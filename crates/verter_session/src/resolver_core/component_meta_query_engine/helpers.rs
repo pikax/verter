@@ -52,7 +52,7 @@ pub(super) fn prepared_type_decl_canonical_dependencies(
     }
     for identity in prepared.name_resolution.values() {
         if !identity.canonical_id.is_empty() {
-            canonical_dependencies.insert(identity.canonical_id.clone());
+            canonical_dependencies.insert(identity.canonical_id.as_ref().to_string());
         }
     }
     canonical_dependencies

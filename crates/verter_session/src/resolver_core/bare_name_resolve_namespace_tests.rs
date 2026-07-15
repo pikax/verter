@@ -46,7 +46,7 @@ fn file_scope_namespace_binds_type_and_value_siblings() {
     )
     .expect("the file-scope namespace must bind the direct TYPE sibling `Inner`");
     assert_eq!(
-        (inner.canonical_id.as_str(), inner.symbol_name.as_str()),
+        (inner.canonical_id.as_ref(), inner.symbol_name.as_ref()),
         ("/src/nst.ts", "M.Inner"),
         "a bare `Inner` inside `namespace M` resolves to the qualified `M.Inner`",
     );
@@ -60,7 +60,7 @@ fn file_scope_namespace_binds_type_and_value_siblings() {
     )
     .expect("the file-scope namespace must bind the direct VALUE sibling `helper`");
     assert_eq!(
-        (helper.canonical_id.as_str(), helper.symbol_name.as_str()),
+        (helper.canonical_id.as_ref(), helper.symbol_name.as_ref()),
         ("/src/nst.ts", "M.helper"),
     );
 
@@ -111,7 +111,7 @@ fn global_augmentation_namespace_binds_global_type_siblings_only() {
     )
     .expect("the global-augmentation namespace must bind the global TYPE sibling `Element`");
     assert_eq!(
-        (element.canonical_id.as_str(), element.symbol_name.as_str()),
+        (element.canonical_id.as_ref(), element.symbol_name.as_ref()),
         ("/src/jsx.ts", "JSX.Element"),
     );
 

@@ -107,10 +107,10 @@ mod tests {
             r.canonical_id
         );
         assert!(r.canonical_id.ends_with("/lib.es5.d.ts"));
-        assert_eq!(r.symbol_name, "Pick");
+        assert_eq!(r.symbol_name.as_ref(), "Pick");
 
         // Reverse-dep edge recorded so re-registration invalidates the consumer.
-        let reverse = ws.reverse_deps_for(r.canonical_id.as_str());
+        let reverse = ws.reverse_deps_for(r.canonical_id.as_ref());
         assert!(
             reverse.iter().any(|c| c == "/ws/main.ts"),
             "consumer MUST be in the reverse-dep set of the ambient virtual id"

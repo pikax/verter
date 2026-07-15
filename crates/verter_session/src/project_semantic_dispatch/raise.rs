@@ -2538,9 +2538,9 @@ fn type_param_shell_node(
         .semantic_graph()
         .intern_node(SemanticNodeData::TypeParam {
             decl: crate::semantic_query::DeclIdentity {
-                canonical_id: Arc::from(prepared.root_identity.canonical_id.as_str()),
+                canonical_id: Arc::clone(&prepared.root_identity.canonical_id),
                 whole_hash: crate::semantic_query::HashValue::default(),
-                decl_name: Arc::from(prepared.root_identity.symbol_name.as_str()),
+                decl_name: Arc::clone(&prepared.root_identity.symbol_name),
             },
             param_index: u16::try_from(param.ordinal).unwrap_or(u16::MAX),
             constraint: None,
@@ -2559,7 +2559,7 @@ fn lower_body_under_env(
     env: &FxHashMap<String, SemanticNodeId>,
 ) -> SemanticNodeId {
     let scope = crate::semantic_query::NodeScopeId::File {
-        canonical_id: Arc::from(prepared.root_identity.canonical_id.as_str()),
+        canonical_id: Arc::clone(&prepared.root_identity.canonical_id),
         whole_hash: crate::semantic_query::HashValue::default(),
         local_scope: None,
     };

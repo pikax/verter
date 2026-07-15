@@ -2763,7 +2763,8 @@ fn migrate_owner_engine_solve_scoped_preserves_env_and_name_resolution() {
         "shallow_lower_type_expr must accept the `env` map"
     );
     assert!(
-        lower_src.contains("name_resolution: &FxHashMap<String, ResolvedRootIdentity>"),
+        lower_src
+            .contains("name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>"),
         "shallow_lower_type_expr must accept the `name_resolution` map"
     );
 }

@@ -1058,6 +1058,27 @@ fn project_type_store_public_accessor_returns_stable_arc() {
     assert!(Arc::ptr_eq(&a, &b));
 }
 
+/// The identity intern pool is owned by the `ProjectTypeStore` — one pool
+/// per store (per-store lifetime), never a process global: two stores hold
+/// independent pools, while one store dedups across accessor reads.
+#[test]
+fn identity_interner_is_per_store_owned_not_process_global() {
+    let store_a = crate::project_type_store::ProjectTypeStore::new();
+    let store_b = crate::project_type_store::ProjectTypeStore::new();
+    let a1 = store_a.identity_interner().intern("/w/shared.ts");
+    let a2 = store_a.identity_interner().intern("/w/shared.ts");
+    assert!(
+        Arc::ptr_eq(&a1, &a2),
+        "one store dedups content-equal identity strings"
+    );
+    let b1 = store_b.identity_interner().intern("/w/shared.ts");
+    assert!(
+        !Arc::ptr_eq(&a1, &b1),
+        "a second store owns an INDEPENDENT pool — no process-global sharing"
+    );
+    assert_eq!(a1, b1, "content equality is unaffected by pool identity");
+}
+
 /// Utility: the `dep_version_for` helper returns a `WholeHash` variant so
 /// callers building a dependency signature do not need to know the
 /// internal `DepVersion` shape.

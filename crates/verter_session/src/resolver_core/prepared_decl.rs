@@ -11,6 +11,7 @@ use verter_semantic::analysis::type_solver::{
 use super::shallow_file_state::ClassifiedTypeDeps;
 use super::{ExportTarget, ShallowFileState};
 use crate::decl_body_memo::{DemandOutcome, LoweredTypeDecl, LoweredValueDecl};
+use crate::identity_interner::IdentityInterner;
 
 /// One per-symbol prepared-decl slot: a warm write-once committed value plus a
 /// resettable in-flight gate.
@@ -148,6 +149,7 @@ fn canonicalize_import_target(
     dep_edges: Option<&FxHashMap<String, String>>,
     local_name: &str,
     target: &super::shallow_file_state::ImportTarget,
+    interner: &IdentityInterner,
 ) -> ResolvedRootIdentity {
     if let Some(final_identity) = import_canonicalization.final_resolution.get(local_name) {
         return final_identity.clone();
@@ -158,7 +160,10 @@ fn canonicalize_import_target(
         &target.source_specifier,
         Some(target.canonical_id.as_str()),
     );
-    ResolvedRootIdentity::new(&resolved_id, &target.imported_name)
+    ResolvedRootIdentity::new(
+        interner.intern(&resolved_id),
+        interner.intern(&target.imported_name),
+    )
 }
 
 fn resolve_import_target(
@@ -204,13 +209,15 @@ pub fn prepare_local_type_decl(
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
     import_canonicalization: &ImportCanonicalization,
+    interner: &IdentityInterner,
 ) -> Option<PreparedTypeDecl> {
     prepare_local_type_decl_outcome(
-        canonical_id,
+        &interner.intern(canonical_id),
         state,
         symbol_name,
         dep_edges,
         import_canonicalization,
+        interner,
     )
     .into_option()
 }
@@ -222,11 +229,12 @@ pub fn prepare_local_type_decl(
 /// result as genuine declaration absence. `prepare_local_type_decl` collapses
 /// the two for direct/standalone callers that do not admit into that slot.
 pub(crate) fn prepare_local_type_decl_outcome(
-    canonical_id: &str,
+    canonical_id: &Arc<str>,
     state: &ShallowFileState,
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
     import_canonicalization: &ImportCanonicalization,
+    interner: &IdentityInterner,
 ) -> PreparedDeclOutcome<PreparedTypeDecl> {
     prepare_local_type_decl_outcome_with_base(
         canonical_id,
@@ -235,6 +243,7 @@ pub(crate) fn prepare_local_type_decl_outcome(
         dep_edges,
         import_canonicalization,
         None,
+        interner,
     )
 }
 
@@ -245,12 +254,13 @@ pub(crate) fn prepare_local_type_decl_outcome(
 /// every non-namespaced decl of the file; `None` builds the table fresh —
 /// the pre-split per-call behavior for standalone entry points.
 fn prepare_local_type_decl_outcome_with_base(
-    canonical_id: &str,
+    canonical_id: &Arc<str>,
     state: &ShallowFileState,
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
     import_canonicalization: &ImportCanonicalization,
-    shared_name_resolution_base: Option<&Arc<FxHashMap<String, ResolvedRootIdentity>>>,
+    shared_name_resolution_base: Option<&Arc<FxHashMap<Arc<str>, ResolvedRootIdentity>>>,
+    interner: &IdentityInterner,
 ) -> PreparedDeclOutcome<PreparedTypeDecl> {
     use verter_semantic::analysis::type_eval::AugmentationScopeKind;
     // A name absent from the file surface but present in the file's own
@@ -303,6 +313,7 @@ fn prepare_local_type_decl_outcome_with_base(
         origin,
         import_canonicalization,
         shared_name_resolution_base,
+        interner,
     )))
 }
 
@@ -324,9 +335,17 @@ pub fn prepare_augmentation_type_decl(
     scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
+    interner: &IdentityInterner,
 ) -> Option<PreparedTypeDecl> {
-    prepare_augmentation_type_decl_outcome(canonical_id, state, scope, symbol_name, dep_edges)
-        .into_option()
+    prepare_augmentation_type_decl_outcome(
+        &interner.intern(canonical_id),
+        state,
+        scope,
+        symbol_name,
+        dep_edges,
+        interner,
+    )
+    .into_option()
 }
 
 /// Lease-aware variant of [`prepare_augmentation_type_decl`]: the cross-file
@@ -337,11 +356,12 @@ pub fn prepare_augmentation_type_decl(
 /// the locator-shape anchor-scope caller (already protected by the preceding
 /// `deref_locator_body` lease-miss → `cache_suppress` rail).
 pub(crate) fn prepare_augmentation_type_decl_outcome(
-    canonical_id: &str,
+    canonical_id: &Arc<str>,
     state: &ShallowFileState,
     scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
+    interner: &IdentityInterner,
 ) -> PreparedDeclOutcome<PreparedTypeDecl> {
     let lowered = match state.augmentation_type_decl_outcome(scope, symbol_name) {
         DemandOutcome::LeaseMiss => return PreparedDeclOutcome::LeaseMiss,
@@ -363,6 +383,7 @@ pub(crate) fn prepare_augmentation_type_decl_outcome(
         Some(scope),
         &ImportCanonicalization::default(),
         None,
+        interner,
     )))
 }
 
@@ -391,7 +412,7 @@ pub(crate) fn prepare_augmentation_type_decl_outcome(
 /// points) builds the table fresh — the pre-split per-call behavior.
 #[allow(clippy::too_many_arguments)]
 fn prepare_type_decl_from_lowered(
-    canonical_id: &str,
+    canonical_id: &Arc<str>,
     state: &ShallowFileState,
     symbol_name: &str,
     lowered: &LoweredTypeDecl,
@@ -399,7 +420,8 @@ fn prepare_type_decl_from_lowered(
     dep_edges: Option<&FxHashMap<String, String>>,
     origin: Option<&verter_semantic::analysis::type_eval::AugmentationScopeKind>,
     import_canonicalization: &ImportCanonicalization,
-    shared_name_resolution_base: Option<&Arc<FxHashMap<String, ResolvedRootIdentity>>>,
+    shared_name_resolution_base: Option<&Arc<FxHashMap<Arc<str>, ResolvedRootIdentity>>>,
+    interner: &IdentityInterner,
 ) -> PreparedTypeDecl {
     #[cfg(test)]
     PREPARED_TYPE_DECL_BUILD_COUNT.with(|count| {
@@ -407,7 +429,7 @@ fn prepare_type_decl_from_lowered(
     });
 
     let mut prepared = PreparedTypeDecl::new(
-        ResolvedRootIdentity::new(canonical_id, symbol_name),
+        ResolvedRootIdentity::new(Arc::clone(canonical_id), interner.intern(symbol_name)),
         lowered.kind,
     );
     // A merged interface carries its ordered contributor SLOTS so body
@@ -441,7 +463,10 @@ fn prepare_type_decl_from_lowered(
     // file-symbol + import entries are a per-FILE artifact (identical for
     // every declaration of this file), so a non-namespaced decl SHARES the
     // caller's base table; only a namespaced decl builds a private table to
-    // add its declaration-scoped sibling bindings.
+    // add its declaration-scoped sibling bindings. Key, identity symbol, and
+    // identity canonical all share pooled allocations minted through the
+    // store-owned interner — a local entry costs zero fresh string copies
+    // once the pool is warm.
     prepared.name_resolution = if !symbol_name.contains('.') {
         match shared_name_resolution_base {
             Some(base) => Arc::clone(base),
@@ -450,6 +475,7 @@ fn prepare_type_decl_from_lowered(
                 state,
                 dep_edges,
                 import_canonicalization,
+                interner,
             )),
         }
     } else {
@@ -474,21 +500,29 @@ fn prepare_type_decl_from_lowered(
                 + state.value_symbol_names().count()
                 + state.import_targets.len(),
         );
-        insert_file_symbol_resolutions(&mut table, canonical_id, state);
-        add_namespace_sibling_resolutions(&mut table, state, symbol_name, canonical_id, origin);
+        insert_file_symbol_resolutions(&mut table, canonical_id, state, interner);
+        add_namespace_sibling_resolutions(
+            &mut table,
+            state,
+            symbol_name,
+            canonical_id,
+            origin,
+            interner,
+        );
         insert_type_space_import_resolutions(
             &mut table,
             canonical_id,
             state,
             dep_edges,
             import_canonicalization,
+            interner,
         );
         Arc::new(table)
     };
 
     // Populate cache deps for invalidation
     let hash_u64 = u64::from_le_bytes(state.whole_hash[..8].try_into().unwrap_or_default());
-    prepared.cache_deps.defining_file = Some((canonical_id.to_string(), hash_u64));
+    prepared.cache_deps.defining_file = Some((canonical_id.as_ref().to_string(), hash_u64));
     prepared.cache_deps.local_closure_participants = deps.local_deps.clone();
 
     // The classification FACTS (member index / wrapper shape / projection
@@ -510,20 +544,23 @@ fn prepare_type_decl_from_lowered(
 /// file. The first pass of BOTH base tables (type-space and value-space) —
 /// imports insert after (and therefore win per key) in both spaces.
 fn insert_file_symbol_resolutions(
-    table: &mut FxHashMap<String, ResolvedRootIdentity>,
-    canonical_id: &str,
+    table: &mut FxHashMap<Arc<str>, ResolvedRootIdentity>,
+    canonical_id: &Arc<str>,
     state: &ShallowFileState,
+    interner: &IdentityInterner,
 ) {
     for dep_name in state.type_symbol_names() {
+        let name = interner.intern(dep_name);
         table.insert(
-            dep_name.to_string(),
-            ResolvedRootIdentity::new(canonical_id, dep_name),
+            Arc::clone(&name),
+            ResolvedRootIdentity::new(Arc::clone(canonical_id), name),
         );
     }
     for dep_name in state.value_symbol_names() {
+        let name = interner.intern(dep_name);
         table.insert(
-            dep_name.to_string(),
-            ResolvedRootIdentity::new(canonical_id, dep_name),
+            Arc::clone(&name),
+            ResolvedRootIdentity::new(Arc::clone(canonical_id), name),
         );
     }
 }
@@ -542,11 +579,12 @@ fn insert_file_symbol_resolutions(
 /// binding with the same local spelling. Value-only imports still populate
 /// the table (including `typeof` dependencies).
 fn insert_type_space_import_resolutions(
-    table: &mut FxHashMap<String, ResolvedRootIdentity>,
-    canonical_id: &str,
+    table: &mut FxHashMap<Arc<str>, ResolvedRootIdentity>,
+    canonical_id: &Arc<str>,
     state: &ShallowFileState,
     dep_edges: Option<&FxHashMap<String, String>>,
     import_canonicalization: &ImportCanonicalization,
+    interner: &IdentityInterner,
 ) {
     for (local_name, target) in state.import_targets.iter() {
         if state.has_type_symbol(local_name) {
@@ -558,8 +596,9 @@ fn insert_type_space_import_resolutions(
             dep_edges,
             local_name,
             target,
+            interner,
         );
-        table.insert(local_name.clone(), resolved);
+        table.insert(interner.intern(local_name), resolved);
     }
 }
 
@@ -568,11 +607,12 @@ fn insert_type_space_import_resolutions(
 /// in a prepared value decl's annotation scope the import binding wins over
 /// a same-named local symbol.
 fn insert_value_space_import_resolutions(
-    table: &mut FxHashMap<String, ResolvedRootIdentity>,
-    canonical_id: &str,
+    table: &mut FxHashMap<Arc<str>, ResolvedRootIdentity>,
+    canonical_id: &Arc<str>,
     state: &ShallowFileState,
     dep_edges: Option<&FxHashMap<String, String>>,
     import_canonicalization: &ImportCanonicalization,
+    interner: &IdentityInterner,
 ) {
     for (local_name, target) in state.import_targets.iter() {
         let resolved = canonicalize_import_target(
@@ -581,8 +621,9 @@ fn insert_value_space_import_resolutions(
             dep_edges,
             local_name,
             target,
+            interner,
         );
-        table.insert(local_name.clone(), resolved);
+        table.insert(interner.intern(local_name), resolved);
     }
 }
 
@@ -592,19 +633,21 @@ fn insert_value_space_import_resolutions(
 /// builds it once per bundle and shares it via `Arc` across those decls; a
 /// namespaced decl re-runs the same passes around its sibling bindings.
 fn build_type_name_resolution_base(
-    canonical_id: &str,
+    canonical_id: &Arc<str>,
     state: &ShallowFileState,
     dep_edges: Option<&FxHashMap<String, String>>,
     import_canonicalization: &ImportCanonicalization,
-) -> FxHashMap<String, ResolvedRootIdentity> {
+    interner: &IdentityInterner,
+) -> FxHashMap<Arc<str>, ResolvedRootIdentity> {
     let mut table = FxHashMap::default();
-    insert_file_symbol_resolutions(&mut table, canonical_id, state);
+    insert_file_symbol_resolutions(&mut table, canonical_id, state, interner);
     insert_type_space_import_resolutions(
         &mut table,
         canonical_id,
         state,
         dep_edges,
         import_canonicalization,
+        interner,
     );
     table
 }
@@ -614,19 +657,21 @@ fn build_type_name_resolution_base(
 /// at all, so this is the COMPLETE table of EVERY prepared value decl of the
 /// file.
 fn build_value_name_resolution_base(
-    canonical_id: &str,
+    canonical_id: &Arc<str>,
     state: &ShallowFileState,
     dep_edges: Option<&FxHashMap<String, String>>,
     import_canonicalization: &ImportCanonicalization,
-) -> FxHashMap<String, ResolvedRootIdentity> {
+    interner: &IdentityInterner,
+) -> FxHashMap<Arc<str>, ResolvedRootIdentity> {
     let mut table = FxHashMap::default();
-    insert_file_symbol_resolutions(&mut table, canonical_id, state);
+    insert_file_symbol_resolutions(&mut table, canonical_id, state, interner);
     insert_value_space_import_resolutions(
         &mut table,
         canonical_id,
         state,
         dep_edges,
         import_canonicalization,
+        interner,
     );
     table
 }
@@ -663,11 +708,12 @@ fn build_value_name_resolution_base(
 ///   across scopes. When module-scope prepared decls become addressable, the
 ///   matching `(Module(spec), …)` siblings bind here.
 fn add_namespace_sibling_resolutions(
-    name_resolution: &mut FxHashMap<String, ResolvedRootIdentity>,
+    name_resolution: &mut FxHashMap<Arc<str>, ResolvedRootIdentity>,
     state: &ShallowFileState,
     symbol_name: &str,
-    canonical_id: &str,
+    canonical_id: &Arc<str>,
     origin: Option<&verter_semantic::analysis::type_eval::AugmentationScopeKind>,
+    interner: &IdentityInterner,
 ) {
     use verter_semantic::analysis::type_eval::AugmentationScopeKind;
     let Some((namespace_prefix, _)) = symbol_name.rsplit_once('.') else {
@@ -683,8 +729,11 @@ fn add_namespace_sibling_resolutions(
                 if let Some(member) = dep_name.strip_prefix(&dotted_prefix) {
                     if !member.contains('.') {
                         name_resolution.insert(
-                            member.to_string(),
-                            ResolvedRootIdentity::new(canonical_id, dep_name),
+                            interner.intern(member),
+                            ResolvedRootIdentity::new(
+                                Arc::clone(canonical_id),
+                                interner.intern(dep_name),
+                            ),
                         );
                     }
                 }
@@ -702,8 +751,11 @@ fn add_namespace_sibling_resolutions(
                 if let Some(member) = name.strip_prefix(&dotted_prefix) {
                     if !member.contains('.') {
                         name_resolution.insert(
-                            member.to_string(),
-                            ResolvedRootIdentity::new(canonical_id, name),
+                            interner.intern(member),
+                            ResolvedRootIdentity::new(
+                                Arc::clone(canonical_id),
+                                interner.intern(name),
+                            ),
                         );
                     }
                 }
@@ -723,6 +775,7 @@ pub fn prepare_exported_type_decl(
     state: &ShallowFileState,
     exported_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
+    interner: &IdentityInterner,
 ) -> Option<PreparedTypeDecl> {
     let ExportTarget::Local { symbol_name } = state.export_target(exported_name)? else {
         return None;
@@ -738,6 +791,7 @@ pub fn prepare_exported_type_decl(
         symbol_name,
         dep_edges,
         &ImportCanonicalization::default(),
+        interner,
     )?;
     prepared.exported_name = Some(exported_name.to_string());
     prepared.provenance.route_kind = Some("direct".to_string());
@@ -751,13 +805,15 @@ pub fn prepare_local_value_decl(
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
     import_canonicalization: &ImportCanonicalization,
+    interner: &IdentityInterner,
 ) -> Option<PreparedValueDecl> {
     prepare_local_value_decl_outcome(
-        canonical_id,
+        &interner.intern(canonical_id),
         state,
         symbol_name,
         dep_edges,
         import_canonicalization,
+        interner,
     )
     .into_option()
 }
@@ -767,11 +823,12 @@ pub fn prepare_local_value_decl(
 /// broken-lease demand from committing a body-less value decl into the
 /// write-once slot cache ([`PreparedValueDeclCache::get`]).
 pub(crate) fn prepare_local_value_decl_outcome(
-    canonical_id: &str,
+    canonical_id: &Arc<str>,
     state: &ShallowFileState,
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
     import_canonicalization: &ImportCanonicalization,
+    interner: &IdentityInterner,
 ) -> PreparedDeclOutcome<PreparedValueDecl> {
     prepare_local_value_decl_outcome_with_base(
         canonical_id,
@@ -780,6 +837,7 @@ pub(crate) fn prepare_local_value_decl_outcome(
         dep_edges,
         import_canonicalization,
         None,
+        interner,
     )
 }
 
@@ -791,12 +849,13 @@ pub(crate) fn prepare_local_value_decl_outcome(
 /// once per bundle) shares it via `Arc`; `None` builds it fresh — the
 /// pre-split per-call behavior for standalone entry points.
 fn prepare_local_value_decl_outcome_with_base(
-    canonical_id: &str,
+    canonical_id: &Arc<str>,
     state: &ShallowFileState,
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
     import_canonicalization: &ImportCanonicalization,
-    shared_name_resolution_base: Option<&Arc<FxHashMap<String, ResolvedRootIdentity>>>,
+    shared_name_resolution_base: Option<&Arc<FxHashMap<Arc<str>, ResolvedRootIdentity>>>,
+    interner: &IdentityInterner,
 ) -> PreparedDeclOutcome<PreparedValueDecl> {
     let lowered: Arc<LoweredValueDecl> = match state.value_decl_outcome(symbol_name) {
         DemandOutcome::LeaseMiss => return PreparedDeclOutcome::LeaseMiss,
@@ -808,7 +867,7 @@ fn prepare_local_value_decl_outcome_with_base(
     }
 
     let mut prepared = PreparedValueDecl::new(
-        ResolvedRootIdentity::new(canonical_id, symbol_name),
+        ResolvedRootIdentity::new(Arc::clone(canonical_id), interner.intern(symbol_name)),
         lowered.kind,
     );
     prepared.type_annotation = lowered.type_annotation.clone();
@@ -821,7 +880,9 @@ fn prepare_local_value_decl_outcome_with_base(
     // value-space base table (file symbols, then imports; a re-export-hop
     // import canonicalizes to the FINAL defining file through the barrel-final
     // canonicalization, same authority as the type rail; otherwise the barrel
-    // fallback applies), shared across every value decl of the file.
+    // fallback applies), shared across every value decl of the file. Keys and
+    // identities are interned `Arc<str>` allocations minted through the
+    // store-owned pool.
     prepared.name_resolution = match shared_name_resolution_base {
         Some(base) => Arc::clone(base),
         None => Arc::new(build_value_name_resolution_base(
@@ -829,11 +890,12 @@ fn prepare_local_value_decl_outcome_with_base(
             state,
             dep_edges,
             import_canonicalization,
+            interner,
         )),
     };
 
     let hash_u64 = u64::from_le_bytes(state.whole_hash[..8].try_into().unwrap_or_default());
-    prepared.cache_deps.defining_file = Some((canonical_id.to_string(), hash_u64));
+    prepared.cache_deps.defining_file = Some((canonical_id.as_ref().to_string(), hash_u64));
 
     PreparedDeclOutcome::Ready(Some(prepared))
 }
@@ -845,6 +907,7 @@ pub fn prepare_exported_value_decl(
     state: &ShallowFileState,
     exported_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
+    interner: &IdentityInterner,
 ) -> Option<PreparedValueDecl> {
     let ExportTarget::Local { symbol_name } = state.export_target(exported_name)? else {
         return None;
@@ -856,6 +919,7 @@ pub fn prepare_exported_value_decl(
         symbol_name,
         dep_edges,
         &ImportCanonicalization::default(),
+        interner,
     )?;
     prepared.exported_name = Some(exported_name.to_string());
     Some(prepared)
@@ -867,13 +931,16 @@ pub struct PreparedTypeDeclCache {
     state: Arc<ShallowFileState>,
     dep_edges: Arc<FxHashMap<String, String>>,
     import_canonicalization: Arc<ImportCanonicalization>,
+    /// Handle to the store-owned identity intern pool (per-store
+    /// lifetime) — the cold build below mints every identity through it.
+    interner: Arc<IdentityInterner>,
     slots: PreparedTypeDeclSlots,
     /// Per-FILE TYPE-space `name_resolution` base table, built lazily ONCE
     /// per cache (`OnceLock` collapses concurrent initializers) and shared
     /// via `Arc` by every non-namespaced prepared type decl this cache
     /// builds — the per-declaration table rebuild this replaces walked every
     /// file symbol + import per decl.
-    name_resolution_base: Arc<OnceLock<Arc<FxHashMap<String, ResolvedRootIdentity>>>>,
+    name_resolution_base: Arc<OnceLock<Arc<FxHashMap<Arc<str>, ResolvedRootIdentity>>>>,
     /// Per-cache-instance count of COLD builds admitted through
     /// [`PreparedTypeDeclCache::get`] (post-gate). Instance-scoped so a
     /// concurrent single-flight test asserts exactly ONE build on ITS OWN
@@ -939,19 +1006,21 @@ impl PreparedTypeDeclCache {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let name_resolution_base = self.name_resolution_base.get_or_init(|| {
             Arc::new(build_type_name_resolution_base(
-                self.canonical_id.as_ref(),
+                &self.canonical_id,
                 self.state.as_ref(),
                 (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
                 &self.import_canonicalization,
+                &self.interner,
             ))
         });
         match prepare_local_type_decl_outcome_with_base(
-            self.canonical_id.as_ref(),
+            &self.canonical_id,
             self.state.as_ref(),
             symbol_name,
             (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
             &self.import_canonicalization,
             Some(name_resolution_base),
+            &self.interner,
         ) {
             PreparedDeclOutcome::LeaseMiss => {
                 // Broken decl-body lease: leave the write-once slot VACANT
@@ -998,11 +1067,14 @@ pub struct PreparedValueDeclCache {
     state: Arc<ShallowFileState>,
     dep_edges: Arc<FxHashMap<String, String>>,
     import_canonicalization: Arc<ImportCanonicalization>,
+    /// Handle to the store-owned identity intern pool (per-store
+    /// lifetime) — the cold build below mints every identity through it.
+    interner: Arc<IdentityInterner>,
     slots: PreparedValueDeclSlots,
     /// Per-FILE VALUE-space `name_resolution` base table — see
     /// [`PreparedTypeDeclCache::name_resolution_base`]; the value space has
     /// no per-declaration bindings, so EVERY prepared value decl shares it.
-    name_resolution_base: Arc<OnceLock<Arc<FxHashMap<String, ResolvedRootIdentity>>>>,
+    name_resolution_base: Arc<OnceLock<Arc<FxHashMap<Arc<str>, ResolvedRootIdentity>>>>,
 }
 
 impl PreparedValueDeclCache {
@@ -1036,19 +1108,21 @@ impl PreparedValueDeclCache {
         }
         let name_resolution_base = self.name_resolution_base.get_or_init(|| {
             Arc::new(build_value_name_resolution_base(
-                self.canonical_id.as_ref(),
+                &self.canonical_id,
                 self.state.as_ref(),
                 (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
                 &self.import_canonicalization,
+                &self.interner,
             ))
         });
         match prepare_local_value_decl_outcome_with_base(
-            self.canonical_id.as_ref(),
+            &self.canonical_id,
             self.state.as_ref(),
             symbol_name,
             (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
             &self.import_canonicalization,
             Some(name_resolution_base),
+            &self.interner,
         ) {
             PreparedDeclOutcome::LeaseMiss => {
                 // Broken decl-body lease: leave the write-once slot VACANT
@@ -1129,6 +1203,7 @@ pub fn build_prepared_decl_bundle(
     dep_edges: FxHashMap<String, String>,
     script_setup_type_bindings: FxHashMap<String, TypeParamBinding>,
     import_canonicalization: ImportCanonicalization,
+    interner: &Arc<IdentityInterner>,
 ) -> PreparedDeclBundle {
     let dep_edges = Arc::new(dep_edges);
     let import_canonicalization = Arc::new(import_canonicalization);
@@ -1168,12 +1243,14 @@ pub fn build_prepared_decl_bundle(
             Arc::clone(&state),
             Arc::clone(&dep_edges),
             Arc::clone(&import_canonicalization),
+            interner,
         ),
         prepared_value_decls: build_prepared_value_decl_cache(
             canonical_id,
             Arc::clone(&state),
             Arc::clone(&dep_edges),
             Arc::clone(&import_canonicalization),
+            interner,
         ),
         dep_edges,
         import_bindings,
@@ -1189,6 +1266,7 @@ pub fn build_prepared_type_decl_cache(
     state: Arc<ShallowFileState>,
     dep_edges: Arc<FxHashMap<String, String>>,
     import_canonicalization: Arc<ImportCanonicalization>,
+    interner: &Arc<IdentityInterner>,
 ) -> PreparedTypeDeclCache {
     let mut slots: FxHashMap<String, PreparedTypeDeclSlot> = state
         .type_symbol_names()
@@ -1211,10 +1289,13 @@ pub fn build_prepared_type_decl_cache(
     }
 
     PreparedTypeDeclCache {
-        canonical_id: Arc::from(canonical_id),
+        // Pool the canonical ONCE: every identity minted for this file (and
+        // the sibling value cache) then shares the pooled allocation.
+        canonical_id: interner.intern(canonical_id),
         state,
         dep_edges,
         import_canonicalization,
+        interner: Arc::clone(interner),
         slots: Arc::new(slots),
         name_resolution_base: Arc::new(OnceLock::new()),
         #[cfg(test)]
@@ -1228,6 +1309,7 @@ pub fn build_prepared_value_decl_cache(
     state: Arc<ShallowFileState>,
     dep_edges: Arc<FxHashMap<String, String>>,
     import_canonicalization: Arc<ImportCanonicalization>,
+    interner: &Arc<IdentityInterner>,
 ) -> PreparedValueDeclCache {
     let slots = state
         .value_symbol_names()
@@ -1236,10 +1318,11 @@ pub fn build_prepared_value_decl_cache(
         .collect();
 
     PreparedValueDeclCache {
-        canonical_id: Arc::from(canonical_id),
+        canonical_id: interner.intern(canonical_id),
         state,
         dep_edges,
         import_canonicalization,
+        interner: Arc::clone(interner),
         slots: Arc::new(slots),
         name_resolution_base: Arc::new(OnceLock::new()),
     }

@@ -2866,10 +2866,15 @@ pub(crate) fn hash_import_route_targets(
         for (specifier, resolution) in &entries {
             0u8.hash(hasher);
             specifier.hash(hasher);
+            // Borrowed form of the historical owned-`Option<String>` feed:
+            // `Option<&str>` hashes byte-identically (discriminant + str
+            // bytes), so the digest is unchanged while the per-entry clone
+            // allocation is gone. Pinned by
+            // `import_route_target_digest_formula_is_pinned`.
             resolution
                 .resolved_canonical_id
-                .clone()
-                .or_else(|| resolution.effective_target().map(str::to_string))
+                .as_deref()
+                .or_else(|| resolution.effective_target())
                 .hash(hasher);
         }
     })

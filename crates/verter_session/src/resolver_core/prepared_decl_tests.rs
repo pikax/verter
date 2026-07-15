@@ -7,16 +7,25 @@ use verter_semantic::analysis::type_eval::ValueDeclKind;
 
 use super::*;
 
+/// Shared test pool: prepare fns intern identities through it.
+fn test_interner() -> Arc<crate::identity_interner::IdentityInterner> {
+    Arc::new(crate::identity_interner::IdentityInterner::with_default_budget())
+}
+
 #[test]
 fn prepares_local_exported_type_decl_from_shallow_file_state() {
     let source = "export interface Props { label: string }";
     let state = ShallowFileState::service_backed_for_test(source);
 
-    let prepared = prepare_exported_type_decl("/src/types.ts", &state, "Props", None)
-        .expect("Props should prepare");
+    let prepared =
+        prepare_exported_type_decl("/src/types.ts", &state, "Props", None, &test_interner())
+            .expect("Props should prepare");
 
-    assert_eq!(prepared.root_identity.canonical_id, "/src/types.ts");
-    assert_eq!(prepared.root_identity.symbol_name, "Props");
+    assert_eq!(
+        prepared.root_identity.canonical_id.as_ref(),
+        "/src/types.ts"
+    );
+    assert_eq!(prepared.root_identity.symbol_name.as_ref(), "Props");
     assert_eq!(prepared.exported_name.as_deref(), Some("Props"));
 
     // Member index should be auto-populated for interface with properties
@@ -34,11 +43,15 @@ export const defaults: Props = { label: 'ok' }
 "#;
     let state = ShallowFileState::service_backed_for_test(source);
 
-    let prepared = prepare_exported_value_decl("/src/types.ts", &state, "defaults", None)
-        .expect("defaults should prepare");
+    let prepared =
+        prepare_exported_value_decl("/src/types.ts", &state, "defaults", None, &test_interner())
+            .expect("defaults should prepare");
 
-    assert_eq!(prepared.root_identity.canonical_id, "/src/types.ts");
-    assert_eq!(prepared.root_identity.symbol_name, "defaults");
+    assert_eq!(
+        prepared.root_identity.canonical_id.as_ref(),
+        "/src/types.ts"
+    );
+    assert_eq!(prepared.root_identity.symbol_name.as_ref(), "defaults");
     assert_eq!(prepared.exported_name.as_deref(), Some("defaults"));
     assert_eq!(prepared.kind, ValueDeclKind::Const);
     assert!(!matches!(
@@ -61,15 +74,20 @@ export type Button = ComponentConfig<typeof theme>
         ("./theme".to_string(), "/src/theme.ts".to_string()),
     ]);
 
-    let prepared =
-        prepare_exported_type_decl("/src/button-types.ts", &state, "Button", Some(&dep_edges))
-            .expect("Button should prepare");
+    let prepared = prepare_exported_type_decl(
+        "/src/button-types.ts",
+        &state,
+        "Button",
+        Some(&dep_edges),
+        &test_interner(),
+    )
+    .expect("Button should prepare");
 
     assert_eq!(
         prepared
             .name_resolution
             .get("theme")
-            .map(|id| (id.canonical_id.as_str(), id.symbol_name.as_str())),
+            .map(|id| (id.canonical_id.as_ref(), id.symbol_name.as_ref())),
         Some(("/src/theme.ts", "theme"))
     );
 }
@@ -101,6 +119,7 @@ import { Separator } from './runtime'
         &state,
         "SeparatorSlots",
         Some(&dep_edges),
+        &test_interner(),
     )
     .expect("SeparatorSlots should prepare");
 
@@ -108,7 +127,7 @@ import { Separator } from './runtime'
         slots
             .name_resolution
             .get("Separator")
-            .map(|id| (id.canonical_id.as_str(), id.symbol_name.as_str())),
+            .map(|id| (id.canonical_id.as_ref(), id.symbol_name.as_ref())),
         Some(("/src/Separator.vue", "Separator")),
         "a type declaration body resolves through the same-file type namespace, not the setup runtime import"
     );
@@ -119,6 +138,7 @@ import { Separator } from './runtime'
             "Separator",
             Some(&dep_edges),
             &ImportCanonicalization::default(),
+            &test_interner(),
         )
         .is_some(),
         "the same-file type declaration must remain addressable even when the value namespace imports the same name"
@@ -136,28 +156,29 @@ export type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
 "#;
     let state = ShallowFileState::service_backed_for_test(source);
 
-    let prepared = prepare_exported_type_decl("/src/Button.vue", &state, "Button", None)
-        .expect("Button should prepare");
+    let prepared =
+        prepare_exported_type_decl("/src/Button.vue", &state, "Button", None, &test_interner())
+            .expect("Button should prepare");
 
     assert_eq!(
         prepared
             .name_resolution
             .get("ComponentConfig")
-            .map(|id| (id.canonical_id.as_str(), id.symbol_name.as_str())),
+            .map(|id| (id.canonical_id.as_ref(), id.symbol_name.as_ref())),
         Some(("/src/tv.ts", "ComponentConfig"))
     );
     assert_eq!(
         prepared
             .name_resolution
             .get("AppConfig")
-            .map(|id| (id.canonical_id.as_str(), id.symbol_name.as_str())),
+            .map(|id| (id.canonical_id.as_ref(), id.symbol_name.as_ref())),
         Some(("/src/schema.ts", "AppConfig"))
     );
     assert_eq!(
         prepared
             .name_resolution
             .get("theme")
-            .map(|id| (id.canonical_id.as_str(), id.symbol_name.as_str())),
+            .map(|id| (id.canonical_id.as_ref(), id.symbol_name.as_ref())),
         Some(("/src/theme.ts", "default"))
     );
 }
@@ -171,14 +192,20 @@ export const defaults: Theme = {} as Theme
 "#;
     let state = ShallowFileState::service_backed_for_test(source);
 
-    let prepared = prepare_exported_value_decl("/src/Button.vue", &state, "defaults", None)
-        .expect("defaults should prepare");
+    let prepared = prepare_exported_value_decl(
+        "/src/Button.vue",
+        &state,
+        "defaults",
+        None,
+        &test_interner(),
+    )
+    .expect("defaults should prepare");
 
     assert_eq!(
         prepared
             .name_resolution
             .get("Theme")
-            .map(|id| (id.canonical_id.as_str(), id.symbol_name.as_str())),
+            .map(|id| (id.canonical_id.as_ref(), id.symbol_name.as_ref())),
         Some(("/src/theme.ts", "Theme"))
     );
 }
@@ -188,7 +215,10 @@ fn does_not_prepare_reexport_without_frontier_routing() {
     let source = r#"export { Props } from "./inner""#;
     let state = ShallowFileState::service_backed_for_test(source);
 
-    assert!(prepare_exported_type_decl("/src/barrel.ts", &state, "Props", None).is_none());
+    assert!(
+        prepare_exported_type_decl("/src/barrel.ts", &state, "Props", None, &test_interner())
+            .is_none()
+    );
 }
 
 #[test]
@@ -200,8 +230,9 @@ export interface Props { child: Inner; data: Local }
 "#;
     let state = ShallowFileState::service_backed_for_test(source);
 
-    let prepared = prepare_exported_type_decl("/src/types.ts", &state, "Props", None)
-        .expect("Props should prepare");
+    let prepared =
+        prepare_exported_type_decl("/src/types.ts", &state, "Props", None, &test_interner())
+            .expect("Props should prepare");
 
     // Should have a member index for 'child' and 'data'
     assert!(
@@ -227,12 +258,14 @@ export const defaults: Props = { label: 'ok' }
         Arc::clone(&state),
         Arc::new(FxHashMap::default()),
         Arc::new(ImportCanonicalization::default()),
+        &test_interner(),
     );
     let value_cache = build_prepared_value_decl_cache(
         "/src/types.ts",
         state,
         Arc::new(FxHashMap::default()),
         Arc::new(ImportCanonicalization::default()),
+        &test_interner(),
     );
 
     assert!(type_cache.contains_key("Props"));
@@ -246,9 +279,10 @@ fn prepared_type_decl_build_counter_is_thread_local() {
     let source = "export interface Props { label: string }";
     let state = ShallowFileState::service_backed_for_test(source);
 
-    let prepared = prepare_exported_type_decl("/src/types.ts", &state, "Props", None)
-        .expect("Props should prepare");
-    assert_eq!(prepared.root_identity.symbol_name, "Props");
+    let prepared =
+        prepare_exported_type_decl("/src/types.ts", &state, "Props", None, &test_interner())
+            .expect("Props should prepare");
+    assert_eq!(prepared.root_identity.symbol_name.as_ref(), "Props");
     assert_eq!(prepared_type_decl_build_count_for_tests(), 1);
 
     let other_thread_count = std::thread::spawn(prepared_type_decl_build_count_for_tests)
@@ -292,6 +326,7 @@ declare module "ext" { namespace NS { interface Foo { x: GlobalOnly } } }
         &AugmentationScopeKind::Module("ext".into()),
         "NS.Foo",
         None,
+        &test_interner(),
     )
     .expect("NS.Foo should prepare");
 
@@ -326,6 +361,7 @@ declare global { namespace JSX {
         "JSX.El",
         None,
         &ImportCanonicalization::default(),
+        &test_interner(),
     )
     .expect("JSX.El should prepare");
 
@@ -335,7 +371,7 @@ declare global { namespace JSX {
         prepared
             .name_resolution
             .get("Common")
-            .map(|i| (i.canonical_id.as_str(), i.symbol_name.as_str())),
+            .map(|i| (i.canonical_id.as_ref(), i.symbol_name.as_ref())),
         Some(("/src/aug.ts", "JSX.Common")),
     );
     // Restrict: the non-consumable global VALUE sibling must NOT be bound.
@@ -385,6 +421,7 @@ export namespace NS {
         "NS.Holder",
         None,
         &ImportCanonicalization::default(),
+        &test_interner(),
     )
     .expect("NS.Holder should prepare");
 
@@ -392,7 +429,7 @@ export namespace NS {
         prepared
             .name_resolution
             .get("Item")
-            .map(|i| (i.canonical_id.as_str(), i.symbol_name.as_str())),
+            .map(|i| (i.canonical_id.as_ref(), i.symbol_name.as_ref())),
         Some(("/ws/fixture.ts", "NS.Item")),
         "a direct namespace sibling must shadow the same-named file-level type symbol"
     );
@@ -424,6 +461,7 @@ export namespace NS {
         "NS.Holder",
         Some(&dep_edges),
         &ImportCanonicalization::default(),
+        &test_interner(),
     )
     .expect("NS.Holder should prepare");
 
@@ -431,7 +469,7 @@ export namespace NS {
         prepared
             .name_resolution
             .get("Item")
-            .map(|i| (i.canonical_id.as_str(), i.symbol_name.as_str())),
+            .map(|i| (i.canonical_id.as_ref(), i.symbol_name.as_ref())),
         Some(("/src/items.ts", "Item")),
         "an import binding wins over a namespace-sibling binding for a \
              name the file's type namespace does not declare"
@@ -462,13 +500,14 @@ export interface SeparatorSlots { root: Separator }
         "SeparatorSlots",
         Some(&dep_edges),
         &ImportCanonicalization::default(),
+        &test_interner(),
     )
     .expect("SeparatorSlots should prepare");
     assert_eq!(
         type_prepared
             .name_resolution
             .get("Separator")
-            .map(|i| (i.canonical_id.as_str(), i.symbol_name.as_str())),
+            .map(|i| (i.canonical_id.as_ref(), i.symbol_name.as_ref())),
         Some(("/src/Separator.vue", "Separator")),
         "TYPE space: the same-file type symbol shadows the import"
     );
@@ -479,13 +518,14 @@ export interface SeparatorSlots { root: Separator }
         "defaults",
         Some(&dep_edges),
         &ImportCanonicalization::default(),
+        &test_interner(),
     )
     .expect("defaults should prepare");
     assert_eq!(
         value_prepared
             .name_resolution
             .get("Separator")
-            .map(|i| (i.canonical_id.as_str(), i.symbol_name.as_str())),
+            .map(|i| (i.canonical_id.as_ref(), i.symbol_name.as_ref())),
         Some(("/src/runtime.ts", "Separator")),
         "VALUE space: the import wins — the value-space import pass has no \
              type-symbol skip"
@@ -515,6 +555,7 @@ export namespace NS {
         "Plain",
         Some(&dep_edges),
         &ImportCanonicalization::default(),
+        &test_interner(),
     )
     .expect("Plain should prepare");
     let namespaced = prepare_local_type_decl(
@@ -523,6 +564,7 @@ export namespace NS {
         "NS.Holder",
         Some(&dep_edges),
         &ImportCanonicalization::default(),
+        &test_interner(),
     )
     .expect("NS.Holder should prepare");
 
@@ -563,12 +605,14 @@ export namespace NS {
         Arc::clone(&state),
         Arc::new(FxHashMap::default()),
         Arc::new(ImportCanonicalization::default()),
+        &test_interner(),
     );
     let value_cache = build_prepared_value_decl_cache(
         "/ws/fixture.ts",
         Arc::clone(&state),
         Arc::new(FxHashMap::default()),
         Arc::new(ImportCanonicalization::default()),
+        &test_interner(),
     );
 
     let a = type_cache.get("A").expect("A prepares");
@@ -634,6 +678,7 @@ fn broken_lease_prepared_type_decl_get_does_not_warm_admit_none_slot() {
         Arc::clone(&state),
         Arc::new(FxHashMap::default()),
         Arc::new(ImportCanonicalization::default()),
+        &test_interner(),
     );
 
     // One successful demand pins the retained-snapshot lease and commits Var0.
@@ -669,6 +714,7 @@ fn broken_lease_prepared_value_decl_get_does_not_warm_admit_none_slot() {
         Arc::clone(&state),
         Arc::new(FxHashMap::default()),
         Arc::new(ImportCanonicalization::default()),
+        &test_interner(),
     );
 
     assert!(
@@ -734,7 +780,14 @@ fn broken_lease_augmentation_prepared_build_surfaces_lease_miss() {
     // Pin the augmenter memo's lease with one successful augmentation demand.
     assert!(
         matches!(
-            prepare_augmentation_type_decl_outcome("/ws/fixture.ts", &state, &scope, "A", None),
+            prepare_augmentation_type_decl_outcome(
+                &Arc::from("/ws/fixture.ts"),
+                &state,
+                &scope,
+                "A",
+                None,
+                &test_interner(),
+            ),
             PreparedDeclOutcome::Ready(Some(_))
         ),
         "augmentation symbol A prepares under a live lease"
@@ -746,7 +799,14 @@ fn broken_lease_augmentation_prepared_build_surfaces_lease_miss() {
     // outcome MUST be the distinct LeaseMiss, never a collapsed Ready(None).
     assert!(
         matches!(
-            prepare_augmentation_type_decl_outcome("/ws/fixture.ts", &state, &scope, "B", None),
+            prepare_augmentation_type_decl_outcome(
+                &Arc::from("/ws/fixture.ts"),
+                &state,
+                &scope,
+                "B",
+                None,
+                &test_interner(),
+            ),
             PreparedDeclOutcome::LeaseMiss
         ),
         "a broken-lease augmentation prepare must surface the DISTINCT \
@@ -784,6 +844,7 @@ fn concurrent_cold_prepared_type_get_is_single_flight() {
         Arc::clone(&state),
         Arc::new(FxHashMap::default()),
         Arc::new(ImportCanonicalization::default()),
+        &test_interner(),
     );
 
     const THREADS: usize = 16;
@@ -834,6 +895,7 @@ fn broken_lease_prepared_type_slot_stays_vacant_and_is_rebuildable() {
         Arc::clone(&state),
         Arc::new(FxHashMap::default()),
         Arc::new(ImportCanonicalization::default()),
+        &test_interner(),
     );
 
     // Pin the lease with one successful build, then break the snapshot.
@@ -873,10 +935,97 @@ fn broken_lease_prepared_type_slot_stays_vacant_and_is_rebuildable() {
         Arc::clone(&fresh_state),
         Arc::new(FxHashMap::default()),
         Arc::new(ImportCanonicalization::default()),
+        &test_interner(),
     );
     assert!(
         fresh_cache.get("Var1").is_some(),
         "under a live lease the symbol recovers — the lease-miss was never a \
              genuine absence"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Identity interning at the prepared-decl minting boundary
+// ---------------------------------------------------------------------------
+
+#[test]
+fn prepared_decl_identities_share_the_pool_canonical_allocation() {
+    let source = r#"
+export interface Props { label: string }
+export type Variant = 'solid' | 'outline'
+"#;
+    let state = ShallowFileState::service_backed_for_test(source);
+    let interner = Arc::new(crate::identity_interner::IdentityInterner::with_default_budget());
+    let bundle = build_prepared_decl_bundle(
+        "/src/types.ts",
+        Arc::clone(&state),
+        FxHashMap::default(),
+        FxHashMap::default(),
+        ImportCanonicalization::default(),
+        &interner,
+    );
+
+    let props = bundle
+        .prepared_type_decls
+        .get("Props")
+        .expect("Props prepares");
+    let variant = bundle
+        .prepared_type_decls
+        .get("Variant")
+        .expect("Variant prepares");
+
+    // Every identity minted for this file shares ONE canonical-id
+    // allocation — the pool's — instead of a fresh String per identity.
+    let pooled_canonical = interner.intern("/src/types.ts");
+    assert!(Arc::ptr_eq(
+        &props.root_identity.canonical_id,
+        &pooled_canonical
+    ));
+    assert!(Arc::ptr_eq(
+        &variant.root_identity.canonical_id,
+        &pooled_canonical
+    ));
+    // Cross-decl name_resolution entries share too: Props' view of
+    // `Variant` resolves to the same canonical allocation.
+    let (key, resolved) = props
+        .name_resolution
+        .get_key_value("Variant")
+        .expect("local sibling resolves");
+    assert!(Arc::ptr_eq(&resolved.canonical_id, &pooled_canonical));
+    // The map key and the identity's symbol name are ONE allocation for a
+    // local symbol (key == resolved symbol).
+    assert!(Arc::ptr_eq(key, &resolved.symbol_name));
+}
+
+#[test]
+fn prepared_value_and_type_caches_share_one_pooled_canonical() {
+    let source = r#"
+export interface Props { label: string }
+export const defaults = { label: 'ok' }
+"#;
+    let state = ShallowFileState::service_backed_for_test(source);
+    let interner = Arc::new(crate::identity_interner::IdentityInterner::with_default_budget());
+    let bundle = build_prepared_decl_bundle(
+        "/src/types.ts",
+        Arc::clone(&state),
+        FxHashMap::default(),
+        FxHashMap::default(),
+        ImportCanonicalization::default(),
+        &interner,
+    );
+    let ty = bundle
+        .prepared_type_decls
+        .get("Props")
+        .expect("Props prepares");
+    let value = bundle
+        .prepared_value_decls
+        .get("defaults")
+        .expect("defaults prepares");
+    assert!(
+        Arc::ptr_eq(
+            &ty.root_identity.canonical_id,
+            &value.root_identity.canonical_id
+        ),
+        "type and value identities of one file share the pooled canonical"
     );
 }

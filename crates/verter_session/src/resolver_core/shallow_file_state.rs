@@ -2511,6 +2511,7 @@ export interface Props { child: Inner; data: Local }
             &state,
             "Props",
             Some(&dep_edges),
+            &crate::identity_interner::IdentityInterner::with_default_budget(),
         )
         .expect("Props should prepare");
 
@@ -2519,8 +2520,8 @@ export interface Props { child: Inner; data: Local }
             prepared
                 .name_resolution
                 .get("Local")
-                .map(|r| &r.canonical_id),
-            Some(&"/src/types.ts".to_string()),
+                .map(|r| r.canonical_id.as_ref()),
+            Some("/src/types.ts"),
             "local dep should resolve to same file"
         );
         // External dep should resolve through dep_edges
@@ -2528,8 +2529,8 @@ export interface Props { child: Inner; data: Local }
             prepared
                 .name_resolution
                 .get("Inner")
-                .map(|r| &r.canonical_id),
-            Some(&"/resolved/inner.ts".to_string()),
+                .map(|r| r.canonical_id.as_ref()),
+            Some("/resolved/inner.ts"),
             "external dep should resolve through dep_edges"
         );
     }

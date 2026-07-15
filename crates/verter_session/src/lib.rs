@@ -282,6 +282,7 @@ mod host_upsert;
 mod host_views;
 mod host_workspace_audit;
 mod id;
+pub(crate) mod identity_interner;
 pub(crate) mod intrinsic_registry;
 pub mod invalidation_domain;
 /// Loop-5 inner-dispatch instrumentation counters. Inert in production —
@@ -396,13 +397,12 @@ pub use verter_language::{
 // of each pass. The dump is keyed by `&'static Location` propagated
 // through the `#[track_caller]` rail from the warm-hit validator
 // down to `HostStoreView::from_host`.
-pub use resolver_store::{dump_from_host_call_sites, reset_from_host_call_sites};
-// Actual base-view sweep counter — a batch-saturation gate reads this
-// (NOT the per-call `from_host` count, which also bumps on cheap
-// token-stable Arc-clone hits) to assert a warm batch performs ~O(1)
-// full-workspace sweeps.
+// The coherent-build sweep counter is the batch-saturation gate's actual
+// base-view sweep count (NOT the per-call `from_host` count, which also
+// bumps on cheap token-stable Arc-clone hits): warm batches sweep ~O(1).
 pub use resolver_store::{
-    reset_store_view_coherent_build_sweeps, store_view_coherent_build_sweeps,
+    dump_from_host_call_sites, reset_from_host_call_sites, reset_store_view_coherent_build_sweeps,
+    store_view_coherent_build_sweeps,
 };
 // The session-overlay copy-on-write counter is deliberately NOT a
 // process-global re-export: it lives per-host on

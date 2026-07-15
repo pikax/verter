@@ -537,7 +537,7 @@ export type FancyProps = Prettify<{ open: boolean }>
         prepared
             .name_resolution
             .get("Prettify")
-            .map(|identity| (identity.canonical_id.as_str(), identity.symbol_name.as_str())),
+            .map(|identity| (identity.canonical_id.as_ref(), identity.symbol_name.as_ref())),
         Some(("/workspace/node_modules/helper/dist/helper.d.ts", "Prettify")),
         "plain imports inside declaration files must resolve helper names through the declaration entrypoint rather than leaving them unresolved or pinned to JS companions",
     );
@@ -571,7 +571,7 @@ export interface CheckboxProps {
         initial
             .name_resolution
             .get("theme")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("#build/ui/checkbox"),
         "before the import route is upgraded the prepared decl should still carry the raw alias target",
     );
@@ -592,7 +592,7 @@ export interface CheckboxProps {
         rebuilt
             .name_resolution
             .get("theme")
-            .map(|identity| (identity.canonical_id.as_str(), identity.symbol_name.as_str())),
+            .map(|identity| (identity.canonical_id.as_ref(), identity.symbol_name.as_ref())),
         Some(("/workspace/.nuxt/ui/checkbox.ts", "default")),
         "prepared decl caches must rebuild when dependency resolutions improve so later typeof/name-resolution walks do not reopen the raw alias path",
     );
@@ -632,7 +632,7 @@ fn prepared_type_decl_bundle_invalidates_when_exact_resolution_changes() {
         initial
             .name_resolution
             .get("Base")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/src/base.ts"),
     );
 
@@ -649,7 +649,7 @@ fn prepared_type_decl_bundle_invalidates_when_exact_resolution_changes() {
         rebuilt
             .name_resolution
             .get("Base")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/src/alt.ts"),
         "exact-resolution fact validation must invalidate the old bundle when the effective target changes",
     );
@@ -714,8 +714,8 @@ fn prepared_decl_name_resolution_canonicalizes_barrel_reexport_to_final_defining
     // FINAL defining file (not the intermediate `/src/barrel.ts`).
     assert_eq!(
         prepared.name_resolution.get("Node").map(|identity| (
-            identity.canonical_id.as_str(),
-            identity.symbol_name.as_str()
+            identity.canonical_id.as_ref(),
+            identity.symbol_name.as_ref()
         )),
         Some(("/src/defining.ts", "Node")),
         "the barrel-imported TYPE `Node` must canonicalize to the FINAL defining file \
@@ -726,8 +726,8 @@ fn prepared_decl_name_resolution_canonicalizes_barrel_reexport_to_final_defining
     // FINAL defining `themeImpl` (the value-export authority peels the alias).
     assert_eq!(
         prepared.name_resolution.get("theme").map(|identity| (
-            identity.canonical_id.as_str(),
-            identity.symbol_name.as_str()
+            identity.canonical_id.as_ref(),
+            identity.symbol_name.as_ref()
         )),
         Some(("/src/defining.ts", "themeImpl")),
         "the barrel-imported VALUE `theme` must canonicalize to the FINAL defining \
@@ -781,7 +781,7 @@ fn prepared_decl_name_resolution_barrel_retarget_invalidates_final_canonical() {
         initial
             .name_resolution
             .get("Node")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/src/a.ts"),
         "before the barrel retarget the final canonical is /src/a.ts",
     );
@@ -812,7 +812,7 @@ fn prepared_decl_name_resolution_barrel_retarget_invalidates_final_canonical() {
         rebuilt
             .name_resolution
             .get("Node")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/src/b.ts"),
         "the barrel retarget must invalidate the owner's prepared name_resolution so the \
          final canonical follows the barrel to /src/b.ts (no stale-served final root)",
@@ -860,14 +860,14 @@ fn prepared_decl_bundle_without_store_view_reuses_stable_cache() {
         first
             .name_resolution
             .get("Base")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/src/dep.ts"),
     );
     assert_eq!(
         second
             .name_resolution
             .get("Base")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/src/dep.ts"),
     );
     assert_eq!(
@@ -950,7 +950,7 @@ fn prepared_decl_bundle_reuses_then_invalidates_on_exact_resolution_change() {
         first
             .name_resolution
             .get("Base")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/src/base.ts"),
     );
 
@@ -972,7 +972,7 @@ fn prepared_decl_bundle_reuses_then_invalidates_on_exact_resolution_change() {
         second
             .name_resolution
             .get("Base")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/src/base.ts"),
     );
 
@@ -998,7 +998,7 @@ fn prepared_decl_bundle_reuses_then_invalidates_on_exact_resolution_change() {
         rebuilt
             .name_resolution
             .get("Base")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/src/alt.ts"),
         "DISCRIMINATING (invalidation): the rebuilt bundle's name_resolution MUST \
          observe the upgraded route (Base -> /src/alt.ts); the stale /src/base.ts \
@@ -1047,14 +1047,14 @@ fn prepared_decl_bundle_with_store_view_reuses_cache_for_structural_exact_resolu
         first
             .name_resolution
             .get("Base")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/workspace/dep.ts"),
     );
     assert_eq!(
         second
             .name_resolution
             .get("Base")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/workspace/dep.ts"),
     );
     assert_eq!(
@@ -1449,11 +1449,13 @@ fn prepared_type_decl_canonicalizes_imported_extends_base() {
         .get("Base")
         .expect("prepared decl should carry imported Base resolution");
     assert_eq!(
-        base.canonical_id, "/src/base.ts",
+        base.canonical_id.as_ref(),
+        "/src/base.ts",
         "prepared decl name_resolution should point at the imported canonical owner",
     );
     assert_eq!(
-        base.symbol_name, "Base",
+        base.symbol_name.as_ref(),
+        "Base",
         "prepared decl name_resolution should preserve the imported exported name",
     );
 }
@@ -1514,8 +1516,8 @@ fn prepared_type_decl_mints_content_free_class_heritage_base_facts() {
         .name_resolution
         .get(fact.name_resolution_ref.as_str())
         .expect("the heritage head routes through name_resolution");
-    assert_eq!(head.canonical_id, "/src/base.ts");
-    assert_eq!(head.symbol_name, "Base");
+    assert_eq!(head.canonical_id.as_ref(), "/src/base.ts");
+    assert_eq!(head.symbol_name.as_ref(), "Base");
     // One content-free locator per authored type argument, addressing the
     // heritage Ref arm of the class body's Intersection fold; `arg_index`
     // selects the authored argument.
@@ -1627,10 +1629,10 @@ fn prepared_type_decl_reuses_indexed_package_shallow_state_without_reread() {
         .get("Payload")
         .expect("prepared package declaration should still resolve imported helper names");
     assert_eq!(
-        payload.canonical_id, "/workspace/node_modules/pkg/dist/payload.d.ts",
+        payload.canonical_id.as_ref(), "/workspace/node_modules/pkg/dist/payload.d.ts",
         "prepared package declaration should canonicalize imported helper edges from the warmed shallow state",
     );
-    assert_eq!(payload.symbol_name, "Payload");
+    assert_eq!(payload.symbol_name.as_ref(), "Payload");
     assert!(
         ws.read_count("/workspace/node_modules/pkg/dist/index3.d.ts") <= 1,
         "prepared package declaration lookup should pay at most one shallow package target read for the active route",
@@ -1686,8 +1688,8 @@ export type FancyProps = Local
         .prepared_type_decl(canonical_id, "Local")
         .expect("missing local decl should be prepared from shallow state");
 
-    assert_eq!(prepared.root_identity.canonical_id, canonical_id);
-    assert_eq!(prepared.root_identity.symbol_name, "Local");
+    assert_eq!(prepared.root_identity.canonical_id.as_ref(), canonical_id);
+    assert_eq!(prepared.root_identity.symbol_name.as_ref(), "Local");
 }
 
 // NOTE: stale prepared-decl replacement test was removed — prepared decls
@@ -8484,7 +8486,8 @@ export interface Props {
         "prepared declaration should resolve imported Component through dependency targets",
     );
     assert_eq!(
-        resolved.canonical_id, "/node_modules/@vue/runtime-core.d.ts",
+        resolved.canonical_id.as_ref(),
+        "/node_modules/@vue/runtime-core.d.ts",
         "prepared declaration lookup should canonicalize imported names",
     );
 
@@ -8545,7 +8548,7 @@ type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
         prepared
             .name_resolution
             .get("AppConfig")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/src/schema.ts"),
         "owner-local prepared declarations should canonicalize type imports through stored dependency targets",
     );
@@ -8553,7 +8556,7 @@ type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
         prepared
             .name_resolution
             .get("ComponentConfig")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/src/tv.ts"),
         "owner-local prepared declarations should canonicalize imported helper aliases through stored dependency targets",
     );
@@ -8561,7 +8564,7 @@ type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
         prepared
             .name_resolution
             .get("theme")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/src/theme.ts"),
         "owner-local prepared declarations should canonicalize imported values through stored dependency targets",
     );
@@ -12057,7 +12060,7 @@ fn bundle_fact_validation_round_trip() {
     let first = host
         .prepared_type_decl("/src/types.ts", "Props")
         .expect("Props should prepare on first lookup");
-    assert_eq!(first.root_identity.symbol_name, "Props");
+    assert_eq!(first.root_identity.symbol_name.as_ref(), "Props");
 
     // Second lookup — should hit cache and return the same result.
     let second = host
@@ -12086,7 +12089,7 @@ fn bundle_fact_validation_round_trip() {
     let updated = host
         .prepared_type_decl("/src/types.ts", "Props")
         .expect("Props should prepare after content change");
-    assert_eq!(updated.root_identity.symbol_name, "Props");
+    assert_eq!(updated.root_identity.symbol_name.as_ref(), "Props");
 
     // Negative: the old symbol shape should be gone (the surface should have
     // changed). We verify the bundle was invalidated by checking the prepared
@@ -12125,7 +12128,7 @@ export interface Delta { delta: string }
     let gamma = host
         .prepared_type_decl("/src/types.ts", "Gamma")
         .expect("Gamma should prepare");
-    assert_eq!(gamma.root_identity.symbol_name, "Gamma");
+    assert_eq!(gamma.root_identity.symbol_name.as_ref(), "Gamma");
     assert_eq!(
         crate::resolver_core::prepared_decl::prepared_type_decl_build_count_for_tests(),
         1,
@@ -12135,7 +12138,7 @@ export interface Delta { delta: string }
     let gamma_again = host
         .prepared_type_decl("/src/types.ts", "Gamma")
         .expect("Gamma should stay cached");
-    assert_eq!(gamma_again.root_identity.symbol_name, "Gamma");
+    assert_eq!(gamma_again.root_identity.symbol_name.as_ref(), "Gamma");
     assert_eq!(
         crate::resolver_core::prepared_decl::prepared_type_decl_build_count_for_tests(),
         1,
@@ -12145,7 +12148,7 @@ export interface Delta { delta: string }
     let alpha = host
         .prepared_type_decl("/src/types.ts", "Alpha")
         .expect("Alpha should prepare");
-    assert_eq!(alpha.root_identity.symbol_name, "Alpha");
+    assert_eq!(alpha.root_identity.symbol_name.as_ref(), "Alpha");
     assert_eq!(
         crate::resolver_core::prepared_decl::prepared_type_decl_build_count_for_tests(),
         2,
@@ -12203,7 +12206,7 @@ fn lazy_promotion_stability() {
         initial
             .name_resolution
             .get("Helper")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/src/dep.d.ts"),
         "lazy resolution should prefer .d.ts via effective_target()",
     );
@@ -12227,7 +12230,7 @@ fn lazy_promotion_stability() {
         after_promotion
             .name_resolution
             .get("Helper")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/src/dep.d.ts"),
         "lazy promotion to the same effective target should NOT change name_resolution",
     );
@@ -12280,7 +12283,7 @@ fn atomic_rebuild_on_route_change() {
         props_v1
             .name_resolution
             .get("Inner")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/src/inner-v1.ts"),
         "Props name_resolution should point to inner-v1",
     );
@@ -12291,7 +12294,7 @@ fn atomic_rebuild_on_route_change() {
         alt_v1
             .name_resolution
             .get("Inner")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/src/inner-v1.ts"),
         "Alt name_resolution should point to inner-v1",
     );
@@ -12310,7 +12313,7 @@ fn atomic_rebuild_on_route_change() {
         props_v2
             .name_resolution
             .get("Inner")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/src/inner-v2.ts"),
         "Props name_resolution must point to inner-v2 after route change",
     );
@@ -12321,7 +12324,7 @@ fn atomic_rebuild_on_route_change() {
         alt_v2
             .name_resolution
             .get("Inner")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/src/inner-v2.ts"),
         "ALL prepared decls must point to inner-v2 after route change — atomic rebuild",
     );
@@ -12411,7 +12414,7 @@ fn regression_stale_prepared_decls_after_dep_resolution_change() {
         initial
             .name_resolution
             .get("Foo")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/types-a.ts"),
         "initial lookup should resolve Foo to types-a",
     );
@@ -12429,7 +12432,7 @@ fn regression_stale_prepared_decls_after_dep_resolution_change() {
         updated
             .name_resolution
             .get("Foo")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/types-b.ts"),
         "prepared decl must reflect the new target after dep-resolution change — guards against stale route bug",
     );
@@ -12438,7 +12441,7 @@ fn regression_stale_prepared_decls_after_dep_resolution_change() {
         updated
             .name_resolution
             .get("Foo")
-            .map(|identity| identity.canonical_id.as_str()),
+            .map(|identity| identity.canonical_id.as_ref()),
         Some("/types-a.ts"),
         "prepared decl must NOT retain the stale route to types-a",
     );
@@ -12475,8 +12478,11 @@ fn regression_declaration_scoped_solving_with_local_closure() {
     );
 
     // Additionally verify Props itself is well-formed.
-    assert_eq!(prepared.root_identity.symbol_name, "Props");
-    assert_eq!(prepared.root_identity.canonical_id, "/src/types.ts");
+    assert_eq!(prepared.root_identity.symbol_name.as_ref(), "Props");
+    assert_eq!(
+        prepared.root_identity.canonical_id.as_ref(),
+        "/src/types.ts"
+    );
 }
 
 /// Regression guard 9: Shallow alias resolution through barrel re-exports.

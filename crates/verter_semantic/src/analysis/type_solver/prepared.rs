@@ -33,8 +33,10 @@ use verter_type_expr::{MappedModifier, ObjectMember, PrimitiveName, TypeExpr};
 /// The content-free anchor of a prepared declaration's authored positions.
 fn decl_anchor(root_identity: &ResolvedRootIdentity, space: LocatorSymbolSpace) -> AuthoredAnchor {
     AuthoredAnchor {
-        canonical_id: Arc::from(root_identity.canonical_id.as_str()),
-        symbol: Arc::from(root_identity.symbol_name.as_str()),
+        // The identity fields are shared `Arc<str>` — the anchor reuses the
+        // same allocations instead of copying.
+        canonical_id: Arc::clone(&root_identity.canonical_id),
+        symbol: Arc::clone(&root_identity.symbol_name),
         space,
     }
 }
@@ -99,8 +101,8 @@ fn member_span_origin(
 /// a freshly constructed prepared decl does not allocate a private empty map
 /// (the prepared-decl builder assigns the real per-file shared table right
 /// after construction; anchor-style consumers keep the empty table).
-fn empty_name_resolution() -> Arc<FxHashMap<String, ResolvedRootIdentity>> {
-    static EMPTY: std::sync::OnceLock<Arc<FxHashMap<String, ResolvedRootIdentity>>> =
+fn empty_name_resolution() -> Arc<FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>> {
+    static EMPTY: std::sync::OnceLock<Arc<FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>>> =
         std::sync::OnceLock::new();
     Arc::clone(EMPTY.get_or_init(|| Arc::new(FxHashMap::default())))
 }
@@ -162,8 +164,9 @@ pub struct PreparedTypeDecl {
     /// file, not per declaration), so the prepared-decl builder shares ONE
     /// immutable base table across all such decls of a defining file; only a
     /// namespaced declaration (whose direct-sibling bindings are
-    /// declaration-scoped) carries its own private table.
-    pub name_resolution: Arc<FxHashMap<String, ResolvedRootIdentity>>,
+    /// declaration-scoped) carries its own private table. Keys are interned
+    /// `Arc<str>` names minted through the store-owned identity pool.
+    pub name_resolution: Arc<FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>>,
 
     /// Declaration provenance metadata.
     pub provenance: DeclProvenance,
@@ -305,10 +308,11 @@ pub struct PreparedValueDecl {
 
     /// Pre-resolved name context for bare names in type annotations
     /// attached to this value declaration. Same semantics (and the same
-    /// per-file `Arc` sharing) as `PreparedTypeDecl::name_resolution`; the
-    /// value-space table has no per-declaration bindings at all, so every
-    /// prepared value decl of a defining file shares one base table.
-    pub name_resolution: Arc<FxHashMap<String, ResolvedRootIdentity>>,
+    /// per-file `Arc` sharing + interned `Arc<str>` keys) as
+    /// `PreparedTypeDecl::name_resolution`; the value-space table has no
+    /// per-declaration bindings at all, so every prepared value decl of a
+    /// defining file shares one base table.
+    pub name_resolution: Arc<FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>>,
 
     /// Cache dependency contract for invalidation.
     pub cache_deps: PreparedCacheDeps,
@@ -485,7 +489,7 @@ impl PreparedTypeDecl {
         // so each member fact is stamped with it. The macro-surface overlay
         // pairs the member's recovered spans with this file.
         let declaration_origin =
-            DeclarationOrigin::Declared(Arc::from(self.root_identity.canonical_id.as_str()));
+            DeclarationOrigin::Declared(Arc::clone(&self.root_identity.canonical_id));
         let mut path_prefix = Vec::new();
         Self::index_transparent_object_members(
             &mut self.member_index,

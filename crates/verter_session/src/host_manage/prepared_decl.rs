@@ -599,6 +599,7 @@ impl VerterHost {
                 dep_edges,
                 script_setup_type_bindings,
                 import_canonicalization,
+                self.project_type_store().identity_interner(),
             ),
         );
 
@@ -731,6 +732,7 @@ impl VerterHost {
         let mut canonicalization =
             crate::resolver_core::prepared_decl::ImportCanonicalization::default();
         let mut route_facts: Vec<crate::resolver_core::FactVersionRef> = Vec::new();
+        let interner = self.project_type_store().identity_interner();
 
         for (local_name, target) in state.import_targets.iter() {
             // The import's resolved barrel canonical (dep_edges → target →
@@ -785,7 +787,10 @@ impl VerterHost {
             if type_final_canonical != barrel_canonical {
                 canonicalization.final_resolution.insert(
                     local_name.clone(),
-                    ResolvedRootIdentity::new(&type_final_canonical, &type_final_name),
+                    ResolvedRootIdentity::new(
+                        interner.intern(&type_final_canonical),
+                        interner.intern(&type_final_name),
+                    ),
                 );
                 route_facts.extend(type_chain_facts.iter().cloned());
                 continue;
@@ -818,7 +823,10 @@ impl VerterHost {
                 if value_final.canonical_id != barrel_canonical {
                     canonicalization.final_resolution.insert(
                         local_name.clone(),
-                        ResolvedRootIdentity::new(&value_final.canonical_id, &value_final.name),
+                        ResolvedRootIdentity::new(
+                            interner.intern(&value_final.canonical_id),
+                            interner.intern(&value_final.name),
+                        ),
                     );
                     route_facts.extend(value_chain_facts.iter().cloned());
                 }
@@ -885,6 +893,7 @@ impl VerterHost {
                 dep_edges,
                 rustc_hash::FxHashMap::default(),
                 import_canonicalization,
+                self.project_type_store().identity_interner(),
             ),
         );
 
@@ -1092,6 +1101,7 @@ impl VerterHost {
                 dep_edges,
                 script_setup_type_bindings,
                 import_canonicalization,
+                self.project_type_store().identity_interner(),
             ),
         );
 

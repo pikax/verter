@@ -236,10 +236,16 @@ impl VerterHost {
             symbol_name,
         )
         .map(|root| (root.canonical_id, root.symbol_name))
-        .unwrap_or_else(|| (scope_canonical_id.to_string(), symbol_name.to_string()));
+        .unwrap_or_else(|| {
+            let interner = self.project_type_store().identity_interner();
+            (
+                interner.intern(scope_canonical_id),
+                interner.intern(symbol_name),
+            )
+        });
         // Walk the re-export chain to land on the declaring file.
         let (declaring_canonical, declaring_symbol) =
-            self.resolve_prepared_decl_target(resolved_root.0.as_str(), resolved_root.1.as_str());
+            self.resolve_prepared_decl_target(resolved_root.0.as_ref(), resolved_root.1.as_ref());
         let whole_hash = self
             .shallow_file_state(declaring_canonical.as_str())
             .map(|s| s.whole_hash)
