@@ -461,23 +461,23 @@ async fn scanner_loop(
         .unwrap_or(false);
 
         // Sync to type provider
-        if compile_ok {
-            if let Some(sync) = &config.project_sync {
-                sync_file_to_provider(
-                    path,
-                    &config.host,
-                    &config.tsx_profile,
-                    sync,
-                    &config.provider_surfaces,
-                    &config.vfs_workspace,
-                    config.is_tsgo,
-                    &config.provider_sync_states,
-                    config.carrier_publish_coordinator.as_ref(),
-                    &config.carrier_transaction_coordinator,
-                    Some(&config.pending_snapshot_provider_sync),
-                )
-                .await;
-            }
+        if compile_ok
+            && (config.project_sync.is_some() || config.carrier_publish_coordinator.is_some())
+        {
+            sync_file_to_provider(
+                path,
+                &config.host,
+                &config.tsx_profile,
+                config.project_sync.as_ref(),
+                &config.provider_surfaces,
+                &config.vfs_workspace,
+                config.is_tsgo,
+                &config.provider_sync_states,
+                config.carrier_publish_coordinator.as_ref(),
+                &config.carrier_transaction_coordinator,
+                Some(&config.pending_snapshot_provider_sync),
+            )
+            .await;
         }
 
         batch_count += 1;
@@ -825,7 +825,7 @@ async fn sync_file_to_provider(
     canonical_id: &str,
     host: &VerterHost,
     profile: &CompileProfile,
-    sync: &ProjectSync,
+    sync: Option<&ProjectSync>,
     provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
     vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
     is_tsgo: bool,
@@ -909,6 +909,12 @@ async fn sync_file_to_provider(
             transition,
             pending,
         } => {
+            let Some(sync) = sync else {
+                tracing::error!(
+                    "workspace_scanner: direct-open carrier decision has no managed provider sync"
+                );
+                return;
+            };
             if is_tsgo {
                 crate::server::configure_provider_paths_for_source(
                     sync,
@@ -1035,8 +1041,10 @@ async fn sync_file_to_provider(
                 {
                     // The declaration overlay (`Decl`), if any, is released by
                     // `DeclOverlayOwner` via the `did_close` lifecycle, never here.
-                    close_stale_paths(sync, provider_surfaces, &state.active_non_decl_paths())
-                        .await;
+                    if let Some(sync) = sync {
+                        close_stale_paths(sync, provider_surfaces, &state.active_non_decl_paths())
+                            .await;
+                    }
                 }
             }
         }
@@ -1431,7 +1439,7 @@ mod tests {
             canonical_id,
             &host,
             &profile,
-            &sync,
+            Some(&sync),
             &crate::provider_surface_store::ProviderSurfaceStore::new(),
             &snapshot,
             false,
@@ -1504,7 +1512,7 @@ mod tests {
             canonical_id,
             &host,
             &profile,
-            &sync,
+            Some(&sync),
             &crate::provider_surface_store::ProviderSurfaceStore::new(),
             &snapshot,
             false,
@@ -1587,7 +1595,7 @@ defineProps<{ msg: string }>()
             canonical_id,
             &host,
             &profile,
-            &sync,
+            Some(&sync),
             &crate::provider_surface_store::ProviderSurfaceStore::new(),
             &snapshot,
             true,
@@ -1701,7 +1709,7 @@ import Child from '@/Child.vue'
             &canonical_id,
             &host,
             &profile,
-            &sync,
+            Some(&sync),
             &crate::provider_surface_store::ProviderSurfaceStore::new(),
             &snapshot,
             true,
@@ -2119,7 +2127,7 @@ defineProps<{ msg: string }>()
             canonical_id,
             &host,
             &profile,
-            &sync,
+            Some(&sync),
             &crate::provider_surface_store::ProviderSurfaceStore::new(),
             &snapshot,
             false,
@@ -2285,7 +2293,7 @@ defineProps<{ msg: string }>()
             &source,
             &host,
             &profile,
-            &sync,
+            Some(&sync),
             &surfaces,
             &owning_vfs,
             false, // tsserver (not tsgo)
@@ -2318,7 +2326,7 @@ defineProps<{ msg: string }>()
             &source,
             &host,
             &profile,
-            &sync,
+            Some(&sync),
             &surfaces,
             &other_vfs,
             false,
@@ -2340,6 +2348,66 @@ defineProps<{ msg: string }>()
             advertised_after.is_empty(),
             "owner loss MUST remove the carrier from the project's advertised set; got {advertised_after:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_scan_publishes_for_editor_tsserver_without_project_sync() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let ws_root = format!("/verter_scan_editor_{nanos}/ws");
+        let tsconfig = format!("{ws_root}/tsconfig.json");
+        let source = format!("{ws_root}/src/App.vue");
+        let host = VerterHost::new_standalone(verter_session::HostConfig::default());
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(source.clone()),
+            input_id: source.clone(),
+            source: Arc::<str>::from(
+                "<script setup lang=\"ts\">\nconst msg: string = 'hi'\n</script>\n\
+                 <template><div>{{ msg }}</div></template>\n",
+            ),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        });
+        let profile = CompileProfile {
+            target: verter_session::CompileTarget::BUNDLER | verter_session::CompileTarget::TSX,
+            ..CompileProfile::default()
+        };
+        assert!(host.ensure_compiled(&source, &profile).is_ok());
+
+        let backend =
+            Arc::new(crate::external_ts::TsserverEngineBackend::with_default_host_version());
+        let coordinator = crate::external_ts::CarrierPublishCoordinator::new_editor_owned(
+            Arc::clone(&backend),
+            "5.9.0",
+        );
+        let sync_states = DashMap::new();
+        let surfaces = crate::provider_surface_store::ProviderSurfaceStore::new();
+        let owning_vfs = make_configured_carrier_vfs(&ws_root, &tsconfig);
+
+        sync_file_to_provider(
+            &source,
+            &host,
+            &profile,
+            None,
+            &surfaces,
+            &owning_vfs,
+            false,
+            &sync_states,
+            Some(&coordinator),
+            &crate::external_ts::CarrierTransactionCoordinator::new(),
+            None,
+        )
+        .await;
+
+        let canonical = crate::external_ts::CanonicalSource::from(source.as_str());
+        assert!(backend.membership_ledger().is_advertised(&canonical));
+        assert!(!backend.external_files_for_project(&tsconfig).is_empty());
+        let state = sync_states
+            .get(&source)
+            .expect("store-only publish must admit receipt-backed carrier state");
+        assert!(state.ide_background_loaded && state.api_background_loaded);
     }
 
     /// The background scan's DIRECT-OPEN (tsgo) IDE sync must record the
@@ -2384,7 +2452,7 @@ defineProps<{ msg: string }>()
             &source,
             &host,
             &profile,
-            &sync,
+            Some(&sync),
             &surfaces,
             &owning_vfs,
             true, // tsgo direct open

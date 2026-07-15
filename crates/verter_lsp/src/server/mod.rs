@@ -337,8 +337,9 @@ pub struct VerterLanguageServer {
     init_generation: Arc<std::sync::atomic::AtomicU64>,
     /// Actual MCP HTTP port (already bound). Sent to the extension during `initialized()`.
     mcp_port: Option<u16>,
-    /// Why no type provider could be started. Sent via `$/verter/typeProviderStatus`.
-    type_provider_none_reason: Option<String>,
+    /// Selection provenance, or why no provider could be started. Sent via
+    /// `$/verter/typeProviderStatus`.
+    type_provider_reason: Option<String>,
     /// Most-recently-used canonical IDs. Updated on did_open, did_change, and
     /// interactive reads (hover, completion, definition). Used for MRU-ordered
     /// snapshot drain — most recently interacted files reconcile first.
@@ -423,6 +424,17 @@ impl VerterLanguageServer {
                     crate::external_ts::default_carrier_store_host_version(),
                 ))
             }
+            (None, crate::TypeProviderKind::EditorTsserver) => {
+                let backend = Arc::new(
+                    crate::external_ts::TsserverEngineBackend::with_default_host_version(),
+                );
+                Some(
+                    crate::external_ts::CarrierPublishCoordinator::new_editor_owned(
+                        backend,
+                        crate::external_ts::default_carrier_store_host_version(),
+                    ),
+                )
+            }
             _ => None,
         };
 
@@ -485,7 +497,7 @@ impl VerterLanguageServer {
             workspace_scanner: Arc::new(tokio::sync::Mutex::new(None)),
             init_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             mcp_port: config.mcp_port,
-            type_provider_none_reason: config.type_provider_none_reason,
+            type_provider_reason: config.type_provider_reason,
             mru_canonical_ids: parking_lot::Mutex::new(Vec::new()),
             vfs_workspace,
             hover_provenance_enabled: std::sync::atomic::AtomicBool::new(false),

@@ -36,6 +36,7 @@ struct FakeServerState {
     closed: Vec<String>,
     saw_initialize: bool,
     saw_api_session: bool,
+    feature_methods: Vec<String>,
 }
 
 /// A fake `tsgo --lsp` server behind the relay: answers `initialize` with an
@@ -100,6 +101,23 @@ fn spawn_fake_tsgo_cfg(
                             &mut write,
                             &id,
                             serde_json::json!({ "kind": "full", "items": [] }),
+                        )
+                        .await;
+                    }
+                    (Some("textDocument/hover"), Some(id)) => {
+                        st.lock()
+                            .unwrap()
+                            .feature_methods
+                            .push("textDocument/hover".to_string());
+                        reply(
+                            &mut write,
+                            &id,
+                            serde_json::json!({
+                                "contents": {
+                                    "kind": "markdown",
+                                    "value": "```ts\nconst label: string\n```"
+                                }
+                            }),
                         )
                         .await;
                     }
@@ -243,6 +261,10 @@ async fn control_dispatch_drives_full_attach_lifecycle_through_relay() {
     assert_eq!(hello.wire_pin, 0xABCD);
     assert_eq!(hello.editor_session_generation, 7);
     assert!(hello.capabilities.carrier_injection && hello.capabilities.api_session);
+    assert!(
+        hello.capabilities.feature_requests,
+        "the authenticated control session must explicitly attest feature reads"
+    );
 
     // waitInitialized: the in-band witness the relay captured.
     let witness = tokio::time::timeout(Duration::from_secs(5), lb.client.wait_initialized())
@@ -289,6 +311,29 @@ async fn control_dispatch_drives_full_attach_lifecycle_through_relay() {
     assert_eq!(api.wire_pin, 0xABCD);
     assert_eq!(api.handle_kind, "integer");
     assert!(lb.fake.lock().unwrap().saw_api_session);
+
+    // featureRequest: a typed read-only hover traverses the SAME relay and is
+    // demultiplexed back to this Verter control client, never the editor.
+    let hover = lb
+        .client
+        .feature_request(
+            crate::control::messages::FeatureRequestMethod::Hover,
+            serde_json::json!({
+                "textDocument": { "uri": carrier_uri },
+                "position": { "line": 0, "character": 13 }
+            }),
+        )
+        .await
+        .expect("feature hover");
+    assert_eq!(
+        hover["contents"]["value"],
+        serde_json::json!("```ts\nconst label: string\n```")
+    );
+    assert_eq!(
+        lb.fake.lock().unwrap().feature_methods,
+        vec!["textDocument/hover"],
+        "the feature request must reach the editor-owned engine exactly once"
+    );
 
     // detach(close_carriers): retracts the carrier and closes THIS control
     // connection ONLY — a NON-DESTRUCTIVE detach. The retraction reached the fake

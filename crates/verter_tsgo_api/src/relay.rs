@@ -808,6 +808,18 @@ impl LspRelay {
         )
     }
 
+    /// Run one typed, read-only LSP feature request on the relayed editor session.
+    /// The control protocol supplies the closed method enum; this method accepts no
+    /// lifecycle or process-control operation and uses the relay's reserved request-id
+    /// namespace, so the response returns to Verter and never reaches the editor.
+    pub(crate) async fn feature_request(
+        &self,
+        method: crate::control::messages::FeatureRequestMethod,
+        params: serde_json::Value,
+    ) -> TsgoApiResult<serde_json::Value> {
+        self.port.send_request(method.as_lsp_method(), params).await
+    }
+
     /// Block until the editor→tsgo `initialize` response has passed the relay,
     /// returning the captured in-band [`InitializedWitness`] (the engine's
     /// `serverInfo.version` + the editor's `initialize` id and workspace

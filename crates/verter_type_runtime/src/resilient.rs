@@ -320,9 +320,15 @@ async fn run_actor<P>(
                 let _ = ack.send(result);
             }
             Command::Crashed { ack } => {
-                {
+                let crashed = {
                     let mut guard = inner.write().await;
-                    *guard = None;
+                    guard.take()
+                };
+                if let Some(provider) = crashed {
+                    // Clear the live cell before awaiting teardown so queries fail
+                    // closed. Owned providers then kill/reap their crashed child under
+                    // their bounded shutdown contract before respawn is admitted.
+                    let _ = provider.shutdown().await;
                 }
                 let _ = ack.send(());
             }

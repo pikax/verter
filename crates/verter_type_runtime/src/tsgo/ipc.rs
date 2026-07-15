@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::UNIX_EPOCH;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -1350,8 +1350,10 @@ pub struct TsgoApiSession {
 /// `TypeProvider` method calls into LSP requests.
 pub struct TsgoTypeProvider {
     transport: Arc<LspTransport>,
-    /// TSGO child process. Killed on drop to prevent orphans.
-    child: Child,
+    /// TSGO child process when this provider owns one. `None` for an already-
+    /// initialized, non-owning editor connection; that mode must never kill or
+    /// originate shutdown/exit toward the editor's engine.
+    child: Option<StdMutex<Option<Child>>>,
     /// Document version counter per path.
     versions: Arc<Mutex<HashMap<String, i32>>>,
     /// Cached file contents for byte-offset → LSP position conversion.
@@ -1367,7 +1369,14 @@ impl Drop for TsgoTypeProvider {
         // start_kill() is non-blocking (sends TerminateProcess on Windows, SIGKILL on Unix).
         // This is a belt-and-suspenders backup — kill_on_drop(true) on the Command
         // already handles this, but an explicit Drop makes the intent clear.
-        let _ = self.child.start_kill();
+        if let Some(slot) = &mut self.child {
+            let child = slot
+                .get_mut()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(child) = child {
+                let _ = child.start_kill();
+            }
+        }
     }
 }
 
@@ -1410,50 +1419,7 @@ impl TsgoTypeProvider {
             .ok_or_else(|| TypeProviderError::new("no stdout"))?;
         let stderr = child.stderr.take();
 
-        let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-
-        // Use a channel + dedicated writer task instead of Arc<Mutex<ChildStdin>>
-        // to prevent the deadlock where read_loop blocks on stdin while request()/notify()
-        // also hold it.
-        // Buffer 1024 messages to accommodate background file sync bursts without backpressure.
-        // Three priority channels: Interactive (hover/completion), Normal (imports),
-        // Background (workspace scan). Buffer 1024 messages for background burst sync.
-        let (interactive_tx, interactive_rx) = mpsc::channel::<StdinMessage>(1024);
-        let (normal_tx, normal_rx) = mpsc::channel::<StdinMessage>(1024);
-        let (background_tx, background_rx) = mpsc::channel::<StdinMessage>(1024);
-        tokio::spawn(stdin_writer_loop(
-            stdin,
-            interactive_rx,
-            normal_rx,
-            background_rx,
-        ));
-
-        let transport = Arc::new(LspTransport {
-            interactive_tx: interactive_tx.clone(),
-            normal_tx,
-            background_tx,
-            pending: Arc::clone(&pending),
-            next_id: AtomicI64::new(1),
-            consecutive_failures: AtomicU32::new(0),
-            crash_notify: crash_notify.as_ref().map(Arc::clone),
-        });
-
-        let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-
-        let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-
-        // Start the read loop in a background task (uses interactive_tx for auto-replies)
-        tokio::spawn(read_loop(
-            stdout,
-            pending,
-            Arc::clone(&diagnostics_cache),
-            Arc::clone(&contents_cache),
-            interactive_tx,
-            crash_notify,
-        ));
+        let provider = Self::from_transport_parts(stdout, stdin, Some(child), crash_notify);
 
         // Log tsgo stderr in a background task so crashes are visible
         if let Some(stderr) = stderr {
@@ -1491,7 +1457,8 @@ impl TsgoTypeProvider {
         // references / rename / signatureHelp / codeAction / semanticTokens /
         // documentHighlight / inlayHint / pull-diagnostic) are left to TSGO's static
         // server-side registration and are not advertised here.
-        let init_result = transport
+        let init_result = match provider
+            .transport
             .request_with_priority(
                 "initialize",
                 serde_json::json!({
@@ -1506,22 +1473,90 @@ impl TsgoTypeProvider {
                 INITIALIZE_TIMEOUT_SECS,
                 ProviderPriority::Interactive,
             )
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = TypeProvider::shutdown(&provider).await;
+                return Err(error);
+            }
+        };
 
         tracing::debug!("TSGO initialized: {:?}", init_result);
 
         // Send initialized notification
-        transport
+        if let Err(error) = provider
+            .transport
             .notify("initialized", serde_json::json!({}))
-            .await?;
+            .await
+        {
+            let _ = TypeProvider::shutdown(&provider).await;
+            return Err(error);
+        }
 
-        Ok(Self {
+        Ok(provider)
+    }
+
+    /// Build a feature provider over an already-initialized, non-owning LSP
+    /// transport. This sends no `initialize`/`initialized`, owns no process, and
+    /// never originates `shutdown`/`exit`; it is the editor-session reuse seam.
+    pub fn from_initialized_transport<R, W>(read: R, write: W) -> Self
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::from_transport_parts(read, write, None, None)
+    }
+
+    fn from_transport_parts<R, W>(
+        read: R,
+        write: W,
+        child: Option<Child>,
+        crash_notify: Option<Arc<Notify>>,
+    ) -> Self
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let (interactive_tx, interactive_rx) = mpsc::channel::<StdinMessage>(1024);
+        let (normal_tx, normal_rx) = mpsc::channel::<StdinMessage>(1024);
+        let (background_tx, background_rx) = mpsc::channel::<StdinMessage>(1024);
+        tokio::spawn(stdin_writer_loop(
+            write,
+            interactive_rx,
+            normal_rx,
+            background_rx,
+        ));
+
+        let transport = Arc::new(LspTransport {
+            interactive_tx: interactive_tx.clone(),
+            normal_tx,
+            background_tx,
+            pending: Arc::clone(&pending),
+            next_id: AtomicI64::new(1),
+            consecutive_failures: AtomicU32::new(0),
+            crash_notify: crash_notify.as_ref().map(Arc::clone),
+        });
+        let diagnostics_cache = Arc::new(Mutex::new(HashMap::new()));
+        let contents = Arc::new(Mutex::new(HashMap::new()));
+        tokio::spawn(read_loop(
+            read,
+            pending,
+            Arc::clone(&diagnostics_cache),
+            Arc::clone(&contents),
+            interactive_tx,
+            crash_notify,
+        ));
+
+        Self {
             transport,
-            child,
+            child: child.map(|child| StdMutex::new(Some(child))),
             versions: Arc::new(Mutex::new(HashMap::new())),
-            contents: contents_cache,
+            contents,
             diagnostics_cache,
-        })
+        }
     }
 
     /// Attach an `--api` checker session to THIS `tsgo --lsp` process by sending
@@ -1566,6 +1601,50 @@ impl TsgoTypeProvider {
     /// rather than re-tracking a second copy.
     pub async fn cached_content(&self, path: &str) -> Option<Arc<str>> {
         self.contents.lock().await.get(&contents_key(path)).cloned()
+    }
+
+    /// Forget locally cached content without emitting an LSP lifecycle write.
+    /// Used by a non-owning feature facade whose real overlay lifecycle is driven
+    /// through the relay's separately tracked carrier-injection channel.
+    pub async fn forget_cached_content(&self, path: &str) {
+        self.contents.lock().await.remove(&contents_key(path));
+        self.versions.lock().await.remove(path);
+    }
+
+    /// Pull and parse the current document diagnostics without degrading a wire
+    /// failure to the push-diagnostic cache. Non-owning editor-session consumers use
+    /// this to distinguish a legitimate empty report from a failed relay request, so
+    /// the caller can make an explicit fallback decision.
+    pub async fn get_diagnostics_strict(
+        &self,
+        path: &str,
+    ) -> Result<Vec<TypeDiagnostic>, TypeProviderError> {
+        let uri = Self::path_to_uri(path);
+        let value = self
+            .transport
+            .request(
+                "textDocument/diagnostic",
+                serde_json::json!({ "textDocument": { "uri": uri } }),
+            )
+            .await?;
+        let content = self.contents.lock().await.get(&contents_key(path)).cloned();
+        let diagnostics = value
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|diagnostic| {
+                        parse_lsp_diagnostic(diagnostic, content.as_deref(), Some(path))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        self.diagnostics_cache
+            .lock()
+            .await
+            .insert(normalize_file_uri(&uri), diagnostics.clone());
+        Ok(diagnostics)
     }
 
     /// Convert a file path to a `file://` URI.
@@ -2481,69 +2560,28 @@ impl TypeProvider for TsgoTypeProvider {
     }
 
     fn get_diagnostics(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
-        let uri = Self::path_to_uri(path);
         let path_owned = path.to_string();
-        let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         let diagnostics_cache = Arc::clone(&self.diagnostics_cache);
         Box::pin(async move {
             // Use pull diagnostics (textDocument/diagnostic) — TSGO supports this
             // model rather than push (publishDiagnostics). Pull is synchronous:
             // we send a request and get the diagnostics back directly.
-            let result = transport
-                .request(
-                    "textDocument/diagnostic",
-                    serde_json::json!({
-                        "textDocument": { "uri": uri }
-                    }),
-                )
-                .await;
-
-            match result {
-                Ok(val) => {
-                    let content = {
-                        let cache = contents_cache.lock().await;
-                        cache.get(&contents_key(&path_owned)).cloned()
-                    };
-
-                    let diags = val
-                        .get("items")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|d| {
-                                    parse_lsp_diagnostic(
-                                        d,
-                                        content.as_deref(),
-                                        Some(path_owned.as_str()),
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-
+            match self.get_diagnostics_strict(&path_owned).await {
+                Ok(diags) => {
                     tracing::debug!(
                         "get_diagnostics: pull returned {} diagnostics for {}",
                         diags.len(),
-                        uri
+                        path_owned
                     );
-
-                    // Cache for future reference
-                    let cache_key = normalize_file_uri(&uri);
-                    diagnostics_cache
-                        .lock()
-                        .await
-                        .insert(cache_key, diags.clone());
-
                     Ok(diags)
                 }
                 Err(e) => {
                     // Pull diagnostics failed — fall back to push diagnostics cache.
                     tracing::debug!(
                         "get_diagnostics: pull failed ({e}), falling back to cache for {}",
-                        uri
+                        path_owned
                     );
-                    let cache_key = normalize_file_uri(&uri);
+                    let cache_key = normalize_file_uri(&Self::path_to_uri(&path_owned));
                     let cache = diagnostics_cache.lock().await;
                     let result = cache.get(&cache_key).cloned().unwrap_or_default();
                     Ok(result)
@@ -3092,7 +3130,14 @@ impl TypeProvider for TsgoTypeProvider {
 
     fn shutdown(&self) -> ProviderFuture<'_, ()> {
         let transport = Arc::clone(&self.transport);
+        let child = self.child.as_ref();
         Box::pin(async move {
+            let Some(child) = child else {
+                // Non-owning editor attach: close only this local feature bridge.
+                // Never send shutdown/exit onto the editor-owned connection.
+                let _ = transport.interactive_tx.send(StdinMessage::Shutdown).await;
+                return Ok(());
+            };
             // Best-effort: try shutdown request + exit notification with overall 3s timeout.
             // If TSGO is unresponsive, we don't hang — the child has kill_on_drop.
             let _ = tokio::time::timeout(std::time::Duration::from_secs(3), async {
@@ -3102,7 +3147,51 @@ impl TypeProvider for TsgoTypeProvider {
             .await;
             // Signal the writer task to stop.
             let _ = transport.interactive_tx.send(StdinMessage::Shutdown).await;
-            Ok(())
+
+            let mut child = child
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            let Some(mut child) = child.take() else {
+                // Idempotent/concurrent shutdown: another caller already owns teardown.
+                return Ok(());
+            };
+
+            match tokio::time::timeout(std::time::Duration::from_secs(1), child.wait()).await {
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(error)) => {
+                    let _ = child.start_kill();
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await;
+                    Err(TypeProviderError::new(format!(
+                        "failed to reap managed TSGO child: {error}"
+                    )))
+                }
+                Err(_) => {
+                    let kill_error = child.start_kill().err();
+                    match tokio::time::timeout(std::time::Duration::from_secs(2), child.wait())
+                        .await
+                    {
+                        Ok(Ok(_)) => Ok(()),
+                        Ok(Err(error)) => Err(TypeProviderError::new(format!(
+                            "failed to reap killed managed TSGO child: {error}{}",
+                            kill_error.map_or_else(String::new, |kill| {
+                                format!(" (kill also failed: {kill})")
+                            })
+                        ))),
+                        Err(_) => Err(TypeProviderError::new(
+                            kill_error.map_or_else(
+                                || "timed out reaping killed managed TSGO child".to_string(),
+                                |kill| {
+                                    format!(
+                                        "failed to kill managed TSGO child ({kill}) and timed out reaping it"
+                                    )
+                                },
+                            ),
+                        )),
+                    }
+                }
+            }
         })
     }
 
@@ -3140,7 +3229,13 @@ impl TypeProvider for TsgoTypeProvider {
     }
 
     fn child_pid(&self) -> Option<u32> {
-        self.child.id()
+        self.child.as_ref().and_then(|child| {
+            child
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .and_then(Child::id)
+        })
     }
 
     // ── Background-priority overrides ────────────────────────────────

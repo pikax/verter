@@ -163,7 +163,7 @@ interface ManifestStat {
  * The reader is PROJECT-SCOPED. The plugin's `create(info)` is per configured
  * project, so a reader is bound to that project's identity (`projectKey` — the
  * configured project's `getProjectName()`, the manifest `projects` key). Every
- * carrier lookup (`readyFile` / `ownedSourceFor` / `readyIdeCompanions`) then
+ * carrier lookup (`readyFile` / `ownedSourceFor` / ready membership) then
  * consults ONLY that project's manifest entry, never another tsconfig's. In a
  * multi-tsconfig workspace this prevents serving / advertising a carrier
  * compiled under one tsconfig's options (`paths`/`types`/`lib`) to a different
@@ -337,14 +337,7 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
     return undefined;
   }
 
-  /**
-   * The IDE-companion provider paths of every READY `CarrierIde` carrier in the
-   * reader's SCOPED project set, intersected with that project's owned-source
-   * set (a ready entry is advertised only when the project also OWNS that
-   * companion). This is the `getExternalFiles` membership set: a project-scoped
-   * reader returns ONLY its own project's carriers, never leaking a sibling
-   * tsconfig's companions into this project's Program.
-   */
+  /** Ready companion identities for non-editor consumers of the shared reader contract. */
   readyIdeCompanions(): string[] {
     const manifest = this.readManifest();
     if (!manifest) {
@@ -353,11 +346,38 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
     const out = new Set<string>();
     for (const project of this.scopedProjectEntries(manifest)) {
       const ownedProviders = new Set(
-        project.owned_sources.map((o) => normalizePath(o.provider_uri)),
+        project.owned_sources.map((owned) => normalizePath(owned.provider_uri)),
       );
       for (const [providerUri, ready] of Object.entries(project.ready_files)) {
         if (ready.role === "CarrierIde" && ownedProviders.has(normalizePath(providerUri))) {
           out.add(providerUri);
+        }
+      }
+    }
+    return [...out];
+  }
+
+  /**
+   * Source identities of every READY `CarrierIde` in the reader's scoped project
+   * set. A source is advertised only when its owned provider has a ready carrier
+   * blob. Keeping the opened source identity in the Program lets the host hooks
+   * substitute generated content without creating a second document identity.
+   */
+  readyIdeSources(): string[] {
+    const manifest = this.readManifest();
+    if (!manifest) {
+      return [];
+    }
+    const out = new Set<string>();
+    for (const project of this.scopedProjectEntries(manifest)) {
+      const readyProviders = new Set(
+        Object.entries(project.ready_files)
+          .filter(([, ready]) => ready.role === "CarrierIde")
+          .map(([providerUri]) => normalizePath(providerUri)),
+      );
+      for (const owned of project.owned_sources) {
+        if (owned.role === "CarrierIde" && readyProviders.has(normalizePath(owned.provider_uri))) {
+          out.add(owned.source_uri);
         }
       }
     }

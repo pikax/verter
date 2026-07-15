@@ -10,7 +10,6 @@
     "skipLibCheck": true,
     "allowArbitraryExtensions": true,
     "allowImportingTsExtensions": true,
-    "baseUrl": ".",
     "paths": {
       "vue": ["./stubs/vue.d.ts"],
       "@verter/types": ["./stubs/verter-types.d.ts"]

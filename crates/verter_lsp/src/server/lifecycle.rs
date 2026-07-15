@@ -36,10 +36,10 @@ pub(super) async fn handle_initialize(
     tracing::info!("verter-lsp initializing");
     tracing::info!(
         "type provider: {} ({})",
-        if server.type_provider.is_some() {
-            "connected"
-        } else {
-            "NONE — no TypeScript intellisense"
+        match server.type_provider_kind {
+            crate::TypeProviderKind::EditorTsserver => "connected through editor plugin",
+            _ if server.type_provider.is_some() => "connected",
+            _ => "NONE — no TypeScript intellisense",
         },
         server.type_provider_kind,
     );
@@ -255,11 +255,7 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
     // provider is active (or why none could be started) for the status bar.
     {
         let kind = server.type_provider_kind.to_string().to_lowercase();
-        let reason = if matches!(server.type_provider_kind, crate::TypeProviderKind::None) {
-            server.type_provider_none_reason.clone()
-        } else {
-            None
-        };
+        let reason = server.type_provider_reason.clone();
         server
             .client
             .send_notification::<TypeProviderStatus>(TypeProviderStatusParams {
@@ -477,7 +473,10 @@ pub(super) async fn handle_did_open(
     }
     let startup_policy = did_open_startup_policy(server.type_provider_kind);
     let prewarm_imported_carrier_apis = startup_policy.sync_imported_carrier_apis
-        && matches!(server.type_provider_kind, crate::TypeProviderKind::Tsserver)
+        && matches!(
+            server.type_provider_kind,
+            crate::TypeProviderKind::Tsserver | crate::TypeProviderKind::EditorTsserver
+        )
         // TEST SEAM: suppressed so the cross-file-rename child-closed lane proves
         // `handle_rename`'s own sync-before-query is the sole sync of the child API.
         && !server.suppress_imported_carrier_prewarm;
@@ -705,7 +704,10 @@ pub(super) async fn handle_did_change(
             // second content authority (the eager `sync_tsx` is a no-op for
             // tsserver). The publish is fail-closed (a no-owner carrier publishes
             // nothing). tsgo keeps the eager `sync_tsx` content open.
-            if matches!(server.type_provider_kind, crate::TypeProviderKind::Tsserver) {
+            if matches!(
+                server.type_provider_kind,
+                crate::TypeProviderKind::Tsserver | crate::TypeProviderKind::EditorTsserver
+            ) {
                 if carrier_language_for(&canonical_id).is_some() {
                     server.publish_carrier_to_external_ts(&canonical_id).await;
                 }

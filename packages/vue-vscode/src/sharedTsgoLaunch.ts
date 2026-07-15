@@ -1,8 +1,7 @@
 /**
  * Extension-side SHARED tsgo editor-attach wiring (pure, `vscode`-free).
  *
- * The OWNED tsgo baseline is always the LSP's default; SHARED editor-attach is an
- * ADDITIVE, OPT-IN, FAIL-CLOSED overlay. For the LSP to engage SHARED it must be
+ * SHARED editor-attach is the first serving tier. For the LSP to engage it, it must be
  * given BOTH `--shared-control-dir` and `--shared-session-key` (see
  * `crates/verter_lsp/src/main.rs` `shared_rendezvous()` — both required), AND a
  * `verter-relay-shim` must be advertising a live real-tsgo attach under that
@@ -12,15 +11,17 @@
  *   - discover the built/packaged `verter-relay-shim` binary,
  *   - discover the native-preview tsgo the shim relays to (the real engine),
  *   - mint a session key + establish an isolated control dir,
- *   - build the `--shared-*` LSP args and the shim spawn args.
+ *   - build the `--shared-*` LSP args,
+ *   - stage an editor-selectable `tsgo` alias whose bytes are the relay shim, and
+ *   - build the environment Native Preview's child inherits.
  *
  * Every step FAILS CLOSED: an absent shim OR an absent tsgo yields a non-engaged
- * plan (the extension stays OWNED), never a throw and never a partial rendezvous
+ * plan (the extension continues to its next serving tier), never a throw and never a partial rendezvous
  * (one `--shared-*` arg without the other would make the LSP's `shared_rendezvous`
  * refuse anyway). No `vscode` import — the whole surface is unit-testable without
  * the extension host.
  */
-import { existsSync, mkdirSync } from "fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync } from "fs";
 import { dirname, join } from "path";
 import { randomBytes } from "crypto";
 
@@ -204,6 +205,46 @@ export function buildShimSpawnArgs(rendezvous: {
   ];
 }
 
+/** Environment names consumed by an editor-spawned relay shim. */
+export const RELAY_REAL_TSGO_ENV = "VERTER_RELAY_REAL_TSGO";
+export const RELAY_CONTROL_DIR_ENV = "VERTER_RELAY_CONTROL_DIR";
+export const RELAY_SESSION_KEY_ENV = "VERTER_RELAY_SESSION_KEY";
+
+/**
+ * Stage a Native Preview tsdk directory containing a `tsgo` executable whose bytes
+ * are the Verter relay shim. Native Preview owns the actual process spawn and argv;
+ * the shim receives its real-engine/rendezvous inputs through the environment.
+ */
+export function prepareEditorTsdk(opts: {
+  shimPath: string;
+  controlDir: string;
+  platform?: NodeJS.Platform;
+  mkdir?: (path: string) => void;
+  copy?: (source: string, destination: string) => void;
+  chmod?: (path: string, mode: number) => void;
+}): { dir: string; executable: string } {
+  const platform = opts.platform ?? process.platform;
+  const dir = join(opts.controlDir, "editor-tsdk");
+  const executable = join(dir, platform === "win32" ? "tsgo.exe" : "tsgo");
+  (opts.mkdir ?? ((path) => void mkdirSync(path, { recursive: true })))(dir);
+  (opts.copy ?? copyFileSync)(opts.shimPath, executable);
+  if (platform !== "win32") {
+    (opts.chmod ?? chmodSync)(executable, 0o755);
+  }
+  return { dir, executable };
+}
+
+/** The exact child environment that binds an editor-owned shim to this rendezvous. */
+export function buildRelayEditorEnv(
+  plan: Pick<SharedTsgoEngaged, "realTsgo" | "controlDir" | "sessionKey">,
+): Record<string, string> {
+  return {
+    [RELAY_REAL_TSGO_ENV]: plan.realTsgo,
+    [RELAY_CONTROL_DIR_ENV]: plan.controlDir,
+    [RELAY_SESSION_KEY_ENV]: plan.sessionKey,
+  };
+}
+
 /** A non-engaged plan carries the fail-closed reason (the extension stays OWNED). */
 export interface SharedTsgoNotEngaged {
   engaged: false;
@@ -219,8 +260,6 @@ export interface SharedTsgoEngaged {
   sessionKey: string;
   /** The `--shared-*` args to append to the verter-lsp argv. */
   lspArgs: string[];
-  /** The argv to spawn `verter-relay-shim` with. */
-  shimArgs: string[];
 }
 
 export type SharedTsgoPlan = SharedTsgoEngaged | SharedTsgoNotEngaged;
@@ -282,13 +321,12 @@ export function planSharedTsgo(opts: {
     mkdir: opts.mkdir,
   });
   const lspArgs = buildSharedLspArgs({ controlDir, sessionKey });
-  const shimArgs = buildShimSpawnArgs({ realTsgo, controlDir, sessionKey });
-  return { engaged: true, shimPath, realTsgo, controlDir, sessionKey, lspArgs, shimArgs };
+  return { engaged: true, shimPath, realTsgo, controlDir, sessionKey, lspArgs };
 }
 
-/** Whether an effective type-provider value routes tsgo (SHARED is a tsgo overlay). */
+/** Whether an effective provider mode should attempt the editor-owned tsgo tier. */
 export function typeProviderRoutesTsgo(typeProvider: string | undefined): boolean {
-  return typeProvider === "tsgo" || typeProvider === "shared-tsgo";
+  return typeProvider === "auto" || typeProvider === "shared-tsgo";
 }
 
 // ── SHARED armed-handshake verification (Q3) ────────────────────────────────────

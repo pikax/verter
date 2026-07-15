@@ -1,6 +1,11 @@
 import { createRequire } from "node:module";
 
 import {
+  computeMemoryAuditMeasure,
+  ensureMemoryAuditCapable,
+  type MemoryAuditBinding,
+  type MemoryAuditCapable,
+  type MemoryAuditQueryMeasure,
   type MetaUiBackend,
   type MetaUiOutcomeBucket,
   type NormalizedMetaArtifact,
@@ -19,6 +24,8 @@ interface WorkerInitPayload {
   uiRoot: string;
   checkerConfig: Record<string, unknown>;
   components: PreparedComponentSnapshot[];
+  /** Opt-in deep memory audit (--memory-audit). */
+  memoryAudit?: boolean;
 }
 
 interface MeasuredQueryResult {
@@ -27,6 +34,8 @@ interface MeasuredQueryResult {
   outcome: MetaUiOutcomeBucket;
   /** Worker-process RSS right after the query (bytes). */
   rssBytes: number;
+  /** Per-query memory measure; present only in memory-audit mode. */
+  memoryAudit?: MemoryAuditQueryMeasure;
 }
 
 type ParentMessage =
@@ -36,6 +45,8 @@ type ParentMessage =
 const require = createRequire(import.meta.url);
 
 let checkerPromise: Promise<any> | null = null;
+/** Validated instrumented-binding handle; null when memory audit is off. */
+let memoryAudit: MemoryAuditCapable | null = null;
 
 process.on("message", (message: ParentMessage) => {
   void handleMessage(message);
@@ -44,6 +55,12 @@ process.on("message", (message: ParentMessage) => {
 async function handleMessage(message: ParentMessage): Promise<void> {
   if (message.type === "init") {
     try {
+      if (message.payload.memoryAudit) {
+        // Loud-failure setup gate: a non-instrumented @verter/native
+        // (missing exports or a null snapshot) throws here, which
+        // surfaces as a fatal message and fails the runner at setup.
+        memoryAudit = ensureMemoryAuditCapable(require("@verter/native") as MemoryAuditBinding);
+      }
       const checker = await createChecker(
         message.payload.uiRoot,
         message.payload.checkerConfig,
@@ -111,15 +128,32 @@ async function executeMeasuredQuery(
   checker: any,
   component: PreparedComponentSnapshot,
 ): Promise<MeasuredQueryResult> {
+  // Memory-audit capture brackets the query OUTSIDE the timed window:
+  // re-arm the allocator high-water mark and snapshot the counters
+  // before the query, then fold the post-query delta into the result.
+  const audit = memoryAudit;
+  let auditBefore = null;
+  if (audit) {
+    audit.resetHighWater();
+    auditBefore = audit.snapshot();
+  }
   const startedAt = performance.now();
   const raw = await checker.getComponentMeta(component.absolutePath);
   const artifact = normalizeComponentMetaArtifact(component.relativePath, raw);
   const latencyMs = performance.now() - startedAt;
   const outcome: MetaUiOutcomeBucket = artifact.diagnostics.length > 0 ? "degraded" : "success";
-  return {
+  const result: MeasuredQueryResult = {
     artifact,
     latencyMs,
     outcome,
     rssBytes: process.memoryUsage().rss,
   };
+  if (audit && auditBefore) {
+    const usage = process.memoryUsage();
+    result.memoryAudit = computeMemoryAuditMeasure(auditBefore, audit.snapshot(), {
+      rss: usage.rss,
+      heapUsed: usage.heapUsed,
+    });
+  }
+  return result;
 }

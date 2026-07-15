@@ -297,15 +297,18 @@ fn process_standard_macro(
             .prepend_alloc(call_abs_start, &format!("const {}=", auto_var_name));
     }
 
-    // Handle destructured declarators: `const { foo } = defineProps(...)` →
-    // `const ___VERTER___props = defineProps(...)`. Overwrite the destructuring
-    // pattern with the auto var name so `__props = ___VERTER___props` resolves.
+    // Keep a destructured macro result available under both identities:
+    //
+    // `const { foo } = defineProps()` becomes
+    // `const ___VERTER___props = defineProps(), { foo } = ___VERTER___props`.
+    //
+    // Moving the original pattern (instead of reproducing its text) preserves
+    // source mappings for aliases, defaults, and rest bindings. Keeping both
+    // declarators in the same declaration also preserves declaration kind and
+    // ordering relative to any following declarators.
     if let Some(d) = declarator {
         if d.name.is_none() && !is_no_return {
-            let binding_start = ctx.content_start + d.binding_span.start;
-            let binding_end = ctx.content_start + d.binding_span.end;
-            ctx.out
-                .overwrite(binding_start, binding_end, &auto_var_name);
+            lower_destructured_declarator(d, call_span, &auto_var_name, ctx);
         }
     }
 
@@ -397,6 +400,12 @@ fn process_define_model(
             .prepend_alloc(call_abs_start, &format!("const {}=", auto_var_name));
     }
 
+    if let Some(d) = declarator {
+        if d.name.is_none() {
+            lower_destructured_declarator(d, call_span, &auto_var_name, ctx);
+        }
+    }
+
     let effective_var_name = declarator
         .and_then(|d| d.name.map(|n| n.to_string()))
         .unwrap_or_else(|| auto_var_name.clone());
@@ -468,6 +477,12 @@ fn process_with_defaults(
             .prepend_alloc(call_abs_start, &format!("const {}=", auto_var_name));
     }
 
+    if let Some(d) = declarator {
+        if d.name.is_none() {
+            lower_destructured_declarator(d, call_span, &auto_var_name, ctx);
+        }
+    }
+
     let effective_var_name = declarator
         .and_then(|d| d.name.map(|n| n.to_string()))
         .unwrap_or_else(|| auto_var_name.clone());
@@ -483,6 +498,22 @@ fn process_with_defaults(
         },
         is_type: has_type_params,
     });
+}
+
+fn lower_destructured_declarator(
+    declarator: &MacroDeclarator<'_>,
+    call_span: Span,
+    auto_var_name: &str,
+    ctx: &mut MacroSourceCtx<'_, '_>,
+) {
+    let binding_start = ctx.content_start + declarator.binding_span.start;
+    let binding_end = ctx.content_start + declarator.binding_span.end;
+    let call_end = ctx.content_start + call_span.end;
+    let suffix = format!(" = {}", auto_var_name);
+
+    ctx.out
+        .move_wrapped(binding_start, binding_end, call_end, ", ", &suffix);
+    ctx.out.prepend_alloc(binding_start, auto_var_name);
 }
 
 /// Check if a type string is a simple reference (identifier) that doesn't need Prettify wrapping.

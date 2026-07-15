@@ -22,7 +22,7 @@ export interface StartupTiming {
   firstTypedCompletionLabel?: string;
   firstTypedCompletionKind?: string;
   firstDiagnosticMs?: number;
-  providerKind?: "tsgo" | "tsserver" | "verter-only";
+  providerKind?: "tsgo" | "tsserver" | "editor-tsserver" | "verter-only";
   typeProviderReason?: string;
   activationToReadyMs?: number;
   activationToFirstTypedCompletionMs?: number;
@@ -772,14 +772,16 @@ export function assertLogNotContains(needle: string, message?: string): void {
 export function parseStartupTiming(): StartupTiming {
   const log = readTestLog();
   const activationMatch = log.match(/\[TIMING\] activation_start (\d+)/);
-  const typeProviderMatch = log.match(/\[TIMING\] type_provider_started (\d+) (tsgo|tsserver)/);
+  const typeProviderMatch = log.match(
+    /\[TIMING\] type_provider_started (\d+) (tsgo|tsserver|editor-tsserver)/,
+  );
   const readyMatch = log.match(/\[TIMING\] ready (\d+)/);
   const typedCompletionMatch = log.match(
     /\[TIMING\] first_typed_completion (\d+) ([^\s]+) ([^\s]+)/,
   );
   const firstDiagnosticMatch = log.match(/\[TIMING\] first_diagnostic (\d+)/);
   const typeProviderStatusMatches = Array.from(
-    log.matchAll(/Type provider status:\s+(tsgo|tsserver|none)(?: \((.+?)\))?/g),
+    log.matchAll(/Type provider status:\s+(tsgo|tsserver|editor-tsserver|none)(?: \((.+?)\))?/g),
   );
   const lastTypeProviderStatus = typeProviderStatusMatches[typeProviderStatusMatches.length - 1];
 
@@ -800,8 +802,7 @@ export function parseStartupTiming(): StartupTiming {
       ? "verter-only"
       : ((lastTypeProviderStatus?.[1] as Exclude<StartupTiming["providerKind"], "verter-only">) ??
         (log.includes("verter-only mode") ? "verter-only" : undefined));
-  const typeProviderReason =
-    lastTypeProviderStatus?.[1] === "none" ? lastTypeProviderStatus[2] : undefined;
+  const typeProviderReason = lastTypeProviderStatus?.[2];
 
   const segments = computeStartupSegments({
     activationStartMs,

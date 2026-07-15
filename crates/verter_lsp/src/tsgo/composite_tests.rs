@@ -1,15 +1,12 @@
 //! Discriminating unit tests for the composite's diagnostics COMPOSITION — pure over
 //! the `TypeDiagnostic` carrier (no engine, no transport).
 //!
-//! The defect these guard: the SHARED overlay used to REPLACE OWNED's `--lsp`
-//! diagnostics wholesale, dropping the syntactic/suggestion/tag/related surface OWNED
-//! provides. The composite now UNIONS SHARED's authoritative semantic diagnostics with
-//! OWNED's, deduplicated — no OWNED class is silently dropped, and an identical
-//! diagnostic reported by both engines is not double-reported.
+//! The editor-owned provider exposes two diagnostic channels from one engine: configured-
+//! project semantic diagnostics over `--api`, and strict LSP pull diagnostics. Their
+//! deduplicated union preserves LSP-only syntax/metadata without consulting managed tsgo.
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use verter_session::external_ts::{AmbiguityCause, CarrierOwnershipResolution};
 use verter_session::{HostConfig, VerterHost};
@@ -33,8 +30,7 @@ use verter_workspace::{FilesystemOptions, FilesystemWorkspace, WorkspaceAccess};
 
 use super::{
     carrier_source_of, compose_diagnostics, compose_establishment_discriminant,
-    compose_owned_with_bounded_shared, injection_shadow_safe, real_file_occupies_injected_path,
-    SharedRendezvous, SharedTsgoOverlay,
+    injection_shadow_safe, real_file_occupies_injected_path, SharedRendezvous, SharedTsgoOverlay,
 };
 
 /// A minimal carrier diagnostic at `[start, end)` with `code` + `message`.
@@ -55,21 +51,17 @@ fn codes(diags: &[TypeDiagnostic]) -> Vec<String> {
 }
 
 /// The core discriminator: for a bound carrier the merged result contains BOTH a
-/// SHARED-only semantic diagnostic AND an OWNED-only non-semantic diagnostic, and an
-/// identical diagnostic reported by both engines is reported exactly once. A
-/// wholesale-replace composite would drop the OWNED-only syntactic diagnostic.
+/// `--api` semantic diagnostic AND an LSP-only non-semantic diagnostic, and an
+/// identical diagnostic reported by both channels is reported exactly once.
 #[test]
-fn compose_unions_shared_semantic_and_owned_nonsemantic_deduped() {
-    // SHARED: an authoritative cross-file SEMANTIC diagnostic (TS2322).
-    let shared = vec![diag(
+fn compose_unions_api_semantic_and_lsp_full_deduped() {
+    let semantic = vec![diag(
         10,
         20,
         "2322",
         "Type 'string' is not assignable to type 'number'.",
     )];
-    // OWNED (`--lsp`): the SAME semantic diagnostic (a duplicate) PLUS an OWNED-only
-    // SYNTACTIC diagnostic (TS1005) that `--api getSemanticDiagnostics` never produces.
-    let owned = vec![
+    let full = vec![
         diag(
             10,
             20,
@@ -79,16 +71,16 @@ fn compose_unions_shared_semantic_and_owned_nonsemantic_deduped() {
         diag(30, 31, "1005", "';' expected."),
     ];
 
-    let merged = compose_diagnostics(shared, owned);
+    let merged = compose_diagnostics(semantic, full);
     let merged_codes = codes(&merged);
 
     assert!(
         merged_codes.iter().any(|c| c == "2322"),
-        "the SHARED semantic diagnostic must survive; got {merged_codes:?}"
+        "the `--api` semantic diagnostic must survive; got {merged_codes:?}"
     );
     assert!(
         merged_codes.iter().any(|c| c == "1005"),
-        "the OWNED-only syntactic diagnostic must NOT be dropped by the overlay; got {merged_codes:?}"
+        "the LSP-only syntactic diagnostic must not be dropped; got {merged_codes:?}"
     );
     assert_eq!(
         merged
@@ -96,37 +88,29 @@ fn compose_unions_shared_semantic_and_owned_nonsemantic_deduped() {
             .filter(|d| d.code.as_deref() == Some("2322"))
             .count(),
         1,
-        "an identical diagnostic reported by BOTH engines is not double-reported"
+        "an identical diagnostic reported by both channels is not double-reported"
     );
     assert_eq!(
         merged.len(),
         2,
-        "union-with-dedup: 1 SHARED semantic + 1 OWNED-only syntactic (the duplicate collapsed)"
+        "union-with-dedup: one semantic + one LSP-only syntactic"
     );
 }
 
-/// The metadata-merge discriminator. When a SHARED and an OWNED diagnostic
-/// collide on `(span, code, message)`, the OWNED copy's `tags` +
-/// `relatedInformation` must be MERGED into the retained SHARED copy — never
-/// dropped. RED before the fix: dedup kept only SHARED's copy, so OWNED's
-/// Unnecessary tag + relatedInformation span vanished.
+/// LSP tags and related information are merged into the retained `--api` copy.
 #[test]
-fn compose_collision_merges_owned_tags_and_related_into_shared() {
-    // SHARED (`--api getSemanticDiagnostics`) reports the diagnostic WITHOUT the
-    // tag/related surface.
-    let shared = vec![diag(10, 20, "6133", "'x' is declared but never used.")];
-    // OWNED (`--lsp`) reports the IDENTICAL diagnostic WITH the Unnecessary tag (the
-    // unused-fade) AND a relatedInformation span.
-    let mut owned_diag = diag(10, 20, "6133", "'x' is declared but never used.");
-    owned_diag.tags = vec![TypeDiagnosticTag::Unnecessary];
-    owned_diag.related_information = vec![DiagnosticRelatedInfo {
+fn compose_collision_merges_lsp_tags_and_related_into_api_copy() {
+    let semantic = vec![diag(10, 20, "6133", "'x' is declared but never used.")];
+    let mut lsp_diag = diag(10, 20, "6133", "'x' is declared but never used.");
+    lsp_diag.tags = vec![TypeDiagnosticTag::Unnecessary];
+    lsp_diag.related_information = vec![DiagnosticRelatedInfo {
         path: "/w/App.vue.tsx".to_string(),
         start: 5,
         end: 6,
         message: "'x' was also declared here.".to_string(),
     }];
 
-    let merged = compose_diagnostics(shared, vec![owned_diag]);
+    let merged = compose_diagnostics(semantic, vec![lsp_diag]);
     assert_eq!(
         merged.len(),
         1,
@@ -136,33 +120,33 @@ fn compose_collision_merges_owned_tags_and_related_into_shared() {
     assert_eq!(
         d.tags,
         vec![TypeDiagnosticTag::Unnecessary],
-        "OWNED's Unnecessary tag must survive the dedup — never silently dropped"
+        "the LSP Unnecessary tag must survive dedup"
     );
     assert_eq!(
         d.related_information.len(),
         1,
-        "OWNED's relatedInformation must survive the dedup"
+        "LSP relatedInformation must survive dedup"
     );
     assert_eq!(
         d.related_information[0].message, "'x' was also declared here.",
-        "the merged related span is OWNED's"
+        "the merged related span is from LSP"
     );
 }
 
-/// The union is deduplicated: when BOTH engines carry a tag, it appears ONCE,
-/// and an OWNED-only tag is added — SHARED's own metadata is preserved and never
+/// The union is deduplicated: when both channels carry a tag, it appears once,
+/// and an LSP-only tag is added — semantic metadata is preserved and never
 /// doubled.
 #[test]
 fn compose_collision_unions_tags_without_duplication() {
-    let mut shared_d = diag(0, 5, "6385", "'foo' is deprecated.");
-    shared_d.tags = vec![TypeDiagnosticTag::Deprecated];
-    let mut owned_d = diag(0, 5, "6385", "'foo' is deprecated.");
-    owned_d.tags = vec![
+    let mut semantic = diag(0, 5, "6385", "'foo' is deprecated.");
+    semantic.tags = vec![TypeDiagnosticTag::Deprecated];
+    let mut full = diag(0, 5, "6385", "'foo' is deprecated.");
+    full.tags = vec![
         TypeDiagnosticTag::Deprecated,
         TypeDiagnosticTag::Unnecessary,
     ];
 
-    let merged = compose_diagnostics(vec![shared_d], vec![owned_d]);
+    let merged = compose_diagnostics(vec![semantic], vec![full]);
     assert_eq!(merged.len(), 1);
     assert_eq!(
         merged[0].tags,
@@ -170,7 +154,7 @@ fn compose_collision_unions_tags_without_duplication() {
             TypeDiagnosticTag::Deprecated,
             TypeDiagnosticTag::Unnecessary
         ],
-        "the shared Deprecated tag is not doubled; the owned-only Unnecessary is added"
+        "the semantic Deprecated tag is not doubled; the LSP-only Unnecessary is added"
     );
 }
 
@@ -178,9 +162,9 @@ fn compose_collision_unions_tags_without_duplication() {
 /// kept), so dedup never silently merges genuinely distinct diagnostics.
 #[test]
 fn compose_dedup_is_span_code_and_message_exact() {
-    let shared = vec![diag(0, 5, "2345", "Argument of type 'A' ...")];
-    let owned = vec![diag(0, 5, "2345", "Argument of type 'B' ...")];
-    let merged = compose_diagnostics(shared, owned);
+    let semantic = vec![diag(0, 5, "2345", "Argument of type 'A' ...")];
+    let full = vec![diag(0, 5, "2345", "Argument of type 'B' ...")];
+    let merged = compose_diagnostics(semantic, full);
     assert_eq!(
         merged.len(),
         2,
@@ -334,89 +318,18 @@ fn injection_shadow_safe_rejects_only_real_file_shadow_causes() {
     );
 }
 
-/// E3: the ENTIRE SHARED overlay contribution is bounded by ONE outer deadline and
-/// FAILS CLOSED to the already-computed OWNED result. A never-answering SHARED path
-/// (a stuck relay / control / `--api` peer) must NOT stall the diagnostics response
-/// past the bound even though OWNED is ready.
-///
-/// RED before the fix: `get_diagnostics` awaited the SHARED contribution with NO outer
-/// deadline, so a hanging inject/control/`--api` turned opt-in SHARED into an unbounded
-/// LSP diagnostics stall. The test guards the production helper with a generous OUTER
-/// timeout so a regression (a removed production bound) fails cleanly rather than hanging
-/// the suite — the production helper must return within its OWN (short) bound first.
-#[tokio::test]
-async fn bounded_shared_contribution_falls_back_to_owned_on_stall() {
-    let owned = vec![diag(0, 1, "1005", "';' expected.")];
-    // A never-answering SHARED path (models a stuck relay/control/`--api` peer).
-    let hanging = async { std::future::pending::<Option<Vec<TypeDiagnostic>>>().await };
-
-    let result = tokio::time::timeout(
-        Duration::from_secs(3),
-        compose_owned_with_bounded_shared(owned.clone(), hanging, Duration::from_millis(150)),
-    )
-    .await
-    .expect(
-        "the bounded SHARED contribution must return within its OWN deadline, never stall \
-         (a stuck relay/control/--api peer must not hang diagnostics)",
-    );
-    assert_eq!(
-        codes(&result),
-        vec!["1005".to_string()],
-        "a stalled SHARED path falls back to the already-computed OWNED result (fail-closed)"
-    );
-}
-
-/// The bounded contribution still OVERLAYS a promptly-answering SHARED result over OWNED
-/// (the bound is a fail-closed ceiling, not a suppressor): a SHARED result that arrives
-/// within the deadline is unioned with OWNED.
-#[tokio::test]
-async fn bounded_shared_contribution_overlays_a_prompt_shared_result() {
-    let owned = vec![diag(30, 31, "1005", "';' expected.")];
-    let shared = async {
-        Some(vec![diag(
-            10,
-            20,
-            "2322",
-            "Type 'string' is not assignable to type 'number'.",
-        )])
-    };
-    let result = compose_owned_with_bounded_shared(owned, shared, Duration::from_secs(5)).await;
-    let mut merged = codes(&result);
-    merged.sort();
-    assert_eq!(
-        merged,
-        vec!["1005".to_string(), "2322".to_string()],
-        "a prompt SHARED result is overlaid (unioned) over OWNED within the bound"
-    );
-}
-
-/// A `None` SHARED contribution (SHARED did not engage — no binding, unestablished attach,
-/// not-SHARED decision) leaves OWNED unchanged WITHOUT waiting out the deadline.
-#[tokio::test]
-async fn bounded_shared_none_leaves_owned_unchanged() {
-    let owned = vec![diag(0, 1, "6133", "'x' is declared but never used.")];
-    let shared = async { None };
-    let result = compose_owned_with_bounded_shared(owned, shared, Duration::from_secs(5)).await;
-    assert_eq!(
-        codes(&result),
-        vec!["6133".to_string()],
-        "a None SHARED contribution (fail-closed) leaves the OWNED result unchanged"
-    );
-}
-
-/// Fail-closed shape: an empty SHARED set leaves OWNED unchanged (the composite's
-/// diagnostics fallback when SHARED does not engage passes OWNED through verbatim).
+/// A valid empty semantic set still preserves LSP-only diagnostics from the same engine.
 #[test]
-fn compose_empty_shared_leaves_owned_unchanged() {
-    let owned = vec![
+fn compose_empty_semantic_preserves_lsp_full_set() {
+    let full = vec![
         diag(0, 1, "1005", "';' expected."),
         diag(2, 3, "6133", "unused"),
     ];
-    let merged = compose_diagnostics(Vec::new(), owned);
+    let merged = compose_diagnostics(Vec::new(), full);
     assert_eq!(
         codes(&merged),
         vec!["1005".to_string(), "6133".to_string()],
-        "empty SHARED ⇒ OWNED stands unchanged, in order"
+        "empty semantic channel preserves the LSP full set in order"
     );
 }
 

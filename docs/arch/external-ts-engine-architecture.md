@@ -105,7 +105,16 @@ Drive the TypeScript **JS language service** with a Verter **carrier-serving hos
 Verter remains the parse/codegen/VFS authority; the store is an engine mirror. A genuinely unavailable carrier ⇒ no TS result (never parse raw SFC text, never emit bogus `TS2307`).
 
 ### 2.3 tsgo (TS≥7) — a DUAL-SURFACE backend (`--api` typecheck + `--lsp` interactive features) over one shared CORE, FS-overlay project membership
-**Not** the tsserver plugin model (tsgo cannot dynamically link third-party code into its server process). Drive the user-installed tsgo's `--api`. This section specifies the **OWNED mode** — Verter spawns its own `--api` instance and the FS overlay backs carriers. **OWNED is the correctness BASELINE and the architectural center of the tsgo backend: it is the actual tsgo path, works in every editor, and is what the rest of this doc means by "the tsgo backend."** The **SHARED mode** (attach to the editor's own tsgo, carriers injected as LSP overlay documents on the shared session — §2.10) is an **optional layered optimization** built ON TOP of this OWNED `--api` backend, enabled only where a full editor TS-LSP proxy exists (VS Code today); it is never on the core path. In OWNED mode the plain LSP `didOpen` overlay is **not** the membership mechanism (the FS overlay + `open_project` is); in the SHARED optimization an LSP overlay document on the *shared* session is the carrier-injection channel (§2.10) — both are bindings of the same carrier contract, OWNED being the primary one. **The TS≥7 distribution is the npm `typescript` package at v7** — e.g. `typescript@7.0.1-rc` (the Go-port "Corsa" `typescript` release; per-platform native binaries `@typescript/typescript-{platform}-{arch}`; `--api` client exported at `typescript/unstable/sync`). **This mechanism is empirically verified (Block-0 gate = GO, 17/17 + GATE 5 7/7; reproducible repo gate at `tools/tsgo-api-gate/`, report `tools/tsgo-api-gate/GATE-REPORT.md`).**
+**Not** the tsserver plugin model (tsgo cannot dynamically link third-party code into its server
+process). Verter supports two bindings of the same project-bound tsgo contract: a non-owning
+attachment to the editor's already-running `--lsp` session, and an owned dual-surface fallback.
+Automatic editor sessions prefer the non-owning binding and keep the managed process cold until a
+connected demand proves the editor route cannot serve; explicit `tsgo` selects the owned binding
+eagerly. In owned mode the FS overlay plus `open_project` establishes membership. In editor-owned
+mode the relay injects LSP overlays into the shared session and the attached `--api` checker reads
+the same Program (§2.10). **The TS≥7 distribution is the npm `typescript` package at v7** — e.g.
+`typescript@7.0.1-rc`; the version and wire shape remain capability-gated by the reproducible
+`tools/tsgo-api-gate/` suite.
 
 **The tsgo backend is DUAL-SURFACE — `--api` (the checker oracle + batch/TSC typecheck) and `--lsp` (interactive IDE features + interactive diagnostics), SEPARATE surfaces sharing one CORE.** The user-installed tsgo exposes two distinct surfaces and the backend drives **both**:
 - **`--api` (MessagePack) = the project-bound CHECKER ORACLE + the BATCH/TSC/vite-perf typecheck surface** — the internal checker / type-reflection primitives Verter needs (carrier membership, the `semantic_diagnostics_for_carrier_in_project` typecheck oracle, type reflection), AND the tsc-like vite-performance BATCH typecheck surface. This is the surface the FS overlay + `open_project` membership of this section, the §2.4 batch typecheck, and the §2.7 cold/warm perf gates all ride. It is the typecheck AUTHORITY (the project-bound oracle S3 proves), but it is **NOT** the INTERACTIVE editor-diagnostics surface (see the diagnostics ruling below).
@@ -306,12 +315,30 @@ A plain `.ts`/`.js` file that does `import Comp from "./Comp.vue"` (or `import {
 
 **Verification — the tsgo half is ALREADY PROVEN; tsserver + the full contract land in the blocks.** The committed gate's **GATE 4** (`tools/tsgo-api-gate/`) shows a plain `Consumer.ts` importing a **bare `"./Exported.vue"`** (overlay serving only the `Exported.vue.tsx` companion, the bare path asserted absent on disk) resolve with zero diagnostics and the companion's exported type flow into the `.ts` — i.e. the tsgo redirection + types-flow of contract item (1) is green NOW. The remaining contract items (2)–(6) on both engines, and the module-specifier rewrite layer, land with Block 4 (tsserver, via the plugin) and Block 5 (tsgo, via the gate-proven overlay). *Guard:* `carrier_dx_enhanced_both_engines_both_frameworks` (the contract (1)–(6) holds on tsserver AND tsgo, with inserted-import specifiers rewritten to `.vue` or the edit failing closed).
 
-### 2.10 Shared-engine mode — an OPTIONAL optimization layered on the OWNED `--api` backend
-The tsgo backend (§2.3) is the **OWNED `--api` path** — that is the correctness baseline and architectural center. **SHARED mode is an OPTIONAL layered optimization built on top of it**, selected per session by capability negotiation and enabled **only where a full editor TS-LSP proxy exists** (VS Code today). It is never on the core path; OWNED always works without it.
+### 2.10 Editor-owned serving order and managed fallback
 
-> **Scheduling note (settled decision).** SHARED mode is **NOT a Block-5 deliverable** — Block 5 ships the OWNED backend only. SHARED is deferred to a **separate, later, spike-gated phase (Block 8 in §3)** that OPENS with a live-spike investigation and scopes everything before any implementation. This section's prose describes the SHARED *mechanism* as investigated; the open SHARED-capability unknowns (third-party pipe access, the B2 proxy feasibility) and the SHARED-diagnostics ruling are settled by that phase's spike, not pre-decided here.
-- **OWNED mode (the backend itself)** — Verter spawns its own `--api` instance (`new API({ tsserver_path, cwd, fs })`); the FS-overlay backs carriers. The **portable baseline** (works in every editor, version-controlled by Verter, stable lifecycle) and the actual tsgo backend. This is what Block 0/GATE 1–4 proved.
-- **SHARED mode (optional optimization)** — Verter attaches to the editor's already-running tsgo and drives carriers against the **editor's own Program** (one engine, no double-checking, instant consistency with what the editor sees). It is an **opt-in enhancement layered on OWNED**, enabled only under the gating preconditions below (editor attach bridge + full TS-LSP proxy); it is **secondary to OWNED**, not co-equal, and OWNED is always the fall-back. **Full carrier parity is a property of the combined tsgo adapter (OWNED + the SHARED optimization with OWNED fall-over), and OWNED alone already provides it**: SHARED cannot serve configs that need tsconfig-virtualization (Verter doesn't own the editor's FS), so for those it routes to OWNED. The OWNED baseline, not the optional optimization, guarantees parity.
+Interactive editor sessions use an identity-proven, editor-first order. In VS Code, Verter first
+attempts to interpose on the exact Native Preview `tsgo` session and reuse that session's Program.
+If Native Preview is unavailable, the extension activates the Verter TypeScript plugin in VS
+Code's own configured `tsserver` project and passes the LSP a project-bound, nonce-validated
+receipt. Only when neither editor route is available does Verter construct a managed TSGO
+fallback, and that fallback stays cold until the first connected semantic demand.
+
+- **Editor-owned Native Preview.** The relay is selected as the editor's TypeScript SDK, so the
+  editor starts and owns the one semantic `tsgo` process. The rendezvous identifies the exact
+  session and project; Verter does not start a second healthy-path engine.
+- **Editor-owned tsserver.** The plugin reads the durable carrier store from inside the editor's
+  configured projects. The LSP publishes carriers and sends `typeProviderSyncComplete` only after
+  the authoritative workspace scan completes; it owns no semantic child for this route.
+- **Managed fallback.** Lifecycle/configuration mutations are recorded without activation and
+  replayed once under a single-flight activation lock. Spawn, version probe, API attach,
+  initialization, failure cleanup, and shutdown are bounded. An owned child is explicitly killed
+  and reaped when graceful shutdown does not complete.
+
+Attestation is fail-closed: receipts are versioned, session-nonce bound, project bound, size
+bounded, and rejected on malformed identity facts. Non-owning teardown retracts Verter overlays
+and drops its connection only; it never initializes, shuts down, exits, or kills the editor's
+engine. Operator-visible provider status reports which route and process/project identity won.
 
 Both modes serve the **identical** §2.3/§2.7/§2.9 carrier/redirection/query contract; they differ only in **how carrier content reaches the Program** and **which Program it is**. The adapter abstracts the difference behind a `CarrierInjectionChannel` so every higher layer (§2.5 sync, §2.7 queries, §2.9 DX) is mode-agnostic.
 
@@ -339,11 +366,24 @@ Both modes serve the **identical** §2.3/§2.7/§2.9 carrier/redirection/query c
 - **No companion path is ever a user-visible document or an un-mapped result on ANY channel.** The editor opens `.vue`/`.svelte` (the source surface) and real `.ts`; the companions exist only inside the shared Program as Verter-injected overlays, and the proxy guarantees every engine response naming a companion path is Verter's to translate or swallow before the editor UI sees it.
 - *Guard:* `shared_mode_requires_full_ts_lsp_proxy` (SHARED is selected only when Verter proxies the editor's entire TS LSP connection; otherwise OWNED) **and** `shared_mode_no_unmapped_carrier_path_leak` (under the proxy, no companion-path span/edit/diagnostic — on any enumerated channel — reaches the editor UI un-mapped). The honest scope: the second guard is checkable precisely *because* the first establishes the proxy; without the proxy, SHARED is not offered, so there is nothing to leak.
 
-**Lifecycle.** The attached session dies when the editor restarts/changes tsgo; Verter detects disconnect, **re-attaches and re-opens its companion overlays**, and meanwhile **fails over to OWNED mode (per redirect-ON reference closure, per B1)** so no query is ever served without a valid Program (fail-closed). Mode is renegotiated on reconnect.
+**Lifecycle.** When the editor restarts or changes tsgo, the relay advertisement/session identity
+changes. Verter evicts the dead non-owning transport, re-attaches, and replays the recorded open
+carrier set into the fresh session. A managed provider is not started merely because the editor is
+still initializing: only a connected demand that observes a bounded attach/sync/serve failure may
+activate the single-flight fallback. Until either route is ready, the query fails closed.
 
-**Editor availability — TWO requirements, both editor-side (this is why SHARED is opt-in, not the universal default).** SHARED needs BOTH: (1) the editor exposes the **attach pipe** (`custom/initializeAPISession`) so Verter can `API.fromLSPConnection` — **VS Code** exposes it via the Native Preview extension's `ExtensionAPI`; and (2) Verter can **proxy the editor's TS LSP connection** for the B2 leak suppression. Where Verter ships the editor's TS integration itself (or sits as LSP middleware), (2) holds; where the editor owns its own TS LSP client and Verter cannot interpose, (2) fails and **SHARED is not offered — OWNED runs instead** (correct, just a second Program). Other matrix editors (Neovim/Helix/Zed/Lapce) today provide neither bridge, so they run OWNED until their tsgo integration exposes the pipe **and** admits a Verter proxy. This dual requirement is the honest reason SHARED is an optional, where-available optimization layered on the universal OWNED baseline, not a default and not co-equal with OWNED.
+**Editor availability.** Reuse requires both an editor attach bridge and full TS-LSP interposition.
+VS Code supplies both through the Native Preview extension plus Verter's staged relay. A client
+that supplies neither fact does not claim editor reuse; its first connected semantic demand may
+activate the managed fallback. The tsserver alternative is also VS Code-specific today because it
+depends on activating and attesting the plugin inside the editor-owned configured project.
 
-**Decision & invariants (OPTIONAL optimization, OWNED baseline):** SHARED mode is an **opt-in enhancement** enabled only where the editor exposes the attach bridge AND Verter can proxy the editor's TS LSP connection (B2) AND the §2.8 handshake passes on the attached session; **OWNED mode is the always-available correctness baseline and the architectural center** — the backend works fully without SHARED ever engaging. The selection is per-session and dynamic (re-evaluated on reconnect), and defaults to OWNED. **Correctness is mode-independent**: both produce real configured-Program results mapped fail-closed; the only differences are memory/consistency (SHARED wins where available) and editor availability (OWNED is universal). The tsgo backend is **DUAL-SURFACE** — it drives BOTH the `tsgo --lsp --stdio` interactive-feature surface AND the `--api` `Checker` surface over ONE connection / Program (the `--lsp` path is **retained and refactored to project-bound membership**, NOT legacy-to-delete; the one-surface-per-concern rule of §2.3) — and the **same client code path serves OWNED's spawned connection and (in the future SHARED phase) an attached editor connection**, so the SHARED optimization, when it is built, layers on cleanly without a provider rewrite. **SHARED mode is NOT a Block-5 deliverable** — Block 5 builds the OWNED dual-surface backend only (gate-proven); the SHARED optimization is a **separate, later, spike-gated phase** (see the SHARED-investigation block in §3) that scopes everything before any implementation. The SHARED-specific guards (`tsgo_shared_mode_carrier_injection`, `shared_mode_failover_is_per_reference_closure`, `shared_mode_requires_full_ts_lsp_proxy`, `shared_mode_no_unmapped_carrier_path_leak`) belong to that future phase, not to Block 5.
+**Decision & invariants.** Automatic editor serving is editor-first, identity-based, and dynamic:
+Native Preview reuse, then an attested editor tsserver plugin, then lazy managed TSGO. Explicit
+`tsgo` remains the eager managed operator override; `off` remains disabled. Correctness is
+route-independent: every result is configured-project bound and mapped fail-closed. Non-owning
+routes never control the editor process lifecycle, and managed failures never leave an owned child
+running. The public route status and the real process/project inventory are acceptance evidence.
 
 ### 2.11 WASM / playground — the TS JS language service IN-CONTEXT (third instantiation, accepted boundary)
 Verter's Rust core compiles to **WASM** (the playground; `crates/verter_wasm` → `wasm32-unknown-unknown`, `--target web`, verified to export carrier-gen + Verter-native analysis). A WASM host **cannot spawn a subprocess**, which sets a hard, **accepted** platform boundary — not a gap to engineer around:
@@ -446,8 +486,13 @@ BOTH rows are cross-crate follow-on deferrals tracked here; neither is in scope 
 ### Block 7 — WASM / playground in-context language service (§2.11; gated spike → impl)
 Bring the configured-project + enhanced-DX improvements to the **playground** via the TS JS `LanguageService` run in-context, reusing the §2.2 carrier-serving CORE as instantiation (b) — sharing the CORE (store/overlay + redirection + specifier-rewrite + mapper), implementing `LanguageServiceHost` directly, NOT the identical tsserver host hooks (§2.11/D4). **Spike first** (the §2.11 obligation): in a browser/worker, load `typescript.js` with Node built-ins stubbed (the `"browser"` field / `@typescript/vfs`), supply the lib `.d.ts` set in-memory, instantiate `ts.createLanguageService(carrierServingHost)`, feed the declaration carrier (`.d.vue.ts`/`.d.svelte.ts`, the bare-import target) + `getIde` (`.vue.tsx`/`.svelte.tsx`) + `getPublicApi` (`.vue.verter.ts`/`.svelte.verter.ts`) companions for the open SFCs, prove the `.x`→declaration-carrier redirection + specifier-rewrite + position-mapping work and a real diagnostic/hover/definition flows, at acceptable worker perf/memory. Then implement: factor the shared CORE so the Node-plugin and in-context instantiations reuse it; wire the playground to the in-context LS. *Removed (not present in the final state):* none (additive — the playground gains real configured-project TS where it previously had `declare module '*.vue'` wildcards). *Verification:* a playground/WASM test where a `.vue`/`.svelte` carrier type-checks through the in-context LS with the §2.9 DX contract holding (mapped back, fail-closed); TS≥7 in WASM is asserted **unavailable** (tsgo native-only — accepted) and the surface returns carrier-gen + Verter-native only there. *Guards:* `wasm_in_context_ls_carrier_membership` (a carrier is a member of the in-context LS Program and types flow); `wasm_tsgo_unavailable_fail_closed` (no fabricated TS≥7 result in WASM). *(Framework-neutral: this benefits BOTH Vue and Svelte carriers in the playground.)*
 
-### Block 8 — SHARED-engine mode (attach-inject to the editor's own tsgo) — RESTRUCTURED around the acceptance objective (§2.10)
-The SHARED optimization (§2.10) — driving carriers against the **editor's own tsgo Program** — is a **separate, later phase** layered on the OWNED tsgo backend (Block 5) AFTER OWNED consolidation (Block 6) and the WASM work (Block 7). Its **concrete acceptance objective** (the phase is judged by it): when a `.ts` imports a `.vue` component (the authoritative D1 acceptance case; `.svelte` is covered only once a matching D1 fixture is added), VS Code resolves the component's REAL types (props/emits/slots/expose) — mimicking the tsserver TypeScript-language-service-plugin — **for tsgo / native-preview, where that plugin mechanism does not exist**. SHARED is never on the core path: OWNED is the universal correctness baseline and is always sufficient on its own; SHARED is opt-in, per-session, additive, defaults to OWNED.
+### Block 8 — editor-owned TypeScript serving — implemented
+
+VS Code now selects the exact editor-owned Native Preview session first, then an attested plugin
+inside the editor-owned tsserver project, and only then the lazy managed TSGO fallback (§2.10).
+The acceptance fixture proves the selected route and configured-project identity, mapped `TS2322`
+plus real component typing, and the absence of a semantic child below Verter's LSP process for
+both editor routes.
 
 **Settled decision (post-spike, authoritative).** The opening live-spike + a Fable improvement pass + an unprimed codex-architect decision + a release-codec verification (D1a) resolved the open unknowns:
 - **attach-inject is the PRIMARY mechanism.** Read-only `ExtensionAPI` pipe access alone cannot inject carriers, so it cannot deliver `.vue`-in-`.ts` typing; the attached `--api` has no content channel (`LSPUpdateSnapshotParams = {openProject?}`, no `fs`), so carriers inject as **LSP `didOpen` overlay documents on the editor's already-configured shared `project.Session`** through a full-wire interposition substrate. Read-only tier is REJECTED as the product path.
@@ -458,11 +503,20 @@ The SHARED optimization (§2.10) — driving carriers against the **editor's own
 
 **Non-owning lifecycle (C13).** On an editor-owned connection Verter NEVER originates a second `initialize` and NEVER sends `exit`/`shutdown` or kills the process (a second `initialize` is a protocol error; `exit`+kill would destroy the editor's engine); proxy pass-through of the editor's own `initialize` is allowed. Teardown = retract Verter's own `didClose` overlays + drop the pipe only. The attach seam splits into an OWNED-only handshake half and a connection-source-agnostic attach half (`initialize_api_session`).
 
-**Decomposition (codex authoritative ordering; landing-bound semantic sub-blocks).** (1) shared provider-neutral core → (2) codec/version witness (the release-channel gate above) → (3) non-owning attach lifecycle → (4) relay/interposition (process-level `typescript.native-preview.tsdk` relay shim: JSON-RPC ID-space multiplexing for injected requests, notification injection, `custom/initializeAPISession` re-emission, server→client pass-through) → (5) pollution gates + redirect-closure OWNED failover → (6) **e2e acceptance (D1) — BLOCKING before SHARED is productized.**
+**Implemented decomposition.** The provider-neutral core, codec/version witness, non-owning
+attach lifecycle, relay interposition, pollution gates, lazy managed fallback, editor-tsserver
+attestation, and real-editor acceptance are one production serving path.
 
-**D1 (the blocking acceptance gate).** An env-gated automated `@vscode/test-electron` suite (native-preview installed into an isolated profile; extension-host Mocha drives `ExtensionAPI.initializeAPIConnection`, the user-level tsdk shim, injection-through-shim Program membership, the G4 wire recording, and the R0 pollution/latency measurement set), env-gated OUT of the canonical run per Testing-Hermeticity. **Centerpiece:** real VS Code + native-preview, a `.ts` imports `Comp.vue`, a wrong prop surfaces `TS2322`, hover shows the real prop type, mapped back through the carrier source. One supervised exploratory human pass is expected for UX/consent observations; the gate itself is the automated suite. **R0 (no user-visible unmapped carrier-path pollution)** is a BLOCKING no-degradation conjunct — carriers intentionally enter the Program, so the bar is that no companion-path result reaches the editor UI un-mapped on ANY enumerated channel: `workspace/diagnostic` / `workspace/symbol`, cross-file results (references/definition/rename), auto-import/completion candidates, code actions / `applyEdit`, semantic tokens, inlay hints, dynamic registrations, `partialResult`/progress, and augmentation; hover P50/P95 + RSS within measured thresholds.
+**D1 acceptance.** The isolated VS Code Insiders suite executes three hard tests for both
+`editor-owned-project@shared-tsgo` and `editor-owned-project@tsserver`: public route provenance
+and exact configured project, mapped semantic diagnostics plus the real component surface, and
+process-tree topology. Missing receipts, provider-sync readiness, run summaries, or executed tests
+are failures rather than skips.
 
-**tsserver (TS<7) is out of Block 8's scope (F1).** On TS<7 the editor's tsserver already loads Verter's language-service-plugin (the `.ts`-imports-`.vue` DX ships there); the two-tsserver topology is a separate later workstream. Block 8 is the tsgo phase.
+**tsserver (TS<7).** The extension activates the existing Verter language-service plugin inside
+VS Code's configured project. Its receipt is accepted only when the session nonce, process id,
+and on-disk configured-project paths validate. The LSP remains carrier-publish-only on this route
+and starts no second semantic server.
 
 *Guards (assertions pinned per sub-block as it lands):* `tsgo_shared_mode_carrier_injection` (an LSP-overlay companion is a member of the attached session's Program and types flow, or the closure fails over to OWNED); `shared_mode_failover_is_per_reference_closure` (B1 — fail-over selects per redirect-ON reference closure, never per-file or per-single-tsconfig; no cross-project redirect-ON edge is split across two engines); `shared_mode_requires_full_ts_lsp_proxy` (SHARED is selected only when Verter proxies the editor's entire TS LSP connection; otherwise OWNED); `shared_mode_no_unmapped_carrier_path_leak` (under the proxy, no companion-path span/edit/diagnostic on any enumerated channel reaches the editor UI un-mapped); plus the release-codec gate's fail-closed version/handle-encoding assertions (SB1).
 

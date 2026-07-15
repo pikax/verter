@@ -529,6 +529,14 @@ fn tsx_props_binding_prefix_is_dunder_props() {
 }
 
 #[test]
+fn tsx_destructured_prop_binding_is_the_real_local() {
+    let resolver = make_tsx_resolver(&[("msg", BindingType::PropsDestructured)]);
+    assert_eq!(resolver.resolve_prefix("msg"), "");
+    assert_eq!(resolver.resolve_simple_expr("msg"), "msg");
+    assert!(BindingType::PropsDestructured.is_props());
+}
+
+#[test]
 fn tsx_unresolved_resolve_simple_expr() {
     let resolver = make_tsx_resolver(&[]);
     assert_eq!(

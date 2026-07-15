@@ -3,15 +3,14 @@
  *
  * The `@vscode/test-electron` process exit code is an UNRELIABLE pass/fail signal on
  * some hosts (Windows can exit 0 even when the extension test run rejected, and the
- * @tsgo host can crash/hang mid-suite). The authoritative oracle is the run summary the
+ * editor host can crash/hang mid-suite). The authoritative oracle is the run summary the
  * mocha runner writes (`e2e/suite/index.ts` → `<logFile>.runsummary`). This module owns
  * the two decisions the runner needs:
- *   - {@link clearRunArtifacts}: DELETE the summary sidecar + the D1 marker BEFORE a run
+ *   - {@link clearRunArtifacts}: delete the log and summary sidecar before a run
  *     so a STALE green summary from a prior run can never false-green a CURRENT
  *     zero-exit crash that writes no fresh summary; and
- *   - {@link enforceRunSummary}: fail on any reported test failure, and — for a run that
- *     MUST be non-vacuous (a NARROWED run, or the D1 acceptance) — fail on a MISSING
- *     summary (a zero-exit host crash) AND on a 0-test execution.
+ *   - {@link enforceRunSummary}: fail on any reported test failure, a MISSING summary
+ *     (a zero-exit host crash), or a 0-test execution. Every release E2E run is required.
  *
  * Split out of `runTests.ts` (whose `main()` auto-runs) so the oracle is unit-testable
  * without launching the editor host; the poll window is injectable so the missing-summary
@@ -30,18 +29,13 @@ export interface RunSummary {
 export function runSummaryPath(logFile: string): string {
   return `${logFile}.runsummary`;
 }
-export function d1MarkerPath(logFile: string): string {
-  return `${logFile}.d1marker`;
-}
-
 /**
- * Delete the run-summary sidecar AND the D1 marker file BEFORE a run, so a STALE green
- * summary (or stale markers) from a PRIOR run can never be read after a CURRENT
- * zero-exit crash that never wrote a fresh one. Best-effort: a missing file is fine
- * (`{ force: true }`).
+ * Delete the log and run-summary sidecar before a run, so stale evidence
+ * from a prior run can never be read after a current zero-exit crash. Best-effort: a
+ * missing file is fine (`{ force: true }`).
  */
 export function clearRunArtifacts(logFile: string): void {
-  for (const p of [runSummaryPath(logFile), d1MarkerPath(logFile)]) {
+  for (const p of [logFile, runSummaryPath(logFile)]) {
     try {
       fs.rmSync(p, { force: true });
     } catch {
@@ -64,12 +58,6 @@ export function clearRunArtifacts(logFile: string): void {
 /** Options for {@link enforceRunSummary}. */
 export interface EnforceRunSummaryOptions {
   /**
-   * Refuse a MISSING summary AND a 0-test execution as a vacuous pass. Set by the caller
-   * for a NARROWED run (`VERTER_E2E_ONLY`) OR the D1 acceptance. When `false`, a missing
-   * summary is allowed to pass (the legacy full-matrix behaviour for non-D1 fixtures).
-   */
-  refuseVacuous: boolean;
-  /**
    * The cross-process flush-lag poll window in ms (the summary is written as the runner's
    * LAST act, so it can be briefly invisible right after `runTests()` resolves). Default
    * 8000; tests pass a small/zero value to avoid the wait.
@@ -81,8 +69,8 @@ export interface EnforceRunSummaryOptions {
 
 /**
  * Enforce the mocha run summary as the authoritative pass/fail oracle. Throws — so the
- * caller counts a fixture failure — when the summary reports any failed test, or (when
- * `refuseVacuous`) when the summary is MISSING or reports a 0-test execution. The
+ * caller counts a fixture failure — when the summary reports any failed test, when the
+ * summary is MISSING, or when it reports a 0-test execution. The
  * delete-before-run (`clearRunArtifacts`) guarantees any summary observed here was
  * written by THIS run, never a stale prior-run leftover.
  */
@@ -101,12 +89,10 @@ export async function enforceRunSummary(
     await new Promise((r) => setTimeout(r, pollIntervalMs));
   }
   if (!fs.existsSync(summaryPath)) {
-    if (opts.refuseVacuous) {
-      throw new Error(
-        `${label}: no run summary at ${summaryPath} — the run recorded no outcome (vacuous pass refused; a D1/narrowed run must write a summary)`,
-      );
-    }
-    return;
+    throw new Error(
+      `${label}: no run summary at ${summaryPath} — the run recorded no outcome ` +
+        `(vacuous pass refused; every required E2E run must write a summary)`,
+    );
   }
   const summary = JSON.parse(fs.readFileSync(summaryPath, "utf-8")) as RunSummary;
   if ((summary.failures ?? 0) > 0) {
@@ -115,7 +101,7 @@ export async function enforceRunSummary(
         (summary.rootHookError ? `; root hook error: ${summary.rootHookError}` : ""),
     );
   }
-  if (opts.refuseVacuous && (summary.executed ?? 0) === 0) {
+  if ((summary.executed ?? 0) === 0) {
     throw new Error(`${label}: run executed 0 tests (vacuous pass refused)`);
   }
 }

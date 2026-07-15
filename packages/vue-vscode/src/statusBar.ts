@@ -26,6 +26,14 @@ export function computeStatusBarState(
         tooltip: "Verter type provider: tsserver (Node.js-based TypeScript server)",
         warning: false,
       };
+    case "editor-tsserver":
+      return {
+        text: "$(check) Verter: Editor TS",
+        tooltip: params.reason
+          ? `Verter type provider: editor-owned tsserver - ${params.reason}`
+          : "Verter type provider: editor-owned tsserver plugin",
+        warning: false,
+      };
     case "none":
     default:
       return {

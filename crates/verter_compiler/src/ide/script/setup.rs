@@ -21,7 +21,7 @@ use crate::parser::types::RootNodeScript;
 use crate::template::code_gen::binding::BindingType;
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::utils::oxc::bindings::collect_setup_binding_refs;
-use crate::utils::oxc::vue::{parse_script_with_companion, ScriptItem, ScriptMode};
+use crate::utils::oxc::vue::{parse_script_with_companion, ScriptItem, ScriptMacro, ScriptMode};
 
 use super::{
     apply_event_handler_param_inference, apply_template_ref_call_inference,
@@ -319,6 +319,15 @@ pub(super) fn process_tsx_script_setup<'alloc>(
     let macro_state = process_macros(&parse_result.items, &mut macro_ctx, &[]);
     let out = macro_ctx.out;
 
+    // Preserve the dual identity of defineProps destructuring: these names are
+    // prop carriers for metadata/runtime purposes, and real source locals for
+    // IDE TSX expressions. The dedicated binding kind lets the TSX resolver use
+    // the local without weakening prop ownership anywhere else.
+    let destructured_prop_bindings = destructured_define_props_bindings(&parse_result.items);
+    for name in &destructured_prop_bindings {
+        bindings.insert(alloc.alloc_str(name), BindingType::PropsDestructured);
+    }
+
     // ── Failure-path recovery application ──────────────────────────
     // Register bindings the token scanner recovered from the REAL source (so the
     // template still resolves them) and emit the OUTPUT-ONLY holes that keep the
@@ -546,6 +555,27 @@ pub(super) fn process_tsx_script_setup<'alloc>(
         // (clean path and recovery path share the same alias semantics).
         if let Some(props_var) = define_props_var {
             wrapper_end.push_str(&format!("\nconst __props = {};", props_var));
+        }
+
+        // Template expressions now read PropsDestructured locals directly. Style
+        // v-bind usage has no TSX expression of its own, so mirror that external
+        // use with a value-read. Preserve the conservative liveness invariant:
+        // incomplete template/style usage means "possibly used"; a completely
+        // proven-unused local gets no synthetic read and remains eligible for TS6133.
+        if !destructured_prop_bindings.is_empty() {
+            let style_v_bind_set: FxHashSet<&str> = options
+                .style_v_bind_vars
+                .iter()
+                .map(String::as_str)
+                .collect();
+            let usage_incomplete =
+                options.template_used_vars.is_none() || !options.style_usage_complete;
+            for name in &destructured_prop_bindings {
+                let style_used = style_v_bind_set.contains(name);
+                if usage_incomplete || style_used {
+                    wrapper_end.push_str(&format!("\nvoid({name});"));
+                }
+            }
         }
 
         // Declare ___VERTER___instance for instance property access in template.
@@ -1043,4 +1073,39 @@ pub(super) fn process_tsx_script_setup<'alloc>(
     );
 
     (deferred_return_close, destructured_block_meta)
+}
+
+/// Return the real local identifiers declared by destructured defineProps / withDefaults
+/// patterns, in source declaration order. Both macro-pattern spans and declaration-name
+/// spans are relative to the script content, so containment is an exact typed-AST fact.
+fn destructured_define_props_bindings<'a>(items: &'a [ScriptItem<'a>]) -> Vec<&'a str> {
+    let pattern_spans: Vec<_> = items
+        .iter()
+        .filter_map(|item| {
+            let declarator = match item {
+                ScriptItem::Macro(ScriptMacro::DefineProps { declarator, .. })
+                | ScriptItem::Macro(ScriptMacro::WithDefaults { declarator, .. }) => {
+                    declarator.as_ref()
+                }
+                _ => return None,
+            }?;
+            declarator.name.is_none().then_some(declarator.binding_span)
+        })
+        .collect();
+
+    let mut seen = FxHashSet::default();
+    items
+        .iter()
+        .filter_map(|item| {
+            let ScriptItem::Declaration(declaration) = item else {
+                return None;
+            };
+            let (name, name_span) = (declaration.name?, declaration.name_span?);
+            pattern_spans
+                .iter()
+                .any(|pattern| name_span.start >= pattern.start && name_span.end <= pattern.end)
+                .then_some(name)
+        })
+        .filter(|name| seen.insert(*name))
+        .collect()
 }

@@ -1,5 +1,5 @@
 {
-  "name": "external-ts-d1-fixture",
+  "name": "editor-owned-project-fixture",
   "version": "1.0.0",
   "private": true,
   "type": "module"

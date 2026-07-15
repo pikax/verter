@@ -57,6 +57,61 @@ fn lsp_relay_parses_with_control_args() {
     assert!(is_lsp(&args), "--lsp ⇒ the relay route is taken");
 }
 
+#[test]
+fn editor_owned_argv_uses_env_rendezvous_and_forwards_without_dashdash() {
+    let mut args = tokens(&["--lsp", "--stdio"]);
+    let parsed = parse_args_from_with_env(&mut args, |name| {
+        Some(
+            match name {
+                REAL_TSGO_ENV => "/opt/real-tsgo",
+                CONTROL_DIR_ENV => "/tmp/editor-control",
+                SESSION_KEY_ENV => "editor-session",
+                _ => return None,
+            }
+            .to_string(),
+        )
+    })
+    .expect("an editor-selected shim must accept native tsgo argv with env rendezvous");
+
+    assert_eq!(parsed.real_tsgo, PathBuf::from("/opt/real-tsgo"));
+    assert_eq!(
+        parsed.control_dir,
+        Some(PathBuf::from("/tmp/editor-control"))
+    );
+    assert_eq!(parsed.session_key.as_deref(), Some("editor-session"));
+    assert_eq!(parsed.forwarded, vec!["--lsp", "--stdio"]);
+    assert!(is_lsp(&parsed));
+}
+
+#[test]
+fn explicit_shim_args_override_editor_environment() {
+    let mut args = tokens(&[
+        "--real-tsgo",
+        "/explicit/tsgo",
+        "--control-dir",
+        "/explicit/control",
+        "--session-key",
+        "explicit-session",
+        "--",
+        "--lsp",
+    ]);
+    let parsed = parse_args_from_with_env(&mut args, |_| Some("ignored-env".to_string())).unwrap();
+    assert_eq!(parsed.real_tsgo, PathBuf::from("/explicit/tsgo"));
+    assert_eq!(parsed.control_dir, Some(PathBuf::from("/explicit/control")));
+    assert_eq!(parsed.session_key.as_deref(), Some("explicit-session"));
+}
+
+#[test]
+fn editor_session_generation_is_exact_in_json_number_consumers() {
+    // Advertisements are JSON and are inspected by editor-side JavaScript as
+    // well as Rust. Keep the generation inside IEEE-754's exact integer range
+    // so equality/identity checks cannot silently round the rendezvous witness.
+    const MAX_JSON_SAFE_INTEGER: u64 = (1_u64 << 53) - 1;
+    for _ in 0..16 {
+        assert!(mint_generation() <= MAX_JSON_SAFE_INTEGER);
+    }
+}
+
 /// The CLI contract shape is preserved: an unknown flag BEFORE `--` is still an
 /// arg error (only the control-arg requirement moved to the `--lsp` path).
 #[test]

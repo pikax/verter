@@ -290,6 +290,47 @@ async fn owned_advertises_exactly_its_companions_under_project() {
 }
 
 #[tokio::test]
+async fn store_only_membership_commits_without_a_local_provider_actor() {
+    // The editor-owned tsserver reads membership directly through its plugin. This
+    // route must complete the durable transaction and mint readiness without a fake
+    // local TypeProvider merely to satisfy the reconciler's shape.
+    let ledger = Arc::new(MembershipLedger::with_initial_session());
+    let committer = RecordingMembershipCommitter::arc();
+    let reconciler = MembershipReconciler::new_store_only(
+        Arc::clone(&ledger),
+        Arc::clone(&committer) as Arc<dyn CarrierMembershipCommitter>,
+        fresh_source_gates(),
+    );
+    let source = CanonicalSource::from("/proj/src/EditorOwned.vue");
+    let outcome = reconciler
+        .reconcile_source_membership(
+            &source,
+            bound("/proj/tsconfig.json"),
+            vec![ide("/proj/src/EditorOwned.vue.tsx")],
+            ReconcileReason::SourceSynced,
+        )
+        .await
+        .expect("store-only membership must not require a local provider");
+
+    assert!(matches!(outcome, ReconcileOutcome::Advertised { .. }));
+    assert!(ledger.is_advertised(&source));
+    assert_eq!(
+        committer.committed.lock().as_slice(),
+        ["/proj/src/EditorOwned.vue"]
+    );
+
+    let removed = reconciler
+        .remove_source_membership(&source, AbsentReason::Deleted)
+        .await
+        .expect("store-only retraction must not require a local provider");
+    assert!(matches!(removed, ReconcileOutcome::Tombstoned { .. }));
+    assert_eq!(
+        committer.retracted.lock().as_slice(),
+        ["/proj/src/EditorOwned.vue"]
+    );
+}
+
+#[tokio::test]
 async fn owner_change_a_to_b_atomically_replaces_leaving_nothing_under_a() {
     // DISCRIMINATION: a publish-then-prune impl that ADDS B without removing the A
     // entry (e.g. a (source, project)-keyed store) leaves the source advertised under

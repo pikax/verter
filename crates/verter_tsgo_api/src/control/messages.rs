@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// name, param, or result shape below. A [`HelloParams::protocol`] that does
 /// not equal this value is refused in [`verify_hello`] (fail closed, no
 /// attach).
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// `verter/hello` — the mandatory first request: version + nonce handshake.
 pub const METHOD_HELLO: &str = "verter/hello";
@@ -33,6 +33,9 @@ pub const METHOD_CARRIER_DID_CHANGE_SYNCED: &str = "verter/carrierDidChangeSynce
 pub const METHOD_CARRIER_DID_CLOSE: &str = "verter/carrierDidClose";
 /// `verter/initializeApiSession` — mint an `--api` session, return its endpoint.
 pub const METHOD_INITIALIZE_API_SESSION: &str = "verter/initializeApiSession";
+/// `verter/featureRequest` — run one typed, read-only LSP feature request on the
+/// editor-owned connection. The method is a closed enum, never an arbitrary tunnel.
+pub const METHOD_FEATURE_REQUEST: &str = "verter/featureRequest";
 /// `verter/detach` — retract carriers (optional) and tear the control session down.
 pub const METHOD_DETACH: &str = "verter/detach";
 /// `verter/status` — a liveness / state snapshot.
@@ -72,6 +75,8 @@ pub struct ControlCapabilities {
     pub api_session: bool,
     /// The initialized-witness barrier is available.
     pub wait_initialized: bool,
+    /// Typed, read-only LSP feature requests are available on the relayed editor session.
+    pub feature_requests: bool,
 }
 
 /// `verter/hello` result: the accepted version, session id, wire pin, editor
@@ -166,6 +171,95 @@ impl InitializeApiSessionResult {
     pub fn endpoint(&self) -> Option<&str> {
         self.pipe_name.as_deref().or(self.socket_path.as_deref())
     }
+}
+
+/// The closed set of read-only LSP requests Verter may multiplex onto the
+/// editor-owned connection. Lifecycle writes, initialization, shutdown, workspace
+/// edits, and arbitrary method strings are deliberately unrepresentable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeatureRequestMethod {
+    #[serde(rename = "textDocument/completion")]
+    Completion,
+    #[serde(rename = "completionItem/resolve")]
+    CompletionResolve,
+    #[serde(rename = "textDocument/hover")]
+    Hover,
+    #[serde(rename = "textDocument/definition")]
+    Definition,
+    #[serde(rename = "textDocument/typeDefinition")]
+    TypeDefinition,
+    #[serde(rename = "textDocument/references")]
+    References,
+    #[serde(rename = "textDocument/rename")]
+    Rename,
+    #[serde(rename = "textDocument/signatureHelp")]
+    SignatureHelp,
+    #[serde(rename = "textDocument/codeAction")]
+    CodeAction,
+    #[serde(rename = "textDocument/semanticTokens/full")]
+    SemanticTokensFull,
+    #[serde(rename = "textDocument/documentHighlight")]
+    DocumentHighlight,
+    #[serde(rename = "textDocument/inlayHint")]
+    InlayHint,
+    #[serde(rename = "textDocument/diagnostic")]
+    Diagnostic,
+}
+
+impl FeatureRequestMethod {
+    /// The exact upstream LSP method sent through the relay's reserved-ID multiplexer.
+    #[must_use]
+    pub const fn as_lsp_method(self) -> &'static str {
+        match self {
+            Self::Completion => "textDocument/completion",
+            Self::CompletionResolve => "completionItem/resolve",
+            Self::Hover => "textDocument/hover",
+            Self::Definition => "textDocument/definition",
+            Self::TypeDefinition => "textDocument/typeDefinition",
+            Self::References => "textDocument/references",
+            Self::Rename => "textDocument/rename",
+            Self::SignatureHelp => "textDocument/signatureHelp",
+            Self::CodeAction => "textDocument/codeAction",
+            Self::SemanticTokensFull => "textDocument/semanticTokens/full",
+            Self::DocumentHighlight => "textDocument/documentHighlight",
+            Self::InlayHint => "textDocument/inlayHint",
+            Self::Diagnostic => "textDocument/diagnostic",
+        }
+    }
+
+    /// Parse an upstream LSP method into the closed read-only request set.
+    #[must_use]
+    pub fn from_lsp_method(method: &str) -> Option<Self> {
+        Some(match method {
+            "textDocument/completion" => Self::Completion,
+            "completionItem/resolve" => Self::CompletionResolve,
+            "textDocument/hover" => Self::Hover,
+            "textDocument/definition" => Self::Definition,
+            "textDocument/typeDefinition" => Self::TypeDefinition,
+            "textDocument/references" => Self::References,
+            "textDocument/rename" => Self::Rename,
+            "textDocument/signatureHelp" => Self::SignatureHelp,
+            "textDocument/codeAction" => Self::CodeAction,
+            "textDocument/semanticTokens/full" => Self::SemanticTokensFull,
+            "textDocument/documentHighlight" => Self::DocumentHighlight,
+            "textDocument/inlayHint" => Self::InlayHint,
+            "textDocument/diagnostic" => Self::Diagnostic,
+            _ => return None,
+        })
+    }
+}
+
+/// `verter/featureRequest` params: one typed method plus its native LSP params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeatureRequestParams {
+    pub method: FeatureRequestMethod,
+    pub params: serde_json::Value,
+}
+
+/// `verter/featureRequest` result: the native LSP result, carried losslessly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeatureRequestResult {
+    pub result: serde_json::Value,
 }
 
 /// `verter/detach` params: whether to retract Verter's carriers on teardown.

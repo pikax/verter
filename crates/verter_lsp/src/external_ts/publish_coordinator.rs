@@ -77,7 +77,9 @@ pub struct CarrierCompanion {
 #[derive(Clone)]
 pub struct CarrierPublishCoordinator {
     backend: Arc<TsserverEngineBackend>,
-    provider: Arc<dyn TypeProvider>,
+    /// Local managed-tsserver actor. The editor-owned plugin route has no local
+    /// actor and consumes the durable store directly.
+    provider: Option<Arc<dyn TypeProvider>>,
     /// The negotiated TypeScript version string carried on every minted binding.
     ts_version: Arc<str>,
     /// The ONE shared per-source membership-serialization gate map. The coordinator
@@ -98,7 +100,22 @@ impl CarrierPublishCoordinator {
     ) -> Self {
         Self {
             backend,
-            provider,
+            provider: Some(provider),
+            ts_version: ts_version.into(),
+            source_gates: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// Build the coordinator for an editor-owned tsserver plugin. Verter publishes
+    /// the same durable membership store but owns no semantic child process.
+    #[must_use]
+    pub fn new_editor_owned(
+        backend: Arc<TsserverEngineBackend>,
+        ts_version: impl Into<Arc<str>>,
+    ) -> Self {
+        Self {
+            backend,
+            provider: None,
             ts_version: ts_version.into(),
             source_gates: Arc::new(DashMap::new()),
         }
@@ -144,12 +161,15 @@ impl CarrierPublishCoordinator {
     /// routes its membership transition through it.
     #[must_use]
     pub(crate) fn reconciler(&self) -> MembershipReconciler {
-        MembershipReconciler::new(
-            Arc::clone(self.backend.membership_ledger()),
-            Arc::clone(&self.provider),
-            Arc::new(self.clone()) as Arc<dyn CarrierMembershipCommitter>,
-            Arc::clone(&self.source_gates),
-        )
+        let ledger = Arc::clone(self.backend.membership_ledger());
+        let committer = Arc::new(self.clone()) as Arc<dyn CarrierMembershipCommitter>;
+        let source_gates = Arc::clone(&self.source_gates);
+        match &self.provider {
+            Some(provider) => {
+                MembershipReconciler::new(ledger, Arc::clone(provider), committer, source_gates)
+            }
+            None => MembershipReconciler::new_store_only(ledger, committer, source_gates),
+        }
     }
 
     /// The SINGLE membership-transition entry every production decision point routes

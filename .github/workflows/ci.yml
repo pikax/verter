@@ -96,7 +96,9 @@ jobs:
               - 'crates/verter_diagnostics/**'
               - 'crates/verter_actions/**'
               - 'crates/verter_lsp/**'
+              - 'crates/verter_relay_shim/**'
               - 'crates/verter_span/**'
+              - 'crates/verter_tsgo_api/**'
               - 'crates/verter_type_runtime/**'
               - 'packages/vue-vscode/**'
               - 'packages/language-shared/**'
@@ -430,16 +432,10 @@ jobs:
       - name: Test @verter/wasm
         run: pnpm --filter @verter/wasm test
 
-  # TODO: Re-enable once E2E flakiness is resolved — tests pass locally but
-  # fail intermittently in CI due to timing/race conditions in the VS Code test host.
-  # build-vscode-e2e:
-  #   name: Build VS Code E2E
-  #   needs: detect-changes
-  #   if: needs.detect-changes.outputs.vscode == 'true'
   build-vscode-e2e:
-    name: Build VS Code E2E (DISABLED — flaky)
+    name: Build VS Code E2E
     needs: detect-changes
-    if: false # Disabled: E2E tests are too flaky in CI
+    if: needs.detect-changes.outputs.vscode == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -461,11 +457,13 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Prepare VS Code E2E artifacts
         run: pnpm --filter verter-vscode prepare:e2e
-      - name: Upload LSP binary
+      - name: Upload editor integration binaries
         uses: actions/upload-artifact@v6
         with:
-          name: lsp-binary-debug
-          path: target/debug/verter-lsp
+          name: vscode-e2e-native
+          path: |
+            target/debug/verter-lsp
+            target/debug/verter-relay-shim
           retention-days: 1
       - name: Upload built extension
         uses: actions/upload-artifact@v6
@@ -473,6 +471,7 @@ jobs:
           name: vscode-e2e-build
           path: |
             packages/language-shared/dist/
+            packages/typescript-plugin/dist/
             packages/vue-vscode/dist/
             packages/vue-vscode/out-test/
           retention-days: 1
@@ -480,7 +479,7 @@ jobs:
   vscode-e2e:
     name: VS Code E2E (${{ matrix.fixture }} / ${{ matrix.type_provider }})
     needs: [detect-changes, build-vscode-e2e]
-    if: false # Disabled: E2E tests are too flaky in CI
+    if: needs.detect-changes.outputs.vscode == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -498,6 +497,11 @@ jobs:
         type_provider:
           - tsserver
           - tsgo
+        include:
+          - fixture: editor-owned-project
+            type_provider: tsserver
+          - fixture: editor-owned-project
+            type_provider: shared-tsgo
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
@@ -506,13 +510,13 @@ jobs:
           node-version: lts/*
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Download LSP binary
+      - name: Download editor integration binaries
         uses: actions/download-artifact@v7
         with:
-          name: lsp-binary-debug
+          name: vscode-e2e-native
           path: target/debug
-      - name: Make LSP binary executable
-        run: chmod +x target/debug/verter-lsp
+      - name: Make editor integration binaries executable
+        run: chmod +x target/debug/verter-lsp target/debug/verter-relay-shim
       - name: Prewarm tsgo cache
         run: npx -y @typescript/native-preview@latest --version
       - name: Download built extension
@@ -525,6 +529,8 @@ jobs:
         env:
           E2E_FIXTURE: ${{ matrix.fixture }}
           E2E_TYPE_PROVIDER: ${{ matrix.type_provider }}
+          VERTER_REQUIRE_TSSERVER: "1"
+          VERTER_REQUIRE_TSGO: "1"
       - name: Upload timing report
         if: always()
         uses: actions/upload-artifact@v6

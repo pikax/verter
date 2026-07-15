@@ -22,6 +22,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -33,11 +34,12 @@ use verter_lsp::documents::position_map::PositionMapper;
 use verter_lsp::documents::provider_projection::ProviderPositionMapper;
 use verter_lsp::tsgo::composite::{SharedRendezvous, SharedTsgoOverlay, TsgoCompositeProvider};
 use verter_lsp::tsgo::shared::{EstablishSharedParams, TsgoSharedProvider};
+use verter_lsp::type_provider::lazy_managed::LazyManagedTypeProvider;
 use verter_lsp::type_provider::merge::tsx_range_to_carrier_range;
 use verter_lsp::type_provider::protocol::{
     CompletionResult, HoverInfo, InlayHint, ProviderDiagnosticContext, RenameLocation,
-    SemanticToken, SignatureHelp, TypeCodeAction, TypeDiagnostic, TypeDiagnosticSeverity,
-    TypeDocumentHighlight, TypeLocation,
+    SemanticToken, SignatureHelp, TypeCodeAction, TypeDiagnostic, TypeDocumentHighlight,
+    TypeLocation,
 };
 use verter_lsp::type_provider::traits::{ProviderFuture, TypeProvider};
 
@@ -362,36 +364,39 @@ fn shim_binary_path() -> PathBuf {
     dir.join(name)
 }
 
-/// Ensure the shim binary is built (self-contained: `cargo test -p verter_lsp`
-/// does not build a sibling crate's bin). Builds it once if absent.
+/// Ensure the shim binary is current (self-contained: `cargo test -p verter_lsp`
+/// does not build a sibling crate's bin). An existing path is not sufficient: Cargo
+/// can leave a stale sibling binary after the control protocol changes. Build once per
+/// test process; Cargo's incremental check makes the up-to-date case cheap.
 fn ensure_shim_built() -> PathBuf {
-    let path = shim_binary_path();
-    if path.is_file() {
-        return path;
-    }
-    let profile = if cfg!(debug_assertions) {
-        "--profile=dev"
-    } else {
-        "--release"
-    };
-    let status = std::process::Command::new(env!("CARGO"))
-        .args([
-            "build",
-            "-p",
-            "verter_relay_shim",
-            "--bin",
-            "verter-relay-shim",
-        ])
-        .arg(profile)
-        .status()
-        .expect("spawn cargo build for the relay shim");
-    assert!(status.success(), "cargo build of verter-relay-shim failed");
-    let path = shim_binary_path();
-    assert!(
-        path.is_file(),
-        "the relay shim binary is missing after build: {path:?}"
-    );
-    path
+    static CURRENT_SHIM: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    CURRENT_SHIM
+        .get_or_init(|| {
+            let profile = if cfg!(debug_assertions) {
+                "--profile=dev"
+            } else {
+                "--release"
+            };
+            let status = std::process::Command::new(env!("CARGO"))
+                .args([
+                    "build",
+                    "-p",
+                    "verter_relay_shim",
+                    "--bin",
+                    "verter-relay-shim",
+                ])
+                .arg(profile)
+                .status()
+                .expect("spawn cargo build for the relay shim");
+            assert!(status.success(), "cargo build of verter-relay-shim failed");
+            let path = shim_binary_path();
+            assert!(
+                path.is_file(),
+                "the relay shim binary is missing after build: {path:?}"
+            );
+            path
+        })
+        .clone()
 }
 
 fn spawn_shim(tsgo: &Path, control_dir: &Path, session_key: &str) -> Child {
@@ -779,25 +784,11 @@ async fn shared_provider_reconnect_mints_fresh_engine_no_split_brain() {
 // diagnostics are overlaid; every other state falls back to OWNED.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A minimal OWNED baseline double: the composite's fallback surface. Its
-/// diagnostics are EMPTY by default, so a TS2322 in the composite's output can only
-/// have come from the SHARED overlay (the discriminator — a mis-wired composite that
-/// delegated diagnostics to OWNED would surface nothing). [`Self::with_diagnostics`]
-/// injects OWNED-only diagnostics to prove the composite COMPOSES (preserves OWNED's
-/// surface) rather than replacing it wholesale with SHARED's semantic set.
+/// A minimal managed-fallback double. Its answers are empty, so any successful
+/// shared result is discriminating; in the topology test it is wrapped by
+/// [`LazyManagedTypeProvider`] and must never be constructed at all.
 #[derive(Default)]
-struct OwnedBaselineDouble {
-    owned_only: Vec<TypeDiagnostic>,
-}
-
-impl OwnedBaselineDouble {
-    /// An OWNED double that surfaces `diags` from `get_diagnostics` — an OWNED-only
-    /// surface (e.g. a syntactic diagnostic) `--api getSemanticDiagnostics` never
-    /// produces, used to prove it survives the SHARED overlay composition.
-    fn with_diagnostics(diags: Vec<TypeDiagnostic>) -> Self {
-        Self { owned_only: diags }
-    }
-}
+struct OwnedBaselineDouble;
 
 impl TypeProvider for OwnedBaselineDouble {
     fn provider_id(&self) -> &'static str {
@@ -829,11 +820,7 @@ impl TypeProvider for OwnedBaselineDouble {
         Box::pin(async move { Ok(None) })
     }
     fn get_diagnostics(&self, _path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
-        // EMPTY by default (so a composite TS2322 is proven to come from SHARED); a
-        // `with_diagnostics` double surfaces its OWNED-only diagnostics, which the
-        // composite must PRESERVE through the SHARED overlay composition.
-        let diags = self.owned_only.clone();
-        Box::pin(async move { Ok(diags) })
+        Box::pin(async move { Ok(Vec::new()) })
     }
     fn get_definition(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async move { Ok(Vec::new()) })
@@ -1154,7 +1141,7 @@ async fn composite_overlays_shared_diagnostics_via_live_resolver() {
     let Some(tsgo) = engine_or_skip() else {
         return;
     };
-    let h = setup_composite(&tsgo, "composite", Arc::new(OwnedBaselineDouble::default())).await;
+    let h = setup_composite(&tsgo, "composite", Arc::new(OwnedBaselineDouble)).await;
 
     // REAL IDE codegen (NOT handcrafted): the imported-prop type flows through the
     // macro into the carrier via the shared resolver.
@@ -1240,32 +1227,27 @@ async fn composite_overlays_shared_diagnostics_via_live_resolver() {
     teardown_composite(h).await;
 }
 
-/// COMPOSITE DIAGNOSTICS COMPOSITION — the composite COMPOSES OWNED's
-/// diagnostics with SHARED's, never replaces them wholesale. The OWNED double surfaces
-/// an OWNED-ONLY diagnostic (a synthetic marker `--api getSemanticDiagnostics` never
-/// produces); the merged output for the bound carrier must contain BOTH that OWNED-only
-/// diagnostic AND the SHARED-only semantic TS2322. Discriminator: a composite that
-/// replaced OWNED wholesale would drop the OWNED-only diagnostic.
+/// SERVING ORDER + TOPOLOGY — successful diagnostics and hover both use the exact
+/// editor-owned relay session. Lifecycle recording and repeated feature queries never
+/// activate the lazy managed fallback, so the shim's real editor tsgo is the only
+/// semantic engine process in the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn composite_composes_owned_and_shared_diagnostics() {
+async fn composite_successful_shared_route_never_activates_managed_fallback() {
     let Some(tsgo) = engine_or_skip() else {
         return;
     };
-
-    // An OWNED-only diagnostic (a distinctive marker message) the SHARED `--api`
-    // semantic set never produces — it must survive the SHARED overlay composition.
-    let owned_only = TypeDiagnostic {
-        message: "verter-owned-only-syntactic-marker".to_string(),
-        severity: TypeDiagnosticSeverity::Error,
-        start: 0,
-        end: 1,
-        code: Some("1005".to_string()),
-        tags: Vec::new(),
-        related_information: Vec::new(),
-    };
-    let owned: Arc<dyn TypeProvider> =
-        Arc::new(OwnedBaselineDouble::with_diagnostics(vec![owned_only]));
-    let h = setup_composite(&tsgo, "compose", owned).await;
+    let activation_count = Arc::new(AtomicUsize::new(0));
+    let fallback = Arc::new(LazyManagedTypeProvider::new({
+        let activation_count = Arc::clone(&activation_count);
+        move || {
+            let activation_count = Arc::clone(&activation_count);
+            async move {
+                activation_count.fetch_add(1, Ordering::SeqCst);
+                Ok(Arc::new(OwnedBaselineDouble) as Arc<dyn TypeProvider>)
+            }
+        }
+    })) as Arc<dyn TypeProvider>;
+    let h = setup_composite(&tsgo, "shared_only", fallback).await;
 
     let (ide_code, _source_map, companion) = compile_vue_ide(WIDGET_VUE);
     let carrier_tsx = norm(&h.src.join("Widget.vue.tsx"));
@@ -1280,7 +1262,14 @@ async fn composite_composes_owned_and_shared_diagnostics() {
         .await
         .expect("composite open of the real IDE carrier");
 
-    let diags = tokio::time::timeout(
+    assert_eq!(
+        activation_count.load(Ordering::SeqCst),
+        0,
+        "carrier lifecycle must not activate managed tsgo"
+    );
+    assert_eq!(h.composite.child_pid(), None);
+
+    let diagnostics = tokio::time::timeout(
         Duration::from_secs(45),
         h.composite.get_diagnostics(&carrier_tsx),
     )
@@ -1288,22 +1277,113 @@ async fn composite_composes_owned_and_shared_diagnostics() {
     .expect("composite get_diagnostics timed out")
     .expect("composite diagnostics");
 
-    let codes: Vec<_> = diags.iter().filter_map(|d| d.code.clone()).collect();
-    eprintln!("[compose] diagnostics codes = {codes:?}");
-
-    // BOTH survive the composition: the SHARED-only semantic TS2322 AND the OWNED-only
-    // marker. A wholesale-replace composite would drop the OWNED-only diagnostic.
+    let codes: Vec<_> = diagnostics
+        .iter()
+        .filter_map(|diagnostic| diagnostic.code.clone())
+        .collect();
     assert!(
-        diags.iter().any(|d| d.code.as_deref() == Some("2322")),
-        "the SHARED semantic TS2322 must be present in the composed output; got {codes:?}"
-    );
-    assert!(
-        diags
+        diagnostics
             .iter()
-            .any(|d| d.message == "verter-owned-only-syntactic-marker"),
-        "the OWNED-only diagnostic must survive the SHARED overlay composition (never \
-         replaced wholesale); got {codes:?}"
+            .any(|diagnostic| diagnostic.code.as_deref() == Some("2322")),
+        "strict pull diagnostics from the shared editor Program must include TS2322; got {codes:?}"
     );
+
+    let label_offset = ide_code
+        .find("props.label")
+        .map(|offset| offset + "props.".len())
+        .expect("real IDE code contains the deliberate props.label access")
+        as u32;
+    let hover = tokio::time::timeout(
+        Duration::from_secs(45),
+        h.composite.get_hover(&carrier_tsx, label_offset),
+    )
+    .await
+    .expect("shared hover timed out")
+    .expect("shared hover request")
+    .expect("hover at props.label");
+    assert!(
+        hover.contents.contains("label") && hover.contents.contains("string"),
+        "hover must come from the editor-owned Program's imported prop type: {hover:?}"
+    );
+
+    assert_eq!(
+        activation_count.load(Ordering::SeqCst),
+        0,
+        "successful shared diagnostics + hover must never construct managed tsgo"
+    );
+    assert_eq!(h.composite.child_pid(), None);
 
     teardown_composite(h).await;
+}
+
+/// A missing advertised editor session is an observed attach failure. It admits the
+/// managed tier on the first bound feature demand, but lifecycle alone remains cold and
+/// repeated demands reuse the single memoized activation.
+#[tokio::test]
+async fn composite_attach_failure_activates_managed_fallback_exactly_once() {
+    let dir = tempdir("missing_editor");
+    let (tsconfig, src) = write_fixture(&dir);
+    let workspace = norm(&dir);
+    let tsconfig = norm(&tsconfig);
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: verter_session::AnalysisLevel::Full,
+        ..HostConfig::default()
+    }));
+    let ws = Arc::new(FilesystemWorkspace::new(FilesystemOptions::default()));
+    ws.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(fixture_snapshot(
+        &workspace, &tsconfig,
+    ))));
+    host.set_workspace(Arc::clone(&ws) as Arc<dyn WorkspaceAccess>);
+
+    let overlay = SharedTsgoOverlay::new(
+        Arc::clone(&host),
+        SharedRendezvous {
+            control_dir: dir.join("absent-control"),
+            session_key: "no-editor-session".to_string(),
+            workspace_root: workspace,
+        },
+    );
+    let activation_count = Arc::new(AtomicUsize::new(0));
+    let fallback = Arc::new(LazyManagedTypeProvider::new({
+        let activation_count = Arc::clone(&activation_count);
+        move || {
+            let activation_count = Arc::clone(&activation_count);
+            async move {
+                activation_count.fetch_add(1, Ordering::SeqCst);
+                Ok(Arc::new(OwnedBaselineDouble) as Arc<dyn TypeProvider>)
+            }
+        }
+    })) as Arc<dyn TypeProvider>;
+    let composite = TsgoCompositeProvider::new(fallback, host, Some(overlay));
+
+    let (ide_code, _source_map, companion) = compile_vue_ide(WIDGET_VUE);
+    let carrier_tsx = norm(&src.join("Widget.vue.tsx"));
+    let companion_ts = norm(&src.join("Widget.vue.verter.ts"));
+    composite
+        .open_file(&companion_ts, &companion)
+        .await
+        .unwrap();
+    composite.open_file(&carrier_tsx, &ide_code).await.unwrap();
+    assert_eq!(activation_count.load(Ordering::SeqCst), 0);
+
+    let offset = ide_code.find("props.label").unwrap() as u32;
+    assert!(composite
+        .get_hover(&carrier_tsx, offset)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(composite
+        .get_hover(&carrier_tsx, offset)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        activation_count.load(Ordering::SeqCst),
+        1,
+        "the observed missing editor attach activates managed once; repeats reuse it"
+    );
+
+    composite.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(dir);
 }

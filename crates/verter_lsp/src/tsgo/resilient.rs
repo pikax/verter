@@ -54,7 +54,14 @@ impl ResilientBackend<TsgoOwnedProvider> for TsgoOwnedBackend {
                 Some(crash_notify),
             )
             .await?;
-            TsgoOwnedProvider::attach(Arc::new(inner), &self.tsgo_bin).await
+            let inner = Arc::new(inner);
+            match TsgoOwnedProvider::attach(Arc::clone(&inner), &self.tsgo_bin).await {
+                Ok(provider) => Ok(provider),
+                Err(error) => {
+                    let _ = inner.shutdown().await;
+                    Err(error)
+                }
+            }
         })
     }
 }

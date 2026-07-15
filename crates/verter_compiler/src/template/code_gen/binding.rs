@@ -145,6 +145,7 @@ impl<'alloc> BindingResolver<'alloc> {
             // setup bindings → bare, globals/keywords → bare,
             // unresolved → instance prefix (matches Vue's _ctx. behavior)
             return match self.bindings.get(ident) {
+                Some(BindingType::PropsDestructured) => "",
                 Some(bt) if bt.is_props() => "__props.",
                 Some(BindingType::Data) | Some(BindingType::Options) => "___VERTER___instance.",
                 Some(_) => "",

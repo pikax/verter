@@ -26,7 +26,7 @@ export interface ParsedStartupTiming {
   lspReadyMs?: number;
   firstTypedCompletionMs?: number;
   firstDiagnosticMs?: number;
-  providerKind?: "tsgo" | "tsserver" | "verter-only";
+  providerKind?: "tsgo" | "tsserver" | "editor-tsserver" | "verter-only";
 }
 
 const DEFAULT_TIMEOUT_MS = 45_000;
@@ -84,6 +84,7 @@ export class StartupProbe {
   private targetUri?: string;
   private completionTask?: Promise<void>;
   private firstDiagnosticLogged = false;
+  private typeProviderStartedLogged = false;
   private disposed = false;
 
   constructor(
@@ -115,7 +116,9 @@ export class StartupProbe {
     writeTimingMarker("first_diagnostic", Date.now());
   }
 
-  markTypeProviderStarted(kind: "tsgo" | "tsserver"): void {
+  markTypeProviderStarted(kind: "tsgo" | "tsserver" | "editor-tsserver"): void {
+    if (this.typeProviderStartedLogged) return;
+    this.typeProviderStartedLogged = true;
     writeTimingMarker("type_provider_started", Date.now(), kind);
   }
 

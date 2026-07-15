@@ -289,7 +289,9 @@ export async function main(): Promise<void> {
   ensureAndVerifyDebugSettings(workspace, harnessSettingsWriter(harness));
 
   const vscodeVersion = readE2eEnv("VSCODE_VERSION") ?? "stable";
-  const vscodeExecutablePath = await resolveVscodeExecutablePath(vscodeVersion);
+  const vscodeExecutablePath = await resolveVscodeExecutablePath(vscodeVersion, {
+    explicitExecutablePath: readE2eEnv("VSCODE_EXECUTABLE"),
+  });
   const lspBinaryPath = copyLspBinaryToTemp(extensionDevelopmentPath);
 
   const logFile =
@@ -345,7 +347,9 @@ export async function mainCanary(): Promise<void> {
     });
 
     const vscodeVersion = readE2eEnv("VSCODE_VERSION") ?? "stable";
-    const vscodeExecutablePath = await resolveVscodeExecutablePath(vscodeVersion);
+    const vscodeExecutablePath = await resolveVscodeExecutablePath(vscodeVersion, {
+      explicitExecutablePath: readE2eEnv("VSCODE_EXECUTABLE"),
+    });
     const lspBinaryPath = copyLspBinaryToTemp(extensionDevelopmentPath);
     const logFile = path.join(os.tmpdir(), `verter-e2e-dx-canary-${process.pid}.log`);
 

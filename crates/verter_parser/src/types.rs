@@ -81,6 +81,10 @@ pub enum BindingType {
     LiteralConst,
     Props,
     PropsAliased,
+    /// A real local introduced by destructuring defineProps/withDefaults.
+    /// Runtime codegen still treats it as a prop; IDE TSX resolves it bare so
+    /// the preserved source binding carries template hovers and liveness.
+    PropsDestructured,
     SetupImport,
     Data,
     Options,
@@ -113,7 +117,10 @@ impl BindingType {
 
     #[inline]
     pub fn is_props(&self) -> bool {
-        matches!(self, BindingType::Props | BindingType::PropsAliased)
+        matches!(
+            self,
+            BindingType::Props | BindingType::PropsAliased | BindingType::PropsDestructured
+        )
     }
 
     #[inline]

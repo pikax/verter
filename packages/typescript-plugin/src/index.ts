@@ -1,13 +1,16 @@
 import type tsModule from "typescript/lib/tsserverlibrary";
 import path from "node:path";
 import {
+  CARRIER_STORE_REFRESH_TOKEN_CONFIG_KEY,
   cleanupCarrierVirtualImportPath,
   containingFileAwareExists,
+  editorOwnsCarrierMembership,
   isCarrierCompanionPath,
   isModuleLevelDefinition,
   isRelativeVue,
   isRelativeVueTs,
   isVue,
+  mapCarrierSourceOffsetToGenerated,
   normalizePath,
   remapAllFileTextChanges,
   remapCarrierSpan,
@@ -31,6 +34,26 @@ import {
   retargetAliasedDefinitionInfos,
 } from "./helpers/barrelNavigation";
 import { VERTER_TYPES_STUB } from "./helpers/verterTypesStub";
+import { writeEditorTsserverAttestation } from "./helpers/editorAttestation";
+
+// tsserver may invoke the plugin module factory separately for different projects.
+// Attestation is process-scoped, so every factory must publish the same union rather
+// than allowing one project's receipt to overwrite another's evidence.
+const processBoundProjects = new Set<string>();
+const processStoreDirByProject = new Map<string, string | undefined>();
+const processEditorOwnsCarrierMembershipByProject = new Map<string, boolean>();
+const processUpdateProjectConfig = new Map<string, (config: Record<string, unknown>) => void>();
+interface ProcessEditorProjectRuntime {
+  readonly projectKey: string;
+  readonly projectService: tsModule.server.ProjectService;
+  readonly languageService: tsModule.LanguageService;
+  readonly getStore: () => DiskCarrierStoreReader;
+  readonly readCompanion: (fileName: string) => string | undefined;
+  readonly readSource: (fileName: string) => string | undefined;
+  readonly editorOwnsMembership: () => boolean;
+}
+const processEditorProjectRuntimes = new Map<string, ProcessEditorProjectRuntime>();
+let processCurrentConfig: Record<string, unknown> | undefined;
 
 /**
  * The `@verter/typescript-plugin` is a THIN SYNCHRONOUS READER over the Rust
@@ -68,8 +91,6 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
   // The resolved store dir per configured project, recorded by `create` (which
   // has the plugin config) so `getExternalFiles` (which does NOT receive the
   // config) can reuse the same store. Keyed by the project name (tsconfig path).
-  const storeDirByProject = new Map<string, string | undefined>();
-
   const create = (info: tsModule.server.PluginCreateInfo) => {
     const logger = info.project.projectService.logger;
     const directory = info.project.getCurrentDirectory();
@@ -77,22 +98,112 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     // The Rust LSP passes the RESOLVED per-workspace store dir in the plugin
     // config; `VERTER_CARRIER_STORE_DIR` is the environment fallback. When
     // neither is set the store is unavailable and the reader is a no-op.
-    const storeDir = resolveCarrierStoreDir(info.config);
+    const effectiveConfig = { ...(processCurrentConfig ?? {}), ...(info.config ?? {}) };
+    let storeDir = resolveCarrierStoreDir(effectiveConfig);
     // Whether to map carrier-companion provider RESPONSES (definition/references/
     // rename/code-action edits/completion-detail edits) back to `.vue`/`.svelte`
     // source. ENABLED by default for the VS Code DIRECT surface (the plugin is the
     // sole mapper); DISABLED by the verter_lsp-internal backend (the Rust merge
     // layer is the sole mapper there, so the plugin returns RAW companion responses
-    // and there is no double-mapping). Content/membership/resolution hooks are
-    // ALWAYS on regardless — only response-mapping is gated.
-    const responseRemap = resolveResponseRemap(info.config);
+    // and there is no double-mapping). Carrier serving remains enabled on both
+    // surfaces; the editor-owned surface preserves the raw source ScriptInfo and
+    // admits a distinct generated companion, while non-editor hosts continue to
+    // serve generated content under the source identity.
+    let responseRemap = resolveResponseRemap(effectiveConfig);
+    let editorOwnsMembership = editorOwnsCarrierMembership(effectiveConfig);
+    let carrierStoreRefreshToken = effectiveConfig[CARRIER_STORE_REFRESH_TOKEN_CONFIG_KEY];
     const projectKey = info.project.getProjectName();
-    storeDirByProject.set(projectKey, storeDir);
+    processBoundProjects.add(projectKey);
+    processCurrentConfig = effectiveConfig;
+    writeEditorTsserverAttestation(processCurrentConfig, processBoundProjects);
+    processStoreDirByProject.set(projectKey, storeDir);
+    processEditorOwnsCarrierMembershipByProject.set(projectKey, editorOwnsMembership);
     // PROJECT-SCOPED reader: `create(info)` is per configured project, so every
     // carrier the host hooks serve comes ONLY from this project's manifest entry
     // — a sibling tsconfig's carrier (compiled under different `paths`/`types`/
     // `lib`) is never served here.
-    const store = new DiskCarrierStoreReader(storeDir, projectKey);
+    let store = new DiskCarrierStoreReader(storeDir, projectKey);
+    // Assigned after the host hooks have captured their original implementations.
+    // The configuration updater closes over this mutable context so every response
+    // provider sees the same project-scoped reader as the live host hooks.
+    let remapContext: CarrierRemapContext;
+    let refreshScheduled = false;
+    processUpdateProjectConfig.set(projectKey, (config) => {
+      const nextStoreDir = resolveCarrierStoreDir(config);
+      const nextResponseRemap = resolveResponseRemap(config);
+      const nextEditorOwnsMembership = editorOwnsCarrierMembership(config);
+      const nextCarrierStoreRefreshToken = config[CARRIER_STORE_REFRESH_TOKEN_CONFIG_KEY];
+      const storeChanged = nextStoreDir !== storeDir;
+      const publicationAdvanced = !Object.is(
+        nextCarrierStoreRefreshToken,
+        carrierStoreRefreshToken,
+      );
+      const servingStateChanged =
+        storeChanged ||
+        nextResponseRemap !== responseRemap ||
+        nextEditorOwnsMembership !== editorOwnsMembership ||
+        publicationAdvanced;
+      storeDir = nextStoreDir;
+      responseRemap = nextResponseRemap;
+      editorOwnsMembership = nextEditorOwnsMembership;
+      carrierStoreRefreshToken = nextCarrierStoreRefreshToken;
+      processStoreDirByProject.set(projectKey, storeDir);
+      processEditorOwnsCarrierMembershipByProject.set(projectKey, editorOwnsMembership);
+      if (storeChanged) {
+        store = new DiskCarrierStoreReader(storeDir, projectKey);
+        if (remapContext !== undefined) {
+          remapContext.reader = store;
+        }
+        logger.info(
+          store.isAvailable()
+            ? `[Verter] carrier store reconfigured: ${storeDir}`
+            : "[Verter] carrier store removed; carrier serving disabled",
+        );
+      }
+      if (!servingStateChanged) return;
+      // The configure request can arrive while tsserver is updating this project's
+      // graph. Mutating that graph re-entrantly corrupts ConfiguredProject state.
+      // Coalesce refreshes onto the next event-loop turn: the store swap is already
+      // visible synchronously, while graph invalidation runs after the current
+      // tsserver command has unwound.
+      if (!refreshScheduled) {
+        refreshScheduled = true;
+        setImmediate(() => {
+          refreshScheduled = false;
+          // TypeScript incorporates plugin `getExternalFiles` into configured
+          // project roots only through its targeted file-name reload path. A
+          // normal dirty graph pass reads the new list after building the old
+          // roots, which is too late. Both TS 5.9 and TS 6 expose this stable
+          // runtime method (although it is omitted from the public declaration).
+          // Use it only for the concrete configured project; never clear every
+          // editor project or mutate the graph inside `configurePlugin`.
+          const configuredProject = info.project as typeof info.project & {
+            getConfigFilePath?: () => tsModule.server.NormalizedPath;
+          };
+          const projectService = info.project
+            .projectService as typeof info.project.projectService & {
+            reloadFileNamesOfConfiguredProject?: (project: typeof configuredProject) => boolean;
+          };
+          if (
+            typeof configuredProject.getConfigFilePath === "function" &&
+            typeof projectService.reloadFileNamesOfConfiguredProject === "function"
+          ) {
+            projectService.reloadFileNamesOfConfiguredProject(configuredProject);
+            info.project.refreshDiagnostics();
+            return;
+          }
+          // `markAsDirty` is a stable tsserver runtime method but intentionally
+          // omitted from the public plugin declaration. Keep the cast narrow;
+          // `refreshDiagnostics` is the typed public notification surface.
+          (
+            info.project as typeof info.project & {
+              markAsDirty?: () => void;
+            }
+          ).markAsDirty?.();
+          info.project.refreshDiagnostics();
+        });
+      }
+    });
     if (store.isAvailable()) {
       logger.info(`[Verter] carrier store: ${storeDir}`);
     } else {
@@ -133,20 +244,25 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
      * (bounded-block / last-good); else `undefined` (unknown / negative).
      */
     const carrierContent = (fileName: string): string | undefined => {
-      // A carrier SOURCE path (`Comp.vue`) → serve its IDE companion's content.
-      const sourceReady = store.readyFileForSource(fileName);
-      if (sourceReady) {
-        const companion = store.companionForSource(fileName) ?? fileName;
-        return store.readBlobSync(sourceReady.blob_rel, companion);
-      }
-      const sourceCompanion = store.companionForSource(fileName);
-      if (sourceCompanion && store.ownedSourceFor(sourceCompanion)) {
-        const result = coldResolveCompanion(store, sourceCompanion);
-        if (result.kind === "ready") {
-          return store.readBlobSync(result.readyFile.blob_rel, sourceCompanion);
+      // Non-editor hosts use the carrier source as the generated document
+      // identity. VS Code already owns that source identity (including its open
+      // raw text), so its plugin surface leaves the source snapshot untouched
+      // and serves only the distinct companion identity below.
+      if (!editorOwnsMembership) {
+        const sourceReady = store.readyFileForSource(fileName);
+        if (sourceReady) {
+          const companion = store.companionForSource(fileName) ?? fileName;
+          return store.readBlobSync(sourceReady.blob_rel, companion);
         }
-        if (result.kind === "lastGood") {
-          return result.content;
+        const sourceCompanion = store.companionForSource(fileName);
+        if (sourceCompanion && store.ownedSourceFor(sourceCompanion)) {
+          const result = coldResolveCompanion(store, sourceCompanion);
+          if (result.kind === "ready") {
+            return store.readBlobSync(result.readyFile.blob_rel, sourceCompanion);
+          }
+          if (result.kind === "lastGood") {
+            return result.content;
+          }
         }
       }
 
@@ -169,14 +285,16 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
     /** Whether `fileName` is a carrier (source OR companion) the store can serve. */
     const carrierExists = (fileName: string): boolean => {
-      if (store.readyFileForSource(fileName)) {
-        return true;
-      }
-      const sourceCompanion = store.companionForSource(fileName);
-      if (sourceCompanion && store.ownedSourceFor(sourceCompanion)) {
-        const result = coldResolveCompanion(store, sourceCompanion);
-        if (result.kind === "ready" || result.kind === "lastGood") {
+      if (!editorOwnsMembership) {
+        if (store.readyFileForSource(fileName)) {
           return true;
+        }
+        const sourceCompanion = store.companionForSource(fileName);
+        if (sourceCompanion && store.ownedSourceFor(sourceCompanion)) {
+          const result = coldResolveCompanion(store, sourceCompanion);
+          if (result.kind === "ready" || result.kind === "lastGood") {
+            return true;
+          }
         }
       }
       if (store.readyFile(fileName)) {
@@ -189,33 +307,76 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       return false;
     };
 
+    // A configured editor project can answer for its visible framework source
+    // through the companion request router even though that raw mixed-content
+    // file is deliberately absent from the TypeScript Program. Expose that
+    // virtual membership to tsserver's diagnostic scheduler; otherwise `geterr`
+    // drops the file before the wrapped diagnostic methods are invoked.
+    const _projectContainsFile = info.project.containsFile?.bind(info.project);
+    if (_projectContainsFile) {
+      info.project.containsFile = (fileName, requireOpen) => {
+        if (editorOwnsMembership) {
+          const companion = store.companionForSource(fileName);
+          if (companion !== undefined && store.readyFile(companion) !== undefined) {
+            return true;
+          }
+          // Open framework sources live in an inferred editor project while
+          // their companions live in the exact configured project. The inferred
+          // project can still answer through that process-level route, so keep
+          // `geterr` from discarding the source before the diagnostic wrapper.
+          if (editorOwnerForSource(fileName) !== undefined) {
+            return true;
+          }
+        }
+        return _projectContainsFile(fileName, requireOpen);
+      };
+    }
+
     // ── host-proxy matrix: read carrier companions from the store ──────────
 
     const _getScriptSnapshot = info.languageServiceHost.getScriptSnapshot?.bind(
       info.languageServiceHost,
     );
+    const readOriginalSource = (fileName: string): string | undefined => {
+      const snapshot = _getScriptSnapshot?.(fileName);
+      return snapshot === undefined
+        ? _readFile(fileName)
+        : snapshot.getText(0, snapshot.getLength());
+    };
     info.languageServiceHost.getScriptSnapshot = (fileName) => {
+      // Always enter the original Project host first. In real tsserver this is
+      // not a redundant read: it creates and attaches the ScriptInfo required
+      // by the document registry for every virtual root/import. Returning a
+      // store snapshot before this call leaves `setDocument` with no ScriptInfo.
+      const hostSnapshot = _getScriptSnapshot?.(fileName);
       const content = carrierContent(fileName);
       if (content !== undefined) {
         return ts.ScriptSnapshot.fromString(content);
       }
-      return _getScriptSnapshot?.(fileName);
+      return hostSnapshot;
     };
 
     const _getScriptVersion = info.languageServiceHost.getScriptVersion?.bind(
       info.languageServiceHost,
     );
     info.languageServiceHost.getScriptVersion = (fileName) => {
+      // Project.getScriptVersion also participates in ScriptInfo creation.
+      // Preserve that lifecycle even though the manifest version remains the
+      // carrier's authoritative invalidation token.
+      const hostVersion = _getScriptVersion?.(fileName);
       // A carrier SOURCE path is versioned by its IDE companion's ready entry.
-      const sourceReady = store.readyFileForSource(fileName);
+      const sourceReady = editorOwnsMembership ? undefined : store.readyFileForSource(fileName);
       if (sourceReady) {
-        return String(sourceReady.version);
+        return `${sourceReady.version}:${sourceReady.content_hash}`;
       }
       const ready = store.readyFile(fileName);
       if (ready) {
-        return String(ready.version);
+        // `version` is monotonic only within one LSP lifetime. Include the
+        // content identity so reopening a persistent store cannot make a fresh
+        // carrier collide with a same-number snapshot from a prior process.
+        return `${ready.version}:${ready.content_hash}`;
       }
-      return _getScriptVersion?.(fileName) ?? "0";
+      return hostVersion ?? "0";
     };
 
     const _getScriptKind = info.languageServiceHost.getScriptKind?.bind(info.languageServiceHost);
@@ -223,7 +384,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       // A carrier SOURCE path (`Comp.vue`) is parsed AS its IDE companion's kind
       // (TSX/JSX): tsserver makes the source a member via `getExternalFiles`, and
       // it must read the generated TSX, not the raw `.vue` text.
-      const sourceReady = store.readyFileForSource(fileName);
+      const sourceReady = editorOwnsMembership ? undefined : store.readyFileForSource(fileName);
       if (sourceReady) {
         return manifestScriptKind(ts, sourceReady.script_kind);
       }
@@ -406,7 +567,13 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     );
     info.languageServiceHost.getCompilationSettings = () => {
       const settings = _getCompilationSettings();
-      return { ...settings, jsx: ts.JsxEmit.Preserve };
+      // Keep TypeScript's exact compiler-options object. TypeScript 6 attaches
+      // configured-project metadata to this identity, and replacing it (even with
+      // every current property descriptor copied) can detach later internal state.
+      if (settings.jsx !== ts.JsxEmit.Preserve) {
+        settings.jsx = ts.JsxEmit.Preserve;
+      }
+      return settings;
     };
 
     const languageService = info.languageService;
@@ -433,12 +600,286 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     // response offsets index; `readSource` reads the original carrier source;
     // `fileExists` disambiguates an ambiguous Svelte rune specifier from a
     // companion in the inserted-import rewrite.
-    const remapContext: CarrierRemapContext = {
+    remapContext = {
       reader: store,
       readCompanion: (provider) => carrierContent(provider),
-      readSource: (source) => _readFile(source),
+      readSource: readOriginalSource,
       fileExists: _fileExists,
     };
+
+    const editorRuntime: ProcessEditorProjectRuntime = {
+      projectKey,
+      projectService: info.project.projectService,
+      languageService,
+      getStore: () => store,
+      readCompanion: carrierContent,
+      readSource: readOriginalSource,
+      editorOwnsMembership: () => editorOwnsMembership,
+    };
+    processEditorProjectRuntimes.set(projectKey, editorRuntime);
+
+    function editorOwnerForSource(fileName: string): ProcessEditorProjectRuntime | undefined {
+      const candidates = [...processEditorProjectRuntimes.values()].filter((runtime) => {
+        if (!runtime.editorOwnsMembership()) return false;
+        const runtimeStore = runtime.getStore();
+        const companion = runtimeStore.companionForSource(fileName);
+        return companion !== undefined && runtimeStore.readyFile(companion) !== undefined;
+      });
+      if (candidates.length === 0) return undefined;
+
+      // A source can participate in more than one tsconfig. Ask the owning
+      // ProjectService for the exact config it already resolved for the open
+      // ScriptInfo; this is the same decision tsserver logs and uses when it
+      // assigns an editor document. The method is stable at runtime in TS 5.9
+      // and TS 6 but omitted from the public declaration, so retain a strict
+      // one-candidate fallback and otherwise fail closed.
+      const projectService = info.project.projectService as typeof info.project.projectService & {
+        getConfigFileNameForFile?: (
+          scriptInfo: tsModule.server.ScriptInfo,
+          findFromCacheOnly: boolean,
+        ) => tsModule.server.NormalizedPath | undefined;
+      };
+      const getScriptInfo = (
+        projectService as unknown as {
+          getScriptInfo?: (fileName: string) => tsModule.server.ScriptInfo | undefined;
+        }
+      ).getScriptInfo;
+      const scriptInfo = getScriptInfo?.call(projectService, fileName);
+      const configFile =
+        scriptInfo === undefined
+          ? undefined
+          : projectService.getConfigFileNameForFile?.(scriptInfo, false);
+      if (configFile !== undefined) {
+        const normalizedConfig = normalizePath(configFile).toLowerCase();
+        const exact = candidates.find(
+          (runtime) => normalizePath(runtime.projectKey).toLowerCase() === normalizedConfig,
+        );
+        if (exact !== undefined) return exact;
+      }
+      return candidates.length === 1 ? candidates[0] : undefined;
+    }
+
+    interface EditorCarrierPosition {
+      runtime: ProcessEditorProjectRuntime;
+      companion: string;
+      position: number;
+    }
+
+    /** Resolve one visible source position into its exact configured companion. */
+    function editorCarrierPosition(
+      fileName: string,
+      position: number,
+    ): EditorCarrierPosition | null {
+      if (!editorOwnsMembership || !isVue(fileName)) return null;
+      const runtime = editorOwnerForSource(fileName);
+      if (runtime === undefined) return null;
+      const runtimeStore = runtime.getStore();
+      const companion = runtimeStore.companionForSource(fileName);
+      if (companion === undefined || runtimeStore.readyFile(companion) === undefined) return null;
+      const generatedPosition = mapCarrierSourceOffsetToGenerated(
+        runtimeStore,
+        companion,
+        fileName,
+        position,
+        runtime.readCompanion,
+        runtime.readSource,
+      );
+      return generatedPosition === null
+        ? null
+        : { runtime, companion, position: generatedPosition };
+    }
+
+    function editorCarrierSelection(
+      fileName: string,
+      selection: number | tsModule.TextRange,
+    ): {
+      runtime: ProcessEditorProjectRuntime;
+      companion: string;
+      selection: number | tsModule.TextRange;
+    } | null {
+      if (typeof selection === "number") {
+        const mapped = editorCarrierPosition(fileName, selection);
+        return mapped === null
+          ? null
+          : {
+              runtime: mapped.runtime,
+              companion: mapped.companion,
+              selection: mapped.position,
+            };
+      }
+      const start = editorCarrierPosition(fileName, selection.pos);
+      const end = editorCarrierPosition(fileName, selection.end);
+      if (
+        start === null ||
+        end === null ||
+        start.runtime !== end.runtime ||
+        normalizePath(start.companion) !== normalizePath(end.companion) ||
+        end.position < start.position
+      ) {
+        return null;
+      }
+      return {
+        runtime: start.runtime,
+        companion: start.companion,
+        selection: { pos: start.position, end: end.position },
+      };
+    }
+
+    /**
+     * VS Code opens the real framework source and owns that ScriptInfo, while
+     * this plugin owns a distinct generated companion root. Route diagnostics
+     * to the companion, then translate every located result back through the
+     * published source map. A carrier that is not ready, or a generated-only
+     * span that cannot be mapped faithfully, produces no TypeScript diagnostic
+     * rather than raw SFC parse noise or a companion-path leak.
+     */
+    function editorSourceDiagnostics<T extends tsModule.Diagnostic>(
+      fileName: string,
+      method: "getSyntacticDiagnostics" | "getSemanticDiagnostics" | "getSuggestionDiagnostics",
+      query: (target: string) => readonly T[],
+    ): T[] {
+      if (!editorOwnsMembership || !isVue(fileName)) {
+        return [...query(fileName)];
+      }
+      const targetRuntime = editorOwnerForSource(fileName);
+      if (targetRuntime === undefined) {
+        return [];
+      }
+      const targetStore = targetRuntime.getStore();
+      const companion = targetStore.companionForSource(fileName);
+      if (companion === undefined || targetStore.readyFile(companion) === undefined) return [];
+      const program = languageService.getProgram?.();
+      if (program === undefined) {
+        return [];
+      }
+      const diagnostics =
+        targetRuntime === editorRuntime
+          ? query(companion)
+          : (
+              targetRuntime.languageService[method] as unknown as (target: string) => readonly T[]
+            ).call(targetRuntime.languageService, companion);
+      const out: T[] = [];
+      for (const diagnostic of diagnostics) {
+        const mapped = mapEditorDiagnostic(diagnostic, program, targetRuntime);
+        if (mapped !== undefined) out.push(mapped);
+      }
+      return out;
+    }
+
+    function mapEditorDiagnostic<T extends tsModule.Diagnostic>(
+      diagnostic: T,
+      program: tsModule.Program,
+      targetRuntime: ProcessEditorProjectRuntime,
+    ): T | undefined {
+      const targetStore = targetRuntime.getStore();
+      const diagnosticFile = diagnostic.file;
+      if (
+        diagnosticFile === undefined ||
+        !isCarrierCompanionPath(targetStore, diagnosticFile.fileName)
+      ) {
+        return diagnostic;
+      }
+      if (diagnostic.start === undefined || diagnostic.length === undefined) {
+        return undefined;
+      }
+      const mapped = remapCarrierSpan(
+        targetStore,
+        diagnosticFile.fileName,
+        { start: diagnostic.start, length: diagnostic.length },
+        targetRuntime.readCompanion,
+        targetRuntime.readSource,
+      );
+      if (mapped === null) {
+        return undefined;
+      }
+      const sourceText = targetRuntime.readSource(mapped.fileName);
+      const sourceFile =
+        program.getSourceFile(mapped.fileName) ??
+        (sourceText === undefined
+          ? undefined
+          : ts.createSourceFile(
+              mapped.fileName,
+              sourceText,
+              ts.ScriptTarget.Latest,
+              true,
+              ts.ScriptKind.TSX,
+            ));
+      if (sourceFile === undefined) {
+        return undefined;
+      }
+      const relatedInformation = diagnostic.relatedInformation
+        ?.map((related) => mapEditorDiagnostic(related, program, targetRuntime))
+        .filter(
+          (related): related is tsModule.DiagnosticRelatedInformation => related !== undefined,
+        );
+      return {
+        ...diagnostic,
+        file: sourceFile,
+        start: mapped.textSpan.start,
+        length: mapped.textSpan.length,
+        ...(relatedInformation === undefined ? {} : { relatedInformation }),
+      } as T;
+    }
+
+    const _getSyntacticDiagnostics = languageService.getSyntacticDiagnostics.bind(languageService);
+    languageService.getSyntacticDiagnostics = (fileName) =>
+      editorSourceDiagnostics(fileName, "getSyntacticDiagnostics", _getSyntacticDiagnostics);
+
+    const _getSemanticDiagnostics = languageService.getSemanticDiagnostics.bind(languageService);
+    languageService.getSemanticDiagnostics = (fileName) =>
+      editorSourceDiagnostics(fileName, "getSemanticDiagnostics", _getSemanticDiagnostics);
+
+    const _getSuggestionDiagnostics =
+      languageService.getSuggestionDiagnostics.bind(languageService);
+    languageService.getSuggestionDiagnostics = (fileName) =>
+      editorSourceDiagnostics(
+        fileName,
+        "getSuggestionDiagnostics",
+        _getSuggestionDiagnostics,
+      ) as tsModule.DiagnosticWithLocation[];
+
+    const _getEncodedSemanticClassifications =
+      languageService.getEncodedSemanticClassifications?.bind(languageService);
+    if (_getEncodedSemanticClassifications) {
+      languageService.getEncodedSemanticClassifications = (fileName, span, format) => {
+        if (!editorOwnsMembership || !isVue(fileName)) {
+          return _getEncodedSemanticClassifications(fileName, span, format);
+        }
+        const routed = editorCarrierSelection(fileName, {
+          pos: span.start,
+          end: span.start + span.length,
+        });
+        if (routed === null || typeof routed.selection === "number") {
+          return { spans: [], endOfLineState: 0 as tsModule.EndOfLineState };
+        }
+        const result = routed.runtime.languageService.getEncodedSemanticClassifications(
+          routed.companion,
+          {
+            start: routed.selection.pos,
+            length: routed.selection.end - routed.selection.pos,
+          },
+          format,
+        );
+        const mappedSpans: number[] = [];
+        for (let index = 0; index + 2 < result.spans.length; index += 3) {
+          const mapped = remapCarrierSpan(
+            routed.runtime.getStore(),
+            routed.companion,
+            { start: result.spans[index], length: result.spans[index + 1] },
+            routed.runtime.readCompanion,
+            routed.runtime.readSource,
+          );
+          if (mapped !== null && normalizePath(mapped.fileName) === normalizePath(fileName)) {
+            mappedSpans.push(
+              mapped.textSpan.start,
+              mapped.textSpan.length,
+              result.spans[index + 2],
+            );
+          }
+        }
+        return { spans: mappedSpans, endOfLineState: result.endOfLineState };
+      };
+    }
 
     function remapDefinitionLike<
       T extends {
@@ -735,6 +1176,26 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
     const _getQuickInfoAtPosition = languageService.getQuickInfoAtPosition.bind(languageService);
     languageService.getQuickInfoAtPosition = (fileName, position) => {
+      if (editorOwnsMembership && isVue(fileName)) {
+        const routed = editorCarrierPosition(fileName, position);
+        if (routed === null) return undefined;
+        const quickInfo = routed.runtime.languageService.getQuickInfoAtPosition(
+          routed.companion,
+          routed.position,
+        );
+        if (quickInfo === undefined) return undefined;
+        const mapped = remapCarrierSpan(
+          routed.runtime.getStore(),
+          routed.companion,
+          quickInfo.textSpan,
+          routed.runtime.readCompanion,
+          routed.runtime.readSource,
+        );
+        if (mapped === null || normalizePath(mapped.fileName) !== normalizePath(fileName)) {
+          return undefined;
+        }
+        return { ...quickInfo, textSpan: mapped.textSpan };
+      }
       const originalQuickInfo = _getQuickInfoAtPosition(fileName, position);
       const context = getProgramSourceContext(fileName);
       if (context) {
@@ -839,7 +1300,55 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       options,
       formattingSettings,
     ) => {
-      const result = _getCompletionsAtPosition(fileName, position, options, formattingSettings);
+      let result: tsModule.CompletionInfo | undefined;
+      if (editorOwnsMembership && isVue(fileName)) {
+        const routed = editorCarrierPosition(fileName, position);
+        if (routed === null) return undefined;
+        const companionResult = routed.runtime.languageService.getCompletionsAtPosition(
+          routed.companion,
+          routed.position,
+          options,
+          formattingSettings,
+        );
+        if (companionResult === undefined) return undefined;
+        const mapSpan = (span: tsModule.TextSpan): tsModule.TextSpan | null => {
+          const mapped = remapCarrierSpan(
+            routed.runtime.getStore(),
+            routed.companion,
+            span,
+            routed.runtime.readCompanion,
+            routed.runtime.readSource,
+          );
+          return mapped !== null && normalizePath(mapped.fileName) === normalizePath(fileName)
+            ? mapped.textSpan
+            : null;
+        };
+        const optionalReplacementSpan = companionResult.optionalReplacementSpan
+          ? mapSpan(companionResult.optionalReplacementSpan)
+          : undefined;
+        if (companionResult.optionalReplacementSpan && optionalReplacementSpan === null) {
+          return undefined;
+        }
+        const mappedOptionalReplacementSpan = optionalReplacementSpan ?? undefined;
+        const entries: tsModule.CompletionEntry[] = [];
+        for (const entry of companionResult.entries) {
+          if (entry.replacementSpan === undefined) {
+            entries.push(entry);
+            continue;
+          }
+          const replacementSpan = mapSpan(entry.replacementSpan);
+          if (replacementSpan !== null) entries.push({ ...entry, replacementSpan });
+        }
+        result = {
+          ...companionResult,
+          entries,
+          ...(mappedOptionalReplacementSpan === undefined
+            ? {}
+            : { optionalReplacementSpan: mappedOptionalReplacementSpan }),
+        };
+      } else {
+        result = _getCompletionsAtPosition(fileName, position, options, formattingSettings);
+      }
       if (result?.entries) {
         const existsRelToContaining = containingFileAwareExists(_fileExists, fileName);
         for (const entry of result.entries) {
@@ -954,6 +1463,39 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
     // ── code fixes / refactors / file-rename: companion edits → source ─────
 
+    const _getApplicableRefactors = languageService.getApplicableRefactors?.bind(languageService);
+    if (_getApplicableRefactors) {
+      languageService.getApplicableRefactors = (
+        fileName,
+        positionOrRange,
+        preferences,
+        triggerReason,
+        kind,
+        includeInteractiveActions,
+      ) => {
+        if (editorOwnsMembership && isVue(fileName)) {
+          const routed = editorCarrierSelection(fileName, positionOrRange);
+          if (routed === null) return [];
+          return routed.runtime.languageService.getApplicableRefactors(
+            routed.companion,
+            routed.selection,
+            preferences,
+            triggerReason,
+            kind,
+            includeInteractiveActions,
+          );
+        }
+        return _getApplicableRefactors(
+          fileName,
+          positionOrRange,
+          preferences,
+          triggerReason,
+          kind,
+          includeInteractiveActions,
+        );
+      };
+    }
+
     const _getCodeFixesAtPosition = languageService.getCodeFixesAtPosition?.bind(languageService);
     if (_getCodeFixesAtPosition) {
       languageService.getCodeFixesAtPosition = (
@@ -1051,16 +1593,10 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     return languageService;
   };
 
-  // `getExternalFiles` is the tsserver membership mechanism: it returns the
-  // COMPANION provider paths of READY carriers (the `.vue.tsx` / `.svelte.tsx`
-  // IDE companions whose blob exists). The companion path is the identity that
-  // becomes a CONFIGURED-project member here — it is exactly what the host hooks
-  // (`getScriptSnapshot`/`getScriptKind`/`getScriptVersion`) serve and what the
-  // LSP queries diagnostics/navigation for, so the advertised identity matches
-  // the served identity (the `extraFileExtensions` `configure` lets the source
-  // extension participate; the published companion carries the generated TSX). A
-  // companion is NEVER advertised before its blob exists (the primary C10
-  // defense).
+  // `getExternalFiles` follows the owning host's document model. Non-editor
+  // hosts advertise READY framework SOURCE identities whose host hooks serve
+  // generated content. VS Code already owns each open raw source ScriptInfo, so
+  // its editor surface advertises only the distinct generated companion roots.
   //
   // PROJECT-SCOPED. `getExternalFiles(project)` is called once per configured
   // project; it must advertise ONLY the carriers the manifest attributes to THIS
@@ -1072,18 +1608,43 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
   // environment fallback for a project `create` has not yet seen.
   const getExternalFiles = (project: tsModule.server.ConfiguredProject) => {
     const projectKey = project.getProjectName();
-    const recorded = storeDirByProject.get(projectKey);
+    const editorOwnsMembership =
+      processEditorOwnsCarrierMembershipByProject.get(projectKey) ??
+      editorOwnsCarrierMembership(processCurrentConfig);
+    if (editorOwnsMembership) {
+      const storeDir =
+        processStoreDirByProject.get(projectKey) ?? resolveCarrierStoreDir(undefined);
+      const store = new DiskCarrierStoreReader(storeDir, projectKey);
+      const out = store.isAvailable() ? store.readyIdeCompanions() : [];
+      project.projectService.logger.info(
+        `[Verter] getExternalFiles(${projectKey}): editor owns sources; ${out.length} companion root(s)`,
+      );
+      return out;
+    }
+    const recorded = processStoreDirByProject.get(projectKey);
     const storeDir = recorded ?? resolveCarrierStoreDir(undefined);
-    // The reader is scoped to THIS project's identity, so `readyIdeCompanions`
-    // returns only this project's ready IDE companions (intersected with its
-    // owned set) — never a sibling tsconfig's.
+    // The reader is scoped to this project, so only its ready source identities
+    // are admitted — never a sibling tsconfig's carriers.
     const store = new DiskCarrierStoreReader(storeDir, projectKey);
     if (!store.isAvailable()) {
       return [];
     }
-    const out = store.readyIdeCompanions();
+    // VS Code registers the contributed framework languages as extra file
+    // extensions, so matching carriers are already configured-project roots.
+    // Returning one of those same paths again as a plugin external file makes
+    // TypeScript 6 acquire two documents for one identity and can trip
+    // ProjectService.setDocument while an open file is reassigned. External
+    // files are only the ready carriers the project does not already own.
+    const canonical = (fileName: string) => {
+      const normalized = normalizePath(fileName);
+      return ts.sys.useCaseSensitiveFileNames ? normalized : normalized.toLowerCase();
+    };
+    const projectFiles = new Set(
+      [...project.getRootFiles(), ...project.getFileNames()].map(canonical),
+    );
+    const out = store.readyIdeSources().filter((source) => !projectFiles.has(canonical(source)));
     project.projectService.logger.info(
-      `[Verter] getExternalFiles(${projectKey}): ${out.length} ready carrier companion(s)`,
+      `[Verter] getExternalFiles(${projectKey}): ${out.length} ready carrier source(s)`,
     );
     return out;
   };
@@ -1091,6 +1652,11 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
   return {
     create,
     getExternalFiles,
+    onConfigurationChanged(config: Record<string, unknown>) {
+      processCurrentConfig = config;
+      writeEditorTsserverAttestation(processCurrentConfig, processBoundProjects);
+      for (const update of processUpdateProjectConfig.values()) update(config);
+    },
   };
 };
 

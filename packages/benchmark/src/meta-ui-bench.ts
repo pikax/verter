@@ -6,11 +6,15 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   applyDefaultBenchmarkTransforms,
+  buildMemoryAuditArtifact,
   compareNormalizedArtifacts,
   rotateComponentOrder,
   summarizeLatencySeries,
   type ArtifactComparison,
+  type MemoryAuditComponentRow,
+  type MemoryAuditQueryMeasure,
   type MetaUiBackend,
+  type MetaUiMemoryAuditArtifact,
   type MetaUiOutcomeBucket,
   type MetaUiScenario,
   type NormalizedMetaArtifact,
@@ -56,6 +60,11 @@ interface MetaUiBenchArgs {
   /// in packages/benchmark/baselines/.
   slaMs: number;
   jsAudit: boolean;
+  /// Opt-in deep memory audit: per-query native allocator counters +
+  /// process memory, written to a SEPARATE `.memory.json` artifact.
+  /// Requires the instrumented native binding (`--features memory_audit`);
+  /// setup fails loudly against a non-instrumented binary.
+  memoryAudit: boolean;
   components: string[];
   limit: number | null;
   expected: "vue-component-meta" | "none";
@@ -108,6 +117,8 @@ interface MeasuredQueryResult {
   outcome: MetaUiOutcomeBucket;
   /** Worker-process RSS right after the query (bytes); absent from older workers. */
   rssBytes?: number;
+  /** Per-query memory measure; present only when --memory-audit is on. */
+  memoryAudit?: MemoryAuditQueryMeasure;
 }
 
 interface WorkerInitPayload {
@@ -115,6 +126,10 @@ interface WorkerInitPayload {
   uiRoot: string;
   checkerConfig: Record<string, unknown>;
   components: PreparedComponentSnapshot[];
+  /** When true the worker validates the instrumented native binding at
+   * setup (loud failure otherwise) and attaches per-query memory
+   * measures. Absent/false keeps today's timing behavior untouched. */
+  memoryAudit?: boolean;
 }
 
 interface QueryWorkerOptions {
@@ -273,6 +288,7 @@ export function parseMetaUiBenchArgs(argv: string[]): MetaUiBenchArgs {
     queryTimeoutMs: DEFAULT_HARD_TIMEOUT_MS,
     slaMs: DEFAULT_SLA_MS,
     jsAudit: false,
+    memoryAudit: false,
     components: [],
     limit: null,
     expected: "vue-component-meta",
@@ -369,6 +385,10 @@ export function parseMetaUiBenchArgs(argv: string[]): MetaUiBenchArgs {
     }
     if (arg === "--js-audit") {
       args.jsAudit = true;
+      continue;
+    }
+    if (arg === "--memory-audit") {
+      args.memoryAudit = true;
       continue;
     }
     if (arg.startsWith("--components=")) {
@@ -573,6 +593,7 @@ async function createBackendInstance(
       uiRoot: prepared.uiRoot,
       checkerConfig,
       components: componentPaths,
+      memoryAudit: args.memoryAudit,
     },
     {
       queryTimeoutMs: args.queryTimeoutMs,
@@ -942,6 +963,23 @@ async function executeMeasuredQuery(
   return instance.query(component);
 }
 
+/**
+ * Collect a per-component memory-audit row from a measured query
+ * result. No-op when memory audit is off (`memoryRows === null`) or the
+ * worker attached no measure (e.g. an older synthetic test worker).
+ */
+function collectMemoryAuditRow(
+  memoryRows: MemoryAuditComponentRow[] | null,
+  repeatIndex: number,
+  relativePath: string,
+  measure: MemoryAuditQueryMeasure | undefined,
+): void {
+  if (!memoryRows || !measure) {
+    return;
+  }
+  memoryRows.push({ relativePath, repeatIndex, ...measure });
+}
+
 function classifyFailure(error: unknown): MetaUiOutcomeBucket {
   const message = error instanceof Error ? error.message : String(error);
   return /(closed|shutdown|terminated|crash|disconnect|EPIPE|broken pipe)/i.test(message)
@@ -992,6 +1030,7 @@ async function runScenario(
   repeats: number,
   warmupPasses: number,
   expectedArtifacts: Map<string, string>,
+  memoryRows: MemoryAuditComponentRow[] | null,
 ): Promise<MetaUiBenchmarkRun> {
   const repeatResults: MetaUiBenchmarkRun["repeats"] = [];
 
@@ -1008,6 +1047,7 @@ async function runScenario(
           rotated,
           warmupPasses,
           expectedArtifacts,
+          memoryRows,
         ),
       );
     } else {
@@ -1021,6 +1061,7 @@ async function runScenario(
           rotated,
           warmupPasses,
           expectedArtifacts,
+          memoryRows,
         ),
       );
     }
@@ -1066,6 +1107,7 @@ async function runSingleScenarioRepeat(
   components: PreparedComponentSnapshot[],
   warmupPasses: number,
   expectedArtifacts: Map<string, string>,
+  memoryRows: MemoryAuditComponentRow[] | null,
 ): Promise<MetaUiBenchmarkRun["repeats"][number]> {
   let setupMs = 0;
   let warmupMs = 0;
@@ -1099,6 +1141,7 @@ async function runSingleScenarioRepeat(
       steadyStateMs += result.latencyMs;
       outcomeCounts[result.outcome]++;
       peakWorkerRssBytes = Math.max(peakWorkerRssBytes, result.rssBytes ?? 0);
+      collectMemoryAuditRow(memoryRows, repeatIndex, component.relativePath, result.memoryAudit);
       componentResults.push({
         relativePath: component.relativePath,
         componentName: componentNameFromPath(component.relativePath),
@@ -1184,6 +1227,7 @@ async function runRepoScenarioRepeat(
   components: PreparedComponentSnapshot[],
   warmupPasses: number,
   expectedArtifacts: Map<string, string>,
+  memoryRows: MemoryAuditComponentRow[] | null,
 ): Promise<MetaUiBenchmarkRun["repeats"][number]> {
   let setupMs = 0;
   let warmupMs = 0;
@@ -1248,6 +1292,12 @@ async function runRepoScenarioRepeat(
           const result = await executeMeasuredQuery(singleInstance, component);
           outcomeCounts[result.outcome]++;
           peakWorkerRssBytes = Math.max(peakWorkerRssBytes, result.rssBytes ?? 0);
+          collectMemoryAuditRow(
+            memoryRows,
+            repeatIndex,
+            component.relativePath,
+            result.memoryAudit,
+          );
           componentResults.push({
             relativePath: component.relativePath,
             componentName: componentNameFromPath(component.relativePath),
@@ -1307,6 +1357,7 @@ async function runRepoScenarioRepeat(
         const result = await executeMeasuredQuery(instance, component);
         outcomeCounts[result.outcome]++;
         peakWorkerRssBytes = Math.max(peakWorkerRssBytes, result.rssBytes ?? 0);
+        collectMemoryAuditRow(memoryRows, repeatIndex, component.relativePath, result.memoryAudit);
         componentResults.push({
           relativePath: component.relativePath,
           componentName: componentNameFromPath(component.relativePath),
@@ -1453,6 +1504,22 @@ function writeRunArtifact(outputDir: string, run: MetaUiBenchmarkRun): string {
   return filePath;
 }
 
+/**
+ * Write the SEPARATE memory-audit artifact
+ * (`meta-ui-<backend>-<scenario>.memory.json`). The timing artifact is
+ * never altered by memory-audit mode. Exported for the hermetic
+ * memory-audit spec.
+ */
+export function writeMemoryAuditArtifact(
+  outputDir: string,
+  artifact: MetaUiMemoryAuditArtifact,
+): string {
+  mkdirSync(outputDir, { recursive: true });
+  const filePath = join(outputDir, `meta-ui-${artifact.backend}-${artifact.scenario}.memory.json`);
+  writeFileSync(filePath, JSON.stringify(artifact, null, 2));
+  return filePath;
+}
+
 async function main() {
   const args = parseMetaUiBenchArgs(process.argv.slice(2));
   const prepared = prepareMetaUiProject(args);
@@ -1484,6 +1551,7 @@ async function main() {
   for (const backend of args.backends) {
     for (const scenario of args.scenarios) {
       logLine(`Running ${backend} / ${scenario}...`);
+      const memoryRows: MemoryAuditComponentRow[] | null = args.memoryAudit ? [] : null;
       const run = await runScenario(
         prepared,
         args,
@@ -1492,9 +1560,17 @@ async function main() {
         args.repeats,
         args.warmupPasses,
         expectedArtifacts,
+        memoryRows,
       );
       runs.push(run);
       writeRunArtifact(args.outputDir, run);
+      if (memoryRows) {
+        const memoryArtifactPath = writeMemoryAuditArtifact(
+          args.outputDir,
+          buildMemoryAuditArtifact({ backend, scenario, rows: memoryRows }),
+        );
+        logLine(`  memory audit -> ${memoryArtifactPath}`);
+      }
       logLine(
         `  steady p50=${run.summary.steadyStateMs.p50.toFixed(2)}ms end-to-end p50=${run.summary.endToEndMs.p50.toFixed(2)}ms`,
       );

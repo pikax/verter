@@ -51,10 +51,16 @@ suite(`Startup Timing [${FIXTURE_NAME}]`, function () {
     }
 
     if (TYPE_PROVIDER) {
+      const expectedProviderKind =
+        TYPE_PROVIDER === "tsserver"
+          ? "editor-tsserver"
+          : TYPE_PROVIDER === "shared-tsgo"
+            ? "tsgo"
+            : TYPE_PROVIDER;
       expect(
         providerKind,
         `Requested ${TYPE_PROVIDER} but got ${providerKind}${timing.typeProviderReason ? ` (${timing.typeProviderReason})` : ""}`,
-      ).to.equal(TYPE_PROVIDER);
+      ).to.equal(expectedProviderKind);
     }
   });
 });

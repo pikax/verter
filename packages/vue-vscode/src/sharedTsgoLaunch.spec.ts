@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   RELAY_SHIM_STEM,
   buildSharedLspArgs,
+  buildRelayEditorEnv,
   buildShimSpawnArgs,
   discoverNativePreviewTsgo,
   discoverRelayShim,
@@ -14,6 +15,7 @@ import {
   mintSessionKey,
   parseArmedControlDir,
   planSharedTsgo,
+  prepareEditorTsdk,
   relayShimBasename,
   relayShimCandidates,
   sessionKeyFromControlDir,
@@ -169,6 +171,39 @@ describe("buildShimSpawnArgs", () => {
   });
 });
 
+describe("prepareEditorTsdk", () => {
+  it("stages the relay bytes under Native Preview's tsgo executable name", () => {
+    const made: string[] = [];
+    const copied: Array<[string, string]> = [];
+    const staged = prepareEditorTsdk({
+      shimPath: "/ext/bin/verter-relay-shim",
+      controlDir: "/tmp/session",
+      platform: "linux",
+      mkdir: (path) => made.push(path),
+      copy: (source, destination) => copied.push([source, destination]),
+      chmod: () => {},
+    });
+    expect(staged).toEqual({
+      dir: join("/tmp/session", "editor-tsdk"),
+      executable: join("/tmp/session", "editor-tsdk", "tsgo"),
+    });
+    expect(made).toEqual([staged.dir]);
+    expect(copied).toEqual([["/ext/bin/verter-relay-shim", staged.executable]]);
+  });
+});
+
+describe("buildRelayEditorEnv", () => {
+  it("binds the editor-spawned shim to the real engine and rendezvous", () => {
+    expect(
+      buildRelayEditorEnv({ realTsgo: "/real/tsgo", controlDir: "/ctl", sessionKey: "key" }),
+    ).toEqual({
+      VERTER_RELAY_REAL_TSGO: "/real/tsgo",
+      VERTER_RELAY_CONTROL_DIR: "/ctl",
+      VERTER_RELAY_SESSION_KEY: "key",
+    });
+  });
+});
+
 describe("planSharedTsgo (fail-closed)", () => {
   const shim = join("/ext", "target", "debug", "verter-relay-shim");
   const tsgo = "/prov/tsc";
@@ -192,8 +227,6 @@ describe("planSharedTsgo (fail-closed)", () => {
       `--shared-control-dir=${plan.controlDir}`,
       `--shared-session-key=${plan.sessionKey}`,
     ]);
-    expect(plan.shimArgs).toContain("--real-tsgo");
-    expect(plan.shimArgs.slice(-3)).toEqual(["--", "--lsp", "--stdio"]);
     expect(created).toEqual([plan.controlDir]);
   });
 
@@ -239,11 +272,11 @@ describe("planSharedTsgo (fail-closed)", () => {
 });
 
 describe("typeProviderRoutesTsgo", () => {
-  it("is true only for tsgo / shared-tsgo", () => {
-    expect(typeProviderRoutesTsgo("tsgo")).toBe(true);
+  it("attempts editor-owned tsgo for auto / shared-tsgo, while explicit tsgo is managed", () => {
+    expect(typeProviderRoutesTsgo("tsgo")).toBe(false);
     expect(typeProviderRoutesTsgo("shared-tsgo")).toBe(true);
     expect(typeProviderRoutesTsgo("tsserver")).toBe(false);
-    expect(typeProviderRoutesTsgo("auto")).toBe(false);
+    expect(typeProviderRoutesTsgo("auto")).toBe(true);
     expect(typeProviderRoutesTsgo("off")).toBe(false);
     expect(typeProviderRoutesTsgo(undefined)).toBe(false);
   });

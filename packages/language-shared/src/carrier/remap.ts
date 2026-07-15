@@ -137,6 +137,42 @@ export function remapCarrierSpan(
   };
 }
 
+/**
+ * Strictly map one user-source UTF-16 offset into its generated companion.
+ * This is the request-side twin of [`remapCarrierSpan`]: editor-owned hosts keep
+ * the raw framework source as the visible document but execute TypeScript
+ * requests against the configured companion Program. Missing readiness, map,
+ * text, or a faithful mapping returns `null` so callers can fail closed.
+ */
+export function mapCarrierSourceOffsetToGenerated(
+  reader: CarrierStoreReader,
+  providerPath: string,
+  sourcePath: string,
+  sourceOffset: number,
+  readCompanionText: (providerPath: string) => string | undefined,
+  readSourceText: (sourcePath: string) => string | undefined,
+): number | null {
+  const ready = reader.readyFile(providerPath);
+  if (!ready || ready.map_rel === undefined) {
+    return null;
+  }
+  const map = parsedMapFor(reader, ready.map_hash, ready.map_rel);
+  if (!map) {
+    return null;
+  }
+  const companionText = readCompanionText(providerPath);
+  if (companionText === undefined) {
+    return null;
+  }
+  const normalizedSource = normalizePath(sourcePath);
+  const mapper = new CarrierMapper({
+    map,
+    generatedText: companionText,
+    readSourceText: (source) => readSourceText(normalizePath(source)),
+  });
+  return mapper.mapSourceOffsetToGenerated(sourceOffset, normalizedSource)?.offset ?? null;
+}
+
 /** Test/maintenance hook: drop the parsed-map cache. */
 export function clearCarrierMapCache(): void {
   parsedMapCache.clear();

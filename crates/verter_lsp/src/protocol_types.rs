@@ -122,9 +122,10 @@ impl tower_lsp_server::ls_types::notification::Notification for TypeProviderStat
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TypeProviderStatusParams {
-    /// Which type provider is active: "tsgo", "tsserver", or "none".
+    /// Which type provider route is active: "tsgo", "tsserver",
+    /// "editor-tsserver", or "none".
     pub kind: String,
-    /// Why no type provider is available (only set when kind is "none").
+    /// Stable provenance for the selected route, or the failure reason for "none".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }

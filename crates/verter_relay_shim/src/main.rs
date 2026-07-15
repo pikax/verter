@@ -58,6 +58,10 @@ use verter_tsgo_api::relay::LspRelay;
 /// The env var a `tsdk` wrapper can use to supply the real tsgo path instead of
 /// `--real-tsgo`.
 const REAL_TSGO_ENV: &str = "VERTER_RELAY_REAL_TSGO";
+/// Env-supplied rendezvous used when the editor launches the shim as a tsgo binary
+/// and therefore controls the argv (`tsgo --lsp --stdio`).
+const CONTROL_DIR_ENV: &str = "VERTER_RELAY_CONTROL_DIR";
+const SESSION_KEY_ENV: &str = "VERTER_RELAY_SESSION_KEY";
 
 /// The stable ASCII identity marker embedded in the shim binary so a packaging step can prove a
 /// candidate file's BYTES are the Verter relay shim (not a renamed `tsgo` or an unrelated binary) by
@@ -161,17 +165,43 @@ fn parse_args() -> Result<ShimArgs, String> {
 /// relay path enforces them ([`run_relay`]) — so a non-`--lsp` passthrough probe
 /// (`--real-tsgo <path> -- --version`) parses cleanly instead of erroring.
 fn parse_args_from(mut args: impl Iterator<Item = String>) -> Result<ShimArgs, String> {
+    parse_args_from_with_env(&mut args, |name| std::env::var(name).ok())
+}
+
+fn parse_args_from_with_env(
+    args: &mut impl Iterator<Item = String>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<ShimArgs, String> {
     let mut real_tsgo: Option<String> = None;
     let mut control_dir: Option<String> = None;
     let mut session_key: Option<String> = None;
     let mut forwarded: Vec<String> = Vec::new();
+    let mut saw_shim_arg = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--real-tsgo" => real_tsgo = Some(expect_value(&mut args, "--real-tsgo")?),
-            "--control-dir" => control_dir = Some(expect_value(&mut args, "--control-dir")?),
-            "--session-key" => session_key = Some(expect_value(&mut args, "--session-key")?),
+            "--real-tsgo" => {
+                saw_shim_arg = true;
+                real_tsgo = Some(expect_value(args, "--real-tsgo")?);
+            }
+            "--control-dir" => {
+                saw_shim_arg = true;
+                control_dir = Some(expect_value(args, "--control-dir")?);
+            }
+            "--session-key" => {
+                saw_shim_arg = true;
+                session_key = Some(expect_value(args, "--session-key")?);
+            }
             "--" => {
+                forwarded.extend(args.by_ref());
+                break;
+            }
+            other if !saw_shim_arg => {
+                // Editor-wrapper invocation: Native Preview owns argv and launches its
+                // selected executable directly as `tsgo --lsp --stdio`. With no shim
+                // control flag seen, the first ordinary tsgo argument begins the
+                // forwarded stream; rendezvous comes from the VERTER_RELAY_* env.
+                forwarded.push(other.to_string());
                 forwarded.extend(args.by_ref());
                 break;
             }
@@ -182,13 +212,15 @@ fn parse_args_from(mut args: impl Iterator<Item = String>) -> Result<ShimArgs, S
     // `--real-tsgo` is required for BOTH paths (passthrough spawns it too); the CONTROL
     // rendezvous args are validated later, only on the `--lsp` relay path.
     let real_tsgo = real_tsgo
-        .or_else(|| std::env::var(REAL_TSGO_ENV).ok())
+        .or_else(|| env(REAL_TSGO_ENV))
         .ok_or_else(|| format!("missing --real-tsgo (or {REAL_TSGO_ENV})"))?;
 
     Ok(ShimArgs {
         real_tsgo: PathBuf::from(real_tsgo),
-        control_dir: control_dir.map(PathBuf::from),
-        session_key,
+        control_dir: control_dir
+            .or_else(|| env(CONTROL_DIR_ENV))
+            .map(PathBuf::from),
+        session_key: session_key.or_else(|| env(SESSION_KEY_ENV)),
         forwarded,
     })
 }
@@ -1061,15 +1093,18 @@ fn mint_nonce() -> Result<String, String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Mint the editor-session generation: a process-local monotone-ish rendezvous witness
-/// mixing wall-clock nanoseconds with the pid, unique per shim start so a reconnect
-/// (a fresh shim) advertises a distinct generation.
+/// Mint the editor-session generation: a wall-clock microsecond rendezvous witness.
+///
+/// Advertisements are JSON consumed by both Rust and editor-side JavaScript, so the
+/// number must remain inside IEEE-754's exact integer range. Epoch microseconds are
+/// monotone-ish across shim restarts and remain exact through the year 2255; unlike
+/// epoch nanoseconds they do not silently lose identity bits in JavaScript.
 fn mint_generation() -> u64 {
-    let nanos = SystemTime::now()
+    const MAX_JSON_SAFE_INTEGER: u128 = (1_u128 << 53) - 1;
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    nanos ^ (u64::from(std::process::id()) << 32)
+        .map(|duration| duration.as_micros().min(MAX_JSON_SAFE_INTEGER) as u64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

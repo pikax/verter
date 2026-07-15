@@ -4,7 +4,6 @@
     "./e2e",
     "./src/startupOptimizations.ts",
     "./src/e2eEnv.ts",
-    "./src/d1AcceptanceGate.ts",
     "./src/sharedTsgoLaunch.ts",
     "./src/runSummaryOracle.ts"
   ],

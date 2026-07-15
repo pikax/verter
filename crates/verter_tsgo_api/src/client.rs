@@ -13,9 +13,12 @@
 //! tests; consumers use the typed methods here.
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::io::AsyncReadExt;
 
 use crate::actor::{spawn_actor, ClientHandle};
 use crate::error::{TsgoApiError, TsgoApiResult};
@@ -359,6 +362,98 @@ pub fn probe_engine_version(exe: &Path) -> TsgoApiResult<String> {
         )));
     }
     let text = String::from_utf8_lossy(&output.stdout);
+    parse_version(&text).ok_or_else(|| {
+        TsgoApiError::Spawn(format!(
+            "could not parse tsgo version from `{}`",
+            text.trim()
+        ))
+    })
+}
+
+/// Probe `tsgo --version` under a hard process bound. Timeout and I/O-failure
+/// paths explicitly kill and reap the probe child before returning, so provider
+/// failover cannot leak a stuck discovery process.
+pub async fn probe_engine_version_bounded(exe: &Path, bound: Duration) -> TsgoApiResult<String> {
+    let mut child = tokio::process::Command::new(exe)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| {
+            TsgoApiError::Spawn(format!(
+                "probe `tsgo --version` at {}: {error}",
+                exe.display()
+            ))
+        })?;
+    let mut stdout = child.stdout.take().ok_or_else(|| {
+        TsgoApiError::Transport("version probe did not expose stdout".to_string())
+    })?;
+    let mut stderr = child.stderr.take().ok_or_else(|| {
+        TsgoApiError::Transport("version probe did not expose stderr".to_string())
+    })?;
+    let stdout_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).await.map(|_| bytes)
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).await.map(|_| bytes)
+    });
+
+    let status = match tokio::time::timeout(bound, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => {
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+            return Err(TsgoApiError::Transport(format!(
+                "wait for `tsgo --version` at {} failed: {error}",
+                exe.display()
+            )));
+        }
+        Err(_) => {
+            let _ = child.start_kill();
+            match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    return Err(TsgoApiError::Transport(format!(
+                        "reap timed-out `tsgo --version` probe at {}: {error}",
+                        exe.display()
+                    )))
+                }
+                Err(_) => {
+                    return Err(TsgoApiError::Timeout(format!(
+                        "`tsgo --version` at {} exceeded {} ms and could not be reaped",
+                        exe.display(),
+                        bound.as_millis()
+                    )))
+                }
+            }
+            return Err(TsgoApiError::Timeout(format!(
+                "`tsgo --version` at {} exceeded {} ms",
+                exe.display(),
+                bound.as_millis()
+            )));
+        }
+    };
+
+    let stdout = stdout_task
+        .await
+        .map_err(|error| TsgoApiError::Transport(format!("join version stdout: {error}")))?
+        .map_err(|error| TsgoApiError::Transport(format!("read version stdout: {error}")))?;
+    let stderr = stderr_task
+        .await
+        .map_err(|error| TsgoApiError::Transport(format!("join version stderr: {error}")))?
+        .map_err(|error| TsgoApiError::Transport(format!("read version stderr: {error}")))?;
+    if !status.success() {
+        return Err(TsgoApiError::Spawn(format!(
+            "`tsgo --version` exited with {:?}: {}",
+            status.code(),
+            String::from_utf8_lossy(&stderr).trim()
+        )));
+    }
+    let text = String::from_utf8_lossy(&stdout);
     parse_version(&text).ok_or_else(|| {
         TsgoApiError::Spawn(format!(
             "could not parse tsgo version from `{}`",

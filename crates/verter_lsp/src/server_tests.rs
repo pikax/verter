@@ -959,7 +959,7 @@ fn make_hover_test_service_with_kind(
                 type_provider_kind: kind,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
             },
         )
@@ -1606,7 +1606,7 @@ async fn make_definition_test_server_with_kind(
                 type_provider_kind: kind,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
             },
         )
@@ -2675,6 +2675,12 @@ fn did_open_startup_policy_enables_sync_for_tsgo_and_tsserver() {
         !tsserver.publish_diagnostics,
         "should not publish diagnostics inline"
     );
+
+    let editor_tsserver = did_open_startup_policy(crate::TypeProviderKind::EditorTsserver);
+    assert!(
+        editor_tsserver.sync_imported_carrier_apis,
+        "the editor tsserver plugin still requires imported carrier-store publication"
+    );
 }
 
 #[test]
@@ -2717,6 +2723,46 @@ fn did_open_provider_sync_policy_skips_api_sync_for_tsserver_but_not_tsgo() {
         !no_provider.await_api_sync,
         "verter-only mode should not await API sync"
     );
+
+    let editor_tsserver = did_open_provider_sync_policy(crate::TypeProviderKind::EditorTsserver);
+    assert!(
+        !editor_tsserver.await_ide_sync && !editor_tsserver.await_api_sync,
+        "an editor-owned server must not be driven through local provider sync"
+    );
+    assert!(
+        editor_tsserver.background_api_sync,
+        "an editor-owned server still queues durable carrier-store publication"
+    );
+}
+
+#[test]
+fn editor_tsserver_constructs_store_publication_without_a_local_provider() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: None,
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::EditorTsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_reason: Some("attested editor project".into()),
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let server = service.inner();
+
+    assert!(server.type_provider.is_none());
+    assert!(server.project_sync.is_none());
+    assert!(server.sync_coordinator.is_none());
+    assert!(
+        server.carrier_publish_coordinator.is_some(),
+        "the editor plugin route requires the durable store publisher"
+    );
 }
 
 #[tokio::test]
@@ -2757,7 +2803,7 @@ async fn initialized_returns_before_background_configure_paths_completes() {
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
             },
         )
@@ -4351,7 +4397,7 @@ async fn goto_type_definition_returns_none_without_provider() {
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
             },
         )
@@ -8296,7 +8342,7 @@ defineProps<{ msg: string }>()
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
             },
         )
@@ -9017,7 +9063,7 @@ async fn sync_imported_carrier_api_lightweight_opens_snapshot_ide_path_for_tsgo(
                 type_provider_kind: crate::TypeProviderKind::Tsgo,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
             },
         )
@@ -9228,7 +9274,7 @@ async fn sync_imported_carrier_api_lightweight_preserves_open_unowned_state() {
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
             },
         )
@@ -9473,7 +9519,7 @@ async fn ensure_current_file_synced_preserves_open_unresolved_carrier_state_when
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
             },
         )
@@ -9574,7 +9620,7 @@ async fn ensure_current_file_synced_reconciles_owned_open_vue_on_owner_loss() {
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
             },
         )
@@ -10277,7 +10323,7 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
                         type_provider_kind: crate::TypeProviderKind::Tsserver,
                         suggest_tsgo: false,
                         mcp_port: None,
-                        type_provider_none_reason: None,
+                        type_provider_reason: None,
                         suppress_imported_carrier_prewarm: false,
                     },
                 )
@@ -10426,7 +10472,7 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_immed
                         type_provider_kind: crate::TypeProviderKind::Tsserver,
                         suggest_tsgo: false,
                         mcp_port: None,
-                        type_provider_none_reason: None,
+                        type_provider_reason: None,
                         suppress_imported_carrier_prewarm: false,
                     },
                 )
@@ -10548,7 +10594,7 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_on_do
                         type_provider_kind: crate::TypeProviderKind::Tsserver,
                         suggest_tsgo: false,
                         mcp_port: None,
-                        type_provider_none_reason: None,
+                        type_provider_reason: None,
                         suppress_imported_carrier_prewarm: false,
                     },
                 )
@@ -10728,7 +10774,7 @@ async fn completion_with_real_tsserver_recovers_when_current_file_sync_was_misse
                         type_provider_kind: crate::TypeProviderKind::Tsserver,
                         suggest_tsgo: false,
                         mcp_port: None,
-                        type_provider_none_reason: None,
+                        type_provider_reason: None,
                         suppress_imported_carrier_prewarm: false,
                     },
                 )
@@ -10841,7 +10887,7 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
                         type_provider_kind: crate::TypeProviderKind::Tsserver,
                         suggest_tsgo: false,
                         mcp_port: None,
-                        type_provider_none_reason: None,
+                        type_provider_reason: None,
                         suppress_imported_carrier_prewarm: false,
                     },
                 )
@@ -11104,7 +11150,7 @@ async fn sync_pending_carrier_provider_file_hydrates_codegen_blockers_before_syn
     let provider_sync_states = DashMap::new();
 
     let synced = sync_pending_carrier_provider_file(
-        &sync,
+        Some(&sync),
         &documents,
         &snapshot,
         &provider_sync_states,
@@ -11205,7 +11251,7 @@ defineProps<{ msg: string }>()
     let provider_sync_states = DashMap::new();
 
     let synced = sync_pending_carrier_provider_file(
-        &sync,
+        Some(&sync),
         &documents,
         &snapshot,
         &provider_sync_states,
@@ -11697,7 +11743,7 @@ async fn provider_projection_context_serves_both_carrier_and_self_file() {
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
             },
         )
@@ -11824,7 +11870,7 @@ async fn self_file_auto_import_resolve_fails_closed_with_no_edits() {
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
             },
         )
@@ -11924,7 +11970,7 @@ async fn missing_ide_context_for_real_carrier_fails_resolve_not_drops_edits() {
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
             },
         )
@@ -12027,7 +12073,7 @@ async fn non_vue_carrier_auto_import_resolve_fails_closed_no_script_setup_synthe
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
             },
         )
@@ -12381,7 +12427,7 @@ async fn rune_module_queryable_before_resolver_ownership() {
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
             },
         )
@@ -12446,7 +12492,7 @@ async fn rune_module_own_buffer_resyncs_on_did_change() {
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
             },
         )
@@ -12528,7 +12574,7 @@ async fn rune_module_self_file_state_closed_on_did_close() {
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
             },
         )
@@ -12608,7 +12654,7 @@ async fn deleting_carrier_source_closes_its_companions_in_provider() {
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
             },
         )
@@ -12712,7 +12758,7 @@ async fn self_file_rename_and_code_actions_gated_off() {
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
             },
         )
@@ -14673,7 +14719,7 @@ async fn did_close_orders_didclose_before_release_so_no_overlay_leak_at_real_han
                 type_provider_kind: crate::TypeProviderKind::Tsgo,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
             },
         )
@@ -14909,7 +14955,7 @@ async fn guarded_decl_close_does_not_strand_concurrently_reopened_overlay() {
                 type_provider_kind: crate::TypeProviderKind::Tsgo,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
             },
         )
@@ -18100,7 +18146,7 @@ async fn stale_close_is_superseded_when_a_reaching_root_reopens_the_overlay() {
                 type_provider_kind: crate::TypeProviderKind::Tsgo,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
             },
         )

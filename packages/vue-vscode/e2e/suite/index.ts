@@ -10,18 +10,35 @@ import {
   TYPE_PROVIDER,
 } from "../helpers";
 
-/** Recursively find all *.test.js files under a directory. */
-function findTestFiles(dir: string): string[] {
+/** Recursively find the authored test sources under a directory. */
+function findTestSources(dir: string): string[] {
   const results: string[] = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      results.push(...findTestFiles(fullPath));
-    } else if (entry.name.endsWith(".test.js")) {
+      results.push(...findTestSources(fullPath));
+    } else if (entry.name.endsWith(".test.ts")) {
       results.push(fullPath);
     }
   }
   return results;
+}
+
+function discoverCompiledTests(compiledRoot: string): string[] {
+  const sourceRoot = path.resolve(compiledRoot, "../../../e2e/suite");
+  const sources = findTestSources(sourceRoot).sort();
+  if (sources.length === 0) {
+    throw new Error(`E2E discovery found no authored *.test.ts files under ${sourceRoot}`);
+  }
+
+  return sources.map((source) => {
+    const relative = path.relative(sourceRoot, source).replace(/\.ts$/, ".js");
+    const compiled = path.join(compiledRoot, relative);
+    if (!fs.existsSync(compiled)) {
+      throw new Error(`E2E test source was not compiled: ${source} -> ${compiled}`);
+    }
+    return compiled;
+  });
 }
 
 /**
@@ -50,7 +67,7 @@ export async function run(): Promise<void> {
 
   const testsRoot = path.resolve(__dirname);
   const onlyPattern = process.env.VERTER_E2E_ONLY || process.env.E2E_ONLY;
-  const files = findTestFiles(testsRoot).filter((file) =>
+  const files = discoverCompiledTests(testsRoot).filter((file) =>
     onlyPattern ? file.includes(onlyPattern) : true,
   );
 
@@ -105,13 +122,12 @@ export async function run(): Promise<void> {
         reject(new Error(`${Math.max(failures, stats.failures ?? 0)} tests failed`));
         return;
       }
-      // Zero-test guard: a NARROWED run (VERTER_E2E_ONLY set) that executed NO tests
-      // is a vacuous pass — the suite failed to load, the pattern matched nothing, or
-      // the root hook aborted. Fail closed so a gate can never silently not-run.
-      if (onlyPattern && executed === 0) {
+      // Zero tests is always a vacuous pass: the suite failed to load, a pattern matched
+      // nothing, or the root hook aborted. Every fixture in the release matrix is required.
+      if (executed === 0) {
         reject(
           new Error(
-            `narrowed run (VERTER_E2E_ONLY=${onlyPattern}) executed 0 tests — vacuous pass refused` +
+            `E2E run${onlyPattern ? ` (VERTER_E2E_ONLY=${onlyPattern})` : ""} executed 0 tests — vacuous pass refused` +
               (rootHookError ? `; root hook error: ${rootHookError}` : ""),
           ),
         );

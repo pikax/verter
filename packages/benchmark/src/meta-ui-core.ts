@@ -522,3 +522,164 @@ function percentile(sorted: readonly number[], ratio: number): number {
   const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * ratio) - 1));
   return sorted[index] ?? 0;
 }
+
+// ---------------------------------------------------------------------------
+// Memory-audit mode (--memory-audit)
+//
+// Opt-in deep memory audit for bench:meta:ui. The native binding, when
+// built with `--features memory_audit` (see `pnpm --filter @verter/native
+// run build:memory-audit`), exposes allocator counters via two ALWAYS
+// exported functions: `memoryAuditSnapshot()` (null on a non-instrumented
+// binary) and `memoryAuditResetHighWater()` (false when non-instrumented).
+// The helpers below are pure so the loud-failure gate and the per-query
+// delta math are unit-testable without a built .node.
+// ---------------------------------------------------------------------------
+
+/** Counters reported by the instrumented native binding. */
+export interface MemoryAuditSnapshot {
+  allocCount: number;
+  deallocCount: number;
+  allocatedBytesTotal: number;
+  liveBytes: number;
+  peakLiveBytes: number;
+}
+
+/** The (possibly absent) memory-audit surface of `@verter/native`. */
+export interface MemoryAuditBinding {
+  memoryAuditSnapshot?: (() => MemoryAuditSnapshot | null) | undefined;
+  memoryAuditResetHighWater?: (() => boolean) | undefined;
+}
+
+/** Validated instrumented-binding handle returned by the setup gate. */
+export interface MemoryAuditCapable {
+  snapshot(): MemoryAuditSnapshot;
+  resetHighWater(): void;
+}
+
+/** Per-query memory measurement attached to a worker query result. */
+export interface MemoryAuditQueryMeasure {
+  /** Allocating calls during the query (snapshot delta). */
+  allocCount: number;
+  /** Bytes requested by allocating calls during the query (delta). */
+  allocatedBytes: number;
+  /** Live-bytes high-water mark within the query window (post-reset). */
+  peakLiveBytes: number;
+  /** Worker-process RSS right after the query. */
+  rssBytes: number;
+  /** Worker V8 heapUsed right after the query. */
+  jsHeapUsedBytes: number;
+}
+
+/** Per-component row in the .memory.json artifact. */
+export interface MemoryAuditComponentRow extends MemoryAuditQueryMeasure {
+  relativePath: string;
+  repeatIndex: number;
+}
+
+export interface MetaUiMemoryAuditArtifact {
+  kind: "meta-ui-memory-audit";
+  generatedAt: string;
+  backend: MetaUiBackend;
+  scenario: MetaUiScenario;
+  components: MemoryAuditComponentRow[];
+  totals: {
+    components: number;
+    allocCount: number;
+    allocatedBytes: number;
+    maxPeakLiveBytes: number;
+    maxRssBytes: number;
+    maxJsHeapUsedBytes: number;
+  };
+}
+
+export const MEMORY_AUDIT_BUILD_HINT =
+  "pnpm --filter @verter/native run build:memory-audit " +
+  "(napi build --release --features memory_audit)";
+
+/**
+ * Loud-failure setup gate for --memory-audit: validate that the loaded
+ * `@verter/native` binding is instrumented. Throws when the exports are
+ * missing (older binary) or when `memoryAuditSnapshot()` returns null
+ * (binary built without the cargo feature). Never fall back silently —
+ * a non-instrumented run would report all-zero counters.
+ */
+export function ensureMemoryAuditCapable(binding: MemoryAuditBinding): MemoryAuditCapable {
+  const fail = (reason: string): never => {
+    throw new Error(
+      `--memory-audit requires an instrumented @verter/native binary: ${reason}. ` +
+        `Rebuild the native binding with: ${MEMORY_AUDIT_BUILD_HINT}. ` +
+        "Timing runs must NOT use the instrumented binary.",
+    );
+  };
+  if (typeof binding.memoryAuditSnapshot !== "function") {
+    fail("the loaded binding has no memoryAuditSnapshot export");
+  }
+  if (typeof binding.memoryAuditResetHighWater !== "function") {
+    fail("the loaded binding has no memoryAuditResetHighWater export");
+  }
+  const probe = binding.memoryAuditSnapshot!();
+  if (probe === null) {
+    fail(
+      "memoryAuditSnapshot() returned null — the binary was built without " +
+        "`--features memory_audit`",
+    );
+  }
+  return {
+    snapshot: () => {
+      const value = binding.memoryAuditSnapshot!();
+      if (value === null) {
+        return fail("memoryAuditSnapshot() returned null mid-run");
+      }
+      return value;
+    },
+    resetHighWater: () => {
+      binding.memoryAuditResetHighWater!();
+    },
+  };
+}
+
+/** Fold two allocator snapshots plus process memory into a per-query measure. */
+export function computeMemoryAuditMeasure(
+  before: MemoryAuditSnapshot,
+  after: MemoryAuditSnapshot,
+  memory: { rss: number; heapUsed: number },
+): MemoryAuditQueryMeasure {
+  return {
+    allocCount: after.allocCount - before.allocCount,
+    allocatedBytes: after.allocatedBytesTotal - before.allocatedBytesTotal,
+    peakLiveBytes: after.peakLiveBytes,
+    rssBytes: memory.rss,
+    jsHeapUsedBytes: memory.heapUsed,
+  };
+}
+
+/** Aggregate collected per-component rows into the .memory.json artifact. */
+export function buildMemoryAuditArtifact(input: {
+  backend: MetaUiBackend;
+  scenario: MetaUiScenario;
+  rows: MemoryAuditComponentRow[];
+}): MetaUiMemoryAuditArtifact {
+  const totals = {
+    components: input.rows.length,
+    allocCount: 0,
+    allocatedBytes: 0,
+    maxPeakLiveBytes: 0,
+    maxRssBytes: 0,
+    maxJsHeapUsedBytes: 0,
+  };
+  for (const row of input.rows) {
+    totals.allocCount += row.allocCount;
+    totals.allocatedBytes += row.allocatedBytes;
+    totals.maxPeakLiveBytes = Math.max(totals.maxPeakLiveBytes, row.peakLiveBytes);
+    totals.maxRssBytes = Math.max(totals.maxRssBytes, row.rssBytes);
+    totals.maxJsHeapUsedBytes = Math.max(totals.maxJsHeapUsedBytes, row.jsHeapUsedBytes);
+  }
+  return {
+    kind: "meta-ui-memory-audit",
+    generatedAt: new Date().toISOString(),
+    backend: input.backend,
+    scenario: input.scenario,
+    components: input.rows,
+    totals,
+  };
+}
