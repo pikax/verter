@@ -282,6 +282,16 @@ pub struct SlotAnalysis {
     pub return_source_scope: Option<TypeExprScope>,
     pub description: Option<String>,
     pub tags: Vec<JsdocTag>,
+    /// Producer fact: does this slot come from the component's own AUTHORED
+    /// slots surface — a member of the resolved `defineSlots<T>()` macro
+    /// surface (inline body, referenced interface, or its heritage) or a
+    /// template `<slot>` element? `false` only for rows arriving purely
+    /// through the evaluated type-expansion channel with no authored
+    /// counterpart — the residual channel VNode-transport keys could leak
+    /// through. Consumed by `@verter/component-meta/published-surface`'s
+    /// `Compat` / `Refined` slot blocklist (an author-declared slot is
+    /// never blocked, whatever its name).
+    pub declared_in_macro_type_arg: bool,
 }
 
 /// A single binding property on a scoped slot.
@@ -2318,6 +2328,9 @@ fn extract_slots_from_macro(
                 return_source_scope,
                 description: field.description.clone(),
                 tags: field.tags.clone(),
+                // Matched an authored `AnalyzedSlotField` — the author's
+                // own defineSlots surface declares this name.
+                declared_in_macro_type_arg: true,
             });
         }
 
@@ -2339,6 +2352,12 @@ fn extract_slots_from_macro(
                 tags: source_field
                     .map(|field| field.tags.clone())
                     .unwrap_or_default(),
+                // A row arriving PURELY through the evaluated
+                // type-expansion channel has no authored counterpart —
+                // the one channel a VNode-transport key can leak
+                // through, and the only rows the compat slot blocklist
+                // may still suppress.
+                declared_in_macro_type_arg: source_field.is_some(),
             });
         }
         return;
@@ -2404,6 +2423,9 @@ fn extract_slots_from_macro(
             return_source_scope,
             description: field.description.clone(),
             tags: field.tags.clone(),
+            // Straight off the authored / resolver-projected
+            // defineSlots surface.
+            declared_in_macro_type_arg: true,
         });
     }
 }
@@ -2680,6 +2702,8 @@ fn merge_template_slots(
                 return_source_scope: None,
                 description: None,
                 tags: Vec::new(),
+                // An authored template `<slot>` element declares the name.
+                declared_in_macro_type_arg: true,
             });
         }
     }

@@ -898,6 +898,9 @@ describe("nativeComponentMetaToComponentMeta", () => {
         bindings: [],
         isRequired: false,
         returnType: "VNode[]",
+        // Forward-compat coercion: a native payload without the producer
+        // fact reads `false` (the compat name block applies).
+        declaredInMacroTypeArg: false,
       },
     ]);
   });

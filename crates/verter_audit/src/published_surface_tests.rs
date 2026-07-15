@@ -239,6 +239,49 @@ fn refined_policy_strips_compat_blocked_slot_names() {
 }
 
 #[test]
+fn compat_policy_never_blocks_author_declared_slot_names() {
+    // The slot blocklist suppresses VNode-transport names that reach the
+    // surface WITHOUT the author declaring them. A slot the SFC author
+    // explicitly declared on the component's own macro surface (the
+    // Popover.vue `anchor?(props: SlotProps<M>): VNode[]` corpus shape —
+    // vue-component-meta itself publishes it) must NEVER be blocked:
+    // the block is a structural condition on `declared_in_macro_type_arg`,
+    // not a bare name-set membership test.
+    let surface = AnalyzedSurface {
+        props: vec![],
+        events: vec![],
+        slots: vec![
+            item("default"),
+            item_declared("anchor"), // author-declared → survives
+            item_declared("el"),     // author-declared → survives
+            item("anchor2"),         // non-blocked name → survives
+            item("placeholder"),     // NOT declared → blocked
+        ],
+        exposed: vec![],
+    };
+    let compat = names_for_policy(PublishedSurfacePolicy::Compat, &surface);
+    assert_eq!(
+        compat.slots,
+        vec![
+            "default".to_string(),
+            "anchor".to_string(),
+            "el".to_string(),
+            "anchor2".to_string(),
+        ],
+        "Compat must keep author-declared blocklist-named slots (anchor/el), \
+         keep ordinary slots, and still strip an UNDECLARED VNode-transport \
+         name (placeholder); got {:?}",
+        compat.slots
+    );
+
+    let refined = names_for_policy(PublishedSurfacePolicy::Refined, &surface);
+    assert_eq!(
+        refined.slots, compat.slots,
+        "Refined inherits the same declared-slot exemption as Compat"
+    );
+}
+
+#[test]
 fn event_name_to_on_prop_name_matches_bench_refiner_camelcase() {
     // The bench refiner derived `on{Event}` via
     // `camelCase("on_" + event.name)`. Our Rust port must produce

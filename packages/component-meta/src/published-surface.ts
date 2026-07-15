@@ -33,9 +33,11 @@ import type {
 export type { AnalyzedSurface, AnalyzedSurfaceItem, PolicyNamesResult, PublishedSurfacePolicy };
 
 /**
- * VNode-only transport keys that `vue-component-meta` suppresses
- * on the slots surface — `@verter/component-meta/compat` mirrors
- * this contract. Mirror of Rust `verter_audit::COMPAT_BLOCKED_SLOT_NAMES`.
+ * VNode-only transport keys suppressed on the slots surface when they
+ * reach it WITHOUT an authored declaration
+ * (`declared_in_macro_type_arg === false`) — an author-declared slot is
+ * never blocked, whatever its name. Mirror of Rust
+ * `verter_audit::COMPAT_BLOCKED_SLOT_NAMES`.
  */
 export const COMPAT_BLOCKED_SLOT_NAMES: readonly string[] = [
   "type",
@@ -120,7 +122,13 @@ export function namesForPolicy(
       return {
         props: surface.props.map((i) => i.name),
         events: surface.events.map((i) => i.name),
-        slots: surface.slots.filter((s) => !blocked.has(s.name)).map((s) => s.name),
+        // Structural block: a VNode-transport NAME is suppressed only
+        // when the author did NOT declare the slot on the component's
+        // own macro surface (Popover.vue's declared `anchor` slot
+        // always survives — `vue-component-meta` publishes it too).
+        slots: surface.slots
+          .filter((s) => s.declared_in_macro_type_arg || !blocked.has(s.name))
+          .map((s) => s.name),
         exposed: surface.exposed.map((i) => i.name),
       };
     }
@@ -146,7 +154,10 @@ export function namesForPolicy(
           })
           .map((p) => p.name),
         events: surface.events.map((i) => i.name),
-        slots: surface.slots.filter((s) => !blocked.has(s.name)).map((s) => s.name),
+        // Same declared-slot exemption as `Compat`.
+        slots: surface.slots
+          .filter((s) => s.declared_in_macro_type_arg || !blocked.has(s.name))
+          .map((s) => s.name),
         exposed: surface.exposed.map((i) => i.name),
       };
     }
@@ -186,9 +197,13 @@ export function refinedPropSurvives(
  * Helper: predicate filter for the `Compat` policy's slot pass.
  *
  * Returns `true` iff the slot survives the `Compat` projection —
- * `slotName` is not in `COMPAT_BLOCKED_SLOT_NAMES`. Useful for
- * direct array.filter use cases.
+ * either the author declared the slot on the component's own macro
+ * surface (`declaredInMacroTypeArg`, the structural exemption: an
+ * author-declared slot is never blocked, whatever its name) or
+ * `slotName` is not in `COMPAT_BLOCKED_SLOT_NAMES`. Callers without
+ * the producer fact fall back to `false` (conservative: the name
+ * block applies). Useful for direct array.filter use cases.
  */
-export function compatSlotSurvives(slotName: string): boolean {
-  return !COMPAT_BLOCKED_SLOT_NAMES.includes(slotName);
+export function compatSlotSurvives(slotName: string, declaredInMacroTypeArg = false): boolean {
+  return declaredInMacroTypeArg || !COMPAT_BLOCKED_SLOT_NAMES.includes(slotName);
 }

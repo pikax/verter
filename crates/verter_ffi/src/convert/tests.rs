@@ -2188,6 +2188,7 @@ fn component_meta_nested_lanes_zip_onto_the_correct_nested_members() {
         return_source_scope: None,
         description: None,
         tags: Vec::new(),
+        declared_in_macro_type_arg: true,
     };
     // The `row` binding name REPEATS across both slots (name-keyed zips
     // collapse it); `default` additionally carries a second binding so the

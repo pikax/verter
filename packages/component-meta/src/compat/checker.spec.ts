@@ -1284,6 +1284,15 @@ describe("mapComponentMeta", () => {
         { name: "props", isScoped: false, bindings: [], isRequired: false },
         { name: "appContext", isScoped: false, bindings: [], isRequired: false },
         { name: "targetStart", isScoped: false, bindings: [], isRequired: false },
+        // Author-declared VNode-transport NAME (the Popover.vue `anchor`
+        // shape) — the structural declared fact exempts it from the block.
+        {
+          name: "anchor",
+          isScoped: true,
+          bindings: [],
+          isRequired: false,
+          declaredInMacroTypeArg: true,
+        },
       ],
       models: [],
       exposed: [],
@@ -1308,7 +1317,7 @@ describe("mapComponentMeta", () => {
 
     const result = mapComponentMeta(meta);
 
-    expect(result.slots.map((slot) => slot.name)).toEqual(["default"]);
+    expect(result.slots.map((slot) => slot.name)).toEqual(["default", "anchor"]);
   });
 
   it("keeps compat exposed on the analysis surface when a public-instance sidecar exists", () => {

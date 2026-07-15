@@ -843,6 +843,9 @@ function decodeSlot(slot: ProtoRecord, graph: DecodedTypeGraph): Record<string, 
       ...maybe("rawType", graph.getStringMaybe(Number(binding.rawTypeId ?? 0))),
     })),
     isRequired: Boolean(slot.isRequired),
+    // Field 8 (`declared_in_macro_type_arg`) — proto3 bool defaults make
+    // the coercion read `false` when the field is absent.
+    declaredInMacroTypeArg: Boolean(slot.declaredInMacroTypeArg),
     ...maybe("returnType", graph.getStringMaybe(Number(slot.returnTypeId ?? 0))),
     ...maybe("description", graph.getStringMaybe(Number(slot.descriptionId ?? 0))),
     ...maybeArray("tags", decodeJsdocTags((slot.tags as ProtoRecord[] | undefined) ?? [], graph)),

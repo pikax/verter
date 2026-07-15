@@ -77,8 +77,8 @@ let compatBrandedStringObjectSchemaCache:
   | Extract<PropertyMetaSchema, { kind: "object" }>
   | null
   | undefined;
-function isCompatVisibleSlotName(name: string): boolean {
-  return compatSlotSurvives(name);
+function isCompatVisibleSlot(slot: SlotMeta): boolean {
+  return compatSlotSurvives(slot.name, slot.declaredInMacroTypeArg === true);
 }
 
 /**
@@ -1807,7 +1807,7 @@ export function mapComponentMeta(
     props: meta.props.map((p) => mapPropMeta(p, options, typeRegistry)),
     events: meta.events.map((e) => mapEventMeta(e, options, typeRegistry)),
     slots: meta.slots
-      .filter((s) => isCompatVisibleSlotName(s.name))
+      .filter((s) => isCompatVisibleSlot(s))
       .map((s) => mapSlotMeta(s, options, typeRegistry)),
     exposed: meta.exposed.map((e) => mapExposedMeta(e, options, typeRegistry)),
     _verter: meta,

@@ -26999,6 +26999,7 @@ fn component_meta_output_missing_sources_follow_central_policy_on_every_lane() {
         return_source_scope: None,
         description: None,
         tags: Vec::new(),
+        declared_in_macro_type_arg: true,
     });
     analysis.models.push(cm::ModelAnalysis {
         name: "m".to_string(),
@@ -27148,6 +27149,7 @@ fn component_meta_output_unraisable_nested_sources_fail_typed_with_inner_index()
             return_source_scope: None,
             description: None,
             tags: Vec::new(),
+            declared_in_macro_type_arg: true,
         });
     let err = crate::meta_resolve::projectors::build_component_meta_output(
         host, "/App.vue", analysis, None,
@@ -31027,5 +31029,83 @@ defineEmits<E>()
                 .iter()
                 .any(|member| matches!(member, TypeExpr::Array { element, .. } if matches!(element.as_ref(), TypeExpr::Primitive(PrimitiveName::String)))),
         "distribution over the inline defaulted union produces `string | string[]`, got {members:?}"
+    );
+}
+
+/// The Popover.vue corpus shape: `anchor` is declared on the component's
+/// own `defineSlots` surface (a referenced interface's own body). The
+/// producer fact `declared_in_macro_type_arg` rides the analysis so the
+/// compat slot blocklist can exempt author-declared VNode-transport
+/// names (an undeclared `anchor` would still be suppressed).
+#[test]
+fn define_slots_surface_slots_carry_declared_in_macro_type_arg() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script lang="ts">
+export interface AppSlots {
+  default?(props: { open: boolean }): any
+  anchor?(props: { open: boolean }): any
+}
+</script>
+<script setup lang="ts">
+defineSlots<AppSlots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("full meta should resolve");
+    let anchor = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "anchor")
+        .expect("the declared `anchor` slot publishes natively");
+    assert!(
+        anchor.declared_in_macro_type_arg,
+        "a slot declared on the component's own defineSlots surface carries \
+         the producer fact — the compat blocklist must never suppress it"
+    );
+    let default_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "default")
+        .expect("default slot publishes");
+    assert!(
+        default_slot.declared_in_macro_type_arg,
+        "every authored defineSlots member carries the fact"
+    );
+}
+
+/// Template-declared sibling: an authored `<slot name=...>` element is an
+/// author declaration too — the fact holds without any `defineSlots`.
+#[test]
+fn template_slots_carry_declared_in_macro_type_arg() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+</script>
+<template><slot name="anchor" /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("full meta should resolve");
+    let anchor = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "anchor")
+        .expect("template-declared slot publishes");
+    assert!(
+        anchor.declared_in_macro_type_arg,
+        "an authored template `<slot>` element declares the name"
     );
 }

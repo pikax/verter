@@ -189,6 +189,7 @@ pub(super) fn component_meta_parts_to_ffi(
                 return_type: s.return_type,
                 description: s.description,
                 tags: s.tags.into_iter().map(jsdoc_to_ffi).collect(),
+                declared_in_macro_type_arg: s.declared_in_macro_type_arg,
             })
             .collect(),
         models: analysis

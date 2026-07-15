@@ -72,7 +72,9 @@ name: string,
  * the author wanted it" from "this name reaches the surface
  * through heritage / HTMLAttributes intersection /
  * utility-type expansion". `Refined` filters Vue intrinsics
- * and `onX`-shadows-emit only when this is `false`.
+ * and `onX`-shadows-emit only when this is `false`; `Compat` /
+ * `Refined` apply the [`COMPAT_BLOCKED_SLOT_NAMES`] slot block
+ * only when this is `false`.
  */
 declared_in_macro_type_arg: boolean,
 /**

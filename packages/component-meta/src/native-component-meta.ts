@@ -98,6 +98,15 @@ export interface NativeSlotMeta {
   returnType?: string;
   description?: string;
   tags?: NativeJsdocTag[];
+  /**
+   * Producer fact: does this slot come from the component's own AUTHORED
+   * slots surface (the resolved `defineSlots<T>()` macro surface or a
+   * template `<slot>` element)? Consumed by the compat slot blocklist —
+   * an author-declared slot is never blocked, whatever its name.
+   * Forward-compat: coerced with `Boolean(...)` so older payloads
+   * without the field read `false` (the name block applies).
+   */
+  declaredInMacroTypeArg?: boolean;
 }
 
 export interface NativeModelMeta {
@@ -602,6 +611,8 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
       ...(slot.returnType !== undefined ? { returnType: slot.returnType } : {}),
       ...(slot.description !== undefined ? { description: slot.description } : {}),
       ...(slot.tags?.length ? { tags: slot.tags } : {}),
+      // Forward-compat coerce — see `NativeSlotMeta.declaredInMacroTypeArg`.
+      declaredInMacroTypeArg: Boolean(slot.declaredInMacroTypeArg),
     })),
     models: meta.models.map((model) => ({
       name: model.name,
