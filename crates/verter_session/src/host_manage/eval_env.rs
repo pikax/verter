@@ -1,7 +1,7 @@
 //! `host_manage::eval_env` — eval-env builders, file-analysis snapshot
 //! constructors, and evaluated-type computation.
 //!
-//! Domain G. Owns the host's `base_eval_env` artifact read, the
+//! Domain G. Owns the host's `base_eval_env_arc` artifact read, the
 //! `FileAnalysisSnapshot` builders for parse / source flows, and the
 //! per-owner evaluated-type compute path. Public surface
 //! remains rooted at `crate::host_manage::*`; this file contributes a
@@ -69,8 +69,12 @@ impl VerterHost {
             return None;
         }
 
+        // Read the id through the memo-owned whole-env `Arc` — a
+        // single map lookup; never a whole-env deep clone (this is the
+        // most-hit whole-env consumer, reached on every
+        // `get_component_meta` resolution).
         let oracle = self
-            .base_eval_env(canonical_source)
+            .base_eval_env_arc(canonical_source)
             .and_then(|env| env.type_declaration_id(resolved_name));
         // Non-breaking readiness cross-check (debug/test only): the
         // bounded graph-native reader must AGREE with the oracle on
@@ -144,15 +148,6 @@ impl VerterHost {
             .iter()
             .position(|name| *name == resolved_name)
             .map(|ordinal| (ordinal as u64) + 1)
-    }
-
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(crate) fn base_eval_env(
-        &self,
-        canonical_id: &str,
-    ) -> Option<verter_semantic::analysis::type_eval::EvalEnv> {
-        self.base_eval_env_arc(canonical_id)
-            .map(|env| (*env).clone())
     }
 
     fn peel_value_decl_alias(&self, canonical_id: &str, name: &str) -> ValueDeclIdentity {

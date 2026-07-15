@@ -458,7 +458,7 @@ impl VerterHost {
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         root_reachability: Option<&verter_semantic::analysis::component_meta::RootReachability>,
-    ) -> Option<verter_semantic::analysis::type_eval::EvalEnv> {
+    ) -> Option<std::sync::Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
         component_meta_trace_custom!(
             "build_fallthrough_eval_env_lightweight",
             format!(
@@ -468,9 +468,7 @@ impl VerterHost {
                 false,
             ),
         );
-        let mut env = self
-            .base_eval_env_arc(canonical_id)
-            .map(|env| (*env).clone())?;
+        let base_env = self.base_eval_env_arc(canonical_id)?;
 
         // Hydrate required runtime values from imports.
         let required_runtime_value_names = match root_reachability {
@@ -479,10 +477,18 @@ impl VerterHost {
             }
             None => collect_required_template_runtime_value_names(snapshot),
         };
-        if !required_runtime_value_names.is_empty() {
-            let local_value_names: rustc_hash::FxHashSet<String> =
-                env.value_symbols.keys().cloned().collect();
-
+        if required_runtime_value_names.is_empty() {
+            // Nothing to hydrate: the memo-owned whole-env Arc IS the
+            // fallthrough env — zero whole-env clones on this path
+            // (every downstream consumer reads it immutably).
+            return Some(base_env);
+        }
+        let local_value_names: rustc_hash::FxHashSet<String> =
+            base_env.value_symbols.keys().cloned().collect();
+        // Hydration mutates: clone the base env once, hydrate, and
+        // hand out a fresh Arc.
+        let mut env = (*base_env).clone();
+        {
             // The graph-native dep extractor
             // (`fallthrough_runtime_value_deps_graph_native`) enumerates the
             // cross-file runtime-value sources the materializer hydrates,
@@ -508,7 +514,7 @@ impl VerterHost {
             );
         }
 
-        Some(env)
+        Some(std::sync::Arc::new(env))
     }
 
     /// Graph-native dep-extraction reader for the lightweight fallthrough
@@ -658,7 +664,7 @@ impl VerterHost {
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         usage_index: u32,
-        eval_env: &mut Option<verter_semantic::analysis::type_eval::EvalEnv>,
+        eval_env: &mut Option<std::sync::Arc<verter_semantic::analysis::type_eval::EvalEnv>>,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         overrides_in: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
     ) -> Option<crate::resolver_core::FallthroughPropOverrideSet> {
@@ -671,7 +677,7 @@ impl VerterHost {
         // Bind the engine to the supplied request-bound `ctx` so cache
         // validators inside the engine inherit the overlay-aware view.
         let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
-        let env_ref = eval_env.as_ref();
+        let env_ref = eval_env.as_deref();
 
         // Each child prop override is carried as its resolved value NODE
         // (env- + parent-override-aware, via `value_expression_override_node`).
@@ -711,7 +717,7 @@ impl VerterHost {
         element_index: u32,
         base: &verter_semantic::analysis::component_meta::ConsumedRootBindings,
         has_unknown_spread: bool,
-        eval_env: &mut Option<verter_semantic::analysis::type_eval::EvalEnv>,
+        eval_env: &mut Option<std::sync::Arc<verter_semantic::analysis::type_eval::EvalEnv>>,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
     ) -> ResolvedConsumedBindings {
@@ -774,7 +780,7 @@ impl VerterHost {
             // cache validators inside the engine inherit the overlay-aware
             // view.
             let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
-            let env_ref = eval_env.as_ref();
+            let env_ref = eval_env.as_deref();
             for directive in spread_directives {
                 let Some(expression) = directive.expression.as_deref() else {
                     push_partial_reason(
@@ -822,7 +828,7 @@ impl VerterHost {
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         usage_index: u32,
-        eval_env: &mut Option<verter_semantic::analysis::type_eval::EvalEnv>,
+        eval_env: &mut Option<std::sync::Arc<verter_semantic::analysis::type_eval::EvalEnv>>,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
     ) -> Vec<DynamicRootCandidate> {
@@ -862,7 +868,7 @@ impl VerterHost {
         candidates.extend(engine.dynamic_root_candidates_for_value_expression(
             canonical_id,
             &expression,
-            eval_env.as_ref(),
+            eval_env.as_deref(),
             overrides,
             snapshot.imports.as_slice(),
         ));

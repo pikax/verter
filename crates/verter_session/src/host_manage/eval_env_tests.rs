@@ -41,7 +41,7 @@ fn base_eval_env_reflects_content_edit_without_eager_clear() {
 
     // Build + cache the eval-env for the initial content.
     let env_before = host
-        .base_eval_env("/src/types.ts")
+        .base_eval_env_arc("/src/types.ts")
         .expect("eval-env builds for initial content");
     assert!(
         env_before.type_declaration_id("Foo").is_some(),
@@ -71,7 +71,7 @@ fn base_eval_env_reflects_content_edit_without_eager_clear() {
     // materialise closure rebuilds the shallow index from a fresh
     // parse, and the next `whole_env()` demand lowers the env from it.
     let env_after = host
-        .base_eval_env("/src/types.ts")
+        .base_eval_env_arc("/src/types.ts")
         .expect("eval-env builds for edited content");
     assert!(
         env_after.type_declaration_id("Bar").is_some(),
@@ -1340,5 +1340,48 @@ fn fix_a_value_export_root_resolver_normalizes_final_canonical_like_type_rail() 
         "/pkg/impl.js",
         "the value rail must NOT report the raw `.js` final when a `.d.ts` companion exists — that is \
          the type-rail divergence the normalization-parity fix removes"
+    );
+}
+
+/// The lightweight fallthrough env IS the memo-owned whole-env `Arc`
+/// when the owner requires no cross-file runtime values: that path
+/// performs zero whole-env deep clones (the clone-and-hydrate variant
+/// runs ONLY when required runtime-value names exist). A static-root
+/// SFC with no imports and no dynamic bindings is exactly that case.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn fallthrough_env_without_required_runtime_values_shares_the_memo_env_arc() {
+    use crate::types::{FileLanguage, HostConfig, UpsertRequest};
+    use crate::VerterHost;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some("/src/Solo.vue".to_string()),
+            input_id: "/src/Solo.vue".to_string(),
+            source: Arc::from(
+                "<script setup lang=\"ts\">\n\
+                 const label = 'static'\n\
+                 </script>\n\
+                 <template><div /></template>\n",
+            ),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("owner upsert");
+
+    let snapshot = host
+        .get_analysis("/src/Solo.vue")
+        .expect("owner analysis snapshot");
+    let env = host
+        .build_fallthrough_eval_env_lightweight("/src/Solo.vue", &snapshot, None)
+        .expect("fallthrough env builds");
+    let memo_env = host
+        .base_eval_env_arc("/src/Solo.vue")
+        .expect("memo whole-env resolves");
+    assert!(
+        Arc::ptr_eq(&env, &memo_env),
+        "no required runtime values ⇒ the fallthrough env must BE the memo's \
+         whole-env Arc (zero whole-env clones on this path)"
     );
 }

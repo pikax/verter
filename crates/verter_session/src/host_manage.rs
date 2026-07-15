@@ -979,7 +979,9 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
 
 impl FallthroughComputeHost for HostFallthroughResolver<'_> {
     type Snapshot = FileAnalysisSnapshot;
-    type EvalEnv = verter_semantic::analysis::type_eval::EvalEnv;
+    // Arc-shared: the no-hydration fallthrough env is the memo-owned
+    // whole-env handle itself; every consumer reads it immutably.
+    type EvalEnv = std::sync::Arc<verter_semantic::analysis::type_eval::EvalEnv>;
 
     fn resolve_root_consumption(
         &self,

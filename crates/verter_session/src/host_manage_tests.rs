@@ -1981,7 +1981,7 @@ fn store_view_generic_dependency_paths_promote_snapshot_and_env_into_imported_ca
     );
 
     let env = host
-        .base_eval_env("/workspace/node_modules/pkg/dist/shared.d.ts")
+        .base_eval_env_arc("/workspace/node_modules/pkg/dist/shared.d.ts")
         .expect("store-view eval env path should build the dependency env");
     assert!(
         env.type_symbols.contains_key("Alpha"),
@@ -2058,7 +2058,7 @@ fn store_view_imported_seed_reuses_cached_source_for_snapshot_and_env() {
     );
 
     let env = host
-        .base_eval_env(canonical_id)
+        .base_eval_env_arc(canonical_id)
         .expect("eval env build should reuse the seeded imported cache");
     assert!(
         env.type_symbols.contains_key("Alpha"),
@@ -2097,7 +2097,7 @@ fn store_view_warm_imported_eval_env_hit_reuses_indexed_route_hash_without_rerea
     );
 
     let env = host
-        .base_eval_env(canonical_id)
+        .base_eval_env_arc(canonical_id)
         .expect("first eval env build should succeed from the routed imported file");
     assert!(
         env.type_symbols.contains_key("Alpha"),
@@ -2107,7 +2107,7 @@ fn store_view_warm_imported_eval_env_hit_reuses_indexed_route_hash_without_rerea
     ws.reset_reads();
 
     let env = host
-        .base_eval_env(canonical_id)
+        .base_eval_env_arc(canonical_id)
         .expect("warm eval env lookup should reuse the cached env");
     assert!(
         env.type_symbols.contains_key("Alpha"),
@@ -2192,7 +2192,7 @@ fn store_view_indexed_imported_seed_reuses_cached_source_for_snapshot_and_env() 
     );
 
     let env = host
-        .base_eval_env(canonical_id)
+        .base_eval_env_arc(canonical_id)
         .expect("eval env build should reuse the indexed imported source");
     assert!(
         env.type_symbols.contains_key("Alpha"),
@@ -8152,7 +8152,7 @@ fn base_eval_env_prefers_declaration_companion_for_runtime_js_dependencies() {
     let host = VerterHost::new(HostConfig::default(), ws);
 
     let env = host
-        .base_eval_env("/workspace/node_modules/pkg/dist/index.js")
+        .base_eval_env_arc("/workspace/node_modules/pkg/dist/index.js")
         .expect("runtime-script env requests should prefer the declaration companion");
 
     assert!(
