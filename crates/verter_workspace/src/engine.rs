@@ -402,6 +402,7 @@ impl Engine {
             compose_env_hash_tables(&projects, &env_inputs_resolve_extensions);
 
         let snapshot = WorkspaceSnapshot {
+            owners_memo: Default::default(),
             projects,
             resolver,
             generation,

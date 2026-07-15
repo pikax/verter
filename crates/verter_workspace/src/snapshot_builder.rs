@@ -166,6 +166,7 @@ pub fn build_workspace_snapshot(
 
     SnapshotBuildResult {
         snapshot: WorkspaceSnapshot {
+            owners_memo: Default::default(),
             projects,
             resolver,
             generation,
@@ -189,6 +190,7 @@ pub fn build_workspace_snapshot_simple(
     let resolver = build_resolver_from_projects(&projects);
 
     WorkspaceSnapshot {
+        owners_memo: Default::default(),
         projects,
         resolver,
         generation,

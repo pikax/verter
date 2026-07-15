@@ -69,6 +69,7 @@ fn fallback_project(id: u32, root: &str) -> OwnershipProject {
 fn snapshot_with(mut projects: Vec<OwnershipProject>) -> WorkspaceSnapshot {
     projects.sort_by(compare_project_precedence);
     WorkspaceSnapshot {
+        owners_memo: Default::default(),
         projects,
         resolver: ProjectResolver::default(),
         generation: SnapshotGeneration(1),
@@ -736,6 +737,7 @@ fn owners_for_file_pins_glob_membership_classes() {
 #[test]
 fn empty_snapshot_has_no_owners() {
     let snap = WorkspaceSnapshot {
+        owners_memo: Default::default(),
         projects: vec![],
         resolver: ProjectResolver::default(),
         generation: SnapshotGeneration(0),
@@ -746,4 +748,142 @@ fn empty_snapshot_has_no_owners() {
         snap.configured_owner_resolution_for_file("d:/anything.ts"),
         ConfiguredOwnerResolution::None
     );
+}
+
+// ── owners_for_file memo (snapshot-owned, bounded, negative-caching) ──
+
+#[test]
+fn memoized_owners_equal_fresh_compute_for_member_excluded_and_non_member() {
+    // Spec-only configured project (empty materialized set) so the glob
+    // matching path — the expensive path the memo exists for — is exercised.
+    let snap = snapshot_with(vec![
+        configured_project(0, "d:/proj", "d:/proj/tsconfig.json", &[]),
+        fallback_project(1, "d:/proj"),
+    ]);
+
+    let member = "d:/proj/src/app.vue";
+    let excluded = "d:/proj/node_modules/dep/index.ts";
+    let non_member = "d:/elsewhere/foo.ts";
+
+    for path in [member, excluded, non_member] {
+        let cold = snap.owners_for_file(path);
+        assert_eq!(
+            cold,
+            snap.compute_owners_for_file(path),
+            "cold memoized answer must equal a fresh compute for {path}"
+        );
+        let warm = snap.owners_for_file(path);
+        assert_eq!(
+            warm, cold,
+            "warm (memo-hit) answer must equal cold for {path}"
+        );
+    }
+
+    // Sanity on the actual answers…
+    assert_eq!(snap.owners_for_file(member).as_slice(), &[ProjectId(0)]);
+    assert!(snap.owners_for_file(excluded).is_empty());
+    assert!(snap.owners_for_file(non_member).is_empty());
+
+    // …and every result — including the two negative (empty) ones — is memoized.
+    assert_eq!(
+        snap.owners_memo.map.len(),
+        3,
+        "negative (empty owner set) results are cached too"
+    );
+
+    // Downstream resolution built on memoized reads stays stable across calls.
+    assert_eq!(
+        snap.configured_owner_resolution_for_file(member),
+        ConfiguredOwnerResolution::Unique(ProjectId(0))
+    );
+    assert_eq!(
+        snap.configured_owner_resolution_for_file(member),
+        ConfiguredOwnerResolution::Unique(ProjectId(0))
+    );
+}
+
+#[test]
+fn memo_hit_is_served_from_the_memo_not_recomputed() {
+    let snap = snapshot_with(vec![
+        configured_project(0, "d:/proj", "d:/proj/tsconfig.json", &[]),
+        fallback_project(1, "d:/proj"),
+    ]);
+
+    let member = "d:/proj/src/app.vue";
+    assert_eq!(snap.owners_for_file(member).as_slice(), &[ProjectId(0)]);
+
+    // Overwrite the memoized entry with a sentinel: a hit must come back from
+    // the memo verbatim. This discriminates "memo is actually read on hit"
+    // from "memo is written but every call still recomputes".
+    let sentinel: SmallVec<[ProjectId; 2]> = SmallVec::from_slice(&[ProjectId(9)]);
+    snap.owners_memo.insert(member, sentinel.clone());
+    assert_eq!(snap.owners_for_file(member), sentinel);
+}
+
+#[test]
+fn new_snapshot_starts_with_a_fresh_memo() {
+    let path = "d:/proj/src/main.ts";
+
+    let snap_a = snapshot_with(vec![
+        configured_project(0, "d:/proj", "d:/proj/tsconfig.json", &[path]),
+        fallback_project(1, "d:/proj"),
+    ]);
+    assert_eq!(snap_a.owners_for_file(path).as_slice(), &[ProjectId(0)]);
+
+    // Same path, different snapshot, different membership: the memo is
+    // snapshot-owned, so snapshot B answers from ITS OWN state, never A's.
+    let snap_b = snapshot_with(vec![
+        configured_project(
+            0,
+            "d:/proj",
+            "d:/proj/tsconfig.json",
+            &["d:/proj/src/other.ts"],
+        ),
+        fallback_project(1, "d:/proj"),
+    ]);
+    assert_eq!(
+        snap_b.owners_memo.map.len(),
+        0,
+        "a freshly built snapshot starts with an empty memo"
+    );
+    assert_eq!(
+        snap_b.owners_for_file(path).as_slice(),
+        &[ProjectId(1)],
+        "snapshot B answers from its own membership (fallback), not A's memo"
+    );
+}
+
+#[test]
+fn memo_bound_clears_on_overflow_and_keeps_answers_correct() {
+    // Production default is bounded at OWNERS_MEMO_CAP…
+    assert_eq!(OwnersMemo::default().cap, OWNERS_MEMO_CAP);
+
+    // …tests exercise the same clear-on-overflow logic with a tiny cap.
+    let mut snap = snapshot_with(vec![
+        configured_project(0, "d:/proj", "d:/proj/tsconfig.json", &[]),
+        fallback_project(1, "d:/proj"),
+    ]);
+    snap.owners_memo = OwnersMemo::with_cap(4);
+
+    for i in 0..4 {
+        let _ = snap.owners_for_file(&format!("d:/elsewhere/f{i}.ts"));
+    }
+    assert_eq!(
+        snap.owners_memo.map.len(),
+        4,
+        "distinct queries fill the memo up to its cap"
+    );
+
+    // One more distinct key: overflow clears the memo, then admits the entry.
+    let over = snap.owners_for_file("d:/proj/src/over.ts");
+    assert_eq!(over.as_slice(), &[ProjectId(0)]);
+    assert_eq!(
+        snap.owners_memo.map.len(),
+        1,
+        "overflowing insert clears the memo first, then admits the new entry"
+    );
+
+    // Evicted keys recompute correctly on the next query.
+    assert!(snap.owners_for_file("d:/elsewhere/f0.ts").is_empty());
+    assert_eq!(snap.owners_memo.map.len(), 2);
 }

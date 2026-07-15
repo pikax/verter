@@ -1954,6 +1954,7 @@ import Child from '@/Child.vue'
         let spec = StaticMembershipSpec::with_typescript_defaults(&root);
 
         let snap = WorkspaceSnapshot {
+            owners_memo: Default::default(),
             projects: vec![
                 OwnershipProject {
                     id: ProjectId(0),
@@ -2008,6 +2009,7 @@ import Child from '@/Child.vue'
         use verter_workspace::ProjectResolver;
 
         let snap = WorkspaceSnapshot {
+            owners_memo: Default::default(),
             projects: vec![],
             resolver: ProjectResolver::default(),
             generation: SnapshotGeneration(1),
@@ -2028,6 +2030,7 @@ import Child from '@/Child.vue'
         let root = CanonicalPath::new("d:/project");
 
         let snap = WorkspaceSnapshot {
+            owners_memo: Default::default(),
             projects: vec![OwnershipProject {
                 id: ProjectId(0),
                 root: root.clone(),
@@ -2213,6 +2216,7 @@ defineProps<{ msg: string }>()
             ),
         ]);
         let snapshot = Arc::new(verter_workspace::WorkspaceSnapshot {
+            owners_memo: Default::default(),
             projects,
             resolver,
             generation: verter_workspace::workspace_snapshot::SnapshotGeneration(1),
