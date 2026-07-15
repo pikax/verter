@@ -183,3 +183,7 @@ model):
 ## Round 2
 
 Second optimisation round + correctness fixes: see `14-round-2-program.md` — steady 6144→4594 ms (−25.2%), RSS 720→624 MB, allocs −10.6%, cumulative 22.5 s → 4.59 s (4.9×).
+
+## Round 4
+
+Round 4 (two-model adversarial hunt — codex + grok): walk fastpaths, key trims, node-arena intern, encode single-own — cumulative −3.0% steady, RSS flat, 0-drift; see `16-round-4-two-model-hunt.md`. Diminishing-returns stopping point.
