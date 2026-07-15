@@ -3349,6 +3349,23 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         merged,
                     );
                 }
+                Frame::FlushObjectFilter {
+                    buffer_id,
+                    keys,
+                    parent_target,
+                } => {
+                    let mut slots = intersection_buffers.remove(&buffer_id).unwrap_or_default();
+                    let source_surface = slots.pop().flatten();
+                    let filtered = source_surface
+                        .map(|surface| self.apply_pick_filter_to_surface(surface, &keys));
+                    self.contribute_surface(
+                        parent_target,
+                        &mut root_contribution,
+                        &mut intersection_buffers,
+                        &mut union_buffers,
+                        filtered,
+                    );
+                }
                 Frame::FlushUnion {
                     buffer_id,
                     parent_target,
@@ -3532,6 +3549,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             SemanticNodeData::InstantiationRef { base, args } => {
                 let identity = base.clone();
                 let args_clone = Arc::clone(args);
+                let args_for_filter = Arc::clone(args);
                 drop(data);
                 // Skeleton mode: unbound TypeParam arguments stay
                 // symbolic so Conditional branches don't collapse to
@@ -3557,6 +3575,49 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         .with_provenance(self.effective_provenance(provenance_override)),
                     )))) {
                     QueryResult::Value(SemanticQueryOutput { value: body, .. }) => {
+                        // L1 carrier-stopped object-filter at a SURFACE
+                        // demand: `build_instantiate` returned the
+                        // `Pick`/`Omit` `InstantiationRef` carrier verbatim
+                        // (open/undecidable SOURCE enumeration domain). The
+                        // filter's OUTPUT keys are its CLOSED key-selection
+                        // argument, so a surface-enumeration demand still
+                        // enumerates the source's ENUMERABLE arms and filters
+                        // them by the selection — never a whole-open-source
+                        // materialisation (the source walk itself stays
+                        // carrier-preserving; its open arms contribute
+                        // nothing, exactly as the direct route publishes
+                        // them). Without this, a heritage/macro-surface
+                        // `Pick<OpenIshSource, K>` contributed ZERO members
+                        // (the nuxt-ui ContentSearch / DropdownMenuContent
+                        // collapse).
+                        if let Some((source, keys)) =
+                            self.object_filter_carrier_surface_filter(&identity, body, &args_for_filter)
+                        {
+                            let buffer_id = *next_buffer_id;
+                            *next_buffer_id += 1;
+                            intersection_buffers.insert(buffer_id, vec![None; 1]);
+                            work.push(Frame::FlushObjectFilter {
+                                buffer_id,
+                                keys,
+                                parent_target: target,
+                            });
+                            work.push(Frame::Visit {
+                                node: source,
+                                target: BufferTarget::Intersection {
+                                    buffer_id,
+                                    arm_index: 0,
+                                },
+                                member_role_override,
+                                heritage_overlay_body: false,
+                                // Utility results are never macro-T own-body
+                                // (mirrors `build_instantiate`'s provenance
+                                // downgrade on the materialising route).
+                                provenance_override: Some(
+                                    crate::semantic_query::SurfaceProvenanceContext::Structural,
+                                ),
+                            });
+                            return;
+                        }
                         // Continue the walk into the materialised body. If the
                         // instantiated declaration is an interface/class, its
                         // body is an `extends`/`implements` heritage overlay —
@@ -4035,6 +4096,82 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     /// Route a contribution to the appropriate slot. Root contributions
     /// merge with the existing root surface (intersection-style merge);
     /// arm contributions land in the per-buffer arm slot.
+    /// Detect an L1 carrier-stopped `Pick` instantiation at a
+    /// SURFACE-enumeration demand: the dispatched `Instantiate` returned
+    /// the builtin `InstantiationRef` carrier verbatim (open/undecidable
+    /// SOURCE enumeration domain — the L1 Instantiate-execution entrance
+    /// in `build_instantiate`), while the filter's OUTPUT-KEY selection
+    /// (argument 1) is a CLOSED literal set. Returns `(source, keys)` for
+    /// the per-source filtered enumeration; `None` keeps the ordinary
+    /// body walk.
+    ///
+    /// `Pick` ONLY — its OUTPUT key set is exactly the key-selection `K`
+    /// (closed even when the SOURCE's key domain is open), so enumerating
+    /// the source's enumerable arms and filtering to `K` is key-complete.
+    /// `Omit`'s output key set is `keyof Source − K` — source-dependent
+    /// and therefore OPEN over an open source — so an `Omit` carrier
+    /// stays a carrier (no under-approximated surface is synthesised).
+    ///
+    /// Utility identity is decided by the shared `BuiltinUtility`
+    /// registry (never a local name match).
+    fn object_filter_carrier_surface_filter(
+        &self,
+        identity: &DeclIdentity,
+        body: SemanticNodeId,
+        args: &[SemanticNodeId],
+    ) -> Option<(SemanticNodeId, Vec<Arc<str>>)> {
+        use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
+        if identity.canonical_id.as_ref() != "__builtin__" || args.len() != 2 {
+            return None;
+        }
+        if !matches!(
+            BuiltinUtility::from_name(identity.decl_name.as_ref())?,
+            BuiltinUtility::Pick
+        ) {
+            return None;
+        }
+        // The dispatch materialises a CLOSED-domain object filter; only
+        // the L1 carrier-stop round-trips the `InstantiationRef` carrier
+        // (same builtin base) back to the walker.
+        let carrier_held = match self.graph().node_data(body).as_deref() {
+            Some(SemanticNodeData::InstantiationRef { base, .. }) => {
+                base.canonical_id.as_ref() == "__builtin__" && base.decl_name == identity.decl_name
+            }
+            _ => false,
+        };
+        if !carrier_held {
+            return None;
+        }
+        let keys = self.dispatch.key_names_from_keyspace_node(args[1])?;
+        Some((args[0], keys))
+    }
+
+    /// Apply the `Pick` member rule to a source's shallow surface — the
+    /// walker-side mirror of `build_builtin_utility`'s materialising
+    /// route: PUBLIC members only, name-filtered to the key selection;
+    /// call/construct/index signatures and the keyspace are dropped
+    /// (`Pick` produces a named-property surface).
+    fn apply_pick_filter_to_surface(
+        &self,
+        surface: ShallowSurface,
+        keys: &[Arc<str>],
+    ) -> ShallowSurface {
+        let key_set: rustc_hash::FxHashSet<&str> = keys.iter().map(|k| k.as_ref()).collect();
+        let members: Vec<ShallowSurfaceMember> = surface
+            .members
+            .into_iter()
+            .filter(|m| m.visibility.is_public())
+            .filter(|m| key_set.contains(m.name.as_ref()))
+            .collect();
+        ShallowSurface {
+            members,
+            call_signatures: Vec::new(),
+            construct_signatures: Vec::new(),
+            index_signatures: Vec::new(),
+            keyspace: None,
+        }
+    }
+
     fn contribute_surface(
         &mut self,
         target: BufferTarget,
@@ -4645,6 +4782,27 @@ enum Frame {
         buffer_id: usize,
         parent_target: BufferTarget,
         union_node: SemanticNodeId,
+    },
+    /// `Pick` SURFACE-position enumeration over an L1 carrier-stopped
+    /// source. `Pick`'s OUTPUT-KEY selection is a CLOSED literal set even
+    /// when the SOURCE's full key domain is open (an open mapped
+    /// intersection arm, an undecidable chain), so a surface-enumeration
+    /// demand — the macro props/slots surface, a heritage arm — still
+    /// enumerates the source's ENUMERABLE arms and filters them to the
+    /// key selection, mirroring the CLOSED-key/open-VALUE mapped policy
+    /// (`synthesise_mapped_surface`) instead of contributing ZERO
+    /// members. The buffer's single slot receives the SOURCE's shallow
+    /// surface (walked through the ordinary carrier-preserving frames —
+    /// open arms stay deferred and contribute nothing, exactly as the
+    /// direct un-filtered route publishes them); the flush applies the
+    /// public-visibility + key-name filter that `build_builtin_utility`'s
+    /// materialising route applies. `Omit` deliberately does NOT
+    /// participate: its output key set (`keyof Source − K`) is
+    /// source-dependent-open, so an `Omit` carrier stays a carrier.
+    FlushObjectFilter {
+        buffer_id: usize,
+        keys: Vec<Arc<str>>,
+        parent_target: BufferTarget,
     },
 }
 
