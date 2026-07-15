@@ -149,13 +149,8 @@ pub(crate) enum MemberValuePosition {
 
 /// The faithful PRESENT structural source for a shallow published member
 /// value with NO authored slot, NO use-site slot, and NO closed/ref upgrade
-/// on its published node: demand-validate the value node through the shared
-/// [`ProjectSemanticDispatch::demand_validated_structural_node`] (the same
-/// per-root validation the callable-params replay applies to its payload
-/// parameters), re-run the closed-leaf /
-/// leaf-union / declaration-identity upgrades on the DEMANDED node (a
-/// resolvable reference publishes its shallow symbol-reference carrier —
-/// shallow-by-default), and publish the projected MEMBER-PATH replay route
+/// on its published node: retain a directly representable declaration identity
+/// or publish the projected MEMBER-PATH replay route
 /// ([`verter_type_expr::facts::ProjectedTypeFact::MemberPath`] — the macro's
 /// STAMPED type-argument base + the member name, replayed through the one
 /// dispatch's EXISTING `ProjectPath` query on demand) for every remaining
@@ -164,38 +159,33 @@ pub(crate) enum MemberValuePosition {
 /// consumer re-resolves the replay address on demand; nothing is flattened
 /// eagerly here.
 ///
-/// `None` ONLY on a genuine miss (an unresolvable residual carrier, an
-/// unknown-materializing failure, no live node data) or with NO stamped
-/// type-argument base to replay off — the caller types the REQUIRED
-/// position's source-construction failure; never a fabricated `unknown`
-/// success and never a fabricated locator.
+/// Source publication validates the ADDRESS, not the terminal demand result:
+/// deferred operators and stable unresolved names are legitimate carriers.
+/// The strict demand-side raise remains responsible for rejecting a projected
+/// miss or an interior unknown-materializing failure, so publishing the address
+/// cannot turn either into a completed `unknown`. `None` is reserved for no
+/// live node, a root failure carrier, or no stamped type-argument base.
 pub(crate) fn structural_member_value_source(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
     member_name: &str,
     type_arg_base: Option<&verter_type_expr::locators::MacroPayloadLocator>,
 ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
-    // STRUCTURAL TRANSIT, not `Published`: validation is a carrier-preserving
-    // classification, never consumer demand — `may_reduce_operator` must stay
-    // `false` at every nested dispatch so a utility/mapped-produced member
-    // value keeps its carrier deferred (a `Published` demand here enumerated
-    // inherited library members into the audit derivation subgraph — the
-    // Rule-5 leak the `block_6i` guards pin closed).
-    let normalized = dispatch.demand_validated_structural_node(
-        node,
-        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-            crate::semantic_query::ProjectionMode::Navigate,
-        ),
-    )?;
-    // The demanded node may NOW carry a closed / declaration-identity
-    // upgrade the published node did not (an unresolved `BareRef` that the
-    // demand resolved to its `DeclRef` identity publishes the shallow
-    // symbol-reference carrier, never a replay route). Lossy instantiation
-    // is excluded: an argument-bearing instantiation publishes the
-    // arg-preserving member-path replay below instead.
-    if let Some(upgraded) =
-        published_member_source_upgrade_for_node(dispatch, Some(normalized), false)
-    {
+    let data = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node)?;
+    if matches!(
+        data.as_ref(),
+        crate::semantic_query::SemanticNodeData::Opaque(error)
+            if !matches!(
+                error,
+                crate::semantic_query::QueryError::RecursiveRef { .. }
+                    | crate::semantic_query::QueryError::DeclPlaceholder { .. }
+            )
+    ) {
+        return None;
+    }
+    // Lossy instantiation is excluded: an argument-bearing instantiation
+    // publishes the arg-preserving member-path replay below instead.
+    if let Some(upgraded) = published_member_source_upgrade_for_node(dispatch, Some(node), false) {
         return Some(upgraded);
     }
     let base = type_arg_base?;

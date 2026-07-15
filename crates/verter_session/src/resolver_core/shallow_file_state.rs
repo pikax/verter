@@ -18,7 +18,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::route_demand::RouteDemand;
 use crate::decl_body_memo::{DemandOutcome, LoweredTypeDecl, LoweredValueDecl};
-use verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource;
+pub(crate) use verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource;
 use verter_semantic::analysis::decl_headers::{TypeDeclHeader, ValueDeclHeader};
 use verter_semantic::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
 use verter_semantic::analysis::Hash16;
@@ -415,8 +415,10 @@ pub trait ShallowImportResolver {
 
 /// A no-op resolver that cannot resolve any specifiers.
 /// Used for test construction where canonical IDs are not needed.
+#[cfg(any(test, feature = "test-support"))]
 struct NullResolver;
 
+#[cfg(any(test, feature = "test-support"))]
 impl ShallowImportResolver for NullResolver {
     fn resolve_canonical(&self, _specifier: &str) -> Option<String> {
         None
@@ -431,10 +433,10 @@ impl ShallowFileState {
     /// serviceless: NO symbol inventory, NO bodies, and any body demand is a
     /// genuine miss — callers must provably never demand a declaration body
     /// (body-demanding fixtures use [`Self::service_backed_for_test`], the
-    /// production lazy shape). Gated `#[cfg(any(test, debug_assertions))]` —
+    /// production lazy shape). Gated `#[cfg(any(test, feature = "test-support"))]` —
     /// integration tests in `tests/` compile without `cfg(test)`; release
     /// production builds compile this edge-less constructor out.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn header_routing_only_for_test(
         whole_hash: Hash16,
         analysis: Arc<AnalyzedExternalTypeSource>,
@@ -448,7 +450,7 @@ impl ShallowFileState {
     /// reexport / import / wildcard edges). Same header-only contract:
     /// EMPTY serviceless memo, no bodies, callers provably never demand
     /// a declaration body.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn header_routing_only_with_resolver_for_test(
         whole_hash: Hash16,
         analysis: Arc<AnalyzedExternalTypeSource>,
@@ -461,7 +463,7 @@ impl ShallowFileState {
     /// The EMPTY serviceless memo backing the header/routing-only test
     /// constructors: no symbol inventory, no bodies, every body demand a
     /// genuine miss. Same gate as [`Self::header_routing_only_for_test`].
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     fn empty_header_only_memo(
         whole_hash: Hash16,
         analysis: &AnalyzedExternalTypeSource,
@@ -490,10 +492,10 @@ impl ShallowFileState {
     /// finished state). Broken-lease no-warm regressions break the lease
     /// out-of-band via
     /// [`crate::decl_body_memo::DeclBodyMemo::release_retained_snapshot_for_test`].
-    /// Gated `#[cfg(any(test, debug_assertions))]` — integration tests in
+    /// Gated `#[cfg(any(test, feature = "test-support"))]` — integration tests in
     /// `tests/` compile without `cfg(test)`; release production builds
     /// compile this out.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn service_backed_for_test(source: &str) -> Arc<Self> {
         Self::service_backed_for_test_at("/ws/fixture.ts", source)
     }
@@ -501,7 +503,7 @@ impl ShallowFileState {
     /// [`Self::service_backed_for_test`] with a caller-chosen canonical id —
     /// for fixtures whose locators/routes anchor on a specific canonical
     /// (augmentation scopes, multi-file stitches).
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn service_backed_for_test_at(canonical: &str, source: &str) -> Arc<Self> {
         Self::service_backed_with_provenance_for_test(canonical, source).0
     }
@@ -509,7 +511,7 @@ impl ShallowFileState {
     /// [`Self::service_backed_for_test_at`] additionally handing back the
     /// memo's [`crate::types::MetaProvenance`] counters so lazy-demand
     /// tests can assert HOW MANY bodies lowered / programs parsed.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn service_backed_with_provenance_for_test(
         canonical: &str,
         source: &str,
@@ -521,7 +523,7 @@ impl ShallowFileState {
     /// `whole_hash` — for artifact-identity fixtures that vary the content
     /// hash as a controlled invalidation axis. The hash keys BOTH the memo
     /// snapshot and the state, exactly like the content-derived default.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn service_backed_for_test_with_hash(
         canonical: &str,
         source: &str,
@@ -535,7 +537,7 @@ impl ShallowFileState {
     /// handle. `whole_hash` derives from the source content (production
     /// shape: same content ⇒ same hash, different content ⇒ different
     /// hash) and keys BOTH the memo snapshot and the state.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn service_backed_with_provenance_and_resolver_for_test(
         canonical: &str,
         source: &str,
@@ -546,7 +548,7 @@ impl ShallowFileState {
 
     /// The ONE service-backed construction core every `service_backed_*`
     /// test front delegates to.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     fn service_backed_core_for_test(
         canonical: &str,
         source: &str,
@@ -599,7 +601,7 @@ impl ShallowFileState {
     /// without any declared symbols and provably never demand a
     /// declaration body. Same gate as
     /// [`Self::header_routing_only_for_test`].
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(clippy::too_many_arguments)]
     pub fn routing_tables_only_for_test(
         whole_hash: Hash16,

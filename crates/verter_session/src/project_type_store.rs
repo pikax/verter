@@ -241,12 +241,12 @@ impl IndexedReady {
     /// artifact carrying a REAL shallow inventory + sources, with every
     /// other field defaulted.
     ///
-    /// Gated `#[cfg(any(test, debug_assertions))]` (the crate's
+    /// Gated `#[cfg(any(test, feature = "test-support"))]` (the crate's
     /// cross-crate test-constructor convention): integration tests in
     /// `tests/` compile the lib without `cfg(test)` but with debug
     /// assertions, while release production builds compile this
     /// invariant-bypassing construction path out entirely.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new_for_test_with_state(
         whole_hash: Hash16,
         shallow_state: Arc<crate::resolver_core::shallow_file_state::ShallowFileState>,
@@ -282,10 +282,10 @@ impl IndexedReady {
     /// `whole_hash`, so everything else is empty. Used by the
     /// `no_legacy_trace_surface` integration test to drive
     /// `FileArtifactStore::insert` through the event-emitting path.
-    /// Same `#[cfg(any(test, debug_assertions))]` gate as
+    /// Same `#[cfg(any(test, feature = "test-support"))]` gate as
     /// [`Self::new_for_test_with_state`] — an invariant-bypassing
     /// construction path never ships in release production builds.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new_for_test(whole_hash: Hash16) -> Self {
         use rustc_hash::FxHashMap;
         let analysis = Arc::new(
@@ -392,7 +392,7 @@ impl AnalysisReadyDb {
 
     /// Test-only constructor that pins a specific schema version on the Db.
     /// Used by `cache_invariant_migration` fixtures.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
         Self::with_counters_and_schema_version(
             Default::default(),
@@ -526,7 +526,7 @@ impl AnalysisReadyDb {
     /// Test-only synthetic-entry inserter used exclusively by
     /// `cache_invariant_migration` fixtures to verify the cache-cluster
     /// schema-version eviction invariant.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
         let key = AnalysisArtifactKey {
             canonical_id: Arc::from(marker),

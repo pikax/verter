@@ -66,33 +66,24 @@ fn singleflight_primitive_lives_under_cache_runtime() {
 /// an entry point), reading the canonical path so the assertion fails
 /// if the file is missing or its API drifted.
 #[test]
-fn rehomed_singleflight_owns_the_verbatim_primitive_api() {
-    let src =
-        std::fs::read_to_string(session_crate_root().join("src/cache_runtime/singleflight.rs"))
-            .expect("read cache_runtime/singleflight.rs");
+fn rehomed_singleflight_exposes_the_typed_admission_contract() {
+    use verter_audit::NonAdmissionReason;
+    use verter_session::for_tests::ComputeAdmission;
 
-    assert!(
-        src.contains("pub enum ComputeAdmission<V, Entry> {"),
-        "singleflight must own `ComputeAdmission<V, Entry>` with its \
-         two type parameters — the stored carrier (`Entry`) and the \
-         projected value (`V`) are semantically distinct and must not \
-         be collapsed.",
-    );
-    for variant in &["Cacheable(Entry)", "ReturnOnly(V)", "Failed"] {
-        assert!(
-            src.contains(variant),
-            "ComputeAdmission must declare the `{variant}` variant.",
-        );
-    }
-    for entry_point in &[
-        "pub fn cooperative_get_or_insert<",
-        "pub fn cooperative_get_or_insert_with_post_publish<",
-        "pub fn cooperative_admit_with_post_publish<",
-    ] {
-        assert!(
-            src.contains(entry_point),
-            "singleflight must expose `{entry_point}…` — one of the three \
-             cooperative admission entry points the primitive owns.",
-        );
-    }
+    let cacheable: ComputeAdmission<&'static str, u32> = ComputeAdmission::Cacheable(17);
+    let return_only: ComputeAdmission<&'static str, u32> = ComputeAdmission::ReturnOnly {
+        value: "served",
+        reason: NonAdmissionReason::PartialResult,
+    };
+    let failed: ComputeAdmission<&'static str, u32> = ComputeAdmission::Failed;
+
+    assert!(matches!(cacheable, ComputeAdmission::Cacheable(17)));
+    assert!(matches!(
+        return_only,
+        ComputeAdmission::ReturnOnly {
+            value: "served",
+            reason: NonAdmissionReason::PartialResult,
+        }
+    ));
+    assert!(matches!(failed, ComputeAdmission::Failed));
 }

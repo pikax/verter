@@ -2220,18 +2220,14 @@ impl PartialReasonSet {
     /// boolean-bridge fold). The producer that originated the partial
     /// records the precise reason; this marks a downstream propagation.
     pub const PROPAGATED: Self = Self(1 << 6);
-    /// The deferred-shell evaluator's per-thread recursion ceiling
-    /// (`EVALUATE_DEFERRED_DEPTH_CEILING`) fired: a recursive operator
-    /// re-dispatch chain (fresh-node regrowth the entry-node memo cannot
-    /// collapse) was truncated and the evaluation carrier-stopped at its
-    /// entry node. The stop is a stack-safety fuse, never a semantic
-    /// classification — the truncated result is refused warm admission.
+    /// Reserved compatibility bit for the retired deferred-evaluator call-
+    /// stack ceiling. The heap-owned evaluator does not produce this reason;
+    /// connected work exhaustion is [`Self::PROJECTION_WORK_LIMIT`] and true
+    /// cross-query recursion is [`Self::CONNECTED_QUERY_DEPTH_LIMIT`].
     pub const DEFERRED_EVALUATION_LIMIT: Self = Self(1 << 7);
-    /// The structural-fact demand loop's residual-carrier step fuse
-    /// (`STRUCTURAL_FACT_DEMAND_FUSE`) fired: a `DeclRef` /
-    /// `InstantiationRef` resolution chain exceeded the per-demand step
-    /// bound before reaching a terminal structural body. The reached node
-    /// is an intermediate carrier, not a stable stop.
+    /// Reserved compatibility bit for the retired structural-fact step fuse.
+    /// Fresh-identity carrier growth now consumes the shared connected work
+    /// envelope and reports [`Self::PROJECTION_WORK_LIMIT`].
     pub const STRUCTURAL_FACT_DEMAND_LIMIT: Self = Self(1 << 8);
     /// A residual-carrier resolution read returned a non-`Miss` query
     /// fault not already classified by the budget / unstable-state /
@@ -2243,6 +2239,14 @@ impl PartialReasonSet {
     /// graph arena (`node_data(id) == None` — missing arena data, not a
     /// staleness signal). The demand cannot classify what it cannot read.
     pub const MISSING_SEMANTIC_NODE_DATA: Self = Self(1 << 10);
+    /// The connected semantic demand exceeded its total projection/evaluation
+    /// work envelope. The returned node is an intermediate carrier stop and
+    /// must never be admitted to a shared memo or result cache.
+    pub const PROJECTION_WORK_LIMIT: Self = Self(1 << 11);
+    /// A genuinely nested cold-query/build chain exceeded the connected
+    /// demand's host-recursion ceiling. Structural worklist depth is not
+    /// counted by this rail.
+    pub const CONNECTED_QUERY_DEPTH_LIMIT: Self = Self(1 << 12);
 
     /// The empty reason set (no partial reasons recorded).
     #[must_use]

@@ -55,6 +55,9 @@ fn tracer_stack_nesting_outer_and_inner_both_non_empty() {
                     "inner tracer must include inner_fact; got {sig:?}"
                 );
             }
+            FactReadSetFinalise::NonCacheable(_) => {
+                panic!("inner scope unexpectedly non-cacheable")
+            }
             FactReadSetFinalise::Overflow => panic!("inner scope overflowed unexpectedly"),
         }
         inner_finalise
@@ -73,6 +76,7 @@ fn tracer_stack_nesting_outer_and_inner_both_non_empty() {
                 "outer tracer must include inner_fact via fan-out; got {sig:?}"
             );
         }
+        FactReadSetFinalise::NonCacheable(_) => panic!("outer scope unexpectedly non-cacheable"),
         FactReadSetFinalise::Overflow => panic!("outer scope overflowed unexpectedly"),
     }
 

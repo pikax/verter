@@ -33,6 +33,7 @@
 //! behind `#[cfg(feature = "external-corpus")]`; see the
 //! `external_corpus` module at the bottom of this file.
 
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -1381,17 +1382,36 @@ defineProps<{ msg: MyStr }>()
 // Test #20 — REGRESSION
 // ---------------------------------------------------------------------------
 //
-// 100-arm intersection over Shallow surface. The walker must terminate
-// in bounded recursion. The 1.0.3m dispatch-level guard already covers
-// the empty-path Shallow walker; this test exercises the same fixture
-// via the public `get_component_meta` end-to-end so the synthesis
-// surface is exercised holistically.
+// 512-arm intersection over the Shallow surface. The walker must terminate
+// without consuming host stack per structural arm. This exercises the public
+// `get_component_meta` path end-to-end in an isolated 2 MiB subprocess, so an
+// abort cannot take down the parent harness.
 #[test]
-fn walker_recursion_depth_bounded_for_100_intersection_shallow() {
+fn walker_stack_safe_for_512_intersection_on_2_mib() {
+    const CHILD_MARKER: &str = "VERTER_SLOT_INTERSECTION_STACK_CHILD";
+    if std::env::var_os(CHILD_MARKER).is_none() {
+        let exe = std::env::current_exe().expect("current unit-test executable");
+        let status = Command::new(exe)
+            .arg("--exact")
+            .arg(
+                "meta_resolve::slot_binding_graph_tests::walker_stack_safe_for_512_intersection_on_2_mib",
+            )
+            .arg("--nocapture")
+            .env(CHILD_MARKER, "1")
+            .env_remove("RUST_MIN_STACK")
+            .status()
+            .expect("spawn isolated slot-intersection stack child");
+        assert!(
+            status.success(),
+            "the isolated 2 MiB slot-intersection child must exit cleanly; status={status}"
+        );
+        return;
+    }
+
     let host = build_test_host();
     let mut decls = String::new();
     let mut intersection = String::new();
-    for i in 0..100 {
+    for i in 0..512 {
         decls.push_str(&format!(
             "export interface S{i} {{ default(props: {{ tag{i}: string }}): any }}\n",
             i = i,
@@ -1414,31 +1434,26 @@ defineSlots<Slots>()
 "#,
     );
 
-    // A 100-arm intersection is a legitimate deep — but bounded —
-    // resolution: the correct walker iterates the arms and terminates.
-    // The 384 KiB cap is sized to fit that legitimate depth while
-    // staying tight enough that a DEPTH regression (a walker that
-    // recurses per-arm instead of iterating) overflows. The value is
-    // raised over the historical 256 KiB to absorb the per-frame cost
-    // of the cold-build cooperative-admission path — the strict
-    // warm-read validator threads a resolver-context handle through
-    // every nested cold build — so the legitimate resolution does not
-    // trip a false overflow.
+    // A 512-arm intersection is a legitimate finite resolution. The public
+    // component-meta path must iterate it on a normal 2 MiB worker stack;
+    // structural depth is not an operational limit. The subprocess isolates
+    // an aborting stack regression from the parent test runner.
     let host_for_thread = Arc::clone(&host);
     let join = std::thread::Builder::new()
-        .stack_size(384 * 1024)
+        .name("slot-intersection-stack-2mib".to_string())
+        .stack_size(2 * 1024 * 1024)
         .spawn(move || {
             host_for_thread
                 .get_component_meta("/src/Comp.vue")
                 .map(|_| ())
         })
-        .expect("spawn");
-    let outcome = join.join();
+        .expect("spawn 2 MiB slot-intersection worker");
+    let outcome = join
+        .join()
+        .expect("2 MiB slot-intersection worker must not panic");
     assert!(
-        outcome.is_ok(),
-        "100-arm intersection through public component-meta entry must not exceed bounded \
-         recursion stack (384 KiB cap); outcome={:?}",
-        outcome.map(|_| "<ok>").unwrap_or("<panic>"),
+        outcome.is_some(),
+        "512-arm intersection through the public component-meta entry must resolve on a 2 MiB stack"
     );
 }
 

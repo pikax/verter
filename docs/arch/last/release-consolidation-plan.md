@@ -156,6 +156,36 @@ deferrable.
 - 2026-07-14: frozen refs verified; archive refs and isolated raw worktree created; main checkout
   protected; ParseLower, LSP, gate-integrity, Stage 10, and optional Svelte handoffs read from their
   owning refs; Svelte classified deferred from its own 6/10 release status.
+- 2026-07-14: cache admission was converted to owner-minted finalisation evidence and its focused
+  mutation/non-admission gates are green. Projection and deferred evaluator recursion were replaced
+  by explicit worklists; the frozen 2 MiB-stack primitive aborts with `0xc00000fd`, while both fixed
+  subprocess cases exit normally. Eleven discriminating projection tests are green, including exact
+  cycle precedence after a real work trip, distinct typed work/depth partials, public diagnostic
+  deduplication, safe carriers, and repeat recomputation/non-admission. The final frame is guarded at
+  32 bytes. A fresh 2026-07-15 alternating three-before/three-after Criterion rerun (30 samples,
+  1 s warm-up, 2 s measurement per case; medians of run point estimates) preserved the allocation
+  snapshot at one allocation for a fresh terminal projection and zero for a memo hit. The median
+  absolute/relative deltas were: terminal cold +7.4 ns/+42.4%, memo hit +2.1 ns/+26.9%, mixed depth
+  4 +145 ns/+10.8%, mixed depth 8 +131 ns/+5.5%, union 32 -114 ns/-13.1%, union 1000
+  -4.47 us/-19.2%, intersection 32 +572 ns/+4.4%, intersection 1000 +22.8 us/+5.6%, full object
+  +450 ns/+17.3%, full function +184 ns/+14.8%, conditional +240 ns/+6.9%, indexed access
+  +133 ns/+3.4%, mapped +433 ns/+11.2%, resolved/unresolved bare references +424 ns/+7.0% and
+  -396 ns/-2.9%, resolved/unresolved import references +639 ns/+6.7% and -390 ns/-5.5%, and the
+  context-split shared DAG -380 ns/-4.5%. Run-to-run variance was substantial for several
+  microcases, so acceptance is based on both absolute cost and the production-shaped paths, not a
+  selectively favourable percentage.
+- 2026-07-15: the projection closeout rerun is focused-green: 11/11 typed projection tests, all
+  controlled 2 MiB projection subprocesses, the separate 2 MiB deferred-keyof subprocess, 13/13
+  LSP projection/diagnostic-path tests, 68/68 cache-runtime tests, owner-scope/non-admission tests,
+  single-engine producer/output guards, `cargo check -p verter_session --all-targets`, and
+  `cargo clippy -p verter_session --all-targets -- -D warnings`. A detached checkout of the exact
+  staged tree independently passed format, Clippy with warnings denied, the 11 projection tests,
+  the 13 LSP projection tests, the 68 cache-runtime tests, the deferred-keyof subprocess, and all
+  195 architecture guards. Unrelated editor-owned TypeScript work remains outside this commit.
 - Raw integration SHA: pending.
 - Clean release SHA: pending.
-- Current failing gate/evidence: workspace Clippy baseline and raw merge not yet executed.
+- Current next action: commit the verified cache/projection/single-engine block, then resume the
+  editor-owned TypeScript serving block. The Nuxt UI `repo_first_pass` comparison with frozen
+  `origin/feat/framework-adapters-clean` follows without importing baseline compatibility patches
+  into the release tree. Full workspace/release gates and clean-history reconstruction remain
+  pending.

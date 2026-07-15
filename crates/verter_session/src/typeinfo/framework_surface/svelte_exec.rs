@@ -132,10 +132,13 @@ pub(crate) fn resolve_svelte_surface(
 
     // Cold compute under an installed fact tracer so the CROSS-FILE facts the
     // captured-`TypeExpr` resolution reads enter the entry's `ReadSetSignature`.
-    let (outcome, finalise, non_cacheable_read_observed) =
-        crate::fact_signature_helpers::install_fact_tracer(host, || {
-            compute_svelte_surface(host, ctx, owner, source)
-        });
+    let (outcome, finalise) = crate::fact_signature_helpers::install_fact_tracer(host, || {
+        compute_svelte_surface(host, ctx, owner, source)
+    });
+    let non_cacheable_read_observed = matches!(
+        &finalise,
+        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+    );
 
     // ReturnOnly never publishes — a surface resolved from a served-without-
     // publication (fenced) artifact must not enter the shared store (its

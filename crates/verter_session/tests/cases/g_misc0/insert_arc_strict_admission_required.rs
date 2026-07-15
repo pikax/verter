@@ -16,11 +16,10 @@
 //!
 //! The loose `insert_arc` and `insert` (which falls through to
 //! `insert_arc`) paths bypass this gate.
-//! `insert_arc` is reserved for "stable-miss producers" — a small
-//! number of legacy call sites where an empty-signature admission is
-//! variant-gated or non-empty-signature-gated at the call site
-//! itself, NOT by the cache substrate. Every NEW fact-validated
-//! cache admission must use the strict path.
+//! The one production use is private to the fallthrough cache owner;
+//! the owner runs the complete cold compute inside its cacheability
+//! scope before that sink is reachable. Every NEW fact-validated cache
+//! admission must use the strict path.
 //!
 //! ## What this guard does
 //!
@@ -39,51 +38,19 @@
 //!
 //! ## Allow-list
 //!
-//! Six call sites in production source legitimately
+//! One call site in production source legitimately
 //! use the loose `<receiver>.insert(...)` / `<receiver>.insert_arc(...)`
-//! admission path. Three categories — call-site-gated, helper
-//! method, and wrapper method — are documented below. Adding a new
+//! admission path. It is owner-gated as documented below. Adding a new
 //! call site here requires extending the allow-list.
 //!
-//! ### Category A: call-site-gated cold paths (variant or fact-presence)
+//! ### Category A: owner-gated cold path
 //!
-//! - `FallthroughResolverState::store_node` in
-//!   `resolver_core/fallthrough_resolver.rs`. The cold-store path
-//!   admits only when `!result.facts.is_empty()` OR the value is
-//!   one of the inherently-constant variants
-//!   (`IntrinsicSurface(_)` / `ConsumedBindings(_)`) — the latter is
-//!   the canonical `is_facts_irrelevant: true` candidate.
-//! - `SymbolResolverState::resolve_node` in
-//!   `resolver_core/symbol_resolver.rs`. The singleflight cold body
-//!   admits only when `!result.facts.is_empty()` (the local
-//!   `stable` boolean). Always non-empty in production today; the
-//!   migration to `insert_arc_with_kind` is in-flight per the
-//!   audit follow-up section.
-//!
-//! ### Category B: pre-resolved helper inserters
-//!
-//! - `RouteDb::insert_route_with_facts` and `RouteDb::insert_barrel_surface`
-//!   in `resolver_core/route_db.rs`. Helpers that accept a pre-
-//!   built `RouteResult` / `BarrelRouteSurface` plus its
-//!   `facts: Vec<FactVersionRef>`. Used exclusively by tests in
-//!   `crates/verter_session/tests/` to seed the cache before
-//!   exercising the warm-hit + fact-bubble path. Live in production
-//!   source (not `#[cfg(test)]`) because they are part of the
-//!   public `RouteDb` API surface.
-//! - `ImportedRootDb::insert_with_facts` in
-//!   `resolver_core/imported_root_db.rs`. Mirror of the route_db
-//!   helpers; currently has no callers (kept for future test-helper
-//!   parity).
-//!
-//! ### Category C: wrapper methods (pass-through)
-//!
-//! - `StableRequestState::insert_arc` in
-//!   `resolver_core/resolver_runtime.rs`. The wrapper method's body
-//!   is a single `self.cache.insert_arc(...)` line — the wrapper
-//!   itself routes loose-admission calls from the helper-API
-//!   surface (Category B) to the substrate. The strict-admission
-//!   wrapper `insert_arc_with_kind` (defined a few lines below) is
-//!   what production cold producers actually call.
+//! - `FallthroughResolverState::insert_admissible_node` in
+//!   `resolver_core/fallthrough_resolver.rs`. This private sink is
+//!   reachable only after `compute_and_maybe_admit` encloses the complete
+//!   cold compute in the cacheability scope and checks supersession.
+//!   Empty facts are accepted only for the generation-keyed intrinsic
+//!   surface; content-unversioned empty signatures are refused.
 //!
 //! Every other production-source call site MUST go through
 //! `insert_arc_with_kind` with a `'static str` cache-kind label.
@@ -101,8 +68,6 @@
 //! - `"component_meta.results"` (`host_manage/component_meta_methods.rs`)
 //! - `"imported_root_db.roots"` (`resolver_core/imported_root_db.rs`)
 //! - `"route_db.routes"` (`resolver_core/route_db.rs`)
-//! - `"route_db.barrel_surfaces"` (`resolver_core/route_db.rs`)
-//! - `"route_db.effective_export_sets"` (`resolver_core/route_db.rs`)
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -139,14 +104,11 @@ fn workspace_root() -> PathBuf {
 /// production-tree guard.
 const EXPECTED_LOOSE_ADMISSION_COUNTS: &[(&str, &str, usize)] = &[
     // Category A: variant-gated / fact-presence-gated cold paths.
-    ("resolver_core/fallthrough_resolver.rs", "store_node", 1),
-    ("resolver_core/symbol_resolver.rs", "resolve_node", 1),
-    // Category B: pre-resolved helper inserters (test-only callers).
-    ("resolver_core/route_db.rs", "insert_route_with_facts", 1),
-    ("resolver_core/route_db.rs", "insert_barrel_surface", 1),
-    ("resolver_core/imported_root_db.rs", "insert_with_facts", 1),
-    // Category C: substrate wrapper method (pass-through).
-    ("resolver_core/resolver_runtime.rs", "insert_arc", 1),
+    (
+        "resolver_core/fallthrough_resolver.rs",
+        "insert_admissible_node",
+        1,
+    ),
 ];
 
 /// Production-source cache kinds. Mirrors
@@ -161,8 +123,6 @@ const PRODUCTION_CACHE_KINDS: &[&str] = &[
     "component_meta.results",
     "imported_root_db.roots",
     "route_db.routes",
-    "route_db.barrel_surfaces",
-    "route_db.effective_export_sets",
 ];
 
 #[derive(Debug)]
@@ -431,7 +391,7 @@ const VALIDATED_FACT_CACHE_FIELDS: &[&str] = &[
 /// guard against are uniformly `self.<field>.insert(...)` /
 /// `self.<field>.insert_arc(...)` (or, inside `StableRequestState`,
 /// `self.cache.insert*` and the analogous `FallthroughResolverState`
-/// / `SymbolResolverState` patterns).
+/// pattern).
 fn receiver_is_known_validated_fact_cache_field(expr: &syn::Expr) -> bool {
     match expr {
         syn::Expr::Field(f) => {

@@ -996,11 +996,9 @@ pub fn session_overlay_discriminator(view: &dyn SessionView) -> Option<Hash16> {
 /// matching overlay artifact discriminator for an optional active session view.
 ///
 /// This is the SINGLE derivation every augmentation-index producer routes
-/// through (the body stitch in
-/// [`crate::project_semantic_dispatch::build::ProjectSemanticDispatch`] and the
-/// names stitch in
-/// [`crate::resolver_core::route_db::RouteDb::get_or_compute_effective_export_set`]),
-/// so the two producers can never disagree on what
+/// through, including the semantic body stitch in
+/// [`crate::project_semantic_dispatch::build::ProjectSemanticDispatch`], so
+/// producers cannot disagree on what
 /// [`crate::file_artifact_store::AugmentationPopulation::Session`] means.
 ///
 /// The `Session` discriminant is keyed by the overlay-set

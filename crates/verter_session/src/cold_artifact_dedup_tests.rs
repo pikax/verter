@@ -4162,10 +4162,13 @@ fn unrootable_wildcard_route_raises_enclosing_cold_compute_suppression() {
     // compute (semantic-memo builds, the owner-import-surface and
     // component-meta proof producers) installs around its cold body —
     // and read the chokepoint flag its admission gates consult.
-    let (entry, _finalise, suppression_raised) =
-        crate::fact_signature_helpers::install_fact_tracer(&host, || {
-            host.build_named_type_export_route_entry(ghost, "Shared")
-        });
+    let (entry, finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
+        host.build_named_type_export_route_entry(ghost, "Shared")
+    });
+    let suppression_raised = matches!(
+        finalise,
+        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+    );
     let (route, facts) = entry.expect("the route must resolve through the later wildcard");
     assert!(
         matches!(route, crate::resolver_core::RouteResult::Resolved { .. }),
@@ -4211,10 +4214,13 @@ fn rooted_wildcard_route_does_not_raise_enclosing_suppression() {
         "export * from './missing';\nexport * from './present';\n",
     );
 
-    let (entry, _finalise, suppression_raised) =
-        crate::fact_signature_helpers::install_fact_tracer(&host, || {
-            host.build_named_type_export_route_entry(barrel, "Shared")
-        });
+    let (entry, finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
+        host.build_named_type_export_route_entry(barrel, "Shared")
+    });
+    let suppression_raised = matches!(
+        finalise,
+        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+    );
     let (route, facts) = entry.expect("the route must resolve through the later wildcard");
     assert!(
         matches!(route, crate::resolver_core::RouteResult::Resolved { .. }),
@@ -4297,10 +4303,13 @@ fn unrooted_import_skip_raises_enclosing_cold_compute_suppression() {
     // producers) installs around its cold body — and read the
     // chokepoint flag its admission gates consult.
     let before = snap(&host).owner_import_surface_unrooted_skip_refusals;
-    let (surface, _finalise, suppression_raised) =
-        crate::fact_signature_helpers::install_fact_tracer(&host, || {
-            host.owner_import_surface(ghost)
-        });
+    let (surface, finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
+        host.owner_import_surface(ghost)
+    });
+    let suppression_raised = matches!(
+        finalise,
+        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+    );
     let surface = surface.expect("the unrooted build still serves its caller the surface");
     assert_eq!(
         snap(&host).owner_import_surface_unrooted_skip_refusals,
@@ -4351,10 +4360,13 @@ fn rooted_import_skip_does_not_raise_enclosing_suppression() {
     );
 
     let before = snap(&host).owner_import_surface_unrooted_skip_refusals;
-    let (surface, _finalise, suppression_raised) =
-        crate::fact_signature_helpers::install_fact_tracer(&host, || {
-            host.owner_import_surface(owner)
-        });
+    let (surface, finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
+        host.owner_import_surface(owner)
+    });
+    let suppression_raised = matches!(
+        finalise,
+        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+    );
     let surface = surface.expect("the rooted build serves the surface");
     assert!(
         surface.bindings.get("Missing").is_none(),

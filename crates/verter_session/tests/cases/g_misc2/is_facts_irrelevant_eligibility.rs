@@ -35,8 +35,9 @@
 //!
 //! Per the Block 1.7 audit, exactly ONE cache is partially eligible
 //! today: `FallthroughResolverState.cache`, restricted to the
-//! `IntrinsicSurface(_)` and `ConsumedBindings(_)` variants of
-//! `FallthroughNodeValue`. Every other fact-validated cache performs
+//! `IntrinsicSurface(_)` variant of `FallthroughNodeValue`. Empty-fact
+//! consumed bindings are deliberately return-only because their key has no
+//! content-version axis. Every other fact-validated cache performs
 //! cross-file reads in cold compute and is NOT eligible.
 //!
 //! ## Discriminator
@@ -87,7 +88,7 @@ const ELIGIBLE_CACHES: &[(&str, &str, &str)] = &[(
     // `FallthroughResolverState::store_node` permits empty-facts
     // admission for these two variants, and a future
     // `is_facts_irrelevant: true` flag would document the gate.
-    "FallthroughResolverState.cache — variants IntrinsicSurface / ConsumedBindings only",
+    "FallthroughResolverState.cache — empty facts only for IntrinsicSurface",
 )];
 
 fn audit_file_path() -> PathBuf {
@@ -253,30 +254,26 @@ fn eligible_cache_still_uses_variant_gated_loose_admission() {
     let path =
         workspace_root().join("crates/verter_session/src/resolver_core/fallthrough_resolver.rs");
     let src = std::fs::read_to_string(&path).expect("read fallthrough_resolver.rs");
-    // The variant-gated loose admission lives inside `store_node`.
-    // We pin two structural facts:
-    //   (a) `store_node` exists.
-    //   (b) The function body still calls `self.cache.insert(`.
-    //   (c) The function body still tests for `IntrinsicSurface` and
-    //       `ConsumedBindings` variants — the variant gate the audit
-    //       names as the eligibility justification.
+    let start = src
+        .find("fn insert_admissible_node")
+        .expect("FallthroughResolverState::insert_admissible_node must exist");
+    let end = src[start..]
+        .find("\n    /// Admit a node")
+        .map_or(src.len(), |offset| start + offset);
+    let body = &src[start..end];
     assert!(
-        src.contains("fn store_node"),
-        "`FallthroughResolverState::store_node` is missing from `{}` — the audit's \
-         eligibility justification depends on this fn's variant gate.",
-        path.display()
-    );
-    assert!(
-        src.contains("self.cache.insert("),
-        "`FallthroughResolverState::store_node` no longer uses the loose `self.cache.insert(...)` \
+        body.contains("self.cache.insert("),
+        "`FallthroughResolverState::insert_admissible_node` no longer uses the loose `self.cache.insert(...)` \
          admission path. The audit eligibility for `FallthroughResolverState.cache` \
          depends on this; update the audit and `ELIGIBLE_CACHES` if the migration \
          landed."
     );
     assert!(
-        src.contains("IntrinsicSurface") && src.contains("ConsumedBindings"),
-        "the variant gate in `store_node` no longer references both \
-         `IntrinsicSurface` and `ConsumedBindings`. The audit's eligibility \
-         justification names BOTH variants; update the audit if the gate changed."
+        body.contains("!result.facts.is_empty()")
+            && body.contains("FallthroughNodeValue::IntrinsicSurface")
+            && !body.contains("FallthroughNodeValue::ConsumedBindings"),
+        "the owner funnel must admit non-empty fact roots and make exactly the \
+         versioned IntrinsicSurface variant eligible on empty facts; unversioned \
+         ConsumedBindings must remain return-only"
     );
 }

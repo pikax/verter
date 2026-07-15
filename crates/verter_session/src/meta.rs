@@ -70,11 +70,20 @@ pub(crate) fn component_meta_expansion_budget_exceeded(
 ) -> bool {
     use verter_semantic::analysis::type_expand::ExpansionStopReason;
 
+    let is_budget = |reason: ExpansionStopReason| {
+        matches!(
+            reason,
+            ExpansionStopReason::BudgetExceeded
+                | ExpansionStopReason::ProjectionWorkLimit
+                | ExpansionStopReason::ConnectedQueryDepthLimit
+        )
+    };
+
     let field_has_budget = |field: &verter_semantic::analysis::type_expand::ExpandedField| {
         field
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.reason == ExpansionStopReason::BudgetExceeded)
+            .any(|diagnostic| is_budget(diagnostic.reason))
     };
     let macro_has_budget =
         |shape: &verter_semantic::analysis::type_expand::ExpandedMacroObjectShape| {
@@ -82,14 +91,14 @@ pub(crate) fn component_meta_expansion_budget_exceeded(
                 .result
                 .diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.reason == ExpansionStopReason::BudgetExceeded)
+                .any(|diagnostic| is_budget(diagnostic.reason))
         };
     let props_has_budget = |shape: &verter_semantic::analysis::type_expand::ExpandedMacroProps| {
         shape
             .result
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.reason == ExpansionStopReason::BudgetExceeded)
+            .any(|diagnostic| is_budget(diagnostic.reason))
     };
 
     types.props.iter().any(field_has_budget)

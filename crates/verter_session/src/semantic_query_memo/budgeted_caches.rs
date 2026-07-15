@@ -110,12 +110,12 @@ pub(crate) struct BudgetedRelationMemo {
     /// the map clear and the budget clear with the `retention_gate`
     /// write guard still held. A race test arms it with a barrier and
     /// calls `wait()` twice — see [`Self::test_arm_clear_midpoint_gate`].
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     clear_midpoint_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Test-only injection point inside [`Self::insert`], parked after
     /// the map insert + budget admission land but before `insert`
     /// returns (with the read guard still held).
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     insert_post_record_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
 }
 
@@ -126,9 +126,9 @@ impl Default for BudgetedRelationMemo {
             budget: GlobalRetentionBudget::default(),
             retention_gate: parking_lot::RwLock::new(()),
             admission_lock: parking_lot::Mutex::new(()),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             clear_midpoint_gate: parking_lot::Mutex::new(None),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             insert_post_record_gate: parking_lot::Mutex::new(None),
         }
     }
@@ -229,7 +229,7 @@ impl BudgetedRelationMemo {
                     .remove_if(&victim_key, |_, entry| entry.admission_seq == victim_seq);
             }
         }
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let gate = self.insert_post_record_gate.lock().clone();
             if let Some(barrier) = gate {
@@ -248,7 +248,7 @@ impl BudgetedRelationMemo {
     pub(crate) fn clear(&self) {
         let _retention = self.retention_gate.write();
         self.memo.clear();
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let gate = self.clear_midpoint_gate.lock().clone();
             if let Some(barrier) = gate {

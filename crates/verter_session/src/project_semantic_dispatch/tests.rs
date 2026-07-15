@@ -19678,11 +19678,10 @@ fn roomy_request_misses_budget_tainted_evaluate_deferred_entry() {
 /// `{ a: { k: number } }["a"]["k"]` evaluates as two deferred `IndexedAccess`
 /// hops: the intermediate `["a"]` hop charges projection-budget op 1; the
 /// terminal `["k"]` hop is op 2. Under a tight cap of 1 the terminal hop trips
-/// `BudgetExceeded`, so `outer` truncates to `Opaque(Miss)`; under a roomy cap
-/// the SAME `(outer, context)` completes to the real terminal member type
-/// `number`. Pre-fix the tight run published the truncated `Miss`, so the
-/// roomy re-run warm-SERVED that stale, WRONG value; the publish gate must
-/// withhold the budget-tainted result so the roomy run recomputes `number`.
+/// the projection-work limit and preserves `outer` as its safe partial carrier;
+/// under a roomy cap the same `(outer, context)` completes to the real terminal
+/// member type `number`. The publish gate must withhold the limited carrier so
+/// the roomy run recomputes `number`.
 #[test]
 fn roomy_request_recomputes_correct_value_after_budget_truncation() {
     use crate::request_context::{
@@ -19730,22 +19729,26 @@ fn roomy_request_recomputes_correct_value_after_budget_truncation() {
     assert!(
         matches!(
             tight_completeness,
-            crate::semantic_query::ResultCompleteness::Partial(_)
+            crate::semantic_query::ResultCompleteness::Partial(reasons)
+                if reasons.contains(
+                    crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT
+                )
         ),
-        "the budget-truncated tight run must report Partial completeness, got {tight_completeness:?}"
+        "the tight run must report Partial(PROJECTION_WORK_LIMIT), got {tight_completeness:?}"
     );
-    // Fixture validity: the tight run truncated to Opaque(Miss) AND raised the
-    // suppress sticky (else the test characterizes nothing).
+    // Fixture validity: the tight run preserves the outer indexed-access
+    // carrier and raises the suppress sticky.
     assert!(
         suppress_after_tight,
         "FIXTURE INVALID: tight budget=1 did not trip BudgetExceeded"
     );
     assert!(
-        matches!(
-            graph.node_data(v_tight).as_deref(),
-            Some(SemanticNodeData::Opaque(_))
-        ),
-        "FIXTURE INVALID: tight run should truncate the terminal hop to Opaque(Miss), got {:?}",
+        v_tight == outer
+            && matches!(
+                graph.node_data(v_tight).as_deref(),
+                Some(SemanticNodeData::IndexedAccess { .. })
+            ),
+        "the tight run must preserve the best safe indexed-access carrier, got {:?}",
         graph.node_data(v_tight).as_deref()
     );
 
@@ -19778,13 +19781,10 @@ fn roomy_request_recomputes_correct_value_after_budget_truncation() {
         "the roomy recompute must be Complete (it reaches the real member type), got \
          {roomy_completeness:?}"
     );
-    // Negative: must NOT warm-serve the budget-tainted Opaque(Miss).
+    // Negative: must not warm-serve the budget-limited carrier.
     assert!(
-        !matches!(
-            graph.node_data(v_roomy).as_deref(),
-            Some(SemanticNodeData::Opaque(_))
-        ),
-        "POISON: roomy re-run warm-served the tight run's budget-truncated Opaque(Miss)"
+        v_roomy != v_tight,
+        "POISON: roomy re-run warm-served the tight run's limited carrier"
     );
     // Positive: the roomy recompute yields the real member type `number`.
     assert!(
@@ -20018,19 +20018,12 @@ fn build_enclosed_demand_partial_taints_enclosing_frame() {
     let muta = graph.intern_node(SemanticNodeData::DeclRef {
         identity: crate::semantic_query::DeclIdentity::from_scope(&scope, Arc::from("MutA")),
     });
-    // FUSE: a `T0..T80` alias chain LONGER than STRUCTURAL_FACT_DEMAND_FUSE (64)
-    // trips the step fuse after `Complete` reads.
+    // FINITE CONTROL: an 80-hop alias chain must settle without a structural
+    // depth cap.
     let t0 = graph.intern_node(SemanticNodeData::DeclRef {
         identity: crate::semantic_query::DeclIdentity::from_scope(&scope, Arc::from("T0")),
     });
-    // DEPTH: a 10_000-deep `KeyOf` chain trips the evaluator's 256 recursion
-    // ceiling (fresh node ids defeat the visited set), all inner reads clean.
     let leaf = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let mut current = leaf;
-    for _ in 0..10_000 {
-        current = graph.intern_node(SemanticNodeData::KeyOf { base: current });
-    }
-    let deep_keyof = current;
     // MISSING: an `Alias` to an unallocated id — the evaluator reaches absent
     // arena data through the hop and reports MISSING_SEMANTIC_NODE_DATA.
     let aliased_missing = graph.intern_node(SemanticNodeData::Alias(
@@ -20074,19 +20067,22 @@ fn build_enclosed_demand_partial_taints_enclosing_frame() {
         crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
     );
     run(
-        t0,
-        "fuse",
-        crate::semantic_query::PartialReasonSet::STRUCTURAL_FACT_DEMAND_LIMIT,
-    );
-    run(
-        deep_keyof,
-        "depth",
-        crate::semantic_query::PartialReasonSet::DEFERRED_EVALUATION_LIMIT,
-    );
-    run(
         aliased_missing,
         "missing",
         crate::semantic_query::PartialReasonSet::MISSING_SEMANTIC_NODE_DATA,
+    );
+
+    let finite_guard =
+        crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
+    let finite = dispatch.normalize_node_for_structural_fact_demand(t0, navigate);
+    let finite_frame = finite_guard.finish();
+    assert!(
+        matches!(finite, StructuralFactDemandOutcome::Complete(_)),
+        "a deep finite carrier chain must resolve Complete"
+    );
+    assert!(
+        !finite_frame.result_is_partial && !finite_frame.cache_suppress,
+        "finite structural depth must not taint the enclosing build"
     );
 }
 
@@ -20098,15 +20094,15 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     // `Grow<[[string]]>` → …, distinct `InstantiationRef` ids the `visited` set
     // can NEVER match) DEFEATS visited-ID cycle detection. The demand primitive
     // instantiates each residual `InstantiationRef` and re-evaluates; because the
-    // ids never repeat, the regrowth is bounded EXACTLY by the demand loop's
-    // step/work fuse (`STRUCTURAL_FACT_DEMAND_LIMIT`) — NOT the `visited`-ID guard
+    // ids never repeat, the regrowth is bounded EXACTLY by the connected-demand
+    // work budget (`PROJECTION_WORK_LIMIT`) — NOT the `visited`-ID guard
     // (`SAME_PATH_RECURSION`), which would only fire if the growth had FOLDED.
     // The outcome types `Partial` — never a fabricated concrete type, never a
     // hang.
     //
     // This test proves BOTH discriminating facts codex required: (1) distinct
     // instantiated node ids per level (fresh-node growth, below), and (2) the
-    // reason is the step fuse, NOT same-path recursion.
+    // reason is the connected work budget, NOT same-path recursion.
     //
     // The demand runs inside an enclosing taint frame, so the operational
     // truncation ALSO refuses warm admission (`result_is_partial` +
@@ -20150,7 +20146,8 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     // (`Grow<[string]>` then `Grow<[[string]]>`), i.e. a FRESH node id per level.
     // This is precisely what defeats the demand loop's `visited`-ID cycle
     // detection — a same-id back-edge would be CAUGHT (`SAME_PATH_RECURSION`),
-    // but these ids never repeat, so ONLY the step fuse can bound the regrowth.
+    // but these ids never repeat, so ONLY the connected work budget can bound
+    // the regrowth.
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let (base0, args0) = match graph.node_data(carrier).as_deref() {
         Some(SemanticNodeData::InstantiationRef { base, args }) => (base.clone(), Arc::clone(args)),
@@ -20204,6 +20201,7 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
 
     let guard =
         crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
+    dispatch.set_connected_limits_for_tests(256, 24);
     let outcome = dispatch.normalize_node_for_structural_fact_demand(carrier, navigate);
     let frame = guard.finish();
 
@@ -20215,15 +20213,15 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
             dispatch.graph().node_data(node).as_deref()
         ),
     };
-    // The fresh-node regrowth is bounded by the demand loop's STEP/WORK FUSE
-    // (`STRUCTURAL_FACT_DEMAND_LIMIT`), NOT by the `visited`-ID cycle guard: the
+    // The fresh-node regrowth is bounded by the connected-demand work budget
+    // (`PROJECTION_WORK_LIMIT`), NOT by the `visited`-ID cycle guard: the
     // ids never repeat (proven distinct above), so `SAME_PATH_RECURSION` must
     // NOT be the reason — its presence would mean visited-ID CAUGHT the loop, the
     // OPPOSITE of the fresh-node-growth class this test characterises.
     assert!(
-        reasons.contains(crate::semantic_query::PartialReasonSet::STRUCTURAL_FACT_DEMAND_LIMIT),
-        "the growing-generic truncation MUST be bounded by the step/work fuse \
-         (STRUCTURAL_FACT_DEMAND_LIMIT) — the fresh-node-growth bound, got {reasons:?}"
+        reasons.contains(crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT),
+        "the growing-generic truncation MUST be bounded by PROJECTION_WORK_LIMIT — \
+         the fresh-node-growth bound, got {reasons:?}"
     );
     assert!(
         !reasons.contains(crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION),
@@ -20248,37 +20246,11 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
 }
 
 #[test]
-fn real_query_over_depth_truncated_nested_demand_refuses_warm_admission() {
-    // REAL-QUERY no-poison discriminator (supersedes a prior test that called the
-    // private keyspace enumerator directly and manually installed a
-    // `BuildLocalTaintGuard` stand-in, asserting only frame taint). Drives a REAL
-    // cold `MappedType` query `{ [K in "a" | "b"]: DeepKeyOf }` through
-    // `execute_read`: the shared cold-build helper installs the per-query taint
-    // frame (NO manual install). Its build ENUMERATES the closed `"a" | "b"` key
-    // domain, then MATERIALISES the per-key value `DeepKeyOf` through
-    // `evaluate_deferred_semantic_node_with_context(..).into_active_query_build_node`
-    // — a REAL PRODUCTION `into_active_query_build_node` caller. That deep value
-    // is a 10_000-deep `KeyOf` chain, so its deferred evaluation trips the 256
-    // recursion ceiling; the truncation folds into the query's OWN build frame and
-    // the shared cooperative memo REFUSES to admit the entry.
-    //
-    // The refusal is asserted END-TO-END on the returned `CacheRead` — its
-    // `result_is_partial` + `cache_suppress` ARE the shared memo's admission
-    // decision (`CacheRead::cache_suppress`: "the memo refuses insertion when this
-    // is true"), NOT a manually-tainted stand-in frame. A memo-absence
-    // corroboration (the depth-truncated value demand never warmed the shared
-    // `evaluate_deferred_memo`) is checked too.
-    //
-    // NOTE: a TRUNCATING key SPACE cannot reach the keyspace enumerator through a
-    // real MappedType — the L1 open-key-domain carrier-stop pre-filters a
-    // non-enumerable key domain to a shell BEFORE enumeration — so the reachable
-    // production truncation is the per-key VALUE materialisation, exercised here.
-    //
-    // DISCRIMINATING: neuter the per-key value materialisation's
-    // `into_active_query_build_node` fold (absorb the truncation into a throwaway
-    // frame) and the MappedType build frame stays clean → the returned `CacheRead`
-    // is `!result_is_partial && !cache_suppress` → the entry is admitted warm (a
-    // surface materialised off a truncated carrier), and this test FAILS.
+fn real_query_deep_finite_nested_demand_completes_and_warms() {
+    // REAL-QUERY structural-depth control. Drive a cold `MappedType` query whose
+    // per-key value is a 10,000-deep finite `KeyOf` chain. The heap evaluator must
+    // materialise it as Complete: structural depth alone is not an operational
+    // limit and must neither taint the enclosing build nor suppress admission.
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -20316,38 +20288,42 @@ fn real_query_over_depth_truncated_nested_demand_refuses_warm_admission() {
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
 
     // REAL cold query through execute_read — the cold-build helper owns the frame.
+    let mapper_for_repeat = mapper.clone();
     let read = dispatch.execute_read(SemanticQueryKey::MappedType {
         source: key_union,
         mapper,
         context,
     });
 
-    // End-to-end admission refusal on the returned CacheRead: the per-key value
-    // materialisation's depth-truncation folded into the MappedType build's OWN
-    // frame, so the cold-build helper OR-ed it into the QueryBuildOutput and the
-    // shared cooperative memo refuses the entry.
     assert!(
-        read.result_is_partial,
-        "a REAL MappedType cold query whose per-key value materialisation is depth-truncated MUST \
-         surface result_is_partial on the returned CacheRead (the into_active_query_build_node \
-         caller folded the truncation into the query's own build frame — NOT a manually-installed \
-         stand-in frame)"
+        !read.result_is_partial,
+        "a 10,000-deep finite structural value must resolve Complete"
     );
     assert!(
-        read.cache_suppress,
-        "the shared cooperative memo MUST refuse to admit the entry (CacheRead::cache_suppress — \
-         'the memo refuses insertion when this is true'); a surface materialised off a truncated \
-         carrier must never warm the shared memo"
+        !read.cache_suppress,
+        "finite structural depth must not suppress the enclosing query's admission"
     );
+    assert!(read.walker_diagnostics.is_empty());
 
-    // Corroboration: the depth-truncated value demand is itself a partial, so it
-    // never warmed the shared deferred-evaluation memo either.
     assert!(
         graph
             .evaluate_deferred_memo_get(deep_value, context)
-            .is_none(),
-        "the depth-truncated value demand must be ABSENT from evaluate_deferred_memo (a partial \
-         evaluation never warms the shared memo)"
+            .is_some(),
+        "a complete deep finite evaluation must be eligible for the shared deferred memo"
+    );
+
+    let stats_before_repeat = graph.stats_snapshot();
+    let repeat = dispatch.execute_read(SemanticQueryKey::MappedType {
+        source: key_union,
+        mapper: mapper_for_repeat,
+        context,
+    });
+    let stats_after_repeat = graph.stats_snapshot();
+    assert!(!repeat.result_is_partial && !repeat.cache_suppress);
+    assert!(repeat.walker_diagnostics.is_empty());
+    assert!(
+        stats_after_repeat.hits > stats_before_repeat.hits,
+        "the complete repeated mapped-type demand must warm-hit"
     );
 }
 

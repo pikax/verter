@@ -675,45 +675,49 @@ impl VerterHost {
             let (executor_view, executor_fp) = fixed.executor_fixed_view();
             Some((executor_view, executor_fp, fixed.is_current()))
         };
-        let ((resolved_opt, meta_opt), read_set) = self.with_fact_tracer(|| {
-            let resolved = match self.resolve_component_meta_with_view_and_fixed(
-                canonical,
-                crate::types::ProjectionMode::Expanded,
-                view,
-                executor_fixed,
-            ) {
-                Some(r) => r,
-                None => return (None, None),
-            };
-            let extract = extract_component_meta_from_resolved(
-                self, canonical, &resolved, true, // include_fallthrough
-                ctx,
-            );
-            (
-                Some(resolved),
-                Some((extract.analysis, extract.completeness)),
-            )
-        });
+        let results = self.project_type_store.component_meta_results();
+        let (resolved_opt, meta_opt) = results.compute_and_admit(
+            self,
+            canonical,
+            "view-aware path",
+            || {
+                let resolved = match self.resolve_component_meta_with_view_and_fixed(
+                    canonical,
+                    crate::types::ProjectionMode::Expanded,
+                    view,
+                    executor_fixed,
+                ) {
+                    Some(r) => r,
+                    None => return (None, None),
+                };
+                let extract = extract_component_meta_from_resolved(
+                    self, canonical, &resolved, true, // include_fallthrough
+                    ctx,
+                );
+                (
+                    Some(resolved),
+                    Some((extract.analysis, extract.completeness)),
+                )
+            },
+            |computed| {
+                let (Some(resolved), Some((meta, extract_completeness))) = computed else {
+                    return crate::component_meta_result_db::ComponentMetaPublishDecision::no_value(
+                    );
+                };
+                let final_completeness = resolved.completeness.merge(*extract_completeness);
+                self.component_meta_publish_decision_with_view(
+                    canonical,
+                    view,
+                    resolved,
+                    meta.clone(),
+                    validated_at_generation,
+                    seed_fence,
+                    final_completeness,
+                )
+            },
+        );
         let resolved = resolved_opt?;
-        let (meta, extract_completeness) = meta_opt?;
-        // ONE merged admission signal: the resolve-phase completeness merged
-        // with the whole-extract scope (macro-DTO read + fallthrough compute).
-        let final_completeness = resolved.completeness.merge(extract_completeness);
-
-        // Seal + admission decision — `publish_if_admissible` (by-value
-        // fenced-serve consult + R20 finalise).
-        self.publish_if_admissible(canonical, "view-aware path", read_set, |sig| {
-            self.publish_component_meta_cache_entry_with_view(
-                canonical,
-                view,
-                &resolved,
-                meta.clone(),
-                sig,
-                validated_at_generation,
-                seed_fence,
-                final_completeness,
-            );
-        });
+        let (meta, _extract_completeness) = meta_opt?;
         Some((resolved, meta))
     }
 
@@ -1004,37 +1008,6 @@ impl VerterHost {
     /// On either refusal the producer still returns the freshly
     /// computed value to its caller (return-only semantics) — only the
     /// cache publish is skipped.
-    pub(super) fn publish_if_admissible(
-        &self,
-        canonical: &str,
-        path_label: &str,
-        read_set: crate::resolver_core::FactReadSet,
-        publish: impl FnOnce(Arc<[crate::resolver_core::FactVersionRef]>),
-    ) {
-        if read_set.non_cacheable_read_observed() {
-            tracing::debug!(
-                target: "verter::audit::record",
-                file = %canonical,
-                path = %path_label,
-                "skipping component-meta cache promotion: cold compute consumed a fenced (ReturnOnly) IndexedReady serve",
-            );
-            return;
-        }
-        match read_set.finalise() {
-            crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
-                publish(fact_dep_signature);
-            }
-            crate::resolver_core::FactReadSetFinalise::Overflow => {
-                tracing::debug!(
-                    target: "verter::audit::record",
-                    file = %canonical,
-                    path = %path_label,
-                    "skipping component-meta cache promotion: fact-signature overflowed cap",
-                );
-            }
-        }
-    }
-
     /// Publish the cold-build result into the project-global
     /// final-result cache, keyed under the view's content hash for the
     /// owner.
@@ -1045,17 +1018,18 @@ impl VerterHost {
     /// admit distinct multi-candidate slots. Falls through to the
     /// base host's `shallow_file_state` if the view does not know
     /// about the canonical.
-    fn publish_component_meta_cache_entry_with_view(
+    fn component_meta_publish_decision_with_view(
         &self,
         canonical: &str,
         view: &dyn crate::session_view::SessionView,
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
         meta: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-        fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>,
         validated_at_generation: u64,
         seed_fence: &ColdSeedFence,
         final_completeness: crate::semantic_query::ResultCompleteness,
-    ) {
+    ) -> crate::component_meta_result_db::ComponentMetaPublishDecision<
+        crate::component_meta_result_db::CachedComponentMetaResult,
+    > {
         // Refuse a partial result on ONE merged signal. `final_completeness` is
         // `resolved.completeness.merge(extract_scope_completeness)`: the
         // resolve-phase completeness merged with the WHOLE-extract scope (the
@@ -1074,18 +1048,24 @@ impl VerterHost {
                 file = %canonical,
                 "skipping component-meta cache promotion (view-aware path): partial result (merged extract+resolve completeness)",
             );
-            return;
+            return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
+                crate::cache_runtime::NonAdmissionReason::PartialResult,
+            );
         }
         // Publish fence: a superseded or non-current snapshot never warms
         // the shared cache.
         if !self.validation_token_still_live(seed_fence, canonical, "view-aware path") {
-            return;
+            return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
+                crate::cache_runtime::NonAdmissionReason::GenerationSuperseded,
+            );
         }
         let Some(whole_hash) = view
             .content_hash_for(canonical)
             .or_else(|| self.shallow_file_state(canonical).map(|s| s.whole_hash))
         else {
-            return;
+            return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
+                crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
+            );
         };
         let key = self.component_meta_result_key(canonical, &ComponentMetaOptions::default());
         let resolution_template =
@@ -1096,21 +1076,12 @@ impl VerterHost {
             canonical_id: Arc::from(canonical),
             whole_hash,
         };
-        // Drop the owner's own non-round-tripping `DerivedFactHash{Route}`
-        // fact before admission (see `strip_owner_route_fact`). Cross-file
-        // route facts and the owner `FileWholeHash` fact are retained.
-        let admitted_signature = strip_owner_route_fact(canonical, &fact_dep_signature);
-        self.project_type_store.component_meta_results().insert(
+        crate::component_meta_result_db::ComponentMetaPublishDecision::publish(
             key,
             whole_hash,
-            crate::component_meta_result_db::ComponentMetaResultEntry {
-                payload: Arc::new(cached),
-                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
-                    admitted_signature,
-                ),
-                validated_at_generation,
-            },
-        );
+            Arc::new(cached),
+            validated_at_generation,
+        )
     }
 
     /// Publish the cold-build result into the project-global
@@ -1129,16 +1100,17 @@ impl VerterHost {
     /// cold-recompute. The synthesis output remains available to the
     /// caller so partial diagnostics still surface — only the cache
     /// promotion is gated.
-    pub(super) fn publish_component_meta_cache_entry(
+    pub(super) fn component_meta_publish_decision(
         &self,
         canonical: &str,
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
         meta: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-        fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>,
         validated_at_generation: u64,
         seed_fence: &ColdSeedFence,
         final_completeness: crate::semantic_query::ResultCompleteness,
-    ) {
+    ) -> crate::component_meta_result_db::ComponentMetaPublishDecision<
+        crate::component_meta_result_db::CachedComponentMetaResult,
+    > {
         // Refuse a partial result on ONE merged signal. `final_completeness` is
         // `resolved.completeness.merge(extract_scope_completeness)`: the
         // resolve-phase completeness merged with the WHOLE-extract scope (the
@@ -1157,7 +1129,9 @@ impl VerterHost {
                 file = %canonical,
                 "skipping component-meta cache promotion: partial result (merged extract+resolve completeness)",
             );
-            return;
+            return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
+                crate::cache_runtime::NonAdmissionReason::PartialResult,
+            );
         }
         // Publish fence: recheck the seed view's validation token against
         // the live host immediately before promotion, AND decline a
@@ -1169,10 +1143,14 @@ impl VerterHost {
         // the shared cache. The result is still returned to the caller
         // (return-only semantics).
         if !self.validation_token_still_live(seed_fence, canonical, "base path") {
-            return;
+            return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
+                crate::cache_runtime::NonAdmissionReason::GenerationSuperseded,
+            );
         }
         let Some(shallow) = self.shallow_file_state(canonical) else {
-            return;
+            return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
+                crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
+            );
         };
         let whole_hash = shallow.whole_hash;
         let key = self.component_meta_result_key(canonical, &ComponentMetaOptions::default());
@@ -1184,21 +1162,12 @@ impl VerterHost {
             canonical_id: Arc::from(canonical),
             whole_hash,
         };
-        // Drop the owner's own non-round-tripping `DerivedFactHash{Route}`
-        // fact before admission (see `strip_owner_route_fact`). Cross-file
-        // route facts and the owner `FileWholeHash` fact are retained.
-        let admitted_signature = strip_owner_route_fact(canonical, &fact_dep_signature);
-        self.project_type_store.component_meta_results().insert(
+        crate::component_meta_result_db::ComponentMetaPublishDecision::publish(
             key,
             whole_hash,
-            crate::component_meta_result_db::ComponentMetaResultEntry {
-                payload: Arc::new(cached),
-                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
-                    admitted_signature,
-                ),
-                validated_at_generation,
-            },
-        );
+            Arc::new(cached),
+            validated_at_generation,
+        )
     }
 
     /// Monotonic request-id generator. Starts at 1; zero is reserved

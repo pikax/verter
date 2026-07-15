@@ -87,6 +87,9 @@ fn install_nests_safely_outer_observes_inner_cold_facts() {
                  (TLS-stack fan-out). Got: {outer_sig:?}",
             );
         }
+        FactReadSetFinalise::NonCacheable(_) => {
+            panic!("outer tracer unexpectedly non-cacheable");
+        }
         FactReadSetFinalise::Overflow => {
             panic!("outer tracer overflowed unexpectedly");
         }

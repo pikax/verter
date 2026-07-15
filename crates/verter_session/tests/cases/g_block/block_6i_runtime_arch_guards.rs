@@ -560,8 +560,8 @@ fn per_key_route_builds_bounded() {
 
     // First resolve: cold path, runs the resolver closure exactly once
     // AND bumps the cold counter.
-    let first = verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
-        db.get_or_resolve_route_observing_facts(rk("o.ts", "X"), &view, probe, || {
+    let first = verter_session::for_tests::with_cacheability_scope_for_tests(&host, |_probe| {
+        db.get_or_resolve_route_observing_facts(rk("o.ts", "X"), &view, &host, || {
             cold_resolver_calls.fetch_add(1, Ordering::Relaxed);
             Some((route.clone(), vec![fact.clone()]))
         })
@@ -585,8 +585,8 @@ fn per_key_route_builds_bounded() {
     // in `get_or_resolve_route_observing_facts` short-circuits at
     // `get_route_with_facts`.
     for i in 0..3 {
-        let warm = verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
-            db.get_or_resolve_route_observing_facts(rk("o.ts", "X"), &view, probe, || {
+        let warm = verter_session::for_tests::with_cacheability_scope_for_tests(&host, |_probe| {
+            db.get_or_resolve_route_observing_facts(rk("o.ts", "X"), &view, &host, || {
                 // This closure MUST NOT run on warm hits. If it does, the
                 // warm-collapse contract is broken.
                 cold_resolver_calls.fetch_add(1, Ordering::Relaxed);

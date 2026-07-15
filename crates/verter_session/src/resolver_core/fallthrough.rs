@@ -99,7 +99,7 @@ pub trait FallthroughResolverHost {
         component_name: &str,
         import_source: &str,
         imported_name: Option<&str>,
-        binding_kind: Option<crate::resolver_core::symbol_resolver::ImportBindingKind>,
+        binding_kind: Option<crate::resolver_core::ImportBindingKind>,
     ) -> Option<String>;
     fn current_dependency_fact_versions(&self, canonical_id: &str) -> Vec<FactVersionRef>;
     fn resolve_child_fallthrough(
@@ -174,7 +174,7 @@ pub enum DynamicRootCandidate {
         imported_name: Option<String>,
         /// Import binding kind — preserved for value-space routing.
         /// Some hosts derive it later from the owning file's import snapshot.
-        binding_kind: Option<crate::resolver_core::symbol_resolver::ImportBindingKind>,
+        binding_kind: Option<crate::resolver_core::ImportBindingKind>,
     },
 }
 
@@ -377,7 +377,7 @@ pub fn append_component_candidate_branches<H: FallthroughResolverHost>(
     component_name: &str,
     import_source: &str,
     imported_name: Option<&str>,
-    binding_kind: Option<crate::resolver_core::symbol_resolver::ImportBindingKind>,
+    binding_kind: Option<crate::resolver_core::ImportBindingKind>,
     branch_key: String,
     condition_text: Option<String>,
     consumed_attrs: &[String],
@@ -1225,13 +1225,13 @@ pub fn component_import_candidate_for_binding(
                     imported_name: binding.imported_name.clone(),
                     binding_kind: Some(match binding.kind {
                         verter_semantic::analysis::types::ImportBindingKind::Named => {
-                            crate::resolver_core::symbol_resolver::ImportBindingKind::Named
+                            crate::resolver_core::ImportBindingKind::Named
                         }
                         verter_semantic::analysis::types::ImportBindingKind::Default => {
-                            crate::resolver_core::symbol_resolver::ImportBindingKind::Default
+                            crate::resolver_core::ImportBindingKind::Default
                         }
                         verter_semantic::analysis::types::ImportBindingKind::Namespace => {
-                            crate::resolver_core::symbol_resolver::ImportBindingKind::Namespace
+                            crate::resolver_core::ImportBindingKind::Namespace
                         }
                     }),
                 })
@@ -1733,7 +1733,7 @@ mod tests {
             _component_name: &str,
             import_source: &str,
             _imported_name: Option<&str>,
-            _binding_kind: Option<crate::resolver_core::symbol_resolver::ImportBindingKind>,
+            _binding_kind: Option<crate::resolver_core::ImportBindingKind>,
         ) -> Option<String> {
             self.canonical_routes
                 .get(&(parent_canonical.to_string(), import_source.to_string()))
@@ -2432,7 +2432,7 @@ mod tests {
                 component_name: "Child".to_string(),
                 import_source: "./Child.vue".to_string(),
                 imported_name: None,
-                binding_kind: Some(crate::resolver_core::symbol_resolver::ImportBindingKind::Named),
+                binding_kind: Some(crate::resolver_core::ImportBindingKind::Named),
             }]
         );
     }
@@ -2468,9 +2468,7 @@ mod tests {
                 component_name: "Child".to_string(),
                 import_source: "./Child.vue".to_string(),
                 imported_name: Some("default".to_string()),
-                binding_kind: Some(
-                    crate::resolver_core::symbol_resolver::ImportBindingKind::Default
-                ),
+                binding_kind: Some(crate::resolver_core::ImportBindingKind::Default),
             }]
         );
     }

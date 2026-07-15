@@ -19,20 +19,20 @@ use crate::types::FileAnalysisSnapshot;
 ///
 /// Test/debug instrumentation only — gated to match the capture-token
 /// module (absent in release).
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) const ROUTE_DEMAND_EMITTED_WHOLE_COUNTER: &str = "route_demand_emitted::Whole";
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) const ROUTE_DEMAND_EMITTED_PICK_COUNTER: &str = "route_demand_emitted::Pick";
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) const ROUTE_DEMAND_EMITTED_MEMBER_PATH_COUNTER: &str =
     "route_demand_emitted::MemberPath";
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) const ROUTE_DEMAND_EMITTED_OMIT_COUNTER: &str = "route_demand_emitted::Omit";
 
 /// Map a `RouteDemand` variant to its capture-token counter name.
 /// Test/debug instrumentation only — gated to match the capture-token
 /// module (absent in release).
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 fn route_demand_counter_name(route: &RouteDemand) -> &'static str {
     match route {
         RouteDemand::Whole => ROUTE_DEMAND_EMITTED_WHOLE_COUNTER,
@@ -476,9 +476,9 @@ pub(crate) fn enqueue_component_meta_registry_ref(
     // ComponentConfig aliases (and the inverse for external imports).
     // Route-demand counter recording — test/debug instrumentation only;
     // gated to match the capture-token module (absent in release).
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     let counter_name = route_demand_counter_name(&route);
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     crate::capture_token::with_active_capture(|t| t.record_counter(counter_name, 1));
     let source_hint = source_hint
         .filter(|source| !source.is_empty())

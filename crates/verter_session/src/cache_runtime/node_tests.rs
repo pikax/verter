@@ -155,6 +155,31 @@ fn signature_admission_from_overflow_finalise_is_non_cacheable() {
     );
 }
 
+/// A complete observation set that consumed a non-cacheable read still
+/// carries its facts for enclosing tracers, but can never authorize a warm
+/// admission. The verdict is intrinsic to `FactReadSetFinalise` so no caller
+/// can drop a sibling boolean and accidentally publish it.
+#[test]
+fn signature_admission_from_non_cacheable_finalise_refuses_admission() {
+    let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
+        canonical_id: "/a.ts".to_string(),
+        hash: [1u8; 16],
+    }]);
+    let admission = SignatureAdmission::from_finalise(FactReadSetFinalise::NonCacheable(facts));
+
+    match &admission {
+        SignatureAdmission::NonCacheable(reason) => assert_eq!(
+            *reason,
+            NonAdmissionReason::UnresolvedProvenance,
+            "a consumed non-cacheable read must fail closed"
+        ),
+        SignatureAdmission::Cacheable(_) => {
+            panic!("a non-cacheable finalise must never authorize admission")
+        }
+    }
+    assert!(admission.cacheable().is_none());
+}
+
 /// `ComputeCtx` carries the store-view compat token (the flight-lane
 /// dimension) alongside the generation. `from_resolver` reads both from
 /// the resolver. This test reads `compat_token` so the field's role is
@@ -628,146 +653,90 @@ fn all_non_admission_reasons() -> Vec<NonAdmissionReason> {
     ]
 }
 
-/// Discriminator: the producer/lowering TLS pass-through (`set_return_only_reason`
-/// → `take_return_only_reason`) preserves the typed
-/// [`NonAdmissionReason`] across the
-/// [`crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(V)`]
-/// boundary so cache-runtime lowerings can attribute the correct
-/// structured refusal reason instead of hard-coding
-/// `NonAdmissionReason::SignatureOverflow`.
-///
-/// The cache-runtime lowering sites in `component_meta_caches.rs`
-/// (imported registry, materialize-structure, ref-cycle) read the
-/// reason from this bridge in their `ReturnOnly(value)` arms;
-/// producers `set_return_only_reason(reason)` immediately before
-/// constructing `ComputeAdmission::ReturnOnly(...)`. This test pins
-/// the bridge contract: every reason the cache-runtime producers
-/// select round-trips intact through the TLS slot.
-///
-/// The cases iterate over [`all_non_admission_reasons`], which uses
-/// an exhaustive `match` so a new `NonAdmissionReason` variant fails
-/// to compile until it is added to the list.
+/// Discriminator: `ComputeAdmission::ReturnOnly` carries every typed refusal
+/// reason by value. The exhaustive helper forces a compile failure when a new
+/// `NonAdmissionReason` variant is added without extending this contract test.
 #[test]
-fn return_only_reason_bridge_round_trips_every_typed_reason() {
-    use crate::cache_runtime::{set_return_only_reason, take_return_only_reason};
+fn return_only_carries_every_typed_reason_by_value() {
+    use crate::cache_runtime::singleflight::ComputeAdmission;
 
-    // Slot starts empty on this thread (every test in this crate runs
-    // on its own thread).
-    assert!(
-        take_return_only_reason().is_none(),
-        "fixture invariant: the TLS slot starts empty on a fresh thread"
-    );
-
-    // Every typed reason the cache-runtime producers may select. The
-    // helper's exhaustive match catches a new enum variant at compile
-    // time — coverage extends to every NonAdmissionReason variant.
     for expected in all_non_admission_reasons() {
-        set_return_only_reason(expected);
-        let observed = take_return_only_reason();
+        let admission: ComputeAdmission<(), ()> = ComputeAdmission::ReturnOnly {
+            value: (),
+            reason: expected,
+        };
+
+        let observed = match admission {
+            ComputeAdmission::ReturnOnly { reason, .. } => reason,
+            ComputeAdmission::Cacheable(_) => unreachable!("fixture pinned to ReturnOnly"),
+            ComputeAdmission::Failed => unreachable!("fixture pinned to ReturnOnly"),
+        };
+
         assert_eq!(
-            observed,
-            Some(expected),
-            "the TLS pass-through MUST round-trip every typed refusal \
-             reason intact: `set_return_only_reason({expected:?})` → \
-             `take_return_only_reason()` should yield `Some({expected:?})`. \
-             A regression that lost the reason at the bridge would \
-             leave downstream telemetry attributing the wrong cause \
-             (the conservative `SignatureOverflow` fallback)."
-        );
-        // The take must have cleared the slot — a subsequent take
-        // yields `None`.
-        assert!(
-            take_return_only_reason().is_none(),
-            "`take_return_only_reason` MUST clear the slot — a leaked \
-             reason would attribute the WRONG cause to the NEXT \
-             unrelated lowering on this thread."
+            observed, expected,
+            "ReturnOnly must carry typed refusal reason {expected:?} by value"
         );
     }
 }
 
-/// Discriminator (behavioral): a producer that arms a typed reason
-/// with [`SetReasonGuard::arm`] and returns
-/// `ComputeAdmission::ReturnOnly(value)` MUST surface that exact
-/// typed reason at the lowering boundary via
-/// [`consume_return_only_reason_for_lowering`]. This exercises the
-/// SAME pattern the 3 cache-runtime lowering sites in
-/// `component_meta_caches.rs` use; a producer that forgets to arm
-/// the guard (or a lowering that hard-codes `SignatureOverflow`)
-/// would be caught here through the synthesised
-/// `CacheAdmission::ReturnOnly { value, reason }`.
-///
-/// The round-trip primitive test above checks the raw set/take pair
-/// in isolation; this test wires a synthetic producer/lowering pair
-/// that mimics the production cache-runtime adapter shape (the
-/// `compute → CacheAdmission` adapter inside `get_or_compute_admit`)
-/// and asserts the typed reason flows end-to-end.
 #[test]
-fn cache_runtime_lowering_carries_armed_typed_reason() {
-    use crate::cache_runtime::{
-        consume_return_only_reason_for_lowering, singleflight::ComputeAdmission, CacheAdmission,
-        NonAdmissionReason, SetReasonGuard,
+fn non_admission_reasons_have_explicit_propagation_policy() {
+    use crate::cache_runtime::admission::non_admission_propagation;
+    use crate::resolver_core::fact_read_set::NonCacheablePropagation;
+
+    assert_eq!(
+        non_admission_propagation(NonAdmissionReason::IntrinsicNonCacheable),
+        NonCacheablePropagation::LocalOnly,
+        "an intrinsic declines this cache family's retention without tainting an enclosing derivation"
+    );
+    assert_eq!(
+        non_admission_propagation(NonAdmissionReason::UnresolvedProvenance),
+        NonCacheablePropagation::Transitive,
+        "unresolved provenance must taint every enclosing derivation"
+    );
+    assert_eq!(
+        non_admission_propagation(NonAdmissionReason::PartialResult),
+        NonCacheablePropagation::Transitive,
+        "a partial child must never warm-replay through an enclosing cache"
+    );
+}
+
+/// Behavioral discriminator: the cache-runtime lowering preserves the exact
+/// typed refusal reason selected by the producer. This mirrors the production
+/// `ComputeAdmission` to `CacheAdmission` adapter shape.
+#[test]
+fn cache_runtime_lowering_preserves_typed_reason_by_value() {
+    use crate::cache_runtime::{singleflight::ComputeAdmission, CacheAdmission};
+
+    let lower = |admission: ComputeAdmission<(), ()>| -> CacheAdmission<()> {
+        match admission {
+            ComputeAdmission::ReturnOnly { value, reason } => {
+                CacheAdmission::ReturnOnly { value, reason }
+            }
+            ComputeAdmission::Cacheable(_) => unreachable!("fixture pinned to ReturnOnly"),
+            ComputeAdmission::Failed => unreachable!("fixture pinned to ReturnOnly"),
+        }
     };
 
-    // For every typed reason variant, run a synthetic producer that
-    // arms the reason via the RAII guard and returns
-    // `ComputeAdmission::ReturnOnly(())`. Lower it through the same
-    // pattern the production lowering sites use and assert the
-    // typed reason carried into `CacheAdmission::ReturnOnly` matches.
     for expected_reason in all_non_admission_reasons() {
-        // Producer: arm the guard, then return `ReturnOnly(value)`.
-        // The guard drops at producer scope exit; the lowering's
-        // `consume_return_only_reason_for_lowering` reads the armed
-        // value before the next iteration.
-        let producer = |reason: NonAdmissionReason| -> ComputeAdmission<(), ()> {
-            let _reason_guard = SetReasonGuard::arm(reason);
-            ComputeAdmission::ReturnOnly(())
+        let produced = ComputeAdmission::ReturnOnly {
+            value: (),
+            reason: expected_reason,
         };
 
-        // Lowering: the production pattern used by the 3 cache-runtime
-        // adapters in `component_meta_caches.rs`. The `ReturnOnly`
-        // arm reads the typed reason from the TLS bridge; the
-        // `Cacheable` / `Failed` arms route through their typed
-        // counterparts (omitted here — this test focuses on the
-        // `ReturnOnly` arm).
-        let lower = |admission: ComputeAdmission<(), ()>| -> CacheAdmission<()> {
-            match admission {
-                ComputeAdmission::ReturnOnly(value) => {
-                    let reason = consume_return_only_reason_for_lowering()
-                        .unwrap_or(NonAdmissionReason::SignatureOverflow);
-                    CacheAdmission::ReturnOnly { value, reason }
-                }
-                ComputeAdmission::Cacheable(_) => unreachable!("fixture pinned to ReturnOnly"),
-                ComputeAdmission::Failed => unreachable!("fixture pinned to ReturnOnly"),
-            }
-        };
-
-        let lowered = lower(producer(expected_reason));
-        match lowered {
+        match lower(produced) {
             CacheAdmission::ReturnOnly {
                 reason: observed, ..
-            } => {
-                assert_eq!(
-                    observed, expected_reason,
-                    "behavioral telemetry contract: a producer that arms \
-                     `SetReasonGuard::arm({expected_reason:?})` and returns \
-                     `ComputeAdmission::ReturnOnly(value)` MUST yield \
-                     `CacheAdmission::ReturnOnly {{ reason: {expected_reason:?}, .. }}` \
-                     at the lowering boundary. A regression that hard-codes \
-                     `SignatureOverflow` (the conservative release fallback) \
-                     or drops the reason at the bridge would fail this \
-                     assertion."
-                );
+            } => assert_eq!(
+                observed, expected_reason,
+                "lowering must preserve typed refusal reason {expected_reason:?}"
+            ),
+            CacheAdmission::Cacheable { .. } => {
+                panic!("fixture unexpectedly lowered to Cacheable")
             }
-            CacheAdmission::Cacheable { .. } => panic!(
-                "expected `CacheAdmission::ReturnOnly` for arm reason \
-                 `{expected_reason:?}`, got `CacheAdmission::Cacheable` — \
-                 the synthetic producer pins the `ReturnOnly` arm."
-            ),
-            CacheAdmission::Failed { .. } => panic!(
-                "expected `CacheAdmission::ReturnOnly` for arm reason \
-                 `{expected_reason:?}`, got `CacheAdmission::Failed` — \
-                 the synthetic producer pins the `ReturnOnly` arm."
-            ),
+            CacheAdmission::Failed { .. } => {
+                panic!("fixture unexpectedly lowered to Failed")
+            }
         }
     }
 }

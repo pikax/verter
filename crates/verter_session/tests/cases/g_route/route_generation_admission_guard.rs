@@ -289,7 +289,7 @@ fn producers() -> [Producer; 5] {
         },
         Producer {
             file: "component_meta_caches.rs",
-            signature: "pub(crate) fn ref_cycle_db_get_or_compute<C>(",
+            signature: "fn trace_ref_cycle_compute<C>(",
             kind: ProducerKind::EntryProducer,
         },
         Producer {

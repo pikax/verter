@@ -89,9 +89,9 @@ use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistryS
 use crate::resolver_core::{FactVersionRef, ResolvedTypeDeclaration, ResolverContext};
 use crate::semantic_query::DepSignature;
 // `ProjectionMode` is referenced only by the mode-only key constructors and
-// the schema-probe helpers, all gated `cfg(any(test, debug_assertions))`;
+// the schema-probe helpers, all gated `cfg(any(test, feature = "test-support"))`;
 // gate the import to match so release does not see it unused.
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 use crate::semantic_query::ProjectionMode;
 
 // ===========================================================================
@@ -568,7 +568,7 @@ impl ImportedRegistryDb {
 
     /// Test-only constructor that pins a specific schema version on the Db.
     /// Used by `cache_invariant_migration` fixtures.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
         Self::with_counter_and_schema_version(Arc::new(AtomicU64::new(0)), schema_version)
     }
@@ -641,11 +641,12 @@ impl ImportedRegistryDb {
     ///   the candidate is admitted into the store (counter bump +
     ///   reverse-index registration under the slot guard), joiners re-read
     ///   the published candidate.
-    /// - `ReturnOnly(value)` — the resolution produced a valid value but
-    ///   shared-cache admission is refused (the signature builder could
-    ///   not build, or the test refusal hook fired). Nothing is admitted,
+    /// - `ReturnOnly { value, reason }` — the resolution produced a valid
+    ///   value but shared-cache admission is refused (the signature builder
+    ///   could not build, or the test refusal hook fired). Nothing is admitted,
     ///   joiners fork and recompute, and the next cold miss recomputes.
-    ///   The resolution is NOT re-run and the fuse is NOT consumed twice.
+    ///   The reason is preserved for refusal telemetry. The resolution is
+    ///   NOT re-run and the fuse is NOT consumed twice.
     /// - `Failed` — the resolution itself failed; joiners surface `None`
     ///   and the next caller retries.
     ///
@@ -665,7 +666,33 @@ impl ImportedRegistryDb {
     /// candidate, bumps the counter, and registers the reverse index
     /// together under the slot guard, so no concurrent remover can observe
     /// a candidate before its counter / index registration exists.
-    pub(crate) fn get_or_compute_admit<F>(
+    pub(crate) fn get_or_compute_admit<P, Prepare, F>(
+        &self,
+        key: &ImportedRegistryKey,
+        ctx: &dyn ResolverContext,
+        prepare: Prepare,
+        compute: F,
+    ) -> Option<ImportedRegistryValue>
+    where
+        Prepare: FnOnce() -> P,
+        F: FnOnce(
+            P,
+        ) -> crate::cache_runtime::singleflight::ComputeAdmission<
+            ImportedRegistryValue,
+            ImportedRegistryEntry,
+        >,
+    {
+        crate::fact_signature_helpers::with_cacheability_scope(
+            ctx.host_for_fact_tracer_install(),
+            |probe| {
+                let prepared = prepare();
+                self.get_or_compute_admit_in_scope(key, ctx, probe, || compute(prepared))
+            },
+        )
+        .0
+    }
+
+    fn get_or_compute_admit_in_scope<F>(
         &self,
         key: &ImportedRegistryKey,
         ctx: &dyn ResolverContext,
@@ -713,20 +740,10 @@ impl ImportedRegistryDb {
                         validated_at_generation: entry.validated_at_generation,
                     }
                 }
-                crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(value) => {
-                    // Consume the typed refusal reason the producer
-                    // armed via `SetReasonGuard::arm` right before
-                    // constructing `ComputeAdmission::ReturnOnly(...)`
-                    // (TLS pass-through, single-threaded between set
-                    // and take because the singleflight winner runs
-                    // `compute()` and the lowering match on the same
-                    // thread). Falls back to `SignatureOverflow` on
-                    // an empty slot; debug builds debug-assert so the
-                    // unmigrated callsite surfaces under `cargo test`.
-                    let reason = crate::cache_runtime::consume_return_only_reason_for_lowering()
-                        .unwrap_or(NonAdmissionReason::SignatureOverflow);
-                    CacheAdmission::ReturnOnly { value, reason }
-                }
+                crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+                    value,
+                    reason,
+                } => CacheAdmission::ReturnOnly { value, reason },
                 crate::cache_runtime::singleflight::ComputeAdmission::Failed => {
                     CacheAdmission::Failed {
                         reason: NonAdmissionReason::ComputeFailed,
@@ -766,11 +783,7 @@ impl ImportedRegistryDb {
             ImportedRegistryEntry,
         >,
     {
-        crate::fact_signature_helpers::with_cacheability_scope(
-            ctx.host_for_fact_tracer_install(),
-            |probe| self.get_or_compute_admit(key, ctx, probe, compute),
-        )
-        .0
+        self.get_or_compute_admit(key, ctx, || (), |()| compute())
     }
 
     pub fn invalidate_canonical(&self, canonical_id: &str) {
@@ -827,7 +840,7 @@ impl ImportedRegistryDb {
     /// cooperative-admission inflight slot and admits the candidate into
     /// the store (registering its reverse index) identically to the cold
     /// publish path. NOT for use from production code.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn insert_for_test(&self, key: ImportedRegistryKey, entry: Arc<ImportedRegistryEntry>) {
         let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
         let signature = crate::fact_signature_helpers::ReadSetSignature::new(Arc::clone(
@@ -847,7 +860,7 @@ impl ImportedRegistryDb {
     /// schema-version eviction invariant. The entry payload is a placeholder;
     /// the fixture only inspects `live_count()` before and after
     /// `evict_if_schema_mismatch()`.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
         let key: ImportedRegistryKey = (Arc::from(marker), Arc::from("synthetic"));
         let entry = Arc::new(ImportedRegistryEntry {
@@ -935,8 +948,8 @@ impl DeclarationLookupDb {
 
     /// The SOLE admission funnel for `DeclarationLookupDb`.
     ///
-    /// `probe` is REQUIRED — see [`ShapeCacheDb::get_or_compute`] for the full
-    /// contract. The verdict is consulted AFTER `compute` returns
+    /// The DB opens the cacheability scope itself around the cold closure. The
+    /// verdict is consulted AFTER `compute` returns
     /// ([`single_entry_admission`]), so a non-cacheable read taken INSIDE the
     /// cold build refuses the write; the computed declaration is still returned
     /// to the winner through `ReturnOnly`.
@@ -951,7 +964,28 @@ impl DeclarationLookupDb {
     /// revalidation rejected the entry because the store view moved under the
     /// compute — a straddling value that must be discarded and re-derived, never
     /// served. See [`single_entry_admission`].
-    pub(crate) fn get_or_compute<F>(
+    pub(crate) fn get_or_compute<P, Prepare, F>(
+        &self,
+        key: &DeclarationLookupKey,
+        ctx: &dyn ResolverContext,
+        prepare: Prepare,
+        compute: F,
+    ) -> Option<Arc<ResolvedTypeDeclaration>>
+    where
+        Prepare: FnOnce() -> P,
+        F: FnOnce(P) -> ComputedEntry<ResolvedTypeDeclaration>,
+    {
+        crate::fact_signature_helpers::with_cacheability_scope(
+            ctx.host_for_fact_tracer_install(),
+            |probe| {
+                let prepared = prepare();
+                self.get_or_compute_in_scope(key, ctx, probe, || compute(prepared))
+            },
+        )
+        .0
+    }
+
+    fn get_or_compute_in_scope<F>(
         &self,
         key: &DeclarationLookupKey,
         ctx: &dyn ResolverContext,
@@ -1007,11 +1041,7 @@ impl DeclarationLookupDb {
     where
         F: FnOnce() -> ComputedEntry<ResolvedTypeDeclaration>,
     {
-        crate::fact_signature_helpers::with_cacheability_scope(
-            ctx.host_for_fact_tracer_install(),
-            |probe| self.get_or_compute(key, ctx, probe, compute),
-        )
-        .0
+        self.get_or_compute(key, ctx, || (), |()| compute())
     }
 
     pub fn invalidate_canonical(&self, canonical_id: &str) {
@@ -1081,8 +1111,8 @@ impl ResolvabilityDb {
 
     /// The SOLE admission funnel for `ResolvabilityDb`.
     ///
-    /// `probe` is REQUIRED — see [`ShapeCacheDb::get_or_compute`] for the full
-    /// contract. The verdict is consulted AFTER `compute` returns
+    /// The DB opens the cacheability scope itself around the cold closure. The
+    /// verdict is consulted AFTER `compute` returns
     /// ([`single_entry_admission`]), so a non-cacheable read taken INSIDE the
     /// cold build refuses the write; the computed bool is still returned to the
     /// winner through `ReturnOnly`.
@@ -1091,7 +1121,28 @@ impl ResolvabilityDb {
     /// (an overflowed signature, an unobservable keyed content version, a
     /// request-partial resolution) still rides `ReturnOnly` back to the winner,
     /// so the caller never re-derives a verdict it already has.
-    pub(crate) fn get_or_compute<F>(
+    pub(crate) fn get_or_compute<P, Prepare, F>(
+        &self,
+        key: &ResolvabilityKey,
+        ctx: &dyn ResolverContext,
+        prepare: Prepare,
+        compute: F,
+    ) -> Option<bool>
+    where
+        Prepare: FnOnce() -> P,
+        F: FnOnce(P) -> ComputedEntry<bool>,
+    {
+        crate::fact_signature_helpers::with_cacheability_scope(
+            ctx.host_for_fact_tracer_install(),
+            |probe| {
+                let prepared = prepare();
+                self.get_or_compute_in_scope(key, ctx, probe, || compute(prepared))
+            },
+        )
+        .0
+    }
+
+    fn get_or_compute_in_scope<F>(
         &self,
         key: &ResolvabilityKey,
         ctx: &dyn ResolverContext,
@@ -1136,11 +1187,7 @@ impl ResolvabilityDb {
     where
         F: FnOnce() -> ComputedEntry<bool>,
     {
-        crate::fact_signature_helpers::with_cacheability_scope(
-            ctx.host_for_fact_tracer_install(),
-            |probe| self.get_or_compute(key, ctx, probe, compute),
-        )
-        .0
+        self.get_or_compute(key, ctx, || (), |()| compute())
     }
 
     pub fn invalidate_canonical(&self, canonical_id: &str) {
@@ -1226,8 +1273,8 @@ impl OwnerCollectionDb {
 
     /// The SOLE admission funnel for `OwnerCollectionDb`.
     ///
-    /// `probe` is REQUIRED — see [`ShapeCacheDb::get_or_compute`] for the full
-    /// contract. The verdict is consulted AFTER `compute` returns
+    /// The DB opens the cacheability scope itself around the cold closure. The
+    /// verdict is consulted AFTER `compute` returns
     /// ([`single_entry_admission`]); the computed locator is still returned to
     /// the winner through `ReturnOnly`.
     ///
@@ -1244,7 +1291,28 @@ impl OwnerCollectionDb {
     /// The closure reports a [`ComputedEntry`], whose `Failed` arm means "no
     /// prepared-decl observation at all" — distinct from `Unrooted`, which is a
     /// locator the cache may serve but must not publish.
-    pub(crate) fn get_or_compute<F>(
+    pub(crate) fn get_or_compute<P, Prepare, F>(
+        &self,
+        key: &OwnerCollectionKey,
+        ctx: &dyn ResolverContext,
+        prepare: Prepare,
+        compute: F,
+    ) -> Option<Option<verter_type_expr::locators::AuthoredBodyLocator>>
+    where
+        Prepare: FnOnce() -> P,
+        F: FnOnce(P) -> ComputedEntry<Option<verter_type_expr::locators::AuthoredBodyLocator>>,
+    {
+        crate::fact_signature_helpers::with_cacheability_scope(
+            ctx.host_for_fact_tracer_install(),
+            |probe| {
+                let prepared = prepare();
+                self.get_or_compute_in_scope(key, ctx, probe, || compute(prepared))
+            },
+        )
+        .0
+    }
+
+    fn get_or_compute_in_scope<F>(
         &self,
         key: &OwnerCollectionKey,
         ctx: &dyn ResolverContext,
@@ -1291,11 +1359,7 @@ impl OwnerCollectionDb {
     where
         F: FnOnce() -> ComputedEntry<Option<verter_type_expr::locators::AuthoredBodyLocator>>,
     {
-        crate::fact_signature_helpers::with_cacheability_scope(
-            ctx.host_for_fact_tracer_install(),
-            |probe| self.get_or_compute(key, ctx, probe, compute),
-        )
-        .0
+        self.get_or_compute(key, ctx, || (), |()| compute())
     }
 
     pub fn invalidate_canonical(&self, canonical_id: &str) {
@@ -1729,6 +1793,52 @@ pub struct ShapeCacheDb {
     schema_version: u32,
 }
 
+/// Sealed capability for one Shape-cache owner scope. Only
+/// [`ShapeCacheDb::with_owner_scope`] can construct it, and its tracer borrow
+/// cannot escape the callback. All production Shape-cache writes require this
+/// capability, so key classification, gates, and the complete cold compute can
+/// share one DB-owned scope.
+pub(crate) struct ShapeCacheOwnerScope<'db, 't> {
+    db: &'db ShapeCacheDb,
+    ctx: &'db dyn ResolverContext,
+    probe: &'t crate::fact_signature_helpers::CacheabilityProbe<'t>,
+}
+
+impl ShapeCacheOwnerScope<'_, '_> {
+    #[must_use]
+    pub(crate) fn peek(&self, key: &ShapeCacheKey) -> Option<MaterializedOutputTypeExpr> {
+        self.db.peek(key, self.ctx)
+    }
+
+    pub(crate) fn get_or_compute<F>(
+        &self,
+        key: &ShapeCacheKey,
+        compute: F,
+    ) -> Option<MaterializedOutputTypeExpr>
+    where
+        F: FnOnce() -> Option<(MaterializedOutputTypeExpr, Arc<[FactVersionRef]>)>,
+    {
+        self.db
+            .get_or_compute_in_scope(key, self.ctx, self.probe, compute)
+    }
+
+    #[must_use]
+    pub(crate) fn non_cacheable(&self) -> bool {
+        self.probe.non_cacheable()
+    }
+
+    pub(crate) fn admit_computed(
+        &self,
+        key: &ShapeCacheKey,
+        value: MaterializedOutputTypeExpr,
+        fact_dep_signature: Arc<[FactVersionRef]>,
+    ) -> MaterializedOutputTypeExpr {
+        let value_for_closure = value.clone();
+        self.get_or_compute(key, move || Some((value_for_closure, fact_dep_signature)))
+            .unwrap_or(value)
+    }
+}
+
 impl ShapeCacheDb {
     pub fn new() -> Self {
         Self::with_counter(Arc::new(AtomicU64::new(0)))
@@ -1743,7 +1853,7 @@ impl ShapeCacheDb {
 
     /// Test-only constructor that pins a specific schema version on the Db.
     /// Used by `cache_invariant_migration` fixtures.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
         Self::with_counter_and_schema_version(Arc::new(AtomicU64::new(0)), schema_version)
     }
@@ -1755,6 +1865,25 @@ impl ShapeCacheDb {
             live_counter,
             schema_version,
         }
+    }
+
+    /// Open the sole production admission scope for this DB. The sealed
+    /// capability passed to `f` is the only route to a Shape-cache write.
+    pub(crate) fn with_owner_scope<'db, F, R>(&'db self, ctx: &'db dyn ResolverContext, f: F) -> R
+    where
+        F: for<'t> FnOnce(ShapeCacheOwnerScope<'db, 't>) -> R,
+    {
+        crate::fact_signature_helpers::with_cacheability_scope(
+            ctx.host_for_fact_tracer_install(),
+            |probe| {
+                f(ShapeCacheOwnerScope {
+                    db: self,
+                    ctx,
+                    probe,
+                })
+            },
+        )
+        .0
     }
 
     /// Peek-only lookup: returns the cached value only if its
@@ -1818,7 +1947,7 @@ impl ShapeCacheDb {
     /// BEFORE every read the compute performs, and a fenced serve consumed
     /// there would sail into a `Cacheable` admission. See
     /// [`single_entry_admission`].
-    pub(crate) fn get_or_compute<F>(
+    fn get_or_compute_in_scope<F>(
         &self,
         key: &ShapeCacheKey,
         ctx: &dyn ResolverContext,
@@ -1879,21 +2008,6 @@ impl ShapeCacheDb {
     /// partial. The gate does NOT OR-in any request-global partial sticky.
     /// On refusal the value is returned verbatim and `peek` continues to
     /// miss.
-    pub(crate) fn admit_computed(
-        &self,
-        key: &ShapeCacheKey,
-        ctx: &dyn ResolverContext,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
-        value: MaterializedOutputTypeExpr,
-        fact_dep_signature: Arc<[FactVersionRef]>,
-    ) -> MaterializedOutputTypeExpr {
-        let value_for_closure = value.clone();
-        let admitted = self.get_or_compute(key, ctx, probe, move || {
-            Some((value_for_closure, fact_dep_signature))
-        });
-        admitted.unwrap_or(value)
-    }
-
     /// Test-only: drive [`Self::get_or_compute`] the way a production producer
     /// does — inside a REAL cacheability tracer scope opened around the whole
     /// compute.
@@ -1913,11 +2027,7 @@ impl ShapeCacheDb {
     where
         F: FnOnce() -> Option<(MaterializedOutputTypeExpr, Arc<[FactVersionRef]>)>,
     {
-        crate::fact_signature_helpers::with_cacheability_scope(
-            ctx.host_for_fact_tracer_install(),
-            |probe| self.get_or_compute(key, ctx, probe, compute),
-        )
-        .0
+        self.with_owner_scope(ctx, |scope| scope.get_or_compute(key, compute))
     }
 
     /// Test-only sibling of [`Self::get_or_compute_traced_for_test`] for
@@ -1930,11 +2040,9 @@ impl ShapeCacheDb {
         value: MaterializedOutputTypeExpr,
         fact_dep_signature: Arc<[FactVersionRef]>,
     ) -> MaterializedOutputTypeExpr {
-        crate::fact_signature_helpers::with_cacheability_scope(
-            ctx.host_for_fact_tracer_install(),
-            |probe| self.admit_computed(key, ctx, probe, value, fact_dep_signature),
-        )
-        .0
+        self.with_owner_scope(ctx, |scope| {
+            scope.admit_computed(key, value, fact_dep_signature)
+        })
     }
 
     pub fn invalidate_canonical(&self, canonical_id: &str) {
@@ -2257,7 +2365,7 @@ impl MaterializeStructureDb {
 
     /// Test-only constructor that pins a specific schema version on the Db.
     /// Used by `cache_invariant_migration` fixtures.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
         Self::with_counter_schema_and_budget(
             Arc::new(AtomicU64::new(0)),
@@ -2348,10 +2456,11 @@ impl MaterializeStructureDb {
 
     /// Cooperative-admission cold compute over the materialise-structure
     /// cache, routed through the query-identity split-publish lifecycle
-    /// adapter over the shared store. The producer supplies the cold
-    /// `compute` closure (its `install_fact_tracer`-wrapped
-    /// materialisation), returning a [`ComputeAdmission`] over a
-    /// [`MaterializeStructureEntry`].
+    /// adapter over the shared store. The producer supplies only the cold
+    /// materialisation closure. The DB invokes it through
+    /// [`crate::component_meta_materialize::trace_materialize_compute`], so
+    /// the owner controls the completeness scope, fact tracer, finalisation,
+    /// and typed admission decision before the storage write.
     ///
     /// The store is budgeted, so the publish lifecycle threads the store's
     /// `retention_gate` as the publish fence and the FIFO retention
@@ -2379,7 +2488,7 @@ impl MaterializeStructureDb {
         // `read_set_signature -> signature`.
         let node_compute =
             move || -> CacheAdmission<crate::semantic_query::CacheRead<MaterializeOutcome>> {
-                match compute() {
+                match crate::component_meta_materialize::trace_materialize_compute(ctx, compute) {
                     crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry) => {
                         // Defensive completeness invariant: only
                         // complete/cacheable entries lower into
@@ -2411,18 +2520,10 @@ impl MaterializeStructureDb {
                             validated_at_generation: entry.validated_at_generation,
                         }
                     }
-                    crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(value) => {
-                        // TLS pass-through: consume the typed refusal
-                        // reason the materialise producer armed via
-                        // `SetReasonGuard::arm`. Debug builds
-                        // debug-assert on an empty slot so unmigrated
-                        // callsites surface; release builds fall back
-                        // to `SignatureOverflow`.
-                        let reason =
-                            crate::cache_runtime::consume_return_only_reason_for_lowering()
-                                .unwrap_or(NonAdmissionReason::SignatureOverflow);
-                        CacheAdmission::ReturnOnly { value, reason }
-                    }
+                    crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+                        value,
+                        reason,
+                    } => CacheAdmission::ReturnOnly { value, reason },
                     crate::cache_runtime::singleflight::ComputeAdmission::Failed => {
                         CacheAdmission::Failed {
                             reason: NonAdmissionReason::ComputeFailed,
@@ -2491,7 +2592,7 @@ impl MaterializeStructureDb {
     /// Test-only synthetic-candidate inserter used exclusively by
     /// `cache_invariant_migration` fixtures to verify the cache-cluster
     /// schema-version eviction invariant.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
         use crate::component_meta_materialize::MaterializationScope;
         use crate::semantic_query::{ResolvedDeclSlotIdentity, SemanticNodeId};
@@ -2764,9 +2865,10 @@ impl RefCycleResultDb {
 
     /// Cooperative-admission cold BFS over the ref-cycle cache, routed
     /// through the query-identity split-publish lifecycle adapter over the
-    /// shared store. The producer supplies the `install_fact_tracer`-wrapped
-    /// BFS `compute` closure, returning a [`ComputeAdmission`] over a
-    /// [`RefCycleEntry`].
+    /// shared store. The producer supplies only the BFS closure. The DB invokes
+    /// it through `trace_ref_cycle_compute`, so the owner controls tracer
+    /// installation, evidence finalisation, and typed admission before the
+    /// storage write.
     ///
     /// The store is budgeted, so the publish lifecycle threads the store's
     /// `retention_gate` as the publish fence and the FIFO retention
@@ -2792,21 +2894,24 @@ impl RefCycleResultDb {
         }
     }
 
-    pub(crate) fn get_or_compute_admit<F>(
+    pub(crate) fn get_or_compute_admit<C>(
         &self,
         id: &DeclIdentity,
         ctx: &dyn ResolverContext,
-        compute: F,
+        compute_bfs: C,
     ) -> Option<crate::semantic_query::CacheRead<bool>>
     where
-        F: FnOnce() -> ComputeAdmission<crate::semantic_query::CacheRead<bool>, RefCycleEntry>,
+        C: FnOnce(
+            &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
+            &mut Vec<(Arc<str>, crate::types::Hash16)>,
+        ) -> bool,
     {
         // Unpack the producer's domain `ComputeAdmission<V, Entry>` into a
         // node-level `CacheAdmission<V>`. `result -> value.value`,
         // `dispatch_dep_signature -> value.dep_signature`,
         // `read_set_signature -> signature`.
         let node_compute = move || -> CacheAdmission<crate::semantic_query::CacheRead<bool>> {
-            match compute() {
+            match trace_ref_cycle_compute(ctx, compute_bfs) {
                 ComputeAdmission::Cacheable(entry) => CacheAdmission::Cacheable {
                     value: crate::semantic_query::CacheRead {
                         value: entry.result,
@@ -2819,17 +2924,7 @@ impl RefCycleResultDb {
                     self_root_canonicals: entry.self_root_canonicals,
                     validated_at_generation: entry.validated_at_generation,
                 },
-                ComputeAdmission::ReturnOnly(value) => {
-                    // TLS pass-through: consume the typed refusal
-                    // reason the ref-cycle producer armed via
-                    // `SetReasonGuard::arm` (e.g.
-                    // `RouteGenerationDependency`,
-                    // `SelfRootConflict`, `SignatureOverflow`,
-                    // `ForcedTestRefusal`). Debug builds debug-assert
-                    // on an empty slot so unmigrated callsites surface;
-                    // release builds fall back to `SignatureOverflow`.
-                    let reason = crate::cache_runtime::consume_return_only_reason_for_lowering()
-                        .unwrap_or(NonAdmissionReason::SignatureOverflow);
+                ComputeAdmission::ReturnOnly { value, reason } => {
                     CacheAdmission::ReturnOnly { value, reason }
                 }
                 ComputeAdmission::Failed => CacheAdmission::Failed {
@@ -3206,6 +3301,21 @@ where
         &mut Vec<(Arc<str>, crate::types::Hash16)>,
     ) -> bool,
 {
+    db.get_or_compute_admit(id, ctx, compute_bfs)
+}
+
+/// Run the complete ref-cycle cold computation inside the DB owner's fact
+/// tracer and lower the finalised evidence to a typed admission outcome.
+fn trace_ref_cycle_compute<C>(
+    ctx: &dyn ResolverContext,
+    compute_bfs: C,
+) -> ComputeAdmission<crate::semantic_query::CacheRead<bool>, RefCycleEntry>
+where
+    C: FnOnce(
+        &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
+        &mut Vec<(Arc<str>, crate::types::Hash16)>,
+    ) -> bool,
+{
     // Wrap the BFS cold-compute with `install_fact_tracer`. On `Ok`,
     // merge the traced observation set on top of the visited-identity
     // self-roots. On `Overflow`, return the computed bool via
@@ -3217,155 +3327,148 @@ where
     // guard-free deferred FIFO eviction, publish fence).
     let host = ctx.host_for_fact_tracer_install();
     let provenance = Arc::clone(&host.provenance);
-    let compute = || -> ComputeAdmission<crate::semantic_query::CacheRead<bool>, RefCycleEntry> {
-        // Snapshot the project generation BEFORE the BFS dispatches
-        // any work. A `ProjectGeneration` reset that lands during
-        // the cold BFS window bumps this; the post-compute
-        // revalidation (run under the `publish_fence` read guard)
-        // then rejects the entry, and a stale entry can neither
-        // survive a reset nor publish into a freshly-cleared cache.
-        let validated_at_generation = ctx.project_type_store().current_project_generation();
-        let mut compute_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
-        let mut observed_self_roots: Vec<(Arc<str>, crate::types::Hash16)> = Vec::new();
-        let (result, finalise, non_cacheable_read_observed) =
-            crate::fact_signature_helpers::install_fact_tracer(host, || {
-                compute_bfs(&mut compute_fence, &mut observed_self_roots)
-            });
+    // Snapshot the project generation BEFORE the BFS dispatches
+    // any work. A `ProjectGeneration` reset that lands during
+    // the cold BFS window bumps this; the post-compute
+    // revalidation (run under the `publish_fence` read guard)
+    // then rejects the entry, and a stale entry can neither
+    // survive a reset nor publish into a freshly-cleared cache.
+    let validated_at_generation = ctx.project_type_store().current_project_generation();
+    let mut compute_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
+    let mut observed_self_roots: Vec<(Arc<str>, crate::types::Hash16)> = Vec::new();
+    let (result, finalise) = crate::fact_signature_helpers::install_fact_tracer(host, || {
+        compute_bfs(&mut compute_fence, &mut observed_self_roots)
+    });
+    provenance
+        .ref_cycle_fact_tracer_installs
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // The dispatch-return fence is the set of files the BFS
+    // actually read. It is built up front — before the
+    // `RouteGeneration` refusal scan — so every `ReturnOnly`
+    // exit can carry it. A `ReturnOnly` `CacheRead` MUST report
+    // this fence: the caller (`ref_root_reaches_transitive_cycle_node`)
+    // merges `read.dep_signature` into its own `local_fence`, so
+    // a `ReturnOnly` that dropped the fence would let an outer
+    // computation be cached without the files the BFS read.
+    // Carrying it makes the `ReturnOnly` path observably
+    // equivalent to the `None`-arm uncached-fallback (which
+    // extends the caller's fence via `local_fence.extend(fence)`)
+    // without running a second uncached BFS. It is the entry's
+    // dispatch-return signature, NOT a cache-validity rail — the
+    // fact carrier built by `ref_cycle_read_set` is the validity
+    // oracle.
+    let dispatch_dep_signature: DepSignature = Arc::from(compute_fence.into_boxed_slice());
+    // `cache_suppress` stays `false`: the caller does not
+    // consume it. A `ReturnOnly` outcome is non-shareable across
+    // cooperative joiners — the winner alone receives this
+    // `CacheRead`, and a joiner that coalesced onto a
+    // `ReturnOnly` winner forks and cold-recomputes its own BFS
+    // (so it builds its own view-accurate fence). The fence
+    // therefore reaches the winner's caller through
+    // `dep_signature`, never through `cache_suppress`.
+    let return_only_value = |dep_signature: DepSignature| crate::semantic_query::CacheRead {
+        value: result,
+        dep_signature,
+        walker_diagnostics: Arc::from([]),
+        cache_suppress: false,
+        result_is_partial: false,
+    };
+    // ReturnOnly never publishes — fenced-serve arm. A BFS whose
+    // traced scope consumed a FENCED (ReturnOnly) IndexedReady
+    // serve derived its reachability answer from a
+    // served-without-publication artifact while its fact carrier
+    // validates against the live view. The computed bool is still
+    // returned via `ReturnOnly`, carrying the BFS fence.
+    if matches!(
+        &finalise,
+        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+    ) {
         provenance
-            .ref_cycle_fact_tracer_installs
+            .ref_cycle_overflow_refusals
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // The dispatch-return fence is the set of files the BFS
-        // actually read. It is built up front — before the
-        // `RouteGeneration` refusal scan — so every `ReturnOnly`
-        // exit can carry it. A `ReturnOnly` `CacheRead` MUST report
-        // this fence: the caller (`ref_root_reaches_transitive_cycle_node`)
-        // merges `read.dep_signature` into its own `local_fence`, so
-        // a `ReturnOnly` that dropped the fence would let an outer
-        // computation be cached without the files the BFS read.
-        // Carrying it makes the `ReturnOnly` path observably
-        // equivalent to the `None`-arm uncached-fallback (which
-        // extends the caller's fence via `local_fence.extend(fence)`)
-        // without running a second uncached BFS. It is the entry's
-        // dispatch-return signature, NOT a cache-validity rail — the
-        // fact carrier built by `ref_cycle_read_set` is the validity
-        // oracle.
-        let dispatch_dep_signature: DepSignature = Arc::from(compute_fence.into_boxed_slice());
-        // `cache_suppress` stays `false`: the caller does not
-        // consume it. A `ReturnOnly` outcome is non-shareable across
-        // cooperative joiners — the winner alone receives this
-        // `CacheRead`, and a joiner that coalesced onto a
-        // `ReturnOnly` winner forks and cold-recomputes its own BFS
-        // (so it builds its own view-accurate fence). The fence
-        // therefore reaches the winner's caller through
-        // `dep_signature`, never through `cache_suppress`.
-        let return_only_value = |dep_signature: DepSignature| crate::semantic_query::CacheRead {
-            value: result,
-            dep_signature,
-            walker_diagnostics: Arc::from([]),
-            cache_suppress: false,
-            result_is_partial: false,
+        return ComputeAdmission::ReturnOnly {
+            value: return_only_value(Arc::clone(&dispatch_dep_signature)),
+            reason: crate::cache_runtime::NonAdmissionReason::GenerationSuperseded,
         };
-        // ReturnOnly never publishes — fenced-serve arm. A BFS whose
-        // traced scope consumed a FENCED (ReturnOnly) IndexedReady
-        // serve derived its reachability answer from a
-        // served-without-publication artifact while its fact carrier
-        // validates against the live view. The computed bool is still
-        // returned via `ReturnOnly`, carrying the BFS fence.
-        if non_cacheable_read_observed {
-            provenance
-                .ref_cycle_overflow_refusals
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
-                crate::cache_runtime::NonAdmissionReason::GenerationSuperseded,
-            );
-            return ComputeAdmission::ReturnOnly(return_only_value(Arc::clone(
-                &dispatch_dep_signature,
-            )));
-        }
-        // Refuse shared admission when the BFS fence carries a
-        // `RouteGeneration` dependency — route generation has no
-        // authoritative validating source, so an entry rooted on
-        // it could not detect a content edit to the route-observed
-        // file. The computed bool is still returned via `ReturnOnly`,
-        // carrying the BFS fence.
-        if dispatch_dep_signature
-            .iter()
-            .any(|(_, v)| matches!(v, crate::semantic_query::DepVersion::RouteGeneration(_)))
-        {
-            provenance
-                .ref_cycle_overflow_refusals
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
-                crate::cache_runtime::NonAdmissionReason::RouteGenerationDependency,
-            );
-            return ComputeAdmission::ReturnOnly(return_only_value(Arc::clone(
-                &dispatch_dep_signature,
-            )));
-        }
-        // Test-only injection: deterministically reproduce the
-        // production refusal contract (tracer overflow / unrootable
-        // self-root / `RouteGeneration` fence dependency) AFTER the
-        // real BFS has populated `compute_fence`. The `ReturnOnly`
-        // `CacheRead` carries the real BFS fence — exactly as every
-        // production refusal site does.
-        #[cfg(test)]
-        if FORCE_REF_CYCLE_RETURN_ONLY.with(|f| f.get()) {
-            provenance
-                .ref_cycle_overflow_refusals
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
-                crate::cache_runtime::NonAdmissionReason::ForcedTestRefusal,
-            );
-            return ComputeAdmission::ReturnOnly(return_only_value(Arc::clone(
-                &dispatch_dep_signature,
-            )));
-        }
-        match finalise {
-            crate::resolver_core::FactReadSetFinalise::Ok(traced) => {
-                // Build the observed-root carrier: visited-identity
-                // self-roots prepended, traced facts merged on top.
-                match ref_cycle_read_set(&observed_self_roots, &traced) {
-                    Some((facts, self_root_canonicals)) => {
-                        ComputeAdmission::Cacheable(RefCycleEntry {
-                            result,
-                            read_set_signature:
-                                crate::fact_signature_helpers::ReadSetSignature::new(facts),
-                            dispatch_dep_signature,
-                            self_root_canonicals,
-                            validated_at_generation,
-                        })
-                    }
-                    None => {
-                        // A torn observation among the visited
-                        // self-roots — the value is valid but the
-                        // signature cannot be built strictly. The
-                        // computed bool is returned via `ReturnOnly`,
-                        // carrying the BFS fence.
-                        provenance
-                            .ref_cycle_overflow_refusals
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
-                            crate::cache_runtime::NonAdmissionReason::SelfRootConflict,
-                        );
-                        ComputeAdmission::ReturnOnly(return_only_value(dispatch_dep_signature))
+    }
+    // Refuse shared admission when the BFS fence carries a
+    // `RouteGeneration` dependency — route generation has no
+    // authoritative validating source, so an entry rooted on
+    // it could not detect a content edit to the route-observed
+    // file. The computed bool is still returned via `ReturnOnly`,
+    // carrying the BFS fence.
+    if dispatch_dep_signature
+        .iter()
+        .any(|(_, v)| matches!(v, crate::semantic_query::DepVersion::RouteGeneration(_)))
+    {
+        provenance
+            .ref_cycle_overflow_refusals
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return ComputeAdmission::ReturnOnly {
+            value: return_only_value(Arc::clone(&dispatch_dep_signature)),
+            reason: crate::cache_runtime::NonAdmissionReason::RouteGenerationDependency,
+        };
+    }
+    // Test-only injection: deterministically reproduce the
+    // production refusal contract (tracer overflow / unrootable
+    // self-root / `RouteGeneration` fence dependency) AFTER the
+    // real BFS has populated `compute_fence`. The `ReturnOnly`
+    // `CacheRead` carries the real BFS fence — exactly as every
+    // production refusal site does.
+    #[cfg(test)]
+    if FORCE_REF_CYCLE_RETURN_ONLY.with(|f| f.get()) {
+        provenance
+            .ref_cycle_overflow_refusals
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return ComputeAdmission::ReturnOnly {
+            value: return_only_value(Arc::clone(&dispatch_dep_signature)),
+            reason: crate::cache_runtime::NonAdmissionReason::ForcedTestRefusal,
+        };
+    }
+    match finalise {
+        crate::resolver_core::FactReadSetFinalise::Ok(traced) => {
+            // Build the observed-root carrier: visited-identity
+            // self-roots prepended, traced facts merged on top.
+            match ref_cycle_read_set(&observed_self_roots, &traced) {
+                Some((facts, self_root_canonicals)) => ComputeAdmission::Cacheable(RefCycleEntry {
+                    result,
+                    read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(facts),
+                    dispatch_dep_signature,
+                    self_root_canonicals,
+                    validated_at_generation,
+                }),
+                None => {
+                    // A torn observation among the visited
+                    // self-roots — the value is valid but the
+                    // signature cannot be built strictly. The
+                    // computed bool is returned via `ReturnOnly`,
+                    // carrying the BFS fence.
+                    provenance
+                        .ref_cycle_overflow_refusals
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    ComputeAdmission::ReturnOnly {
+                        value: return_only_value(dispatch_dep_signature),
+                        reason: crate::cache_runtime::NonAdmissionReason::SelfRootConflict,
                     }
                 }
             }
-            crate::resolver_core::FactReadSetFinalise::Overflow => {
-                provenance
-                    .ref_cycle_overflow_refusals
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                // Tracer overflowed — return the computed bool via
-                // `ReturnOnly`, carrying the BFS fence; no second
-                // uncached BFS.
-                let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
-                    crate::cache_runtime::NonAdmissionReason::SignatureOverflow,
-                );
-                ComputeAdmission::ReturnOnly(return_only_value(dispatch_dep_signature))
+        }
+        crate::resolver_core::FactReadSetFinalise::NonCacheable(_) => {
+            unreachable!("non-cacheable finalise returned above before cache admission")
+        }
+        crate::resolver_core::FactReadSetFinalise::Overflow => {
+            provenance
+                .ref_cycle_overflow_refusals
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Tracer overflowed — return the computed bool via
+            // `ReturnOnly`, carrying the BFS fence; no second
+            // uncached BFS.
+            ComputeAdmission::ReturnOnly {
+                value: return_only_value(dispatch_dep_signature),
+                reason: crate::cache_runtime::NonAdmissionReason::SignatureOverflow,
             }
         }
-    };
-    db.get_or_compute_admit(id, ctx, compute)
+    }
 }
 
 /// Build the observed-root fact signature + self-root canonical set
@@ -3474,9 +3577,9 @@ fn ref_cycle_read_set(
 /// producer.
 ///
 /// Reached today only through tests and the `for_tests` wrapper (both
-/// gated `cfg(any(test, debug_assertions))`); gated to match so the
-/// producer is not a dead symbol in release.
-#[cfg(any(test, debug_assertions))]
+/// gated by the explicit `test-support` feature); gated to match so the
+/// producer is absent from every ordinary production build.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn app_config_no_override_proof_get_or_compute(
     ctx: &dyn crate::resolver_core::ResolverContext,
     key: &crate::app_config_proof_db::AppConfigNoOverrideProofKey,
@@ -3534,7 +3637,7 @@ pub(crate) fn app_config_no_override_proof_get_or_compute(
             .map(|ir| !ir.declares_interface_app_config)
             .unwrap_or(true)
     };
-    let (no_override, finalise, non_cacheable_read_observed) =
+    let (no_override, finalise) =
         crate::fact_signature_helpers::install_fact_tracer(host, cold_body);
     host.provenance
         .app_config_proof_fact_tracer_installs
@@ -3543,12 +3646,6 @@ pub(crate) fn app_config_no_override_proof_get_or_compute(
     // from a served-without-publication artifact must not seal a
     // shared no-override entry whose facts validate against the live
     // view. Decline to publish; the consumer takes the slow path.
-    if non_cacheable_read_observed {
-        host.provenance
-            .app_config_proof_overflow_refusals
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        return None;
-    }
     match finalise {
         crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
             if !no_override {
@@ -3562,6 +3659,12 @@ pub(crate) fn app_config_no_override_proof_get_or_compute(
             Some(Arc::new(
                 crate::app_config_proof_db::AppConfigNoOverrideProofEntry { fact_dep_signature },
             ))
+        }
+        crate::resolver_core::FactReadSetFinalise::NonCacheable(_) => {
+            host.provenance
+                .app_config_proof_overflow_refusals
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            None
         }
         crate::resolver_core::FactReadSetFinalise::Overflow => {
             host.provenance

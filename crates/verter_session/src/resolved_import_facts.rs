@@ -51,7 +51,7 @@ use dashmap::DashMap;
 use verter_semantic::analysis::Hash16;
 use verter_semantic::facts::registry::{Fact, InternedName, InternedSpecifier, SymbolSpace};
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Substrate version for [`ResolvedImportFactsDb`] entries.
@@ -282,18 +282,18 @@ pub struct ResolvedImportFactsDb {
     /// `VerterHost::admit_resolved_import_facts_for_owner` after a
     /// successful `insert_if_absent`. Snapshot via
     /// [`Self::positive_admissions`].
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     positive_admissions: AtomicU64,
     /// Producer-admission provenance counter — negative (unresolved)
     /// entries admitted as facts so the validator can detect when a
     /// previously unresolved binding becomes resolved on workspace
     /// bump.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     negative_admissions: AtomicU64,
     /// Producer-admission provenance counter — namespace
     /// (`import * as ns from "X"`) entries admitted. Subset of
     /// positive admissions for v8 AMENDMENT-S discrimination.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     namespace_admissions: AtomicU64,
 }
 
@@ -314,6 +314,29 @@ impl ResolvedImportFactsDb {
         self.entries.get(key).map(|v| Arc::clone(&*v))
     }
 
+    /// Owner-controlled cold admission. The build closure executes only for
+    /// the vacant key while the owner holds the DashMap entry authority; the
+    /// raw map write is not exposed to production callers. `Some(metadata)`
+    /// means this call built and admitted the value, while `None` means an
+    /// existing deterministic value won the race.
+    pub(crate) fn get_or_compute<M, F>(
+        &self,
+        key: ResolvedImportFactsKey,
+        compute: F,
+    ) -> (Arc<ResolvedImportFacts>, Option<M>)
+    where
+        F: FnOnce() -> (Arc<ResolvedImportFacts>, M),
+    {
+        match self.entries.entry(key) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => (Arc::clone(entry.get()), None),
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let (value, metadata) = compute();
+                entry.insert(Arc::clone(&value));
+                (value, Some(metadata))
+            }
+        }
+    }
+
     /// Admit a freshly-resolved payload. Returns `true` when the
     /// caller's entry won the admission race, `false` when an
     /// existing entry was already present.
@@ -322,17 +345,13 @@ impl ResolvedImportFactsDb {
     /// deterministic recomputation, so the existing entry is
     /// preserved to keep `Arc` identity stable for consumers
     /// already holding a clone.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn insert_if_absent(
         &self,
         key: ResolvedImportFactsKey,
         value: Arc<ResolvedImportFacts>,
     ) -> bool {
-        let mut admitted = false;
-        self.entries.entry(key).or_insert_with(|| {
-            admitted = true;
-            value
-        });
-        admitted
+        self.get_or_compute(key, || (value, ())).1.is_some()
     }
 
     /// Number of cached entries. Used by tests + diagnostics.
@@ -364,7 +383,7 @@ impl ResolvedImportFactsDb {
     /// Test-only — the snapshot accessor
     /// [`Self::resolved_import_facts_positive_admissions`] reads
     /// this counter from discriminating tests.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn record_positive_admission(&self) {
         self.positive_admissions.fetch_add(1, Ordering::Relaxed);
     }
@@ -372,7 +391,7 @@ impl ResolvedImportFactsDb {
     /// Bump the negative-admission provenance counter. Called by the
     /// production producer after each per-binding negative
     /// (unresolved) entry it admits.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn record_negative_admission(&self) {
         self.negative_admissions.fetch_add(1, Ordering::Relaxed);
     }
@@ -380,7 +399,7 @@ impl ResolvedImportFactsDb {
     /// Bump the namespace-admission provenance counter. Called by
     /// the production producer when the admitted entry's `space`
     /// is [`SymbolSpace::Namespace`].
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn record_namespace_admission(&self) {
         self.namespace_admissions.fetch_add(1, Ordering::Relaxed);
     }
@@ -389,14 +408,14 @@ impl ResolvedImportFactsDb {
     /// load — counter is a discriminator, not a synchronisation
     /// primitive). Used by `discriminating tests to verify the
     /// production producer ran (delta > 0 against pre-state).
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn resolved_import_facts_positive_admissions(&self) -> u64 {
         self.positive_admissions.load(Ordering::Relaxed)
     }
 
     /// Snapshot the negative-admission provenance counter.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn resolved_import_facts_negative_admissions(&self) -> u64 {
         self.negative_admissions.load(Ordering::Relaxed)
@@ -404,7 +423,7 @@ impl ResolvedImportFactsDb {
 
     /// Snapshot the namespace-admission provenance counter (subset
     /// of positive admissions where `space == SymbolSpace::Namespace`).
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn resolved_import_facts_namespace_admissions(&self) -> u64 {
         self.namespace_admissions.load(Ordering::Relaxed)

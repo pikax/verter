@@ -54,6 +54,7 @@ fn slot_binding_graph_fact_tracer_carries_module_aug_index_shape() {
 
     let captured = match finalise {
         FactReadSetFinalise::Ok(sig) => sig,
+        FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
         FactReadSetFinalise::Overflow => panic!(
             "Matrix slice: tracer overflowed on a single-fact \
              signature — substrate bug, not test bug"

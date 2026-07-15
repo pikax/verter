@@ -387,6 +387,7 @@ impl VerterHost {
             test_force: crate::host_test_force::TestForceKnobs::default(),
             #[cfg(test)]
             macro_hot_lowering_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(any(test, feature = "test-support"))]
             compile_tier_prefetch_invocations: std::sync::atomic::AtomicUsize::new(0),
             signature_overflow_at_install: std::sync::atomic::AtomicU64::new(0),
         }

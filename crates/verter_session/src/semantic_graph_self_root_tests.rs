@@ -1161,7 +1161,7 @@ fn cold_owner_bubbles_carrier_into_outer_tracer() {
     // The cold-owner publish path must bubble the freshly-built carrier
     // (whose facts rail leads with the self-root `FileWholeHash` for `c`)
     // into this outer tracer.
-    let ((), cold_finalise, _) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
+    let ((), cold_finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
         let dispatch = host.semantic_dispatch();
         let r = dispatch.execute_type_node(key.clone());
         assert!(
@@ -1172,6 +1172,9 @@ fn cold_owner_bubbles_carrier_into_outer_tracer() {
 
     let cold_facts = match cold_finalise {
         FactReadSetFinalise::Ok(sig) => sig,
+        FactReadSetFinalise::NonCacheable(_) => {
+            panic!("cold ResolveDecl unexpectedly consumed a non-cacheable read")
+        }
         FactReadSetFinalise::Overflow => {
             panic!("outer tracer overflowed — a single ResolveDecl cold build cannot overflow")
         }
@@ -1194,12 +1197,15 @@ fn cold_owner_bubbles_carrier_into_outer_tracer() {
     // warm-hit-child coverage MUST equal the cold-built-child coverage:
     // a parent's dep set is path-independent regardless of whether the
     // child was cold or warm.
-    let ((), warm_finalise, _) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
+    let ((), warm_finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
         let dispatch = host.semantic_dispatch();
         let _ = dispatch.execute_type_node(key.clone());
     });
     let warm_facts = match warm_finalise {
         FactReadSetFinalise::Ok(sig) => sig,
+        FactReadSetFinalise::NonCacheable(_) => {
+            panic!("warm ResolveDecl unexpectedly consumed a non-cacheable read")
+        }
         FactReadSetFinalise::Overflow => panic!("warm outer tracer overflowed — setup error"),
     };
     assert!(

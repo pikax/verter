@@ -8,8 +8,10 @@
 
 use std::sync::Arc;
 
+#[cfg(any(test, feature = "test-support"))]
+use crate::resolver_core::PermissiveStoreView;
 use crate::resolver_core::{
-    FactVersionRef, PermissiveStoreView, SingleflightGroup, StoreView, ValidatedFactCache,
+    FactVersionRef, ResolverContext, SingleflightGroup, StoreView, ValidatedFactCache,
 };
 
 /// Result of resolving an imported type root.
@@ -97,6 +99,7 @@ impl ImportedRootDb {
     }
 
     /// Permissive lookup without store-view validation.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn get_any(
         &self,
         provider_canonical: &str,
@@ -107,20 +110,27 @@ impl ImportedRootDb {
     }
 
     /// Look up or resolve a root for `(provider, imported_name)` with fact validation.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn get_or_resolve_with_facts<V, F>(
         &self,
         provider_canonical: &str,
         imported_name: &str,
         view: &V,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        host: &crate::VerterHost,
         resolve: F,
     ) -> Option<Arc<ImportedRootResult>>
     where
         V: StoreView + ?Sized,
         F: Fn() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
     {
-        self.get_or_resolve_returning_facts(provider_canonical, imported_name, view, probe, resolve)
-            .map(|(arc, _)| arc)
+        self.get_or_resolve_returning_facts_with_context(
+            provider_canonical,
+            imported_name,
+            view,
+            host,
+            resolve,
+        )
+        .map(|(arc, _)| arc)
     }
 
     /// Like [`Self::get_or_resolve_with_facts`] but ALSO returns the
@@ -129,7 +139,54 @@ impl ImportedRootDb {
     /// cache entry (e.g. `OwnerImportSurfaceDb`) consume this
     /// variant so the dependent cache observes every chain
     /// participant — not only the final tuple.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn get_or_resolve_returning_facts<V, F>(
+        &self,
+        provider_canonical: &str,
+        imported_name: &str,
+        view: &V,
+        host: &crate::VerterHost,
+        resolve: F,
+    ) -> Option<(Arc<ImportedRootResult>, Arc<[FactVersionRef]>)>
+    where
+        V: StoreView + ?Sized,
+        F: Fn() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
+    {
+        self.get_or_resolve_returning_facts_with_context(
+            provider_canonical,
+            imported_name,
+            view,
+            host,
+            resolve,
+        )
+    }
+
+    pub(crate) fn get_or_resolve_returning_facts_with_context<V, F>(
+        &self,
+        provider_canonical: &str,
+        imported_name: &str,
+        view: &V,
+        ctx: &dyn ResolverContext,
+        resolve: F,
+    ) -> Option<(Arc<ImportedRootResult>, Arc<[FactVersionRef]>)>
+    where
+        V: StoreView + ?Sized,
+        F: Fn() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
+    {
+        let tracer_host = ctx.host_for_fact_tracer_install();
+        crate::fact_signature_helpers::with_cacheability_scope(tracer_host, |probe| {
+            self.get_or_resolve_returning_facts_in_scope(
+                provider_canonical,
+                imported_name,
+                view,
+                probe,
+                resolve,
+            )
+        })
+        .0
+    }
+
+    fn get_or_resolve_returning_facts_in_scope<V, F>(
         &self,
         provider_canonical: &str,
         imported_name: &str,
@@ -354,9 +411,13 @@ impl ImportedRootDb {
         V: StoreView + ?Sized,
         F: Fn() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
     {
-        test_cacheability_scope(|probe| {
-            self.get_or_resolve_with_facts(provider_canonical, imported_name, view, probe, resolve)
-        })
+        self.get_or_resolve_with_facts(
+            provider_canonical,
+            imported_name,
+            view,
+            test_host(),
+            resolve,
+        )
     }
 
     /// Insert a pre-resolved root proof. **Test-only**: the empty-facts
@@ -372,18 +433,6 @@ impl ImportedRootDb {
         let key = (provider_canonical.clone(), imported_name);
         let _ = provider_canonical;
         self.roots.insert(key, result, Vec::new());
-    }
-
-    /// Insert a pre-resolved root proof with explicit fact validation.
-    pub fn insert_with_facts(
-        &self,
-        provider_canonical: String,
-        imported_name: String,
-        result: ImportedRootResult,
-        facts: Vec<FactVersionRef>,
-    ) {
-        let key = (provider_canonical, imported_name);
-        self.roots.insert(key, result, facts);
     }
 
     /// Seed roots from a legacy `resolved_type_roots` map.
@@ -479,17 +528,13 @@ impl crate::invalidation_domain::InvalidationByCanonical for ImportedRootDb {
     }
 }
 
-/// Open a cacheability tracer scope for the in-crate cache unit tests. The scope
-/// is the ONLY mint for a `CacheabilityProbe`; the host is a scope carrier, not a
-/// fixture under test, so it is created once per process.
+/// Host used by in-crate cache unit tests. Production callers supply their
+/// request's resolver context; the DB owns the tracer scope in both cases.
 #[cfg(test)]
-fn test_cacheability_scope<R>(
-    f: impl for<'t> FnOnce(&crate::fact_signature_helpers::CacheabilityProbe<'t>) -> R,
-) -> R {
+fn test_host() -> &'static crate::VerterHost {
     static TEST_SCOPE_HOST: std::sync::OnceLock<crate::VerterHost> = std::sync::OnceLock::new();
-    let host = TEST_SCOPE_HOST
-        .get_or_init(|| crate::VerterHost::new_standalone(crate::types::HostConfig::default()));
-    crate::fact_signature_helpers::with_cacheability_scope(host, f).0
+    TEST_SCOPE_HOST
+        .get_or_init(|| crate::VerterHost::new_standalone(crate::types::HostConfig::default()))
 }
 
 #[cfg(test)]

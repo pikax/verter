@@ -2841,7 +2841,7 @@ fn non_budget_partial_gates_fallthrough_admission_with_budget_unexhausted() {
         "the cold-compute scope must carry a Partial after a non-budget fold"
     );
 
-    // (a) `store_node` refuses a cacheable node on the typed-completeness gate.
+    // (a) The owner-run node admission refuses on typed completeness.
     //
     // The cacheability probe is CLEAN here (no fenced serve, no overflow), which
     // is what isolates the rail under test: the ONLY thing that can refuse this
@@ -2850,24 +2850,16 @@ fn non_budget_partial_gates_fallthrough_admission_with_budget_unexhausted() {
     let key = intrinsic_surface_key(&anchor, generation, "div");
     let members = host.intrinsic_members_for_tag("div");
     let node = host.build_runtime_intrinsic_surface_node(&members);
-    let ((), probe_non_cacheable) =
-        crate::fact_signature_helpers::with_cacheability_scope(&host, |probe| {
-            host.resolver_runtime()
-                .fallthrough
-                .store_node(key.clone(), node, probe);
-        });
-    assert!(
-        !probe_non_cacheable,
-        "isolation: the probe must be CLEAN, so the refusal below is attributable to the \
-         typed-completeness gate alone"
-    );
+    host.resolver_runtime()
+        .fallthrough
+        .compute_and_maybe_admit(&host, || ((), Some((key.clone(), node))));
     let view = FallthroughRequestHost::snapshot_store_view(&host);
     assert!(
         host.resolver_runtime()
             .fallthrough
             .get_cached_node(&key, &view)
             .is_none(),
-        "a NON-budget partial (budget not exhausted) MUST refuse store_node admission — the gate is \
+        "a NON-budget partial (budget not exhausted) MUST refuse owner admission — the gate is \
          typed completeness, NOT is_exhausted() (pre-fix is_exhausted()=false stored the node)"
     );
 
@@ -2883,7 +2875,8 @@ fn non_budget_partial_gates_fallthrough_admission_with_budget_unexhausted() {
         fact_versions: Vec::new(),
     };
     crate::fact_signature_helpers::with_cacheability_scope(&host, |probe| {
-        host.cache_fallthrough_result(canonical, None, &result, probe);
+        let admission = crate::resolver_core::FallthroughStableAdmission::from_test_scope(probe);
+        host.cache_fallthrough_result(canonical, None, &result, &admission);
     });
     let mirror_present = host
         .derived_raw_cache()
@@ -3121,6 +3114,46 @@ fn prepared_type_decl_lookup_rejects_stale_cache_entries() {
     assert!(
         host.prepared_type_decl("/src/types.ts", "Props").is_none(),
         "prepared lookup without an explicit store view should also reject the stale bundle"
+    );
+}
+
+#[test]
+fn resolved_type_declaration_same_name_edit_never_replays_stale_metadata() {
+    let host = make_host();
+    let canonical = "/src/types.ts";
+
+    upsert_non_sfc(&host, canonical, "export interface Props { label: string }");
+    let _ = host
+        .ensure_indexed_ready(canonical)
+        .expect("the initial declaration must be indexed");
+
+    let before =
+        crate::host_manage::jsdoc_resolve::resolve_type_declaration(&host, canonical, "Props");
+    assert_eq!(
+        before.kind,
+        crate::resolver_core::ResolvedDeclarationKind::Interface,
+        "control: the first lookup must resolve the authored interface"
+    );
+
+    upsert_non_sfc(
+        &host,
+        canonical,
+        "export type Props = { label: string; count: number }",
+    );
+    let _ = host
+        .ensure_indexed_ready(canonical)
+        .expect("the edited declaration must be re-indexed");
+
+    let after =
+        crate::host_manage::jsdoc_resolve::resolve_type_declaration(&host, canonical, "Props");
+    assert_eq!(
+        after.kind,
+        crate::resolver_core::ResolvedDeclarationKind::TypeAlias,
+        "a same-name edit must resolve current declaration metadata rather than replaying a stale symbol-cache entry: before={before:?}, after={after:?}"
+    );
+    assert_ne!(
+        after.span, before.span,
+        "the declaration span must move with the edited body"
     );
 }
 

@@ -239,6 +239,9 @@ mod file_source_env_observation_tests {
         );
         let facts = match read_set.finalise() {
             FactReadSetFinalise::Ok(facts) => facts,
+            FactReadSetFinalise::NonCacheable(_) => {
+                panic!("the observed source-env fact is cacheable")
+            }
             FactReadSetFinalise::Overflow => panic!("one fact cannot overflow the signature cap"),
         };
         assert_eq!(
@@ -299,7 +302,8 @@ mod tracer_cacheability_tests {
 
         // The raw 3-tuple entry: overflow lands in `finalise`, and the
         // non-cacheable-read bit stays FALSE (no fenced serve / lease miss ran).
-        let (value, finalise, non_cacheable_read_observed) = install_fact_tracer(&host, || 7u32);
+        let (value, finalise) = install_fact_tracer(&host, || 7u32);
+        let non_cacheable_read_observed = matches!(&finalise, FactReadSetFinalise::NonCacheable(_));
         assert_eq!(value, 7, "the traced value flows to the caller verbatim");
         assert!(
             matches!(finalise, FactReadSetFinalise::Overflow),
@@ -371,7 +375,7 @@ mod tracer_cacheability_tests {
         // The signature-CONSUMING boundary (it finalises and roots its entry on the
         // finalised set) with TWO nested cacheability scopes inside it — the shape
         // the producer rewiring creates.
-        let (_v, finalise, _nc) = install_fact_tracer(&host, || {
+        let (_v, finalise) = install_fact_tracer(&host, || {
             let (inner, inner_non_cacheable) = install_fact_tracer_cacheability(&host, || {
                 let (deepest, deepest_non_cacheable) =
                     install_fact_tracer_cacheability(&host, || 1u32);

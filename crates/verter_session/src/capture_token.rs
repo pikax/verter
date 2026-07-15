@@ -14,7 +14,7 @@
 //!
 //! This module is `pub(crate)`; integration tests reach the API through
 //! the [`for_tests`](crate::for_tests) re-export module gated
-//! `cfg(any(test, debug_assertions))`. Production release builds do not
+//! `cfg(any(test, feature = "test-support"))`. Production release builds do not
 //! extend the public surface — `for_tests` is absent in the release
 //! build configuration.
 //!
@@ -23,14 +23,14 @@
 //! Integration tests in `crates/verter_session/tests/*.rs` build as a
 //! separate crate target. Cargo compiles the lib for those tests with
 //! `cfg(test)` UNSET but `debug_assertions` SET, so the whole module is
-//! gated `cfg(any(test, debug_assertions))` (declared in `lib.rs`):
+//! gated `cfg(any(test, feature = "test-support"))` (declared in `lib.rs`):
 //! 1. `pub(crate)` keeps the API out of the public crate surface.
 //! 2. The same gate covers the `for_tests` re-export, so release-build
 //!    downstream consumers cannot access it.
 //! 3. `cargo build --release` has `debug_assertions` OFF, so neither this
 //!    module nor its recording hooks are compiled — release pays zero
 //!    cost. Every production `with_active_capture(..)` recording site
-//!    carries the matching `#[cfg(any(test, debug_assertions))]` so the
+//!    carries the matching `#[cfg(any(test, feature = "test-support"))]` so the
 //!    hook simply does not exist in release (no thread-local lookup).
 
 use std::collections::{HashMap, HashSet};

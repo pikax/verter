@@ -53,7 +53,7 @@ mod inflight;
 mod interner;
 mod reverse_index;
 mod stats;
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 mod test_gates;
 // Test-only observability surface for `SemanticGraphStore` (in-flight
 // abort driver, joiner-admission strong-count + condvar-pairing probes,
@@ -61,9 +61,9 @@ mod test_gates;
 // memo logic here stays under the Tier-2 module-size budget. Gated out of
 // release: its only consumers are tests and the `for_tests` shims, both of
 // which build with `debug_assertions` (test profile) or `cfg(test)`.
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 mod test_support;
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub use test_support::{
     empty_signature_for_tests, test_trigger_inflight_abort, TestForceColdAbortGuard,
@@ -91,9 +91,9 @@ use inflight::{
 };
 use stats::{AtomicSemanticGraphStats, EntriesLockGuard, InFlightStatsGuard};
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 use test_gates::validate_running_probe;
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 pub use test_gates::{ValidateRunningProbeGuard, VALIDATE_RUNNING_PROBE_TEST_LOCK};
 
 /// Test-only: the stable variant label of the [`FamilyKey`] a
@@ -101,7 +101,7 @@ pub use test_gates::{ValidateRunningProbeGuard, VALIDATE_RUNNING_PROBE_TEST_LOCK
 /// guards assert the family-domain mapping (e.g. that `Relate` maps to the
 /// dedicated `FamilyKey::Relate`, never aliasing `IndexedAccess`) without
 /// exposing the `pub(super)` `FamilyKey` taxonomy outside the crate.
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 #[must_use]
 pub fn family_variant_label_for_tests(
@@ -116,7 +116,7 @@ pub fn family_variant_label_for_tests(
 /// inflated by embedding the ~130B `RelateMemoKey` by value — without exposing
 /// the `pub(super)` `FamilyKey` taxonomy outside the crate. The `Relate` payload
 /// must stay BOXED (see [`family::FamilyKey::Relate`]).
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 #[must_use]
 pub fn family_key_size_for_tests() -> usize {
@@ -248,7 +248,7 @@ pub struct SemanticGraphStore {
     /// `cfg`-gated to `test` / `debug_assertions`: the field and the
     /// `invalidate_all` probe are both absent from release builds, so the
     /// production reset path is unchanged.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     invalidate_all_post_entries_clear_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Per-store test-only injection point inside [`Self::invalidate_all`],
     /// fired immediately before the `memo_budget` clear — and, in
@@ -266,7 +266,7 @@ pub struct SemanticGraphStore {
     ///
     /// `cfg`-gated to `test` / `debug_assertions`; absent from release
     /// builds, so the production reset path is unchanged.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     invalidate_all_pre_memo_budget_clear_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Per-store test-only injection point inside the warm-slot publish
     /// path ([`Self::warm_publish_one`] / [`Self::warm_publish_one_if_absent`]
@@ -281,7 +281,7 @@ pub struct SemanticGraphStore {
     ///
     /// **Per-store scope (test hermeticity).** Per-store, never a
     /// process-global. `cfg`-gated to `test` / `debug_assertions`.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     publish_post_memo_budget_record_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Per-store test-only injection point inside
     /// [`Self::execute_cooperative`]'s cold-winner path, fired AFTER
@@ -295,7 +295,7 @@ pub struct SemanticGraphStore {
     ///
     /// **Per-store scope (test hermeticity).** Per-store, never a
     /// process-global. `cfg`-gated to `test` / `debug_assertions`.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     cold_winner_pre_backfill_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Per-store test-only injection point inside [`Self::invalidate_all`],
     /// fired right BEFORE the `canonical_to_entries` reverse-index clear —
@@ -312,7 +312,7 @@ pub struct SemanticGraphStore {
     ///
     /// **Per-store scope (test hermeticity).** Per-store, never a
     /// process-global. `cfg`-gated to `test` / `debug_assertions`.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     invalidate_all_pre_reverse_index_clear_gate:
         parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Per-store test-only injection point inside
@@ -332,7 +332,7 @@ pub struct SemanticGraphStore {
     ///
     /// **Per-store scope (test hermeticity).** Per-store, never a
     /// process-global. `cfg`-gated to `test` / `debug_assertions`.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     publish_post_reverse_index_prune_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Per-store test-only injection point inside [`Self::invalidate_all`]'s
     /// in-flight abort loop, fired while iterating the COLLECTED entry
@@ -343,7 +343,7 @@ pub struct SemanticGraphStore {
     /// lock order that keeps the abort loop within the module's global
     /// rule (`state` is never taken while the `inflight` table lock is
     /// held). Per-store scoped; `cfg`-gated to `test` / `debug_assertions`.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     invalidate_all_inflight_abort_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Per-store test-only injection point inside
     /// [`Self::invalidate_canonical`]'s in-flight abort loop, fired while
@@ -354,7 +354,7 @@ pub struct SemanticGraphStore {
     /// honours the same collect-then-release lock order as
     /// [`Self::invalidate_all`]. Per-store scoped; `cfg`-gated to `test` /
     /// `debug_assertions`.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     invalidate_canonical_inflight_abort_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Per-store test-only counter: incremented by one IMMEDIATELY before
     /// a cooperative joiner blocks on the per-entry `ready` condvar via
@@ -371,7 +371,7 @@ pub struct SemanticGraphStore {
     /// concurrent test's joiners. `cfg`-gated to `test` / `debug_assertions`;
     /// the increment and the field are both absent from release builds, so
     /// the production cooperative-wait path is unchanged.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     joiner_on_condvar_count: std::sync::atomic::AtomicUsize,
     /// Reverse index. For each canonical id,
     /// holds the set of `(family, slot)` pairs whose published
@@ -466,6 +466,38 @@ pub struct SemanticGraphStore {
     >,
 }
 
+/// Value-side relation admission decision. The relation engine supplies only
+/// the observed self-roots and judgement; [`SemanticGraphStore`] owns the
+/// tracer, finalization, carrier construction, and storage write.
+pub(crate) enum RelationPublishDecision {
+    Publish {
+        observed_self_roots: Vec<ObservedGraphSelfRoot>,
+        result: crate::semantic_query::RelationResult,
+        validated_at_generation: u64,
+    },
+    ReturnOnly(crate::cache_runtime::NonAdmissionReason),
+}
+
+impl RelationPublishDecision {
+    #[inline]
+    pub(crate) fn publish(
+        observed_self_roots: Vec<ObservedGraphSelfRoot>,
+        result: crate::semantic_query::RelationResult,
+        validated_at_generation: u64,
+    ) -> Self {
+        Self::Publish {
+            observed_self_roots,
+            result,
+            validated_at_generation,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn return_only(reason: crate::cache_runtime::NonAdmissionReason) -> Self {
+        Self::ReturnOnly(reason)
+    }
+}
+
 /// Reverse-index type alias. See
 /// [`SemanticGraphStore::canonical_to_entries`] for the contract.
 ///
@@ -495,6 +527,28 @@ impl std::fmt::Debug for SemanticGraphStore {
 }
 
 impl SemanticGraphStore {
+    /// Whether this thread is already building `key` and the cooperative memo
+    /// will therefore return its established recursion sentinel. Callers may
+    /// use this read-only preflight to preserve cycle semantics ahead of an
+    /// orthogonal operational budget check; the cooperative path remains the
+    /// sole authority that records and returns the sentinel.
+    pub(crate) fn is_same_path_inflight_on_current_thread(&self, key: &SemanticQueryKey) -> bool {
+        IN_FLIGHT_ON_THIS_THREAD.with(|slot| slot.borrow().iter().any(|active| active == key))
+    }
+
+    /// Run a test body with `key` installed on the cooperative memo's real
+    /// same-thread recursion stack. This exercises callers' ordering against
+    /// the production sentinel authority without duplicating its TLS state.
+    #[cfg(test)]
+    pub(crate) fn with_same_path_inflight_for_test<T>(
+        &self,
+        key: SemanticQueryKey,
+        body: impl FnOnce() -> T,
+    ) -> T {
+        let _guard = RecursionStackGuard::push(key);
+        body()
+    }
+
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -563,16 +617,16 @@ impl SemanticGraphStore {
         // Wait-time measurement feeds the capture-token entries-mutex
         // hook only; gated to match the instrumentation module (absent
         // in release).
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         let wait_start = Instant::now();
         let guard = self.entries.lock();
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         let wait_ns = wait_start.elapsed().as_nanos();
         EntriesLockGuard {
             guard: Some(guard),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             hold_start: Instant::now(),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             wait_ns,
         }
     }
@@ -1100,7 +1154,7 @@ impl SemanticGraphStore {
                 // and asserts `inflight.try_lock()` succeeds, proving the
                 // collect-then-release lock order. `None` (production
                 // default) is a no-op.
-                #[cfg(any(test, debug_assertions))]
+                #[cfg(any(test, feature = "test-support"))]
                 {
                     let gate = self.invalidate_canonical_inflight_abort_gate.lock().clone();
                     if let Some(barrier) = gate {
@@ -1276,7 +1330,7 @@ impl SemanticGraphStore {
                 // asserts `inflight.try_lock()` succeeds, proving the
                 // collect-then-release lock order. `None` (production
                 // default) is a no-op.
-                #[cfg(any(test, debug_assertions))]
+                #[cfg(any(test, feature = "test-support"))]
                 {
                     let gate = self.invalidate_all_inflight_abort_gate.lock().clone();
                     if let Some(barrier) = gate {
@@ -1301,7 +1355,7 @@ impl SemanticGraphStore {
             // lock still held, so a race test can assert the clear runs
             // in the `entries` lock domain. `None` (the production
             // default) is a no-op.
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             {
                 let gate = self
                     .invalidate_all_pre_memo_budget_clear_gate
@@ -1340,7 +1394,7 @@ impl SemanticGraphStore {
             // lock still held, so a race test can assert the clear runs in
             // the `entries` lock domain. `None` (the production default)
             // is a no-op.
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             {
                 let gate = self
                     .invalidate_all_pre_reverse_index_clear_gate
@@ -1362,7 +1416,7 @@ impl SemanticGraphStore {
         // winner re-checks `aborted` (already set above) and must skip.
         // A single relaxed lock probe; `None` (the production default) is
         // a no-op.
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let gate = self.invalidate_all_post_entries_clear_gate.lock().clone();
             if let Some(barrier) = gate {
@@ -1437,6 +1491,67 @@ impl SemanticGraphStore {
         Some((empty_signature(), entry.result))
     }
 
+    /// Run the complete cold relation computation inside a store-owned fact
+    /// tracer, finalize the dependency evidence, build the self-rooted carrier,
+    /// and perform the sole production relation-memo write.
+    pub(crate) fn compute_relation_and_admit<R, Compute, Decide>(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        key: crate::semantic_query::RelateMemoKey,
+        compute: Compute,
+        decide: Decide,
+    ) -> R
+    where
+        Compute: FnOnce() -> R,
+        Decide: FnOnce(&R) -> RelationPublishDecision,
+    {
+        let host = ctx.host_for_fact_tracer_install();
+        let (value, read_set) = host.with_fact_tracer(compute);
+        match read_set.finalise() {
+            crate::resolver_core::FactReadSetFinalise::Ok(facts) => match decide(&value) {
+                RelationPublishDecision::Publish {
+                    observed_self_roots,
+                    result,
+                    validated_at_generation,
+                } => {
+                    let mut self_root_canonicals: Vec<Arc<str>> =
+                        Vec::with_capacity(observed_self_roots.len());
+                    for (canonical, _) in &observed_self_roots {
+                        if !self_root_canonicals.iter().any(|root| root == canonical) {
+                            self_root_canonicals.push(Arc::clone(canonical));
+                        }
+                    }
+                    match semantic_graph_read_set_signature(&observed_self_roots, &facts) {
+                        Some(carrier) => self.insert_relation_owned(
+                            key,
+                            carrier,
+                            Arc::from(self_root_canonicals),
+                            result,
+                            validated_at_generation,
+                        ),
+                        None => crate::cache_runtime::admission::propagate_non_admission(
+                            crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
+                        ),
+                    }
+                }
+                RelationPublishDecision::ReturnOnly(reason) => {
+                    crate::cache_runtime::admission::propagate_non_admission(reason);
+                }
+            },
+            crate::resolver_core::FactReadSetFinalise::NonCacheable(_) => {
+                crate::cache_runtime::admission::propagate_non_admission(
+                    crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
+                );
+            }
+            crate::resolver_core::FactReadSetFinalise::Overflow => {
+                crate::cache_runtime::admission::propagate_non_admission(
+                    crate::cache_runtime::NonAdmissionReason::SignatureOverflow,
+                );
+            }
+        }
+        value
+    }
+
     /// Publish a relation judgement for the full relation identity `key`.
     /// Writes to the dedicated relation memo DashMap, separate from the family
     /// memo so pairwise identity does not inflate the single-node keyspace.
@@ -1445,7 +1560,7 @@ impl SemanticGraphStore {
     /// [`semantic_graph_read_set_signature`] from the relation build's
     /// observed self-roots; `self_root_canonicals` is checked strictly,
     /// and `validated_at_generation` gates on a project-shape bump.
-    pub fn insert_relation(
+    fn insert_relation_owned(
         &self,
         key: crate::semantic_query::RelateMemoKey,
         carrier: crate::fact_signature_helpers::ReadSetSignature,
@@ -1457,6 +1572,26 @@ impl SemanticGraphStore {
         // guard; `DashMap::entry` makes the new-vs-replace decision
         // atomic. `admission_seq` stays paired with the ledger record.
         self.relation_memo.insert(
+            key,
+            carrier,
+            self_root_canonicals,
+            result,
+            validated_at_generation,
+        );
+    }
+
+    /// Test-support seed seam for relation-memo fixtures. Production writes
+    /// route through [`Self::compute_relation_and_admit`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn insert_relation(
+        &self,
+        key: crate::semantic_query::RelateMemoKey,
+        carrier: crate::fact_signature_helpers::ReadSetSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
+        result: crate::semantic_query::RelationResult,
+        validated_at_generation: u64,
+    ) {
+        self.insert_relation_owned(
             key,
             carrier,
             self_root_canonicals,
@@ -1536,7 +1671,7 @@ impl SemanticGraphStore {
         // unchanged when no token is bound. The timestamp read and the
         // recording site below both gate on the instrumentation module so
         // release does not pay for them.
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         let start = Instant::now();
         // Build the edge under the derivation lock, then release the
         // lock before pushing into the accumulator — the accumulator
@@ -1609,9 +1744,9 @@ impl SemanticGraphStore {
         // `origin_edge_count` bump on the dedup path. The ledger / count
         // mirror the production-side ledger writes so test snapshots
         // observe the same dedup property.
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         let elapsed_ns = start.elapsed().as_nanos();
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         crate::capture_token::with_active_capture(|t| {
             if !already_recorded {
                 let dep_signature_hash =
@@ -1802,6 +1937,7 @@ impl SemanticGraphStore {
     /// WITHOUT validating its carrier, so the unvalidated nature is
     /// explicit at every call site.
     #[must_use]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn get_unvalidated(
         &self,
         key: &SemanticQueryKey,
@@ -2210,7 +2346,7 @@ impl SemanticGraphStore {
         // Capture-token dispatch recording (warm). Same as the slow
         // path's pre-loop observation. Gated to match the instrumentation
         // module (absent in release).
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         crate::capture_token::with_active_capture(|t| t.record_dispatch(key, /* hit */ true));
 
         tracing::debug!(
@@ -2266,7 +2402,7 @@ impl SemanticGraphStore {
 
         // Capture-token dispatch recording (cold). Gated to match the
         // instrumentation module (absent in release).
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         crate::capture_token::with_active_capture(|t| {
             t.record_dispatch(&key, /* hit */ false)
         });
@@ -2354,7 +2490,7 @@ impl SemanticGraphStore {
                 // than the in-flight strong count, which rises one step
                 // earlier when the joiner merely clones the entry. No
                 // production behaviour change (gated out of release builds).
-                #[cfg(any(test, debug_assertions))]
+                #[cfg(any(test, feature = "test-support"))]
                 self.joiner_on_condvar_count.fetch_add(1, Ordering::SeqCst);
                 inflight
                     .ready
@@ -2699,7 +2835,7 @@ impl SemanticGraphStore {
             // winner's still-registered in-flight entry `aborted`) in the
             // exact window the `published` gate alone does not cover.
             // `None` (the production default) is a no-op.
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             {
                 let gate = self.cold_winner_pre_backfill_gate.lock().clone();
                 if let Some(barrier) = gate {
@@ -3243,7 +3379,7 @@ impl SemanticGraphStore {
         // admission lands and with the `entries` lock still held, so a
         // race test can assert the admission is recorded in the `entries`
         // lock domain. `None` (the production default) is a no-op.
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let gate = self.publish_post_memo_budget_record_gate.lock().clone();
             if let Some(barrier) = gate {
@@ -3268,7 +3404,7 @@ impl SemanticGraphStore {
         // was pruned, so the post-prune injection point fires only when a
         // FIFO eviction actually happened. `cfg`-gated — absent from
         // release builds, where the gate block is also compiled out.
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         let mut pruned_any = false;
         for (_victim_seq, victim) in victims {
             // Remove the victim from `entries` (keeping map and budget
@@ -3298,7 +3434,7 @@ impl SemanticGraphStore {
                             canonical,
                             &(victim.clone(), slot, entry.admission_seq),
                         );
-                        #[cfg(any(test, debug_assertions))]
+                        #[cfg(any(test, feature = "test-support"))]
                         {
                             pruned_any = true;
                         }
@@ -3313,7 +3449,7 @@ impl SemanticGraphStore {
         // domain. Fires only when at least one victim registration was
         // pruned (so a publish that evicts nothing does not park).
         // `None` (the production default) is a no-op.
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         {
             if pruned_any {
                 let gate = self.publish_post_reverse_index_prune_gate.lock().clone();
@@ -3366,6 +3502,7 @@ impl SemanticGraphStore {
     /// [`Self::publish_with_carrier_dispatch_and_generation_for_tests`]
     /// with an empty dispatch-dep signature and generation `0`.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn publish_with_carrier_for_tests(
         &self,
         key: SemanticQueryKey,
@@ -3387,6 +3524,7 @@ impl SemanticGraphStore {
     /// explicit `dispatch_dep_signature` (FIFO reverse-index symmetry
     /// discriminator). Generation `0`.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn publish_with_carrier_and_dispatch_for_tests(
         &self,
         key: SemanticQueryKey,
@@ -3413,6 +3551,7 @@ impl SemanticGraphStore {
     /// set that DIFFERS from the nominal slot (the §3.4 discriminating
     /// guards).
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn publish_with_carrier_dispatch_and_generation_for_tests(
         &self,
         key: SemanticQueryKey,
@@ -3442,6 +3581,7 @@ impl SemanticGraphStore {
     /// the warm-hit `cached_satisfies` gate and the recorded-point
     /// backfill directly.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn publish_with_materialized_set_for_tests(
         &self,
         key: SemanticQueryKey,
@@ -3528,10 +3668,10 @@ impl SemanticGraphStore {
 ///
 /// `execute_cooperative_batch` (the constructing consumer) is a
 /// `#[cfg(test)]` non-admission probe, but the enum is also re-exported
-/// through the `for_tests` shim (gated `cfg(any(test, debug_assertions))`)
+/// through the `for_tests` shim (gated `cfg(any(test, feature = "test-support"))`)
 /// so the integration suite can probe its existence; gate to match the
 /// shim so it is not a dead symbol in release.
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BatchExpandError {
     /// Canonical's content hash changed between the surface envelope's

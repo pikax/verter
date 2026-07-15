@@ -558,7 +558,7 @@ mod carrier {
         /// current caller but stays as the carrier's read contract.
         /// Test-only carrier assembly from a raw [`TypeExpr`] (no capability
         /// required). Gated `#[cfg(any(test, feature = "test-support"))]` — NOT
-        /// `#[cfg(any(test, debug_assertions))]` — so it is reachable ONLY from
+        /// `#[cfg(any(test, feature = "test-support"))]` — so it is reachable ONLY from
         /// genuine test code (the in-crate `#[cfg(test)]` suites AND, via the
         /// production-unreachable `test-support` feature, the separate
         /// integration-test binary's `ShapeCacheDb` synthetic-carrier proof

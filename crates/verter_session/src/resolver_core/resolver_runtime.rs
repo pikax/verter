@@ -1,4 +1,4 @@
-//! Unified resolver runtime holding both symbol and fallthrough subsystems.
+//! Unified resolver runtime holding shared resolver request state.
 //!
 //! The runtime is created once per host and reused across requests. Both native
 //! (scheduler) and WASM (non-scheduler) backends use the same runtime type —
@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 use crate::resolver_core::{
     fallthrough_resolver::FallthroughResolverState, imported_root_db::ImportedRootDb,
-    prepared_decl::PreparedDeclBundle, route_db::RouteDb, symbol_resolver::SymbolResolverState,
-    FactVersionRef, FallthroughNodeKey, ResolutionNodeKey, ResolverCounters, SingleflightGroup,
-    StableExecutionValue, StoreView, ValidatedFactCache,
+    prepared_decl::PreparedDeclBundle, route_db::RouteDb, FactVersionRef, FallthroughNodeKey,
+    ResolutionNodeKey, ResolverCounters, SingleflightGroup, StableExecutionValue, StoreView,
+    ValidatedFactCache,
 };
 
 pub struct StableRequestState<K, V>
@@ -83,10 +83,6 @@ where
     {
         self.cache
             .get_if_valid_self_rooted_attributed(key, view, self_root_canonicals)
-    }
-
-    pub fn insert_arc(&self, key: K, value: Arc<V>, facts: Vec<FactVersionRef>) {
-        self.cache.insert_arc(key, value, facts);
     }
 
     /// Strict-admission wrapper: forwards through to
@@ -173,8 +169,6 @@ where
     MetaV: Clone,
     FallthroughV: Clone,
 {
-    /// Symbol/type resolution subsystem.
-    pub symbol: SymbolResolverState,
     /// Fallthrough/inheritance resolution subsystem.
     pub fallthrough: FallthroughResolverState,
     /// Top-level materialized component-meta request state.
@@ -234,7 +228,6 @@ where
     pub fn new(routes: Arc<RouteDb>, imported_roots: Arc<ImportedRootDb>) -> Self {
         let counters = Arc::new(ResolverCounters::new());
         Self {
-            symbol: SymbolResolverState::new(counters.clone()),
             fallthrough: FallthroughResolverState::new(counters.clone()),
             component_meta: StableRequestState::new(),
             prepared_decl_bundles: StableRequestState::new(),
@@ -255,7 +248,6 @@ where
         imported_roots: Arc<ImportedRootDb>,
     ) -> Self {
         Self {
-            symbol: SymbolResolverState::new(counters.clone()),
             fallthrough: FallthroughResolverState::new(counters.clone()),
             component_meta: StableRequestState::new(),
             prepared_decl_bundles: StableRequestState::new(),
@@ -286,7 +278,6 @@ where
 
     /// Clear all cached results in both subsystems.
     pub fn clear_caches(&self) {
-        self.symbol.clear_cache();
         self.fallthrough.clear_cache();
         self.component_meta.clear();
         self.prepared_decl_bundles.clear();
@@ -384,7 +375,7 @@ mod tests {
     #[test]
     fn runtime_creates_with_shared_counters() {
         let runtime = UnifiedResolverRuntime::<(), ()>::for_tests();
-        runtime.symbol.counters().record_cache_hit();
+        runtime.counters.record_cache_hit();
         runtime.fallthrough.counters().record_cache_miss();
 
         let snap = runtime.counter_snapshot();
@@ -404,7 +395,7 @@ mod tests {
         counters.record_cache_hit();
 
         let runtime = UnifiedResolverRuntime::<(), ()>::for_tests_with_counters(counters.clone());
-        runtime.symbol.counters().record_cache_hit();
+        runtime.counters.record_cache_hit();
 
         assert_eq!(runtime.counter_snapshot().node_cache_hits, 2);
         assert_eq!(counters.snapshot().node_cache_hits, 2);
@@ -413,7 +404,7 @@ mod tests {
     #[test]
     fn runtime_reset_counters_clears_all() {
         let runtime = UnifiedResolverRuntime::<(), ()>::for_tests();
-        runtime.symbol.counters().record_cache_hit();
+        runtime.counters.record_cache_hit();
         runtime.fallthrough.counters().record_cache_miss();
 
         runtime.reset_counters();

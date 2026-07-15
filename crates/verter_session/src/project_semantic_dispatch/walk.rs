@@ -120,6 +120,14 @@ pub(crate) fn probe_walk_typeof_resolved(
 /// human-readable messages without re-walking the graph.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ShallowDiagnostic {
+    /// The connected root demand exhausted its projection/evaluation work
+    /// envelope while identities were still changing. This is operational
+    /// partiality, not a semantic cycle or an unresolved-reference carrier.
+    ProjectionWorkLimit { root: SemanticNodeId },
+    /// The connected root demand exceeded the separate nested host-query
+    /// boundary limit. Heap-owned structural traversal does not count toward
+    /// this rail.
+    ConnectedQueryDepthLimit { root: SemanticNodeId },
     /// `T & T` — duplicate intersection arm short-circuited so the
     /// walker does not re-enter an arm that contributes nothing new.
     DuplicateArmShortCircuited { node: SemanticNodeId },

@@ -1270,12 +1270,32 @@ pub(crate) fn compute_verter_diagnostics_for_with_views(
                 ),
             );
 
+            // Projection safety limits are typed component-meta outcomes, not
+            // parser diagnostics or lint rules. Resolve the owner surface and
+            // map only those two operational reasons onto the macro call span
+            // used by editor consumers.
+            if let Some(component_meta) = host.get_component_meta(&canonical_id) {
+                let macro_spans: Vec<verter_span::Span> =
+                    analysis.macros.iter().map(|mac| mac.span).collect();
+                diags.extend(
+                    crate::features::diagnostics::map_projection_limit_diagnostics(
+                        &macro_spans,
+                        &component_meta.macro_expansion_diagnostics,
+                        &doc.line_index,
+                    ),
+                );
+            }
+
             // When lint is not explicitly configured, suppress lint diagnostics but
             // keep component usage diagnostics (type-level, not lint rules).
             if !lint_explicitly_configured {
                 diags.retain(|d| match &d.code {
                     Some(NumberOrString::String(code)) => {
-                        if code == "verter/unknown-prop" || code == "verter/unknown-model" {
+                        if code == "verter/unknown-prop"
+                            || code == "verter/unknown-model"
+                            || code == crate::features::diagnostics::TYPE_EXPANSION_BUDGET_CODE
+                            || code == crate::features::diagnostics::TYPE_QUERY_DEPTH_LIMIT_CODE
+                        {
                             return true;
                         }
                         !code.starts_with("verter/")

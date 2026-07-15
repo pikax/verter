@@ -113,11 +113,11 @@ fn unrelated_route_eviction_keeps_original_warm() {
     // priming and locks in the baseline counter values for the
     // second-call delta.
     let _ = install_fact_tracer_for_tests(&host, || {
-        verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
+        verter_session::for_tests::with_cacheability_scope_for_tests(&host, |_probe| {
             db.get_or_resolve_route_observing_facts(
                 rk("orig_provider.ts", "OrigName"),
                 &view,
-                probe,
+                &host,
                 || unreachable!("first call: original route is pre-warmed"),
             )
         })
@@ -145,11 +145,11 @@ fn unrelated_route_eviction_keeps_original_warm() {
     // here — the closure would run, the cold counter would advance,
     // and the `unreachable!` below would trip.
     let (result, finalise) = install_fact_tracer_for_tests(&host, || {
-        verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
+        verter_session::for_tests::with_cacheability_scope_for_tests(&host, |_probe| {
             db.get_or_resolve_route_observing_facts(
                 rk("orig_provider.ts", "OrigName"),
                 &view,
-                probe,
+                &host,
                 || {
                     unreachable!(
                         "second call: original route must STILL be warm after \
@@ -218,6 +218,7 @@ fn unrelated_route_eviction_keeps_original_warm() {
                  got {sig:?})."
             );
         }
+        FactReadSetFinalise::NonCacheable(_) => panic!("warm tracer unexpectedly non-cacheable"),
         FactReadSetFinalise::Overflow => panic!("warm-after-foreign-evict tracer overflowed"),
     }
 }

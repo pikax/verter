@@ -218,7 +218,9 @@ pub(crate) fn lookup<N: ArtifactNode>(
                     self_root_canonicals,
                     validated_at_generation,
                 }),
-                CacheAdmission::ReturnOnly { value, .. } => ComputeAdmission::ReturnOnly(value),
+                CacheAdmission::ReturnOnly { value, reason } => {
+                    ComputeAdmission::ReturnOnly { value, reason }
+                }
                 CacheAdmission::Failed { .. } => ComputeAdmission::Failed,
             }
         },
@@ -445,7 +447,9 @@ pub(crate) mod query {
                             validated_at_generation,
                         })
                     }
-                    CacheAdmission::ReturnOnly { value, .. } => ComputeAdmission::ReturnOnly(value),
+                    CacheAdmission::ReturnOnly { value, reason } => {
+                        ComputeAdmission::ReturnOnly { value, reason }
+                    }
                     CacheAdmission::Failed { .. } => ComputeAdmission::Failed,
                 }
             },

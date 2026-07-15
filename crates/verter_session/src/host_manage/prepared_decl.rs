@@ -93,7 +93,7 @@ impl VerterHost {
     /// for VerterHost::prepared_decl_bundle` — production callers go
     /// through `ctx.prepared_decl_bundle` (which routes through
     /// `_with_store_view`).
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub(crate) fn prepared_decl_bundle(
         &self,
@@ -254,6 +254,7 @@ impl VerterHost {
                     // a partial-completeness lattice — a served bundle is
                     // complete.
                     completeness: crate::semantic_query::ResultCompleteness::Complete,
+                    cache_refusal: None,
                 });
             }
             // Per-request audit attribution: cold materialisation of
@@ -331,6 +332,7 @@ impl VerterHost {
                 // Prepared-decl bundles gate on `stable`/`admitted`, not a
                 // partial-completeness lattice.
                 completeness: crate::semantic_query::ResultCompleteness::Complete,
+                cache_refusal: None,
             })
         };
         // Bounded re-validation loop, mirroring the IndexedReady lane:
@@ -1156,7 +1158,7 @@ impl VerterHost {
 
     /// Test-only bare wrapper. Production callers go through
     /// `ctx.prepared_type_decl` (which routes through `_with_store_view`).
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub(crate) fn prepared_type_decl(
         &self,
@@ -2277,7 +2279,7 @@ impl VerterHost {
     /// always visible by value at the consumption site (and via the
     /// traced-scope chokepoint flag). Test fixtures that only need the
     /// artifact call this wrapper.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub(crate) fn ensure_indexed_ready(
         &self,
@@ -3362,23 +3364,11 @@ impl VerterHost {
         let shallow = self.shallow_file_state(owner_canonical)?;
         let whole_hash = shallow.whole_hash;
         let surfaces = self.project_type_store.owner_import_surfaces();
-        // R3/R26/R28: fact-validate the cached surface against the
-        // request-bound store view. A barrel retarget / chain-internal
-        // edit invalidates the entry on read via its recorded
-        // `fact_dep_signature`. Stale-key cleanup keeps the cache
-        // bounded — when the chain facts no longer validate, we
-        // drop the entry outright so the next build replaces it.
-        if let Some(cached) = surfaces.get_with_view(self, owner_canonical, whole_hash, view) {
-            return Some(cached);
-        }
-        if surfaces.get(owner_canonical, whole_hash).is_some() {
-            surfaces.remove(owner_canonical);
-        }
-
-        component_meta_trace_custom!(
-            "owner_import_surface_build",
-            format!("owner={}", owner_canonical),
-        );
+        surfaces.get_or_compute(self, owner_canonical, whole_hash, view, || {
+            component_meta_trace_custom!(
+                "owner_import_surface_build",
+                format!("owner={}", owner_canonical),
+            );
 
         // Snapshot the project generation BEFORE the cold compute
         // dispatches any work. The carrier validates only file-content
@@ -3391,14 +3381,10 @@ impl VerterHost {
         // rejects on warm read when the live generation differs.
         let validated_at_generation = self.project_type_store().current_project_generation();
 
-        // Wrap the cold body with `install_fact_tracer` so the
-        // surface's `fact_dep_signature` reflects every fact the
-        // chain walks observed via the resolver's TLS-installed
-        // tracer fan-out. The producer ALSO accumulates `chain_facts`
-        // explicitly for direct-API fan-in (a legacy bookkeeping
-        // path the producer-install observability surface retains).
-        // On `FactReadSetFinalise::Overflow` we refuse to admit the
-        // entry — the next request cold-recomputes.
+        // `OwnerImportSurfaceDb::get_or_compute` owns the fact tracer around
+        // this complete closure. The producer accumulates direct-chain facts
+        // as value-side observations; the DB re-observes and finalises them,
+        // rebuilds the admitted signature, and owns the only write.
         let cold_body = || {
             // (local_name, final_canonical, final_exported_name, target_whole_hash)
             type SurfaceBuildEntry = (Arc<str>, Arc<str>, Arc<str>, Option<Hash16>);
@@ -3497,60 +3483,14 @@ impl VerterHost {
                 unrooted_route_walk,
             )
         };
-        let (cold_output, finalise, non_cacheable_read_observed) =
-            crate::fact_signature_helpers::install_fact_tracer(self, cold_body);
-        self.provenance
-            .owner_import_surface_fact_tracer_installs
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let (entries, mut chain_facts, unresolved_sources, unrooted_route_walk) = cold_output;
-        match finalise {
-            crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
-                // Merge traced facts into the producer-side chain_facts
-                // so the surface's fact_dep_signature is the union of
-                // direct-fan-in observations and TLS-traced
-                // sub-query observations.
-                let mut seen: rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef> =
-                    chain_facts.iter().cloned().collect();
-                for fact in fact_dep_signature.iter() {
-                    if seen.insert(fact.clone()) {
-                        chain_facts.push(fact.clone());
-                    }
-                }
-            }
-            crate::resolver_core::FactReadSetFinalise::Overflow => {
-                self.provenance
-                    .owner_import_surface_overflow_refusals
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                // Refuse cache admission; the caller cold-recomputes
-                // on the next request. Return Some(surface) so the
-                // current call still has a fresh surface to consume
-                // — but do NOT insert into the warm cache.
-                let surface = crate::owner_import_surface::build_owner_import_surface(
-                    Arc::from(owner_canonical),
-                    whole_hash,
-                    entries,
-                    chain_facts,
-                    validated_at_generation,
-                );
-                return Some(surface);
-            }
-        }
+        let (entries, mut chain_facts, unresolved_sources, unrooted_route_walk) = cold_body();
 
-        // ReturnOnly never publishes — fenced-serve refusal arm, beside
-        // the overflow arm above and the unrooted-skip arm below. Two
-        // signals, either refuses: the traced scope consumed a FENCED
-        // (ReturnOnly) IndexedReady serve directly (the by-value
-        // chokepoint flag carried through `install_fact_tracer`), or a
-        // per-binding route walk returned the empty-facts
-        // strict-admission signal (which also covers a fenced serve
-        // adopted cross-thread inside the route-db lanes, where this
-        // thread's tracer never sees the original serve). The surface is
-        // served to the caller WITHOUT admission — a persisted entry
-        // would bind a fenced-resolved target with direct-hop facts that
-        // validate against the live view, an entry the read-side fact
-        // rail cannot reject; the next request cold-recomputes against
-        // the live workspace.
-        if non_cacheable_read_observed || unrooted_route_walk {
+        // A per-binding route walk returning the empty-facts strict-admission
+        // signal is served but never published. This also covers a fenced serve
+        // adopted cross-thread inside the route DB, where the owner tracer cannot
+        // see the original serve. Direct traced non-cacheability and overflow are
+        // enforced independently by `OwnerImportSurfaceDb` after this closure.
+        if unrooted_route_walk {
             self.provenance
                 .owner_import_surface_fenced_serve_refusals
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3561,7 +3501,10 @@ impl VerterHost {
                 chain_facts,
                 validated_at_generation,
             );
-            return Some(surface);
+            return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+                value: surface,
+                reason: crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
+            };
         }
 
         // Root every SKIPPED unresolved direct import in the owner's
@@ -3618,7 +3561,10 @@ impl VerterHost {
                         chain_facts,
                         validated_at_generation,
                     );
-                    return Some(surface);
+                    return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+                        value: surface,
+                        reason: crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
+                    };
                 }
             }
         }
@@ -3630,8 +3576,8 @@ impl VerterHost {
             chain_facts,
             validated_at_generation,
         );
-        surfaces.insert(Arc::from(owner_canonical), Arc::clone(&surface));
-        Some(surface)
+        crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(surface)
+        })
     }
 
     /// Resolve a direct owner import binding to its final root identity via
@@ -3650,7 +3596,7 @@ impl VerterHost {
     /// request-bound `_with_store_view`); the test-only arm on
     /// `impl ResolverContext for VerterHost` reaches this wrapper on
     /// test fixtures that call `host.<method>` directly.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub(crate) fn resolve_owner_direct_import(
         &self,

@@ -256,7 +256,7 @@ impl VerterHost {
     /// routes through the request-bound `_with_store_view`); the
     /// test-only arm on `impl ResolverContext for VerterHost` reaches
     /// this wrapper on test fixtures that call `host.<method>` directly.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub(crate) fn resolve_named_type_export_target(
         &self,

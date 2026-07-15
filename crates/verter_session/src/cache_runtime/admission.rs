@@ -10,40 +10,12 @@
 //!
 //! Signature finalisation ([`SignatureAdmission`]) classifies a tracer
 //! result before the value is even built: an `Ok` signature is
-//! cacheable; an overflow is non-cacheable with a typed reason. The
+//! cacheable; intrinsic non-cacheability and overflow are both
+//! non-cacheable with typed reasons. The
 //! refusal reason ([`NonAdmissionReason`]) lives in the audit leaf
 //! crate so structured refusal events can depend on it without a
 //! back-edge to `verter_session`.
 //!
-//! # `let _ = SetReasonGuard::arm(...)` is a SILENT BYPASS
-//!
-//! The `#[must_use]` attribute on [`SetReasonGuard`] does NOT cover
-//! `let _ = SetReasonGuard::arm(reason);` because the underscore
-//! pattern itself binds the expression — and that binding drops
-//! immediately on the very next semicolon. The slot is armed and
-//! cleared on the same line, before the producer constructs
-//! `ComputeAdmission::ReturnOnly(...)`, so the lowering observes an
-//! empty slot and the debug-assert fires.
-//!
-//! Always use a NAMED binding:
-//!
-//! ```ignore
-//! let _reason_guard = SetReasonGuard::arm(reason);   // CORRECT
-//! return ComputeAdmission::ReturnOnly(value);
-//! ```
-//!
-//! The leading underscore on `_reason_guard` keeps the dead-code
-//! lint quiet without dropping early; the named local extends the
-//! guard's lifetime to the end of the enclosing scope, which is what
-//! the panic-safety contract relies on.
-//!
-//! This module is `deny`-linted on `let_underscore_must_use` so the
-//! mistake is a compile error inside `admission.rs` itself; callers
-//! in other modules are guided by the docstring above and by the
-//! `let _reason_guard` convention every existing production callsite
-//! follows.
-
-#![deny(clippy::let_underscore_must_use)]
 
 use std::sync::Arc;
 
@@ -54,6 +26,51 @@ use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
 /// from the audit leaf crate ([`verter_audit::NonAdmissionReason`]) so
 /// the runtime and structured refusal events name one type.
 pub(crate) use verter_audit::NonAdmissionReason;
+
+/// Classify whether a typed cache-refusal reason is confined to the cache
+/// family making the decision or taints every enclosing derivation that
+/// consumes the returned value.
+///
+/// Keep this match exhaustive: adding an audit reason without choosing its
+/// propagation semantics is a compile error. Intrinsics and the deterministic
+/// test refusal are locally valid values whose non-retention is family policy;
+/// every correctness, provenance, completeness, or world-stability failure is
+/// transitive.
+#[inline]
+pub(crate) fn non_admission_propagation(
+    reason: NonAdmissionReason,
+) -> crate::resolver_core::fact_read_set::NonCacheablePropagation {
+    use crate::resolver_core::fact_read_set::NonCacheablePropagation;
+
+    match reason {
+        NonAdmissionReason::IntrinsicNonCacheable | NonAdmissionReason::ForcedTestRefusal => {
+            NonCacheablePropagation::LocalOnly
+        }
+        NonAdmissionReason::SignatureOverflow
+        | NonAdmissionReason::EmptySignature
+        | NonAdmissionReason::SelfRootConflict
+        | NonAdmissionReason::RouteGenerationDependency
+        | NonAdmissionReason::GenerationSuperseded
+        | NonAdmissionReason::PostComputeRevalidationFailed
+        | NonAdmissionReason::BudgetExceeded
+        | NonAdmissionReason::Cancelled
+        | NonAdmissionReason::UnresolvedProvenance
+        | NonAdmissionReason::ComputeFailed
+        | NonAdmissionReason::PartialResult => NonCacheablePropagation::Transitive,
+    }
+}
+
+/// Propagate a returned non-admitted value into the active enclosing tracer
+/// scopes when its typed reason describes a transitive derivation hazard.
+/// Local-only refusal has already been enforced by the cache owner and must
+/// not poison a caller that can independently root its own result.
+#[inline]
+pub(crate) fn propagate_non_admission(reason: NonAdmissionReason) {
+    let propagation = non_admission_propagation(reason);
+    if propagation == crate::resolver_core::fact_read_set::NonCacheablePropagation::Transitive {
+        crate::resolver_core::resolver_context::note_non_cacheable_propagation(propagation);
+    }
+}
 
 /// THE shared result-cache partial-admission gate — **PURE** over the
 /// supplied completeness.
@@ -105,9 +122,9 @@ pub(crate) fn refuse_result_cache_admission_if_partial(value_is_partial: bool) -
 /// A cold compute installs a tracer, walks its dependency graph, and
 /// finalises the tracer into a [`FactReadSetFinalise`]. This type lifts
 /// that raw result into the admission vocabulary: an `Ok` signature is
-/// [`SignatureAdmission::Cacheable`]; an overflow is
-/// [`SignatureAdmission::NonCacheable`] with
-/// [`NonAdmissionReason::SignatureOverflow`].
+/// [`SignatureAdmission::Cacheable`]; intrinsic non-cacheability and
+/// overflow are [`SignatureAdmission::NonCacheable`] with their
+/// corresponding typed reason.
 ///
 /// `allow(dead_code)`: the query-identity cache families that finalise
 /// signatures through this surface land alongside it; the variants and
@@ -133,6 +150,9 @@ impl SignatureAdmission {
         match finalise {
             FactReadSetFinalise::Ok(facts) => {
                 SignatureAdmission::Cacheable(ReadSetSignature::new(facts))
+            }
+            FactReadSetFinalise::NonCacheable(_) => {
+                SignatureAdmission::NonCacheable(NonAdmissionReason::UnresolvedProvenance)
             }
             FactReadSetFinalise::Overflow => {
                 SignatureAdmission::NonCacheable(NonAdmissionReason::SignatureOverflow)
@@ -160,188 +180,6 @@ impl SignatureAdmission {
             SignatureAdmission::Cacheable(sig) => Some(sig),
             SignatureAdmission::NonCacheable(_) => None,
         }
-    }
-}
-
-thread_local! {
-    /// Single-slot per-thread pass-through for the
-    /// [`NonAdmissionReason`] a cooperative-admission producer chose
-    /// when it returned [`super::singleflight::ComputeAdmission::ReturnOnly(value)`].
-    ///
-    /// The [`super::singleflight::ComputeAdmission::ReturnOnly(V)`]
-    /// substrate variant intentionally does NOT carry the reason —
-    /// widening it would force every cooperative producer to pre-commit
-    /// to a reason at the variant call site. Cache-runtime lowering
-    /// boundaries (`ComputeAdmission` → `CacheAdmission`) need the
-    /// reason to attribute structured refusal telemetry. This TLS slot
-    /// bridges the two without widening the substrate enum.
-    ///
-    /// Contract: the producer arms the slot with a [`SetReasonGuard`]
-    /// IMMEDIATELY BEFORE constructing `ComputeAdmission::ReturnOnly(v)`;
-    /// the lowering reads + clears the slot with
-    /// [`take_return_only_reason`] in its `ReturnOnly` arm. The producer's
-    /// `compute()` and the lowering's `match` run on the same thread
-    /// (the singleflight winner's thread), in immediate sequence, so the
-    /// TLS slot survives unmodified between set and take.
-    ///
-    /// Safety: [`SetReasonGuard`]'s `Drop` clears the slot on producer
-    /// panic (via `std::thread::panicking()`) so a panic between `set`
-    /// and `ReturnOnly` cannot leak a stale reason onto the next
-    /// lowering on the same thread. In the normal (non-panic) flow the
-    /// guard's `Drop` is a no-op; the lowering's
-    /// [`take_return_only_reason`] consumes the slot.
-    ///
-    /// Debug builds enforce the pairing: a `take` against an empty slot
-    /// is a [`debug_assert!`] failure, so a producer that forgets to
-    /// arm the guard surfaces loudly under `cargo test` /
-    /// `cargo build`. Release builds fall back to
-    /// [`NonAdmissionReason::SignatureOverflow`] so structured refusal
-    /// telemetry stays non-fatal in production.
-    static LAST_RETURN_ONLY_REASON: std::cell::Cell<Option<NonAdmissionReason>> =
-        const { std::cell::Cell::new(None) };
-}
-
-/// Producer-side: record the structured refusal reason for the
-/// upcoming `ComputeAdmission::ReturnOnly(...)`. The matching
-/// [`take_return_only_reason`] call at the lowering boundary consumes
-/// the slot. Setting twice without an intervening take is harmless —
-/// the lowering takes the latest value.
-///
-/// Prefer [`SetReasonGuard::arm`] over calling this directly: the RAII
-/// guard adds panic-safety (the slot is cleared if the producer
-/// unwinds between `set` and `ReturnOnly`).
-#[inline]
-pub(crate) fn set_return_only_reason(reason: NonAdmissionReason) {
-    LAST_RETURN_ONLY_REASON.with(|c| c.set(Some(reason)));
-}
-
-/// Lowering-side primitive: consume the producer-recorded refusal
-/// reason. Returns the reason the producer armed via
-/// [`SetReasonGuard::arm`] / [`set_return_only_reason`], or `None` if
-/// the slot is empty. Clears the slot.
-///
-/// This primitive is unconditional — it does NOT debug-assert on an
-/// empty slot. The cache-runtime ComputeAdmission → CacheAdmission
-/// lowering boundaries call [`consume_return_only_reason_for_lowering`]
-/// instead, which wraps this primitive with the producer-pairing
-/// debug-assert. Tests and the RAII guard's panic-path use this
-/// primitive directly.
-#[inline]
-pub(crate) fn take_return_only_reason() -> Option<NonAdmissionReason> {
-    LAST_RETURN_ONLY_REASON.with(|c| c.take())
-}
-
-/// Lowering-side: consume the producer-recorded refusal reason on a
-/// `ComputeAdmission::ReturnOnly(...)` arm. Returns the reason the
-/// producer armed, or `None` if the slot is empty.
-///
-/// Debug builds: `debug_assert!`s on a `None` slot — a producer
-/// reached `ComputeAdmission::ReturnOnly(...)` without arming the
-/// reason, which would silently mis-attribute structured refusal
-/// telemetry to the conservative fallback reason. Surfacing under
-/// `cargo test` forces the producer-side omission to be fixed at the
-/// callsite rather than masked.
-///
-/// Release builds: returns `None` on an empty slot; the caller folds
-/// to [`NonAdmissionReason::SignatureOverflow`] as a conservative
-/// non-fatal default.
-#[inline]
-pub(crate) fn consume_return_only_reason_for_lowering() -> Option<NonAdmissionReason> {
-    let taken = take_return_only_reason();
-    debug_assert!(
-        taken.is_some(),
-        "cache-runtime lowering: `consume_return_only_reason_for_lowering` \
-         called with an empty slot. Every \
-         `ComputeAdmission::ReturnOnly(value)` arm MUST be preceded by \
-         a `SetReasonGuard::arm(reason)` on the producer side so \
-         structured refusal telemetry attributes the actual cause. \
-         The release-build fallback masks this omission with \
-         `SignatureOverflow`; debug builds surface it."
-    );
-    taken
-}
-
-/// RAII guard that arms the TLS refusal-reason slot for the upcoming
-/// `ComputeAdmission::ReturnOnly(...)`. The construct-and-drop sequence
-/// is:
-///
-///   * `SetReasonGuard::arm(reason)` records the reason in the TLS
-///     slot and returns the guard.
-///   * The producer returns `ComputeAdmission::ReturnOnly(value)`.
-///   * The guard drops at the end of `compute()`; in the normal flow
-///     `Drop` is a no-op (the lowering will consume the slot).
-///   * The lowering matches `ComputeAdmission::ReturnOnly(value)` and
-///     calls [`take_return_only_reason`], consuming the slot.
-///
-/// On panic between `arm` and `ReturnOnly`, `Drop` runs with
-/// [`std::thread::panicking()`] returning `true`. The guard clears the
-/// slot so the NEXT unrelated lowering on the same thread does not
-/// inherit a stale reason. The window between `arm` and the inner
-/// `ComputeAdmission::ReturnOnly(...)` construction is small (an
-/// `Arc::clone` and a struct literal), but the panic-safety is cheap
-/// and the alternative (a leaked reason silently mis-attributing the
-/// next refusal) is silent.
-///
-/// # Binding convention — `#[must_use]` does NOT cover `let _`
-///
-/// The `#[must_use]` attribute below WARNS only when the returned
-/// guard is fully ignored (e.g. `SetReasonGuard::arm(reason);` with
-/// no binding). It does NOT trigger on
-/// `let _ = SetReasonGuard::arm(reason);` because the underscore
-/// pattern IS a binding — and that binding drops the guard
-/// IMMEDIATELY on the very next semicolon. The slot is armed and
-/// then cleared on the same line, before the producer's
-/// `ComputeAdmission::ReturnOnly(...)` constructor runs, so the
-/// lowering sees an empty slot and the debug-assert fires.
-///
-/// **Use `let _reason_guard = SetReasonGuard::arm(reason);`** — a
-/// named binding extends the guard's lifetime to the end of the
-/// enclosing scope, which is what the panic-safety contract relies
-/// on. A leading underscore (`_reason_guard`) suppresses the
-/// dead-code lint without dropping early.
-///
-/// `let _ = ...` for this guard is the same defect as forgetting
-/// `arm` entirely. The lint
-/// `#[deny(clippy::let_underscore_must_use)]` at the module level
-/// makes this mistake a compile error.
-#[must_use = "the guard must be bound to a named local (e.g. \
-              `let _reason_guard = SetReasonGuard::arm(reason);`) so \
-              it stays alive until the producer constructs \
-              ComputeAdmission::ReturnOnly. `let _ = ...` drops the \
-              guard immediately on the same statement and breaks \
-              panic-safety."]
-pub(crate) struct SetReasonGuard {
-    // Marker to prevent direct construction (force callers through
-    // `arm` so the slot is always armed).
-    _private: (),
-}
-
-impl SetReasonGuard {
-    /// Arm the TLS slot with `reason` and return the guard. Pair with
-    /// `ComputeAdmission::ReturnOnly(value)` on the next statement;
-    /// the lowering's [`take_return_only_reason`] consumes the slot.
-    #[inline]
-    pub(crate) fn arm(reason: NonAdmissionReason) -> Self {
-        set_return_only_reason(reason);
-        SetReasonGuard { _private: () }
-    }
-}
-
-impl Drop for SetReasonGuard {
-    #[inline]
-    fn drop(&mut self) {
-        if std::thread::panicking() {
-            // Producer panicked between `arm` and `ReturnOnly`. Clear
-            // the TLS slot so the next unrelated lowering on this
-            // thread does not inherit a stale reason. Cleared via the
-            // bare slot write rather than `take_return_only_reason`
-            // so the debug-assert in `take` does not fire on the
-            // already-cleared next call.
-            LAST_RETURN_ONLY_REASON.with(|c| c.set(None));
-        }
-        // Normal flow: the lowering's `take_return_only_reason` will
-        // (or already did) consume the slot. The guard's `Drop` is a
-        // no-op so the take sees the armed value.
     }
 }
 

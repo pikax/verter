@@ -83,18 +83,18 @@ pub(crate) use vue_script_extract::{
 // `virtual_file_pipeline` private module path.
 //
 // The cfg gate MUST match the target's gate in `virtual_file_pipeline.rs`
-// (`CompileForceOverflowGuard` is `#[cfg(any(test, debug_assertions))]`).
+// (`CompileForceOverflowGuard` is `#[cfg(any(test, feature = "test-support"))]`).
 // A `pub use` of a cfg-stripped item is an unresolved-import error in
 // release builds (`cargo build --release`, where `debug_assertions` is
 // off), so the gate is required, not optional.
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub use virtual_file_pipeline::CompileForceOverflowGuard;
 
 // Test-only introspection for the Session-only compile-tier prefetch
 // gate. Same cfg gate as above (a `pub use` of a cfg-stripped item is an
 // unresolved-import error in release builds).
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub use virtual_file_pipeline::{
     compile_tier_prefetch_invocations, reset_compile_tier_prefetch_invocations,

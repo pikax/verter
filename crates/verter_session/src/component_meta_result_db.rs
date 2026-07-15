@@ -117,6 +117,75 @@ pub struct ComponentMetaResultEntry<P> {
     pub validated_at_generation: u64,
 }
 
+/// Caller-supplied, value-side portion of a component-meta admission
+/// decision. It deliberately carries no fact signature: only
+/// [`ComponentMetaResultDb::compute_and_admit`] can attach the evidence
+/// finalized from the tracer scope it owns.
+pub(crate) enum ComponentMetaPublishDecision<P> {
+    /// The cold result is complete and its publish fence is still live.
+    Publish {
+        key: ComponentMetaResultKey,
+        owner_whole_hash: Hash16,
+        payload: Arc<P>,
+        validated_at_generation: u64,
+    },
+    /// A valid caller-visible value must not warm this cache.
+    ReturnOnly(crate::cache_runtime::NonAdmissionReason),
+    /// The cold computation produced no result to retain.
+    NoValue,
+}
+
+impl<P> ComponentMetaPublishDecision<P> {
+    #[inline]
+    pub(crate) fn publish(
+        key: ComponentMetaResultKey,
+        owner_whole_hash: Hash16,
+        payload: Arc<P>,
+        validated_at_generation: u64,
+    ) -> Self {
+        Self::Publish {
+            key,
+            owner_whole_hash,
+            payload,
+            validated_at_generation,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn return_only(reason: crate::cache_runtime::NonAdmissionReason) -> Self {
+        Self::ReturnOnly(reason)
+    }
+
+    #[inline]
+    pub(crate) fn no_value() -> Self {
+        Self::NoValue
+    }
+}
+
+/// Remove only the owner's non-round-tripping route-derived fact before the
+/// final-result signature is stored. Cross-file route facts and the owner's
+/// whole-hash root remain part of the validating evidence.
+fn strip_owner_route_fact(
+    owner_canonical: &str,
+    facts: &[crate::resolver_core::FactVersionRef],
+) -> Arc<[crate::resolver_core::FactVersionRef]> {
+    facts
+        .iter()
+        .filter(|fact| {
+            !matches!(
+                fact,
+                crate::resolver_core::FactVersionRef::DerivedFactHash {
+                    canonical_id,
+                    kind: crate::resolver_core::DerivedFactKind::Route,
+                    ..
+                } if canonical_id == owner_canonical
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>()
+        .into()
+}
+
 /// Sanitized snapshot of a
 /// [`crate::meta_resolve::ResolvedComponentMetaState`] suitable for
 /// cross-request reuse. Excludes per-request fields (`request_id`,
@@ -324,7 +393,7 @@ impl<P> ComponentMetaResultDb<P> {
 
     /// Test-only constructor that pins a specific schema version on the Db.
     /// Used by `cache_invariant_migration` fixtures.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
         Self::with_counters_and_schema_version(
             Arc::new(AtomicU64::new(0)),
@@ -395,6 +464,7 @@ impl<P> ComponentMetaResultDb<P> {
     /// current [`crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION`]
     /// return `None`.
     #[must_use]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn get(
         &self,
         key: &ComponentMetaResultKey,
@@ -542,6 +612,86 @@ impl<P> ComponentMetaResultDb<P> {
         Some(Arc::new(candidate.value.clone()))
     }
 
+    /// Run a complete component-meta cold computation inside the DB-owned
+    /// fact-tracer scope, finalize its evidence, classify the returned value,
+    /// and perform the sole production write when every gate admits.
+    ///
+    /// The caller supplies only the computation and a value-side decision.
+    /// It cannot attach or substitute a fact signature: this owner finalizes
+    /// the tracer after the closure returns and constructs the stored carrier
+    /// immediately before [`Self::insert_owned`].
+    pub(crate) fn compute_and_admit<R, Compute, Decide>(
+        &self,
+        host: &crate::VerterHost,
+        canonical: &str,
+        path_label: &str,
+        compute: Compute,
+        decide: Decide,
+    ) -> R
+    where
+        Compute: FnOnce() -> R,
+        Decide: FnOnce(&R) -> ComponentMetaPublishDecision<P>,
+    {
+        let (value, read_set) = host.with_fact_tracer(compute);
+        let finalise = read_set.finalise();
+        match finalise {
+            crate::resolver_core::FactReadSetFinalise::Ok(facts) => match decide(&value) {
+                ComponentMetaPublishDecision::Publish {
+                    key,
+                    owner_whole_hash,
+                    payload,
+                    validated_at_generation,
+                } => {
+                    let admitted_facts = strip_owner_route_fact(&key.owner_canonical, &facts);
+                    self.insert_owned(
+                        key,
+                        owner_whole_hash,
+                        ComponentMetaResultEntry {
+                            payload,
+                            read_set_signature:
+                                crate::fact_signature_helpers::ReadSetSignature::new(
+                                    admitted_facts,
+                                ),
+                            validated_at_generation,
+                        },
+                    );
+                }
+                ComponentMetaPublishDecision::ReturnOnly(reason) => {
+                    crate::cache_runtime::admission::propagate_non_admission(reason);
+                    tracing::debug!(
+                        target: "verter::audit::record",
+                        file = %canonical,
+                        path = %path_label,
+                        reason = %reason,
+                        "skipping component-meta cache promotion: typed admission refusal",
+                    );
+                }
+                ComponentMetaPublishDecision::NoValue => {}
+            },
+            crate::resolver_core::FactReadSetFinalise::NonCacheable(_) => {
+                let reason = crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance;
+                crate::cache_runtime::admission::propagate_non_admission(reason);
+                tracing::debug!(
+                    target: "verter::audit::record",
+                    file = %canonical,
+                    path = %path_label,
+                    "skipping component-meta cache promotion: cold compute consumed a non-cacheable read",
+                );
+            }
+            crate::resolver_core::FactReadSetFinalise::Overflow => {
+                let reason = crate::cache_runtime::NonAdmissionReason::SignatureOverflow;
+                crate::cache_runtime::admission::propagate_non_admission(reason);
+                tracing::debug!(
+                    target: "verter::audit::record",
+                    file = %canonical,
+                    path = %path_label,
+                    "skipping component-meta cache promotion: fact-signature overflowed cap",
+                );
+            }
+        }
+        value
+    }
+
     /// Insert a final result entry for the given owner content version.
     /// Cancelled, budget-exceeded, or partial results must **not** be
     /// passed here — callers are responsible for filtering. The cache
@@ -552,7 +702,7 @@ impl<P> ComponentMetaResultDb<P> {
     /// place; a new owner content version appends a candidate to the
     /// slot, and the bounded substrate evicts the oldest candidate /
     /// global-oldest entry to stay within the per-slot and global caps.
-    pub fn insert(
+    fn insert_owned(
         &self,
         key: ComponentMetaResultKey,
         owner_whole_hash: Hash16,
@@ -568,6 +718,19 @@ impl<P> ComponentMetaResultDb<P> {
         // evictions remove that many. `fetch_add`/`fetch_sub` compose
         // exactly under concurrent admissions.
         self.apply_live_delta(usize::from(outcome.fresh), outcome.evicted);
+    }
+
+    /// Test-support seed seam. Production admission must route through
+    /// [`Self::compute_and_admit`] so the DB owns tracing, finalization, and
+    /// the only write.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn insert(
+        &self,
+        key: ComponentMetaResultKey,
+        owner_whole_hash: Hash16,
+        entry: ComponentMetaResultEntry<P>,
+    ) {
+        self.insert_owned(key, owner_whole_hash, entry);
     }
 
     /// Remove the candidate for one owner content version. Returns the
@@ -644,7 +807,7 @@ impl<P> ComponentMetaResultDb<P> {
     /// helper to a single payload type. The `read_set_signature` carrier
     /// is crate-private, so the entry is assembled here rather than in the
     /// integration-test fixture.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn insert_synthetic_for_schema_test_with_payload(
         &self,
         key: ComponentMetaResultKey,
@@ -800,6 +963,52 @@ impl<P> std::fmt::Debug for ComponentMetaResultDb<P> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn production_component_meta_admission_is_db_owned() {
+        let db_source = include_str!("component_meta_result_db.rs");
+        let base_producer = include_str!("host_manage/component_meta_entry.rs");
+        let resolution_producer = include_str!("host_manage/component_meta_entry_resolution.rs");
+
+        let compute_start = db_source
+            .find("\n    pub(crate) fn compute_and_admit")
+            .expect("ComponentMetaResultDb must own the cold trace/finalise/admit funnel");
+        let compute_end = db_source[compute_start..]
+            .find("\n    /// Insert a final result entry")
+            .map(|offset| compute_start + offset)
+            .expect("compute-and-admit method must end before the test seed seam");
+        let compute_body = &db_source[compute_start..compute_end];
+        assert!(
+            compute_body.contains("host.with_fact_tracer"),
+            "the DB-owned funnel must install the tracer around the caller's cold closure"
+        );
+        assert!(
+            db_source
+                .lines()
+                .any(|line| line.trim_start().starts_with("fn insert_owned(")),
+            "the production write must be a private DB implementation detail"
+        );
+        let test_insert = db_source
+            .find("\n    pub fn insert(")
+            .expect("test-support seed insert must remain available");
+        assert!(
+            db_source[test_insert.saturating_sub(180)..test_insert]
+                .contains("#[cfg(any(test, feature = \"test-support\"))]"),
+            "the raw seed insert must compile only for tests or explicit test-support"
+        );
+        assert!(
+            compute_body.contains("self.insert_owned("),
+            "only the DB-owned funnel may consume finalized evidence into storage"
+        );
+        assert!(
+            !base_producer.contains("component_meta_results().insert("),
+            "the base/view producer must not reach the raw result-cache write"
+        );
+        assert!(
+            !resolution_producer.contains("component_meta_results().insert("),
+            "the resolution producer must not reach the raw result-cache write"
+        );
+    }
+
     fn empty_sig() -> crate::fact_signature_helpers::ReadSetSignature {
         crate::fact_signature_helpers::ReadSetSignature::empty()
     }
@@ -819,6 +1028,63 @@ mod tests {
             type_env_hash: [0u8; 16],
             lib_env_hash: [0u8; 16],
         }
+    }
+
+    #[test]
+    fn db_owned_compute_attaches_traced_facts_and_refuses_hazards() {
+        let host = crate::VerterHost::new_standalone(crate::types::HostConfig::default());
+        let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
+        let key = mk_result_key("/w/owner.vue", [0u8; 16]);
+        let owner_hash = [7u8; 16];
+        let owner_fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+            canonical_id: "/w/owner.vue".to_string(),
+            hash: owner_hash,
+        };
+
+        let value = db.compute_and_admit(
+            &host,
+            "/w/owner.vue",
+            "unit-test",
+            || {
+                crate::resolver_core::resolver_context::observe_fan_out(owner_fact.clone());
+                41u32
+            },
+            |_value| {
+                ComponentMetaPublishDecision::publish(key.clone(), owner_hash, Arc::new(41u32), 0)
+            },
+        );
+        assert_eq!(value, 41);
+        let admitted = db
+            .get(&key, owner_hash)
+            .expect("DB-owned computation must admit its traced candidate");
+        assert_eq!(admitted.read_set_signature.facts.as_ref(), &[owner_fact]);
+
+        let refused_key = mk_result_key("/w/refused.vue", [0u8; 16]);
+        let refused_hash = [8u8; 16];
+        let refused_value = db.compute_and_admit(
+            &host,
+            "/w/refused.vue",
+            "unit-test",
+            || {
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                );
+                42u32
+            },
+            |_value| {
+                ComponentMetaPublishDecision::publish(
+                    refused_key.clone(),
+                    refused_hash,
+                    Arc::new(42u32),
+                    0,
+                )
+            },
+        );
+        assert_eq!(refused_value, 42, "ReturnOnly still serves the cold caller");
+        assert!(
+            db.get(&refused_key, refused_hash).is_none(),
+            "a transitive derivation hazard must never reach storage"
+        );
     }
 
     #[test]

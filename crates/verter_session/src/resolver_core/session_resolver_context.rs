@@ -102,6 +102,7 @@ impl<'a> SessionResolverContext<'a> {
     /// the end of the query. The wrapper does not retain references
     /// after the call returns.
     #[must_use]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn new(
         inner: &'a crate::VerterHost,
         view: &'a dyn SessionView,

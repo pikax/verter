@@ -1347,6 +1347,8 @@ fn expansion_execution_status_to_proto(value: &str) -> proto::ExpansionExecution
 fn expansion_reason_to_proto(value: &str) -> proto::ExpansionStopReason {
     match value {
         "budgetExceeded" => proto::ExpansionStopReason::BudgetExceeded,
+        "projectionWorkLimit" => proto::ExpansionStopReason::ProjectionWorkLimit,
+        "connectedQueryDepthLimit" => proto::ExpansionStopReason::ConnectedQueryDepthLimit,
         "mappedDepthExceeded" => proto::ExpansionStopReason::MappedDepthExceeded,
         "unresolvedReference" => proto::ExpansionStopReason::UnresolvedReference,
         "indeterminateConditional" => proto::ExpansionStopReason::IndeterminateConditional,
@@ -1538,6 +1540,26 @@ mod tests {
     use crate::graph::GraphBuilder;
     use crate::types::FfiComponentMetaFlags;
     use verter_type_expr::TypeExpr;
+
+    #[test]
+    fn projection_limit_reasons_keep_distinct_wire_values() {
+        assert_eq!(
+            super::expansion_reason_to_proto("projectionWorkLimit") as i32,
+            super::proto::ExpansionStopReason::ProjectionWorkLimit as i32
+        );
+        assert_eq!(
+            super::expansion_reason_to_proto("connectedQueryDepthLimit") as i32,
+            super::proto::ExpansionStopReason::ConnectedQueryDepthLimit as i32
+        );
+        assert_eq!(
+            super::proto::ExpansionStopReason::ProjectionWorkLimit as i32,
+            13
+        );
+        assert_eq!(
+            super::proto::ExpansionStopReason::ConnectedQueryDepthLimit as i32,
+            14
+        );
+    }
 
     #[test]
     fn component_meta_payload_roundtrips_recursive_graph() {

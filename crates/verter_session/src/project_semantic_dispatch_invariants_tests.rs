@@ -63,23 +63,35 @@ fn substitute_returns_input_node_on_cyclic_reentry() {
     );
 }
 
-/// Guard invariant: `evaluate_deferred_semantic_node` reaches a
-/// fix-point on a recursive alias via the stack-local visited set
-/// + `next == node` termination. Verified by source-content grep.
+/// The deferred evaluator terminates when a reducer returns its input node as
+/// a stable fixpoint. A template literal over non-finite `string` is a real
+/// carrier-stop: evaluation must return the same shell as Complete rather than
+/// loop, fabricate a miss, or report an operational limit.
 #[test]
-fn evaluate_deferred_reaches_fixpoint_on_recursive_type_alias() {
-    let evaluate_src = include_str!("project_semantic_dispatch/evaluate.rs");
-    assert!(
-        evaluate_src.contains("let mut visited = rustc_hash::FxHashSet::default();"),
-        "evaluate_deferred_semantic_node must use a visited set for cycle detection"
+fn evaluate_deferred_terminates_on_stable_template_literal_fixpoint() {
+    let host = host_for_relation_tests();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
+        quasis: Arc::from([Arc::<str>::from("prefix:"), Arc::<str>::from("")]),
+        expressions: Arc::from([string]),
+    });
+
+    let (result, completeness) = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(
+        template,
+        crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
     );
-    assert!(
-        evaluate_src.contains("if next == node"),
-        "evaluate_deferred_semantic_node must terminate on `next == node` fix-point"
+    assert_eq!(
+        result, template,
+        "the stable carrier is the evaluator fixpoint"
     );
-    assert!(
-        evaluate_src.contains("!visited.insert(next)"),
-        "evaluate_deferred_semantic_node must return on visited-set re-entry"
+    assert_eq!(
+        completeness,
+        crate::semantic_query::ResultCompleteness::Complete,
+        "a stable non-finite carrier is Complete, not an operational limit"
     );
 }
 

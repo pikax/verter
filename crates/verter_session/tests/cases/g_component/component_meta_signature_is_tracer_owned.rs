@@ -121,6 +121,7 @@ fn published_component_meta_signature_equals_finalized_tracer_read_set() {
     .expect("cold traced read set must compute for /src/Comp.vue");
     let traced_facts: Vec<FactVersionRef> = match traced {
         FactReadSetFinalise::Ok(facts) => facts.to_vec(),
+        FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
         FactReadSetFinalise::Overflow => {
             panic!("this small fixture must not overflow the fact-signature cap")
         }

@@ -22,7 +22,7 @@ impl VerterHost {
     /// request-bound `_with_store_view`); the test-only arm on
     /// `impl ResolverContext for VerterHost` reaches this wrapper on
     /// test fixtures that call `host.<method>` directly.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub(crate) fn resolve_imported_type_root(
         &self,
@@ -74,7 +74,7 @@ impl VerterHost {
     /// boundary explicitly (build a view + call
     /// `_with_facts_with_store_view`). The test-only wrapper above
     /// (`resolve_imported_type_root`) reaches this helper transitively.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub(crate) fn resolve_imported_type_root_with_facts(
         &self,
@@ -123,7 +123,7 @@ impl VerterHost {
             .resolve_eval_dependency_canonical(dep_canonical)
             .unwrap_or_else(|| dep_canonical.to_string());
 
-        // The cacheability scope is the OUTERMOST bracket of this producer: the
+        // `ImportedRootDb` owns the OUTERMOST cacheability scope: the
         // route walk inside the resolve closure rides `ensure_indexed_ready_serve`
         // and demands decl bodies, so it can consume a FENCED serve, a BROKEN
         // decl-body lease, or an UNROOTABLE route. Three of those four reasons are
@@ -131,69 +131,65 @@ impl VerterHost {
         // an entry admitted under one roots on the LIVE hash and validates on every
         // warm read forever. The funnel consults the scope's verdict AFTER the
         // resolve runs and refuses the persist; the root is still returned.
-        let (cached, _non_cacheable) =
-            crate::fact_signature_helpers::with_cacheability_scope(self, |probe| {
-                self.resolver
-                    .runtime
-                    .imported_roots
-                    .get_or_resolve_returning_facts(
+        let cached = self
+            .resolver
+            .runtime
+            .imported_roots
+            .get_or_resolve_returning_facts_with_context(
+                normalized_canonical.as_str(),
+                imported_name,
+                view,
+                self,
+                || {
+                    // Trace inside the closure: the closure runs only on
+                    // cache miss, so the trace event records actual
+                    // resolution work — not redundant lookups.
+                    component_meta_trace_custom!(
+                        "resolve_imported_type_root",
+                        format!("canonical={} imported={}", dep_canonical, imported_name),
+                    );
+
+                    if let Some((resolved, facts)) = self
+                        .resolve_direct_imported_type_root_fast_path(
+                            normalized_canonical.as_str(),
+                            imported_name,
+                        )
+                    {
+                        return Some((
+                            crate::resolver_core::ImportedRootResult::Resolved {
+                                canonical_source: resolved.0,
+                                resolved_symbol: resolved.1,
+                            },
+                            facts,
+                        ));
+                    }
+                    // Use resolve_named_type_export_target which checks
+                    // the RouteDb before doing the barrel walk. This avoids
+                    // redundant barrel walks when the route has already been
+                    // resolved by a prior query. Then collect full route
+                    // participant facts via build_named_type_export_route_entry
+                    // for proper cache invalidation on intermediate barrel changes.
+                    let (route_result, facts) = self.build_named_type_export_route_entry(
                         normalized_canonical.as_str(),
                         imported_name,
-                        view,
-                        probe,
-                        || {
-                            // Trace inside the closure: the closure runs only on
-                            // cache miss, so the trace event records actual
-                            // resolution work — not redundant lookups.
-                            component_meta_trace_custom!(
-                                "resolve_imported_type_root",
-                                format!("canonical={} imported={}", dep_canonical, imported_name),
-                            );
-
-                            if let Some((resolved, facts)) = self
-                                .resolve_direct_imported_type_root_fast_path(
-                                    normalized_canonical.as_str(),
-                                    imported_name,
-                                )
-                            {
-                                return Some((
-                                    crate::resolver_core::ImportedRootResult::Resolved {
-                                        canonical_source: resolved.0,
-                                        resolved_symbol: resolved.1,
-                                    },
-                                    facts,
-                                ));
-                            }
-                            // Use resolve_named_type_export_target which checks
-                            // the RouteDb before doing the barrel walk. This avoids
-                            // redundant barrel walks when the route has already been
-                            // resolved by a prior query. Then collect full route
-                            // participant facts via build_named_type_export_route_entry
-                            // for proper cache invalidation on intermediate barrel changes.
-                            let (route_result, facts) = self.build_named_type_export_route_entry(
-                                normalized_canonical.as_str(),
-                                imported_name,
-                            )?;
-                            let root_result = match route_result {
-                                crate::resolver_core::RouteResult::Resolved {
-                                    defining_canonical,
-                                    defining_symbol,
-                                } => crate::resolver_core::ImportedRootResult::Resolved {
-                                    canonical_source: self
-                                        .resolve_eval_dependency_canonical(
-                                            defining_canonical.as_str(),
-                                        )
-                                        .unwrap_or(defining_canonical),
-                                    resolved_symbol: defining_symbol,
-                                },
-                                crate::resolver_core::RouteResult::Miss => {
-                                    crate::resolver_core::ImportedRootResult::Miss
-                                }
-                            };
-                            Some((root_result, facts))
+                    )?;
+                    let root_result = match route_result {
+                        crate::resolver_core::RouteResult::Resolved {
+                            defining_canonical,
+                            defining_symbol,
+                        } => crate::resolver_core::ImportedRootResult::Resolved {
+                            canonical_source: self
+                                .resolve_eval_dependency_canonical(defining_canonical.as_str())
+                                .unwrap_or(defining_canonical),
+                            resolved_symbol: defining_symbol,
                         },
-                    )
-            });
+                        crate::resolver_core::RouteResult::Miss => {
+                            crate::resolver_core::ImportedRootResult::Miss
+                        }
+                    };
+                    Some((root_result, facts))
+                },
+            );
         let (resolved, source_kind, facts) = match cached {
             Some((cached, facts)) => match cached.as_tuple() {
                 Some(tuple) => (tuple, "named_export_target", facts),

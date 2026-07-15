@@ -438,9 +438,9 @@ impl VerterHost {
     /// This wrapper exists for test fixtures that drive cold-compute
     /// directly from a bare `&VerterHost`. It builds the request-bound
     /// ctx via [`crate::resolver_core::with_bare_host_ctx_for_test`]
-    /// (itself `#[cfg(any(test, debug_assertions))]`-gated), so the
+    /// (itself `#[cfg(any(test, feature = "test-support"))]`-gated), so the
     /// release-build crate drops the helper + this wrapper entirely.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn compute_component_meta_state(
         &self,
@@ -836,7 +836,7 @@ impl VerterHost {
         // supply a real request-bound ctx; the sole test-only wrapper
         // `compute_component_meta_state` constructs a bare-host ctx
         // via `with_bare_host_ctx_for_test` and is itself
-        // `#[cfg(any(test, debug_assertions))]`-gated.
+        // `#[cfg(any(test, feature = "test-support"))]`-gated.
         // Step 6.6.A: reset the per-request dep-signature accumulator
         // so each compute call starts fresh. Inner materialize_until_stable
         // calls accumulate dispatch-side facts; we drain + merge them
@@ -1577,7 +1577,7 @@ impl VerterHost {
                     field,
                     &define_props_roots,
                 ) {
-                    #[cfg(any(test, debug_assertions))]
+                    #[cfg(any(test, feature = "test-support"))]
                     crate::capture_token::with_active_capture(|t| {
                         t.record_counter(
                             crate::meta_resolve::SLOT_BINDING_REGISTRY_COLLECTION_SKIP_COUNTER,
@@ -2511,6 +2511,9 @@ impl VerterHost {
             .component_meta
             .get_if_valid(&cache_key, view)
         {
+            if cached.completeness.is_partial() {
+                return None;
+            }
             self.mirror_cached_resolved_meta_arc(canonical, mode, view_fingerprint, cached.clone());
             return Some(cached.as_ref().clone());
         }
@@ -2524,6 +2527,9 @@ impl VerterHost {
         use crate::resolver_core::StoreView;
         let entry = self.derived_raw_cache().get(canonical)?;
         let cached = entry.cached_resolved_meta.get(&(mode, view_fingerprint))?;
+        if cached.state.completeness.is_partial() {
+            return None;
+        }
         // R3/R26/R28: dispatch through
         // `StoreView::validates_fact_signature` as a per-domain
         // override hook. The default impl in `resolver_core/mod.rs`
@@ -2589,6 +2595,9 @@ impl VerterHost {
         fact_versions: &[crate::resolver_core::FactVersionRef],
         view_fingerprint: u64,
     ) {
+        if state.completeness.is_partial() {
+            return;
+        }
         component_meta_trace_custom!(
             "store_cached_component_meta_result",
             format!(
@@ -2648,6 +2657,9 @@ impl VerterHost {
         view_fingerprint: u64,
         state: Arc<ResolvedComponentMetaState>,
     ) {
+        if state.completeness.is_partial() {
+            return;
+        }
         // R3/R26/R28: capture the resolved state's observed fact set
         // as an `Arc<[FactVersionRef]>` so the wrapper's warm-hit
         // validator can clone the handle without copying the slice.

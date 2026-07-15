@@ -282,9 +282,8 @@ fn member_shape_peek_or_compute(
     // the reduce alone left the gates' and the key-classification's serves
     // unobserved.
     let outer_ctx: &dyn ResolverContext = query_engine.ctx;
-    let (value, _non_cacheable) = crate::fact_signature_helpers::with_cacheability_scope(
-        outer_ctx.host_for_fact_tracer_install(),
-        |probe| {
+    let cache = outer_ctx.project_type_store().shape_cache_db();
+    let value = cache.with_owner_scope(outer_ctx, |scope| {
             // The admitted member's value graph node is the raise/reduce subject; the
             // cache key keys on the ADMITTED member (`admitted.member().value`) so an
             // arbitrary / unadmitted `SemanticNodeId` cannot be routed through the
@@ -321,8 +320,7 @@ fn member_shape_peek_or_compute(
             // entry's dep_signature must be re-emitted into the active fact
             // tracer + dispatch dep-signature accumulator so the request's
             // dep set sees the same facts the cold compute emitted.
-            let cache = ctx.project_type_store().shape_cache_db();
-            if let Some(cached) = cache.peek(&key, ctx) {
+            if let Some(cached) = scope.peek(&key) {
                 emit_dispatch_dep_signature_facts(ctx, cached.dep_signature());
                 return cached;
             }
@@ -370,7 +368,7 @@ fn member_shape_peek_or_compute(
                 };
                 let value =
                     raise_node_to_sealed_carrier(&dispatch, member_value, package_backed_fence);
-                return admit_member_shape_if_possible(ctx, &key, value, probe);
+                return admit_member_shape_if_possible(ctx, &key, value, &scope);
             }
             // Non-package-backed: the gate returns `Some(empty)` unless a contributing
             // canonical's authoritative hash was unavailable mid-gate, in which case it
@@ -409,7 +407,7 @@ fn member_shape_peek_or_compute(
                         combine_dep_signatures(&package_backed_fence, &fence, scope_canonical_id);
                     let value =
                         raise_node_to_sealed_carrier(&dispatch, member_value, combined_fence);
-                    return admit_member_shape_if_possible(ctx, &key, value, probe);
+                    return admit_member_shape_if_possible(ctx, &key, value, &scope);
                 }
                 fence
             } else {
@@ -433,7 +431,7 @@ fn member_shape_peek_or_compute(
                 // sibling members hitting the same `SurfaceMember.value` short-circuit at
                 // peek time.
                 let value = raise_node_to_sealed_carrier(&dispatch, member_value, gate_fence);
-                return admit_member_shape_if_possible(ctx, &key, value, probe);
+                return admit_member_shape_if_possible(ctx, &key, value, &scope);
             }
 
             // (5) Cold compute via the graph-native reducer. Single-shot —
@@ -505,7 +503,7 @@ fn member_shape_peek_or_compute(
             // plumbing.
             if crate::cache_runtime::refuse_result_cache_admission_if_partial(
                 materialized_with_gate_fence.result_is_partial(),
-            ) || probe.non_cacheable()
+            ) || scope.non_cacheable()
             {
                 // A non-cacheable read was consumed ANYWHERE in this compute — the key
                 // classification, a gate whose fence roots this entry, or the reduce: the
@@ -516,7 +514,7 @@ fn member_shape_peek_or_compute(
                 return materialized_with_gate_fence;
             }
             let materialized_for_closure = materialized_with_gate_fence.clone();
-            let admitted = cache.get_or_compute(&key, ctx, probe, move || {
+            let admitted = scope.get_or_compute(&key, move || {
         let scope_obs = observed_scope?;
         let parse_fact = scope_obs.syntactic_export_set.clone()?;
         match crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
@@ -531,8 +529,7 @@ fn member_shape_peek_or_compute(
         }
     });
             admitted.unwrap_or(materialized_with_gate_fence)
-        },
-    );
+        });
     value
 }
 
@@ -625,7 +622,7 @@ fn admit_member_shape_if_possible(
     ctx: &dyn ResolverContext,
     key: &crate::component_meta_caches::ShapeCacheKey,
     value: crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr,
-    probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+    owner_scope: &crate::component_meta_caches::ShapeCacheOwnerScope<'_, '_>,
 ) -> crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr {
     // The producing compute consumed a non-cacheable read (or overflowed its
     // signature): serve the value, publish nothing. `package_backed_fence_opt` —
@@ -633,7 +630,7 @@ fn admit_member_shape_if_possible(
     // with an available hash passes it; this is the rail that catches it. (The
     // `get_or_compute` funnel refuses independently; the early return skips the
     // futile signature plumbing.)
-    if probe.non_cacheable() {
+    if owner_scope.non_cacheable() {
         return value;
     }
     // Local early return: refuse a GENUINE-partial shape before any
@@ -659,9 +656,7 @@ fn admit_member_shape_if_possible(
         crate::cache_runtime::SignatureAdmission::Cacheable(sig) => sig.facts,
         crate::cache_runtime::SignatureAdmission::NonCacheable(_) => return value,
     };
-    ctx.project_type_store()
-        .shape_cache_db()
-        .admit_computed(key, ctx, probe, value, fact_sig)
+    owner_scope.admit_computed(key, value, fact_sig)
 }
 
 /// Build an [`ExpandedField`] for a single surface member.
@@ -806,19 +801,20 @@ pub(crate) fn surface_member_to_expanded_field(
                 Some(source) => verter_type_expr::facts::SourcePosition::Present(source),
                 // No authored position, no use-site slot, no upgrade on the
                 // published node: the STRUCTURAL member-source projection. A
-                // member value that demand-validates to KNOWN structure (an
+                // member value with a valid structural replay address (an
                 // imported function / inline object / rich tuple / array /
                 // composite / instantiation) publishes its faithful shallow
-                // carrier — the closed/ref upgrade on the DEMANDED node, or
+                // carrier — the closed/ref upgrade on the admitted node, or
                 // the projected MEMBER-PATH replay route off the macro's
                 // stamped type-argument base (the consumer re-resolves it on
                 // demand through the one shared dispatch; nothing flattens
                 // eagerly). ONLY a genuine miss stays the typed
-                // source-construction FAILURE: a GENUINE-partial
+                // source-construction FAILURE: an operationally partial
                 // materialization (a torn read is never a replay-address
                 // proof), an unknown-materializing resolver failure carrier,
-                // an unresolved residual reference/import carrier, or a
-                // structural value with no stamped base to replay off. There
+                // or a structural value with no stamped base to replay off.
+                // A stable unresolved reference/import is itself a faithful
+                // Complete carrier. There
                 // is no proven-open producer position on this arm: every
                 // member enumerated from a type-based macro surface carries a
                 // REQUIRED value-type position (runtime/unannotated positions
@@ -828,18 +824,20 @@ pub(crate) fn surface_member_to_expanded_field(
                 // member-path / callable-params replay) own them.
                 None => match value_position {
                     MemberValuePosition::ShallowMember => {
-                        let structural = if materialized.result_is_partial() {
-                            None
-                        } else {
-                            materialized.node_id().and_then(|node| {
-                                structural_member_value_source(
-                                    &dispatch,
-                                    node,
-                                    member.name.as_ref(),
-                                    type_arg_base,
-                                )
-                            })
-                        };
+                        // Source construction is anchored in the admitted
+                        // member's original carrier node, not the reduced
+                        // result node. A terminal reduction may legitimately
+                        // stop on an `Opaque(RecursiveRef)` or projection miss
+                        // while the authored member path remains a faithful,
+                        // replayable address. Partiality is retained on the
+                        // materialized outcome and still refuses cache
+                        // admission; it does not erase the best safe carrier.
+                        let structural = structural_member_value_source(
+                            &dispatch,
+                            member.value,
+                            member.name.as_ref(),
+                            type_arg_base,
+                        );
                         match structural {
                             Some(source) => {
                                 verter_type_expr::facts::SourcePosition::Present(source)

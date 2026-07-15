@@ -2,7 +2,7 @@
 //! `crates/verter_session/tests/*.rs`. Integration tests build the lib
 //! WITHOUT `cfg(test)` set, so they cannot reach `pub(crate)` items
 //! through the normal `cfg(test)` test-helper pattern. This module is
-//! gated `cfg(any(test, debug_assertions))` at its declaration site in
+//! gated `cfg(any(test, feature = "test-support"))` at its declaration site in
 //! `lib.rs` so release builds never compile it (`debug_assertions` is
 //! OFF in `cargo build --release`).
 //!
@@ -110,9 +110,7 @@ pub fn install_fact_tracer_for_tests<F, R>(
 where
     F: FnOnce() -> R,
 {
-    let (value, finalise, _non_cacheable_read_observed) =
-        crate::fact_signature_helpers::install_fact_tracer(host, f);
-    (value, finalise)
+    crate::fact_signature_helpers::install_fact_tracer(host, f)
 }
 
 /// Open a REAL cacheability tracer scope and hand `f` the scope's

@@ -5,11 +5,10 @@
 //! or partial semantic results must not be promoted as warm shared
 //! cache entries". Each test:
 //!
-//! 1. Constructs a hermetic host with a deliberately-tight
-//!    `HostConfig::depth_budget`.
-//! 2. Issues a path-projection key whose length exceeds the budget,
-//!    asserting the result is `QueryResult::Recursive(_)` (or
-//!    `Error(_)`) — the budget-exceeded sentinel.
+//! 1. Constructs a hermetic host with a deliberately tight operational
+//!    budget.
+//! 2. Issues a demand that exceeds the budget, asserting typed partial
+//!    completeness, a safe result carrier, and cache suppression.
 //! 3. Re-issues the SAME key on the SAME host. The cold counter MUST
 //!    increment (the partial result was NOT promoted to the warm
 //!    cache); the warm counter MUST NOT increment.
@@ -21,12 +20,14 @@
 use std::sync::Arc;
 
 use crate::host_test_audit::DispatchCounter;
-use crate::request_context::{RequestContext, RequestContextGuard};
-use crate::resolver_core::BudgetDomain;
+use crate::request_context::{
+    current_cold_compute_completeness, ColdComputeCompletenessScope, RequestContext,
+    RequestContextGuard,
+};
 use crate::semantic_query::{
-    PathSegment, ProjectionMode, ProjectionReductionContext, QueryError, QueryResult,
-    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SurfaceMember,
-    SurfaceView,
+    PartialReasonSet, PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult,
+    ResultCompleteness, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
+    SurfaceMember, SurfaceView,
 };
 use crate::types::HostConfig;
 use crate::VerterHost;
@@ -142,46 +143,45 @@ fn request_projection_budget_caps_distinct_dispatch_cold_builds() {
         host.config.projection_op_budget,
     );
     let _ctx_guard = RequestContextGuard::install(ctx);
+    let _completeness_scope = ColdComputeCompletenessScope::enter();
     let dispatch = host.semantic_dispatch();
 
-    let first = dispatch.execute_type_node(first_key);
+    let first = dispatch.execute_read(first_key);
     assert!(
-        matches!(first, QueryResult::Value(_)),
+        matches!(first.value, QueryResult::Value(_))
+            && !first.result_is_partial
+            && first.walker_diagnostics.is_empty(),
         "first cold projection within budget must succeed, got {first:?}",
     );
 
-    let second = dispatch.execute_type_node(second_key);
-    match second {
-        QueryResult::Error(QueryError::BudgetExceeded(failure)) => {
-            assert_eq!(failure.domain, BudgetDomain::ProjectionOperation);
-            assert_eq!(failure.limit, 1);
-            assert_eq!(failure.actual, 2);
-        }
-        other => panic!(
-            "second distinct cold projection must trip the request projection budget; got {other:?}"
-        ),
-    }
+    let second = dispatch.execute_read(second_key);
+    assert!(
+        matches!(second.value, QueryResult::Value(_))
+            && second.result_is_partial
+            && second.cache_suppress,
+        "the limited projection must retain a safe carrier and typed partial rails; got {second:?}"
+    );
+    assert!(matches!(
+        current_cold_compute_completeness(),
+        ResultCompleteness::Partial(reasons)
+            if reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
+    ));
+    assert!(matches!(
+        second.walker_diagnostics.as_ref(),
+        [crate::project_semantic_dispatch::walk::ShallowDiagnostic::ProjectionWorkLimit { .. }]
+    ));
 }
 
-/// Post-trip projection-op queries MUST early-exit at the dispatcher
-/// entry without entering the `execute_cooperative` admission machinery.
-///
-/// Empirical motivation (ChatMessages.vue): 99.2% of the
-/// 255,038 cold MappedType builds in a single component-meta request
-/// were rejected by the projection-op budget *after* the fuse tripped.
-/// Each rejected build still paid the cooperative-admission cost — the
-/// in-flight table mutex + Arc clone, the per-key warm probe, the
-/// fact-tracer install + finalisation, the joiner-condvar entry path —
-/// for ~1ms per call in aggregate. ~250 seconds of pure overhead with
-/// zero progress, because every call returned
-/// `BudgetExceeded(cache_suppress=true)`.
+/// Post-trip projection-op queries early-exit at the dispatcher entry without
+/// entering cooperative admission. They preserve a safe value carrier,
+/// `Partial(PROJECTION_WORK_LIMIT)`, one typed diagnostic, and cache
+/// suppression.
 ///
 /// Discriminator: drive the request past the projection-op fuse, then
 /// issue many additional projection-op queries on DISTINCT keys.
 /// Post-trip queries MUST:
 ///
-/// 1. Return `BudgetExceeded` with the same `actual` value (the peek is
-///    non-incrementing — see `RequestBudget::is_exhausted`).
+/// 1. Return the same typed partial contract without incrementing the budget.
 /// 2. NOT increment the `RequestBudget::projection_ops_executed`
 ///    counter past the trip-point value (which would mean the
 ///    cooperative-admission build closure ran and bumped via
@@ -189,13 +189,6 @@ fn request_projection_budget_caps_distinct_dispatch_cold_builds() {
 /// 3. NOT increment the cooperative-admission entry counter
 ///    `EXECUTE_COOPERATIVE_CALLS` (the architectural invariant — the
 ///    early-exit happens BEFORE `execute_cooperative`).
-///
-/// Pre-fix the test FAILS at all three assertions: every post-trip
-/// query incremented the executed counter, entered cooperative
-/// admission, and produced a stale `actual` that drifted with each
-/// new call. Post-fix the assertions hold because the dispatcher's
-/// fast-path early-exit returns the budget-exceeded sentinel without
-/// touching the cooperative-admission machinery.
 #[test]
 fn post_trip_projection_op_queries_bypass_cooperative_admission() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
@@ -229,81 +222,71 @@ fn post_trip_projection_op_queries_bypass_cooperative_admission() {
     );
     let request_budget = Arc::clone(&ctx.projection_budget);
     let _ctx_guard = RequestContextGuard::install(ctx);
+    let _completeness_scope = ColdComputeCompletenessScope::enter();
     let dispatch = host.semantic_dispatch();
 
-    // The first call lands within budget (1/1), the second trips it
-    // (2/1 → BudgetExceeded with actual=2). Both calls enter the
-    // cooperative-admission machinery; only the second is rejected by
-    // the in-closure cap check.
-    let first_keyof = dispatch.execute_type_node(SemanticQueryKey::KeyOf {
+    // The first call lands within budget (1/1); the second trips it (2/1).
+    // Both calls enter cooperative admission; only the second returns the
+    // typed limited carrier from the in-closure cap check.
+    let first_keyof = dispatch.execute_read(SemanticQueryKey::KeyOf {
         base: bases[0],
         context,
     });
     assert!(
-        matches!(first_keyof, QueryResult::Value(_)),
+        matches!(first_keyof.value, QueryResult::Value(_)) && !first_keyof.result_is_partial,
         "1st keyof within budget should succeed (got {first_keyof:?})"
     );
-    let second_keyof = dispatch.execute_type_node(SemanticQueryKey::KeyOf {
+    let second_keyof = dispatch.execute_read(SemanticQueryKey::KeyOf {
         base: bases[1],
         context,
     });
-    let trip_actual = match second_keyof {
-        QueryResult::Error(QueryError::BudgetExceeded(ref failure)) => failure.actual,
-        other => panic!("2nd keyof should trip the budget (got {other:?})"),
-    };
-    assert_eq!(
-        trip_actual, 2,
-        "trip-point actual must be 2 (1st + 2nd checked-increments)"
+    assert!(
+        matches!(second_keyof.value, QueryResult::Value(_))
+            && second_keyof.result_is_partial
+            && second_keyof.cache_suppress,
+        "2nd keyof should trip to a safe typed partial carrier (got {second_keyof:?})"
     );
+    assert!(matches!(
+        current_cold_compute_completeness(),
+        ResultCompleteness::Partial(reasons)
+            if reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
+    ));
+    assert!(matches!(
+        second_keyof.walker_diagnostics.as_ref(),
+        [crate::project_semantic_dispatch::walk::ShallowDiagnostic::ProjectionWorkLimit { .. }]
+    ));
     let executed_at_trip = request_budget.projection_ops_executed_count();
     assert_eq!(
         executed_at_trip, 2,
         "RequestBudget executed counter should equal 2 immediately after the trip"
     );
 
-    // Drive 4 additional projection-op queries on DISTINCT (base)
-    // values. Each must return BudgetExceeded with the same `actual`
-    // value (peek-only — the executed counter MUST NOT advance).
+    // Drive four additional projection-op queries on distinct bases. Each
+    // must return the typed limited carrier without advancing the counter.
     for (i, &base) in bases.iter().enumerate().take(6).skip(2) {
         let key = SemanticQueryKey::KeyOf { base, context };
-        let result = dispatch.execute_type_node(key);
-        match result {
-            QueryResult::Error(QueryError::BudgetExceeded(failure)) => {
-                assert_eq!(
-                    failure.domain,
-                    BudgetDomain::ProjectionOperation,
-                    "post-trip query #{i} domain must stay ProjectionOperation"
-                );
-                assert_eq!(
-                    failure.limit, 1,
-                    "post-trip query #{i} limit reports the configured budget"
-                );
-                assert_eq!(
-                    failure.actual, 2,
-                    "post-trip query #{i} reports the trip-point actual (peek is non-incrementing)"
-                );
-            }
-            other => panic!("post-trip query #{i} should still be BudgetExceeded (got {other:?})"),
-        }
+        let result = dispatch.execute_read(key);
+        assert!(
+            matches!(result.value, QueryResult::Value(_))
+                && result.result_is_partial
+                && result.cache_suppress,
+            "post-trip query #{i} must retain a safe typed partial carrier (got {result:?})"
+        );
+        assert!(matches!(
+            result.walker_diagnostics.as_ref(),
+            [crate::project_semantic_dispatch::walk::ShallowDiagnostic::ProjectionWorkLimit { .. }]
+        ));
     }
 
     // Discriminating invariant. The per-request projection budget is
     // hermetic to this request (it lives on the RequestContext) so
     // this assertion is robust against parallel test execution.
-    //
-    // Pre-fix: every post-trip dispatch enters the cooperative-
-    // admission build closure, which calls `check_projection_op_count`
-    // (a `fetch_add(1)`) — the executed counter would advance by 1 per
-    // post-trip query, ending at 6 (2 trip + 4 post-trip).
-    //
-    // Post-fix: the dispatcher's `is_exhausted` peek short-circuits
-    // before the build closure runs, leaving the executed counter at
-    // its trip-point value.
+    // The dispatcher's `is_exhausted` peek short-circuits before the build
+    // closure runs, leaving the executed counter at its trip-point value.
     let executed_after_posttrip = request_budget.projection_ops_executed_count();
     assert_eq!(
         executed_after_posttrip, executed_at_trip,
-        "post-trip queries MUST NOT bump the request budget's executed counter; \
-         pre-fix value would advance to 6 (2 trip + 4 post-trip incremental check calls)"
+        "post-trip queries must not bump the request budget's executed counter"
     );
 }
 
@@ -339,25 +322,28 @@ fn post_trip_typeof_early_exit_attributes_to_typeof_cold_counter() {
         host.config.projection_op_budget,
     );
     let _ctx_guard = RequestContextGuard::install(ctx);
+    let _completeness_scope = ColdComputeCompletenessScope::enter();
     let dispatch = host.semantic_dispatch();
 
     // Trip the projection-op fuse: 1st KeyOf lands within budget,
     // 2nd trips it.
-    let first = dispatch.execute_type_node(SemanticQueryKey::KeyOf {
+    let first = dispatch.execute_read(SemanticQueryKey::KeyOf {
         base: bases[0],
         context,
     });
     assert!(
-        matches!(first, QueryResult::Value(_)),
+        matches!(first.value, QueryResult::Value(_)) && !first.result_is_partial,
         "1st keyof within budget should succeed (got {first:?})"
     );
-    let second = dispatch.execute_type_node(SemanticQueryKey::KeyOf {
+    let second = dispatch.execute_read(SemanticQueryKey::KeyOf {
         base: bases[1],
         context,
     });
     assert!(
-        matches!(second, QueryResult::Error(QueryError::BudgetExceeded(_))),
-        "2nd keyof should trip the budget (got {second:?})"
+        matches!(second.value, QueryResult::Value(_))
+            && second.result_is_partial
+            && second.cache_suppress,
+        "2nd keyof should trip to a safe typed partial carrier (got {second:?})"
     );
 
     // Post-trip TypeOf dispatch: counts toward the budget, so it takes
@@ -379,11 +365,17 @@ fn post_trip_typeof_early_exit_attributes_to_typeof_cold_counter() {
         ),
         context: TypeOfContext::new(context, Default::default()),
     };
-    let result = dispatch.execute_type_node(typeof_key);
+    let result = dispatch.execute_read(typeof_key);
     assert!(
-        matches!(result, QueryResult::Error(QueryError::BudgetExceeded(_))),
-        "post-trip TypeOf must take the budget early-exit (got {result:?})"
+        matches!(result.value, QueryResult::Value(_))
+            && result.result_is_partial
+            && result.cache_suppress,
+        "post-trip TypeOf must take the typed-partial budget early-exit (got {result:?})"
     );
+    assert!(matches!(
+        result.walker_diagnostics.as_ref(),
+        [crate::project_semantic_dispatch::walk::ShallowDiagnostic::ProjectionWorkLimit { .. }]
+    ));
     let typeof_cold_after = live_ctx
         .semantic_query_typeof_cold
         .load(std::sync::atomic::Ordering::Relaxed);
@@ -409,11 +401,6 @@ fn post_trip_typeof_early_exit_attributes_to_typeof_cold_counter() {
 /// enter cooperative admission (the budget-gate is keyed on
 /// `semantic_query_counts_toward_projection_budget` only) and MUST
 /// produce a non-error value.
-///
-/// Pre-fix this test passes trivially because there was no early-exit
-/// at all. Post-fix it fails if the early-exit accidentally widens its
-/// gate to include non-projection queries — which would silently
-/// poison the budget-exhausted request's final-result assembly path.
 #[test]
 fn post_trip_non_projection_queries_still_dispatch_normally() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
@@ -435,20 +422,23 @@ fn post_trip_non_projection_queries_still_dispatch_normally() {
         host.config.projection_op_budget,
     );
     let _ctx_guard = RequestContextGuard::install(ctx);
+    let _completeness_scope = ColdComputeCompletenessScope::enter();
     let dispatch = host.semantic_dispatch();
 
     // Trip the projection-op fuse with two distinct KeyOf calls.
-    let _ = dispatch.execute_type_node(SemanticQueryKey::KeyOf {
+    let _ = dispatch.execute_read(SemanticQueryKey::KeyOf {
         base: base_a,
         context,
     });
-    let trip = dispatch.execute_type_node(SemanticQueryKey::KeyOf {
+    let trip = dispatch.execute_read(SemanticQueryKey::KeyOf {
         base: base_b,
         context,
     });
     assert!(
-        matches!(trip, QueryResult::Error(QueryError::BudgetExceeded(_))),
-        "2nd keyof should trip the fuse (got {trip:?})"
+        matches!(trip.value, QueryResult::Value(_))
+            && trip.result_is_partial
+            && trip.cache_suppress,
+        "2nd keyof should trip the fuse to a safe typed partial (got {trip:?})"
     );
 
     // Snapshot cooperative-admission entry count after the trip.
@@ -464,9 +454,10 @@ fn post_trip_non_projection_queries_still_dispatch_normally() {
     let normalize_key = SemanticQueryKey::NormalizeUnion {
         members: single_member,
     };
-    let normalize_result = dispatch.execute_type_node(normalize_key);
+    let normalize_result = dispatch.execute_read(normalize_key);
     assert!(
-        matches!(normalize_result, QueryResult::Value(_)),
+        matches!(normalize_result.value, QueryResult::Value(_))
+            && !normalize_result.result_is_partial,
         "post-trip NormalizeUnion must dispatch normally; \
          widening the early-exit gate to non-projection queries would \
          break partial-result assembly (got {normalize_result:?})"
@@ -949,7 +940,7 @@ fn no_cache_promotion_for_budget_exceeded_engine_state_promotion() {
 /// 1. the first cold `Conditional` build lands within budget (1/1),
 ///    returns a concrete `Value`, and counts (executed counter == 1);
 /// 2. a SECOND, DISTINCT cold `Conditional` build trips the fuse,
-///    returning `QueryError::BudgetExceeded`;
+///    returning a safe carrier plus `Partial(PROJECTION_WORK_LIMIT)`;
 /// 3. that `CacheRead.cache_suppress == true` (the build closure marks
 ///    the budget-exceeded carrier non-cacheable); and
 /// 4. re-querying the SAME tripped key returns `BudgetExceeded` again
@@ -1017,14 +1008,23 @@ fn budget_trip_conditional_suppresses_and_does_not_warm() {
     );
 
     // (2)+(3) second distinct build trips + suppresses.
+    let second_scope = ColdComputeCompletenessScope::enter();
     let second = dispatch.execute_read(key_second.clone());
-    assert!(
-        matches!(
-            second.value,
-            QueryResult::Error(QueryError::BudgetExceeded(_))
-        ),
-        "2nd distinct Conditional must trip the budget (pre-L3 it returned a Value); got {:?}",
-        second.value
+    let QueryResult::Value(second_carrier) = second.value else {
+        panic!("a work-limited Conditional must preserve a safe carrier");
+    };
+    assert!(matches!(
+        current_cold_compute_completeness(),
+        ResultCompleteness::Partial(reasons)
+            if reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
+    ));
+    assert_eq!(
+        second.walker_diagnostics.as_ref(),
+        &[
+            crate::project_semantic_dispatch::walk::ShallowDiagnostic::ProjectionWorkLimit {
+                root: second_carrier,
+            }
+        ]
     );
     assert!(
         second.cache_suppress,
@@ -1046,6 +1046,7 @@ fn budget_trip_conditional_suppresses_and_does_not_warm() {
     // replay actually enters `execute_cooperative`: if the partial had
     // been promoted it would WARM-hit; if it was correctly suppressed it
     // COLD-rebuilds. Assert cold delta increases with NO warm hit.
+    drop(second_scope);
     drop(_ctx_guard);
     let fresh_ctx = RequestContext::with_kind_timing_and_projection_budget(
         2,
@@ -1096,7 +1097,7 @@ fn budget_trip_instantiate_suppresses_and_does_not_warm() {
     // `projection_op_budget = 1`: the FIRST decidable `Partial<{ … }>`
     // cold build lands within the budget (it counts exactly one
     // budget-gated Instantiate op at the dispatch entry) and the SECOND
-    // distinct build trips the fuse, returning a real `BudgetExceeded`.
+    // distinct build trips the fuse, returning a typed partial safe carrier.
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
         analysis_level: crate::types::AnalysisLevel::Full,
         projection_op_budget: 1,
@@ -1147,14 +1148,23 @@ fn budget_trip_instantiate_suppresses_and_does_not_warm() {
          in the budget gate); executed counter still 0"
     );
 
+    let second_scope = ColdComputeCompletenessScope::enter();
     let second = dispatch.execute_read(key_second.clone());
-    assert!(
-        matches!(
-            second.value,
-            QueryResult::Error(QueryError::BudgetExceeded(_))
-        ),
-        "2nd distinct Instantiate must trip the budget (pre-L3 it returned a Value); got {:?}",
-        second.value
+    let QueryResult::Value(second_carrier) = second.value else {
+        panic!("a work-limited Instantiate must preserve a safe carrier");
+    };
+    assert!(matches!(
+        current_cold_compute_completeness(),
+        ResultCompleteness::Partial(reasons)
+            if reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
+    ));
+    assert_eq!(
+        second.walker_diagnostics.as_ref(),
+        &[
+            crate::project_semantic_dispatch::walk::ShallowDiagnostic::ProjectionWorkLimit {
+                root: second_carrier,
+            }
+        ]
     );
     assert!(
         second.cache_suppress,
@@ -1170,6 +1180,7 @@ fn budget_trip_instantiate_suppresses_and_does_not_warm() {
     // The fresh budget lets the replay enter cooperative admission so a
     // promoted partial would warm-hit; a correctly-suppressed partial
     // cold-rebuilds. Assert cold delta increases with NO warm hit.
+    drop(second_scope);
     drop(_ctx_guard);
     let fresh_ctx = RequestContext::with_kind_timing_and_projection_budget(
         2,

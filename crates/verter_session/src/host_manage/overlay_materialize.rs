@@ -506,7 +506,7 @@ impl VerterHost {
     /// drops the publication status. PRODUCTION code must use the serve
     /// variant (the carrier is the only production accessor for an
     /// overlay `IndexedReady`).
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub(crate) fn materialize_overlay_indexed_ready_with_view(
         &self,

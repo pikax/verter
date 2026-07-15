@@ -94,11 +94,11 @@ fn warm_hit_advances_warm_counter_and_bubbles_route_facts() {
     // branch MUST bubble the cached fact into the tracer AND advance
     // the warm counter by exactly one.
     let (result, finalise) = install_fact_tracer_for_tests(&host, || {
-        verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
+        verter_session::for_tests::with_cacheability_scope_for_tests(&host, |_probe| {
             db.get_or_resolve_route_observing_facts(
                 rk("warm_provider.ts", "Bar"),
                 &view,
-                probe,
+                &host,
                 || unreachable!("resolve closure must not run on warm hit"),
             )
         })
@@ -142,6 +142,9 @@ fn warm_hit_advances_warm_counter_and_bubbles_route_facts() {
                  warm-hit branch is not calling `observe_fact_signature` \
                  on the cached signature."
             );
+        }
+        FactReadSetFinalise::NonCacheable(_) => {
+            panic!("warm-hit tracer unexpectedly non-cacheable")
         }
         FactReadSetFinalise::Overflow => panic!("warm-hit tracer overflowed"),
     }

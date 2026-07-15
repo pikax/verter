@@ -78,7 +78,6 @@ use super::helpers::{
 use super::registry_decl::prepared_decl_authored_body_locator;
 use super::{engine_fact_signature_for_exported_type, ComponentMetaQueryEngine};
 use crate::component_meta_caches::ComputedEntry;
-use crate::fact_signature_helpers::with_cacheability_scope;
 
 impl ComponentMetaQueryEngine<'_> {
     pub fn resolve_imported_registry_symbol(
@@ -140,12 +139,13 @@ impl ComponentMetaQueryEngine<'_> {
         #[cfg(test)]
         super::await_imported_registry_post_peek_barrier_for_tests(canonical_id);
 
-        let fact_tracer_host = ctx.host_for_fact_tracer_install();
-        // The cacheability scope is the OUTERMOST bracket of the cold path: the
-        // lazy load and the observed-hash read below feed the entry's ROOT, and
-        // the route walk inside the funnel's closure feeds its VALUE. Both must
-        // lie inside one scope for the post-compute verdict to cover them.
-        let (host_value, _non_cacheable) = with_cacheability_scope(fact_tracer_host, |probe| {
+        // The DB owns the OUTERMOST cacheability scope. Its preparation closure
+        // covers the lazy load and observed-hash read that feed the entry's root;
+        // its compute closure covers the route walk that produces the value.
+        let host_value = host_db.get_or_compute_admit(
+            &arc_key,
+            ctx,
+            || {
             // Lazy first-time loading BEFORE the content observation: the
             // imported canonical may not have been loaded yet when this
             // registry demand is its FIRST touch (a renamed import discovered
@@ -223,7 +223,9 @@ impl ComponentMetaQueryEngine<'_> {
             //   revalidation rejected the freshly-built entry (a file mutated
             //   mid-compute). The request resolves to a transient miss; the next
             //   request cold-recomputes. The resolution is never re-run here.
-            host_db.get_or_compute_admit(&arc_key, ctx, probe, || {
+                observed_keyed_hash
+            },
+            |observed_keyed_hash| {
                 Self::resolve_imported_registry_symbol_admission(
                     self,
                     ctx,
@@ -231,8 +233,8 @@ impl ComponentMetaQueryEngine<'_> {
                     exported_name,
                     observed_keyed_hash,
                 )
-            })
-        });
+            },
+        );
         Self::finish_imported_registry_lookup(self, key, host_value)
     }
 
@@ -302,10 +304,10 @@ impl ComponentMetaQueryEngine<'_> {
                     // absent value through `ReturnOnly(None)` (NOT a cacheable
                     // negative).
                     crate::request_context::mark_request_result_partial();
-                    let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
-                        crate::cache_runtime::NonAdmissionReason::PartialResult,
-                    );
-                    return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(None);
+                    return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+                        value: None,
+                        reason: crate::cache_runtime::NonAdmissionReason::PartialResult,
+                    };
                 }
             };
         let resolved_value = resolved.map(std::sync::Arc::new);
@@ -316,12 +318,10 @@ impl ComponentMetaQueryEngine<'_> {
             // discriminating test can drive the refused-admission path without
             // manufacturing a stale observed hash. The freshly-resolved value is
             // still returned to the winner via `ReturnOnly`.
-            let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
-                crate::cache_runtime::NonAdmissionReason::ForcedTestRefusal,
-            );
-            return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
-                resolved_value,
-            );
+            return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+                value: resolved_value,
+                reason: crate::cache_runtime::NonAdmissionReason::ForcedTestRefusal,
+            };
         }
         let Some(observed) = observed_keyed_hash else {
             // No authoritative current content for the keyed canonical —
@@ -329,12 +329,10 @@ impl ComponentMetaQueryEngine<'_> {
             // via `ReturnOnly`. The missing current-content read means the
             // provenance could not be rooted to a self-root canonical, so a
             // cross-view joiner could never view-validate it.
-            let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
-                crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
-            );
-            return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
-                resolved_value,
-            );
+            return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+                value: resolved_value,
+                reason: crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
+            };
         };
         match engine_fact_signature_for_exported_type(ctx, canonical_id, exported_name, observed) {
             crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
@@ -347,12 +345,10 @@ impl ComponentMetaQueryEngine<'_> {
                 )
             }
             crate::cache_runtime::SignatureAdmission::NonCacheable(reason) => {
-                // Pass the typed refusal reason through the TLS bridge so the
-                // downstream `CacheAdmission` lowering attributes the correct
-                // structured refusal reason instead of hard-coding
-                // `SignatureOverflow`.
-                let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(reason);
-                crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(resolved_value)
+                crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+                    value: resolved_value,
+                    reason,
+                }
             }
         }
     }
@@ -398,10 +394,8 @@ impl ComponentMetaQueryEngine<'_> {
             std::sync::Arc::<str>::from(canonical_source),
             std::sync::Arc::<str>::from(requested_name),
         );
-        // Host handle for the cacheability scope (a `Copy` `&dyn` yields an
-        // owned `&VerterHost`, so this holds no borrow on `self`).
-        let host = self.ctx.host_for_fact_tracer_install();
-        let (declaration, _non_cacheable) = with_cacheability_scope(host, |probe| {
+        let host_db = self.ctx.project_type_store().declaration_db();
+        let declaration = {
             // Observe the keyed canonical's content version ONCE, before the
             // value is computed, through the view-aware
             // `authoritative_current_content_hash` oracle (overlay-correct under
@@ -409,10 +403,10 @@ impl ComponentMetaQueryEngine<'_> {
             // provenance-pure: it roots the entry's self-root on this observed
             // hash, never a current-content re-read inside the closure. The read
             // is INSIDE the scope because it feeds the entry's root.
-            let observed_keyed_hash = self
-                .ctx
-                .authoritative_current_content_hash(canonical_source);
-            let host_db = self.ctx.project_type_store().declaration_db();
+            let prepare = || {
+                self.ctx
+                    .authoritative_current_content_hash(canonical_source)
+            };
             // Both compute arms ride `ensure_indexed_ready_serve` (the
             // prepared-decl read and the dep-resolution fallback), so this cache
             // carries the fenced-serve / lease-miss exposure its siblings do: the
@@ -423,39 +417,40 @@ impl ComponentMetaQueryEngine<'_> {
             // computed declaration back through `ReturnOnly`, so THAT refusal
             // costs no second resolution. It is not the funnel's only
             // post-compute verdict — see the `None` arm below.
-            let host_value = host_db.get_or_compute(&arc_key, self.ctx, probe, || {
-                let computed = self
-                    .resolve_direct_prepared_type_declaration(canonical_source, requested_name)
-                    .unwrap_or_else(|| {
-                        self.ctx
-                            .resolve_type_declaration_for_dep(canonical_source, requested_name)
-                    });
-                // Every arm below KEEPS the freshly-resolved declaration:
-                // returning a bare `None` would discard it and force the arm
-                // after the funnel to re-run the whole resolution, with no
-                // guarantee the second run reproduces the first.
-                let Some(observed) = observed_keyed_hash else {
-                    // No observable content version for the keyed canonical —
-                    // nothing to root the entry on.
-                    return ComputedEntry::Unrooted(
-                        computed,
-                        crate::cache_runtime::NonAdmissionReason::EmptySignature,
-                    );
-                };
-                match engine_fact_signature_for_exported_type(
-                    self.ctx,
-                    canonical_source,
-                    requested_name,
-                    observed,
-                ) {
-                    crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
-                        ComputedEntry::Rooted(computed, sig.facts)
+            let host_value =
+                host_db.get_or_compute(&arc_key, self.ctx, prepare, |observed_keyed_hash| {
+                    let computed = self
+                        .resolve_direct_prepared_type_declaration(canonical_source, requested_name)
+                        .unwrap_or_else(|| {
+                            self.ctx
+                                .resolve_type_declaration_for_dep(canonical_source, requested_name)
+                        });
+                    // Every arm below KEEPS the freshly-resolved declaration:
+                    // returning a bare `None` would discard it and force the arm
+                    // after the funnel to re-run the whole resolution, with no
+                    // guarantee the second run reproduces the first.
+                    let Some(observed) = observed_keyed_hash else {
+                        // No observable content version for the keyed canonical —
+                        // nothing to root the entry on.
+                        return ComputedEntry::Unrooted(
+                            computed,
+                            crate::cache_runtime::NonAdmissionReason::EmptySignature,
+                        );
+                    };
+                    match engine_fact_signature_for_exported_type(
+                        self.ctx,
+                        canonical_source,
+                        requested_name,
+                        observed,
+                    ) {
+                        crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
+                            ComputedEntry::Rooted(computed, sig.facts)
+                        }
+                        crate::cache_runtime::SignatureAdmission::NonCacheable(reason) => {
+                            ComputedEntry::Unrooted(computed, reason)
+                        }
                     }
-                    crate::cache_runtime::SignatureAdmission::NonCacheable(reason) => {
-                        ComputedEntry::Unrooted(computed, reason)
-                    }
-                }
-            });
+                });
             match host_value {
                 Some(arc_decl) => arc_decl.as_ref().clone(),
                 // `None` is a genuine compute failure, or a post-compute
@@ -481,7 +476,7 @@ impl ComponentMetaQueryEngine<'_> {
                             .resolve_type_declaration_for_dep(canonical_source, requested_name)
                     }),
             }
-        });
+        };
         self.declarations
             .borrow_mut()
             .insert(key, declaration.clone());
@@ -509,12 +504,11 @@ impl ComponentMetaQueryEngine<'_> {
             std::sync::Arc::<str>::from(source_key),
             std::sync::Arc::<str>::from(exported_name),
         );
-        let host = self.ctx.host_for_fact_tracer_install();
-        let (resolved, _non_cacheable) = with_cacheability_scope(host, |probe| {
+        let host_db = self.ctx.project_type_store().resolvable_db();
+        let resolved = {
             // Observed once, before the value is computed and inside the scope —
             // it feeds the entry's root (see `resolve_type_declaration`).
-            let observed_keyed_hash = self.ctx.authoritative_current_content_hash(source_key);
-            let host_db = self.ctx.project_type_store().resolvable_db();
+            let prepare = || self.ctx.authoritative_current_content_hash(source_key);
             // The bool is DERIVED from the same resolution `ImportedRegistryDb`
             // caches, so it inherits the same exposure: a fenced serve or a
             // broken decl-body lease consumed inside
@@ -522,50 +516,51 @@ impl ComponentMetaQueryEngine<'_> {
             // basis the live view cannot re-check, while the entry's signature
             // validates against that live view. The funnel's CACHEABILITY verdict
             // refuses the write and returns the computed bool.
-            let host_value = host_db.get_or_compute(&arc_key, self.ctx, probe, || {
-                let computed = if self.prepared_type_decl(source_key, exported_name).is_some() {
-                    true
-                } else {
-                    self.resolve_imported_registry_symbol(source_key, exported_name)
-                        .is_some()
-                };
-                // If the imported-registry resolution above tripped the
-                // wildcard-route fuse (which marked the request-result
-                // completeness partial), the derived `false` is NOT an
-                // authoritative "unresolvable" verdict — the symbol was never
-                // looked up. Refuse to admit it; the caller still receives the
-                // bool so it never sees a spurious cached `false`. The
-                // `ResolvabilityDb` rail has no per-value partial flag, so it
-                // supplies the request-result completeness (one request resolves
-                // one component's meta) to the pure gate.
-                if crate::cache_runtime::refuse_result_cache_admission_if_partial(
-                    crate::request_context::current_request_result_is_partial(),
-                ) {
-                    return ComputedEntry::Unrooted(
-                        computed,
-                        crate::cache_runtime::NonAdmissionReason::PartialResult,
-                    );
-                }
-                let Some(observed) = observed_keyed_hash else {
-                    return ComputedEntry::Unrooted(
-                        computed,
-                        crate::cache_runtime::NonAdmissionReason::EmptySignature,
-                    );
-                };
-                match engine_fact_signature_for_exported_type(
-                    self.ctx,
-                    source_key,
-                    exported_name,
-                    observed,
-                ) {
-                    crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
-                        ComputedEntry::Rooted(computed, sig.facts)
+            let host_value =
+                host_db.get_or_compute(&arc_key, self.ctx, prepare, |observed_keyed_hash| {
+                    let computed = if self.prepared_type_decl(source_key, exported_name).is_some() {
+                        true
+                    } else {
+                        self.resolve_imported_registry_symbol(source_key, exported_name)
+                            .is_some()
+                    };
+                    // If the imported-registry resolution above tripped the
+                    // wildcard-route fuse (which marked the request-result
+                    // completeness partial), the derived `false` is NOT an
+                    // authoritative "unresolvable" verdict — the symbol was never
+                    // looked up. Refuse to admit it; the caller still receives the
+                    // bool so it never sees a spurious cached `false`. The
+                    // `ResolvabilityDb` rail has no per-value partial flag, so it
+                    // supplies the request-result completeness (one request resolves
+                    // one component's meta) to the pure gate.
+                    if crate::cache_runtime::refuse_result_cache_admission_if_partial(
+                        crate::request_context::current_request_result_is_partial(),
+                    ) {
+                        return ComputedEntry::Unrooted(
+                            computed,
+                            crate::cache_runtime::NonAdmissionReason::PartialResult,
+                        );
                     }
-                    crate::cache_runtime::SignatureAdmission::NonCacheable(reason) => {
-                        ComputedEntry::Unrooted(computed, reason)
+                    let Some(observed) = observed_keyed_hash else {
+                        return ComputedEntry::Unrooted(
+                            computed,
+                            crate::cache_runtime::NonAdmissionReason::EmptySignature,
+                        );
+                    };
+                    match engine_fact_signature_for_exported_type(
+                        self.ctx,
+                        source_key,
+                        exported_name,
+                        observed,
+                    ) {
+                        crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
+                            ComputedEntry::Rooted(computed, sig.facts)
+                        }
+                        crate::cache_runtime::SignatureAdmission::NonCacheable(reason) => {
+                            ComputedEntry::Unrooted(computed, reason)
+                        }
                     }
-                }
-            });
+                });
             match host_value {
                 Some(value) => value,
                 // A `None` host-value is a post-compute REVALIDATION reject (the
@@ -585,7 +580,7 @@ impl ComponentMetaQueryEngine<'_> {
                     }
                 }
             }
-        });
+        };
         self.resolvable.borrow_mut().insert(key, resolved);
         resolved
     }
@@ -618,8 +613,9 @@ impl ComponentMetaQueryEngine<'_> {
             std::sync::Arc::<str>::from(owner_canonical),
             std::sync::Arc::<str>::from(name),
         );
-        let host = self.ctx.host_for_fact_tracer_install();
-        let (body, _non_cacheable) = with_cacheability_scope(host, |probe| {
+        let ctx = self.ctx;
+        let host_db = ctx.project_type_store().owner_collection_db();
+        let body = {
             // Observe the owner canonical's prepared decl AND the content
             // version it was materialised from from ONE prepared-decl bundle.
             // The cache value (the prepared decl's authored body LOCATOR) and
@@ -629,9 +625,8 @@ impl ComponentMetaQueryEngine<'_> {
             // is fetched through the view-aware `prepared_decl_bundle`
             // accessor). This read is INSIDE the scope: it is the lease-miss
             // consumption point (see the method docs).
-            let observed = self.observed_prepared_type_decl(owner_canonical, name);
-            let host_db = self.ctx.project_type_store().owner_collection_db();
-            let host_value = host_db.get_or_compute(&arc_key, self.ctx, probe, || {
+            let prepare = || self.observed_prepared_type_decl(owner_canonical, name);
+            let host_value = host_db.get_or_compute(&arc_key, ctx, prepare, |observed| {
                 // No prepared-decl bundle at all: there is no value to serve and
                 // none to publish.
                 let Some(observed) = observed.as_ref() else {
@@ -648,7 +643,7 @@ impl ComponentMetaQueryEngine<'_> {
                 // observation recorded — the value and the self-root then
                 // provably agree on one content identity.
                 match engine_fact_signature_for_exported_type(
-                    self.ctx,
+                    ctx,
                     observed.canonical_id.as_str(),
                     name,
                     observed.whole_hash,
@@ -674,7 +669,7 @@ impl ComponentMetaQueryEngine<'_> {
                     .prepared_type_decl(owner_canonical, name)
                     .map(|prepared| prepared_decl_authored_body_locator(&prepared)),
             }
-        });
+        };
         self.owner_collection_exprs
             .borrow_mut()
             .insert(name.to_string(), body.clone());

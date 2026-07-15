@@ -86,6 +86,18 @@ use crate::resolver_core::{FactVersionRef, FACT_SIGNATURE_CAP};
 /// the heap exactly once.
 const INLINE_CAPACITY: usize = 16;
 
+/// How a cache-refusal signal propagates through nested cold-compute scopes.
+///
+/// `LocalOnly` refuses retention for the scope that owns the admission
+/// decision while leaving an enclosing compute free to root its own result.
+/// `Transitive` identifies an unsafe derivation basis: every enclosing scope
+/// that consumes the value must refuse admission too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NonCacheablePropagation {
+    LocalOnly,
+    Transitive,
+}
+
 /// Push-style accumulator for cold-compute fact reads.
 ///
 /// Construct via [`FactReadSet::new`], record observations via
@@ -115,7 +127,10 @@ pub struct FactReadSet {
     /// cannot reject. Orthogonal to completeness: such a result stays
     /// `Complete` and flows to the caller; ONLY memo/cache admission is
     /// refused.
-    non_cacheable_read_observed: bool,
+    /// Strongest refusal propagation observed by this scope. `Option` keeps
+    /// the state allocation-free while preserving the distinction that a
+    /// boolean erased. `Transitive` monotonically dominates `LocalOnly`.
+    non_cacheable_propagation: Option<NonCacheablePropagation>,
     _not_send_sync: PhantomData<*const ()>,
 }
 
@@ -130,6 +145,7 @@ impl std::fmt::Debug for FactReadSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FactReadSet")
             .field("len", &self.observations.len())
+            .field("non_cacheable_propagation", &self.non_cacheable_propagation)
             .finish()
     }
 }
@@ -141,7 +157,7 @@ impl FactReadSet {
     pub fn new() -> Self {
         Self {
             observations: SmallVec::new(),
-            non_cacheable_read_observed: false,
+            non_cacheable_propagation: None,
             _not_send_sync: PhantomData,
         }
     }
@@ -150,8 +166,10 @@ impl FactReadSet {
     /// lease, unrootable route, unobservable source-env) was consumed
     /// inside this tracer's scope. Monotonic — never cleared.
     #[inline]
-    pub fn note_non_cacheable_read(&mut self) {
-        self.non_cacheable_read_observed = true;
+    pub(crate) fn note_non_cacheable_read(&mut self, propagation: NonCacheablePropagation) {
+        if self.non_cacheable_propagation != Some(NonCacheablePropagation::Transitive) {
+            self.non_cacheable_propagation = Some(propagation);
+        }
     }
 
     /// TRUE when any non-cacheable read was consumed inside this tracer's
@@ -159,7 +177,7 @@ impl FactReadSet {
     #[inline]
     #[must_use]
     pub fn non_cacheable_read_observed(&self) -> bool {
-        self.non_cacheable_read_observed
+        self.non_cacheable_propagation.is_some()
     }
 
     /// Record one observed fact.
@@ -253,7 +271,11 @@ impl FactReadSet {
             return FactReadSetFinalise::Overflow;
         }
         let arc: Arc<[FactVersionRef]> = Arc::from(self.observations.into_vec());
-        FactReadSetFinalise::Ok(arc)
+        if self.non_cacheable_propagation.is_some() {
+            FactReadSetFinalise::NonCacheable(arc)
+        } else {
+            FactReadSetFinalise::Ok(arc)
+        }
     }
 }
 
@@ -263,6 +285,11 @@ pub enum FactReadSetFinalise {
     /// Successfully sealed: an immutable, sorted, deduplicated
     /// signature ready to install as a `Candidate::fact_dep_signature`.
     Ok(Arc<[FactVersionRef]>),
+    /// The observation set is complete and remains available for bubbling into
+    /// an enclosing tracer, but this compute consumed a read whose validating
+    /// basis cannot be represented by those facts. The value may be returned;
+    /// these facts must never authorize shared-cache admission.
+    NonCacheable(Arc<[FactVersionRef]>),
     /// Signature exceeded [`FACT_SIGNATURE_CAP`]; the caller must
     /// refuse admission. No partial signature is returned — the
     /// tracer is consumed regardless of outcome.
@@ -322,8 +349,8 @@ impl FactReadSetCell {
 
     /// Record a non-cacheable read consumption through `&self`.
     #[inline]
-    pub fn note_non_cacheable_read(&self) {
-        self.0.borrow_mut().note_non_cacheable_read();
+    pub(crate) fn note_non_cacheable_read(&self, propagation: NonCacheablePropagation) {
+        self.0.borrow_mut().note_non_cacheable_read(propagation);
     }
 
     /// Whether a non-cacheable read was consumed in this scope.
@@ -488,4 +515,41 @@ fn compare_route_surface_fact(
         .then_with(|| format!("{:?}", a.key).cmp(&format!("{:?}", b.key)))
         .then_with(|| (a.lane as u8).cmp(&(b.lane as u8)))
         .then_with(|| a.expected_hash.cmp(&b.expected_hash))
+}
+
+#[cfg(test)]
+mod finalise_tests {
+    use super::*;
+
+    fn fact(index: usize) -> FactVersionRef {
+        FactVersionRef::FileWholeHash {
+            canonical_id: format!("/fact-{index}.ts"),
+            hash: [(index & 0xff) as u8; 16],
+        }
+    }
+
+    #[test]
+    fn finalise_encodes_non_cacheability_in_the_evidence() {
+        let mut read_set = FactReadSet::new();
+        read_set.observe(fact(1));
+        read_set.note_non_cacheable_read(NonCacheablePropagation::Transitive);
+
+        match read_set.finalise() {
+            FactReadSetFinalise::NonCacheable(facts) => {
+                assert_eq!(facts.as_ref(), &[fact(1)]);
+            }
+            other => panic!("non-cacheable observation finalised as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn overflow_dominates_non_cacheability() {
+        let mut read_set = FactReadSet::new();
+        read_set.note_non_cacheable_read(NonCacheablePropagation::Transitive);
+        for index in 0..=FACT_SIGNATURE_CAP {
+            read_set.observe(fact(index));
+        }
+
+        assert!(matches!(read_set.finalise(), FactReadSetFinalise::Overflow));
+    }
 }

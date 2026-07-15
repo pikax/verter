@@ -52,6 +52,9 @@ fn overflow_at_install_refuses_admission_and_advances_telemetry() {
                 sig.len()
             );
         }
+        FactReadSetFinalise::NonCacheable(_) => {
+            panic!("overflow fixture unexpectedly finalised as non-cacheable")
+        }
     }
     assert!(
         overflow_after > overflow_before,

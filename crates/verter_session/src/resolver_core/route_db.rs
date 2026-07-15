@@ -7,20 +7,11 @@
 //! wildcard specifiers are resolved once. Individual `(barrel, name)` lookups
 //! then read the surface in O(1). Route misses are cached as `RouteResult::Miss`.
 //!
-//! `EffectiveExportSet` cold-path computation stitches module augmentations
-//! into the resolved export surface for a provider canonical. The
-//! `effective_export_sets` sister table caches the post-augmentation
-//! result keyed by `(provider, project_identity, resolve_env_hash,
-//! lib_env_hash, session_scope)` (R21 — route surface depends on libs
-//! because module augmentations live in libs). The `session_scope`
-//! dimension is the CONTENT-FREE [`EffectiveExportSetScope`]
-//! (`Base` / `Session(session_scope_id)`, derived from
-//! `StoreView::compat_token().session`); the overlay-set content
-//! fingerprint NEVER enters this query-identity key (R6) — overlay
-//! content identity is validated on the VALUE via the
-//! `ModuleAugmentationIndexShape` fingerprint fact. The
-//! `effective_export_set` submodule holds the authoritative key
-//! composition.
+//! Module-augmentation stitching is owned by `ProjectSemanticDispatch`. The
+//! `effective_export_sets` table remains only as the validation backing for the
+//! legacy `FactKey::EffectiveExportSet` fact shape; there is no production cold
+//! publisher for it. New semantic results observe
+//! `ModuleAugmentationIndexShape` and contributor facts directly.
 //!
 //! Concurrent cold requests for the same barrel surface or route key coalesce
 //! via singleflight.
@@ -31,9 +22,11 @@ use rustc_hash::FxHashMap;
 use verter_semantic::facts::registry::SymbolSpace;
 
 use crate::file_artifact_store::ProjectIdentity;
+#[cfg(any(test, feature = "test-support"))]
+use crate::resolver_core::PermissiveStoreView;
 use crate::resolver_core::{
-    FactVersionRef, PermissiveStoreView, SingleflightGroup, SingleflightRole,
-    SingleflightRunResult, StoreView, ValidatedFactCache,
+    FactVersionRef, ResolverContext, SingleflightGroup, SingleflightRole, SingleflightRunResult,
+    StoreView, ValidatedFactCache,
 };
 use crate::types::Hash16;
 
@@ -227,28 +220,26 @@ pub struct RouteDb {
     /// (R6); the overlay-set content fingerprint is matched on the value,
     /// never in this key.
     effective_export_sets: ValidatedFactCache<EffectiveExportSetKey, EffectiveExportSetEntry>,
-    effective_export_singleflight:
-        SingleflightGroup<EffectiveExportSetKey, Arc<EffectiveExportSetEntry>, ()>,
     /// Test-only provenance counter — bumped each time
     /// [`Self::get_or_resolve_route_observing_facts`] returns through
     /// the warm-hit branch (validated cache lookup succeeded). Pairs
     /// with the cold + coalesced counters so tests can discriminate
     /// which branch satisfied a consumer call.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     route_warm_fact_bubble_emissions: std::sync::atomic::AtomicU64,
     /// Test-only provenance counter — bumped when
     /// [`Self::get_or_resolve_route_observing_facts`] returned through
     /// the singleflight leader branch (this thread won the cold
     /// resolve and admitted the entry). The freshly-stored facts are
     /// re-read from the validated cache before this counter advances.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     route_cold_fact_bubble_emissions: std::sync::atomic::AtomicU64,
     /// Test-only provenance counter — bumped when
     /// [`Self::get_or_resolve_route_observing_facts`] returned through
     /// the singleflight follower branch (another thread won the
     /// cold resolve, this thread joined and re-read the just-admitted
     /// facts). Discriminates the coalesced-join path from leader.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     route_coalesced_fact_bubble_emissions: std::sync::atomic::AtomicU64,
 }
 
@@ -260,21 +251,20 @@ impl RouteDb {
             barrel_surfaces: ValidatedFactCache::default(),
             barrel_singleflight: SingleflightGroup::default(),
             effective_export_sets: ValidatedFactCache::default(),
-            effective_export_singleflight: SingleflightGroup::default(),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             route_warm_fact_bubble_emissions: std::sync::atomic::AtomicU64::new(0),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             route_cold_fact_bubble_emissions: std::sync::atomic::AtomicU64::new(0),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             route_coalesced_fact_bubble_emissions: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
     /// Snapshot the test-only warm fact-bubble emission counter.
     /// Returns the current value with relaxed ordering. Exposed under
-    /// `cfg(any(test, debug_assertions))` so integration tests in
+    /// `cfg(any(test, feature = "test-support"))` so integration tests in
     /// `tests/` (which compile without `cfg(test)`) can read it.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn route_warm_fact_bubble_emissions(&self) -> u64 {
         self.route_warm_fact_bubble_emissions
@@ -283,7 +273,7 @@ impl RouteDb {
 
     /// Snapshot the test-only cold fact-bubble emission counter.
     /// Returns the current value with relaxed ordering.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn route_cold_fact_bubble_emissions(&self) -> u64 {
         self.route_cold_fact_bubble_emissions
@@ -292,7 +282,7 @@ impl RouteDb {
 
     /// Snapshot the test-only coalesced fact-bubble emission counter.
     /// Returns the current value with relaxed ordering.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn route_coalesced_fact_bubble_emissions(&self) -> u64 {
         self.route_coalesced_fact_bubble_emissions
@@ -327,6 +317,7 @@ impl RouteDb {
     }
 
     /// Permissive route lookup without store-view validation.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn get_route_any(&self, key: &RouteNameKey) -> Option<Arc<RouteResult>> {
         let result = self.routes.get_if_valid(key, &PermissiveStoreView);
         if let Some(ctx) = crate::request_context::current_request_context() {
@@ -346,7 +337,42 @@ impl RouteDb {
     }
 
     /// Look up or materialize a route for `key` with fact validation.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn get_or_resolve_route_with_facts<V, F>(
+        &self,
+        key: RouteNameKey,
+        view: &V,
+        host: &crate::VerterHost,
+        resolve: F,
+    ) -> Option<Arc<RouteResult>>
+    where
+        V: StoreView + ?Sized,
+        F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
+    {
+        self.get_or_resolve_route_with_facts_with_context(key, view, host, resolve)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn get_or_resolve_route_with_facts_with_context<V, F>(
+        &self,
+        key: RouteNameKey,
+        view: &V,
+        ctx: &dyn ResolverContext,
+        resolve: F,
+    ) -> Option<Arc<RouteResult>>
+    where
+        V: StoreView + ?Sized,
+        F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
+    {
+        let tracer_host = ctx.host_for_fact_tracer_install();
+        crate::fact_signature_helpers::with_cacheability_scope(tracer_host, |probe| {
+            self.get_or_resolve_route_with_facts_in_scope(key, view, probe, resolve)
+        })
+        .0
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn get_or_resolve_route_with_facts_in_scope<V, F>(
         &self,
         key: RouteNameKey,
         view: &V,
@@ -572,9 +598,9 @@ impl RouteDb {
     /// the leader — replacing the wall-clock sleep that previously raced
     /// the follower's registration.
     ///
-    /// Exposed under `cfg(any(test, debug_assertions))` so integration
+    /// Exposed under `cfg(any(test, feature = "test-support"))` so integration
     /// tests in `tests/` (which compile without `cfg(test)`) can call it.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn test_route_inflight_strong_count<V: StoreView + ?Sized>(
         &self,
         key: &RouteNameKey,
@@ -599,11 +625,11 @@ impl RouteDb {
     /// attempts, which is the state in which adopting an unrooted route
     /// becomes observable.
     ///
-    /// Exposed under `cfg(any(test, debug_assertions))` so integration
+    /// Exposed under `cfg(any(test, feature = "test-support"))` so integration
     /// tests in `tests/` (which compile without `cfg(test)`) can reach
     /// the private singleflight group. The pin is released when `f`
     /// returns.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn test_with_pinned_route_lane<V, R>(
         &self,
         key: RouteNameKey,
@@ -653,7 +679,40 @@ impl RouteDb {
     /// `with_fact_tracer` scopes use it instead of [`Self::get_route`]
     /// or [`Self::get_or_resolve_route_with_facts`] (the latter remain
     /// available as low-level primitives for intra-RouteDb code).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn get_or_resolve_route_observing_facts<V, F>(
+        &self,
+        key: RouteNameKey,
+        view: &V,
+        host: &crate::VerterHost,
+        resolve: F,
+    ) -> Option<Arc<RouteResult>>
+    where
+        V: StoreView + ?Sized,
+        F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
+    {
+        self.get_or_resolve_route_observing_facts_with_context(key, view, host, resolve)
+    }
+
+    pub(crate) fn get_or_resolve_route_observing_facts_with_context<V, F>(
+        &self,
+        key: RouteNameKey,
+        view: &V,
+        ctx: &dyn ResolverContext,
+        resolve: F,
+    ) -> Option<Arc<RouteResult>>
+    where
+        V: StoreView + ?Sized,
+        F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
+    {
+        let tracer_host = ctx.host_for_fact_tracer_install();
+        crate::fact_signature_helpers::with_cacheability_scope(tracer_host, |probe| {
+            self.get_or_resolve_route_observing_facts_in_scope(key, view, probe, resolve)
+        })
+        .0
+    }
+
+    fn get_or_resolve_route_observing_facts_in_scope<V, F>(
         &self,
         key: RouteNameKey,
         view: &V,
@@ -667,7 +726,7 @@ impl RouteDb {
         // Warm-hit fast path: validated cache lookup with fact bubbling.
         if let Some((value, facts)) = self.get_route_with_facts(&key, view) {
             crate::fact_signature_helpers::observe_fact_signature(&facts);
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             self.route_warm_fact_bubble_emissions
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Some(value);
@@ -688,7 +747,7 @@ impl RouteDb {
         // tracer scope.
         if let Some((_value, facts)) = self.get_route_with_facts(&key, view) {
             crate::fact_signature_helpers::observe_fact_signature(&facts);
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             match run_result.role {
                 SingleflightRole::Leader => {
                     self.route_cold_fact_bubble_emissions
@@ -723,9 +782,7 @@ impl RouteDb {
         V: StoreView + ?Sized,
         F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
     {
-        test_cacheability_scope(|probe| {
-            self.get_or_resolve_route_with_facts(key, view, probe, resolve)
-        })
+        self.get_or_resolve_route_with_facts(key, view, test_host(), resolve)
     }
 
     /// Test-only traced sibling of [`Self::get_or_build_barrel_surface`].
@@ -740,7 +797,7 @@ impl RouteDb {
         V: StoreView,
         F: FnOnce() -> Option<BarrelRouteSurface>,
     {
-        test_cacheability_scope(|probe| self.get_or_build_barrel_surface(key, view, probe, build))
+        self.get_or_build_barrel_surface(key, view, test_host(), build)
     }
 
     /// Insert a pre-resolved route. **Test-only**: the empty-facts variant
@@ -752,6 +809,7 @@ impl RouteDb {
     }
 
     /// Insert a pre-resolved route with explicit fact validation.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn insert_route_with_facts(
         &self,
         key: RouteNameKey,
@@ -820,7 +878,26 @@ impl RouteDb {
     }
 
     /// Look up or build a barrel surface.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn get_or_build_barrel_surface<V, F>(
+        &self,
+        key: BarrelSurfaceKey,
+        view: &V,
+        host: &crate::VerterHost,
+        build: F,
+    ) -> Option<Arc<BarrelRouteSurface>>
+    where
+        V: StoreView,
+        F: FnOnce() -> Option<BarrelRouteSurface>,
+    {
+        crate::fact_signature_helpers::with_cacheability_scope(host, |probe| {
+            self.get_or_build_barrel_surface_in_scope(key, view, probe, build)
+        })
+        .0
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn get_or_build_barrel_surface_in_scope<V, F>(
         &self,
         key: BarrelSurfaceKey,
         view: &V,
@@ -875,6 +952,7 @@ impl RouteDb {
     }
 
     /// Insert a pre-built barrel surface under `key`.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn insert_barrel_surface(&self, key: BarrelSurfaceKey, surface: BarrelRouteSurface) {
         let facts = self.barrel_validation_facts(&surface);
         self.barrel_surfaces.insert(key, surface, facts);
@@ -917,10 +995,9 @@ impl RouteDb {
         self.barrel_surfaces.clear();
         self.barrel_singleflight.clear();
         self.effective_export_sets.clear();
-        self.effective_export_singleflight.clear();
         // Reset the test-only fact-bubble provenance counters so each
         // test sees a clean baseline after a host-wide clear.
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         {
             self.route_warm_fact_bubble_emissions
                 .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -947,6 +1024,7 @@ impl RouteDb {
     /// takes `Vec<FactVersionRef>`, not the immutable `Arc<[...]>`
     /// the candidate stores). For warm-hit observation onto the
     /// active tracer use `observe_borrowed_signature(...)` instead.
+    #[cfg(any(test, feature = "test-support"))]
     fn barrel_validation_facts(&self, surface: &BarrelRouteSurface) -> Vec<FactVersionRef> {
         surface.fact_dep_signature.as_ref().to_vec()
     }
@@ -1011,19 +1089,13 @@ impl crate::invalidation_domain::InvalidationByCanonical for RouteDb {
     }
 }
 
-/// Open a cacheability tracer scope for the in-crate cache unit tests.
-///
-/// The scope is the ONLY mint for a `CacheabilityProbe`. The host it needs is
-/// created once per process: these tests exercise the cache substrate itself, so
-/// the host is a scope carrier, not a fixture under test.
+/// Resolver context used by in-crate cache unit tests. The DB owns the tracer
+/// scope in tests and production alike.
 #[cfg(test)]
-fn test_cacheability_scope<R>(
-    f: impl for<'t> FnOnce(&crate::fact_signature_helpers::CacheabilityProbe<'t>) -> R,
-) -> R {
+fn test_host() -> &'static crate::VerterHost {
     static TEST_SCOPE_HOST: std::sync::OnceLock<crate::VerterHost> = std::sync::OnceLock::new();
-    let host = TEST_SCOPE_HOST
-        .get_or_init(|| crate::VerterHost::new_standalone(crate::types::HostConfig::default()));
-    crate::fact_signature_helpers::with_cacheability_scope(host, f).0
+    TEST_SCOPE_HOST
+        .get_or_init(|| crate::VerterHost::new_standalone(crate::types::HostConfig::default()))
 }
 
 #[cfg(test)]

@@ -56,6 +56,9 @@ fn fan_out_reaches_all_three_levels() {
                     "{name} tracer must contain the fanned-out fact; got {sig:?}"
                 );
             }
+            FactReadSetFinalise::NonCacheable(_) => {
+                panic!("{name} scope unexpectedly non-cacheable")
+            }
             FactReadSetFinalise::Overflow => panic!("{name} scope overflowed unexpectedly"),
         }
     }

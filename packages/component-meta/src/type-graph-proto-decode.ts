@@ -110,6 +110,8 @@ const EXPANSION_REASON_CYCLIC_REFERENCE = 9;
 const EXPANSION_REASON_CYCLIC_INSTANTIATION = 10;
 const EXPANSION_REASON_INSTANTIATION_ERROR = 11;
 const EXPANSION_REASON_EMPTY_UNION_ARM = 12;
+const EXPANSION_REASON_PROJECTION_WORK_LIMIT = 13;
+const EXPANSION_REASON_CONNECTED_QUERY_DEPTH_LIMIT = 14;
 
 const ACCEPTED_SURFACE_COMPLETENESS_EXACT = 1;
 const ACCEPTED_SURFACE_COMPLETENESS_LOWER_BOUND = 2;
@@ -1619,6 +1621,8 @@ function decodeExpansionStopReason(
   value: number,
 ):
   | "budgetExceeded"
+  | "projectionWorkLimit"
+  | "connectedQueryDepthLimit"
   | "mappedDepthExceeded"
   | "unresolvedReference"
   | "indeterminateConditional"
@@ -1655,6 +1659,10 @@ function decodeExpansionStopReason(
       return "instantiationError";
     case EXPANSION_REASON_EMPTY_UNION_ARM:
       return "emptyUnionArm";
+    case EXPANSION_REASON_PROJECTION_WORK_LIMIT:
+      return "projectionWorkLimit";
+    case EXPANSION_REASON_CONNECTED_QUERY_DEPTH_LIMIT:
+      return "connectedQueryDepthLimit";
     default:
       throw graphError(`component-meta graph payload has unknown expansion stop reason ${value}`);
   }

@@ -32,8 +32,6 @@
 //! - `"component_meta.results"` (`host_manage/component_meta_methods.rs`)
 //! - `"imported_root_db.roots"` (`resolver_core/imported_root_db.rs`)
 //! - `"route_db.routes"` (`resolver_core/route_db.rs`)
-//! - `"route_db.barrel_surfaces"` (`resolver_core/route_db.rs`)
-//! - `"route_db.effective_export_sets"` (`resolver_core/route_db.rs`)
 
 #![cfg(test)]
 
@@ -50,8 +48,6 @@ const PRODUCTION_CACHE_KINDS: &[&str] = &[
     "component_meta.results",
     "imported_root_db.roots",
     "route_db.routes",
-    "route_db.barrel_surfaces",
-    "route_db.effective_export_sets",
 ];
 
 /// For every production cache kind, an empty-signature admission

@@ -64,6 +64,58 @@ struct AugmentationContributions {
     source_env_unobservable: bool,
 }
 
+/// Record a completed semantic augmentation stitch using the public typed
+/// audit schema. This is emitted only after at least one augmenter contributed
+/// and after the exact augmenter-set fingerprint has been observed by the
+/// consumer's fact tracer.
+fn emit_module_augmentation_stitched_event(
+    target: &crate::file_artifact_store::AugmentationTargetKind,
+    augmenter_count: u32,
+    fingerprint: crate::semantic_query::HashValue,
+) {
+    use crate::file_artifact_store::AugmentationTargetKind;
+    use verter_audit::AugmentationTargetKindTag;
+
+    let (target_kind_tag, external_specifier, resolved_relative_canonical, wildcard_pattern) =
+        match target {
+            AugmentationTargetKind::ExternalSpecifier(specifier) => (
+                AugmentationTargetKindTag::ExternalSpecifier,
+                Some(Arc::<str>::from(specifier.as_ref())),
+                None,
+                None,
+            ),
+            AugmentationTargetKind::ResolvedRelativeCanonical(canonical) => (
+                AugmentationTargetKindTag::ResolvedRelativeCanonical,
+                None,
+                Some(Arc::clone(canonical)),
+                None,
+            ),
+            AugmentationTargetKind::WildcardAmbient(pattern) => (
+                AugmentationTargetKindTag::WildcardAmbient,
+                None,
+                None,
+                Some(Arc::<str>::from(pattern.as_ref())),
+            ),
+            AugmentationTargetKind::GlobalAugmentation => (
+                AugmentationTargetKindTag::GlobalAugmentation,
+                None,
+                None,
+                None,
+            ),
+        };
+
+    crate::host_manage::push_structured_event(
+        crate::component_meta_audit::StructuredAuditEvent::ModuleAugmentationStitched {
+            target_kind_tag,
+            external_specifier,
+            resolved_relative_canonical,
+            wildcard_pattern,
+            augmenter_count,
+            fingerprint,
+        },
+    );
+}
+
 /// One resolved heritage base from a class's `extends` clause
 /// ([`ProjectSemanticDispatch::class_heritage_bases`]): the base decl's
 /// `(canonical, symbol)` identity plus the heritage clause's authored
@@ -2673,8 +2725,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `ModuleAugmentationIndexShape` (augmenter-set) fact plus each augmenter's
     /// `FileWholeHash` onto the active fact tracer so the cached value
     /// invalidates on an augmenter add/remove OR an augmenter content edit.
-    /// It reuses the same fact rail as
-    /// [`crate::resolver_core::route_db::RouteDb::get_or_compute_effective_export_set`].
+    /// This is the production augmentation-stitch fact rail.
     fn stitch_module_augmentations(
         &self,
         decl_canonical: &Arc<str>,
@@ -2762,8 +2813,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Observes the augmenter-set fingerprint (`ModuleAugmentationIndexShape`)
     /// plus each augmenter's `FileWholeHash` onto the active fact tracer
     /// so the cached value invalidates on an augmenter
-    /// add/remove/reorder OR an augmenter content edit — the same fact rail as
-    /// [`crate::resolver_core::route_db::RouteDb::get_or_compute_effective_export_set`].
+    /// add/remove/reorder OR an augmenter content edit.
     /// These two facts are the sole cache-validity rail for the merged value:
     /// a member-body edit that leaves the augmenter skeleton (hence the
     /// set fingerprint) intact still moves the augmenter's `FileWholeHash`, so
@@ -2789,10 +2839,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // session's overlay artifacts (matched by the session overlay
         // discriminator) with base; otherwise base-only. A session overlay's
         // `declare module` augmenters stay isolated from the base index. The
-        // population + discriminator are derived through the shared
-        // `augmentation_population_for_view` so the names stitch
-        // (`RouteDb::get_or_compute_effective_export_set`) agrees on the
-        // `Session(u64)` semantics.
+        // Population + discriminator are derived through the shared
+        // `augmentation_population_for_view`, the single session-population
+        // definition for semantic augmentation stitching.
         let (population, overlay_discriminator) =
             crate::session_view::augmentation_population_for_view(self.ctx.active_session_view());
 
@@ -2829,9 +2878,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut source_env_unobservable = false;
         // Stale-key self-heals discovered below are written back into the
         // cached `AugmenterSet` after the loop so the NEXT stitch hits the
-        // fast exact-key path instead of re-healing every call — the SAME
-        // write-back the names stitch
-        // (`RouteDb::get_or_compute_effective_export_set`) performs.
+        // fast exact-key path instead of re-healing every call.
         let mut refreshed_keys: Vec<(usize, crate::file_artifact_store::FileArtifactKey)> =
             Vec::new();
         for (augmenter_idx, augmenter) in augmenter_set.entries.iter().enumerate() {
@@ -2864,9 +2911,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // the augmenter on that miss would silently drop a real
             // augmentation. `ensure_indexed_ready_serve` above already materialised
             // the augmenter's CURRENT version, so `indexed.whole_hash` is the
-            // scheduler-authoritative current content hash — the SAME healing
-            // path the names stitch
-            // (`RouteDb::get_or_compute_effective_export_set`) uses.
+            // scheduler-authoritative current content hash.
             let Some((art, refreshed_key)) = artifact_store
                 .augmenter_artifacts_self_healing(&augmenter.artifact_key, indexed.whole_hash)
             else {
@@ -3142,6 +3187,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 source_env_unobservable = true;
             }
         }
+
+        emit_module_augmentation_stitched_event(
+            &target,
+            contributor_roots.len() as u32,
+            augmenter_set.fingerprint,
+        );
 
         Some(AugmentationContributions {
             contributor_nodes,
@@ -3520,7 +3571,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             scope_payload,
             shadowing,
         };
-        self.project_located_decl_body(substituted, decl_kind, &inputs, substitutions, context)
+        let projected =
+            self.project_located_decl_body(substituted, decl_kind, &inputs, substitutions, context);
+        if let crate::semantic_query::ResultCompleteness::Partial(reasons) = projected.completeness
+        {
+            self.fold_local_partial_completeness(reasons);
+        }
+        projected.node
     }
 
     pub(super) fn backfill_member_index_surface(
@@ -4710,18 +4767,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .evaluate_deferred_semantic_node_with_context(node, context)
             .into_active_query_build_node(self);
         // Sound termination on the residual chain: a `visited` set detects
-        // resolution cycles, and the shared per-demand step fuse
-        // (`STRUCTURAL_FACT_DEMAND_FUSE` — the same bound the structural-fact
-        // demand loop carries) bounds fresh-node regrowth the visited set
-        // cannot (each `Instantiate` step can mint a NEW node id). Both
+        // exact resolution cycles, and the connected work envelope bounds
+        // fresh-node regrowth the visited set cannot (each `Instantiate` step
+        // can mint a NEW node id). Both
         // abnormal stops are TYPED: they fold a partial into the enclosing
         // query build's taint frame (refusing warm admission) instead of
         // silently returning an intermediate carrier the signature-utility
         // caller would classify as settled.
         let mut visited = rustc_hash::FxHashSet::default();
-        let mut steps: u32 = 0;
-        // bounded-loop: visited-set cycle detection + the shared
-        // STRUCTURAL_FACT_DEMAND_FUSE step fuse, both typed-partial on trip.
+        // Bounded loop: exact-identity cycle detection plus the shared
+        // connected work envelope, both typed-partial on trip.
         loop {
             let (slot, inst_args, owner_canonical) = match self
                 .graph()
@@ -4742,8 +4797,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     Arc::clone(&base.canonical_id),
                 ),
                 // Settled (non-carrier) — the stable stop; checked BEFORE the
-                // fuse so a chain that settles on exactly the last permitted
-                // step is never falsely partial.
+                // work budget so a chain that settles on exactly the last
+                // permitted step is never falsely partial.
                 _ => return current,
             };
             if !visited.insert(current) {
@@ -4754,15 +4809,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 );
                 return current;
             }
-            if steps >= crate::project_semantic_dispatch::evaluate::STRUCTURAL_FACT_DEMAND_FUSE {
-                // Step-fuse trip on fresh-node regrowth: the reached node is
-                // an INTERMEDIATE carrier — typed partial.
-                self.fold_local_partial_completeness(
-                    crate::semantic_query::PartialReasonSet::STRUCTURAL_FACT_DEMAND_LIMIT,
-                );
+            if let Err(reasons) = self.charge_connected_work() {
+                // Fresh-node regrowth exhausted the shared connected envelope.
+                self.fold_local_partial_completeness(reasons);
                 return current;
             }
-            steps += 1;
             let read = self.execute_read(SemanticQueryKey::Instantiate(
                 crate::semantic_query::InstantiateKey::new(
                     slot,

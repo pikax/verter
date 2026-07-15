@@ -13370,6 +13370,57 @@ fn compute_verter_diagnostics_ignores_plain_typescript_files() {
     );
 }
 
+#[test]
+fn compute_verter_diagnostics_surfaces_one_projection_budget_failure_at_macro_span() {
+    let host = Arc::new(VerterHost::new_standalone(verter_session::HostConfig {
+        analysis_level: verter_session::AnalysisLevel::Full,
+        projection_op_budget: 1,
+        ..verter_session::HostConfig::default()
+    }));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri: Uri = "file:///workspace/src/Limited.vue".parse().unwrap();
+    let source = r#"<script setup lang="ts">
+type Box<T> = { value: T }
+type Props<T> = { first: Box<T>; second: Box<T> }
+const props = defineProps<Props<string>>()
+</script>
+<template>{{ props.first.value }}</template>
+"#;
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let diagnostics =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &DashMap::new(), None);
+    let limited: Vec<_> = diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.code
+                == Some(NumberOrString::String(
+                    crate::features::diagnostics::TYPE_EXPANSION_BUDGET_CODE.to_string(),
+                ))
+        })
+        .collect();
+
+    assert_eq!(
+        limited.len(),
+        1,
+        "public diagnostics must deduplicate the root limit"
+    );
+    assert_eq!(
+        limited[0].message,
+        "Type expansion exceeded Verter's safe evaluation budget."
+    );
+    assert_eq!(limited[0].severity, Some(DiagnosticSeverity::WARNING));
+    assert_eq!(
+        limited[0].range.start.line, 3,
+        "the failure must point at the defineProps root demand"
+    );
+}
+
 /// Proves that `compute_verter_diagnostics_for` bypasses its cache when the
 /// host's `diagnostics_generation` changes (even if the document version hasn't).
 #[test]

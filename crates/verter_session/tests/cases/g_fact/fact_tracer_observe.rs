@@ -79,6 +79,7 @@ fn cold_compute_observes_each_dep() {
                 .collect();
             assert_eq!(names, vec!["/a.ts", "/b.ts", "/c.ts"]);
         }
+        FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
         FactReadSetFinalise::Overflow => panic!("3 facts should not overflow"),
     }
 }
@@ -143,6 +144,7 @@ fn observe_borrowed_signature_appends() {
                 .collect();
             assert_eq!(names, vec!["/x.ts", "/y.ts", "/z.ts"]);
         }
+        FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
         FactReadSetFinalise::Overflow => panic!("3 facts should not overflow"),
     }
 }
@@ -185,6 +187,7 @@ fn signature_cap_overflow_returns_overflow() {
         FactReadSetFinalise::Ok(_) => {
             panic!("{N_OVERFLOW} distinct facts must overflow")
         }
+        FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
         FactReadSetFinalise::Overflow => {
             // Expected outcome: overflow sentinel.
         }
@@ -242,6 +245,7 @@ fn finalise_sorts_and_dedups() {
                 .collect();
             assert_eq!(names, vec!["/aaa.ts", "/bbb.ts"]);
         }
+        FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
         FactReadSetFinalise::Overflow => panic!("2 unique facts must not overflow"),
     }
 }
@@ -295,6 +299,7 @@ fn nested_with_fact_tracer_scopes_capture_via_fan_out() {
                 "inner set must contain the inner_fact"
             );
         }
+        FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
         FactReadSetFinalise::Overflow => panic!("inner set should not overflow"),
     }
 
@@ -316,6 +321,7 @@ fn nested_with_fact_tracer_scopes_capture_via_fan_out() {
                 "outer set must contain the inner_fact (fan-out from inner scope)"
             );
         }
+        FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
         FactReadSetFinalise::Overflow => panic!("outer set should not overflow"),
     }
 
@@ -351,6 +357,7 @@ fn empty_tracer_is_empty_and_records_change_state() {
     assert_eq!(inner.len(), 1);
     match inner.finalise() {
         FactReadSetFinalise::Ok(arc) => assert_eq!(arc.len(), 1),
+        FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
         FactReadSetFinalise::Overflow => panic!("1 fact must not overflow"),
     }
 }

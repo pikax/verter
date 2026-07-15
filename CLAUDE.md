@@ -133,7 +133,7 @@ Cross-file augmentation merge is the SAME `MergedDecl` peer-merge path as same-f
 
 Facts rail: the cold stitch observes one `FactKey::ModuleAugmentationIndexShape` fingerprint plus one `FileWholeHash` per contributing file and records `self_root_canonicals = {base} ∪ {augmenters}` — a content edit to ANY contributor misses the warm read; torn/partial routes through `ReturnOnly`. Query keys stay content-free (R6). The index is OVERLAY-AWARE (`AugmentationPopulation {Base, Session(overlay-set fingerprint)}`): overlay augmenters NEVER poison the base index and NEVER cross sessions, and there is NO base-only session assert on the augmentation-index / `EffectiveExportSet` surface — a session view is accepted under `Session` scope.
 
-Guards: `session_overlay_augmenter_isolated_from_base_index`, `effective_export_set_session_view_stitches_overlay_augmenter`, `no_effective_export_set_base_only_session_assert`.
+Guards: `session_overlay_augmenter_isolated_from_base_index`, `session_overlay_augmentation_isolated_from_base_meta`.
 
 See `/type-resolution` skill for the stitch chain and the overlay-aware index, and `/type-cache-architecture` for the content-addressed vs query-identity augmentation key split.
 

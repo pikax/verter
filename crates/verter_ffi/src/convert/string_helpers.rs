@@ -85,6 +85,12 @@ pub(super) fn expansion_stop_reason_to_string(
         verter_semantic::analysis::type_expand::ExpansionStopReason::BudgetExceeded => {
             "budgetExceeded".to_string()
         }
+        verter_semantic::analysis::type_expand::ExpansionStopReason::ProjectionWorkLimit => {
+            "projectionWorkLimit".to_string()
+        }
+        verter_semantic::analysis::type_expand::ExpansionStopReason::ConnectedQueryDepthLimit => {
+            "connectedQueryDepthLimit".to_string()
+        }
         verter_semantic::analysis::type_expand::ExpansionStopReason::MappedDepthExceeded => {
             "mappedDepthExceeded".to_string()
         }

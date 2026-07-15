@@ -173,6 +173,11 @@ pub struct ExpansionDiagnostic {
 #[serde(rename_all = "camelCase")]
 pub enum ExpansionStopReason {
     BudgetExceeded,
+    /// The connected projection/evaluation demand exhausted its total work
+    /// envelope while semantic identity continued to change.
+    ProjectionWorkLimit,
+    /// The separate connected host-query nesting limit was exhausted.
+    ConnectedQueryDepthLimit,
     MappedDepthExceeded,
     UnresolvedReference,
     IndeterminateConditional,

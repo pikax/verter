@@ -1813,9 +1813,47 @@ fn resolved_meta_reuses_resolver_cache_after_legacy_slot_is_cleared() {
     );
 }
 
+#[test]
+fn resolved_meta_partial_direct_publish_refuses_validated_and_legacy_slots() {
+    let project = make_project();
+    project
+        .upsert_base("Comp.vue", &sfc("count: number"))
+        .unwrap();
+    let host = project.host();
+    let mode = crate::types::ProjectionMode::Expanded;
+    let mut partial = host
+        .resolve_component_meta("Comp.vue", mode)
+        .expect("control resolve must produce a complete state to mutate into a partial fixture");
+
+    let key =
+        crate::host_manage::component_meta_request_impl::resolved_meta_cache_key("Comp.vue", mode);
+    host.resolver_runtime().component_meta.remove(&key);
+    clear_legacy_cached_resolved_state(&project, "Comp.vue", mode);
+
+    partial.completeness = crate::semantic_query::ResultCompleteness::partial(
+        crate::semantic_query::PartialReasonSet::PROPAGATED,
+    );
+    partial.synthesis_should_suppress = true;
+    let facts = partial.fact_versions.clone();
+    host.store_cached_resolved_meta("Comp.vue", mode, &partial, &facts);
+
+    assert!(
+        cached_resolved_state(&project, "Comp.vue", mode).is_none(),
+        "a direct partial publish must not write the legacy resolved-meta mirror"
+    );
+    let view = host.resolver_store_view_read().into_owned_view();
+    assert!(
+        host.resolver_runtime()
+            .component_meta
+            .get_if_valid(&key, &view)
+            .is_none(),
+        "a direct partial publish must not write the validated resolved-meta cache"
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn fallthrough_reuses_resolver_cache_after_legacy_slot_is_cleared() {
+fn fallthrough_runtime_cache_remains_authoritative_after_legacy_slot_is_cleared() {
     let project = make_project();
     project
         .upsert_base("/Child.vue", r#"<template><div>child</div></template>"#)
@@ -1846,20 +1884,22 @@ import Child from './Child.vue'
 
     project.host().provenance.reset();
 
-    let _ = project
+    let second = project
         .host()
         .resolve_fallthrough_surface("/App.vue")
         .expect("second fallthrough resolve should succeed from resolver-owned cache");
     let after_second = project.host().resolver_runtime().counter_snapshot();
-    let second_cache = cached_fallthrough_state(&project, "/App.vue")
-        .expect("resolver-owned fallthrough cache hit should mirror back into the legacy slot");
+    assert!(
+        cached_fallthrough_state(&project, "/App.vue").is_none(),
+        "a warm runtime read is read-only and must not repopulate the legacy mirror"
+    );
 
     let first_prop_names: Vec<_> = first_cache
         .accepted_props
         .iter()
         .map(|prop| prop.name.as_str())
         .collect();
-    let second_prop_names: Vec<_> = second_cache
+    let second_prop_names: Vec<_> = second
         .accepted_props
         .iter()
         .map(|prop| prop.name.as_str())
@@ -1867,12 +1907,12 @@ import Child from './Child.vue'
     assert_eq!(first_prop_names, second_prop_names);
     assert_eq!(
         first_cache.accepted_surface_completeness,
-        second_cache.accepted_surface_completeness
+        second.accepted_surface_completeness
     );
     assert_eq!(
         first_cache.fact_versions.len(),
-        second_cache.fact_versions.len(),
-        "legacy mirror repopulation should preserve dependency fact coverage"
+        second.fact_versions.len(),
+        "the authoritative runtime result preserves dependency fact coverage"
     );
     assert!(
         after_first.node_cache_misses > 0,
@@ -1888,7 +1928,7 @@ import Child from './Child.vue'
     assert_eq!(
         provenance(&project).resolver_node_cache_hits,
         1,
-        "second fallthrough lookup should be served from the runtime cache and mirrored back into the legacy slot"
+        "second fallthrough lookup should be served from the authoritative runtime cache"
     );
     assert_eq!(
         provenance(&project).resolver_node_cache_misses,
@@ -3196,7 +3236,7 @@ import Child from './Child.vue'
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn fallthrough_recomputes_from_runtime_subnodes_after_top_level_node_clear() {
+fn fallthrough_recomputes_and_reuses_runtime_subnode_after_top_level_node_clear() {
     let project = make_project();
     project
         .upsert_base(
@@ -3248,8 +3288,8 @@ const attrs = { id: 'hero', title: 'Hello' }
         "recomputed fallthrough must still treat spread attrs as consumed"
     );
     assert!(
-        runtime.node_cache_hits >= 2,
-        "recomputing after evicting the top-level and root-follow nodes should reuse multiple deeper runtime subnodes, got {:?}",
+        runtime.node_cache_hits >= 1,
+        "recomputing after evicting the top-level and root-follow nodes should reuse an available deeper runtime subnode, got {:?}",
         runtime
     );
 }
@@ -29069,14 +29109,59 @@ defineEmits<Events>()
     );
 }
 
-/// GENUINE-MISS CONTROL: a call-signature emit whose payload param
-/// references a type that does not exist ANYWHERE stays a typed failure —
-/// the CallableParams replay validates each payload param root through the
-/// one shared dispatch and REFUSES an unresolvable reference, carrying the
-/// failed `.tuple[N]` position; it never fabricates a tuple around a broken
-/// reference. The fail-closed rail still catches TRUE misses.
+/// An authored unresolved call-signature parameter remains an explicit,
+/// Complete `Ref` inside its payload tuple. Imported and local call signatures
+/// share the same carrier-preserving behavior and emit no budget diagnostic.
 #[test]
-fn call_signature_emit_with_unresolvable_param_stays_a_typed_failure() {
+fn call_signature_emit_with_unresolved_param_stays_a_complete_carrier() {
+    fn assert_complete_missing_payload(project: &MetaProject) {
+        let output = project
+            .host()
+            .get_component_meta_output("/App.vue")
+            .expect("a stable unresolved payload carrier must materialize")
+            .expect("the component resolves");
+        let (analysis, _resolution, types) = output.into_parts();
+        assert!(
+            analysis
+                .macro_expansion_diagnostics
+                .iter()
+                .all(|expansion| expansion.diagnostics.is_empty()),
+            "a stable unresolved reference must not receive an operational budget diagnostic: {:?}",
+            analysis.macro_expansion_diagnostics
+        );
+        let save = analysis
+            .events
+            .iter()
+            .position(|event| event.name == "save")
+            .expect("the save event publishes");
+        let lanes = types.into_lanes();
+        let TypeExpr::Tuple { elements, .. } = &lanes.event_payloads[save] else {
+            panic!(
+                "the callable payload must remain a tuple carrier; got {:?}",
+                lanes.event_payloads[save]
+            );
+        };
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0].label.as_deref(), Some("value"));
+        assert!(matches!(
+            &elements[0].ty,
+            TypeExpr::Ref {
+                name,
+                type_arguments
+            } if name.as_ref() == "Missing" && type_arguments.is_empty()
+        ));
+
+        let (_analysis, state) = project
+            .host()
+            .get_component_meta_with_resolution("/App.vue")
+            .expect("the stable unresolved payload remains resolvable");
+        assert!(
+            !state.completeness.is_partial() && !state.synthesis_should_suppress,
+            "a stable unresolved callable parameter is Complete and cacheable; got {:?}",
+            state.completeness
+        );
+    }
+
     let project = make_project();
     project
         .upsert_base(
@@ -29095,36 +29180,10 @@ defineEmits<Events>()
         )
         .unwrap();
 
-    let err = project
-        .host()
-        .get_component_meta_output("/App.vue")
-        .expect_err(
-            "a payload param referencing a non-existent type must FAIL typed — \
-             the replay never fabricates a tuple around a broken reference",
-        );
-    assert_eq!(
-        err.lane,
-        crate::meta_resolve::ComponentMetaOutputLane::EventPayload,
-        "the typed failure names the failed lane"
-    );
-    match &err.failure {
-        crate::meta_resolve::ComponentMetaOutputFailure::InteriorSourceMiss { path } => {
-            assert_eq!(
-                path.as_ref(),
-                &[crate::meta_resolve::InteriorSourceStep::TupleElement { ordinal: 0 }],
-                "the failure names the exact unresolvable payload element"
-            );
-        }
-        other => panic!(
-            "the unresolvable param fails as the strict interior miss with \
-             its .tuple[N] position, got {other:?}"
-        ),
-    }
+    assert_complete_missing_payload(&project);
 
-    // The LOCAL form of the same genuine miss fails the same way: with the
-    // normalized source authoritative, a locally-authored call signature
-    // routes through the SAME CallableParams replay and the SAME per-param
-    // validation — never a fabricated tuple around a broken reference.
+    // The local form routes through the same replay and preserves the same
+    // stable carrier.
     let local = make_project();
     local
         .upsert_base(
@@ -29135,17 +29194,7 @@ defineEmits<{ (e: 'save', value: Missing): void }>()
 <template><div /></template>"#,
         )
         .unwrap();
-    let local_err = local
-        .host()
-        .get_component_meta_output("/App.vue")
-        .expect_err(
-            "a LOCAL payload param referencing a non-existent type must FAIL \
-             typed exactly like the cross-file form",
-        );
-    assert_eq!(
-        local_err.lane,
-        crate::meta_resolve::ComponentMetaOutputLane::EventPayload
-    );
+    assert_complete_missing_payload(&local);
 }
 
 /// POSITIVE CONTROL: an AUTHORED `unknown` emit payload param is a PRESENT,
@@ -29466,14 +29515,11 @@ defineProps<Props>()
     );
 }
 
-/// GENUINE-MISS control: a props member whose value references a
-/// NON-EXISTENT type (`broken: MissingType`) demand-validates to an
-/// unresolvable residual carrier — the structural projection must NOT
-/// fabricate a Present replay route for it. The REQUIRED member-value
-/// position stays the typed source-construction failure and output
-/// materialization fails typed.
+/// Stable unresolved-name control: an authored name that cannot currently be
+/// resolved remains an explicit `Ref` carrier. This is a complete semantic
+/// result, not operational truncation and not a fabricated `unknown`.
 #[test]
-fn prop_member_value_referencing_nonexistent_type_stays_failed() {
+fn prop_member_value_referencing_unresolved_type_stays_complete_carrier() {
     let project = make_project();
     project
         .upsert_base(
@@ -29492,63 +29538,49 @@ defineProps<Props>()
         )
         .unwrap();
 
-    let err = project
+    let (analysis, _resolution, types) = project
         .host()
         .get_component_meta_output("/App.vue")
-        .expect_err(
-            "a member value referencing a non-existent type is a genuine miss \
-             and must FAIL output materialization with a typed error",
-        );
-    assert_eq!(
-        err.lane,
-        crate::meta_resolve::ComponentMetaOutputLane::Prop,
-        "the typed failure names the failed lane"
-    );
-    assert_eq!(
-        err.failure,
-        crate::meta_resolve::ComponentMetaOutputFailure::RequiredSourceUnavailable {
-            failure:
-                verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
-        },
-        "the failure class is the producer-typed member-value failure"
-    );
-    assert_eq!(
-        *err.position,
-        verter_type_expr::facts::SourcePosition::Failed(
-            verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+        .expect("a stable unresolved reference has a representable source")
+        .expect("component resolves")
+        .into_parts();
+    let index = analysis
+        .props
+        .iter()
+        .position(|prop| prop.name == "broken")
+        .expect("broken prop publishes");
+    assert!(
+        matches!(
+            &types.into_lanes().props[index],
+            TypeExpr::Ref { name, type_arguments }
+                if name.as_ref() == "MissingType" && type_arguments.is_empty()
         ),
-        "the error carries the FAILED position — there is no SemanticTypeSource to report"
+        "the authored unresolved name remains an explicit zero-argument Ref carrier"
     );
 
-    // Non-completed enforcement: the assembled analysis result is NOT
-    // labeled complete, so it is never cached as a complete success.
     let (_analysis, state) = project
         .host()
         .get_component_meta_with_resolution("/App.vue")
-        .expect("the analysis itself still assembles");
+        .expect("component resolves");
     assert!(
-        state.completeness.is_partial(),
-        "a failed REQUIRED member-value position must leave the result NON-complete; got {:?}",
+        !state.completeness.is_partial(),
+        "a stable unresolved carrier is Complete; got {:?}",
         state.completeness
     );
     assert!(
-        state.synthesis_should_suppress,
-        "the failed REQUIRED position must suppress warm result admission"
+        !state.synthesis_should_suppress,
+        "a stable unresolved carrier does not suppress an otherwise complete result"
     );
 }
 
-/// Shared body for the masked same-name intersection cases: a
-/// `defineProps<T>()` whose type argument INTERSECTS a locally-authored
-/// literal arm (`{ x: string }`) with an imported arm whose SAME-NAME member
-/// is unresolvable (`Bad { x: MissingType }`). The merged member `x` has a
-/// FAILED contributor — the resolvable local arm must NOT mask it into a
-/// wrong concrete `string` success: the merged REQUIRED member-value
-/// position fails typed, exactly like the single-contributor genuine miss
-/// ([`prop_member_value_referencing_nonexistent_type_stays_failed`]).
-fn assert_masked_same_name_intersection_prop_fails_closed(type_argument: &str) {
+/// Shared body for same-name intersection cases containing a stable unresolved
+/// reference. `MissingType` is not an operational failure: it stays an
+/// explicit carrier beside the concrete `string` contributor. Neither arm may
+/// mask or erase the other, and the result remains complete.
+fn assert_same_name_intersection_prop_preserves_unresolved_carrier(type_argument: &str) {
     let project = make_project();
     // `/bad.ts` compiles as a file but `MissingType` does not exist anywhere:
-    // `Bad.x` is a genuine unresolvable member value.
+    // `Bad.x` therefore carries a stable unresolved authored reference.
     project
         .upsert_base("/bad.ts", "export interface Bad { x: MissingType }\n")
         .unwrap();
@@ -29565,70 +29597,67 @@ defineProps<{type_argument}>()
         )
         .unwrap();
 
-    let err = project
+    let (analysis, _resolution, types) = project
         .host()
         .get_component_meta_output("/App.vue")
-        .expect_err(
-            "a same-name intersection member with a FAILED contributor is a \
-             genuine miss for the MERGED member — the resolvable local arm \
-             must not mask it into a concrete success; output \
-             materialization must FAIL with the typed error",
+        .expect("a stable unresolved carrier materializes without an output failure")
+        .expect("the SFC resolves")
+        .into_parts();
+    let index = analysis
+        .props
+        .iter()
+        .position(|prop| prop.name == "x")
+        .expect("the merged prop publishes");
+    let lanes = types.into_lanes();
+    let TypeExpr::Intersection(arms) = &lanes.props[index] else {
+        panic!(
+            "the merged member must preserve both contributors as an intersection; got {:?}",
+            lanes.props[index]
         );
-    assert_eq!(
-        err.lane,
-        crate::meta_resolve::ComponentMetaOutputLane::Prop,
-        "the typed failure names the failed lane"
+    };
+    assert!(
+        arms.iter()
+            .any(|arm| matches!(arm, TypeExpr::Ref { name, type_arguments }
+                if name.as_ref() == "MissingType" && type_arguments.is_empty())),
+        "the unresolved contributor remains an explicit Ref carrier; got {arms:?}"
     );
-    assert_eq!(
-        err.failure,
-        crate::meta_resolve::ComponentMetaOutputFailure::RequiredSourceUnavailable {
-            failure:
-                verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
-        },
-        "the failure class is the producer-typed member-value failure"
+    assert!(
+        arms.iter()
+            .any(|arm| matches!(arm, TypeExpr::Primitive(PrimitiveName::String))),
+        "the local contributor remains present beside the carrier; got {arms:?}"
     );
 
-    // Non-completed enforcement: the masked-contributor analysis result is
-    // NOT labeled complete, so it is never cached as a complete success.
     let (_analysis, state) = project
         .host()
         .get_component_meta_with_resolution("/App.vue")
         .expect("the analysis itself still assembles");
     assert!(
-        state.completeness.is_partial(),
-        "a failed same-name contributor must leave the result NON-complete; got {:?}",
+        !state.completeness.is_partial(),
+        "a stable unresolved contributor is Complete; got {:?}",
         state.completeness
     );
     assert!(
-        state.synthesis_should_suppress,
-        "the failed same-name contributor must suppress warm result admission"
+        !state.synthesis_should_suppress,
+        "stable unresolved carriers do not suppress warm admission"
     );
 }
 
-/// MASKED-CONTRIBUTOR enforcement, local-arm-first order: in
-/// `defineProps<{ x: string } & Bad>()` the locally-authored `x: string`
-/// analyzer candidate must NOT be accepted as the merged member's source
-/// while the imported same-name contributor `Bad.x` is unresolvable — that
-/// acceptance published a wrong concrete `string` success (`completed`)
-/// where `defineProps<Bad>()` alone correctly failed typed.
+/// Local-arm-first order preserves both the concrete contributor and the
+/// stable unresolved carrier.
 #[test]
-fn masked_failed_same_name_intersection_prop_contributor_fails_closed() {
-    assert_masked_same_name_intersection_prop_fails_closed("{ x: string } & Bad");
+fn same_name_intersection_prop_preserves_unresolved_carrier() {
+    assert_same_name_intersection_prop_preserves_unresolved_carrier("{ x: string } & Bad");
 }
 
-/// MASKED-CONTRIBUTOR enforcement, imported-arm-first order: intersection
-/// arm order must not change the fail-closed decision
-/// (`defineProps<Bad & { x: string }>()` masked identically).
+/// Imported-arm-first order has the same carrier-preserving semantics.
 #[test]
-fn masked_failed_same_name_intersection_prop_contributor_fails_closed_reversed() {
-    assert_masked_same_name_intersection_prop_fails_closed("Bad & { x: string }");
+fn same_name_intersection_prop_preserves_unresolved_carrier_reversed() {
+    assert_same_name_intersection_prop_preserves_unresolved_carrier("Bad & { x: string }");
 }
 
 /// POSITIVE control (no overfire): a same-name intersection whose arms AGREE
 /// on a resolvable type (`{ x: string } & Good` with `Good { x: string }`)
-/// stays a PRESENT `string` prop and a COMPLETE result — the masked-failed
-/// fail-close must not fire on an intersection whose every contributor
-/// resolves.
+/// stays a PRESENT `string` prop and a COMPLETE result.
 #[test]
 fn agreeing_same_name_intersection_prop_stays_present() {
     let project = make_project();
@@ -29743,13 +29772,10 @@ defineProps<{ x: string } & { x: string }>()
     );
 }
 
-/// MASKED-CONTRIBUTOR enforcement on the EMITS property-style surface: in
-/// `defineEmits<{ save: [id: number] } & BadEmits>()` where the imported
-/// same-name contributor `BadEmits.save` is unresolvable, the merged `save`
-/// payload must FAIL typed — the resolvable local tuple arm must not mask
-/// the failed contributor into a concrete `[id: number]` success.
+/// The EMITS property-style surface preserves a stable unresolved payload arm
+/// beside the concrete tuple arm, rather than masking either contributor.
 #[test]
-fn masked_failed_same_name_intersection_emit_contributor_fails_closed() {
+fn same_name_intersection_emit_preserves_unresolved_carrier() {
     let project = make_project();
     project
         .upsert_base(
@@ -29768,26 +29794,53 @@ defineEmits<{ save: [id: number] } & BadEmits>()
         )
         .unwrap();
 
-    let err = project
+    let (analysis, _resolution, types) = project
         .host()
         .get_component_meta_output("/App.vue")
-        .expect_err(
-            "a same-name emit payload with a FAILED contributor must fail \
-             output materialization typed — never a masked concrete tuple",
+        .expect("the stable unresolved emit carrier materializes")
+        .expect("the SFC resolves")
+        .into_parts();
+    let index = analysis
+        .events
+        .iter()
+        .position(|event| event.name == "save")
+        .expect("save event publishes");
+    let lanes = types.into_lanes();
+    let TypeExpr::Intersection(arms) = &lanes.event_payloads[index] else {
+        panic!(
+            "the merged payload preserves both contributors; got {:?}",
+            lanes.event_payloads[index]
         );
-    assert_eq!(
-        err.lane,
-        crate::meta_resolve::ComponentMetaOutputLane::EventPayload,
-        "the typed failure names the event-payload lane"
+    };
+    assert!(
+        arms.iter()
+            .any(|arm| matches!(arm, TypeExpr::Ref { name, type_arguments }
+                if name.as_ref() == "MissingType" && type_arguments.is_empty())),
+        "the unresolved emit contributor remains an explicit carrier; got {arms:?}"
+    );
+    assert!(
+        arms.iter()
+            .any(|arm| matches!(arm, TypeExpr::Tuple { elements, .. }
+            if elements.len() == 1
+                && elements[0].label.as_deref() == Some("id")
+                && matches!(elements[0].ty, TypeExpr::Primitive(PrimitiveName::Number)))),
+        "the concrete tuple contributor remains present; got {arms:?}"
+    );
+    let (_analysis, state) = project
+        .host()
+        .get_component_meta_with_resolution("/App.vue")
+        .expect("component resolves");
+    assert!(
+        !state.completeness.is_partial() && !state.synthesis_should_suppress,
+        "stable unresolved emit carriers remain complete and cacheable; got {:?}",
+        state.completeness
     );
 }
 
-/// MASKED-CONTRIBUTOR enforcement on the EXPOSED surface: in
-/// `defineExpose<{ x: string } & Bad>()` where the imported same-name
-/// contributor `Bad.x` is unresolvable, the merged exposed member must FAIL
-/// typed — never a masked concrete `string`.
+/// The EXPOSED surface likewise preserves a stable unresolved arm beside the
+/// concrete `string` arm.
 #[test]
-fn masked_failed_same_name_intersection_exposed_contributor_fails_closed() {
+fn same_name_intersection_exposed_preserves_unresolved_carrier() {
     let project = make_project();
     project
         .upsert_base("/bad.ts", "export interface Bad { x: MissingType }\n")
@@ -29803,26 +29856,48 @@ defineExpose<{ x: string } & Bad>()
         )
         .unwrap();
 
-    let err = project
+    let (analysis, _resolution, types) = project
         .host()
         .get_component_meta_output("/App.vue")
-        .expect_err(
-            "a same-name exposed member with a FAILED contributor must fail \
-             output materialization typed — never a masked concrete string",
+        .expect("the stable unresolved exposed carrier materializes")
+        .expect("the SFC resolves")
+        .into_parts();
+    let index = analysis
+        .exposed
+        .iter()
+        .position(|member| member.name == "x")
+        .expect("x exposed member publishes");
+    let lanes = types.into_lanes();
+    let TypeExpr::Intersection(arms) = &lanes.exposed[index] else {
+        panic!(
+            "the exposed member preserves both contributors; got {:?}",
+            lanes.exposed[index]
         );
-    assert_eq!(
-        err.lane,
-        crate::meta_resolve::ComponentMetaOutputLane::Exposed,
-        "the typed failure names the exposed lane"
+    };
+    assert!(
+        arms.iter()
+            .any(|arm| matches!(arm, TypeExpr::Ref { name, type_arguments }
+                if name.as_ref() == "MissingType" && type_arguments.is_empty()))
+            && arms
+                .iter()
+                .any(|arm| matches!(arm, TypeExpr::Primitive(PrimitiveName::String))),
+        "the exposed intersection retains the carrier and concrete arm; got {arms:?}"
+    );
+    let (_analysis, state) = project
+        .host()
+        .get_component_meta_with_resolution("/App.vue")
+        .expect("component resolves");
+    assert!(
+        !state.completeness.is_partial() && !state.synthesis_should_suppress,
+        "stable unresolved exposed carriers remain complete and cacheable; got {:?}",
+        state.completeness
     );
 }
 
-/// GENUINE-MISS control on the EMITS property-style surface, single
-/// contributor: `defineEmits<BadEmits>()` alone (no masking sibling) must
-/// fail typed — the unvalidated member-path replay route previously
-/// published a Present source for the unresolvable payload and completed.
+/// A single stable unresolved EMITS payload remains an explicit Complete
+/// carrier; it is not an operational projection miss.
 #[test]
-fn emit_payload_referencing_nonexistent_type_stays_failed() {
+fn emit_payload_referencing_unresolved_type_stays_complete_carrier() {
     let project = make_project();
     project
         .upsert_base(
@@ -29841,26 +29916,40 @@ defineEmits<BadEmits>()
         )
         .unwrap();
 
-    let err = project
+    let (analysis, _resolution, types) = project
         .host()
         .get_component_meta_output("/App.vue")
-        .expect_err(
-            "an emit payload referencing a non-existent type is a genuine \
-             miss and must FAIL output materialization with a typed error",
-        );
-    assert_eq!(
-        err.lane,
-        crate::meta_resolve::ComponentMetaOutputLane::EventPayload,
-        "the typed failure names the event-payload lane"
+        .expect("a stable unresolved emit carrier materializes")
+        .expect("the SFC resolves")
+        .into_parts();
+    let index = analysis
+        .events
+        .iter()
+        .position(|event| event.name == "save")
+        .expect("save event publishes");
+    assert!(
+        matches!(
+            &types.into_lanes().event_payloads[index],
+            TypeExpr::Ref { name, type_arguments }
+                if name.as_ref() == "MissingType" && type_arguments.is_empty()
+        ),
+        "the authored unresolved payload remains an explicit Ref carrier"
+    );
+    let (_analysis, state) = project
+        .host()
+        .get_component_meta_with_resolution("/App.vue")
+        .expect("component resolves");
+    assert!(
+        !state.completeness.is_partial() && !state.synthesis_should_suppress,
+        "the stable unresolved payload remains Complete and cacheable; got {:?}",
+        state.completeness
     );
 }
 
-/// GENUINE-MISS control on the SLOTS surface, single contributor:
-/// `defineSlots<BadSlots>()` alone must not complete as a full success with
-/// the failed slot silently absent — the result stays NON-complete
-/// (never admitted warm as complete metadata).
+/// A stable unresolved SLOTS member remains Complete but does not become a
+/// fabricated callable slot.
 #[test]
-fn slot_member_referencing_nonexistent_type_never_completes() {
+fn slot_member_referencing_unresolved_type_is_complete_but_not_callable() {
     let project = make_project();
     project
         .upsert_base(
@@ -29879,28 +29968,30 @@ defineSlots<BadSlots>()
         )
         .unwrap();
 
-    let (_analysis, state) = project
+    let (analysis, state) = project
         .host()
         .get_component_meta_with_resolution("/App.vue")
-        .expect("the analysis itself still assembles");
+        .expect("the analysis resolves");
     assert!(
-        state.completeness.is_partial(),
-        "an unresolvable slot member must leave the result NON-complete; got {:?}",
+        !analysis.slots.iter().any(|slot| slot.name == "item"),
+        "a bare unresolved carrier is not fabricated into a callable slot"
+    );
+    assert!(
+        !state.completeness.is_partial(),
+        "a stable unresolved slot carrier is Complete; got {:?}",
         state.completeness
     );
     assert!(
-        state.synthesis_should_suppress,
-        "the unresolvable slot member must suppress warm result admission"
+        !state.synthesis_should_suppress,
+        "a stable unresolved slot carrier does not suppress warm admission"
     );
 }
 
-/// MASKED-CONTRIBUTOR enforcement on INDEX-SIGNATURE positions: index
-/// signatures CONCATENATE across intersection arms (no same-name merge), so
-/// the imported arm's `[k: string]: MissingType` signature keeps its own
-/// row — its unresolvable VALUE position must fail typed, never be dropped
-/// while the local `[k: string]: string` signature completes the surface.
+/// Index signatures concatenate across intersection arms. A stable unresolved
+/// value remains an explicit carrier in its row while the concrete sibling row
+/// remains intact; neither makes the result partial.
 #[test]
-fn masked_failed_intersection_index_signature_value_never_completes() {
+fn intersection_index_signature_preserves_unresolved_value_carrier() {
     let project = make_project();
     project
         .upsert_base(
@@ -29919,37 +30010,60 @@ defineProps<{ [k: string]: string } & BadIndex>()
         )
         .unwrap();
 
-    // Index-signature positions are not one of the materialized output type
-    // lanes, so the typed output error cannot name them; the enforcement
-    // rail is the shape-level completeness: the FAILED value position marks
-    // the result NON-complete and suppresses warm admission — the resolvable
-    // sibling signature must not complete the surface.
     let (_analysis, state) = project
         .host()
         .get_component_meta_with_resolution("/App.vue")
-        .expect("the analysis itself still assembles");
+        .expect("the analysis resolves");
+    let evaluated = state
+        .evaluated_types
+        .as_ref()
+        .expect("evaluated types present");
+    let signatures = &evaluated.define_props[0].result.value.index_signatures;
+    assert_eq!(
+        signatures.len(),
+        2,
+        "both intersection index signatures remain present"
+    );
+    let demanded_values: Vec<_> = signatures
+        .iter()
+        .map(|signature| {
+            demand_published_type(
+                project.host(),
+                "/App.vue",
+                signature.value_type.present(),
+                "intersection index-signature value",
+            )
+        })
+        .collect();
     assert!(
-        state.completeness.is_partial(),
-        "a failed index-signature VALUE position must leave the result \
-         NON-complete; got {:?}",
+        demanded_values.iter().any(
+            |value| matches!(value, TypeExpr::Ref { name, type_arguments }
+                if name.as_ref() == "MissingType" && type_arguments.is_empty())
+        ),
+        "the unresolved value remains an explicit Ref carrier; got {demanded_values:?}"
+    );
+    assert!(
+        demanded_values
+            .iter()
+            .any(|value| matches!(value, TypeExpr::Primitive(PrimitiveName::String))),
+        "the concrete sibling value remains present; got {demanded_values:?}"
+    );
+    assert!(
+        !state.completeness.is_partial(),
+        "a stable unresolved index value is Complete; got {:?}",
         state.completeness
     );
     assert!(
-        state.synthesis_should_suppress,
-        "the failed index-signature VALUE must suppress warm result admission"
+        !state.synthesis_should_suppress,
+        "a stable unresolved index value does not suppress warm admission"
     );
 }
 
-/// MASKED-CONTRIBUTOR observation on the SLOTS surface: in
-/// `defineSlots<{ item(props: { a: string }): any } & BadSlots>()` where the
-/// imported same-name contributor `BadSlots.item` is unresolvable, the
-/// merged `item` slot must NOT publish the resolvable local callable's
-/// bindings as a completed concrete success. The slots normalizer keeps
-/// function-like members only, so the fail-closed form here is the merged
-/// member NOT realizing as a callable (no fabricated slot) combined with a
-/// NON-complete result — never a masked complete success.
+/// The SLOTS callable view may retain the known callable arm as its best safe
+/// projection. A stable unresolved non-callable arm does not turn that view
+/// into an operational partial or suppress cache admission.
 #[test]
-fn masked_failed_same_name_intersection_slot_contributor_never_completes() {
+fn same_name_intersection_slot_keeps_callable_projection_without_partiality() {
     let project = make_project();
     project
         .upsert_base(
@@ -29968,29 +30082,29 @@ defineSlots<{ item(props: { a: string }): any } & BadSlots>()
         )
         .unwrap();
 
-    // Either output materialization fails typed, or the merged slot is not
-    // published as a completed concrete success — a masked complete `item`
-    // slot with the local arm's bindings is the fail-open this pins closed.
-    match project.host().get_component_meta_output("/App.vue") {
-        Err(_) => {}
-        Ok(output) => {
-            let (analysis, _resolution, _types) = output.expect("the SFC resolves").into_parts();
-            let masked_complete = analysis.slots.iter().any(|slot| slot.name == "item")
-                && !project
-                    .host()
-                    .get_component_meta_with_resolution("/App.vue")
-                    .expect("resolves")
-                    .1
-                    .completeness
-                    .is_partial();
-            assert!(
-                !masked_complete,
-                "a merged slot with a FAILED same-name contributor must not \
-                 publish as a COMPLETE concrete success; slots={:?}",
-                analysis.slots
-            );
-        }
-    }
+    let (analysis, state) = project
+        .host()
+        .get_component_meta_with_resolution("/App.vue")
+        .expect("component resolves");
+    let slot = analysis
+        .slots
+        .iter()
+        .find(|slot| slot.name == "item")
+        .expect("the known callable contributor remains available as the best safe slot view");
+    assert!(
+        slot.bindings.iter().any(|binding| binding.name == "a"),
+        "the callable projection retains its authored binding; got {:?}",
+        slot.bindings
+    );
+    assert!(
+        !state.completeness.is_partial(),
+        "a stable unresolved non-callable arm does not make the callable slot projection partial; got {:?}",
+        state.completeness
+    );
+    assert!(
+        !state.synthesis_should_suppress,
+        "stable unresolved carriers do not suppress warm admission"
+    );
 }
 
 /// SOLE-AUTHORITY discrimination: the `define_props` SHAPE lane publishes
@@ -30356,5 +30470,276 @@ defineProps<{ config: { handler(msg: string) } }>()
         err.position.is_present(),
         "the failed slot was a PRESENT source (the interior, not the position, failed); got {:?}",
         err.position
+    );
+}
+
+#[test]
+fn stable_reference_carriers_materialize_without_source_failure() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export type Threshold = number | { start: number; end: number }
+export interface Props {
+  threshold?: Threshold
+  boundary?: Element | null | Array<Element | null>
+  format?: NumberFormatOptions
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let (analysis, _resolution, types) = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect("stable reference carriers are representable output sources")
+        .expect("component resolves")
+        .into_parts();
+    let lanes = types.into_lanes();
+    let prop_type = |name: &str| {
+        let index = analysis
+            .props
+            .iter()
+            .position(|prop| prop.name == name)
+            .unwrap_or_else(|| panic!("the {name} prop publishes"));
+        &lanes.props[index]
+    };
+
+    assert!(
+        matches!(prop_type("threshold"), TypeExpr::Union(arms) if arms.len() == 2),
+        "a resolvable alias may materialize its complete structural body; got {:?}",
+        prop_type("threshold")
+    );
+    let TypeExpr::Union(boundary) = prop_type("boundary") else {
+        panic!(
+            "the structural reference union remains a union carrier; got {:?}",
+            prop_type("boundary")
+        );
+    };
+    assert!(
+        boundary
+            .iter()
+            .any(|arm| matches!(arm, TypeExpr::Ref { name, .. } if name.as_ref() == "Element")),
+        "the unresolved DOM reference remains an explicit carrier; got {boundary:?}"
+    );
+    assert!(
+        boundary
+            .iter()
+            .any(|arm| matches!(arm, TypeExpr::Array { .. })),
+        "the array shell remains structural; got {boundary:?}"
+    );
+    assert!(
+        matches!(prop_type("format"), TypeExpr::Ref { name, .. } if name.as_ref() == "NumberFormatOptions"),
+        "the unresolved Intl-style name remains an explicit carrier; got {:?}",
+        prop_type("format")
+    );
+
+    let (_analysis, state) = project
+        .host()
+        .get_component_meta_with_resolution("/App.vue")
+        .expect("component resolves");
+    assert!(
+        !state.completeness.is_partial(),
+        "stable unresolved carriers are complete structural results; got {:?}",
+        state.completeness
+    );
+    assert!(
+        !state.synthesis_should_suppress,
+        "stable carriers do not suppress an otherwise complete result"
+    );
+}
+
+#[test]
+fn generic_member_path_materializes_type_parameter_carriers() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export interface Item { id: string }
+export interface Props<U extends Item = Item>
+  extends Partial<Pick<ExternalMenuOptions<U>, 'editor' | 'pluginKey'>> {
+  items?: U[] | U[][]
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Generic.vue",
+            r#"<script setup lang="ts" generic="T extends Item = Item">
+import type { Item, Props } from './types'
+withDefaults(defineProps<Props<T>>(), { pluginKey: 'menu' })
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let (analysis, _resolution, types) = project
+        .host()
+        .get_component_meta_output("/Generic.vue")
+        .expect("the generic member path must not materialize to an opaque miss")
+        .expect("component resolves")
+        .into_parts();
+    let index = analysis
+        .props
+        .iter()
+        .position(|prop| prop.name == "items")
+        .expect("items prop publishes");
+    let TypeExpr::Union(arms) = &types.into_lanes().props[index] else {
+        panic!("items retains its union shape");
+    };
+
+    fn array_leaf(expr: &TypeExpr) -> Option<&TypeExpr> {
+        match expr {
+            TypeExpr::Array { element, .. } => array_leaf(element).or(Some(element)),
+            _ => None,
+        }
+    }
+
+    assert_eq!(arms.len(), 2, "T[] | T[][] keeps both structural arms");
+    for arm in arms.iter() {
+        let leaf = array_leaf(arm).expect("each arm is an array");
+        assert!(
+            matches!(leaf, TypeExpr::TypeParameter(param) if param.name == "T"),
+            "the script-setup generic remains a type-parameter carrier; got {leaf:?}"
+        );
+    }
+}
+
+#[test]
+fn recursive_indexed_access_member_replays_from_the_authored_surface() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/links.ts",
+            r#"export interface LinkProps extends BaseLinkProps {
+  to?: string
+}
+
+export interface BaseLinkProps {
+  href?: LinkProps['to']
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Link.vue",
+            r#"<script setup lang="ts">
+import type { LinkProps } from './links'
+defineProps<LinkProps>()
+</script>
+<template><a /></template>"#,
+        )
+        .unwrap();
+
+    let (analysis, _resolution, types) = project
+        .host()
+        .get_component_meta_output("/Link.vue")
+        .expect("a recursive indexed-access member retains a replayable source")
+        .expect("component resolves")
+        .into_parts();
+    let index = analysis
+        .props
+        .iter()
+        .position(|prop| prop.name == "href")
+        .expect("href prop publishes");
+    assert!(
+        matches!(
+            &types.into_lanes().props[index],
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+                | TypeExpr::IndexedAccess { .. }
+        ),
+        "the recursive carrier must resolve safely or remain an explicit indexed-access shell"
+    );
+
+    let (_analysis, state) = project
+        .host()
+        .get_component_meta_with_resolution("/Link.vue")
+        .expect("component resolves");
+    assert!(
+        !state.completeness.is_partial(),
+        "a legitimate recursive carrier is complete, not budget exhaustion"
+    );
+}
+
+#[test]
+fn normal_script_type_alias_wins_over_setup_runtime_import_in_slot_binding() {
+    let project = make_project();
+    project
+        .upsert_base("/runtime.ts", "export const Separator = {}\n")
+        .unwrap();
+    project
+        .upsert_base(
+            "/Separator.vue",
+            r#"<script lang="ts">
+type Separator = { ui: { root: string } }
+export interface SeparatorSlots {
+  default?(props: { ui: Separator['ui'] }): unknown
+}
+</script>
+<script setup lang="ts">
+import { Separator } from './runtime'
+defineSlots<SeparatorSlots>()
+</script>
+<template><Separator><slot :ui="{}" /></Separator></template>"#,
+        )
+        .unwrap();
+
+    let (analysis, _resolution, types) = project
+        .host()
+        .get_component_meta_output("/Separator.vue")
+        .expect("the slot binding resolves in the normal script's type namespace")
+        .expect("component resolves")
+        .into_parts();
+    let slot_index = analysis
+        .slots
+        .iter()
+        .position(|slot| slot.name == "default")
+        .expect("default slot publishes");
+    let binding_index = analysis.slots[slot_index]
+        .bindings
+        .iter()
+        .position(|binding| binding.name == "ui")
+        .expect("ui binding publishes");
+    let lanes = types.into_lanes();
+    assert!(
+        matches!(
+            &lanes.slot_bindings[slot_index][binding_index],
+            TypeExpr::SyntheticSlotBinding(carrier)
+                if carrier.slot_name.as_deref() == Some("default")
+                    && carrier.binding_name.as_ref() == "ui"
+        ),
+        "the public lane retains the shallow, re-demandable slot-binding carrier; got {:?}",
+        lanes.slot_bindings[slot_index][binding_index]
+    );
+    let demanded = demand_published_type(
+        project.host(),
+        "/Separator.vue",
+        analysis.slots[slot_index].bindings[binding_index]
+            .type_source
+            .present(),
+        "default.ui slot binding",
+    );
+    let TypeExpr::Object(object) = &demanded else {
+        panic!("the local Separator['ui'] binding resolves to its object; got {demanded:?}");
+    };
+    assert!(
+        object.properties.iter().any(|property| {
+            matches!(
+                property,
+                verter_type_expr::ObjectMember::Property(property)
+                    if property.name == "root"
+                        && matches!(property.ty, TypeExpr::Primitive(PrimitiveName::String))
+            )
+        }),
+        "the local ui object retains its root:string member; got {object:?}"
     );
 }

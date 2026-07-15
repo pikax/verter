@@ -7,6 +7,7 @@
 //! discriminators poll.
 
 use super::*;
+use crate::cache_runtime::NonAdmissionReason;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -852,7 +853,10 @@ fn return_only_winner_not_broadcast_cross_view_joiner_forks() {
                 tx_winner_in_compute.send(()).expect("signal in-compute");
                 release_barrier_w.wait();
                 // Valid but non-cacheable outcome.
-                ComputeAdmission::ReturnOnly("winner-returnonly".to_string())
+                ComputeAdmission::ReturnOnly {
+                    value: "winner-returnonly".to_string(),
+                    reason: NonAdmissionReason::ForcedTestRefusal,
+                }
             },
             |entry: &String| entry.clone(),
             |_entry: &String| true,
@@ -1445,7 +1449,10 @@ fn return_only_does_not_publish_reverse_index_or_persist() {
         5u32,
         (5u32, 0u8),
         |entry: &String| Some(entry.clone()),
-        || ComputeAdmission::<String, String>::ReturnOnly("winner-only".to_string()),
+        || ComputeAdmission::<String, String>::ReturnOnly {
+            value: "winner-only".to_string(),
+            reason: NonAdmissionReason::ForcedTestRefusal,
+        },
         |entry: &String| entry.clone(),
         |_entry: &String| true,
         |_k: &u32, _e: &Arc<String>| {},
@@ -1470,6 +1477,52 @@ fn return_only_does_not_publish_reverse_index_or_persist() {
         0,
         "a ReturnOnly outcome must NOT fire post_publish (no reverse-index / persist)"
     );
+}
+
+/// Typed `ReturnOnly` reasons control whether the returned value taints an
+/// enclosing cold compute. Family-local non-retention must leave the outer
+/// tracer cacheable; an unresolved derivation basis must refuse the outer
+/// admission even though the winner still receives its valid value.
+#[test]
+fn return_only_reason_propagates_only_transitive_hazards() {
+    use crate::resolver_core::FactReadSetFinalise;
+    use crate::types::HostConfig;
+    use crate::VerterHost;
+
+    fn run(reason: NonAdmissionReason) -> FactReadSetFinalise {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let map: DashMap<u32, Arc<String>> = DashMap::new();
+        let inflight: InflightTable<(u32, u8)> = InflightTable::default();
+        let (value, finalise) = host.with_fact_tracer(|| {
+            cooperative_admit_with_post_publish_by_flight_key(
+                &map,
+                &inflight,
+                9u32,
+                (9u32, 0u8),
+                |entry: &String| Some(entry.clone()),
+                || ComputeAdmission::<String, String>::ReturnOnly {
+                    value: "winner-only".to_string(),
+                    reason,
+                },
+                |entry: &String| entry.clone(),
+                |_entry: &String| true,
+                |_k: &u32, _e: &Arc<String>| {},
+                |_e: &Arc<String>, _k: &u32| {},
+                None,
+            )
+        });
+        assert_eq!(value.as_deref(), Some("winner-only"));
+        finalise.finalise()
+    }
+
+    assert!(matches!(
+        run(NonAdmissionReason::IntrinsicNonCacheable),
+        FactReadSetFinalise::Ok(_)
+    ));
+    assert!(matches!(
+        run(NonAdmissionReason::UnresolvedProvenance),
+        FactReadSetFinalise::NonCacheable(_)
+    ));
 }
 
 /// A budgeted cache driven through the CACHE-KEY-IS-FLIGHT-KEY entry point

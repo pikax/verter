@@ -15,6 +15,7 @@ use super::*;
 use crate::cache_runtime::admission::{Candidate, FactCandidateDiscriminant};
 use crate::cache_runtime::candidate_store::ReverseIndexedCandidateStore;
 use crate::cache_runtime::singleflight::{ComputeAdmission, InflightTable};
+use crate::cache_runtime::NonAdmissionReason;
 use crate::fact_signature_helpers::ReadSetSignature;
 use crate::resolver_core::FactVersionRef;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -40,7 +41,10 @@ fn lookup_publish_return_only_never_publishes() {
         &inflight,
         1u32,
         || None::<String>,
-        || ComputeAdmission::<String, String>::ReturnOnly("winner-only".to_string()),
+        || ComputeAdmission::<String, String>::ReturnOnly {
+            value: "winner-only".to_string(),
+            reason: NonAdmissionReason::ForcedTestRefusal,
+        },
         |entry: &String| entry.clone(),
         |_entry: &String| None,
         |_entry: &String| true,

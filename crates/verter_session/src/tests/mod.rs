@@ -1,7 +1,7 @@
 //! Test-support modules accessible to the integration tests under
 //! `crates/verter_session/tests/*.rs`.
 //!
-//! This module is gated `cfg(any(test, debug_assertions))` at its
+//! This module is gated `cfg(any(test, feature = "test-support"))` at its
 //! declaration site in `lib.rs`, so release builds never include it
 //! (release sets `debug_assertions = OFF`). The submodules expose
 //! reusable harness types that integration tests would otherwise need

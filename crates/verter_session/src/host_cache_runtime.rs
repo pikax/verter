@@ -524,7 +524,7 @@ impl VerterHost {
     /// Number of entries in the content-addressed compile-output cache.
     /// Used by integration tests to verify that `Content`-mode publishes
     /// land in this node while `Session` / `Stateless` modes do not.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn compile_output_pure_content_entry_count(&self) -> usize {
         self.project_type_store

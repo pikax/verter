@@ -93,6 +93,7 @@ pub(crate) mod enumerate;
 pub(crate) mod evaluate;
 pub(crate) mod locator_shape;
 pub(crate) mod locator_view;
+mod locator_view_worklist;
 pub(crate) mod lower;
 pub(crate) mod output_materialization;
 // Private adjacent module: crate-wide compile-time `assert_not_impl_any!`
@@ -172,6 +173,74 @@ pub(crate) use evaluate::StructuralFactDemandOutcome;
 /// `build_instantiate` invocations share the active set.
 pub(super) type InstantiateIdentity = (Arc<str>, Arc<str>);
 
+const MAX_CONNECTED_PROJECTION_WORK: usize = 262_144;
+const MAX_CONNECTED_QUERY_DEPTH: u16 = 24;
+
+#[derive(Debug)]
+struct ConnectedDemandState {
+    active: std::cell::Cell<bool>,
+    work_used: std::cell::Cell<usize>,
+    work_limit: std::cell::Cell<usize>,
+    query_depth: std::cell::Cell<u16>,
+    query_depth_limit: std::cell::Cell<u16>,
+    tripped: std::cell::Cell<crate::semantic_query::PartialReasonSet>,
+}
+
+impl ConnectedDemandState {
+    fn new(work_limit: usize, query_depth_limit: u16) -> Self {
+        Self {
+            active: std::cell::Cell::new(false),
+            work_used: std::cell::Cell::new(0),
+            work_limit: std::cell::Cell::new(work_limit),
+            query_depth: std::cell::Cell::new(0),
+            query_depth_limit: std::cell::Cell::new(query_depth_limit),
+            tripped: std::cell::Cell::new(crate::semantic_query::PartialReasonSet::empty()),
+        }
+    }
+
+    fn begin(&self, work_limit: usize, query_depth_limit: u16) {
+        self.work_used.set(0);
+        self.work_limit.set(work_limit);
+        self.query_depth.set(0);
+        self.query_depth_limit.set(query_depth_limit);
+        self.tripped
+            .set(crate::semantic_query::PartialReasonSet::empty());
+        self.active.set(true);
+    }
+}
+
+/// Panic-safe lifetime of one connected semantic demand. The outermost
+/// dispatch or direct projector installs the state; nested query and worklist
+/// entries join it without holding a `RefCell` borrow across semantic work.
+struct ConnectedDemandGuard<'g> {
+    state: &'g ConnectedDemandState,
+    root: bool,
+    entered_query_depth: bool,
+}
+
+impl ConnectedDemandGuard<'_> {
+    fn is_root(&self) -> bool {
+        self.root
+    }
+}
+
+impl Drop for ConnectedDemandGuard<'_> {
+    fn drop(&mut self) {
+        if self.entered_query_depth {
+            self.state
+                .query_depth
+                .set(self.state.query_depth.get().saturating_sub(1));
+        }
+        if self.root {
+            debug_assert!(
+                self.state.query_depth.get() == 0,
+                "connected-demand root dropped while a nested query boundary remained active"
+            );
+            self.state.active.set(false);
+        }
+    }
+}
+
 /// Host-bound dispatcher for [`SemanticQueryApi`].
 ///
 /// The dispatcher borrows the host for the duration of a query — every
@@ -247,6 +316,11 @@ pub struct ProjectSemanticDispatch<'a> {
     /// `cache_suppress` (memo non-admission), never the request partial
     /// sticky (which would wrongly refuse component-meta warm).
     pub(super) build_local_taint: std::cell::RefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
+    connected_demand: ConnectedDemandState,
+    #[cfg(test)]
+    connected_work_limit_for_tests: std::cell::Cell<usize>,
+    #[cfg(test)]
+    connected_query_depth_limit_for_tests: std::cell::Cell<u16>,
 }
 
 /// One cold-build-local taint frame: the OR-accumulator a single cold
@@ -347,7 +421,296 @@ impl<'a> ProjectSemanticDispatch<'a> {
             carrier_normalizing: std::cell::RefCell::new(smallvec::SmallVec::new()),
             closedness_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
             build_local_taint: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            connected_demand: ConnectedDemandState::new(
+                MAX_CONNECTED_PROJECTION_WORK,
+                MAX_CONNECTED_QUERY_DEPTH,
+            ),
+            #[cfg(test)]
+            connected_work_limit_for_tests: std::cell::Cell::new(MAX_CONNECTED_PROJECTION_WORK),
+            #[cfg(test)]
+            connected_query_depth_limit_for_tests: std::cell::Cell::new(MAX_CONNECTED_QUERY_DEPTH),
         }
+    }
+
+    fn connected_work_limit(&self) -> usize {
+        #[cfg(test)]
+        {
+            self.connected_work_limit_for_tests.get()
+        }
+        #[cfg(not(test))]
+        {
+            MAX_CONNECTED_PROJECTION_WORK
+        }
+    }
+
+    fn connected_query_depth_limit(&self) -> u16 {
+        #[cfg(test)]
+        {
+            self.connected_query_depth_limit_for_tests.get()
+        }
+        #[cfg(not(test))]
+        {
+            MAX_CONNECTED_QUERY_DEPTH
+        }
+    }
+
+    fn enter_connected_demand(
+        &self,
+        query_boundary: bool,
+    ) -> (
+        ConnectedDemandGuard<'_>,
+        Option<crate::semantic_query::PartialReasonSet>,
+    ) {
+        let state = &self.connected_demand;
+        let root = !state.active.get();
+        if root {
+            state.begin(
+                self.connected_work_limit(),
+                self.connected_query_depth_limit(),
+            );
+        }
+        let mut entered_query_depth = false;
+        let tripped = state.tripped.get();
+        let trip = if !tripped.is_empty() {
+            Some(tripped)
+        } else if query_boundary && state.query_depth.get() >= state.query_depth_limit.get() {
+            let tripped =
+                tripped.union(crate::semantic_query::PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT);
+            state.tripped.set(tripped);
+            Some(tripped)
+        } else {
+            if query_boundary {
+                state.query_depth.set(state.query_depth.get() + 1);
+                entered_query_depth = true;
+            }
+            None
+        };
+        (
+            ConnectedDemandGuard {
+                state,
+                root,
+                entered_query_depth,
+            },
+            trip,
+        )
+    }
+
+    pub(super) fn charge_connected_work(
+        &self,
+    ) -> Result<(), crate::semantic_query::PartialReasonSet> {
+        let state = &self.connected_demand;
+        debug_assert!(
+            state.active.get(),
+            "connected work must be charged inside a connected-demand guard"
+        );
+        let tripped = state.tripped.get();
+        if !tripped.is_empty() {
+            return Err(tripped);
+        }
+        let work_used = state.work_used.get();
+        if work_used >= state.work_limit.get() {
+            let tripped =
+                tripped.union(crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT);
+            state.tripped.set(tripped);
+            return Err(tripped);
+        }
+        state.work_used.set(work_used + 1);
+        Ok(())
+    }
+
+    /// Snapshot the remaining work available to a query-free terminal run.
+    /// The caller commits exactly the units it consumes before any nested
+    /// semantic dispatch.
+    #[inline(always)]
+    pub(super) fn connected_work_available(
+        &self,
+    ) -> Result<usize, crate::semantic_query::PartialReasonSet> {
+        let state = &self.connected_demand;
+        debug_assert!(
+            state.active.get(),
+            "connected work must be observed inside a connected-demand guard"
+        );
+        let tripped = state.tripped.get();
+        if !tripped.is_empty() {
+            return Err(tripped);
+        }
+        let work_used = state.work_used.get();
+        Ok(state.work_limit.get().saturating_sub(work_used))
+    }
+
+    #[inline(always)]
+    pub(super) fn commit_connected_work(&self, consumed: usize) {
+        if consumed == 0 {
+            return;
+        }
+        let state = &self.connected_demand;
+        debug_assert!(state.active.get());
+        let work_used = state.work_used.get();
+        debug_assert!(work_used.saturating_add(consumed) <= state.work_limit.get());
+        state.work_used.set(work_used + consumed);
+    }
+
+    pub(super) fn connected_demand_trip(&self) -> Option<crate::semantic_query::PartialReasonSet> {
+        self.connected_demand
+            .active
+            .get()
+            .then(|| self.connected_demand.tripped.get())
+            .filter(|tripped| !tripped.is_empty())
+    }
+
+    fn trip_connected_demand(
+        &self,
+        reason: crate::semantic_query::PartialReasonSet,
+    ) -> crate::semantic_query::PartialReasonSet {
+        let state = &self.connected_demand;
+        debug_assert!(
+            state.active.get(),
+            "an operational limit can trip only inside a connected demand"
+        );
+        let tripped = state.tripped.get().union(reason);
+        state.tripped.set(tripped);
+        tripped
+    }
+
+    fn connected_limit_carrier(
+        &self,
+        key: &SemanticQueryKey,
+        reasons: crate::semantic_query::PartialReasonSet,
+    ) -> SemanticNodeId {
+        let graph = self.graph();
+        match key {
+            SemanticQueryKey::Instantiate(key) => {
+                graph.intern_node(SemanticNodeData::InstantiationRef {
+                    base: DeclIdentity {
+                        canonical_id: Arc::clone(&key.base().defining_canonical),
+                        whole_hash: crate::semantic_query::HashValue::default(),
+                        decl_name: Arc::clone(&key.base().merged_symbol_name),
+                    },
+                    args: Arc::clone(key.args()),
+                })
+            }
+            SemanticQueryKey::ProjectMember { base, .. }
+            | SemanticQueryKey::IndexedAccess { base, .. }
+            | SemanticQueryKey::KeyOf { base, .. }
+            | SemanticQueryKey::ProjectPath { base, .. } => *base,
+            SemanticQueryKey::MappedType { source, mapper, .. } => {
+                graph.intern_node(SemanticNodeData::Mapped {
+                    source: *source,
+                    mapper: mapper.clone(),
+                })
+            }
+            SemanticQueryKey::Conditional {
+                check,
+                extends,
+                true_branch,
+                false_branch,
+                distributive,
+            } => graph.intern_node(SemanticNodeData::Conditional {
+                check: *check,
+                extends: *extends,
+                true_branch_ref: *true_branch,
+                false_branch_ref: *false_branch,
+                distributive: *distributive,
+            }),
+            SemanticQueryKey::NormalizeUnion { members } => {
+                graph.intern_node(SemanticNodeData::Union(Arc::clone(members)))
+            }
+            SemanticQueryKey::NormalizeIntersection { members } => {
+                graph.intern_node(SemanticNodeData::Intersection(Arc::clone(members)))
+            }
+            SemanticQueryKey::Relate { source, .. } => *source,
+            _ => {
+                let state = &self.connected_demand;
+                let (limit, actual, rail) = if state.active.get() {
+                    if reasons.contains(
+                        crate::semantic_query::PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT,
+                    ) {
+                        (
+                            usize::from(state.query_depth_limit.get()),
+                            u64::from(state.query_depth.get()),
+                            "connected-query-depth",
+                        )
+                    } else {
+                        (
+                            state.work_limit.get(),
+                            state.work_used.get() as u64,
+                            "projection-work",
+                        )
+                    }
+                } else {
+                    (0, 0, "unknown")
+                };
+                self.opaque(QueryError::BudgetExceeded(BudgetExceededFailure {
+                    domain: BudgetDomain::ProjectionOperation,
+                    limit,
+                    actual,
+                    context: format!("semantic-dispatch:{rail}"),
+                }))
+            }
+        }
+    }
+
+    fn connected_limit_read(
+        &self,
+        key: &SemanticQueryKey,
+        reasons: crate::semantic_query::PartialReasonSet,
+    ) -> CacheRead<QueryResult<SemanticNodeId>> {
+        let carrier = self.connected_limit_carrier(key, reasons);
+        self.fold_local_partial_completeness(reasons);
+        CacheRead {
+            value: QueryResult::Value(carrier),
+            dep_signature: empty_signature(),
+            walker_diagnostics: self.connected_limit_diagnostics(carrier, reasons),
+            cache_suppress: true,
+            result_is_partial: true,
+        }
+    }
+
+    fn connected_limit_diagnostics(
+        &self,
+        root: SemanticNodeId,
+        reasons: crate::semantic_query::PartialReasonSet,
+    ) -> Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]> {
+        use crate::project_semantic_dispatch::walk::ShallowDiagnostic;
+
+        let mut diagnostics = Vec::with_capacity(2);
+        if reasons.contains(crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT) {
+            diagnostics.push(ShallowDiagnostic::ProjectionWorkLimit { root });
+        }
+        if reasons.contains(crate::semantic_query::PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT) {
+            diagnostics.push(ShallowDiagnostic::ConnectedQueryDepthLimit { root });
+        }
+        Arc::from(diagnostics.into_boxed_slice())
+    }
+
+    fn append_connected_limit_diagnostics(
+        &self,
+        key: &SemanticQueryKey,
+        reasons: crate::semantic_query::PartialReasonSet,
+        read: &mut CacheRead<QueryResult<SemanticNodeId>>,
+    ) {
+        let root = self.connected_limit_carrier(key, reasons);
+        let additions = self.connected_limit_diagnostics(root, reasons);
+        if additions.is_empty() {
+            return;
+        }
+        let mut diagnostics = read.walker_diagnostics.to_vec();
+        for diagnostic in additions.iter() {
+            if !diagnostics.contains(diagnostic) {
+                diagnostics.push(diagnostic.clone());
+            }
+        }
+        read.walker_diagnostics = Arc::from(diagnostics.into_boxed_slice());
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_connected_limits_for_tests(&self, work: usize, depth: u16) {
+        assert!(
+            !self.connected_demand.active.get(),
+            "test limits must be set before entering a connected demand"
+        );
+        self.connected_work_limit_for_tests.set(work);
+        self.connected_query_depth_limit_for_tests.set(depth);
     }
 
     /// Fold a discarded nested-read's metadata into the TOP cold-build-local
@@ -702,7 +1065,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `cfg`-gated to `test` / `debug_assertions`: the method is
     /// absent from release builds, so the production crate surface
     /// is unchanged.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn substitute_semantic_type_param_for_tests(
         &self,
         node: SemanticNodeId,
@@ -1027,10 +1390,10 @@ pub(crate) fn dispatch_test_inject_parse_fact_if_set() {
 /// fact on arm; clears on drop. Concurrent tests must serialise via a
 /// shared `Mutex` because the slot is process-global.
 #[doc(hidden)]
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 pub struct DispatchInjectParseFactGuard;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 impl DispatchInjectParseFactGuard {
     /// Arm the dispatch's test-only Parse-fact injection slot with
     /// `fact`. The next cold build observes `fact` onto every active
@@ -1046,7 +1409,7 @@ impl DispatchInjectParseFactGuard {
     }
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for DispatchInjectParseFactGuard {
     fn drop(&mut self) {
         DISPATCH_TEST_INJECT_PARSE_FACT_ARMED.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -1231,7 +1594,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return (key, CarrierNormalizationPrelude::none());
         }
         let host = self.ctx.host_for_fact_tracer_install();
-        let (normalized, finalise, non_cacheable_read_observed) =
+        let (normalized, finalise) =
             crate::fact_signature_helpers::install_fact_tracer(host, || {
                 let normalized = self.normalize_carrier_subject_key(key);
                 // Test-only: force a fenced (ReturnOnly) serve observation onto
@@ -1256,8 +1619,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // resolving the carrier head means the rewrite's value basis came
                 // from a served-without-publication artifact — refuse warm
                 // admission of any enclosing entry that rode this rewrite.
-                cache_suppress: non_cacheable_read_observed,
+                cache_suppress: false,
             },
+            crate::resolver_core::FactReadSetFinalise::NonCacheable(facts) => {
+                CarrierNormalizationPrelude {
+                    facts: Some(facts),
+                    cache_suppress: true,
+                }
+            }
             crate::resolver_core::FactReadSetFinalise::Overflow => CarrierNormalizationPrelude {
                 // An overflowed prelude yields no bounded fact list — the rewrite
                 // cannot be soundly rooted, so suppress caching (the value still
@@ -1273,6 +1642,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         key: SemanticQueryKey,
     ) -> CacheRead<QueryResult<SemanticNodeId>> {
+        // Install or join the connected state before carrier normalisation,
+        // whose resolver can itself dispatch. Query-depth/work charging waits
+        // until the canonical memo identity is known so an exact same-path key
+        // can retain the cooperative memo's recursion sentinel semantics.
+        let (connected_guard, preexisting_trip) = self.enter_connected_demand(false);
         // Per-request dispatch-mask trace. Record the INCOMING CALLER tag
         // (NOT the post-canonicalisation tag) so caller intent
         // (`ProjectMember` / `IndexedAccess`) is preserved, and record it
@@ -1351,6 +1725,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // suppresses caching (the value still flows, the memo refuses).
         let (key, carrier_prelude) = self.trace_carrier_subject_normalization_if_needed(key);
 
+        let exact_same_path = self.graph().is_same_path_inflight_on_current_thread(&key);
+        let mut query_depth_guard = None;
+        if !exact_same_path {
+            if let Some(reasons) = preexisting_trip {
+                return self.connected_limit_read(&key, reasons);
+            }
+            let (guard, depth_trip) = self.enter_connected_demand(true);
+            if let Some(reasons) = depth_trip {
+                return self.connected_limit_read(&key, reasons);
+            }
+            query_depth_guard = Some(guard);
+            if let Err(reasons) = self.charge_connected_work() {
+                return self.connected_limit_read(&key, reasons);
+            }
+        }
+
         // Post-trip fast-path early-exit. Once the request's
         // projection-op fuse has already tripped, every subsequent
         // projection-op query (MappedType / KeyOf / ProjectPath /
@@ -1380,16 +1770,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // kinds) and the demand-bearing `TypeOf`. Kinds outside that
         // set (ResolveDecl, NormalizeUnion, …) bypass the early-exit —
         // their cost is not what the work budget bounds.
-        if semantic_query_counts_toward_projection_budget(&key) {
+        if !exact_same_path && semantic_query_counts_toward_projection_budget(&key) {
             if let Some(budget) = crate::request_context::current_request_budget() {
                 if budget.is_exhausted() {
-                    let limit = budget.effective_projection_op_budget();
-                    let failure = BudgetExceededFailure {
-                        domain: BudgetDomain::ProjectionOperation,
-                        limit,
-                        actual: budget.projection_ops_executed_count() as u64,
-                        context: format!("semantic-dispatch:post-trip:{key:?}"),
-                    };
                     // Attribute the post-trip dispatch via the SAME
                     // per-kind cold counters the slow path bumps from
                     // `execute_via_cold_build_helper`'s post-cooperative
@@ -1446,14 +1829,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // `Opaque(Miss)`) would never taint the enclosing cold
                     // build, which would then admit a complete `Value`
                     // (`result_is_partial=false`) and launder the partial.
-                    self.fold_cache_read_rails(true, true);
-                    return CacheRead {
-                        value: QueryResult::Error(QueryError::BudgetExceeded(failure)),
-                        dep_signature: empty_signature(),
-                        walker_diagnostics: Arc::from([]),
-                        cache_suppress: true,
-                        result_is_partial: true,
-                    };
+                    let reasons = self.trip_connected_demand(
+                        crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT,
+                    );
+                    return self.connected_limit_read(&key, reasons);
                 }
             }
         }
@@ -1480,22 +1859,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let key_for_build = key.clone();
         let raw_build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+            if matches!(&key_for_build, SemanticQueryKey::Instantiate(_)) {
+                if let Err(reasons) = self.charge_connected_work() {
+                    let carrier = self.connected_limit_carrier(&key_for_build, reasons);
+                    self.fold_local_partial_completeness(reasons);
+                    let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
+                        QueryResult::Value(carrier),
+                        self.project_generation_signature(),
+                    )
+                        .into();
+                    output.result_is_partial = true;
+                    output.cache_suppress = true;
+                    return output;
+                }
+            }
             if semantic_query_counts_toward_projection_budget(&key_for_build) {
                 if let Some(budget) = crate::request_context::current_request_budget() {
                     if budget.check_projection_op_count() {
-                        let limit = budget.effective_projection_op_budget();
-                        let failure = BudgetExceededFailure {
-                            domain: BudgetDomain::ProjectionOperation,
-                            limit,
-                            actual: budget.projection_ops_executed_count() as u64,
-                            context: format!("semantic-dispatch:{key_for_build:?}"),
-                        };
+                        let reasons = self.trip_connected_demand(
+                            crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT,
+                        );
+                        let carrier = self.connected_limit_carrier(&key_for_build, reasons);
+                        self.fold_local_partial_completeness(reasons);
                         let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
                             (
-                                QueryResult::Error(QueryError::BudgetExceeded(failure)),
+                                QueryResult::Value(carrier),
                                 self.project_generation_signature(),
                             )
                                 .into();
+                        output.walker_diagnostics =
+                            self.connected_limit_diagnostics(carrier, reasons).to_vec();
                         output.cache_suppress = true;
                         output.result_is_partial = true;
                         return output;
@@ -1675,8 +2068,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // panic / early-return too (panic-safe pop), so an unwinding
             // cold build never leaks a stale frame onto the stack.
             let taint_guard = BuildLocalTaintGuard::push(&self.build_local_taint);
-            let (mut output, finalise, non_cacheable_read_observed) =
-                crate::fact_signature_helpers::install_fact_tracer(host, || {
+            let (mut output, finalise) = crate::fact_signature_helpers::install_fact_tracer(
+                host,
+                || {
                     // Test-only fact-injection hook. When the
                     // `dispatch_test_inject_parse_fact` slot is non-None,
                     // observe the recorded `Parse(...)` fact onto the
@@ -1715,7 +2109,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         self.fold_into_top_build_local_taint(true, false);
                     }
                     raw_build()
-                });
+                },
+            );
             let build_local = taint_guard.finish();
             output.result_is_partial |= build_local.result_is_partial;
             output.cache_suppress |= build_local.cache_suppress;
@@ -1727,7 +2122,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // project generation; the traced facts validate against a
             // fresh view) cannot be rejected read-side. The value still
             // flows to the caller; the memo refuses admission.
-            output.cache_suppress |= non_cacheable_read_observed;
+            output.cache_suppress |= matches!(
+                &finalise,
+                crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+            );
             provenance
                 .memo_entry_fact_tracer_installs
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1836,6 +2234,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if carrier_prelude.cache_suppress() {
             cache_read.cache_suppress = true;
         }
+        if connected_guard.is_root() {
+            if let Some(reasons) = self.connected_demand_trip() {
+                self.append_connected_limit_diagnostics(&key, reasons, &mut cache_read);
+            }
+        }
         self.fold_cache_read_rails(cache_read.result_is_partial, cache_read.cache_suppress);
         tracing::debug!(
             target: "verter::dispatch::execute_via_helper",
@@ -1843,6 +2246,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             suppress = cache_read.cache_suppress,
             "execute_via_cold_build_helper"
         );
+        drop(query_depth_guard);
         cache_read
     }
 }
@@ -1906,8 +2310,14 @@ fn finalise_traced_build_output(
     // overflowed / fenced-serve carrier rewrite) regardless of the build's own
     // finalise arm.
     output.cache_suppress |= carrier_prelude.cache_suppress();
+    let finalise_is_non_cacheable = matches!(
+        &finalise,
+        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+    );
+    output.cache_suppress |= finalise_is_non_cacheable;
     match finalise {
-        crate::resolver_core::FactReadSetFinalise::Ok(traced_facts) => {
+        crate::resolver_core::FactReadSetFinalise::Ok(traced_facts)
+        | crate::resolver_core::FactReadSetFinalise::NonCacheable(traced_facts) => {
             // Record the self-root canonicals (deduplicated) for the
             // strict warm-read validator on the published `MemoEntry`.
             let mut self_root_canonicals: Vec<Arc<str>> =
@@ -2803,3 +3213,6 @@ mod mapped_key_domain_carrier_tests;
 
 #[cfg(test)]
 mod raised_shape_tests;
+
+#[cfg(test)]
+mod projection_stack_safety_tests;

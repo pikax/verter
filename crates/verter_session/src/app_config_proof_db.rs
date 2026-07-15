@@ -145,9 +145,9 @@ impl AppConfigNoOverrideProofDb {
     /// component-meta ComponentConfig resolver consumes the proof
     /// via the same `peek` surface. That producer is reached today only
     /// through tests / the `for_tests` wrapper, so this read gate is
-    /// `cfg(any(test, debug_assertions))` to match (no dead surface in
+    /// `cfg(any(test, feature = "test-support"))` to match (no dead surface in
     /// release).
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn peek(
         &self,
         key: &AppConfigNoOverrideProofKey,
@@ -175,6 +175,7 @@ impl AppConfigNoOverrideProofDb {
     /// derivation is no longer performed at publish time — the
     /// producer is the single authority for the entry's
     /// validation contract.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn publish(
         &self,
         key: AppConfigNoOverrideProofKey,

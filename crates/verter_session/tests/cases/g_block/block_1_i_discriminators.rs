@@ -452,7 +452,7 @@ fn materialize_structure_peek_and_register_use_carrier() {
 ///
 /// The `ComputeAdmission::{Cacheable, ReturnOnly, Failed}` admission
 /// outcome lifts the non-cacheable case into the cooperative API.
-/// A `ReturnOnly(V)` value carries NO `Entry` and NO dep-signature
+/// A `ReturnOnly { value, reason }` value carries NO `Entry` and NO dep-signature
 /// carrier, so it cannot be view-validated against a cooperative
 /// joiner's own view: two requests carrying the same cache key can
 /// run under different overlays, and a carrier-less value is not
@@ -485,7 +485,7 @@ fn cooperative_return_only_not_shared_to_joiners() {
         ca_src.contains("pub enum ComputeAdmission<V, Entry> {"),
         "ComputeAdmission<V, Entry> must exist with the three-variant shape"
     );
-    for variant in &["Cacheable(Entry)", "ReturnOnly(V)", "Failed"] {
+    for variant in &["Cacheable(Entry)", "ReturnOnly {", "Failed"] {
         assert!(
             ca_src.contains(variant),
             "ComputeAdmission must declare variant `{variant}`"
@@ -504,7 +504,7 @@ fn cooperative_return_only_not_shared_to_joiners() {
     // alone receives the value. Scope the check to the `ReturnOnly`
     // match arm.
     let return_only_arm_idx = ca_src
-        .find("ComputeAdmission::ReturnOnly(value) => {")
+        .find("ComputeAdmission::ReturnOnly { value, reason } => {")
         .expect("ReturnOnly admission arm must exist");
     let cacheable_arm_idx = ca_src
         .find("ComputeAdmission::Cacheable(entry) => {")
@@ -540,7 +540,7 @@ fn cooperative_return_only_not_shared_to_joiners() {
     // `cache_runtime/singleflight.rs` for the behavioural discriminator.
     let cacheable_arm_end = cacheable_arm_idx
         + ca_src[cacheable_arm_idx..]
-            .find("ComputeAdmission::ReturnOnly(value) => {")
+            .find("ComputeAdmission::ReturnOnly { value, reason } => {")
             .expect("ReturnOnly arm follows Cacheable arm");
     let cacheable_arm_window = &ca_src[cacheable_arm_idx..cacheable_arm_end];
     assert!(
@@ -570,7 +570,7 @@ fn cooperative_return_only_not_shared_to_joiners() {
          uncached via `run_uncached_materialisation` — it is shared with no one)"
     );
     assert!(
-        mat_src.contains("crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly("),
+        mat_src.contains("crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {"),
         "the materialiser's `get_or_compute_admit` compute closure must \
          model overflow / non-cacheable outcomes as \
          `singleflight::ComputeAdmission::ReturnOnly` so they are NOT \

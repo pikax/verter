@@ -150,6 +150,7 @@ fn accumulate_dispatch_mixed_signature_converts_project_drops_route() {
 fn finalised_facts(result: FactReadSetFinalise) -> Vec<FactVersionRef> {
     match result {
         FactReadSetFinalise::Ok(facts) => facts.to_vec(),
+        FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
         FactReadSetFinalise::Overflow => panic!("tracer overflowed in a tiny-signature test"),
     }
 }

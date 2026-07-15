@@ -78,9 +78,10 @@ pub(crate) mod published_reducer;
 // / member ref-identity) — pure node-domain projections consumed by the
 // terminal sink.
 mod published_source;
-// The demand-validated structural member-source projection — shared with the
+// The address-validated structural member-source projection — shared with the
 // vue_exec DTO normalizers (the normalized prop/expose rows publish the same
-// closed/ref/member-path ladder the member sink publishes).
+// closed/ref/member-path ladder the member sink publishes). Terminal demand
+// remains strict, while stable unresolved addresses remain valid carriers.
 pub(crate) use published_source::structural_member_value_source;
 pub(crate) mod slots;
 

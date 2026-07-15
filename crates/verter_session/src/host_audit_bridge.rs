@@ -51,9 +51,10 @@ fn map_kind(diag: &ExpansionDiagnostic) -> AuditDiagnosticKind {
     // `meta_resolve::diagnostic_convert::shallow_to_expansion` now
     // emits dedicated variants.
     match diag.reason {
-        ExpansionStopReason::BudgetExceeded | ExpansionStopReason::MappedDepthExceeded => {
-            AuditDiagnosticKind::BudgetExceeded
-        }
+        ExpansionStopReason::BudgetExceeded
+        | ExpansionStopReason::ProjectionWorkLimit
+        | ExpansionStopReason::ConnectedQueryDepthLimit
+        | ExpansionStopReason::MappedDepthExceeded => AuditDiagnosticKind::BudgetExceeded,
         ExpansionStopReason::IndeterminateConditional
         | ExpansionStopReason::ConditionalContextTruncated => AuditDiagnosticKind::OpenConditional,
         ExpansionStopReason::CyclicReference | ExpansionStopReason::CyclicInstantiation => {

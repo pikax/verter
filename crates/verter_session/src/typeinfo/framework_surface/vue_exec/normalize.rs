@@ -256,7 +256,7 @@ pub(crate) fn props_from_typeinfo_surface(
 /// - the complete CLOSED fact when the member's VALUE node decides one — a
 ///   LEAF, a LEAF-UNION, or a TUPLE whose elements are all complete closed
 ///   element facts;
-/// - else the demand-validated structural source
+/// - else the address-validated structural source
 ///   ([`crate::meta_resolve::projectors::structural_member_value_source`] —
 ///   the shallow symbol-reference carrier for a resolvable reference, or the
 ///   projected MEMBER-PATH replay route off the macro's stamped
@@ -479,15 +479,16 @@ pub(crate) fn index_signatures_from_surface(
 /// — leaf and leaf-union elements are complete by themselves, so the fact
 /// demands back to the typed tuple through the shared raise bridge). A
 /// RICHER position (a nested object, a function, a composite, a reference)
-/// demand-validates through the shared structural-fact primitive and
+/// validates through the shared structural-fact primitive and
 /// publishes the projected INDEX-POSITION replay route
 /// ([`ProjectedTypeFact::IndexPosition`](verter_type_expr::facts::ProjectedTypeFact)
 /// — the macro's STAMPED type-argument base + the signature's
 /// declaration-order SURFACE ordinal + the key/value role, replayed through
 /// the one shared dispatch on demand; the published position stays SHALLOW).
-/// ONLY a genuine miss — an unresolvable residual carrier, an
-/// unknown-materializing failure, or no stamped base to replay off — is the
-/// typed source-construction FAILURE
+/// ONLY a genuine miss — an operational partial, an unknown-materializing
+/// failure, or no stamped base to replay off — is the typed
+/// source-construction FAILURE. A stable unresolved reference remains a
+/// faithful Complete carrier.
 /// (`UnrepresentableRequiredMemberValue`): a REQUIRED index key/value
 /// position with no faithful projected source marks the result non-complete
 /// instead of degrading to a fabricated `unknown` success. All decisions are
@@ -515,10 +516,11 @@ fn index_position_source(
     if let Some(tuple) = closed_tuple_fact(dispatch, node) {
         return SourcePosition::Present(SemanticTypeSource::Closed(ClosedTypeFact::Tuple(tuple)));
     }
-    // A richer position that demand-validates to KNOWN structure publishes
+    // A richer position that structurally validates publishes
     // the content-free replay address off the stamped type-argument base;
-    // a genuine miss (unresolvable carrier / unknown-materializing / no
-    // base) stays the typed failure. STRUCTURAL TRANSIT, not `Published`:
+    // a genuine miss (operational partial / unknown-materializing / no base)
+    // stays the typed failure. Stable unresolved references are valid
+    // carriers. STRUCTURAL TRANSIT, not `Published`:
     // validation is a carrier-preserving classification, never consumer
     // demand — operator reduction stays deferred so no library keyspace is
     // enumerated at publication.
@@ -1038,8 +1040,9 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fiel
 ///   same-name members, inherited referenced tuples / objects, and
 ///   substituted generic surfaces, which the closed vocabulary cannot
 ///   express and a single contributor locator would misrepresent. A merged
-///   value that FAILS validation (an unresolvable contributor) publishes NO
-///   replay route — the caller types the required-payload failure;
+///   value that carries a stable unresolved contributor still publishes the
+///   replay route and retains that carrier. Only an operational partial or
+///   unknown-materializing failure rejects the route;
 /// - else (no authored type argument to replay off) the arg-preserving
 ///   authored USE-SITE body slot
 ///   ([`crate::meta_resolve::arg_preserving_member_use_site_slot`] — the
@@ -1071,14 +1074,11 @@ fn inherited_emit_payload_source(
         return Some(SemanticTypeSource::Closed(ClosedTypeFact::Tuple(tuple)));
     }
     if let Some(base) = type_arg_base {
-        // The projected replay route denotes the MERGED member — publish it
-        // ONLY when the merged value demand-validates through the shared
-        // structural-fact primitive (the same per-root validation the
-        // structural member-source projection applies). A merged value with
-        // a FAILED contributor (`[id: number] & <unresolvable import>`) must
-        // fail the REQUIRED payload position typed (`None` here) instead of
-        // riding a replay whose demand-side reduction would drop the failed
-        // arm and mask it with the resolvable sibling's tuple.
+        // The projected replay route denotes the MERGED member. Validate it
+        // through the shared structural-fact primitive before publication:
+        // stable unresolved references remain Complete carriers and replay
+        // faithfully beside concrete arms; operational partials and
+        // unknown-materializing failures reject the route.
         dispatch.demand_validated_structural_node(
             member.value,
             ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
@@ -1120,9 +1120,10 @@ fn inherited_emit_payload_source(
 /// `Intersection([v, v'])` over two same-shape nodes).
 ///
 /// Only a proven coverage publishes the contributor locator; an unraisable
-/// candidate or an unprovable / failed equality (`None` / `Some(false)`,
-/// including ANY composite arm that does not match — a FAILED contributor
-/// can never be covered by its resolvable sibling) fails CLOSED — the
+/// candidate or an unprovable / unequal result (`None` / `Some(false)`,
+/// including ANY composite arm that does not match — such as a stable
+/// unresolved carrier beside a concrete sibling) declines the single-source
+/// shortcut — the
 /// caller publishes the graph-native merged-member route instead.
 /// Node-domain only; no `TypeExpr` is materialized here.
 fn authored_candidate_matches_member_value(
@@ -1150,7 +1151,8 @@ fn authored_candidate_matches_member_value(
     // Composite coverage: the authored candidate denotes the merged member
     // when EVERY contributing arm folds to the candidate's own raised shape
     // (an agree-duplicate merge). A single non-matching arm — a different
-    // shape, or an unresolvable failed contributor — fails the proof.
+    // shape or a stable unresolved carrier — fails the proof and therefore
+    // selects the graph-native merged replay source.
     match node_data_for(dispatch.ctx, member_value).as_deref() {
         Some(SemanticNodeData::Intersection(arms) | SemanticNodeData::Union(arms)) => {
             !arms.is_empty()

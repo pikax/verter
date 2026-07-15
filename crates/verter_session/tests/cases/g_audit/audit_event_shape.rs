@@ -236,34 +236,6 @@ fn stage_6c_augmentation_paths_do_not_emit_custom() {
     }
 }
 
-/// Collect the source of the entire `route_db` module — the
-/// `route_db.rs` file plus every `*.rs` under the sibling `route_db/`
-/// directory (where the `EffectiveExportSet` stitch + its audit emission
-/// live). Returns the concatenated text so the augmentation guards stay
-/// correct under module splits.
-fn route_db_module_text(session_src: &std::path::Path) -> String {
-    let resolver_core = session_src.join("resolver_core");
-    let mut text = fs::read_to_string(resolver_core.join("route_db.rs")).expect("route_db.rs");
-    let route_db_dir = resolver_core.join("route_db");
-    if route_db_dir.is_dir() {
-        let mut children: Vec<_> = fs::read_dir(&route_db_dir)
-            .expect("read route_db/")
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "rs"))
-            .collect();
-        children.sort();
-        for child in children {
-            text.push('\n');
-            text.push_str(
-                &fs::read_to_string(&child)
-                    .unwrap_or_else(|e| panic!("read {}: {}", child.display(), e)),
-            );
-        }
-    }
-    text
-}
-
 /// Both audit-event variants are referenced from the augmentation
 /// production emission sites. Sanity check that the emission helpers
 /// exist + reference the typed variants.
@@ -273,13 +245,17 @@ fn stage_6c_emission_sites_reference_typed_variants() {
     let session_src = crates.join("verter_session").join("src");
 
     let file_artifact_store = session_src.join("file_artifact_store.rs");
+    let augmentation_stitch = session_src
+        .join("project_semantic_dispatch")
+        .join("build.rs");
 
-    let route_db_text = route_db_module_text(&session_src);
+    let augmentation_stitch_text =
+        fs::read_to_string(&augmentation_stitch).expect("project_semantic_dispatch/build.rs");
     let fas_text = fs::read_to_string(&file_artifact_store).expect("file_artifact_store.rs");
 
     assert!(
-        route_db_text.contains("ModuleAugmentationStitched"),
-        "the `route_db` module MUST reference `ModuleAugmentationStitched` audit event"
+        augmentation_stitch_text.contains("ModuleAugmentationStitched"),
+        "the semantic augmentation stitch MUST reference `ModuleAugmentationStitched` audit event"
     );
     assert!(
         fas_text.contains("ModuleAugmentationIndexShape"),

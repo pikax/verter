@@ -7,7 +7,7 @@
 //! probe of each bridge — the conversion the integration test
 //! `tests/cases/g_misc0/dispatch_bridges_convert_project_generation.rs` asserts.
 //!
-//! The module is gated `cfg(any(test, debug_assertions))` at its
+//! The module is gated `cfg(any(test, feature = "test-support"))` at its
 //! `lib.rs` declaration site, so release builds never include it.
 
 use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};

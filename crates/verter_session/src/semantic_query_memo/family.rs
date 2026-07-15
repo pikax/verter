@@ -116,7 +116,7 @@ impl MemoEntry {
         // assert `entries.try_lock()` succeeds from a peer thread while
         // this validate is in progress. Disarmed by default; armed via
         // [`super::SemanticGraphStore::arm_validate_running_probe_for_tests`].
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         super::validate_running_probe();
         self.read_set_signature
             .validate_with_self_roots(ctx, &self.self_root_canonicals)
@@ -468,6 +468,7 @@ impl FamilyKey {
     /// [`SemanticQueryKey`] maps to — e.g. that `Relate` maps to the dedicated
     /// `Relate` family and never aliases `IndexedAccess` — without exposing the
     /// `pub(super)` taxonomy outside the crate.
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn variant_label(&self) -> &'static str {
         match self {
             FamilyKey::ResolveDecl(_) => "ResolveDecl",

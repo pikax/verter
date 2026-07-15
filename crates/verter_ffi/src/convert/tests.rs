@@ -692,16 +692,33 @@ fn expansion_metadata_to_ffi_preserves_exactness_and_execution_status() {
         exactness: verter_semantic::analysis::type_solver::result::SolverExactness::ExactSymbolic,
         execution_status:
             verter_semantic::analysis::type_solver::result::ExecutionStatus::HardStop,
-        diagnostics: vec![verter_semantic::analysis::type_expand::ExpansionDiagnostic {
-            reason: verter_semantic::analysis::type_expand::ExpansionStopReason::UnsupportedOperator,
-            context: "kept symbolic".to_string(),
-            property_name: None,
-        }],
+        diagnostics: vec![
+            verter_semantic::analysis::type_expand::ExpansionDiagnostic {
+                reason:
+                    verter_semantic::analysis::type_expand::ExpansionStopReason::UnsupportedOperator,
+                context: "kept symbolic".to_string(),
+                property_name: None,
+            },
+            verter_semantic::analysis::type_expand::ExpansionDiagnostic {
+                reason:
+                    verter_semantic::analysis::type_expand::ExpansionStopReason::ProjectionWorkLimit,
+                context: "work limit".to_string(),
+                property_name: None,
+            },
+            verter_semantic::analysis::type_expand::ExpansionDiagnostic {
+                reason: verter_semantic::analysis::type_expand::ExpansionStopReason::ConnectedQueryDepthLimit,
+                context: "query depth limit".to_string(),
+                property_name: None,
+            },
+        ],
     });
 
     assert_eq!(ffi.exactness, "exactSymbolic");
     assert_eq!(ffi.execution_status, "hardStop");
-    assert_eq!(ffi.diagnostics.len(), 1);
+    assert_eq!(ffi.diagnostics.len(), 3);
+    assert_eq!(ffi.diagnostics[0].reason, "unsupportedOperator");
+    assert_eq!(ffi.diagnostics[1].reason, "projectionWorkLimit");
+    assert_eq!(ffi.diagnostics[2].reason, "connectedQueryDepthLimit");
 }
 
 // ── Config: all policy string variants ───────────────────────────

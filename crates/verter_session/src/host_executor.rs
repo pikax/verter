@@ -276,7 +276,7 @@ impl StageExecutor for HostStageExecutor {
         // simulate a parse-completion event without touching the
         // scheduler. Returns immediately when no token is bound (the
         // production hot path).
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         crate::capture_token::with_active_capture(|t| {
             t.record_parse(canonical_id);
         });

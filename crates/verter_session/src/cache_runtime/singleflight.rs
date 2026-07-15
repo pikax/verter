@@ -138,14 +138,15 @@ use super::singleflight_publish::{
 /// - `Cacheable(Entry)` — the result is valid AND cacheable. The
 ///   admission flow inserts the entry into the map; joiners re-read the
 ///   freshly-published entry and run `validate` against their own view.
-/// - `ReturnOnly(V)` — the result is valid but NOT cacheable (e.g.
-///   the producer's fact-signature tracer overflowed). The admission
-///   flow does NOT insert into the map. A `ReturnOnly` outcome carries
-///   no `Entry` and no dep-signature carrier, so it CANNOT be
+/// - `ReturnOnly { value, reason }` — the result is valid but NOT
+///   cacheable (e.g. the producer's fact-signature tracer overflowed).
+///   The admission flow does NOT insert into the map. A `ReturnOnly`
+///   outcome carries no `Entry` and no dep-signature carrier, so it CANNOT be
 ///   view-validated against a cooperative joiner's own view. It is
 ///   therefore non-shareable: the winner alone receives the `V`, and
 ///   every joiner is forced to fork and cold-recompute for its own
-///   view. The next cold-miss recomputes from scratch.
+///   view. The typed `reason` is retained for refusal telemetry. The
+///   next cold-miss recomputes from scratch.
 /// - `Failed` — compute observed a fatal condition (panic substitute,
 ///   missing dep, parse error). Joiners wake to a failed slot and
 ///   surface `None`; the next cold-miss retries.
@@ -167,7 +168,10 @@ pub enum ComputeAdmission<V, Entry> {
     /// Result is valid but NOT cacheable. Cache does NOT admit. The
     /// winner receives the `V` directly; joiners cannot view-validate a
     /// carrier-less value and therefore fork + cold-recompute.
-    ReturnOnly(V),
+    ReturnOnly {
+        value: V,
+        reason: crate::cache_runtime::NonAdmissionReason,
+    },
     /// Cold-compute failed (panic substitute, missing dep, etc.).
     /// Joiners surface `None`; subsequent callers retry the cold path.
     Failed,
@@ -864,12 +868,13 @@ where
 /// - `Cacheable(Entry)` — insert into the map, call `post_publish`.
 ///   Joiners re-read the published entry and run `validate` against
 ///   their own view.
-/// - `ReturnOnly(V)` — do NOT insert; do NOT call `post_publish`. A
-///   `ReturnOnly` value carries no `Entry` and no dep-signature
-///   carrier, so it cannot be view-validated against a joiner's own
-///   view. The winner alone receives the `V`; joiners observe the
+/// - `ReturnOnly { value, reason }` — do NOT insert; do NOT call
+///   `post_publish`. A `ReturnOnly` value carries no `Entry` and no
+///   dep-signature carrier, so it cannot be view-validated against a
+///   joiner's own view. The winner alone receives the `V`; joiners observe the
 ///   non-cacheable-winner flag and fork + cold-recompute for their own
-///   view. The cache stays empty so the next cold-miss recomputes.
+///   view. The typed `reason` is available to the lowering for refusal
+///   telemetry. The cache stays empty so the next cold-miss recomputes.
 /// - `Failed` — mark the slot failed; joiners surface `None`.
 ///
 /// **Joiner contract.** Joiners wake on the slot's condvar. If
@@ -1299,13 +1304,14 @@ where
                 slot.ready.notify_all();
                 Some(value)
             }
-            ComputeAdmission::ReturnOnly(value) => {
+            ComputeAdmission::ReturnOnly { value, reason } => {
                 // Valid result but not cacheable. The map stays empty and
                 // no dep-signature carrier is published, so a joiner has
                 // nothing to view-validate against its own view. Mark the
                 // slot `non_cacheable_winner` so every joiner forks and
                 // cold-recomputes for its own view; the winner alone
                 // receives `value`.
+                crate::cache_runtime::admission::propagate_non_admission(reason);
                 {
                     let mut state = slot.state.lock();
                     state.completed = true;

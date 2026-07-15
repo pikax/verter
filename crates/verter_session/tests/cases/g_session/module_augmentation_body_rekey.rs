@@ -3,11 +3,8 @@
 //! re-key whose decl skeleton (hence `parse_stable_hash`, hence the
 //! augmenter-set fingerprint) is unchanged.
 //!
-//! `RouteDb::get_or_compute_effective_export_set` (the NAMES stitch)
-//! already self-heals a stale captured key — proven by
-//! `rekeyed_augmenter_with_unchanged_skeleton_is_not_dropped` in
-//! `g_misc3/module_augmentation_stitching.rs`. But the LIVE `MergedDecl`
-//! body stitch (`ProjectSemanticDispatch::collect_augmentation_contributions`)
+//! The live `MergedDecl` body stitch
+//! (`ProjectSemanticDispatch::collect_augmentation_contributions`)
 //! re-fetched the augmenter's retained inner body via
 //! `artifact_store.get_artifacts(&augmenter.artifact_key)` and silently
 //! `continue`d on a miss — so a real augmentation could disappear after a

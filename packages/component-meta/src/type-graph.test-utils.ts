@@ -54,6 +54,8 @@ export interface TestTypeRegistryEntry {
 export interface TestExpansionDiagnostic {
   reason:
     | "budgetExceeded"
+    | "projectionWorkLimit"
+    | "connectedQueryDepthLimit"
     | "mappedDepthExceeded"
     | "unresolvedReference"
     | "indeterminateConditional"
@@ -138,6 +140,8 @@ const EXPANSION_REASON_CYCLIC_REFERENCE = 9;
 const EXPANSION_REASON_CYCLIC_INSTANTIATION = 10;
 const EXPANSION_REASON_INSTANTIATION_ERROR = 11;
 const EXPANSION_REASON_EMPTY_UNION_ARM = 12;
+const EXPANSION_REASON_PROJECTION_WORK_LIMIT = 13;
+const EXPANSION_REASON_CONNECTED_QUERY_DEPTH_LIMIT = 14;
 
 type TypeNodeInit = NonNullable<
   NonNullable<ComponentMetaPayloadInit["typeGraph"]>["nodes"]
@@ -451,5 +455,9 @@ function encodeExpansionReason(value: TestExpansionDiagnostic["reason"]): number
       return EXPANSION_REASON_INSTANTIATION_ERROR;
     case "emptyUnionArm":
       return EXPANSION_REASON_EMPTY_UNION_ARM;
+    case "projectionWorkLimit":
+      return EXPANSION_REASON_PROJECTION_WORK_LIMIT;
+    case "connectedQueryDepthLimit":
+      return EXPANSION_REASON_CONNECTED_QUERY_DEPTH_LIMIT;
   }
 }

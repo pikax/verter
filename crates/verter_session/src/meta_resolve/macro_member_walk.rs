@@ -16,7 +16,7 @@ use crate::types::FileAnalysisSnapshot;
 ///
 /// Test/debug instrumentation only — gated to match the capture-token
 /// module (absent in release).
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) const SLOT_BINDING_REGISTRY_COLLECTION_SKIP_COUNTER: &str =
     "slot_binding_registry_collection_skips";
 

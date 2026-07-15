@@ -342,7 +342,7 @@ fixture** the moment its substrate lands (per §3.2(e) — the guard appears the
    context-sensitive `SemanticQueryKey` finalization, `U2`).
 
 **Session / overlay augmentation is OVERLAY-AWARE (LANDED — the acceptance bar is the landed guard
-trio, not a fail-closed gate).** The augmentation index is overlay-aware:
+pair, not a fail-closed gate).** The augmentation index is overlay-aware:
 `FileArtifactStore::augmentation_index` is keyed by `AugmentationTargetKey { project_identity,
 resolve_env_hash, lib_env_hash, population, target }`, where `population: AugmentationPopulation
 {Base, Session(overlay-set fingerprint)}` keeps a session overlay's augmenters in a `Session` slot
@@ -351,18 +351,16 @@ overlay edit that adds/removes a `declare module` / `declare global` contributor
 stitched overlay-aware answer — NOT a fail-closed degradation and NOT a silently-stale base-only
 answer; overlay augmenters never poison the base index and never cross sessions, and there is NO
 base-only `session.is_none()` assert on this surface (CLAUDE.md §Declaration Augmentation is the
-current-state authority). The landed acceptance bar is the guard trio
+current-state authority). The landed acceptance bar is the guard pair
 `session_overlay_augmenter_isolated_from_base_index` +
-`effective_export_set_session_view_stitches_overlay_augmenter` +
-`no_effective_export_set_base_only_session_assert` (registered under the Declaration Augmentation row
+`session_overlay_augmentation_isolated_from_base_meta` (registered under the Declaration Augmentation row
 of `crates/verter_session/tests/g_misc0/critical_rules_have_guards.rs`). The formerly-planned
 `session_overlay_augmentation_fails_closed_until_implemented` deliverable is RETIRED: its either/or
 contract ("implemented OR fail closed until implemented") was discharged on the IMPLEMENTED arm, so
 writing the fail-closed guard now would REGRESS landed behavior (a session view gets a stitched
 answer, not `ReturnOnly`); it must not be reintroduced in any block's guard list or in the generated
 block-contract table. This composes with the broken-code recovery contract (§0.5.3) and the
-overlay-results-do-not-populate-base-caches Cache-Architecture rule (the query-identity
-`EffectiveExportSetScope` stays content-free; overlay content identity is validated on the VALUE).
+overlay-results-do-not-populate-base-caches Cache-Architecture rule.
 
 ### 0.5.2 The Native Emit Boundary (B.9 — DECIDED, codex + claude converged)
 
@@ -3606,8 +3604,7 @@ U-block's scope bullet for the contract.
   — a semantic discriminator, NOT a content/version hash, R6-consistent); and the
   LANDED overlay-aware augmentation guards kept green:
   `session_overlay_augmenter_isolated_from_base_index`,
-  `effective_export_set_session_view_stitches_overlay_augmenter`,
-  `no_effective_export_set_base_only_session_assert` (the augmentation index is
+  `session_overlay_augmentation_isolated_from_base_meta` (the augmentation index is
   overlay-aware via `AugmentationTargetKey.population` — §0.5.1; the retired
   fail-closed deliverable `session_overlay_augmentation_fails_closed_until_implemented`
   must NOT be reintroduced).
@@ -4987,8 +4984,7 @@ The full-replacement effort is "done" when ALL of the following hold:
   `negative_name_lookup_requires_recorded_completeness_or_returnonly`,
   `binder_scope_id_enters_context_sensitive_query_identity`,
   `session_overlay_augmenter_isolated_from_base_index`,
-  `effective_export_set_session_view_stitches_overlay_augmenter`,
-  `no_effective_export_set_base_only_session_assert`,
+  `session_overlay_augmentation_isolated_from_base_meta`,
   `nav_location_index_runs_zero_typed_ir_dispatch`,
   `native_navigation_replaces_ts_navigation_backend`,
   `native_binder_surfaces_replace_ts_aux_nav_paths`,

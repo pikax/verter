@@ -95,6 +95,7 @@ impl<'a> HostResolverContext<'a> {
     /// so cooperative-admission lanes that inherit the context share
     /// the same overlay.
     #[must_use]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn new(
         inner: &'a crate::VerterHost,
         base: &'a HostStoreView,
@@ -536,9 +537,9 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
 /// fallthrough / intrinsic-projection) can keep their bodies concise
 /// without inlining the 3-line construction dance.
 ///
-/// `#[cfg(any(test, debug_assertions))]`-gated so release builds drop
+/// `#[cfg(any(test, feature = "test-support"))]`-gated so release builds drop
 /// the helper entirely.
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn with_bare_host_ctx_for_test<R>(
     host: &crate::VerterHost,
     f: impl FnOnce(&dyn ResolverContext) -> R,

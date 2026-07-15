@@ -20,11 +20,17 @@
 // imports resolved through `meta_resolve` private siblings; after the
 // move, `super` is `host_manage`, so the rewrite goes via the parent
 // module's `pub(crate)`-re-exported surface.
+use crate::fact_signature_helpers::named_cacheability_scope;
 use crate::host_manage::component_meta_trace_custom;
 use crate::meta_resolve::ResolvedComponentMetaState;
-use crate::resolver_core::{ComponentMetaRequestHost, RequestSource, SingleflightRole};
+use crate::resolver_core::{
+    ComponentMetaComputeOutcome, ComponentMetaRequestHost, RequestSource, SingleflightRole,
+};
 use crate::types::{FileAnalysisSnapshot, Hash16, ProjectionMode};
 use crate::VerterHost;
+
+#[cfg(test)]
+use crate::host_test_force::TracerScope;
 
 use crate::instant::Instant;
 
@@ -128,15 +134,6 @@ impl ComponentMetaRequestHost for VerterHost {
         mode: Self::Mode,
     ) -> crate::resolver_core::ResolutionNodeKey {
         resolved_meta_cache_key(canonical, mode)
-    }
-
-    fn snapshot_store_view(&self) -> Self::View {
-        // The request driver gates currentness through
-        // `snapshot_store_view_read` + `snapshot_view_is_current`; this
-        // owned-view accessor hands back the cold-seed's inner view.
-        self.resolver_store_view_read()
-            .into_cold_seed_view()
-            .into_inner()
     }
 
     fn snapshot_store_view_read(&self) -> (Self::View, bool) {
@@ -247,73 +244,78 @@ impl ComponentMetaRequestHost for VerterHost {
         captured: Option<&Self::CapturedInputs>,
         store_view: Option<&Self::View>,
         base_is_current: bool,
-    ) -> Option<Self::Resolution> {
-        // Consume the request-bound `store_view` to construct a
-        // `HostResolverContext` so the cold-compute pipeline binds
-        // overlay-aware reads to the same view the executor already
-        // snapshotted. The singleflight executor always supplies a
-        // view in production (`snapshot_view` builds one above);
-        // the `None` branch falls back to building a view here for
-        // robustness. `base_is_current` carries the executor snapshot's
-        // currentness so the `HostResolverContext` fails its nested
-        // warm-cache probes closed on a non-current seed.
-        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        match store_view {
-            Some(view) => {
-                if let Some(captured) = captured {
-                    return self.compute_component_meta_state_from_captured_with_view_arg(
-                        canonical,
-                        mode,
-                        captured,
-                        view,
-                        &overlay,
-                        base_is_current,
-                    );
+    ) -> ComponentMetaComputeOutcome<Self::Resolution> {
+        let (value, non_cacheable) =
+            named_cacheability_scope!(self, TracerScope::ComponentMetaRequest, || {
+                // Consume the request-bound `store_view` to construct a
+                // `HostResolverContext` so the cold-compute pipeline binds
+                // overlay-aware reads to the same view the executor already
+                // snapshotted. The singleflight executor always supplies a
+                // view in production (`snapshot_view` builds one above);
+                // the `None` branch falls back to building a view here for
+                // robustness. `base_is_current` carries the executor snapshot's
+                // currentness so the `HostResolverContext` fails its nested
+                // warm-cache probes closed on a non-current seed.
+                let overlay =
+                    std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+                match store_view {
+                    Some(view) => {
+                        if let Some(captured) = captured {
+                            return self.compute_component_meta_state_from_captured_with_view_arg(
+                                canonical,
+                                mode,
+                                captured,
+                                view,
+                                &overlay,
+                                base_is_current,
+                            );
+                        }
+                        let whole_hash = self
+                            .current_or_read_whole_hash(canonical)
+                            .unwrap_or_default();
+                        self.compute_component_meta_state_with_view_arg(
+                            canonical,
+                            mode,
+                            whole_hash,
+                            view,
+                            &overlay,
+                            base_is_current,
+                        )
+                    }
+                    None => {
+                        // Cold compute with no driver-supplied view: this runs
+                        // inside `run_stable_request`'s `compute`, whose `is_stable`
+                        // fence gates promotion. Seed from the cold-seed view AND
+                        // carry its currentness so the derived context fails its
+                        // nested warm-cache probes closed on a non-current seed.
+                        let cold_seed = self.resolver_store_view_read().into_cold_seed_view();
+                        let seed_is_current = cold_seed.is_current();
+                        let view = cold_seed.into_inner();
+                        if let Some(captured) = captured {
+                            return self.compute_component_meta_state_from_captured_with_view_arg(
+                                canonical,
+                                mode,
+                                captured,
+                                &view,
+                                &overlay,
+                                seed_is_current,
+                            );
+                        }
+                        let whole_hash = self
+                            .current_or_read_whole_hash(canonical)
+                            .unwrap_or_default();
+                        self.compute_component_meta_state_with_view_arg(
+                            canonical,
+                            mode,
+                            whole_hash,
+                            &view,
+                            &overlay,
+                            seed_is_current,
+                        )
+                    }
                 }
-                let whole_hash = self
-                    .current_or_read_whole_hash(canonical)
-                    .unwrap_or_default();
-                self.compute_component_meta_state_with_view_arg(
-                    canonical,
-                    mode,
-                    whole_hash,
-                    view,
-                    &overlay,
-                    base_is_current,
-                )
-            }
-            None => {
-                // Cold compute with no driver-supplied view: this runs
-                // inside `run_stable_request`'s `compute`, whose `is_stable`
-                // fence gates promotion. Seed from the cold-seed view AND
-                // carry its currentness so the derived context fails its
-                // nested warm-cache probes closed on a non-current seed.
-                let cold_seed = self.resolver_store_view_read().into_cold_seed_view();
-                let seed_is_current = cold_seed.is_current();
-                let view = cold_seed.into_inner();
-                if let Some(captured) = captured {
-                    return self.compute_component_meta_state_from_captured_with_view_arg(
-                        canonical,
-                        mode,
-                        captured,
-                        &view,
-                        &overlay,
-                        seed_is_current,
-                    );
-                }
-                let whole_hash = self
-                    .current_or_read_whole_hash(canonical)
-                    .unwrap_or_default();
-                self.compute_component_meta_state_with_view_arg(
-                    canonical,
-                    mode,
-                    whole_hash,
-                    &view,
-                    &overlay,
-                    seed_is_current,
-                )
-            }
-        }
+            });
+        ComponentMetaComputeOutcome::from_owner_scope(value, non_cacheable)
     }
 
     fn store_component_meta_result(
@@ -325,10 +327,11 @@ impl ComponentMetaRequestHost for VerterHost {
         self.store_cached_resolved_meta(canonical, mode, result, &result.fact_versions);
     }
 
-    fn resolution_is_partial(&self, result: &Self::Resolution) -> bool {
-        // Read the typed completeness (the authoritative partial signal);
-        // `synthesis_should_suppress` is its bool projection.
-        result.completeness.is_partial()
+    fn resolution_completeness(
+        &self,
+        result: &Self::Resolution,
+    ) -> crate::semantic_query::ResultCompleteness {
+        result.completeness
     }
 }
 
@@ -344,20 +347,6 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
         mode: Self::Mode,
     ) -> crate::resolver_core::ResolutionNodeKey {
         resolved_meta_cache_key_with_view_fingerprint(canonical, mode, self.view.fingerprint())
-    }
-
-    fn snapshot_store_view(&self) -> Self::View {
-        // The request driver gates currentness through
-        // `snapshot_store_view_read` + `snapshot_view_is_current`; this
-        // owned-view accessor hands back the cold-seed's inner view,
-        // overlay-rooted for the request view (mirroring
-        // `snapshot_store_view_read`) so every view this host hands the
-        // executor is already overlay-aware.
-        self.host
-            .resolver_store_view_read()
-            .into_cold_seed_view()
-            .with_session_overlay(self.host, self.view)
-            .into_inner()
     }
 
     fn snapshot_store_view_read(&self) -> (Self::View, bool) {
@@ -423,73 +412,77 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
         captured: Option<&Self::CapturedInputs>,
         store_view: Option<&Self::View>,
         base_is_current: bool,
-    ) -> Option<Self::Resolution> {
-        // View-aware cold compute: thread the session view through a
-        // `SessionResolverContext` so the resolver-tier reads (prepared
-        // declarations, dep-source materialisation, registry+macro shapes)
-        // observe overlay candidates published by the prewarm pass.
-        //
-        // The cold-seed is built from the EXECUTOR's `(store_view,
-        // base_is_current)` pair — the SAME single read the driver's
-        // promotion fence (`is_stable`) gates on — re-bound through
-        // `StoreViewRead::from_executor_snapshot` so currentness stays
-        // intrinsic to the seed. This makes the compute seed and the
-        // promotion-gating seed ONE read, matching the bare-host and
-        // session-host paths (which already rebind through
-        // `from_executor_snapshot`). Taking a SECOND fresh base read here
-        // would diverge from the fence: under additive store-view churn —
-        // which advances the artifact / load generations the
-        // external-supersession fingerprint EXCLUDES — that second read can be
-        // `ReturnOnly` while the executor snapshot is `Current`, so the fence
-        // would promote a result computed from a non-current seed.
-        // `self.overlay` is the request-scoped completion overlay shared
-        // across capture / try-get-cached / compute boundaries.
-        //
-        // The supplied `store_view` is ALREADY overlay-rooted — the fixed-view
-        // (batch) path's view was overlaid ONCE by `capture_batch_fixed_view`
-        // and shared across jobs; the per-attempt path's view was overlaid by
-        // `snapshot_store_view_read`. So the overlay is NOT re-applied per job
-        // here (that per-job copy-on-write was the O(N²) regression) — the
-        // seed only rebinds currentness onto the already-overlaid view.
-        //
-        // The `None` arm (no executor-supplied view) is a robustness fallback —
-        // production always arrives through `run_component_meta_request` →
-        // executor → `compute(view)` with a request-bound view. It derives the
-        // seed (and its currentness) from its OWN fresh read, overlay-rooted,
-        // so currentness stays intrinsic.
-        let cold_seed = match store_view {
-            Some(view) => crate::resolver_store::StoreViewRead::from_executor_snapshot(
-                view.clone(),
-                base_is_current,
-            )
-            .into_cold_seed_view(),
-            None => self.host.view_bound_cold_seed(self.view),
-        };
-        if let Some(captured) = captured {
-            return self
-                .host
-                .compute_component_meta_state_from_captured_with_session_view_and_base(
-                    canonical,
-                    mode,
-                    captured,
-                    self.view,
-                    &cold_seed,
-                    &self.overlay,
-                );
-        }
-        let whole_hash = self
-            .host
-            .current_or_read_whole_hash(canonical)
-            .unwrap_or_default();
-        self.host
-            .compute_component_meta_state_with_session_view_and_base(
-                canonical,
-                mode,
-                whole_hash,
-                self.view,
-                &cold_seed,
-                &self.overlay,
-            )
+    ) -> ComponentMetaComputeOutcome<Self::Resolution> {
+        let (value, non_cacheable) =
+            named_cacheability_scope!(self.host, TracerScope::ComponentMetaRequest, || {
+                // View-aware cold compute: thread the session view through a
+                // `SessionResolverContext` so the resolver-tier reads (prepared
+                // declarations, dep-source materialisation, registry+macro shapes)
+                // observe overlay candidates published by the prewarm pass.
+                //
+                // The cold-seed is built from the EXECUTOR's `(store_view,
+                // base_is_current)` pair — the SAME single read the driver's
+                // promotion fence (`is_stable`) gates on — re-bound through
+                // `StoreViewRead::from_executor_snapshot` so currentness stays
+                // intrinsic to the seed. This makes the compute seed and the
+                // promotion-gating seed ONE read, matching the bare-host and
+                // session-host paths (which already rebind through
+                // `from_executor_snapshot`). Taking a SECOND fresh base read here
+                // would diverge from the fence: under additive store-view churn —
+                // which advances the artifact / load generations the
+                // external-supersession fingerprint EXCLUDES — that second read can be
+                // `ReturnOnly` while the executor snapshot is `Current`, so the fence
+                // would promote a result computed from a non-current seed.
+                // `self.overlay` is the request-scoped completion overlay shared
+                // across capture / try-get-cached / compute boundaries.
+                //
+                // The supplied `store_view` is ALREADY overlay-rooted — the fixed-view
+                // (batch) path's view was overlaid ONCE by `capture_batch_fixed_view`
+                // and shared across jobs; the per-attempt path's view was overlaid by
+                // `snapshot_store_view_read`. So the overlay is NOT re-applied per job
+                // here (that per-job copy-on-write was the O(N²) regression) — the
+                // seed only rebinds currentness onto the already-overlaid view.
+                //
+                // The `None` arm (no executor-supplied view) is a robustness fallback —
+                // production always arrives through `run_component_meta_request` →
+                // executor → `compute(view)` with a request-bound view. It derives the
+                // seed (and its currentness) from its OWN fresh read, overlay-rooted,
+                // so currentness stays intrinsic.
+                let cold_seed = match store_view {
+                    Some(view) => crate::resolver_store::StoreViewRead::from_executor_snapshot(
+                        view.clone(),
+                        base_is_current,
+                    )
+                    .into_cold_seed_view(),
+                    None => self.host.view_bound_cold_seed(self.view),
+                };
+                if let Some(captured) = captured {
+                    return self
+                        .host
+                        .compute_component_meta_state_from_captured_with_session_view_and_base(
+                            canonical,
+                            mode,
+                            captured,
+                            self.view,
+                            &cold_seed,
+                            &self.overlay,
+                        );
+                }
+                let whole_hash = self
+                    .host
+                    .current_or_read_whole_hash(canonical)
+                    .unwrap_or_default();
+                self.host
+                    .compute_component_meta_state_with_session_view_and_base(
+                        canonical,
+                        mode,
+                        whole_hash,
+                        self.view,
+                        &cold_seed,
+                        &self.overlay,
+                    )
+            });
+        ComponentMetaComputeOutcome::from_owner_scope(value, non_cacheable)
     }
 
     fn store_component_meta_result(
@@ -507,10 +500,11 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
         );
     }
 
-    fn resolution_is_partial(&self, result: &Self::Resolution) -> bool {
-        // Read the typed completeness (the authoritative partial signal);
-        // `synthesis_should_suppress` is its bool projection.
-        result.completeness.is_partial()
+    fn resolution_completeness(
+        &self,
+        result: &Self::Resolution,
+    ) -> crate::semantic_query::ResultCompleteness {
+        result.completeness
     }
 }
 

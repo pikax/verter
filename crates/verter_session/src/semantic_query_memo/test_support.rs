@@ -92,7 +92,7 @@ impl SemanticGraphStore {
     /// cannot perturb the build it observes. The accessor and the counter
     /// it reads are both `cfg`-gated to `test` / `debug_assertions` and
     /// are absent from release builds.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     #[must_use]
     pub fn test_joiner_on_condvar_count(&self) -> usize {

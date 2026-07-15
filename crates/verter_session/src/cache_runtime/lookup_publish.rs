@@ -365,7 +365,8 @@ where
                 slot.ready.notify_all();
                 Some(value)
             }
-            ComputeAdmission::ReturnOnly(value) => {
+            ComputeAdmission::ReturnOnly { value, reason } => {
+                crate::cache_runtime::admission::propagate_non_admission(reason);
                 {
                     let mut state = slot.state.lock();
                     state.completed = true;

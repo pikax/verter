@@ -24,8 +24,8 @@
 //! - `resolve_owner_direct_import`
 //! - `resolve_type_declaration_for_dep`
 //!
-//! Each method MUST contain BOTH a `#[cfg(any(test, debug_assertions))]`
-//! arm AND a `#[cfg(not(any(test, debug_assertions)))] { panic!(...) }`
+//! Each method MUST contain BOTH a `#[cfg(any(test, feature = "test-support"))]`
+//! arm AND a `#[cfg(not(any(test, feature = "test-support")))] { panic!(...) }`
 //! arm. The guard greps for both the method signature and the panic
 //! body in the same file
 //! (`crates/verter_session/src/resolver_core/resolver_context.rs`) —
@@ -159,15 +159,15 @@ fn bare_host_resolver_methods_retain_cfg_test_arm() {
     // debug_assertions)))` because `debug_assertions` is OFF for
     // `cargo build --release`.
     let cfg_test_count = impl_body
-        .matches("#[cfg(any(test, debug_assertions))]")
+        .matches("#[cfg(any(test, feature = \"test-support\"))]")
         .count();
     let cfg_not_test_count = impl_body
-        .matches("#[cfg(not(any(test, debug_assertions)))]")
+        .matches("#[cfg(not(any(test, feature = \"test-support\")))]")
         .count();
     assert!(
         cfg_test_count >= EXPECTED_PANIC_METHODS.len(),
         "`impl ResolverContext for VerterHost` MUST retain \
-         at least {} `#[cfg(any(test, debug_assertions))]` arms (one per panic-shim \
+         at least {} test-support arms (one per panic-shim \
          resolver method). Found {}.",
         EXPECTED_PANIC_METHODS.len(),
         cfg_test_count,
@@ -175,7 +175,7 @@ fn bare_host_resolver_methods_retain_cfg_test_arm() {
     assert!(
         cfg_not_test_count >= EXPECTED_PANIC_METHODS.len(),
         "`impl ResolverContext for VerterHost` MUST retain \
-         at least {} `#[cfg(not(any(test, debug_assertions)))]` arms (one per panic-shim \
+         at least {} non-test-support panic arms (one per panic-shim \
          resolver method). Found {}.",
         EXPECTED_PANIC_METHODS.len(),
         cfg_not_test_count,

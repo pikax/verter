@@ -225,53 +225,73 @@ impl VerterHost {
         let canonical = canonical.to_string();
         let (executor_view, executor_fp) = fixed.executor_fixed_view();
         let executor_fixed = Some((executor_view, executor_fp, fixed.is_current()));
-        let (maybe_resolved_analysis, read_set) = self.with_fact_tracer(|| {
-            let mut resolved = match self.resolve_component_meta_with_view_and_fixed(
-                canonical.as_str(),
-                crate::types::ProjectionMode::Expanded,
-                view,
-                executor_fixed,
-            ) {
-                Some(r) => r,
-                None => return None,
-            };
-            resolved.request_id = request_id;
-            // Open the publication-boundary tracing span. Carries the
-            // per-request `trace_id` (from `RequestContext`) so audit
-            // consumers can join `RequestAuditRecord.trace_id` to
-            // captured tracing logs by string match. The
-            // `suppress` field surfaces the synthesis suppression
-            // decision in spans for the same reason.
-            let publish_trace_id = crate::request_context::current_request_context()
-                .map(|ctx| ctx.trace_id.clone())
-                .unwrap_or_default();
-            let publish_span = tracing::info_span!(
-                "publish_component_meta",
-                file = %canonical,
-                trace_id = %publish_trace_id,
-                suppress = resolved.synthesis_should_suppress,
-            );
-            let _publish_enter = publish_span.enter();
-            tracing::info!(
-                trace_id = %publish_trace_id,
-                suppress = resolved.synthesis_should_suppress,
-                "publish_component_meta",
-            );
-            // Always include fallthrough — the solver path does not use walker
-            // overflow as a gating signal.
-            let extract = extract_component_meta_from_resolved(
-                self,
-                canonical.as_str(),
-                &resolved,
-                true, // include_fallthrough
-                host_ctx_ref,
-            );
-            Some((extract.analysis, resolved, extract.completeness))
-        });
-        let (analysis, resolved, extract_completeness) = maybe_resolved_analysis?;
+        let results = self.project_type_store().component_meta_results();
+        let maybe_resolved_analysis = results.compute_and_admit(
+            self,
+            canonical.as_str(),
+            "with-resolution path",
+            || {
+                let mut resolved = match self.resolve_component_meta_with_view_and_fixed(
+                    canonical.as_str(),
+                    crate::types::ProjectionMode::Expanded,
+                    view,
+                    executor_fixed,
+                ) {
+                    Some(r) => r,
+                    None => return None,
+                };
+                resolved.request_id = request_id;
+                // Open the publication-boundary tracing span. Carries the
+                // per-request `trace_id` (from `RequestContext`) so audit
+                // consumers can join `RequestAuditRecord.trace_id` to
+                // captured tracing logs by string match. The
+                // `suppress` field surfaces the synthesis suppression
+                // decision in spans for the same reason.
+                let publish_trace_id = crate::request_context::current_request_context()
+                    .map(|ctx| ctx.trace_id.clone())
+                    .unwrap_or_default();
+                let publish_span = tracing::info_span!(
+                    "publish_component_meta",
+                    file = %canonical,
+                    trace_id = %publish_trace_id,
+                    suppress = resolved.synthesis_should_suppress,
+                );
+                let _publish_enter = publish_span.enter();
+                tracing::info!(
+                    trace_id = %publish_trace_id,
+                    suppress = resolved.synthesis_should_suppress,
+                    "publish_component_meta",
+                );
+                // Always include fallthrough — the solver path does not use walker
+                // overflow as a gating signal.
+                let extract = extract_component_meta_from_resolved(
+                    self,
+                    canonical.as_str(),
+                    &resolved,
+                    true, // include_fallthrough
+                    host_ctx_ref,
+                );
+                Some((extract.analysis, resolved, extract.completeness))
+            },
+            |computed| {
+                let Some((analysis, resolved, extract_completeness)) = computed else {
+                    return crate::component_meta_result_db::ComponentMetaPublishDecision::no_value(
+                    );
+                };
+                let final_completeness = resolved.completeness.merge(*extract_completeness);
+                self.component_meta_publish_decision(
+                    canonical.as_str(),
+                    resolved,
+                    analysis.clone(),
+                    validated_at_generation,
+                    seed_fence,
+                    final_completeness,
+                )
+            },
+        );
+        let (analysis, resolved, _extract_completeness) = maybe_resolved_analysis?;
         // ONE merged admission signal: the resolve-phase completeness merged
         // with the whole-extract scope (macro-DTO read + fallthrough compute).
-        let final_completeness = resolved.completeness.merge(extract_completeness);
 
         // Seal + admission decision — `publish_if_admissible` (by-value
         // fenced-serve consult + R20 finalise). An admitted write lets
@@ -279,23 +299,6 @@ impl VerterHost {
         // `try_with_resolution_cache_hit`; suppression is enforced inside
         // `publish_component_meta_cache_entry` via the merged
         // `final_completeness` signal.
-        self.publish_if_admissible(
-            canonical.as_str(),
-            "with-resolution path",
-            read_set,
-            |sig| {
-                self.publish_component_meta_cache_entry(
-                    canonical.as_str(),
-                    &resolved,
-                    analysis.clone(),
-                    sig,
-                    validated_at_generation,
-                    seed_fence,
-                    final_completeness,
-                );
-            },
-        );
-
         Some((analysis, resolved))
     }
 

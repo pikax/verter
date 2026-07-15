@@ -1125,24 +1125,24 @@ fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
             crate::for_tests::augmentation_force_source_env_unobservable_for_tests(host, true)
         });
         let view = host.resolver_store_view_read().into_owned_view();
-        let (read, _finalise, outer_non_cacheable) =
-            crate::fact_signature_helpers::install_fact_tracer(host, || {
-                let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-                let ctx = crate::resolver_core::HostResolverContext::new(host, &view, overlay);
-                let dispatch = ProjectSemanticDispatch::new(&ctx);
-                let key =
-                    SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-                        dispatch.type_slot_for(Arc::from("/types.ts"), Arc::from("Foo")),
-                        Arc::from(
-                            Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
-                        ),
-                        dispatch.instantiate_context_for(
-                            "/types.ts",
-                            ProjectionReductionContext::published(ProjectionMode::Expanded),
-                        ),
-                    ));
-                dispatch.execute_read(key)
-            });
+        let (read, finalise) = crate::fact_signature_helpers::install_fact_tracer(host, || {
+            let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let ctx = crate::resolver_core::HostResolverContext::new(host, &view, overlay);
+            let dispatch = ProjectSemanticDispatch::new(&ctx);
+            let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                dispatch.type_slot_for(Arc::from("/types.ts"), Arc::from("Foo")),
+                Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+                dispatch.instantiate_context_for(
+                    "/types.ts",
+                    ProjectionReductionContext::published(ProjectionMode::Expanded),
+                ),
+            ));
+            dispatch.execute_read(key)
+        });
+        let outer_non_cacheable = matches!(
+            finalise,
+            crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        );
         (
             read.cache_suppress,
             read.result_is_partial,

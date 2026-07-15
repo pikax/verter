@@ -370,7 +370,7 @@ pub struct BoundedCandidateMap<K, D, V> {
     /// arming it on one map never parks an unrelated concurrent test's
     /// `clear`. Absent from release builds — the production reset path
     /// is unchanged.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     clear_midpoint_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Test-only injection point inside [`Self::admit`], parked AFTER
     /// the slot push and the budget `record_admission` complete but
@@ -379,7 +379,7 @@ pub struct BoundedCandidateMap<K, D, V> {
     /// admit's update has fully landed (admitter parked here) before it
     /// releases a concurrently-parked `clear`. Per-instance; absent from
     /// release builds.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     admit_post_record_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
     /// Test-only injection point inside [`Self::admit`], parked AFTER
     /// the slot mutation + removed-seq `forget_seq` but BEFORE the
@@ -389,7 +389,7 @@ pub struct BoundedCandidateMap<K, D, V> {
     /// a concurrent admit of the same slot cannot record between this
     /// admit's slot mutation and its `record_admission`. Per-instance;
     /// absent from release builds.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     admit_pre_budget_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
 }
 
@@ -407,11 +407,11 @@ where
             budget: GlobalRetentionBudget::new(global_cap),
             per_slot_cap: per_slot_cap.max(1),
             retention_gate: parking_lot::RwLock::new(()),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             clear_midpoint_gate: parking_lot::Mutex::new(None),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             admit_post_record_gate: parking_lot::Mutex::new(None),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             admit_pre_budget_gate: parking_lot::Mutex::new(None),
         }
     }
@@ -729,7 +729,7 @@ where
             // the same slot cannot record between this admit's slot
             // mutation and its `record_admission` — the test drives that
             // serialisation. `None` (the production default) is a no-op.
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             {
                 let gate = self.admit_pre_budget_gate.lock().clone();
                 if let Some(barrier) = gate {
@@ -783,7 +783,7 @@ where
         // pinned here (read guard engaged); the second `wait()` releases
         // `admit` to drop the guard and return. `None` (the production
         // default) is a no-op.
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let gate = self.admit_post_record_gate.lock().clone();
             if let Some(barrier) = gate {
@@ -887,7 +887,7 @@ where
         // observe that `clear` is pinned here (write guard engaged); the
         // second `wait()` releases `clear` to finish. `None` (the
         // production default) is a no-op.
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let gate = self.clear_midpoint_gate.lock().clone();
             if let Some(barrier) = gate {

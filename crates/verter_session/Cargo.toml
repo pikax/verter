@@ -274,3 +274,7 @@ required-features = ["oracle-gen"]
 [[bench]]
 name = "host_bench"
 harness = false
+
+[[bench]]
+name = "projection_safety_bench"
+harness = false

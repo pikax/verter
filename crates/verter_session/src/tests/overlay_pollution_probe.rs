@@ -9,7 +9,7 @@
 //! (sealed `pub(crate)`) or `VerterHost::authoritative_current_content_hash`
 //! / `normalized_analysis_canonical` (`pub(crate)`). This module hosts
 //! the shims; it sits under the crate-root `tests` module (gated
-//! `cfg(any(test, debug_assertions))`), so the integration test reaches
+//! `cfg(any(test, feature = "test-support"))`), so the integration test reaches
 //! it as `verter_session::tests::overlay_pollution_probe`.
 
 use std::sync::Arc;

@@ -26,6 +26,7 @@
 
 use std::sync::Arc;
 
+use rustc_hash::FxHashSet;
 use verter_type_expr::facts::{ClosedTypeFact, ProjectedTypeFact, SemanticTypeSource};
 use verter_type_expr::locators::{AuthoredAnchor, AuthoredBodyLocator, MacroPayloadPosition};
 
@@ -473,22 +474,53 @@ impl ProjectSemanticDispatch<'_> {
         }
     }
 
+    /// Re-project the one-level Vue macro surface identified by a stamped
+    /// type-argument payload. Member-path, callable-parameter, and index-
+    /// position sources all replay through this single producer so their
+    /// substitution, heritage filtering, and provenance match publication.
+    fn replay_vue_macro_type_argument_surface(
+        &self,
+        payload: &verter_type_expr::locators::MacroPayloadLocator,
+    ) -> Option<crate::typeinfo::framework_surface::vue_exec::VueMacroSurface> {
+        if payload.payload != MacroPayloadPosition::TypeArgument {
+            return None;
+        }
+        let canonical = payload.anchor.canonical_id.as_ref();
+        let macro_kind = {
+            let serve = self.ctx.ensure_indexed_ready_serve(canonical)?;
+            serve
+                .indexed
+                .snapshot
+                .macros
+                .get(payload.macro_index as usize)?
+                .kind
+        };
+        self.ctx
+            .host_for_fact_tracer_install()
+            .resolve_vue_macro_surface_with_ctx(
+                self.ctx,
+                &crate::typeinfo::types::VueMacroSurfaceRequest {
+                    owner_canonical: Arc::from(canonical),
+                    macro_index: payload.macro_index as usize,
+                    macro_kind,
+                    root_identity: [0u8; 16],
+                    level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+                },
+            )
+    }
+
     /// Raise a projected MEMBER-PATH fact ([`ProjectedTypeFact::MemberPath`])
-    /// by replaying the publication surface's own producing route: the BASE
-    /// authored body lowers mode-neutrally through the shared
-    /// authored-locator routing (the macro type-argument position resolves
-    /// via its sole sanctioned hot-mirror producer,
-    /// `macro_type_arg_hot_ref`; every other position through the memoized
-    /// `LowerLocator` deref), then the member PATH replays through the one
-    /// dispatch's EXISTING `ProjectPath` query under the caller's context —
-    /// intermediate hops run in `Navigate`, the terminal hop in the caller's
-    /// mode, so path-precision and shallow-by-default are preserved and a
-    /// merged same-name member / inherited referenced tuple / substituted
-    /// generic surface materializes exactly as the publication surface
-    /// projected it. Mirrors [`Self::raise_macro_field_payload_to_hot`]'s
-    /// base-plus-member-hop shape; never a second resolver. An unroutable
-    /// base or a projection miss is an honest `None` — never a fabricated
-    /// body.
+    /// by replaying the publication surface's own producing route. A stamped
+    /// macro type-argument base reuses the SAME one-level Vue macro surface
+    /// producer as publication, then selects the first path member from that
+    /// surface. This is essential for generic substitution and heritage
+    /// filtering: re-walking the raw type argument can retain a non-contributing
+    /// open mapped arm or miss a union-alias member that the published surface
+    /// already resolved. Non-macro bases lower mode-neutrally through the
+    /// authored-locator route. Any remaining path segments project through the
+    /// one dispatch's existing `ProjectPath` query under the caller's context.
+    /// An unroutable base, missing surface member, or projection miss is an
+    /// honest `None` — never a fabricated body.
     fn raise_projected_member_path(
         &self,
         base: &AuthoredBodyLocator,
@@ -496,6 +528,17 @@ impl ProjectSemanticDispatch<'_> {
         ctx: &SourceRaiseContext<'_>,
     ) -> Option<HotTypeRef> {
         let locator = absolutize_locator(base, ctx.scope_canonical_id);
+        if let AuthoredBodyLocator::MacroPayload(payload) = &locator {
+            if payload.payload == MacroPayloadPosition::TypeArgument && !path.is_empty() {
+                let surface = self.replay_vue_macro_type_argument_surface(payload)?;
+                let member = surface
+                    .surface
+                    .members
+                    .iter()
+                    .find(|member| member.name.as_ref() == path[0].as_str())?;
+                return self.raise_projected_path_from_node(member.value, &path[1..], ctx);
+            }
+        }
         // The base stays MODE-NEUTRAL (carrier/shell): the caller's terminal
         // demand applies to the PATH projection below, exactly as in the
         // per-FIELD replay.
@@ -505,15 +548,29 @@ impl ProjectSemanticDispatch<'_> {
                 crate::semantic_query::ProjectionMode::Navigate,
             ),
         )?;
+        self.raise_projected_path_from_node(base_hot.node(), path, ctx)
+    }
+
+    fn raise_projected_path_from_node(
+        &self,
+        base: SemanticNodeId,
+        path: &[String],
+        ctx: &SourceRaiseContext<'_>,
+    ) -> Option<HotTypeRef> {
         if path.is_empty() {
-            return Some(base_hot);
+            if super::raise::node_is_unknown_materializing_failure(self, base) {
+                return None;
+            }
+            let hot = HotTypeRef::new(base);
+            ctx.check_raised_unknown_materializing(self, Some(&hot));
+            return Some(hot);
         }
         let segments: Arc<[PathSegment]> = path
             .iter()
             .map(|segment| PathSegment::Member(Arc::from(segment.as_str())))
             .collect();
         let read = self.execute_read(SemanticQueryKey::ProjectPath {
-            base: base_hot.node(),
+            base,
             path: segments,
             context: ctx.context,
         });
@@ -588,39 +645,7 @@ impl ProjectSemanticDispatch<'_> {
         let AuthoredBodyLocator::MacroPayload(payload) = &locator else {
             return None;
         };
-        if payload.payload != MacroPayloadPosition::TypeArgument {
-            return None;
-        }
-        let canonical = payload.anchor.canonical_id.as_ref();
-        // The macro KIND drives the surface projection's provenance exactly
-        // as it did at normalization time — a parse-domain fact lookup on the
-        // owner's ALWAYS-present file-analysis snapshot (`indexed.snapshot`,
-        // the same source `resolve_vue_macro_surface_with_ctx` reads — the
-        // scope-dependent `script_analysis` option may be absent on a
-        // narrower-scope serve), never a resolution.
-        let macro_kind = {
-            let serve = self.ctx.ensure_indexed_ready_serve(canonical)?;
-            serve
-                .indexed
-                .snapshot
-                .macros
-                .get(payload.macro_index as usize)?
-                .kind
-        };
-        // Re-project the SAME one-level macro surface the normalization read.
-        let host = self.ctx.host_for_fact_tracer_install();
-        let surface = host.resolve_vue_macro_surface_with_ctx(
-            self.ctx,
-            &crate::typeinfo::types::VueMacroSurfaceRequest {
-                owner_canonical: Arc::from(canonical),
-                macro_index: payload.macro_index as usize,
-                macro_kind,
-                // A hint only — the producer re-derives the authoritative
-                // live `whole_hash` from the ctx-resolved snapshot.
-                root_identity: [0u8; 16],
-                level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
-            },
-        )?;
+        let surface = self.replay_vue_macro_type_argument_surface(payload)?;
         // Deterministic NODE-domain signature selection: the ordinal indexes
         // the surface's declaration-order call-signature sequence (the exact
         // pre-expansion sequence the producer stamped). Bounds drift is an
@@ -694,24 +719,21 @@ impl ProjectSemanticDispatch<'_> {
     /// node-domain reader): `Some(normalized)` when the node resolves to
     /// KNOWN structure (a function / object / tuple / array / composite /
     /// resolved reference — any reached shape); `None` on a GENUINE miss —
-    /// no live node data, a residual unresolved reference/import carrier the
-    /// demand made no progress on, an unknown-materializing resolver
-    /// failure carrier, or a composite (`Intersection` / `Union`) with ANY
-    /// unresolvable contributing arm. VALIDATION ONLY: the normalized node
+    /// no live node data, an unknown-materializing resolver failure carrier,
+    /// or a composite (`Intersection` / `Union`) with ANY failed contributing
+    /// arm. A stable residual `BareRef` / `ImportType` is semantic content,
+    /// not a projection miss: it remains an explicit shallow carrier and the
+    /// demand remains `Complete`. VALIDATION ONLY: the normalized node
     /// classifies; it never replaces a published shallow form. Shared by the
     /// callable-params payload-parameter validation and the structural
     /// member-source projection.
     ///
-    /// The composite arm rule is the merged-contributor fail-close: a merged
-    /// same-name member value (`string & Bad['x']` where `Bad['x']` names a
-    /// declaration that does not resolve) must NOT validate on the strength
-    /// of its resolvable arms alone — downstream materialization reduces a
-    /// composite by IGNORING non-contributing arms, so a validated composite
-    /// with a failed arm would publish the resolvable sibling as a wrong
-    /// concrete success (a masked contributor, stronger than an honest
-    /// `unknown`). Arms recurse through this same primitive; interned nodes
-    /// are acyclic by construction, so the recursion is bounded by the
-    /// composite's own nesting.
+    /// The composite arm rule is the merged-contributor fail-close: an arm
+    /// containing an operational projection miss must NOT validate on the
+    /// strength of its resolvable siblings alone. Stable unresolved references
+    /// are not misses and remain valid arms. The normalized graph is inspected
+    /// with an explicit worklist and a visited set — structural nesting never
+    /// consumes the host stack, and shared DAG arms are checked once.
     pub(crate) fn demand_validated_structural_node(
         &self,
         node: SemanticNodeId,
@@ -724,25 +746,32 @@ impl ProjectSemanticDispatch<'_> {
         let normalized = self
             .normalize_node_for_structural_fact_demand(node, context)
             .into_complete_node()?;
-        let data = super::node_data_for(self.ctx, normalized);
-        let unresolvable = match data.as_deref() {
-            None => true,
-            // A residual unresolved reference carrier the demand primitive
-            // made no progress on: the position names a declaration that
-            // does not resolve under the live view.
-            Some(SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_)) => true,
-            // A composite is resolvable only when EVERY contributing arm is:
-            // a failed arm makes the whole position unresolvable (never
-            // masked by a resolvable sibling).
-            Some(SemanticNodeData::Intersection(arms) | SemanticNodeData::Union(arms)) => {
-                arms.iter().any(|&arm| {
-                    self.demand_validated_structural_node(arm, context)
-                        .is_none()
-                })
+        let mut pending = vec![normalized];
+        let mut visited = FxHashSet::default();
+        while let Some(current) = pending.pop() {
+            if !visited.insert(current) {
+                continue;
             }
-            Some(_) => super::raise::node_is_unknown_materializing_failure(self, normalized),
-        };
-        (!unresolvable).then_some(normalized)
+            let data = super::node_data_for(self.ctx, current)?;
+            match data.as_ref() {
+                // Stable residual reference carriers are COMPLETE semantic
+                // results. Root normalization already distinguished an
+                // operational partial before this validation walk starts.
+                SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_) => {}
+                // Root normalization projected every composite child through
+                // the shared heap worklist. Validation therefore inspects the
+                // resulting graph directly; it never recursively re-demands
+                // each suffix (which would be both stackful and quadratic).
+                SemanticNodeData::Intersection(arms) | SemanticNodeData::Union(arms) => {
+                    pending.extend(arms.iter().copied());
+                }
+                _ if super::raise::node_is_unknown_materializing_failure(self, current) => {
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        Some(normalized)
     }
 
     /// Raise a projected INDEX-POSITION fact
@@ -780,36 +809,7 @@ impl ProjectSemanticDispatch<'_> {
         let AuthoredBodyLocator::MacroPayload(payload) = &locator else {
             return None;
         };
-        if payload.payload != MacroPayloadPosition::TypeArgument {
-            return None;
-        }
-        let canonical = payload.anchor.canonical_id.as_ref();
-        // The macro KIND drives the surface projection's provenance exactly
-        // as it did at normalization time — a parse-domain fact lookup on the
-        // owner's ALWAYS-present file-analysis snapshot, never a resolution.
-        let macro_kind = {
-            let serve = self.ctx.ensure_indexed_ready_serve(canonical)?;
-            serve
-                .indexed
-                .snapshot
-                .macros
-                .get(payload.macro_index as usize)?
-                .kind
-        };
-        // Re-project the SAME one-level macro surface the normalization read.
-        let host = self.ctx.host_for_fact_tracer_install();
-        let surface = host.resolve_vue_macro_surface_with_ctx(
-            self.ctx,
-            &crate::typeinfo::types::VueMacroSurfaceRequest {
-                owner_canonical: Arc::from(canonical),
-                macro_index: payload.macro_index as usize,
-                macro_kind,
-                // A hint only — the producer re-derives the authoritative
-                // live `whole_hash` from the ctx-resolved snapshot.
-                root_identity: [0u8; 16],
-                level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
-            },
-        )?;
+        let surface = self.replay_vue_macro_type_argument_surface(payload)?;
         // Deterministic NODE-domain signature selection: the ordinal indexes
         // the surface's declaration-order index-signature sequence. Bounds
         // drift is an honest miss.
@@ -909,16 +909,14 @@ impl ProjectSemanticDispatch<'_> {
         // `result_is_partial()`-only gate below cannot reject it; the scope's
         // CACHEABILITY verdict (which also folds a fact-signature overflow) is the
         // rail the `ShapeCacheDb` admission funnel consults.
-        let (value, _non_cacheable) = crate::fact_signature_helpers::with_cacheability_scope(
-            self.ctx.host_for_fact_tracer_install(),
-            |probe| {
+        let cache = self.ctx.project_type_store().shape_cache_db();
+        let value = cache.with_owner_scope(self.ctx, |scope| {
                 let id = crate::semantic_query::SyntheticBindingId::from_carrier_key(key);
                 let cache_key =
             crate::component_meta_caches::ShapeCacheKey::synthetic_binding_whole_with_context(
                 id, context,
             );
-                let cache = self.ctx.project_type_store().shape_cache_db();
-                if let Some(cached) = cache.peek(&cache_key, self.ctx) {
+                if let Some(cached) = scope.peek(&cache_key) {
                     crate::meta_resolve::emit_dispatch_dep_signature_facts(
                         self.ctx,
                         cached.dep_signature(),
@@ -974,7 +972,7 @@ impl ProjectSemanticDispatch<'_> {
                     .ctx
                     .observe_materialize_scope(key.scope_canonical_id.as_ref());
                 let reduced_for_closure = reduced.clone();
-                let _ = cache.get_or_compute(&cache_key, self.ctx, probe, move || {
+                let _ = scope.get_or_compute(&cache_key, move || {
             let scope_obs = observed_scope?;
             let parse_fact = scope_obs.syntactic_export_set.clone()?;
             match crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
@@ -989,8 +987,7 @@ impl ProjectSemanticDispatch<'_> {
             }
         });
                 Some(HotTypeRef::new(node))
-            },
-        );
+            });
         value
     }
 

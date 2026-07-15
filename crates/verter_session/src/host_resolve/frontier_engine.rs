@@ -1126,7 +1126,7 @@ impl VerterHost {
         // outer `with_fact_tracer` scope on the current thread (warm
         // hits + cold leader resolves + coalesced follower joins).
         //
-        // The cacheability scope is the OUTERMOST bracket of the cold path: the
+        // `RouteDb` owns the OUTERMOST cacheability scope: the
         // walk inside `build_named_type_export_route_entry` rides
         // `ensure_indexed_ready_serve` and demands decl bodies, so it can consume
         // a fenced serve, a broken decl-body lease, or an unrootable route. The
@@ -1134,14 +1134,12 @@ impl VerterHost {
         // funnel's post-compute verdict is the structural floor that covers all
         // four — including the content-neutral ones, where the hash does not move
         // and a warm-rooted entry would validate forever.
-        let (cached_route, _non_cacheable) =
-            crate::fact_signature_helpers::with_cacheability_scope(self, |probe| {
-                self.resolver
-                    .runtime
-                    .routes
-                    .get_or_resolve_route_observing_facts(route_key, view, probe, || {
-                        self.build_named_type_export_route_entry(provider, requested_name)
-                    })
+        let cached_route = self
+            .resolver
+            .runtime
+            .routes
+            .get_or_resolve_route_observing_facts_with_context(route_key, view, self, || {
+                self.build_named_type_export_route_entry(provider, requested_name)
             });
         let cached_route = cached_route?;
         cached_route
@@ -1156,7 +1154,7 @@ impl VerterHost {
     /// through the request-bound `_with_store_view`); the test-only
     /// arm on `impl ResolverContext for VerterHost` reaches this
     /// wrapper on test fixtures that call `host.<method>` directly.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub(crate) fn resolve_named_type_export_target_shallow(
         &self,

@@ -29,6 +29,8 @@ export interface NativeJsdocTag {
 export interface NativeExpansionDiagnostic {
   reason:
     | "budgetExceeded"
+    | "projectionWorkLimit"
+    | "connectedQueryDepthLimit"
     | "mappedDepthExceeded"
     | "unresolvedReference"
     | "indeterminateConditional"

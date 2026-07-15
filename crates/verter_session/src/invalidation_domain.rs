@@ -270,9 +270,9 @@ where
         // Per-canonical visit-count hook — test/debug instrumentation
         // only; gated to match the capture-token module (absent in
         // release).
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         let visited = keys.len() as u64;
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         crate::capture_token::with_active_capture(|t| {
             t.record_counter("invalidate_canonical_entries_visited", visited);
         });

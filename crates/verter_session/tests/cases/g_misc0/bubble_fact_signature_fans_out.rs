@@ -56,6 +56,7 @@ fn bubble_fact_signature_reaches_all_three_levels() {
                     "{level} must contain the shared fact after fan-out bubble; got {sig:?}"
                 );
             }
+            FactReadSetFinalise::NonCacheable(_) => panic!("{level} unexpectedly non-cacheable"),
             FactReadSetFinalise::Overflow => panic!("{level} overflowed"),
         }
     }
@@ -81,6 +82,7 @@ fn observe_fan_out_borrowed_with_multiple_facts() {
                 );
             }
         }
+        FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
         FactReadSetFinalise::Overflow => panic!("overflowed on tiny signature"),
     }
 }

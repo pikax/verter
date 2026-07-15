@@ -161,11 +161,11 @@ fn burst_follower_reresolves_instead_of_adopting_unadmitted_route() {
             let leader = thread::spawn(move || {
                 let host = leader_host;
                 let view = PermissiveStoreView;
-                verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
+                verter_session::for_tests::with_cacheability_scope_for_tests(&host, |_probe| {
                     leader_db.get_or_resolve_route_observing_facts(
                         rk("burst_provider.ts", "Burst"),
                         &view,
-                        probe,
+                        &host,
                         || {
                             tx_leader_in_closure
                                 .send(())
@@ -206,11 +206,11 @@ fn burst_follower_reresolves_instead_of_adopting_unadmitted_route() {
             let follower = thread::spawn(move || {
                 let host = follower_host;
                 let view = PermissiveStoreView;
-                verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
+                verter_session::for_tests::with_cacheability_scope_for_tests(&host, |_probe| {
                     follower_db.get_or_resolve_route_observing_facts(
                         rk("burst_provider.ts", "Burst"),
                         &view,
-                        probe,
+                        &host,
                         move || {
                             follower_resolves_in_closure.fetch_add(1, Ordering::SeqCst);
                             Some((live_route(), vec![live_fact()]))

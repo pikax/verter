@@ -128,6 +128,11 @@ pub(crate) struct TestForceKnobs {
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TracerScope {
+    /// The whole component-meta request cold compute. Targeting this scope
+    /// proves the request-level admission rail independently of every nested
+    /// cache producer: nested scopes stay cacheable while only the final
+    /// resolved-meta publication is refused.
+    ComponentMetaRequest,
     /// The framework script-fact entry-point's IMPORT-ROUTE resolution scope —
     /// the cacheability tracer that brackets `resolve_snapshot_imports`, whose
     /// verdict (fenced serve OR fact-signature overflow) is the ONLY thing that

@@ -1,13 +1,10 @@
 # The reachable stack-overflow crash in the shared projection primitive — implementer-ready design
 
-**Status: NOT STARTED.** This is a real, reachable process crash — an abort, not a typed failure —
-in a primitive that **every** dispatch consumer goes through. It is pre-existing, it is not caused
-by the cutover work, and it is not fixed by the landed checkpoint. The design below was decided by a
-three-leg architecture consult (two independent legs plus a decider, all code-grounded, unanimous on
-the core) and is ready to implement. **The consult's transcripts and the implementation brief no
-longer exist** — nothing from that effort was pushed — so the substance is reproduced here in full.
-Everything you need is in this document; every source citation resolves against the committed
-repository in front of you.
+**Status: IMPLEMENTED AND FOCUSED-GREEN (2026-07-14).** The recursive projection and deferred
+evaluator staging have been replaced by explicit heap worklists. Operational exhaustion remains a
+typed partial result, reaches the public diagnostic path, and is refused by warm memo/cache
+admission. The release-wide gate and clean-history reconstruction remain tracked by
+`release-consolidation-plan.md`.
 
 ## 1. The defect
 
@@ -118,8 +115,38 @@ unsound. Bench before accepting: terminal and memo-hit paths; depth 4 and 8 obje
 32-arm and 1000-arm unions and intersections; full-child-group objects and functions; shared-DAG
 context-split memo hits; the staged conditional/indexed/mapped arms; and resolvable **and
 unresolvable** bare-reference and import-type heads — the last of these is where you confirm dead
-arguments stay **unprojected**. Require no shallow allocation increase and no material (>~5%)
-shallow-throughput regression, and **report the numbers**.
+arguments stay **unprojected**. Require no shallow allocation increase and no material
+shallow-throughput regression, and **report both relative and absolute numbers**. Percentage-only
+judgments are misleading for single-node nanosecond cases; production-shaped reference/operator
+paths and contemporaneous baseline reruns decide materiality.
+
+### Implemented evidence
+
+- The frozen recursive primitive aborts its controlled 2 MiB-stack subprocess with Windows stack
+  overflow `0xc00000fd`. This red evidence was captured in a protected detached worktree before the
+  fix; the same authored 200-deep tuple and closed-conditional cases now exit normally and resolve
+  `Complete`.
+- Ten discriminating projection tests cover legitimate recursion, a genuinely pre-tripped active
+  identity cycle, exact cooperative-memo identity, deep finite tuple/conditional structures, the
+  exact work boundary, distinct connected-query depth exhaustion, runaway fresh-identity growth,
+  recomputation/non-admission, and stable unresolved complete carriers.
+- Public limit diagnostics use `verter/type-expansion-budget` and
+  `verter/type-query-depth-limit`; each root demand/reason is deduplicated and carries the best
+  available source span and safe carrier.
+- `ProjectionFrame` is compile-time guarded at 32 bytes. Reference arguments reuse one boxed
+  continuation state; mapped staging reuses one boxed state across stages. A fresh terminal
+  projection allocates once and a root memo hit allocates zero times.
+- A fresh alternating three-before/three-after 30-sample Criterion matrix (1 s warm-up, 2 s
+  measurement) preserves the allocation snapshot at one allocation for a fresh terminal projection
+  and zero for a memo hit. Medians of the three run point estimates show 32/1000-arm unions faster
+  by 13.1%/19.2%; production-shaped resolved/unresolved bare and import references range from 5.5%
+  faster to 7.0% slower (+639 ns at the largest positive absolute delta); conditional and indexed
+  staging add 240 ns/133 ns; the shared-DAG case improves by 380 ns. The largest shallow
+  percentages are the full object (+450 ns/+17.3%), full function (+184 ns/+14.8%), and mapped
+  (+433 ns/+11.2%) microcases. Terminal cold and memo-hit paths add 7.4 ns and 2.1 ns respectively.
+  Individual run medians vary materially on this Windows host, so acceptance uses these absolute
+  costs and production-shaped paths alongside the relative figures rather than selecting one
+  favourable percentage.
 
 ## 3. The fuse — dual rail, and deliberately NO structural-depth cap
 
@@ -137,9 +164,10 @@ they fire with no request budget present:
   trip yields a typed `PROJECTION_WORK_LIMIT` partial. This is what bounds a **single deep demand's
   internal work** — which a per-demand reducer fuse structurally cannot see.
 - **Rail B — a cross-query HOST-RECURSION depth cap.** This is the **only** host-stack rail that
-  survives. Cap *genuinely recursive host boundaries* only: a recursive deferred-evaluator entry,
-  and an operator/resolver dispatch that nests another cold query/build/project chain. **Do not cap
-  worklist or structural depth.** Start at 24 and **calibrate empirically against the 2 MB
+  survives. Cap *genuinely recursive host boundaries* only: an operator/resolver dispatch that
+  nests another cold query/build/project chain. Heap evaluator entries and worklist frames are not
+  query-depth boundaries. **Do not cap worklist or structural depth.** Start at 24 and **calibrate
+  empirically against the 2 MB
   controlled-stack test using the worst observed cross-query build path, retaining substantial
   headroom** for frame-size drift, diagnostics and unwind-drop (a defensible band is 8–32). A trip
   yields a typed `CONNECTED_QUERY_DEPTH_LIMIT` partial.
@@ -155,13 +183,30 @@ completeness into the active demand state and taints the build frame so that the
 memo and cache admission**. A trip must **never** fabricate a `Complete`.
 
 The evaluator's recursive deferred `keyof` / indexed-access staging converts to **heap frames** by
-the same rule. Retain the existing 256-deep evaluator ceiling **only** as a logical typed-partial
-signal, and **delete its host-stack-rail role together with the "128 MB fits 256 frames at ~50 KB"
-sizing rationale** (the doc comment above `EVALUATE_DEFERRED_DEPTH_CEILING` in
-`crates/verter_session/src/project_semantic_dispatch/evaluate.rs`). The identity guard that maps an
-exact same-identity cycle to `Opaque(RecursiveRef)` **stays first and unchanged**. Be precise about
-reasons: resource exhaustion is **not** a miss, a depth cap is **not** same-path recursion, and a
-stable unresolved reference or authored miss stays **`Complete` on its carrier**.
+the same rule. The former 256-deep evaluator ceiling is retired completely: it is neither a
+host-stack rail nor a logical structural-depth limit. Its compatibility reason bit remains reserved
+but has no production producer. The identity guard that maps an exact same-identity cycle to
+`Opaque(RecursiveRef)` **stays first and unchanged**. Be precise about reasons: resource exhaustion
+is **not** a miss, a connected-query depth trip is **not** same-path recursion, and a stable
+unresolved reference or authored miss stays **`Complete` on its carrier**.
+
+### 4.1 Public diagnostic contract
+
+Operational partiality is user-visible, not telemetry-only. The typed rails propagate through
+`ShallowDiagnostic` and `ExpansionStopReason` into component-meta and the LSP diagnostics path:
+
+- `PROJECTION_WORK_LIMIT` / `ProjectionWorkLimit` maps to
+  `verter/type-expansion-budget` with “Type expansion exceeded Verter's safe evaluation budget.”
+- `CONNECTED_QUERY_DEPTH_LIMIT` / `ConnectedQueryDepthLimit` maps to
+  `verter/type-query-depth-limit` with a distinct connected-query-depth message.
+
+Both are warning diagnostics. The mapper attaches the authored macro/root span when available and
+deduplicates by root demand plus typed reason, so one runaway root produces one public diagnostic.
+The best safe carrier remains available in the partial result, but neither the deferred memo, the
+shared query memo, nor a final component-meta cache may admit it; a repeated demand recomputes.
+Exact in-flight identity cycles retain their recursive sentinel semantics and do not produce either
+budget diagnostic. Legitimate recursive carriers, deep finite structures, and stable unresolved
+references remain complete and diagnostic-free. Logs and audit events are supplementary only.
 
 **After this change, no correctness path may depend on `RUST_MIN_STACK`.**
 
@@ -204,8 +249,8 @@ Crash-freedom, each RED-pre at 2 MB and GREEN post-fix:
 - **200 nested closed conditionals** in one body resolve to the exact expected node and **`Complete`**
   — this is the case that discriminates the full-function rewrite from a spine-only one.
 - Regrowth (`Grow<T> = T | Grow<[[[[T]]]]>`, and 8-, 140- and 200-deep nestings), driven **directly
-  through successive instantiate demands**, does **not** abort: it returns a typed `Partial` carrying
-  the applicable work-limit or depth reason, **refuses warm admission**, and a repeat **recomputes**.
+  through successive instantiate demands**, does **not** abort: fresh-identity growth returns a
+  typed `Partial(PROJECTION_WORK_LIMIT)`, **refuses warm admission**, and a repeat **recomputes**.
 - A chain of **more than `MAX_CONNECTED_QUERY_DEPTH` distinct declarations** through operator
   re-dispatch returns `Partial(CONNECTED_QUERY_DEPTH_LIMIT)` with **no cache admission**.
 - A projection-budget trip after some children have completed leaves the unfinished root in

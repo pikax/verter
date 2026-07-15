@@ -3,7 +3,26 @@ use crate::resolver_core::{
     StableExecutionValue, StableRequestExecutor, StoreView,
 };
 
-pub trait ComponentMetaRequestHost {
+/// By-value result of the owner-scoped component-meta cold computation.
+/// `cache_refusal` is orthogonal to typed completeness: the value remains
+/// complete and returnable, but cannot be published or retained.
+pub(crate) struct ComponentMetaComputeOutcome<R> {
+    pub(crate) value: Option<R>,
+    pub(crate) cache_refusal: Option<crate::resolver_core::fact_read_set::NonCacheablePropagation>,
+}
+
+impl<R> ComponentMetaComputeOutcome<R> {
+    pub(crate) fn from_owner_scope(value: Option<R>, non_cacheable: bool) -> Self {
+        Self {
+            value,
+            cache_refusal: non_cacheable.then_some(
+                crate::resolver_core::fact_read_set::NonCacheablePropagation::Transitive,
+            ),
+        }
+    }
+}
+
+pub(crate) trait ComponentMetaRequestHost {
     type View: StoreView + Clone;
     type Mode: Copy;
     type Resolution: Clone;
@@ -21,10 +40,8 @@ pub trait ComponentMetaRequestHost {
     /// defaulted `true` would let a host that owns a churn-prone manager
     /// but forgets the override silently launder every snapshot as
     /// proven-current. Hosts that own no manager and never churn
-    /// (test/stub hosts) state that explicitly with
-    /// `(self.snapshot_store_view(), true)`.
+    /// (test/stub hosts) state that explicitly by returning `(view, true)`.
     fn snapshot_store_view_read(&self) -> (Self::View, bool);
-    fn snapshot_store_view(&self) -> Self::View;
     /// Live `u64` fold of the host's EXTERNAL-supersession token
     /// dimensions (epoch / project-generation / env-hash / identity /
     /// overlay — the same set
@@ -67,34 +84,23 @@ pub trait ComponentMetaRequestHost {
         captured: Option<&Self::CapturedInputs>,
         store_view: Option<&Self::View>,
         base_is_current: bool,
-    ) -> Option<Self::Resolution>;
+    ) -> ComponentMetaComputeOutcome<Self::Resolution>;
     fn store_component_meta_result(
         &self,
         canonical: &str,
         mode: Self::Mode,
         result: &Self::Resolution,
     );
-    /// Whether `result` carries its OWN per-result partiality (a
-    /// budget-fail-closed / carrier-stopped compute). Consulted by the
-    /// FIXED-VIEW executor's promotion gate only: a genuinely partial
-    /// result is returned to its caller but never admitted to the shared
-    /// resolved-meta/payload caches — admitting it would warm-replay a
-    /// TRANSIENT trip as a sticky degraded surface for every later
-    /// request. The gate keys on the LANE, not the caller: every
-    /// fixed-view request is gated — the batch fan-out AND the session
-    /// scalar surface, which shares the batch fixed-view lane at N=1.
-    /// Only the per-attempt path (`None` fixed view — the bare-host and
-    /// session-runtime scalar lanes) is ungated and keeps the landed
-    /// scalar resolved-layer replay semantics (pinned by the
-    /// partial-metadata invariant suite).
-    ///
-    /// REQUIRED (no default): `false` is a completeness claim that opens
-    /// the batch admission gate — a defaulted `false` would let a host
-    /// whose resolution type DOES carry a completeness signal, but which
-    /// forgets the override, silently warm genuine partials into the
-    /// shared caches. Hosts whose resolution type carries no completeness
-    /// signal state that explicitly by returning `false`.
-    fn resolution_is_partial(&self, result: &Self::Resolution) -> bool;
+    /// Typed structural completeness carried by `result`. Every scalar and
+    /// fixed-view lane captures this immediately after compute; a partial is
+    /// returned to its caller but can neither reach a publisher nor remain as
+    /// a joinable rendezvous. This is deliberately required: a defaulted
+    /// `Complete` would let a host silently warm a transient budget failure as
+    /// a sticky degraded surface.
+    fn resolution_completeness(
+        &self,
+        result: &Self::Resolution,
+    ) -> crate::semantic_query::ResultCompleteness;
 }
 
 struct ComponentMetaRequestExecutor<'a, H: ComponentMetaRequestHost> {
@@ -154,6 +160,8 @@ struct ComponentMetaRequestExecutor<'a, H: ComponentMetaRequestHost> {
     /// [`Self::snapshot_view_is_current`].
     snapshot_view_current: bool,
     captured_inputs: Option<H::CapturedInputs>,
+    last_completeness: crate::semantic_query::ResultCompleteness,
+    last_cache_refusal: Option<crate::resolver_core::fact_read_set::NonCacheablePropagation>,
     max_attempts: usize,
 }
 
@@ -168,6 +176,8 @@ impl<'a, H: ComponentMetaRequestHost> ComponentMetaRequestExecutor<'a, H> {
             fallback_snapshot_incoherent: false,
             snapshot_view_current: true,
             captured_inputs: None,
+            last_completeness: crate::semantic_query::ResultCompleteness::Complete,
+            last_cache_refusal: None,
             max_attempts,
         }
     }
@@ -299,7 +309,7 @@ where
     }
 
     fn compute(&mut self, view: &Self::View) -> Result<Option<H::Resolution>, Self::Error> {
-        Ok(self.host.compute_component_meta(
+        let outcome = self.host.compute_component_meta(
             &self.canonical,
             self.mode,
             self.captured_inputs.as_ref(),
@@ -308,7 +318,14 @@ where
             // request-bound context fails its nested warm-cache probes
             // closed on a non-current (`ReturnOnly`) seed.
             self.snapshot_view_current,
-        ))
+        );
+        self.last_completeness = outcome
+            .value
+            .as_ref()
+            .map(|value| self.host.resolution_completeness(value))
+            .unwrap_or(crate::semantic_query::ResultCompleteness::Complete);
+        self.last_cache_refusal = outcome.cache_refusal;
+        Ok(outcome.value)
     }
 
     fn is_stable(&mut self, _view: &Self::View) -> bool {
@@ -352,26 +369,16 @@ where
             .is_some_and(|fp| self.host.current_view_supersession_fingerprint() == fp)
     }
 
-    fn store_stable(&mut self, value: &Option<H::Resolution>) {
+    fn store_stable(
+        &mut self,
+        value: &Option<H::Resolution>,
+        _admission: crate::resolver_core::StableAdmission,
+    ) {
         if let Some(result) = value.as_ref() {
-            // Per-result completeness rail on the FIXED-VIEW path: the
-            // fixed view is an optimization for view acquisition, never an
-            // admission bypass — a GENUINE partial (budget fail-closed /
-            // carrier-stopped) must not enter the shared warm caches,
-            // where it would replay as a sticky degraded surface for every
-            // later request instead of healing on the next cold compute.
-            // Conjunctive with the token fence in `is_stable` (complete
-            // AND current AND not superseded). The gate keys on the lane:
-            // it covers every fixed-view request — the batch fan-out and
-            // the session scalar surface, which shares the fixed-view lane
-            // at N=1 — while the per-attempt path (`None` fixed view: the
-            // bare-host and session-runtime scalar lanes) is deliberately
-            // NOT gated here and keeps the landed scalar resolved-layer
-            // replay semantics, pinned by the partial-metadata invariant
-            // suite.
-            if self.fixed_store_view.is_some() && self.host.resolution_is_partial(result) {
-                return;
-            }
+            // The driver can mint `StableAdmission` only after proving this
+            // attempt current, structurally complete, and free of an
+            // owner-scoped cache refusal. This publisher therefore has no
+            // second, drift-prone boolean policy to re-derive.
             self.host
                 .store_component_meta_result(&self.canonical, self.mode, result);
         }
@@ -379,6 +386,20 @@ where
 
     fn max_attempts(&self) -> usize {
         self.max_attempts
+    }
+
+    fn capture_completeness(&self) -> crate::semantic_query::ResultCompleteness {
+        self.last_completeness
+    }
+
+    fn capture_cache_refusal(
+        &self,
+    ) -> Option<crate::resolver_core::fact_read_set::NonCacheablePropagation> {
+        self.last_cache_refusal
+    }
+
+    fn fold_follower_completeness(&self, joined: crate::semantic_query::ResultCompleteness) {
+        crate::request_context::fold_result_completeness(joined);
     }
 }
 
@@ -462,7 +483,7 @@ mod tests {
         flip_to_on_compute: Option<u64>,
         /// Disarms `flip_to_on_compute` after the first compute.
         flip_armed: Cell<bool>,
-        /// When `true`, EVERY `snapshot_store_view()` call advances
+        /// When `true`, EVERY `snapshot_store_view_read()` call advances
         /// `live_fp` (increments it) as a side effect — modelling a
         /// concurrent external mutation that lands DURING the snapshot. A
         /// per-attempt pre/post fingerprint comparison therefore always
@@ -471,7 +492,7 @@ mod tests {
         /// fallback then suffers the same straddling mutation: the captured
         /// view is OLD relative to the post-snapshot fingerprint read.
         flip_on_every_snapshot: Cell<bool>,
-        /// Churn-then-settle budget. When `> 0`, each `snapshot_store_view()`
+        /// Churn-then-settle budget. When `> 0`, each `snapshot_store_view_read()`
         /// call advances `live_fp` AND decrements the budget; once it reaches
         /// `0`, snapshots stop straddling. Sized to cover exactly the FIRST
         /// outer attempt's snapshots (its inner coherence loop plus the
@@ -489,6 +510,9 @@ mod tests {
         /// `max_attempts + 1` times.
         computes: Cell<usize>,
     }
+
+    const PARTIAL_RESULT_FP: u64 = 0xD3AD_B0D6;
+    const NON_CACHEABLE_RESULT_FP: u64 = 0xCACE_F00D;
 
     impl ComponentMetaRequestHost for MockHost {
         type View = StubView;
@@ -508,7 +532,9 @@ mod tests {
             }
         }
 
-        fn snapshot_store_view(&self) -> Self::View {
+        // Owns no `StoreViewManager`; after applying the synthetic churn
+        // below, the returned stub view itself is current by construction.
+        fn snapshot_store_view_read(&self) -> (Self::View, bool) {
             // Model a concurrent external mutation landing DURING the
             // snapshot: the live fingerprint advances as the view is taken,
             // so any pre/post comparison straddling this build diverges.
@@ -522,13 +548,7 @@ mod tests {
                 self.live_fp.set(self.live_fp.get().wrapping_add(1));
                 self.snapshot_flip_budget.set(budget - 1);
             }
-            StubView
-        }
-
-        // Owns no `StoreViewManager` and never churns: every snapshot is
-        // current by construction.
-        fn snapshot_store_view_read(&self) -> (Self::View, bool) {
-            (self.snapshot_store_view(), true)
+            (StubView, true)
         }
 
         fn current_view_supersession_fingerprint(&self) -> u64 {
@@ -559,7 +579,7 @@ mod tests {
             _captured: Option<&Self::CapturedInputs>,
             _store_view: Option<&Self::View>,
             _base_is_current: bool,
-        ) -> Option<Self::Resolution> {
+        ) -> ComponentMetaComputeOutcome<Self::Resolution> {
             self.computes.set(self.computes.get() + 1);
             // Simulate an external mutation (env-hash shift) landing
             // mid-compute: the live external fingerprint moves WITHOUT any
@@ -570,7 +590,10 @@ mod tests {
                     self.flip_armed.set(false);
                 }
             }
-            Some(42)
+            ComponentMetaComputeOutcome::from_owner_scope(
+                Some(42),
+                self.live_fp.get() == NON_CACHEABLE_RESULT_FP,
+            )
         }
 
         fn store_component_meta_result(
@@ -582,9 +605,19 @@ mod tests {
             self.promotions.borrow_mut().push(canonical.to_string());
         }
 
-        // `usize` carries no completeness signal: never partial.
-        fn resolution_is_partial(&self, _result: &Self::Resolution) -> bool {
-            false
+        // The sentinel fingerprint drives a stable-but-partial result for
+        // the scalar no-poison regression without changing the value type.
+        fn resolution_completeness(
+            &self,
+            _result: &Self::Resolution,
+        ) -> crate::semantic_query::ResultCompleteness {
+            if self.live_fp.get() == PARTIAL_RESULT_FP {
+                crate::semantic_query::ResultCompleteness::partial(
+                    crate::semantic_query::PartialReasonSet::PROPAGATED,
+                )
+            } else {
+                crate::semantic_query::ResultCompleteness::Complete
+            }
         }
     }
 
@@ -830,6 +863,74 @@ mod tests {
             ["/proj/App.vue".to_string()],
             "a stable compute (no mid-compute external mutation) MUST promote the \
              result to the shared cache exactly once"
+        );
+    }
+
+    #[test]
+    fn scalar_partial_result_is_returned_but_never_promoted() {
+        let host = MockHost {
+            live_fp: Cell::new(PARTIAL_RESULT_FP),
+            flip_to_on_compute: None,
+            flip_armed: Cell::new(false),
+            flip_on_every_snapshot: Cell::new(false),
+            snapshot_flip_budget: Cell::new(0),
+            promotions: std::cell::RefCell::new(Vec::new()),
+            computes: Cell::new(0),
+        };
+        let singleflight = SingleflightGroup::<
+            ResolutionNodeKey,
+            StableExecutionValue<Option<usize>>,
+            (),
+        >::default();
+
+        // `None` selects the ordinary scalar lane. Historically only the
+        // fixed/batch lane consulted per-result completeness, so this stable
+        // partial was mirrored into the shared cache and reported Complete.
+        let result = run_component_meta_request(&host, &singleflight, "/proj/App.vue", (), None, 1);
+
+        assert_eq!(result.value, Some(42), "the partial remains return-only");
+        assert!(
+            result.completeness.is_partial(),
+            "the scalar result must carry its typed partiality to callers and followers"
+        );
+        assert!(
+            host.promotions.borrow().is_empty(),
+            "a stable scalar partial must not reach any shared-cache or legacy-mirror publisher"
+        );
+    }
+
+    #[test]
+    fn scalar_cache_refused_result_is_complete_return_only_and_never_promoted() {
+        let host = MockHost {
+            live_fp: Cell::new(NON_CACHEABLE_RESULT_FP),
+            flip_to_on_compute: None,
+            flip_armed: Cell::new(false),
+            flip_on_every_snapshot: Cell::new(false),
+            snapshot_flip_budget: Cell::new(0),
+            promotions: std::cell::RefCell::new(Vec::new()),
+            computes: Cell::new(0),
+        };
+        let singleflight = SingleflightGroup::<
+            ResolutionNodeKey,
+            StableExecutionValue<Option<usize>>,
+            (),
+        >::default();
+
+        let result = run_component_meta_request(&host, &singleflight, "/proj/App.vue", (), None, 1);
+
+        assert_eq!(
+            result.value,
+            Some(42),
+            "the complete value remains returnable"
+        );
+        assert_eq!(
+            result.completeness,
+            crate::semantic_query::ResultCompleteness::Complete,
+            "cache refusal is orthogonal to structural completeness"
+        );
+        assert!(
+            host.promotions.borrow().is_empty(),
+            "a stable complete result with an owner-scoped cache refusal must never reach a publisher"
         );
     }
 

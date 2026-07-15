@@ -75,6 +75,57 @@ export type Button = ComponentConfig<typeof theme>
 }
 
 #[test]
+fn prepared_type_decl_prefers_same_file_type_over_same_named_value_import() {
+    let source = r#"
+type Separator = { ui: { root: string } }
+export interface SeparatorSlots {
+    default?(props: { ui: Separator['ui'] }): unknown
+}
+import { Separator } from './runtime'
+"#;
+    let state = ShallowFileState::service_backed_for_test(source);
+    let dep_edges =
+        FxHashMap::from_iter([("./runtime".to_string(), "/src/runtime.ts".to_string())]);
+
+    assert!(
+        state.has_type_symbol("Separator"),
+        "the authored type alias must remain present in the type namespace"
+    );
+    assert!(
+        state.is_import_local("Separator"),
+        "the same-named runtime import is intentionally present as the collision control"
+    );
+
+    let slots = prepare_exported_type_decl(
+        "/src/Separator.vue",
+        &state,
+        "SeparatorSlots",
+        Some(&dep_edges),
+    )
+    .expect("SeparatorSlots should prepare");
+
+    assert_eq!(
+        slots
+            .name_resolution
+            .get("Separator")
+            .map(|id| (id.canonical_id.as_str(), id.symbol_name.as_str())),
+        Some(("/src/Separator.vue", "Separator")),
+        "a type declaration body resolves through the same-file type namespace, not the setup runtime import"
+    );
+    assert!(
+        prepare_local_type_decl(
+            "/src/Separator.vue",
+            &state,
+            "Separator",
+            Some(&dep_edges),
+            &ImportCanonicalization::default(),
+        )
+        .is_some(),
+        "the same-file type declaration must remain addressable even when the value namespace imports the same name"
+    );
+}
+
+#[test]
 fn prepared_type_decl_falls_back_to_canonical_relative_targets_without_dep_edges() {
     let source = r#"
 import type { ComponentConfig } from './tv.ts'

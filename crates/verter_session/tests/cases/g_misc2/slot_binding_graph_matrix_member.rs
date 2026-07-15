@@ -46,6 +46,7 @@ fn slot_binding_graph_fact_tracer_carries_member() {
 
     let captured = match finalise {
         FactReadSetFinalise::Ok(sig) => sig,
+        FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
         FactReadSetFinalise::Overflow => panic!(
             "tracer overflowed on a single-fact \
              signature — substrate bug, not test bug"

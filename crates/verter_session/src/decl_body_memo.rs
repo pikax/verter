@@ -32,12 +32,12 @@ use std::sync::{Arc, OnceLock};
 use dashmap::DashMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
+#[cfg(any(test, feature = "test-support"))]
+use crate::resolver_core::shallow_file_state::AnalyzedExternalTypeSource;
 use verter_parser::utils::oxc::script::raw_surface::{
     capture_statement_surfaces, merge_overload_groups, RawSourceSurface, SymbolSpace,
 };
-use verter_parser::utils::oxc::script::type_surface::{
-    collect_statement_dependency_names, AnalyzedExternalTypeSource,
-};
+use verter_parser::utils::oxc::script::type_surface::collect_statement_dependency_names;
 use verter_semantic::analysis::decl_headers::DeclHeaderIndex;
 use verter_semantic::analysis::framework_facts::svelte::{
     lower_props_annotation_at, PropsAnnotationLowering,
@@ -535,6 +535,7 @@ impl DeclBodyMemo {
     /// pre-filled from the built env using the same per-symbol folding
     /// the lazy path performs, and the whole env is pre-set. No service;
     /// nothing lowers lazily.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn seeded_from_env(
         key: SnapshotKey,
         env: &EvalEnv,

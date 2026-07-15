@@ -604,10 +604,15 @@ impl FallthroughRequestHost for VerterHost {
     type View = crate::resolver_store::HostStoreView;
     type Resolution = crate::types::FallthroughResolution;
 
+    fn cacheability_context(&self) -> &dyn crate::resolver_core::ResolverContext {
+        self
+    }
+
     fn generic_root_propagation(&self) -> bool {
         self.config.generic_root_propagation
     }
 
+    #[cfg(test)]
     fn snapshot_store_view(&self) -> Self::View {
         // The fallthrough request driver gates currentness through
         // `snapshot_store_view_read` + `snapshot_view_is_current`; this
@@ -639,106 +644,53 @@ impl FallthroughRequestHost for VerterHost {
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         store_view: &Self::View,
     ) -> Option<Self::Resolution> {
-        // The warm peek is itself a PRODUCER: on a root-follow hit it BACKFILLS
-        // the branch-union key, and on any hit it warms the `cached_fallthrough`
-        // mirror. Both are shared-cache admissions, so the whole body runs
-        // inside ONE cacheability tracer scope — every read that produces the
-        // backfilled node (the node lookups and the node→resolution
-        // projections) lies inside it, and the probe is sampled at each
-        // admission, after the value it admits has been built.
-        let (resolution, _non_cacheable) = crate::fact_signature_helpers::with_cacheability_scope(
-            self,
-            |probe| -> Option<Self::Resolution> {
-                let cache_key = fallthrough_cache_key(
-                    canonical_id,
-                    self.config.generic_root_propagation,
-                    prop_type_overrides,
-                );
-
-                // Per-request hoist: read through the caller-supplied
-                // `store_view` (built ONCE at the request boundary) instead of
-                // building a fresh owned snapshot per call.
-                let live_view = store_view;
-                if let Some(node) = self
-                    .resolver_runtime()
-                    .fallthrough
-                    .get_cached_node(&cache_key, live_view)
-                {
-                    if let Some(resolution) = self.runtime_branch_union_node_to_resolution(node) {
-                        let resolution = Arc::new(resolution);
-                        if prop_type_overrides.is_none() {
-                            self.mirror_cached_fallthrough_arc(
-                                canonical_id,
-                                resolution.clone(),
-                                probe,
-                            );
-                        }
-                        return Some((*resolution).clone());
-                    }
-                }
-
-                let root_follow_key = crate::resolver_core::fallthrough_resolver::root_follow_key(
-                    canonical_id,
-                    crate::resolver_core::FallthroughOverrideIdentity::for_overrides(
-                        prop_type_overrides,
-                    ),
-                    self.config.generic_root_propagation,
-                );
-                if let Some(node) = self
-                    .resolver_runtime()
-                    .fallthrough
-                    .get_cached_node(&root_follow_key, live_view)
-                {
-                    if let Some(resolution) = self.runtime_root_follow_node_to_resolution(node) {
-                        let resolution = Arc::new(resolution);
-                        self.resolver_runtime().fallthrough.store_node(
-                            cache_key,
-                            self.build_runtime_fallthrough_node(resolution.as_ref()),
-                            probe,
-                        );
-                        if prop_type_overrides.is_none() {
-                            self.mirror_cached_fallthrough_arc(
-                                canonical_id,
-                                resolution.clone(),
-                                probe,
-                            );
-                        }
-                        return Some((*resolution).clone());
-                    }
-                }
-
-                if prop_type_overrides.is_none() {
-                    // cached_fallthrough lives on DerivedRawState (D48 split).
-                    if let Some(cc) = self.derived_raw_cache().get(canonical_id) {
-                        if let Some(ref cached) = cc.cached_fallthrough {
-                            // R3/R26/R28: dispatch through
-                            // `StoreView::validates_fact_signature` as a
-                            // per-domain override hook. The default impl in
-                            // `resolver_core/mod.rs` walks the signature via
-                            // `.iter().all(self.validates(..))`, so the live
-                            // behavior matches the legacy per-item form; the
-                            // dispatch point exists so future per-domain
-                            // implementers can short-circuit on the first
-                            // mismatch without changing call sites.
-                            if cached.generic_root_propagation
-                                == self.config.generic_root_propagation
-                                && store_view.validates_fact_signature(&cached.fact_versions)
-                            {
-                                self.mirror_cached_fallthrough_arc(
-                                    canonical_id,
-                                    cached.resolution.clone(),
-                                    probe,
-                                );
-                                return Some((*cached.resolution).clone());
-                            }
-                        }
-                    }
-                }
-
-                None
-            },
+        let cache_key = fallthrough_cache_key(
+            canonical_id,
+            self.config.generic_root_propagation,
+            prop_type_overrides,
         );
-        resolution
+
+        // A warm preflight is read-only. Stable cold completion is the sole
+        // owner of sibling-key and legacy-mirror promotions, so no admission
+        // can occur before the request executor's stability fence.
+        if let Some(node) = self
+            .resolver_runtime()
+            .fallthrough
+            .get_cached_node(&cache_key, store_view)
+        {
+            if let Some(resolution) = self.runtime_branch_union_node_to_resolution(node) {
+                return Some(resolution);
+            }
+        }
+
+        let root_follow_key = crate::resolver_core::fallthrough_resolver::root_follow_key(
+            canonical_id,
+            crate::resolver_core::FallthroughOverrideIdentity::for_overrides(prop_type_overrides),
+            self.config.generic_root_propagation,
+        );
+        if let Some(node) = self
+            .resolver_runtime()
+            .fallthrough
+            .get_cached_node(&root_follow_key, store_view)
+        {
+            if let Some(resolution) = self.runtime_root_follow_node_to_resolution(node) {
+                return Some(resolution);
+            }
+        }
+
+        if prop_type_overrides.is_none() {
+            if let Some(cc) = self.derived_raw_cache().get(canonical_id) {
+                if let Some(ref cached) = cc.cached_fallthrough {
+                    if cached.generic_root_propagation == self.config.generic_root_propagation
+                        && store_view.validates_fact_signature(&cached.fact_versions)
+                    {
+                        return Some((*cached.resolution).clone());
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     fn compute_fallthrough_surface_uncached(
@@ -794,9 +746,9 @@ impl FallthroughRequestHost for VerterHost {
         canonical_id: &str,
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         result: &Self::Resolution,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        admission: &crate::resolver_core::FallthroughStableAdmission<'_>,
     ) {
-        self.cache_fallthrough_result(canonical_id, prop_type_overrides, result, probe);
+        self.cache_fallthrough_result(canonical_id, prop_type_overrides, result, admission);
     }
 }
 
@@ -875,20 +827,17 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         // members are built — so its verdict covers every read that produced
         // them. Fanning out to the enclosing tracers also refuses the OWNER's
         // fallthrough admission on the same read.
-        let (members, _non_cacheable) =
-            crate::fact_signature_helpers::with_cacheability_scope(self.host, |probe| {
+        self.host
+            .resolver_runtime()
+            .fallthrough
+            .compute_and_maybe_admit(self.host, || {
                 let members = self
                     .host
                     .project_intrinsic_members_for_tag(canonical_id, tag, self.ctx)
                     .unwrap_or_else(|| self.host.intrinsic_members_for_tag(tag));
-                self.host.resolver_runtime().fallthrough.store_node(
-                    cache_key,
-                    self.host.build_runtime_intrinsic_surface_node(&members),
-                    probe,
-                );
-                members
-            });
-        members
+                let node = self.host.build_runtime_intrinsic_surface_node(&members);
+                (members, Some((cache_key, node)))
+            })
     }
 
     fn resolve_child_component_canonical(
@@ -897,7 +846,7 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         component_name: &str,
         import_source: &str,
         imported_name: Option<&str>,
-        binding_kind: Option<crate::resolver_core::symbol_resolver::ImportBindingKind>,
+        binding_kind: Option<crate::resolver_core::ImportBindingKind>,
     ) -> Option<String> {
         debug_assert_eq!(self.parent_canonical_id, parent_canonical);
         let dep_canonical = self.host.resolve_loaded_dependency_canonical(
@@ -921,13 +870,13 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
                 (
                     match binding.kind {
                         verter_semantic::analysis::types::ImportBindingKind::Named => {
-                            crate::resolver_core::symbol_resolver::ImportBindingKind::Named
+                            crate::resolver_core::ImportBindingKind::Named
                         }
                         verter_semantic::analysis::types::ImportBindingKind::Default => {
-                            crate::resolver_core::symbol_resolver::ImportBindingKind::Default
+                            crate::resolver_core::ImportBindingKind::Default
                         }
                         verter_semantic::analysis::types::ImportBindingKind::Namespace => {
-                            crate::resolver_core::symbol_resolver::ImportBindingKind::Namespace
+                            crate::resolver_core::ImportBindingKind::Namespace
                         }
                     },
                     binding.imported_name.clone(),
@@ -936,18 +885,18 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
 
         let binding_kind = binding_kind
             .or_else(|| derived_import_binding.as_ref().map(|(kind, _)| *kind))
-            .unwrap_or(crate::resolver_core::symbol_resolver::ImportBindingKind::Named);
+            .unwrap_or(crate::resolver_core::ImportBindingKind::Named);
         let imported_name = imported_name
             .map(str::to_string)
             .or_else(|| derived_import_binding.and_then(|(_, imported_name)| imported_name));
         let requested_export_name = match binding_kind {
-            crate::resolver_core::symbol_resolver::ImportBindingKind::Default => {
+            crate::resolver_core::ImportBindingKind::Default => {
                 imported_name.as_deref().unwrap_or("default")
             }
-            crate::resolver_core::symbol_resolver::ImportBindingKind::Named => {
+            crate::resolver_core::ImportBindingKind::Named => {
                 imported_name.as_deref().unwrap_or(component_name)
             }
-            crate::resolver_core::symbol_resolver::ImportBindingKind::Namespace => component_name,
+            crate::resolver_core::ImportBindingKind::Namespace => component_name,
         };
 
         self.host
@@ -993,8 +942,10 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         // own fallthrough resolution (imports, type surfaces, root chain) is the
         // read set this admission must be fail-closed on, so the scope opens
         // BEFORE it and the probe is sampled after it returns.
-        let (resolution, _non_cacheable) =
-            crate::fact_signature_helpers::with_cacheability_scope(self.host, |probe| {
+        self.host
+            .resolver_runtime()
+            .fallthrough
+            .compute_and_maybe_admit(self.host, || {
                 let resolution = self
                     .host
                     .resolve_fallthrough_surface_internal_with_overrides(
@@ -1003,18 +954,14 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
                         visiting,
                     );
 
-                if let Some(resolution) = resolution.as_ref() {
-                    self.host.resolver_runtime().fallthrough.store_node(
+                let candidate = resolution.as_ref().map(|resolution| {
+                    (
                         cache_key,
                         self.host.build_runtime_child_surface_node(resolution),
-                        probe,
-                    );
-                }
-
-                resolution
-            });
-
-        resolution
+                    )
+                });
+                (resolution, candidate)
+            })
     }
 }
 
@@ -1059,8 +1006,11 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
         // the owner's bindings through the shared resolver, so it can consume a
         // fenced serve / broken lease / unrootable route. The probe is sampled
         // after `resolved` is built, so its verdict covers that compute.
-        let (resolved, _non_cacheable) =
-            crate::fact_signature_helpers::with_cacheability_scope(self.host, |probe| {
+        let resolved = self
+            .host
+            .resolver_runtime()
+            .fallthrough
+            .compute_and_maybe_admit(self.host, || {
                 let resolved = self.host.resolve_root_consumption(
                     canonical_id,
                     snapshot,
@@ -1071,12 +1021,8 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
                     self.ctx,
                     overrides,
                 );
-                self.host.resolver_runtime().fallthrough.store_node(
-                    cache_key,
-                    self.host.build_runtime_consumed_bindings_node(&resolved),
-                    probe,
-                );
-                resolved
+                let node = self.host.build_runtime_consumed_bindings_node(&resolved);
+                (resolved, Some((cache_key, node)))
             });
         ResolvedConsumedBindings {
             bindings: resolved.bindings,

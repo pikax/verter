@@ -621,7 +621,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // Named for the same reason as the import-route scope above: a test targets
     // ONE of the two sibling tracers and must be able to say WHICH. Erased in a
     // production build.
-    let (payload_opt, finalise, validate_non_cacheable) =
+    let (payload_opt, finalise) =
         named_fact_tracer!(host, TracerScope::ScriptFactsProviderValidate, || {
             // Observe the owner's whole hash + every resolved import contributor so
             // a content edit to any of them misses the warm entry.
@@ -673,9 +673,15 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // ReadSetSignature carries the SAME cross-file facts — a same-content import
     // reroute that flips the facts then misses the warm surface entry too. The
     // facts are bubbled BEFORE `finalise` is consumed by the admission check.
-    if let crate::resolver_core::FactReadSetFinalise::Ok(facts) = &finalise {
+    if let crate::resolver_core::FactReadSetFinalise::Ok(facts)
+    | crate::resolver_core::FactReadSetFinalise::NonCacheable(facts) = &finalise
+    {
         crate::fact_signature_helpers::bubble_fact_signature_via_tls(facts.as_ref());
     }
+    let validate_non_cacheable = matches!(
+        &finalise,
+        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+    );
     let admission = SignatureAdmission::from_finalise(finalise);
     // An import-dependent validation whose owner import-route rail could NOT be
     // produced must NOT warm the store (it would stale-serve on a re-route).

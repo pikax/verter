@@ -374,7 +374,7 @@ impl CompileOutputNodePureContent {
     /// are disjoint. Available under `test` / `debug_assertions` so an
     /// external `tests/` crate (which links the lib in the dev profile)
     /// can observe the store footprint via a host accessor.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn entry_count(&self) -> usize {
         self.entries.len()
     }

@@ -174,11 +174,11 @@ fn follower_bubbles_leader_facts_and_advances_coalesced_counter() {
         // only be minted by opening a real tracer scope (which is per-thread).
         let host = VerterHost::new_standalone(Default::default());
         let view = PermissiveStoreView;
-        verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
+        verter_session::for_tests::with_cacheability_scope_for_tests(&host, |_probe| {
             leader_db.get_or_resolve_route_observing_facts(
                 rk("join_provider.ts", "Joined"),
                 &view,
-                probe,
+                &host,
                 || {
                     // We have claimed the singleflight slot and are
                     // inside the resolve closure. Signal the driver, then
@@ -229,11 +229,11 @@ fn follower_bubbles_leader_facts_and_advances_coalesced_counter() {
         let host = VerterHost::new_standalone(Default::default());
         let view = PermissiveStoreView;
         let (route_result, finalise) = install_fact_tracer_for_tests(&host, || {
-            verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
+            verter_session::for_tests::with_cacheability_scope_for_tests(&host, |_probe| {
                 follower_db.get_or_resolve_route_observing_facts(
                     rk("join_provider.ts", "Joined"),
                     &view,
-                    probe,
+                    &host,
                     || {
                         // The follower's resolve closure MUST NOT run.
                         // If it does, the test isn't exercising the
@@ -311,6 +311,9 @@ fn follower_bubbles_leader_facts_and_advances_coalesced_counter() {
                  not find the leader's admitted entry OR did not call \
                  `observe_fact_signature` on the fanned-out facts."
             );
+        }
+        FactReadSetFinalise::NonCacheable(_) => {
+            panic!("follower tracer unexpectedly non-cacheable")
         }
         FactReadSetFinalise::Overflow => panic!("follower outer tracer overflowed"),
     }

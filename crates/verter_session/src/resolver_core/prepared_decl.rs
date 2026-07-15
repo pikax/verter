@@ -259,7 +259,13 @@ pub(crate) fn prepare_local_type_decl_outcome(
                 DemandOutcome::Ready(Some(lowered)) => (lowered, None, Some(&global_scope)),
             }
         };
-    if state.is_import_local(symbol_name) {
+    // Type-space declarations win over a same-named import binding. This is
+    // observable for Vue SFCs because normal `<script>` and `<script setup>`
+    // are distinct authored scopes even though their shallow facts share one
+    // file owner: a normal-script `type Separator = ...` must remain
+    // addressable when setup imports the runtime value `Separator`. A pure
+    // import local still has no prepared declaration.
+    if state.is_import_local(symbol_name) && !state.has_type_symbol(symbol_name) {
         return PreparedDeclOutcome::Ready(None);
     }
 
@@ -429,6 +435,14 @@ fn prepare_type_decl_from_lowered(
     // the eager fast-path's stored identity at the FINAL definition rather than
     // the intermediate barrel.
     for (local_name, target) in state.import_targets.iter() {
+        // `PreparedTypeDecl` bodies are lowered in TYPE space. Preserve the
+        // same local-first precedence used by route-fact classification and
+        // the declaration-scope fallback: a same-file type header shadows an
+        // import binding with the same local spelling. Value-only imports
+        // continue to populate the map (including `typeof` dependencies).
+        if state.has_type_symbol(local_name) {
+            continue;
+        }
         let resolved = canonicalize_import_target(
             import_canonicalization,
             canonical_id,
@@ -981,7 +995,6 @@ pub fn build_prepared_type_decl_cache(
 ) -> PreparedTypeDeclCache {
     let mut slots: FxHashMap<String, PreparedTypeDeclSlot> = state
         .type_symbol_names()
-        .filter(|symbol_name| !state.is_import_local(symbol_name))
         .map(|symbol_name| (symbol_name.to_string(), Arc::new(PreparedDeclSlot::new())))
         .collect();
     // Global-augmentation declarations (`declare global { interface N {} }`)

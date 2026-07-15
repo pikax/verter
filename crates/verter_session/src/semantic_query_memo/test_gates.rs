@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use super::SemanticGraphStore;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 impl SemanticGraphStore {
     /// Test-only driver: arm the [`Self::invalidate_all`] post-`entries`-
     /// clear injection point with `barrier`. The next `invalidate_all` on
@@ -195,13 +195,13 @@ impl SemanticGraphStore {
 /// drivers on [`SemanticGraphStore`]. Clears the per-store gate it
 /// borrows on drop so a later operation on the same store does not park
 /// on a stale barrier.
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub struct TestInvalidateAllGateGuard<'a> {
     pub(super) gate: &'a parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for TestInvalidateAllGateGuard<'_> {
     fn drop(&mut self) {
         *self.gate.lock() = None;
@@ -217,14 +217,14 @@ impl Drop for TestInvalidateAllGateGuard<'_> {
 // thread is inside `validate` — proving the warm-read path released
 // the mutex before invoking `validate`. Disarmed by default.
 // ────────────────────────────────────────────────────────────────────
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 static VALIDATE_RUNNING_PROBE: parking_lot::Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>> =
     parking_lot::Mutex::new(None);
 
 /// Invoked from inside [`super::family::MemoEntry::validate`] on every
 /// validate call. Fires the armed probe if any. No-op on the
 /// production path (no probe armed).
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 #[inline]
 pub(super) fn validate_running_probe() {
     let probe = VALIDATE_RUNNING_PROBE.lock().clone();
@@ -236,13 +236,13 @@ pub(super) fn validate_running_probe() {
 /// RAII guard returned by
 /// [`SemanticGraphStore::arm_validate_running_probe_for_tests`]. On
 /// drop the global probe is cleared.
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub struct ValidateRunningProbeGuard {
     pub(crate) _private: (),
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for ValidateRunningProbeGuard {
     fn drop(&mut self) {
         *VALIDATE_RUNNING_PROBE.lock() = None;
@@ -252,11 +252,11 @@ impl Drop for ValidateRunningProbeGuard {
 /// Process-global lock used by tests that arm the global validate
 /// probe to serialise across the test binary, preventing
 /// interleaving with other tests that exercise warm reads.
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub static VALIDATE_RUNNING_PROBE_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 impl SemanticGraphStore {
     /// Arm a process-global validate-running probe — a closure
     /// invoked from inside [`super::family::MemoEntry::validate`]

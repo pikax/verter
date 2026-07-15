@@ -2,7 +2,7 @@
 //! `verter-tsc` binary; skips ONLY on genuine tsgo / node_modules absence).
 //!
 //! Pins the COMPLETE current (Full-mode, `HostConfig::default()`) tsgo diagnostic
-//! MULTISET produced by `verter-tsc --noEmit -p <fixtures/diagnostics/tsconfig.json>`,
+//! MULTISET produced by `verter-tsc --noEmit -p <cases/fixtures/diagnostics/tsconfig.json>`,
 //! and asserts EXACT MULTISET EQUALITY over the tuple key `(file, line, col, ts_code)`
 //! WITH per-key COUNT:
 //!   - a DROPPED diagnostic (missing tuple OR reduced count) -> RED;
@@ -65,7 +65,7 @@ use std::process::Command;
 
 // ── Pinned expected diagnostic MULTISET (sorted) ────────────────────────
 // Captured from the current `verter-tsc` run over
-// `crates/verter_tsc/tests/fixtures/diagnostics/`. Tuple =
+// `crates/verter_tsc/tests/cases/fixtures/diagnostics/`. Tuple =
 // `(fixture_relative_path, line, col, ts_code, count, stable_message_substring)`.
 // `count` pins multiplicity (raw total = 71; two keys repeat:
 // `src/DirectiveErrors.vue(1,1) TS7006` x3, `src/GenericComp.vue(1,1) TS6196` x2).
@@ -278,6 +278,7 @@ fn workspace_root() -> PathBuf {
 fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
+        .join("cases")
         .join("fixtures")
         .join("diagnostics")
 }

@@ -97,10 +97,7 @@ use crate::types::Hash16;
 /// superseded artifact — an entry the read-side fact rail cannot
 /// reject, so every shared-cache admission point MUST refuse it
 /// (serve the value to the caller, publish nothing).
-pub(crate) fn install_fact_tracer<F, R>(
-    host: &crate::VerterHost,
-    f: F,
-) -> (R, FactReadSetFinalise, bool)
+pub(crate) fn install_fact_tracer<F, R>(host: &crate::VerterHost, f: F) -> (R, FactReadSetFinalise)
 where
     F: FnOnce() -> R,
 {
@@ -109,7 +106,6 @@ where
         force_tracer_overflow_observations(host, None);
         f()
     });
-    let non_cacheable_read_observed = read_set.non_cacheable_read_observed();
     let finalise = read_set.finalise();
     // The overflow audit event + host counter are emitted HERE and ONLY here —
     // at the ONE signature-CONSUMING boundary per compute. The cacheability
@@ -127,7 +123,7 @@ where
         host.signature_overflow_at_install
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
-    (value, finalise, non_cacheable_read_observed)
+    (value, finalise)
 }
 
 /// Test-only fact-injection hook read at every tracer scope entry
@@ -230,7 +226,7 @@ pub(crate) fn install_fact_tracer_named<F, R>(
     host: &crate::VerterHost,
     scope: crate::host_test_force::TracerScope,
     f: F,
-) -> (R, FactReadSetFinalise, bool)
+) -> (R, FactReadSetFinalise)
 where
     F: FnOnce() -> R,
 {
@@ -238,7 +234,6 @@ where
         force_tracer_overflow_observations(host, Some(scope));
         f()
     });
-    let non_cacheable_read_observed = read_set.non_cacheable_read_observed();
     let finalise = read_set.finalise();
     if matches!(finalise, FactReadSetFinalise::Overflow) {
         crate::host_manage::push_structured_event(
@@ -250,7 +245,7 @@ where
         host.signature_overflow_at_install
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
-    (value, finalise, non_cacheable_read_observed)
+    (value, finalise)
 }
 
 /// Open an [`install_fact_tracer_cacheability`] scope that a test can TARGET BY
@@ -521,9 +516,9 @@ pub(crate) fn dep_signature_to_fact_signature(sig: &DepSignature) -> Vec<FactVer
 /// reached through the `for_tests::read_signature_overflow_at_install`
 /// re-export in `lib.rs` (see
 /// `tests/cases/g_fact/fact_read_set_finalise_overflow.rs`). The `for_tests`
-/// shim is gated `cfg(any(test, debug_assertions))`; this accessor
+/// shim is gated `cfg(any(test, feature = "test-support"))`; this accessor
 /// matches so it is not a dead symbol in release.
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 #[inline]
 pub(crate) fn read_signature_overflow_at_install(host: &crate::VerterHost) -> u64 {
     host.signature_overflow_at_install
@@ -541,10 +536,10 @@ pub(crate) fn read_signature_overflow_at_install(host: &crate::VerterHost) -> u6
 ///
 /// This is the lazy (non-strict) validator. Production warm reads use
 /// [`validate_fact_signature_with_self_roots`]; the only consumer of
-/// the lazy form is the `cfg(any(test, debug_assertions))`-gated
+/// the lazy form is the `cfg(any(test, feature = "test-support"))`-gated
 /// `AppConfigNoOverrideProofDb::peek` plus the substrate test suite, so
 /// it is gated to match (no dead surface in release).
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 #[inline]
 #[track_caller]
 pub(crate) fn validate_fact_signature(

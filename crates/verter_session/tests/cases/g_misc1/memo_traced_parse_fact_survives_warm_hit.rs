@@ -190,6 +190,9 @@ fn dispatch_warm_hit_bubbles_traced_parse_fact_into_outer_tracer() {
                  expected to contain: {want:?}"
             );
         }
+        FactReadSetFinalise::NonCacheable(_) => {
+            panic!("warm outer tracer unexpectedly non-cacheable")
+        }
         FactReadSetFinalise::Overflow => {
             panic!(
                 "outer tracer overflowed — test setup error (injected only one fact, \

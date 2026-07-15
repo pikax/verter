@@ -164,29 +164,18 @@ impl VerterHost {
         // `fold_follower_completeness`). No stale-across-retries caller scope
         // outlives the attempt it describes.
         //
-        // No-poison CACHEABILITY scope: it BRACKETS the whole request, so the
-        // cold compute (`compute_fallthrough_surface_uncached` and every child
-        // it recurses into) runs INSIDE it and the executor's `store_stable`
-        // samples the probe AFTER that compute. A scope opened at the store
-        // site instead would start after the compute's fenced serve / broken
-        // decl-body lease / unrootable route had already been consumed and
-        // would prove nothing. Nested child scopes (`resolve_child_fallthrough`,
-        // `intrinsic_members_for_tag`, `resolve_root_consumption`) fan their
-        // non-cacheable reads out to EVERY active tracer, so a poisoned child
-        // read also refuses THIS owner's admission.
-        let (result, _non_cacheable) =
-            crate::fact_signature_helpers::with_cacheability_scope(self, |probe| {
-                crate::resolver_core::run_fallthrough_request(
-                    self,
-                    &self.resolver_runtime().top_level_fallthrough_singleflight,
-                    canonical_id,
-                    prop_type_overrides,
-                    visiting,
-                    None,
-                    probe,
-                    STORE_VIEW_STABILITY_MAX_ATTEMPTS,
-                )
-            });
+        // The request owner opens the no-poison cacheability scope around its
+        // complete warm/singleflight/cold/stable-admission lifecycle. No
+        // caller-minted probe crosses this boundary.
+        let result = crate::resolver_core::run_fallthrough_request(
+            self,
+            &self.resolver_runtime().top_level_fallthrough_singleflight,
+            canonical_id,
+            prop_type_overrides,
+            visiting,
+            None,
+            STORE_VIEW_STABILITY_MAX_ATTEMPTS,
+        );
 
         if matches!(result.source, RequestSource::Cache) {
             self.provenance
@@ -894,7 +883,7 @@ impl VerterHost {
         canonical_id: &str,
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         result: &crate::types::FallthroughResolution,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        admission: &crate::resolver_core::FallthroughStableAdmission<'_>,
     ) {
         // No-poison: a PARTIAL fallthrough (a budget/fuse trip folded into the
         // active cold-compute completeness scope) must NOT warm any fallthrough
@@ -914,7 +903,7 @@ impl VerterHost {
             prop_type_overrides,
         );
         let resolution = Arc::new(result.clone());
-        self.resolver_runtime().fallthrough.store_node(
+        self.resolver_runtime().fallthrough.admit_stable_node(
             crate::resolver_core::fallthrough_resolver::root_follow_key(
                 canonical_id,
                 crate::resolver_core::FallthroughOverrideIdentity::for_overrides(
@@ -923,15 +912,15 @@ impl VerterHost {
                 self.config.generic_root_propagation,
             ),
             self.build_runtime_root_follow_node(result),
-            probe,
+            admission,
         );
-        self.resolver_runtime().fallthrough.store_node(
+        self.resolver_runtime().fallthrough.admit_stable_node(
             cache_key,
             self.build_runtime_fallthrough_node(result),
-            probe,
+            admission,
         );
         if prop_type_overrides.is_none() {
-            self.mirror_cached_fallthrough_arc(canonical_id, resolution, probe);
+            self.mirror_cached_fallthrough_arc(canonical_id, resolution, admission);
         }
     }
 
@@ -1192,7 +1181,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         resolution: Arc<crate::types::FallthroughResolution>,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        admission: &crate::resolver_core::FallthroughStableAdmission<'_>,
     ) {
         // No-poison SELF-GATE: the mirror is a promotion site (it warms the
         // legacy `cached_fallthrough` entry on `DerivedRawState`), so it carries
@@ -1205,7 +1194,7 @@ impl VerterHost {
         // mirror's own `fact_versions` root on the LIVE view, so a poisoned
         // entry would revalidate on every warm read forever. The resolution is
         // still returned to the caller — mirror non-admission only.
-        if probe.non_cacheable() {
+        if admission.non_cacheable() {
             return;
         }
         // PARTIAL: a budget / fuse / fatal read folded into the active

@@ -1228,38 +1228,13 @@ query-identity slots — listed for inventory completeness):**
 - `semantic_db` — retired; subsumed by `SemanticGraphStore` direct
   ownership in `ProjectTypeStore`.
 
-**Session-view fail-closed contract (skill R29 line 745).** The
-augmentation-sensitive query path returns an OBSERVABLE typed error
-on a session view, NOT a "valid but non-cacheable" result. The
-runtime contract:
-
-```rust
-// crates/verter_session/src/route_db.rs (post-cutover signature)
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EffectiveExportSetError {
-    SessionAugmentationNotSupported,
-    // ... other observable errors
-}
-
-impl RouteDb {
-    pub fn get_or_compute_effective_export_set(
-        &self,
-        canonical: &CanonicalId,
-        view: &dyn StoreView,
-    ) -> Result<std::sync::Arc<EffectiveExportSet>, EffectiveExportSetError> {
-        if view.compat_token().is_session() {
-            return Err(EffectiveExportSetError::SessionAugmentationNotSupported);
-        }
-        // base-only path: compute, admit
-    }
-}
-```
-
-The session caller observes the typed error and surfaces it (or
-short-circuits its own pipeline) — it does NOT receive a valid
-base-only `EffectiveExportSet`. `CacheAdmission::ReturnOnly` is the
-WRONG shape here because it would return a valid base computation to
-the session caller.
+**Session-view augmentation contract (landed).** The earlier fail-closed
+RouteDb effective-export cold-publisher design was superseded and the
+dead funnel has been deleted. `ProjectSemanticDispatch` owns the sole
+production augmentation stitch. Session views use the overlay-aware
+`AugmentationPopulation::Session` index and return a real stitched result;
+`session_overlay_augmentation_isolated_from_base_meta` proves the overlay
+answer and subsequent base answer remain isolated.
 
 **Skill `R28` two-fact model.** `MemberPresence` (key exists) and `Member`
 (key's body identity) are SEPARATE facts. Adding `Foo.b` invalidates
@@ -1330,11 +1305,9 @@ pnpm install --frozen-lockfile
   — inserts two overlay variants of the same `ComponentMetaResultDb`
   slot; asserts both candidates are present and each revalidates only
   under its own snapshot. Negative: the first is not overwritten.
-- `crates/verter_session/tests/module_augmentation_runtime.rs::effective_export_set_rejects_session_view`
-  — under base view, augmenter set computes and admits. Under session
-  view, `RouteDb::get_or_compute_effective_export_set` returns
-  `Err(SessionAugmentationNotSupported)`. The `ReturnOnly` shape is
-  explicitly the wrong contract here.
+- `crates/verter_session/tests/cases/g_session/session_overlay_augmentation_isolation.rs::session_overlay_augmentation_isolated_from_base_meta`
+  — a session overlay augmenter changes the session result without poisoning
+  the base result; the post-session base re-query remains unchanged.
 - `crates/verter_session/tests/module_augmentation_runtime.rs::augmentation_index_population_is_incremental`
   — adding one augmenter touches one `AugmentationTargetKey` entry;
   no full-corpus rescan counter increment.

@@ -94,11 +94,11 @@ fn cold_resolve_advances_cold_counter_and_bubbles_admitted_facts() {
     // closure runs and returns a non-empty fact signature. The
     // observing entry-point admits the entry, re-reads, and bubbles.
     let (result, finalise) = install_fact_tracer_for_tests(&host, || {
-        verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
+        verter_session::for_tests::with_cacheability_scope_for_tests(&host, |_probe| {
             db.get_or_resolve_route_observing_facts(
                 rk("cold_provider.ts", "Baz"),
                 &view,
-                probe,
+                &host,
                 || {
                     calls.fetch_add(1, Ordering::Relaxed);
                     Some((resolved_route(), vec![fact_for_closure.clone()]))
@@ -150,6 +150,9 @@ fn cold_resolve_advances_cold_counter_and_bubbles_admitted_facts() {
                  returned the route Arc without re-reading and fanning \
                  facts into the tracer scope."
             );
+        }
+        FactReadSetFinalise::NonCacheable(_) => {
+            panic!("cold-resolve tracer unexpectedly non-cacheable")
         }
         FactReadSetFinalise::Overflow => panic!("cold-resolve tracer overflowed"),
     }

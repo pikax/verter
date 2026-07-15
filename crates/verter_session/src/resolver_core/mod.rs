@@ -22,6 +22,7 @@ mod fallthrough;
 pub mod fallthrough_override_key;
 mod fallthrough_request;
 pub mod fallthrough_resolver;
+pub mod import_binding;
 pub mod prepared_decl;
 pub mod resolver_runtime;
 pub mod route_demand;
@@ -31,7 +32,6 @@ pub(crate) mod surface_projector;
 #[cfg(test)]
 mod surface_projector_tests;
 pub mod svelte_default_synth;
-pub mod symbol_resolver;
 pub mod vue_default_synth;
 
 pub mod fact_read_set;
@@ -49,7 +49,7 @@ pub use fact_read_set::{FactReadSet, FactReadSetCell, FactReadSetFinalise};
 // Substrate re-export. Hot-path callers construct the
 // request-bound wrapper at entry points; the wiring lands in the
 // hot-path conversion commit (C).
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use host_resolver_context::with_bare_host_ctx_for_test;
 #[allow(unused_imports)]
 pub(crate) use host_resolver_context::HostResolverContext;
@@ -61,6 +61,7 @@ pub(crate) use resolver_context::{
 pub(crate) use session_resolver_context::SessionResolverContext;
 
 pub use fuses::{FuseBudgets, FuseState, FuseTrip};
+pub use import_binding::ImportBindingKind;
 pub use imported_root_db::{ImportedRootDb, ImportedRootResult};
 pub use route_db::{
     BarrelRouteSurface, BarrelSurfaceKey, EffectiveExportEntry, EffectiveExportSetEntry,
@@ -77,6 +78,7 @@ pub use component_meta::{
     ResolvedMacroMeta, ResolvedTypeRegistryMeta,
 };
 pub use component_meta_query_engine::ComponentMetaQueryEngine;
+pub(crate) use component_meta_request::ComponentMetaComputeOutcome;
 // The surface-projection helpers (`surface_view_from_semantic_node`,
 // `compound_root_surface_view_via_dispatch`,
 // `surface_view_to_registry_type_expr`) are intentionally NOT re-exported from
@@ -100,7 +102,7 @@ pub(crate) use component_meta_query_engine::{
     type_expr_contains_semantic_miss, type_expr_root_is_unmaterialized_sentinel,
 };
 pub(crate) use component_meta_request::run_component_meta_request;
-pub use component_meta_request::ComponentMetaRequestHost;
+pub(crate) use component_meta_request::ComponentMetaRequestHost;
 pub use declaration_metadata::{
     resolve_direct_local_type_declaration, resolve_local_type_declaration,
     resolve_type_declaration, DeclarationMetadataResolver, ResolvedDeclarationKind,
@@ -133,8 +135,8 @@ pub use fallthrough::{
     ResolvedConsumedBindings, ResolvedFallthroughSurface,
 };
 pub use fallthrough_override_key::FallthroughOverrideIdentity;
-pub(crate) use fallthrough_request::run_fallthrough_request;
-pub use fallthrough_request::FallthroughRequestHost;
+pub(crate) use fallthrough_request::FallthroughRequestHost;
+pub(crate) use fallthrough_request::{run_fallthrough_request, FallthroughStableAdmission};
 pub use prepared_decl::{
     build_prepared_type_decl_cache, build_prepared_value_decl_cache,
     prepare_augmentation_type_decl, prepare_exported_type_decl, prepare_exported_value_decl,
@@ -789,6 +791,17 @@ pub(crate) struct StableExecutionValue<V> {
     /// [`ResultCompleteness::Complete`] for every generic executor, which
     /// leaves their rendezvous byte-identical.
     pub completeness: ResultCompleteness,
+    /// Typed cache-refusal propagation captured from the owner-scoped cold
+    /// compute. `Some` means the value is return-only: it is neither
+    /// published nor retained as a joinable rendezvous.
+    pub cache_refusal: Option<fact_read_set::NonCacheablePropagation>,
+}
+
+/// Sealed evidence that the stable-request driver observed a current,
+/// complete, cacheable cold result. Only the driver can construct it; a
+/// publisher cannot be called with a partial or cache-refused value.
+pub(crate) struct StableAdmission {
+    _private: (),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -886,7 +899,10 @@ where
     fn try_get_cached(&mut self, view: &Self::View) -> Option<V>;
     fn compute(&mut self, view: &Self::View) -> Result<V, Self::Error>;
     fn is_stable(&mut self, view: &Self::View) -> bool;
-    fn store_stable(&mut self, value: &V);
+    /// Publish a view-stable value, carrying the compute's typed
+    /// completeness captured before this method is called. Publishers must
+    /// refuse `Partial` values while still returning them to the caller.
+    fn store_stable(&mut self, value: &V, admission: StableAdmission);
 
     fn max_attempts(&self) -> usize {
         3
@@ -904,6 +920,12 @@ where
     /// COMPUTE completeness.
     fn capture_completeness(&self) -> ResultCompleteness {
         ResultCompleteness::Complete
+    }
+
+    /// Typed cache-only refusal captured by the cold compute. Unlike
+    /// completeness, this does not make the value structurally partial.
+    fn capture_cache_refusal(&self) -> Option<fact_read_set::NonCacheablePropagation> {
+        None
     }
 
     /// Invoked on a FOLLOWER join with the joined leader's completeness,
@@ -967,12 +989,19 @@ where
         if !snapshot_is_current {
             let value = executor.compute(&store_view)?;
             if executor.is_stable(&store_view) {
-                executor.store_stable(&value);
+                let completeness = executor.capture_completeness();
+                let cache_refusal = executor.capture_cache_refusal();
+                if !completeness.is_partial() && cache_refusal.is_none() {
+                    executor.store_stable(&value, StableAdmission { _private: () });
+                }
+                if let Some(propagation) = cache_refusal {
+                    resolver_context::note_non_cacheable_propagation(propagation);
+                }
                 return Ok(RequestRunResult {
                     value,
                     source: RequestSource::Fallback,
                     attempts: attempt + 1,
-                    completeness: executor.capture_completeness(),
+                    completeness,
                 });
             }
             // Unstable off-lane result. For a per-attempt snapshot, retry on
@@ -984,6 +1013,9 @@ where
             // burns projection budget. Return the first fenced (return-only)
             // result now.
             if executor.snapshot_is_immutable() {
+                if let Some(propagation) = executor.capture_cache_refusal() {
+                    resolver_context::note_non_cacheable_propagation(propagation);
+                }
                 return Ok(RequestRunResult {
                     value,
                     source: RequestSource::Fallback,
@@ -1053,26 +1085,28 @@ where
                         computed: false,
                         // A warm hit is complete (partials never warm).
                         completeness: ResultCompleteness::Complete,
+                        cache_refusal: None,
                     });
                 }
 
                 let value = executor.compute(&store_view)?;
                 let stable = executor.is_stable(&store_view);
-                if stable {
-                    executor.store_stable(&value);
+                let completeness = executor.capture_completeness();
+                let cache_refusal = executor.capture_cache_refusal();
+                if stable && !completeness.is_partial() && cache_refusal.is_none() {
+                    executor.store_stable(&value, StableAdmission { _private: () });
                 }
-                // Snapshot the leader's COMPUTE completeness AFTER
-                // compute/`store_stable` and store it INTO the value before
+                // The leader's COMPUTE completeness was captured before
+                // `store_stable`; store it INTO the value before
                 // it is published as `FlightInner::Done` under the
                 // `flights`→`inner` lock — so any follower that observes
                 // `Done` observes the completeness atomically with the value.
-                let completeness = executor.capture_completeness();
-
                 Ok(StableExecutionValue {
                     value,
                     stable,
                     computed: true,
                     completeness,
+                    cache_refusal,
                 })
             },
             // Retain ONLY stable results as a joinable rendezvous. An
@@ -1080,7 +1114,7 @@ where
             // NOT be retained, or the stability-retry loop below — and any
             // concurrent sibling — would join the torn result instead of
             // recomputing against fresh state.
-            |sev| sev.stable,
+            |sev| sev.stable && !sev.completeness.is_partial() && sev.cache_refusal.is_none(),
         )?;
 
         if flight.value.stable {
@@ -1113,6 +1147,9 @@ where
             if matches!(flight.role, SingleflightRole::Follower) {
                 executor.fold_follower_completeness(flight.value.completeness);
             }
+            if let Some(propagation) = flight.value.cache_refusal {
+                resolver_context::note_non_cacheable_propagation(propagation);
+            }
             return Ok(RequestRunResult {
                 value: flight.value.value.clone(),
                 source,
@@ -1130,6 +1167,9 @@ where
         // result now instead of recomputing it every remaining attempt plus
         // the fallback.
         if executor.snapshot_is_immutable() {
+            if let Some(propagation) = flight.value.cache_refusal {
+                resolver_context::note_non_cacheable_propagation(propagation);
+            }
             return Ok(RequestRunResult {
                 value: flight.value.value.clone(),
                 source: RequestSource::Fallback,
@@ -1145,6 +1185,9 @@ where
     let store_view = executor.snapshot_view();
     let value = executor.compute(&store_view)?;
     let completeness = executor.capture_completeness();
+    if let Some(propagation) = executor.capture_cache_refusal() {
+        resolver_context::note_non_cacheable_propagation(propagation);
+    }
     Ok(RequestRunResult {
         value,
         source: RequestSource::Fallback,
@@ -2472,10 +2515,10 @@ where
     /// admission onto the singleflight — it does not race the follower
     /// under parallel load.
     ///
-    /// Exposed under `cfg(any(test, debug_assertions))` so integration
+    /// Exposed under `cfg(any(test, feature = "test-support"))` so integration
     /// tests in `tests/` (which compile without `cfg(test)`) can reach it
     /// transitively through the per-DB test-only accessors.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn test_flight_strong_count(&self, key: &K, token: StoreViewCompatToken) -> usize {
         let lane_key = (key.clone(), token);
         self.flights
@@ -2709,7 +2752,7 @@ mod tests {
             self.last_stable
         }
 
-        fn store_stable(&mut self, value: &usize) {
+        fn store_stable(&mut self, value: &usize, _admission: StableAdmission) {
             self.published.push(*value);
             self.cache
                 .insert(self.key.clone(), *value, vec![self.valid_fact.clone()]);
@@ -3019,6 +3062,7 @@ mod tests {
                         stable: true,
                         computed: true,
                         completeness: crate::semantic_query::ResultCompleteness::Complete,
+                        cache_refusal: None,
                     })
                 },
                 |sev| sev.stable,
@@ -3307,6 +3351,8 @@ mod tests {
     struct SessionBurstExecutor<'a> {
         shared: &'a SessionBurstState,
         session_id: u64,
+        partial: bool,
+        cache_refusal: bool,
         /// When `true`, this caller's `compute` blocks on
         /// `shared.leader_gate` (used to PIN the leader mid-flight while
         /// the driver lines up a straggler). When `false`, `compute`
@@ -3368,7 +3414,7 @@ mod tests {
             true
         }
 
-        fn store_stable(&mut self, value: &usize) {
+        fn store_stable(&mut self, value: &usize, _admission: StableAdmission) {
             self.shared.cache.insert(
                 "node".to_string(),
                 *value,
@@ -3378,6 +3424,19 @@ mod tests {
 
         fn max_attempts(&self) -> usize {
             3
+        }
+
+        fn capture_completeness(&self) -> ResultCompleteness {
+            if self.partial {
+                ResultCompleteness::partial(crate::semantic_query::PartialReasonSet::PROPAGATED)
+            } else {
+                ResultCompleteness::Complete
+            }
+        }
+
+        fn capture_cache_refusal(&self) -> Option<fact_read_set::NonCacheablePropagation> {
+            self.cache_refusal
+                .then_some(fact_read_set::NonCacheablePropagation::Transitive)
         }
     }
 
@@ -3440,6 +3499,8 @@ mod tests {
                 let mut executor = SessionBurstExecutor {
                     shared: &shared,
                     session_id: SESSION_ID,
+                    partial: false,
+                    cache_refusal: false,
                     gated_leader: true,
                 };
                 run_stable_request(&singleflight, &mut executor).unwrap()
@@ -3493,6 +3554,8 @@ mod tests {
                 let mut executor = SessionBurstExecutor {
                     shared: &shared,
                     session_id: SESSION_ID,
+                    partial: false,
+                    cache_refusal: false,
                     gated_leader: false,
                 };
                 run_stable_request(&singleflight, &mut executor).unwrap()
@@ -3607,6 +3670,134 @@ mod tests {
             0,
             "the `session: Some(id)` lane must be reaped after the last pin releases \
              (per-burst rendezvous, not a cache)",
+        );
+    }
+
+    #[test]
+    fn partial_stable_result_is_not_retained_for_post_compute_join() {
+        const SESSION_ID: u64 = 71;
+        let singleflight =
+            SingleflightGroup::<String, StableExecutionValue<usize>, &'static str>::default();
+        let shared = SessionBurstState {
+            cache: ValidatedFactCache::default(),
+            valid_fact: FactVersionRef::FileWholeHash {
+                canonical_id: "/src/App.vue".to_string(),
+                hash: [7; 16],
+            },
+            computes: AtomicUsize::new(0),
+            leader_gate: Mutex::new(true),
+            leader_gate_cv: Condvar::new(),
+            leader_entered: Mutex::new(false),
+            leader_entered_cv: Condvar::new(),
+        };
+        let token = StoreViewCompatToken {
+            epoch: 1,
+            session: Some(SESSION_ID),
+            validity_fingerprint: 0,
+        };
+
+        // Keep a participation pin alive across both calls. A complete
+        // result would remain joinable in this post-compute window; a
+        // partial must remove its lane before returning.
+        let _pin = singleflight.participate("node".to_string(), token);
+        let mut first_executor = SessionBurstExecutor {
+            shared: &shared,
+            session_id: SESSION_ID,
+            partial: true,
+            cache_refusal: false,
+            gated_leader: false,
+        };
+        let first = run_stable_request(&singleflight, &mut first_executor).unwrap();
+        let mut second_executor = SessionBurstExecutor {
+            shared: &shared,
+            session_id: SESSION_ID,
+            partial: true,
+            cache_refusal: false,
+            gated_leader: false,
+        };
+        let second = run_stable_request(&singleflight, &mut second_executor).unwrap();
+
+        assert!(first.completeness.is_partial());
+        assert!(second.completeness.is_partial());
+        assert_eq!(
+            shared.computes.load(Ordering::SeqCst),
+            2,
+            "the second call must cold-compute; retaining the first partial would make it a follower"
+        );
+        assert_eq!(
+            second.source,
+            RequestSource::Flight {
+                role: SingleflightRole::Leader,
+                forked_lane: false,
+            }
+        );
+        assert!(
+            shared.cache.values().is_empty(),
+            "the partial publisher must leave the validated cache empty"
+        );
+    }
+
+    #[test]
+    fn cache_refused_stable_result_is_not_retained_for_post_compute_join() {
+        const SESSION_ID: u64 = 72;
+        let singleflight =
+            SingleflightGroup::<String, StableExecutionValue<usize>, &'static str>::default();
+        let shared = SessionBurstState {
+            cache: ValidatedFactCache::default(),
+            valid_fact: FactVersionRef::FileWholeHash {
+                canonical_id: "/src/App.vue".to_string(),
+                hash: [7; 16],
+            },
+            computes: AtomicUsize::new(0),
+            leader_gate: Mutex::new(true),
+            leader_gate_cv: Condvar::new(),
+            leader_entered: Mutex::new(false),
+            leader_entered_cv: Condvar::new(),
+        };
+        let token = StoreViewCompatToken {
+            epoch: 1,
+            session: Some(SESSION_ID),
+            validity_fingerprint: 0,
+        };
+
+        // Keep the completed lane alive across both calls. The first value
+        // is structurally complete and stable, so only the cache-refusal rail
+        // can force the lane out before the second claim.
+        let _pin = singleflight.participate("node".to_string(), token);
+        let mut first_executor = SessionBurstExecutor {
+            shared: &shared,
+            session_id: SESSION_ID,
+            partial: false,
+            cache_refusal: true,
+            gated_leader: false,
+        };
+        let first = run_stable_request(&singleflight, &mut first_executor).unwrap();
+        let mut second_executor = SessionBurstExecutor {
+            shared: &shared,
+            session_id: SESSION_ID,
+            partial: false,
+            cache_refusal: true,
+            gated_leader: false,
+        };
+        let second = run_stable_request(&singleflight, &mut second_executor).unwrap();
+
+        assert_eq!(first.completeness, ResultCompleteness::Complete);
+        assert_eq!(second.completeness, ResultCompleteness::Complete);
+        assert_eq!(
+            shared.computes.load(Ordering::SeqCst),
+            2,
+            "the second call must cold-compute; retaining the first cache-refused value would make it a follower"
+        );
+        assert_eq!(
+            second.source,
+            RequestSource::Flight {
+                role: SingleflightRole::Leader,
+                forked_lane: false,
+            }
+        );
+        assert!(
+            shared.cache.values().is_empty(),
+            "the cache-refused publisher must leave the validated cache empty"
         );
     }
 
@@ -4633,10 +4824,12 @@ mod file_source_env_fact_rail_tests {
 
         let forward_sig = match forward.finalise() {
             FactReadSetFinalise::Ok(sig) => sig,
+            FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
             FactReadSetFinalise::Overflow => panic!("two facts cannot overflow the signature cap"),
         };
         let reverse_sig = match reverse.finalise() {
             FactReadSetFinalise::Ok(sig) => sig,
+            FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
             FactReadSetFinalise::Overflow => panic!("two facts cannot overflow the signature cap"),
         };
         assert_eq!(

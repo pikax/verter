@@ -140,8 +140,8 @@ plan doc is gitignored and is not a committed ledger).
   typed `UnknownMaterializingSourceInterior` failure;
   `component_meta_output_failed_interior_locator_fails_closed_per_source_family` pins the strict
   `InteriorSourceMiss` nested-position path;
-  `prop_member_value_referencing_nonexistent_type_stays_failed` pins the member-value
-  genuine-miss producer fail-close. The producer contract is pinned by the `SourcePosition` witnesses
+  `member_path_projection_onto_interned_miss_fails_output_typed_never_silent_unknown` pins the
+  member-path genuine-miss producer fail-close. The producer contract is pinned by the `SourcePosition` witnesses
   (`crates/verter_type_expr/src/source_position_witnesses.rs` — the three states never alias),
   the genuine-miss emit control on DEBT ROW #1
   (`call_signature_emit_with_unresolvable_param_stays_a_typed_failure`), and the member-value
@@ -168,12 +168,10 @@ plan doc is gitignored and is not a committed ledger).
 - **Closure mechanism.**
   1. **Structural member-source projection**
      (`structural_member_value_source`, `meta_resolve/projectors/published_source.rs`): a member
-     value with no authored/use-site/closed source demand-validates through the ONE shared
-     structural-fact primitive (`ProjectSemanticDispatch::demand_validated_structural_node` —
-     carrier-preserving STRUCTURAL TRANSIT, the same per-root validation the callable-params
-     replay applies; validation only, no library keyspace enumerated at publication). A KNOWN
-     structural value publishes its faithful shallow carrier: the closed/ref upgrade on the
-     DEMANDED node (a resolvable reference publishes its shallow symbol-reference carrier), or
+     value with no authored/use-site/closed source validates its replay ADDRESS in the node domain.
+     Deferred operators and stable unresolved references remain legitimate carriers; terminal
+     consumer demand stays strict and rejects genuine projection misses. A KNOWN structural value
+     publishes its faithful shallow carrier: the closed/ref upgrade on the admitted source node, or
      the projected MEMBER-PATH replay route (`ProjectedTypeFact::MemberPath` — the macro's
      stamped type-argument base + the member name, replayed through the one dispatch's EXISTING
      `ProjectPath` query on demand). Replay-route sources are FINAL consumer-demand addresses:
@@ -220,11 +218,11 @@ plan doc is gitignored and is not a committed ledger).
   `packages/component-meta/test/member-value-honesty.test.ts` (the function member publishes the
   shallow function structure; the object member publishes the shallow object and its nested
   leaf). The fail-closed rail STAYS EXECUTABLE:
-  `prop_member_value_referencing_nonexistent_type_stays_failed` pins that a genuinely-unresolvable
-  member value (a broken reference) still fails typed, non-complete, suppressed — 
-  `Failed(UnrepresentableRequiredMemberValue)` is reachable ONLY from genuine misses (an
-  unresolvable residual carrier, an unknown-materializing failure, a torn partial read, or no
-  stamped replay base); the positive controls
+  `prop_member_value_referencing_unresolved_type_stays_complete_carrier` pins the complementary
+  rule: a stable unresolved authored reference remains an explicit `Ref`, Complete, and
+  diagnostic-free. `Failed(UnrepresentableRequiredMemberValue)` remains reachable ONLY from
+  genuine misses (an unknown-materializing failure, a torn operational partial, or no stamped
+  replay base); the positive and fail-closed controls
   (`recoverable_shallow_prop_values_still_complete_as_present`,
   `present_source_with_interior_unknown_materializing_opaque_fails_output`) keep the recoverable
   and interior-fail-close arms pinned.

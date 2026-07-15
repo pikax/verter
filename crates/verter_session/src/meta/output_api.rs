@@ -342,6 +342,7 @@ impl MetaSession {
                 }
                 true
             }
+            crate::resolver_core::FactReadSetFinalise::NonCacheable(_) => false,
             crate::resolver_core::FactReadSetFinalise::Overflow => false,
         };
         // Conjunctive rails: the token fence (external supersession /

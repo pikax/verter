@@ -313,6 +313,51 @@ describe("decodeComponentMetaPayload", () => {
     });
   });
 
+  it("decodes distinct connected projection limit reasons", () => {
+    expect(ExpansionStopReason.PROJECTION_WORK_LIMIT).toBe(13);
+    expect(ExpansionStopReason.CONNECTED_QUERY_DEPTH_LIMIT).toBe(14);
+
+    const payload = encodeTestComponentMetaPayload({
+      filePath: "/project/src/Limited.vue",
+      props: [
+        {
+          name: "runaway",
+          type: { kind: "ref", name: "Runaway" },
+          typeExpansion: {
+            exactness: "incomplete",
+            executionStatus: "interrupted",
+            diagnostics: [
+              {
+                reason: "projectionWorkLimit",
+                context: "connected demand exhausted its work budget",
+              },
+            ],
+          },
+        },
+        {
+          name: "nested",
+          type: { kind: "ref", name: "Nested" },
+          typeExpansion: {
+            exactness: "incomplete",
+            executionStatus: "interrupted",
+            diagnostics: [
+              {
+                reason: "connectedQueryDepthLimit",
+                context: "connected query nesting exhausted its depth budget",
+              },
+            ],
+          },
+        },
+      ],
+    });
+
+    const native = decodeComponentMetaPayload(payload);
+    expect(native.props.map((prop) => prop.typeExpansion?.diagnostics[0]?.reason)).toEqual([
+      "projectionWorkLimit",
+      "connectedQueryDepthLimit",
+    ]);
+  });
+
   it("does not leak descriptor memoization across payload instances", () => {
     const stringPayload = encodeTestComponentMetaPayload({
       filePath: "/project/src/Node.vue",

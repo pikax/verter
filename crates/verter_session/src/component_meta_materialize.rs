@@ -577,11 +577,8 @@ fn finish_materialize_admission(
         // view; no entry is published. The CacheRead's dep_signature is
         // empty: non-cacheable results MUST NOT propagate as cache deps
         // (R20).
-        let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
-            crate::cache_runtime::NonAdmissionReason::IntrinsicNonCacheable,
-        );
-        return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
-            crate::semantic_query::CacheRead {
+        return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+            value: crate::semantic_query::CacheRead {
                 value: outcome,
                 dep_signature: empty_signature(),
                 walker_diagnostics: Arc::from([]),
@@ -599,7 +596,8 @@ fn finish_materialize_admission(
                 result_is_partial: crate::request_context::current_cold_compute_completeness()
                     .is_partial(),
             },
-        );
+            reason: crate::cache_runtime::NonAdmissionReason::IntrinsicNonCacheable,
+        };
     }
     // Shared result-cache partial gate. A GENUINE partial — a
     // budget exhaustion / fatal `QueryError` / same-path materialiser
@@ -615,18 +613,16 @@ fn finish_materialize_admission(
     if crate::cache_runtime::refuse_result_cache_admission_if_partial(
         crate::request_context::current_cold_compute_completeness().is_partial(),
     ) {
-        let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
-            crate::cache_runtime::NonAdmissionReason::PartialResult,
-        );
-        return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
-            crate::semantic_query::CacheRead {
+        return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+            value: crate::semantic_query::CacheRead {
                 value: outcome,
                 dep_signature: empty_signature(),
                 walker_diagnostics: Arc::from([]),
                 cache_suppress: true,
                 result_is_partial: true,
             },
-        );
+            reason: crate::cache_runtime::NonAdmissionReason::PartialResult,
+        };
     }
     let dispatch_dep_signature = dep_signature_from_fence(local_fence.clone());
     match materialize_structure_read_set(&local_fence, base_origin_self_root) {
@@ -653,9 +649,8 @@ fn finish_materialize_admission(
             // validator could not soundly check. `ReturnOnly` is
             // non-shareable — cooperative joiners fork + cold-recompute
             // for their own view.
-            let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(reason);
-            crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
-                crate::semantic_query::CacheRead {
+            crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+                value: crate::semantic_query::CacheRead {
                     value: outcome,
                     dep_signature: empty_signature(),
                     walker_diagnostics: Arc::from([]),
@@ -669,7 +664,8 @@ fn finish_materialize_admission(
                     result_is_partial: crate::request_context::current_cold_compute_completeness()
                         .is_partial(),
                 },
-            )
+                reason,
+            }
         }
     }
 }
@@ -1493,213 +1489,6 @@ pub(crate) fn materialize_component_meta_structure(
         )
     };
 
-    // Wrap the cooperative-admission compute closure with
-    // `install_fact_tracer`. On `FactReadSetFinalise::Ok`, override
-    // the entry's `read_set_signature.facts` rail with the traced
-    // observation set (the producer's authoritative R28 signature).
-    // On `FactReadSetFinalise::Overflow`, the materialised outcome is
-    // still valid — only the path-precise signature is too large to
-    // admit safely. Route the value through `ComputeAdmission::ReturnOnly`:
-    // the winner receives the valid outcome, but it is non-shareable —
-    // cooperative joiners fork + cold-recompute for their own view. The
-    // cache stays empty so the next request cold-recomputes.
-    let host = ctx.host_for_fact_tracer_install();
-    let compute = {
-        let provenance = Arc::clone(&host.provenance);
-        move || -> crate::cache_runtime::singleflight::ComputeAdmission<
-            crate::semantic_query::CacheRead<MaterializeOutcome>,
-            MaterializeStructureEntry,
-        > {
-            // Per-cold-compute completeness scope: this cold
-            // compute admits into the SHARED `MaterializeStructureDb`
-            // (reused across consumers via R7 cross-owner reuse), so the
-            // entry must carry its OWN completeness — the partiality of
-            // THIS compute's contributing reads, NOT a request-global
-            // proxy that would let one consumer's partial poison a sibling
-            // consumer's complete entry. The scope covers both the inner
-            // compute (its child `observe_*` folds in) and the wrapper's
-            // re-publish gates below; single-threaded by construction
-            // (the singleflight winner's thread).
-            let _completeness_scope =
-                crate::request_context::ColdComputeCompletenessScope::enter();
-            let (admission, finalise, non_cacheable_read_observed) =
-                crate::fact_signature_helpers::install_fact_tracer(host, compute);
-            provenance
-                .materialize_structure_fact_tracer_installs
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // ReturnOnly never publishes — fenced-serve arm. A compute
-            // whose traced scope consumed a FENCED (ReturnOnly)
-            // IndexedReady serve derived its value from a
-            // served-without-publication artifact while its fact rail
-            // validates against the live view. Convert a Cacheable
-            // outcome to ReturnOnly (value served, entry never
-            // admitted) — same shape as the Overflow arm below.
-            if non_cacheable_read_observed {
-                return match admission {
-                    crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry) => {
-                        let result_is_partial =
-                            crate::cache_runtime::refuse_result_cache_admission_if_partial(
-                                crate::request_context::current_cold_compute_completeness()
-                                    .is_partial(),
-                            );
-                        let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
-                            if result_is_partial {
-                                crate::cache_runtime::NonAdmissionReason::PartialResult
-                            } else {
-                                crate::cache_runtime::NonAdmissionReason::GenerationSuperseded
-                            },
-                        );
-                        crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
-                            crate::semantic_query::CacheRead {
-                                value: entry.outcome,
-                                dep_signature: empty_signature(),
-                                walker_diagnostics: Arc::from([]),
-                                cache_suppress: true,
-                                result_is_partial,
-                            },
-                        )
-                    }
-                    other => other,
-                };
-            }
-            match finalise {
-                crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
-                    match admission {
-                        crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry)
-                            if crate::cache_runtime::refuse_result_cache_admission_if_partial(
-                                crate::request_context::current_cold_compute_completeness()
-                                    .is_partial(),
-                            ) =>
-                        {
-                            // Defensive wrapper gate. A genuine partial
-                            // folded into this cold compute's completeness
-                            // scope DURING the fact-tracer install window
-                            // (after `finish_materialize_admission` returned
-                            // `Cacheable`) must still refuse the
-                            // wrapper-level re-publish. Route the valid
-                            // outcome through `ReturnOnly` with
-                            // `result_is_partial = true` so it never warms.
-                            let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
-                                crate::cache_runtime::NonAdmissionReason::PartialResult,
-                            );
-                            crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
-                                crate::semantic_query::CacheRead {
-                                    value: entry.outcome,
-                                    dep_signature: empty_signature(),
-                                    walker_diagnostics: Arc::from([]),
-                                    cache_suppress: true,
-                                    result_is_partial: true,
-                                },
-                            )
-                        }
-                        crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(mut entry) => {
-                            // Merge the tracer's authoritative
-                            // observation set ON TOP of the producer
-                            // carrier's observed self-roots — the
-                            // base-origin self-root leads, the traced
-                            // facts follow (deduped against the
-                            // self-roots). Replacing the rail wholesale
-                            // would drop the observed self-roots the
-                            // warm-read validator checks strictly. A
-                            // torn read (traced self-root hash
-                            // disagrees with the observed one) routes
-                            // the value through `ReturnOnly`.
-                            match merge_traced_facts_into_materialize_carrier(
-                                &entry.read_set_signature.facts,
-                                &entry.self_root_canonicals,
-                                &fact_dep_signature,
-                            ) {
-                                Some(merged) => {
-                                    // Re-build the fact carrier with the
-                                    // merged traced facts. The entry's
-                                    // `dispatch_dep_signature` is the
-                                    // dispatch-return rail — untouched.
-                                    entry.read_set_signature =
-                                        crate::fact_signature_helpers::ReadSetSignature::new(
-                                            merged,
-                                        );
-                                    crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-                                        entry,
-                                    )
-                                }
-                                None => {
-                                    // The traced self-root facts torn
-                                    // against the observed self-roots
-                                    // — the value is valid but the
-                                    // signature cannot be rooted
-                                    // strictly. Route through
-                                    // `ReturnOnly` with the
-                                    // `SelfRootConflict` reason.
-                                    let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
-                                        crate::cache_runtime::NonAdmissionReason::SelfRootConflict,
-                                    );
-                                    crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
-                                        self_root_conflict_return_only(entry.outcome),
-                                    )
-                                }
-                            }
-                        }
-                        other => other,
-                    }
-                }
-                crate::resolver_core::FactReadSetFinalise::Overflow => {
-                    provenance
-                        .materialize_structure_overflow_refusals
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    // Tracer overflowed — the materialised outcome is
-                    // valid but cannot be admitted safely. Convert a
-                    // Cacheable outcome to ReturnOnly: the winner
-                    // receives the value without admitting the entry.
-                    // ReturnOnly is non-shareable — cooperative joiners
-                    // fork + cold-recompute for their own view.
-                    // Pre-existing ReturnOnly (intrinsically
-                    // non-cacheable) passes through unchanged.
-                    match admission {
-                        crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry) => {
-                            // Defensive wrapper gate (overflow arm). A
-                            // genuine partial in this cold compute's
-                            // completeness scope takes precedence over the
-                            // benign signature-overflow reason: preserve
-                            // `result_is_partial = scope partiality` so a
-                            // partial that also overflowed never warms.
-                            let result_is_partial =
-                                crate::cache_runtime::refuse_result_cache_admission_if_partial(
-                                    crate::request_context::current_cold_compute_completeness()
-                                        .is_partial(),
-                                );
-                            let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
-                                if result_is_partial {
-                                    crate::cache_runtime::NonAdmissionReason::PartialResult
-                                } else {
-                                    crate::cache_runtime::NonAdmissionReason::SignatureOverflow
-                                },
-                            );
-                            crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
-                                crate::semantic_query::CacheRead {
-                                    value: entry.outcome,
-                                    dep_signature: empty_signature(),
-                                    walker_diagnostics: Arc::from([]),
-                                    // Signature-overflow = benign non-cacheable
-                                    // COMPLETE per the two-signal model: ReturnOnly
-                                    // already gates inner-memo admission, but
-                                    // cache_suppress carries the non-cacheability
-                                    // signal consistently with the Tainted /
-                                    // self-root-refusal ReturnOnly arms above —
-                                    // result_is_partial defensively tracks the
-                                    // sticky: a complete-but-overflowed value
-                                    // stays false; a genuine partial that also
-                                    // overflowed stays true so it never warms.
-                                    cache_suppress: true,
-                                    result_is_partial,
-                                },
-                            )
-                        }
-                        other => other,
-                    }
-                }
-            }
-        }
-    };
     match cache_key {
         Some(cache_key) => {
             // Canonical-keyed subject: route the cold materialisation
@@ -1748,7 +1537,209 @@ pub(crate) fn materialize_component_meta_structure(
             // no-under-root invariant). No DB peek/publish and no
             // singleflight: an anonymous node was going to recompute anyway,
             // and nothing is shared.
-            run_uncached_materialisation(compute(), key.base)
+            run_uncached_materialisation(trace_materialize_compute(ctx, compute), key.base)
+        }
+    }
+}
+
+/// Execute a complete materialize cold compute inside an owner-controlled
+/// fact-tracing and completeness scope, then lower the finalised evidence
+/// to a typed admission outcome. Cached callers invoke this only from
+/// `MaterializeStructureDb`; the uncached anonymous-subject lane reuses the
+/// same evidence policy without exposing a storage mutator.
+pub(crate) fn trace_materialize_compute<F>(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    compute: F,
+) -> crate::cache_runtime::singleflight::ComputeAdmission<
+    crate::semantic_query::CacheRead<MaterializeOutcome>,
+    MaterializeStructureEntry,
+>
+where
+    F: FnOnce() -> crate::cache_runtime::singleflight::ComputeAdmission<
+        crate::semantic_query::CacheRead<MaterializeOutcome>,
+        MaterializeStructureEntry,
+    >,
+{
+    let host = ctx.host_for_fact_tracer_install();
+    let provenance = Arc::clone(&host.provenance);
+    // Per-cold-compute completeness scope: this cold
+    // compute admits into the SHARED `MaterializeStructureDb`
+    // (reused across consumers via R7 cross-owner reuse), so the
+    // entry must carry its OWN completeness — the partiality of
+    // THIS compute's contributing reads, NOT a request-global
+    // proxy that would let one consumer's partial poison a sibling
+    // consumer's complete entry. The scope covers both the inner
+    // compute (its child `observe_*` folds in) and the wrapper's
+    // re-publish gates below; single-threaded by construction
+    // (the singleflight winner's thread).
+    let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
+    let (admission, finalise) = crate::fact_signature_helpers::install_fact_tracer(host, compute);
+    provenance
+        .materialize_structure_fact_tracer_installs
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // ReturnOnly never publishes — fenced-serve arm. A compute
+    // whose traced scope consumed a FENCED (ReturnOnly)
+    // IndexedReady serve derived its value from a
+    // served-without-publication artifact while its fact rail
+    // validates against the live view. Convert a Cacheable
+    // outcome to ReturnOnly (value served, entry never
+    // admitted) — same shape as the Overflow arm below.
+    if matches!(
+        &finalise,
+        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+    ) {
+        return match admission {
+            crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry) => {
+                let result_is_partial =
+                    crate::cache_runtime::refuse_result_cache_admission_if_partial(
+                        crate::request_context::current_cold_compute_completeness().is_partial(),
+                    );
+                let reason = if result_is_partial {
+                    crate::cache_runtime::NonAdmissionReason::PartialResult
+                } else {
+                    crate::cache_runtime::NonAdmissionReason::GenerationSuperseded
+                };
+                crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+                    value: crate::semantic_query::CacheRead {
+                        value: entry.outcome,
+                        dep_signature: empty_signature(),
+                        walker_diagnostics: Arc::from([]),
+                        cache_suppress: true,
+                        result_is_partial,
+                    },
+                    reason,
+                }
+            }
+            other => other,
+        };
+    }
+    match finalise {
+        crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
+            match admission {
+                crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry)
+                    if crate::cache_runtime::refuse_result_cache_admission_if_partial(
+                        crate::request_context::current_cold_compute_completeness().is_partial(),
+                    ) =>
+                {
+                    // Defensive wrapper gate. A genuine partial
+                    // folded into this cold compute's completeness
+                    // scope DURING the fact-tracer install window
+                    // (after `finish_materialize_admission` returned
+                    // `Cacheable`) must still refuse the
+                    // wrapper-level re-publish. Route the valid
+                    // outcome through `ReturnOnly` with
+                    // `result_is_partial = true` so it never warms.
+                    crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+                        value: crate::semantic_query::CacheRead {
+                            value: entry.outcome,
+                            dep_signature: empty_signature(),
+                            walker_diagnostics: Arc::from([]),
+                            cache_suppress: true,
+                            result_is_partial: true,
+                        },
+                        reason: crate::cache_runtime::NonAdmissionReason::PartialResult,
+                    }
+                }
+                crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(mut entry) => {
+                    // Merge the tracer's authoritative
+                    // observation set ON TOP of the producer
+                    // carrier's observed self-roots — the
+                    // base-origin self-root leads, the traced
+                    // facts follow (deduped against the
+                    // self-roots). Replacing the rail wholesale
+                    // would drop the observed self-roots the
+                    // warm-read validator checks strictly. A
+                    // torn read (traced self-root hash
+                    // disagrees with the observed one) routes
+                    // the value through `ReturnOnly`.
+                    match merge_traced_facts_into_materialize_carrier(
+                        &entry.read_set_signature.facts,
+                        &entry.self_root_canonicals,
+                        &fact_dep_signature,
+                    ) {
+                        Some(merged) => {
+                            // Re-build the fact carrier with the
+                            // merged traced facts. The entry's
+                            // `dispatch_dep_signature` is the
+                            // dispatch-return rail — untouched.
+                            entry.read_set_signature =
+                                crate::fact_signature_helpers::ReadSetSignature::new(merged);
+                            crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry)
+                        }
+                        None => {
+                            // The traced self-root facts torn
+                            // against the observed self-roots
+                            // — the value is valid but the
+                            // signature cannot be rooted
+                            // strictly. Route through
+                            // `ReturnOnly` with the
+                            // `SelfRootConflict` reason.
+                            crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+                                value: self_root_conflict_return_only(entry.outcome),
+                                reason: crate::cache_runtime::NonAdmissionReason::SelfRootConflict,
+                            }
+                        }
+                    }
+                }
+                other => other,
+            }
+        }
+        crate::resolver_core::FactReadSetFinalise::NonCacheable(_) => {
+            unreachable!("non-cacheable finalise returned above before cache admission")
+        }
+        crate::resolver_core::FactReadSetFinalise::Overflow => {
+            provenance
+                .materialize_structure_overflow_refusals
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Tracer overflowed — the materialised outcome is
+            // valid but cannot be admitted safely. Convert a
+            // Cacheable outcome to ReturnOnly: the winner
+            // receives the value without admitting the entry.
+            // ReturnOnly is non-shareable — cooperative joiners
+            // fork + cold-recompute for their own view.
+            // Pre-existing ReturnOnly (intrinsically
+            // non-cacheable) passes through unchanged.
+            match admission {
+                crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry) => {
+                    // Defensive wrapper gate (overflow arm). A
+                    // genuine partial in this cold compute's
+                    // completeness scope takes precedence over the
+                    // benign signature-overflow reason: preserve
+                    // `result_is_partial = scope partiality` so a
+                    // partial that also overflowed never warms.
+                    let result_is_partial =
+                        crate::cache_runtime::refuse_result_cache_admission_if_partial(
+                            crate::request_context::current_cold_compute_completeness()
+                                .is_partial(),
+                        );
+                    let reason = if result_is_partial {
+                        crate::cache_runtime::NonAdmissionReason::PartialResult
+                    } else {
+                        crate::cache_runtime::NonAdmissionReason::SignatureOverflow
+                    };
+                    crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+                        value: crate::semantic_query::CacheRead {
+                            value: entry.outcome,
+                            dep_signature: empty_signature(),
+                            walker_diagnostics: Arc::from([]),
+                            // Signature-overflow = benign non-cacheable
+                            // COMPLETE per the two-signal model: ReturnOnly
+                            // already gates inner-memo admission, but
+                            // cache_suppress carries the non-cacheability
+                            // signal consistently with the Tainted /
+                            // self-root-refusal ReturnOnly arms above —
+                            // result_is_partial defensively tracks the
+                            // sticky: a complete-but-overflowed value
+                            // stays false; a genuine partial that also
+                            // overflowed stays true so it never warms.
+                            cache_suppress: true,
+                            result_is_partial,
+                        },
+                        reason,
+                    }
+                }
+                other => other,
+            }
         }
     }
 }
@@ -1784,7 +1775,7 @@ fn run_uncached_materialisation(
             cache_suppress: true,
             result_is_partial: false,
         },
-        ComputeAdmission::ReturnOnly(read) => read,
+        ComputeAdmission::ReturnOnly { value: read, .. } => read,
         ComputeAdmission::Failed => crate::semantic_query::CacheRead {
             value: MaterializeOutcome::Tainted(fallback_base),
             dep_signature: empty_signature(),

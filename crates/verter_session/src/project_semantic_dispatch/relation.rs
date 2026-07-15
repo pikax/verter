@@ -1,7 +1,7 @@
 //! Relation engine for semantic-node assignability.
 //!
 //! The authoritative relation engine on the semantic graph. Results memoise
-//! through [`SemanticGraphStore::insert_relation`] /
+//! through [`SemanticGraphStore::compute_relation_and_admit`] /
 //! [`SemanticGraphStore::get_relation`] keyed by the FULL relation identity
 //! [`crate::semantic_query::RelateMemoKey`] (source / target / relation kind /
 //! policy / source freshness / inference context / env+substitution+
@@ -106,8 +106,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Relate `source` against `target`. Returns the tri-state
     /// relation judgement as a [`RelationResult`].
     ///
-    /// All three outcomes memoise with dep-signature fencing via
-    /// [`SemanticGraphStore::insert_relation`]. Warm hits short-circuit
+    /// All three outcomes memoise with store-owned tracing and dep-signature
+    /// fencing via [`SemanticGraphStore::compute_relation_and_admit`]. Warm hits short-circuit
     /// before the decision table runs.
     pub(crate) fn relate_nodes(
         &self,
@@ -170,10 +170,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // below. The RAII guard pops the frame on panic / early-return too
         // (panic-safe pop), so an unwinding relation compute never leaks a
         // stale frame onto the stack.
-        let taint_guard =
-            crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&self.build_local_taint);
-        let (result, finalise, non_cacheable_read_observed) =
-            crate::fact_signature_helpers::install_fact_tracer(host, || {
+        let (result, _relation_build_local) = graph.compute_relation_and_admit(
+            self.ctx,
+            key.clone(),
+            || {
+                let taint_guard = crate::project_semantic_dispatch::BuildLocalTaintGuard::push(
+                    &self.build_local_taint,
+                );
                 // Test-only fact-injection hook. When the host's per-host
                 // `relation_force_overflow_observations` knob is non-zero, emit
                 // that many synthetic `FileWholeHash` observations onto the active
@@ -193,99 +196,43 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         );
                     }
                 }
-                if enter_relation_guard(&key) {
+                let result = if enter_relation_guard(&key) {
                     let mut bindings: Vec<InferBinding> = Vec::new();
-                    let r = self.decide_relation_with_dispatch(source, target, &mut bindings);
+                    let result = self.decide_relation_with_dispatch(source, target, &mut bindings);
                     exit_relation_guard(&key);
-                    r
+                    result
                 } else {
                     RelationResult::Unknown
+                };
+                let relation_build_local = taint_guard.finish();
+                if relation_build_local.result_is_partial || relation_build_local.cache_suppress {
+                    self.fold_into_top_build_local_taint(
+                        relation_build_local.result_is_partial,
+                        relation_build_local.cache_suppress,
+                    );
                 }
-            });
-        // Pop this relation's cold-build-local taint frame. If a nested
-        // identity-carrier `Instantiate` unwrap surfaced a PARTIAL or
-        // non-cacheable read, the shared read boundary folded it here.
-        // Bubble that taint into any enclosing build's frame (so the outer
-        // build also refuses memo admission), and use it below to refuse the
-        // relation-memo insert for a partial/non-cacheable-derived `Unknown`.
-        let relation_build_local = taint_guard.finish();
-        // After the pop, the new stack top (if any) is the ENCLOSING build's
-        // frame; folding here bubbles this relation's partiality/non-cacheability
-        // outward so the outer build also refuses memo admission.
-        if relation_build_local.result_is_partial || relation_build_local.cache_suppress {
-            self.fold_into_top_build_local_taint(
-                relation_build_local.result_is_partial,
-                relation_build_local.cache_suppress,
-            );
-        }
-        // ReturnOnly never publishes — fenced-serve arm: a judgement
-        // whose traced scope consumed a FENCED (ReturnOnly) serve was
-        // derived from a served-without-publication artifact; return it
-        // to the caller, refuse relation-memo admission.
-        if non_cacheable_read_observed {
-            return (result, fence);
-        }
-        // Overflowed read-set: the judgement is returned to the caller but
-        // refused memo admission — the dependency fence cannot be
-        // represented — matching the cooperative cold-build contract.
-        let traced_facts: &[crate::resolver_core::FactVersionRef] = match &finalise {
-            crate::resolver_core::FactReadSetFinalise::Ok(facts) => facts,
-            crate::resolver_core::FactReadSetFinalise::Overflow => return (result, fence),
-        };
-        // Relation-memo non-admission: a relation `Unknown` (or any
-        // judgement) that arose from a PARTIAL nested read — OR from a
-        // nested read that was merely non-cacheable (`cache_suppress`) —
-        // must NOT be admitted to the relation memo. A partial launders as
-        // a cacheable judgement that a later identical relation check
-        // warm-replays as complete; a non-cacheable nested read means the
-        // judgement's own dependency fence cannot be soundly represented in
-        // the relation memo, so the relation entry must likewise refuse
-        // admission (the defensive OR — same rule the semantic family memo
-        // applies: refuse `cache_suppress || result_is_partial`). The taint
-        // was folded into this relation's build-local frame by the shared
-        // read boundary (`execute_via_cold_build_helper`) for every nested
-        // identity-carrier `Instantiate` unwrap.
-        //
-        // TODO(follow-up): the relation collapses this partial-derived
-        // outcome to a bare `RelationResult::Unknown` (the identity-carrier
-        // unwrap returns `Unresolvable` on the budget-tripped `Instantiate`).
-        // §5 carries forward a richer public relation outcome — a
-        // `RelationResult::BudgetExceeded` payload carrying the partial /
-        // proof so callers can distinguish a genuine non-relation from a
-        // budget-collapsed one. NOT required for cache-poisoning closure
-        // (the partial is already correctly refused admission here); tracked
-        // separately.
-        if relation_build_local.result_is_partial || relation_build_local.cache_suppress {
-            return (result, fence);
-        }
-        // Self-version rooting: the relation judgement depends on the
-        // `source` and `target` node surfaces plus the transitive facts
-        // traced above — root the memo entry on the file content version
-        // each file-derived input was lowered from and merge the traced
-        // cross-file facts. A `None` carrier (a torn / conflicting self-root
-        // observation, or a traced `FileWholeHash` that disagrees with the
-        // observed self-root) makes the judgement non-cacheable: it is
-        // returned to the caller but not admitted to the relation memo.
-        let observed_self_roots = self.observed_self_roots_from_nodes([source, target]);
-        let mut self_root_canonicals: Vec<std::sync::Arc<str>> =
-            Vec::with_capacity(observed_self_roots.len());
-        for (canonical, _) in observed_self_roots.iter() {
-            if !self_root_canonicals.iter().any(|c| c == canonical) {
-                self_root_canonicals.push(std::sync::Arc::clone(canonical));
-            }
-        }
-        if let Some(carrier) = crate::semantic_query_memo::semantic_graph_read_set_signature(
-            &observed_self_roots,
-            traced_facts,
-        ) {
-            graph.insert_relation(
-                key,
-                carrier,
-                std::sync::Arc::from(self_root_canonicals),
-                result.clone(),
-                validated_at_generation,
-            );
-        }
+                (result, relation_build_local)
+            },
+            |(result, relation_build_local)| {
+                if relation_build_local.result_is_partial {
+                    return crate::semantic_query_memo::RelationPublishDecision::return_only(
+                        crate::cache_runtime::NonAdmissionReason::PartialResult,
+                    );
+                }
+                if relation_build_local.cache_suppress {
+                    return crate::semantic_query_memo::RelationPublishDecision::return_only(
+                        crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
+                    );
+                }
+                crate::semantic_query_memo::RelationPublishDecision::publish(
+                    self.observed_self_roots_from_nodes([source, target]),
+                    result.clone(),
+                    validated_at_generation,
+                )
+            },
+        );
+        // The store owns evidence finalisation and the only production write;
+        // the relation engine supplies only the computed value and self-roots.
         (result, fence)
     }
 

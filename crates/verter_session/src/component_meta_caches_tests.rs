@@ -140,6 +140,124 @@ defineProps<{ msg: string; count: number }>()
         .unwrap();
 }
 
+#[test]
+fn component_meta_owner_scope_refuses_only_the_final_publication_then_heals() {
+    let project = make_project();
+    upsert_simple_props_fixture(&project);
+    let session = project.open_session_batch().unwrap();
+    let host = session.host();
+    let mode = crate::types::ProjectionMode::Expanded;
+    let canonical = host.resolve_alias_or_canonical("/Simple.vue");
+    let view = HostViewRef::new(host);
+    let request_host = ViewBoundRequestHost {
+        host,
+        view: &view,
+        overlay: Arc::new(CanonicalCompletionOverlay::new()),
+    };
+    let key = request_host.cache_key(&canonical, mode);
+    let singleflight = host.resolver_runtime().component_meta.singleflight();
+    let recomputes_before = host
+        .provenance()
+        .component_meta_resolved_state_recomputes
+        .load(Relaxed);
+
+    // Target ONLY the outer component-meta owner scope. Nested producers do
+    // not claim this named one-shot and therefore remain ordinarily
+    // cacheable; the test discriminates the request-level refusal rail from
+    // any inner cache's independent admission policy.
+    crate::host_test_force::arm_fact_tracer_overflow_once(
+        crate::host_test_force::TracerScope::ComponentMetaRequest,
+        crate::resolver_core::FACT_SIGNATURE_CAP + 1,
+    );
+    let first = run_component_meta_request(
+        &request_host,
+        singleflight,
+        &canonical,
+        mode,
+        None,
+        crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS,
+    );
+
+    assert!(
+        first.value.is_some(),
+        "the cache-refused value remains returnable"
+    );
+    assert_eq!(
+        first.completeness,
+        crate::semantic_query::ResultCompleteness::Complete,
+        "targeted cache refusal must not masquerade as structural partiality"
+    );
+    assert_eq!(
+        first.source,
+        RequestSource::Flight {
+            role: SingleflightRole::Leader,
+            forked_lane: false,
+        },
+        "the targeted first request must execute the cold leader path"
+    );
+    assert!(
+        host.resolver_runtime()
+            .component_meta
+            .candidate_signatures_for_key(&key)
+            .is_empty(),
+        "the owner-scoped overflow must block the final resolved-meta publication"
+    );
+
+    // The one-shot is consumed. A second request must cold-compute and
+    // publish normally, proving the first refusal was not retained as a
+    // joinable rendezvous or sticky degraded cache entry.
+    let second = run_component_meta_request(
+        &request_host,
+        singleflight,
+        &canonical,
+        mode,
+        None,
+        crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS,
+    );
+    assert_eq!(
+        second.source,
+        RequestSource::Flight {
+            role: SingleflightRole::Leader,
+            forked_lane: false,
+        },
+        "the request after a cache refusal must heal via a fresh cold leader"
+    );
+    assert_eq!(
+        host.resolver_runtime()
+            .component_meta
+            .candidate_signatures_for_key(&key)
+            .len(),
+        1,
+        "the healed complete request must publish exactly one candidate"
+    );
+    assert_eq!(
+        host.provenance()
+            .component_meta_resolved_state_recomputes
+            .load(Relaxed)
+            - recomputes_before,
+        2,
+        "the refused request and the healing request must each compute once"
+    );
+
+    let third = run_component_meta_request(
+        &request_host,
+        singleflight,
+        &canonical,
+        mode,
+        None,
+        crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS,
+    );
+    assert_eq!(third.source, RequestSource::Cache);
+    assert_eq!(
+        host.provenance()
+            .component_meta_resolved_state_recomputes
+            .load(Relaxed)
+            - recomputes_before,
+        2,
+        "the healed candidate must serve the next request warm"
+    );
+}
+
 fn time_ns<F: FnOnce()>(f: F) -> u128 {
     let start = Instant::now();
     f();
@@ -298,16 +416,15 @@ impl<'a> ComponentMetaRequestHost for GatingRequestHost<'a> {
         self.inner.cache_key(canonical, mode)
     }
 
-    fn snapshot_store_view(&self) -> Self::View {
-        self.inner.snapshot_store_view()
-    }
-
     fn snapshot_store_view_read(&self) -> (Self::View, bool) {
         self.inner.snapshot_store_view_read()
     }
 
-    fn resolution_is_partial(&self, result: &Self::Resolution) -> bool {
-        self.inner.resolution_is_partial(result)
+    fn resolution_completeness(
+        &self,
+        result: &Self::Resolution,
+    ) -> crate::semantic_query::ResultCompleteness {
+        self.inner.resolution_completeness(result)
     }
 
     fn current_view_supersession_fingerprint(&self) -> u64 {
@@ -340,7 +457,7 @@ impl<'a> ComponentMetaRequestHost for GatingRequestHost<'a> {
         captured: Option<&Self::CapturedInputs>,
         store_view: Option<&Self::View>,
         base_is_current: bool,
-    ) -> Option<Self::Resolution> {
+    ) -> crate::resolver_core::ComponentMetaComputeOutcome<Self::Resolution> {
         // Only the elected Leader reaches `compute`; Followers join the
         // in-flight lane and never call this. Signal entry, then park
         // until the test releases the gate, THEN run the real compute.
@@ -459,7 +576,7 @@ fn concurrent_demand_for_same_meta_key_collapses_to_one_compute() {
         overlay: Arc::new(CanonicalCompletionOverlay::new()),
     };
     let key = probe_host.cache_key(&canonical, mode);
-    let token = probe_host.snapshot_store_view().compat_token();
+    let token = probe_host.snapshot_store_view_read().0.compat_token();
 
     let sf = host.resolver_runtime().component_meta.singleflight();
     let gate = Arc::new(LeaderGate::new());
@@ -1292,14 +1409,14 @@ fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
         fn cache_key(&self, canonical: &str, mode: Self::Mode) -> ResolutionNodeKey {
             self.inner.cache_key(canonical, mode)
         }
-        fn snapshot_store_view(&self) -> Self::View {
-            self.inner.snapshot_store_view()
-        }
         fn snapshot_store_view_read(&self) -> (Self::View, bool) {
             self.inner.snapshot_store_view_read()
         }
-        fn resolution_is_partial(&self, result: &Self::Resolution) -> bool {
-            self.inner.resolution_is_partial(result)
+        fn resolution_completeness(
+            &self,
+            result: &Self::Resolution,
+        ) -> crate::semantic_query::ResultCompleteness {
+            self.inner.resolution_completeness(result)
         }
         fn current_view_supersession_fingerprint(&self) -> u64 {
             self.inner.current_view_supersession_fingerprint()
@@ -1333,7 +1450,7 @@ fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
             captured: Option<&Self::CapturedInputs>,
             store_view: Option<&Self::View>,
             base_is_current: bool,
-        ) -> Option<Self::Resolution> {
+        ) -> crate::resolver_core::ComponentMetaComputeOutcome<Self::Resolution> {
             let before = HOST_STORE_VIEW_FROM_HOST_BUILDS.with(std::cell::Cell::get);
             let result = self.inner.compute_component_meta(
                 canonical,

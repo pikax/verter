@@ -60,7 +60,7 @@ fn member_shape_peek_or_compute_peeks_cache_before_node_gates() {
     let body = fn_body_slice(&content, "fn member_shape_peek_or_compute(");
 
     let peek_idx = body
-        .find("cache.peek(&key")
+        .find("scope.peek(&key")
         .expect("guard: `member_shape_peek_or_compute` MUST peek the `ShapeCacheDb` slot.");
     let route_gate_idx = body
         .find("node_package_backed_object_like_root_with_fence(")

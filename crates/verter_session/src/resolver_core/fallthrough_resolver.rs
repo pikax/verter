@@ -5,20 +5,11 @@
 //! where cache keys are based on component identity + override identity
 //! (not symbol identity).
 //!
-//! # Cross-Subsystem Cycle Safety
-//!
-//! Fallthrough resolution may trigger symbol resolution (to expand a child
-//! component's type surface) and symbol resolution may trigger fallthrough
-//! resolution (to compute accepted surfaces). Both subsystems share a single
-//! [`crate::resolver_core::symbol_resolver::ResolveContext`] per root request,
-//! which carries tagged recursion stacks for both subsystems. This prevents
-//! deadlock and false cycle cuts.
-
 use std::sync::Arc;
 
 use crate::resolver_core::{
-    FactVersionRef, FallthroughNodeKey, FallthroughOverrideIdentity, ResolverCounters,
-    ResolverDiagnostic, StoreView, ValidatedFactCache,
+    FactVersionRef, FallthroughNodeKey, FallthroughOverrideIdentity, ResolverContext,
+    ResolverCounters, ResolverDiagnostic, StoreView, ValidatedFactCache,
 };
 use verter_semantic::analysis::component_meta::{
     AcceptedEventAnalysis, AcceptedPropAnalysis, AcceptedSurfaceCompleteness, FallthroughSurface,
@@ -210,19 +201,66 @@ impl FallthroughResolverState {
         None
     }
 
-    /// Warm the fallthrough node cache with `result`.
+    /// Run a fallthrough-node producer inside the cache owner's complete
+    /// cacheability and supersession fence, then admit the optional candidate.
     ///
-    /// `probe` is the [`CacheabilityProbe`](crate::fact_signature_helpers::CacheabilityProbe)
-    /// of the cacheability tracer scope that ENCLOSES the compute which
-    /// produced `result`. It cannot be forged — `with_cacheability_scope` is
-    /// its only constructor — so an untraced producer cannot reach this funnel
-    /// at all.
+    /// The producer returns its caller-visible value separately from the cache
+    /// candidate so a refused admission is still served.  The owner captures
+    /// the external-supersession fingerprint before the compute and rechecks it
+    /// after the compute; a result built across an epoch/project/env/identity
+    /// transition is therefore return-only.  No caller-supplied probe or raw
+    /// write surface is involved.
+    pub(crate) fn compute_and_maybe_admit<R>(
+        &self,
+        ctx: &dyn ResolverContext,
+        compute: impl FnOnce() -> (R, Option<(FallthroughNodeKey, FallthroughNodeResult)>),
+    ) -> R {
+        let host = ctx.host_for_fact_tracer_install();
+        let supersession_before = host.current_external_supersession_fingerprint();
+        let ((value, candidate), non_cacheable) =
+            crate::fact_signature_helpers::with_cacheability_scope(host, |_probe| compute());
+
+        if !non_cacheable && host.current_external_supersession_fingerprint() == supersession_before
+        {
+            if let Some((key, result)) = candidate {
+                self.insert_admissible_node(key, result);
+            }
+        }
+
+        value
+    }
+
+    fn insert_admissible_node(&self, key: FallthroughNodeKey, result: FallthroughNodeResult) {
+        if !key.is_cacheable() {
+            return;
+        }
+        if crate::cache_runtime::refuse_result_cache_admission_if_partial(
+            crate::request_context::current_cold_compute_completeness().is_partial(),
+        ) {
+            return;
+        }
+        // An empty validated-fact signature is true for every future view.
+        // The intrinsic surface is the sole exception: its key carries the
+        // project cache generation that changes with its source registry.
+        // Consumed bindings have no such version axis and must recompute until
+        // their producer supplies a real fact root.
+        if !result.facts.is_empty()
+            || matches!(result.value, FallthroughNodeValue::IntrinsicSurface(_))
+        {
+            self.cache.insert(key, result.clone(), result.facts.clone());
+        }
+    }
+
+    /// Admit a node produced by the stable request owner.
+    ///
+    /// `admission` is sealed evidence minted by the stable request owner after
+    /// the owner-opened cacheability scope enclosed the compute.
     ///
     /// THREE independent no-poison rails, all fail-closed:
     ///
     /// 1. **uncacheable key** — an override-bearing key whose identity is
     ///    `Uncacheable` would alias two genuinely-different override sets.
-    /// 2. **non-cacheable compute** (`probe.non_cacheable()`) — the compute
+    /// 2. **non-cacheable compute** (`admission.non_cacheable()`) — the compute
     ///    consumed a FENCED (ReturnOnly, `store_published == false`) serve, a
     ///    broken decl-body lease, an unrootable import route, or an
     ///    unobservable contributor source env; or its observation set
@@ -236,32 +274,16 @@ impl FallthroughResolverState {
     ///    cold-compute completeness scope. The typed completeness signal is the
     ///    no-poison rail shared with the component-meta materialiser, not a
     ///    fallthrough-private predicate.
-    pub fn store_node(
+    pub(crate) fn admit_stable_node(
         &self,
         key: FallthroughNodeKey,
         result: FallthroughNodeResult,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        admission: &crate::resolver_core::FallthroughStableAdmission<'_>,
     ) {
-        if !key.is_cacheable() {
+        if admission.non_cacheable() {
             return;
         }
-        if probe.non_cacheable() {
-            return;
-        }
-        if crate::cache_runtime::refuse_result_cache_admission_if_partial(
-            crate::request_context::current_cold_compute_completeness().is_partial(),
-        ) {
-            return;
-        }
-        if !result.facts.is_empty()
-            || matches!(
-                result.value,
-                FallthroughNodeValue::IntrinsicSurface(_)
-                    | FallthroughNodeValue::ConsumedBindings(_)
-            )
-        {
-            self.cache.insert(key, result.clone(), result.facts.clone());
-        }
+        self.insert_admissible_node(key, result);
     }
 }
 
@@ -314,36 +336,111 @@ pub fn consumed_bindings_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolver_core::symbol_resolver::ResolveContext;
+
+    fn cacheable_root_node(canonical: &str, hash: u8) -> FallthroughNodeResult {
+        FallthroughNodeResult {
+            value: FallthroughNodeValue::RootFollow(RootFollowResult::default()),
+            facts: vec![FactVersionRef::FileWholeHash {
+                canonical_id: canonical.to_string(),
+                hash: [hash; 16],
+            }],
+            diagnostics: Vec::new(),
+        }
+    }
 
     #[test]
-    fn cross_subsystem_visiting_sets_are_independent() {
-        let mut ctx = ResolveContext::new();
+    fn owner_compute_scope_admits_control_and_refuses_transitive_hazard() {
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        let counters = Arc::new(ResolverCounters::default());
+        let state = FallthroughResolverState::new(counters);
+        let canonical = "/src/Child.vue";
+        let key = root_follow_key(canonical, FallthroughOverrideIdentity::NoOverrides, false);
 
-        let symbol_key = crate::resolver_core::ResolutionNodeKey {
-            symbol_id: "/src/types.ts#Props".to_string(),
-            node_kind: crate::resolver_core::ResolutionNodeKind::SymbolExpand,
-            traversal_lens: crate::resolver_core::TraversalLens::StructuralObject,
-            member_path_hash: 0,
-            type_args_hash: 0,
-            behavior_flags: 0,
-            view_fingerprint: 0,
-        };
-        ctx.visiting.insert(symbol_key.clone());
-
-        let ft_key = root_follow_key(
-            "/src/App.vue",
-            FallthroughOverrideIdentity::NoOverrides,
-            false,
+        let control = state.compute_and_maybe_admit(&host, || {
+            (
+                7usize,
+                Some((key.clone(), cacheable_root_node(canonical, 1))),
+            )
+        });
+        assert_eq!(control, 7);
+        assert_eq!(
+            state.cached_candidate_count(&key),
+            1,
+            "control: a clean, fact-rooted owner compute must admit exactly one candidate"
         );
-        ctx.fallthrough_visiting.insert(ft_key.clone());
 
-        assert!(ctx.visiting.contains(&symbol_key));
-        assert!(ctx.fallthrough_visiting.contains(&ft_key));
+        state.clear_cache();
+        let served = state.compute_and_maybe_admit(&host, || {
+            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+            );
+            (
+                11usize,
+                Some((key.clone(), cacheable_root_node(canonical, 1))),
+            )
+        });
+        assert_eq!(served, 11, "a non-cacheable compute is still served");
+        assert_eq!(
+            state.cached_candidate_count(&key),
+            0,
+            "a transitive hazard observed inside the owner-run compute must refuse admission"
+        );
+    }
 
-        ctx.visiting.remove(&symbol_key);
-        assert!(!ctx.visiting.contains(&symbol_key));
-        assert!(ctx.fallthrough_visiting.contains(&ft_key));
+    #[test]
+    fn empty_unversioned_consumed_binding_is_served_but_never_admitted() {
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        let state = FallthroughResolverState::new(Arc::new(ResolverCounters::default()));
+        let key = consumed_bindings_key(
+            "/src/Owner.vue",
+            "root:0",
+            FallthroughOverrideIdentity::NoOverrides,
+        );
+        let node = FallthroughNodeResult {
+            value: FallthroughNodeValue::ConsumedBindings(ConsumedBindingsResult::default()),
+            facts: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+
+        let served = state.compute_and_maybe_admit(&host, || ("served", Some((key.clone(), node))));
+
+        assert_eq!(served, "served");
+        assert_eq!(
+            state.cached_candidate_count(&key),
+            0,
+            "an empty signature under a content-unversioned consumed-binding key validates vacuously forever and must not be retained"
+        );
+    }
+
+    #[test]
+    fn owner_compute_crossing_external_supersession_is_return_only() {
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        let state = FallthroughResolverState::new(Arc::new(ResolverCounters::default()));
+        let canonical = "/src/Child.vue";
+        let key = root_follow_key(canonical, FallthroughOverrideIdentity::NoOverrides, false);
+
+        let served = state.compute_and_maybe_admit(&host, || {
+            let _ = host
+                .upsert(crate::UpsertRequest {
+                    canonical_id: None,
+                    input_id: canonical.to_string(),
+                    source: Arc::from("<template><div /></template>"),
+                    file_language: crate::FileLanguage::vue(),
+                    aliases: Vec::new(),
+                })
+                .expect("fixture upsert must advance the external supersession state");
+            (
+                13usize,
+                Some((key.clone(), cacheable_root_node(canonical, 1))),
+            )
+        });
+
+        assert_eq!(served, 13, "the unstable result remains return-only");
+        assert_eq!(
+            state.cached_candidate_count(&key),
+            0,
+            "a nested node built across an external state transition must not publish before the outer request fence"
+        );
     }
 
     #[test]

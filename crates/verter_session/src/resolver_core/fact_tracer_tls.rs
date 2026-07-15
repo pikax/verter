@@ -20,6 +20,7 @@ use std::cell::RefCell;
 
 use smallvec::SmallVec;
 
+use crate::resolver_core::fact_read_set::NonCacheablePropagation;
 use crate::resolver_core::{FactReadSetCell, FactVersionRef};
 
 thread_local! {
@@ -153,13 +154,53 @@ pub(super) fn observe_fan_out_borrowed(sig: &[FactVersionRef]) {
 /// shared-cache admission. Same snapshot-then-iterate reentrancy
 /// discipline as [`observe_fan_out`].
 #[inline]
-pub(super) fn note_non_cacheable_read_fan_out() {
+pub(super) fn note_non_cacheable_read(propagation: NonCacheablePropagation) {
     let ptrs: SmallVec<[*const FactReadSetCell; 8]> =
         ACTIVE_TRACERS.with(|slot| slot.borrow().clone());
-    for ptr in ptrs {
+    let first = match propagation {
+        NonCacheablePropagation::LocalOnly => ptrs.len().saturating_sub(1),
+        NonCacheablePropagation::Transitive => 0,
+    };
+    for ptr in ptrs.into_iter().skip(first) {
         if !ptr.is_null() {
             // SAFETY: see module-level SAFETY contract.
-            unsafe { &*ptr }.note_non_cacheable_read();
+            unsafe { &*ptr }.note_non_cacheable_read(propagation);
         }
+    }
+}
+
+#[cfg(test)]
+mod propagation_tests {
+    use super::*;
+    use crate::resolver_core::fact_read_set::NonCacheablePropagation;
+
+    #[test]
+    fn local_only_refusal_marks_only_the_owning_tracer() {
+        let outer = FactReadSetCell::new();
+        let inner = FactReadSetCell::new();
+        install(&outer);
+        install(&inner);
+
+        note_non_cacheable_read(NonCacheablePropagation::LocalOnly);
+
+        clear();
+        clear();
+        assert!(!outer.non_cacheable_read_observed());
+        assert!(inner.non_cacheable_read_observed());
+    }
+
+    #[test]
+    fn transitive_hazard_marks_every_enclosing_tracer() {
+        let outer = FactReadSetCell::new();
+        let inner = FactReadSetCell::new();
+        install(&outer);
+        install(&inner);
+
+        note_non_cacheable_read(NonCacheablePropagation::Transitive);
+
+        clear();
+        clear();
+        assert!(outer.non_cacheable_read_observed());
+        assert!(inner.non_cacheable_read_observed());
     }
 }

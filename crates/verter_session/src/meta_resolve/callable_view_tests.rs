@@ -1845,15 +1845,15 @@ fn first_param_object_surface_keeps_root_carrier_shaped() {
 // Direct boundedness / fail-closed tests for the shared demand primitive
 // (`normalize_node_for_structural_fact_demand`) the view composes. Each asserts
 // BOUNDED termination + the contract: a resolvable chain materialises, an
-// unresolvable / circular / over-deep carrier carrier-stops fail-closed
-// (returns a carrier / opaque, NEVER panics, NEVER fabricates a concrete type).
+// unresolvable / circular carriers stop fail-closed, while deep finite carriers
+// resolve fully (NEVER panics, NEVER fabricates a concrete type).
 // These also pin finding #1 — the same residual-carrier resolution feeds the
 // view-side recursions whose fuses this cycle hardens.
 
 /// Workspace host carrying the carrier-shape fixtures used by the primitive
 /// contract tests: a 2-hop `DeclRef→DeclRef` chain that terminates at a string
 /// literal, a mutual-recursion cycle, an identity generic, and a `T0..T80`
-/// alias chain LONGER than `STRUCTURAL_FACT_DEMAND_FUSE` (64).
+/// finite alias chain used to prove structural depth is not capped.
 fn primitive_carrier_host() -> (Arc<VerterHost>, CurrentHostStoreView) {
     let mut deep = String::new();
     for i in 0..80u32 {
@@ -1947,16 +1947,13 @@ fn normalize_node_for_fact_demand_resolves_carrier_chains() {
 }
 
 #[test]
-fn normalize_node_for_fact_demand_circular_and_deep_fail_closed() {
+fn normalize_node_for_fact_demand_preserves_cycles_and_resolves_deep_finite_chain() {
     // FAIL-CLOSED boundedness, TYPED: a mutual-recursion cycle (`MutA = MutB;
     // MutB = MutA`) terminates via the primitive's `visited` set and reports
     // `Partial(SAME_PATH_RECURSION)` — the outcome exposes NO node, so a
     // consumer can never classify the unsettled carrier (never a fabricated
-    // concrete type, never a hang). A `T0..T80` alias chain LONGER than
-    // `STRUCTURAL_FACT_DEMAND_FUSE` (64) trips the step fuse and reports
-    // `Partial(STRUCTURAL_FACT_DEMAND_LIMIT)` — it does NOT reach the `'leaf'`
-    // terminal (the short-chain control in the sibling test DOES), proving the
-    // fuse fired rather than running to completion.
+    // concrete type, never a hang). The finite `T0..T80` alias chain must resolve
+    // all the way to `'leaf'`; structural depth is not a resource limit.
     let (host, view) = primitive_carrier_host();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
     let ctx = HostResolverContext::from_current(&host, &view, overlay);
@@ -1979,7 +1976,8 @@ fn normalize_node_for_fact_demand_circular_and_deep_fail_closed() {
     // PRECONDITION (#4): the raw nodes are genuinely `DeclRef` carriers BEFORE
     // the primitive resolves them, so a future lowering change can't make these
     // boundedness assertions pass for the wrong reason (a pre-resolved node would
-    // never exercise the cycle / fuse paths). `mutual: MutA` and `deepchain: T0`
+    // never exercise the cycle / deep traversal paths). `mutual: MutA` and
+    // `deepchain: T0`
     // are both alias `DeclRef`s.
     assert!(
         matches!(
@@ -2010,20 +2008,19 @@ fn normalize_node_for_fact_demand_circular_and_deep_fail_closed() {
         ),
     }
 
-    // Over-fuse alias chain → typed step-fuse partial, NEVER a Complete node
-    // (the discriminator: a short chain reaches the `'leaf'` terminal Complete —
-    // see `normalize_node_for_fact_demand_resolves_carrier_chains`).
-    let deep = dispatch.normalize_node_for_structural_fact_demand(member("deepchain"), navigate());
-    match deep {
-        StructuralFactDemandOutcome::Partial(reasons) => assert!(
-            reasons.contains(PartialReasonSet::STRUCTURAL_FACT_DEMAND_LIMIT),
-            "the step-fuse stop carries STRUCTURAL_FACT_DEMAND_LIMIT, got {reasons:?}"
+    // Finite alias-chain depth is not capped: the terminal remains Complete.
+    let deep = dispatch
+        .normalize_node_for_structural_fact_demand(member("deepchain"), navigate())
+        .into_complete_node()
+        .expect("a deep finite alias chain resolves Complete");
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, deep).as_deref(),
+            Some(SemanticNodeData::Literal(LiteralValue::String(value))) if value == "leaf"
         ),
-        StructuralFactDemandOutcome::Complete(node) => panic!(
-            "a >FUSE-deep alias chain must be Partial, not Complete({:?})",
-            node_data_for(dispatch.ctx, node).as_deref()
-        ),
-    }
+        "the deep finite alias chain must reach its terminal leaf, got {:?}",
+        node_data_for(dispatch.ctx, deep).as_deref()
+    );
 }
 
 #[test]

@@ -178,14 +178,14 @@ impl DerivationStore {
         // live `Arc` to dedup against and a fresh one is allocated.
         if let Some(existing) = self.signature_pool.get(&sig) {
             if let Some(arc) = existing.upgrade() {
-                #[cfg(any(test, debug_assertions))]
+                #[cfg(any(test, feature = "test-support"))]
                 crate::capture_token::with_active_capture(|t| t.record_signature_intern(true));
                 return arc;
             }
         }
         let arc = Arc::new(sig.clone());
         self.signature_pool.insert(sig, Arc::downgrade(&arc));
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         crate::capture_token::with_active_capture(|t| t.record_signature_intern(false));
         // Compact dead `Weak`s write-side. The pool's reclamation is
         // tied to edge lifetime, so an evicted edge — whether a whole

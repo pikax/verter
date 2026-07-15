@@ -88,6 +88,8 @@ export interface JsdocTag {
 export interface TypeExpansionDiagnostic {
   reason:
     | "budgetExceeded"
+    | "projectionWorkLimit"
+    | "connectedQueryDepthLimit"
     | "mappedDepthExceeded"
     | "unresolvedReference"
     | "indeterminateConditional"

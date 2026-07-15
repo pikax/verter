@@ -49,12 +49,12 @@ pub(crate) struct RenderOnlyMain {
 /// state. The knob is per-host, so arming it on one host never poisons a
 /// concurrent compile on a different host running on another test thread.
 #[doc(hidden)]
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 pub struct CompileForceOverflowGuard<'h> {
     host: &'h VerterHost,
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 impl<'h> CompileForceOverflowGuard<'h> {
     /// Set `host`'s forced observation count to `n` and return the guard.
     pub(crate) fn arm(host: &'h VerterHost, n: usize) -> Self {
@@ -64,7 +64,7 @@ impl<'h> CompileForceOverflowGuard<'h> {
     }
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for CompileForceOverflowGuard<'_> {
     fn drop(&mut self) {
         self.host
@@ -79,7 +79,7 @@ impl Drop for CompileForceOverflowGuard<'_> {
 /// reflects only that compute's prefetch invocations, independent of any
 /// earlier compile on the same host.
 #[doc(hidden)]
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 pub fn reset_compile_tier_prefetch_invocations(host: &VerterHost) {
     host.compile_tier_prefetch_invocations
         .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -90,7 +90,7 @@ pub fn reset_compile_tier_prefetch_invocations(host: &VerterHost) {
 /// atomic; pair with [`reset_compile_tier_prefetch_invocations`] around a
 /// single cold compute for a deterministic observation.
 #[doc(hidden)]
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 pub fn compile_tier_prefetch_invocations(host: &VerterHost) -> usize {
     host.compile_tier_prefetch_invocations
         .load(std::sync::atomic::Ordering::Relaxed)
@@ -358,7 +358,7 @@ impl VerterHost {
         // Test/debug-only invocation count. The cold-compute path gates
         // this prefetch to `Session`; the per-host counter lets a routing
         // test observe that gate without a fact-rail side channel.
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         self.compile_tier_prefetch_invocations
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 

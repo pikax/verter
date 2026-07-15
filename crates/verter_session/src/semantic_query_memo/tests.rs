@@ -3,6 +3,33 @@
 //! `DepSignatureInterner`.
 
 use super::*;
+
+#[test]
+fn production_relation_admission_is_semantic_store_owned() {
+    let store_source = include_str!("mod.rs");
+    let producer_source = include_str!("../project_semantic_dispatch/relation.rs");
+
+    let owner_start = store_source
+        .find("\n    pub(crate) fn compute_relation_and_admit")
+        .expect("SemanticGraphStore must own relation tracing and admission");
+    let owner_end = store_source[owner_start..]
+        .find("\n    /// Publish a relation judgement")
+        .map(|offset| owner_start + offset)
+        .expect("the owner-controlled relation funnel must precede the test seed seam");
+    let owner_body = &store_source[owner_start..owner_end];
+    assert!(owner_body.contains("host.with_fact_tracer"));
+    assert!(owner_body.contains("self.insert_relation_owned("));
+    assert!(
+        !producer_source.contains("graph.insert_relation("),
+        "the relation engine must supply computation and roots, never reach the raw write"
+    );
+    assert!(
+        store_source
+            .lines()
+            .any(|line| line.trim_start().starts_with("fn insert_relation_owned(")),
+        "the production relation write must be private"
+    );
+}
 use crate::semantic_query::{DepVersion, PrimitiveKind, ResolveDeclKey, ScopeId};
 use crate::{HostConfig, VerterHost};
 
@@ -5762,7 +5789,7 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
         let host = ctx_host();
         // Outer tracer scope spans the whole dispatch so the
         // joiner-bubble target is the cell the joiner returns into.
-        let ((), finalise, _) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
+        let ((), finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
             let cache_read = joiner_store.execute_cooperative(
                 &host,
                 joiner_key,
@@ -5812,6 +5839,7 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
                  deliver the fact to this thread's outer tracer."
             );
         }
+        FactReadSetFinalise::NonCacheable(_) => panic!("joiner tracer unexpectedly non-cacheable"),
         FactReadSetFinalise::Overflow => panic!("joiner outer tracer overflowed"),
     }
 }
@@ -5968,7 +5996,7 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
         let host: &crate::VerterHost = joiner_host.as_ref();
         // Outer tracer scope spans the whole dispatch so the
         // joiner-bubble target is the cell the joiner returns into.
-        let (joiner_suppress, finalise, _) =
+        let (joiner_suppress, finalise) =
             crate::fact_signature_helpers::install_fact_tracer(host, || {
                 let cache_read = joiner_store.execute_cooperative(
                     host,
@@ -6032,6 +6060,7 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
                  admitted under-rooted.",
             );
         }
+        FactReadSetFinalise::NonCacheable(_) => panic!("joiner tracer unexpectedly non-cacheable"),
         FactReadSetFinalise::Overflow => panic!("joiner outer tracer overflowed"),
     }
 

@@ -81,7 +81,7 @@ pub(crate) use dep_signature::{
 // directly; production callers route through
 // `emit_dispatch_dep_signature_facts`, enforced by the
 // `no_accumulate_dispatch_dep_signature_outside_helpers` guard.
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use dep_signature::accumulate_dispatch_dep_signature;
 // Consumed by the Vue/Svelte normalizers in §5a SP2/SP3; the re-export lands now
 // (substrate-first) but has no production caller yet, so the import is unused on
@@ -114,7 +114,7 @@ pub(crate) use graph_predicates::{
 // `host_manage/jsdoc_resolve.rs` (host-impl tier; the
 // `HostComponentMetaResolver` adapter and `read_full_source` helper
 // belong with the host).
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
 pub(crate) use crate::host_manage::jsdoc_resolve::resolve_type_declaration;
 #[allow(unused_imports)]
@@ -133,7 +133,7 @@ pub(crate) use macro_member_walk::{
 // match their definitions (absent in release).
 #[cfg(test)]
 pub(crate) use macro_member_walk::PICK_MEMBER_ROUTE_CALLABLE_DESCENT_COUNTER;
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use macro_member_walk::SLOT_BINDING_REGISTRY_COLLECTION_SKIP_COUNTER;
 pub(crate) use origin_graph::build_origin_graph;
 // `request_host` source moved to

@@ -4621,10 +4621,10 @@ fn imported_registry_cooperative_generation_reject_cleans_reverse_index() {
     let mut cold_ran = false;
     let _ = db.get_or_compute_admit_traced_for_test(&key, ctx, || {
         cold_ran = true;
-        let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
-            crate::cache_runtime::NonAdmissionReason::GenerationSuperseded,
-        );
-        crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(None)
+        crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+            value: None,
+            reason: crate::cache_runtime::NonAdmissionReason::GenerationSuperseded,
+        }
     });
     assert!(
         cold_ran,

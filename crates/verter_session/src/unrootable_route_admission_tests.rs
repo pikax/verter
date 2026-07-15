@@ -118,9 +118,13 @@ fn unrootable_route_walk_marks_the_enclosing_traced_compute() {
 
     // The enclosing traced compute: a shared-cache producer that folds this
     // route into its own result and then decides admission from its rails.
-    let (resolved, _finalise, non_cacheable) = install_fact_tracer(&host, || {
+    let (resolved, finalise) = install_fact_tracer(&host, || {
         host.resolve_named_type_export_target(provider, "Missing")
     });
+    let non_cacheable = matches!(
+        finalise,
+        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+    );
 
     assert!(
         resolved.is_none(),
@@ -139,9 +143,13 @@ fn unrootable_imported_root_walk_marks_the_enclosing_traced_compute() {
     let provider = "/ws/unrootable_root_provider.ts";
     let host = host_with_unrootable_provider(provider);
 
-    let (_root, _finalise, non_cacheable) = install_fact_tracer(&host, || {
+    let (_root, finalise) = install_fact_tracer(&host, || {
         host.resolve_imported_type_root(provider, "Missing")
     });
+    let non_cacheable = matches!(
+        finalise,
+        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+    );
 
     assert!(
         non_cacheable,
@@ -169,9 +177,13 @@ fn rootable_route_walk_leaves_the_enclosing_traced_compute_clean() {
         "control fixture must produce a rootable route (got {route:?})"
     );
 
-    let (resolved, _finalise, non_cacheable) = install_fact_tracer(&host, || {
+    let (resolved, finalise) = install_fact_tracer(&host, || {
         host.resolve_named_type_export_target("/ws/clean_provider.ts", "Foo")
     });
+    let non_cacheable = matches!(
+        finalise,
+        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+    );
 
     assert_eq!(
         resolved,

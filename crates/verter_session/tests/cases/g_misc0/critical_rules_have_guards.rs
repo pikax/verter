@@ -288,7 +288,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
     (
         "Fallthrough / Root Inheritance",
         &[
-            "fallthrough_recomputes_from_runtime_subnodes_after_top_level_node_clear",
+            "fallthrough_recomputes_and_reuses_runtime_subnode_after_top_level_node_clear",
             "fallthrough_runtime_reuse_survives_host_cache_clear",
             "fallthrough_reuses_root_follow_after_branch_union_node_clear",
         ],
@@ -1106,13 +1106,9 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             //     is a lib test (not scanner-visible); these `tests/` guards
             //     pin the same rule.
             "session_overlay_augmenter_isolated_from_base_index",
-            // (iii) the session view is accepted AND stitches its own overlay
-            //       augmenter (the base-only assert is gone, and the session
-            //       branch is overlay-correct, not base-presented-as-session).
-            "effective_export_set_session_view_stitches_overlay_augmenter",
-            // (iv) static guard: NO `compat_token().session.is_none()` base-only
-            //      assert on the augmentation-index / EffectiveExportSet surface.
-            "no_effective_export_set_base_only_session_assert",
+            // (ii) production end-to-end proof: the session view stitches its
+            //      own overlay augmenter while the base result stays isolated.
+            "session_overlay_augmentation_isolated_from_base_meta",
         ],
     ),
     (
@@ -1789,59 +1785,3 @@ fn every_registry_guard_name_validity_scanner_discriminates_against_fake() {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// "Declaration Augmentation" (CRITICAL) guard 16-iv.
-//
-// The overlay-aware augmentation index retired the fail-closed base-only
-// `assert!(view.compat_token().session.is_none(), …)` that previously rejected
-// a session view in `RouteDb::get_or_compute_effective_export_set`. A session
-// call now keys its augmenter set under `AugmentationPopulation::Session` and
-// scans the session's overlay artifacts unioned with base. Re-introducing the
-// base-only assert would silently make every session augmentation query a hard
-// error again.
-//
-// DISCRIMINATING: against the pre-deletion tree this scanner finds the assert
-// string and FAILS; against the post-deletion tree the surface is clean and it
-// PASSES.
-// ────────────────────────────────────────────────────────────────────
-#[test]
-fn no_effective_export_set_base_only_session_assert() {
-    // `get_or_compute_effective_export_set` lives in the route_db submodule
-    // `route_db/effective_export_set.rs`; scan the whole route_db module
-    // (file + submodule) so a re-introduced base-only assert is caught
-    // wherever the function is hosted.
-    let mut src = read_doc("crates/verter_session/src/resolver_core/route_db.rs");
-    let submodule = workspace_root()
-        .join("crates/verter_session/src/resolver_core/route_db/effective_export_set.rs");
-    if submodule.is_file() {
-        src.push('\n');
-        src.push_str(
-            &fs::read_to_string(&submodule).expect("read route_db/effective_export_set.rs"),
-        );
-    }
-
-    // The retired assert pinned `session.is_none()` with the "base-only"
-    // invariant message. Neither the predicate nor the message may reappear on
-    // this surface.
-    assert!(
-        !src.contains("EffectiveExportSet is base-only"),
-        "guard 16-iv: the base-only EffectiveExportSet invariant message must \
-         not reappear in route_db.rs — the overlay-aware augmentation index \
-         accepts session views (population identity), so the fail-closed \
-         base-only assert is RETIRED."
-    );
-    assert!(
-        !src.contains("compat_token().session.is_none()"),
-        "guard 16-iv: a `compat_token().session.is_none()` base-only assert \
-         must not gate the augmentation-index / EffectiveExportSet surface in \
-         route_db.rs — session views are accepted under \
-         `AugmentationPopulation::Session`."
-    );
-
-    // Self-discrimination: the assert pattern is genuinely a substring test, so
-    // the scanner would catch a re-introduction (e.g. inside an `assert!`).
-    let reintroduced = "assert!(view.compat_token().session.is_none()";
-    assert!(
-        !src.contains(reintroduced),
-        "guard 16-iv: the literal base-only session assert is forbidden."
-    );
-}

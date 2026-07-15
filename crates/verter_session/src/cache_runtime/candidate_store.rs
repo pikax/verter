@@ -60,7 +60,7 @@ use super::node::QUERY_SLOT_CANDIDATE_CAP;
 use crate::bounded_query_retention::GlobalRetentionBudget;
 // Used only by the test/debug-gated `insert_for_test` surface below; gated
 // to match so release builds do not flag it as unused.
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 use crate::fact_signature_helpers::ReadSetSignature;
 
 /// A candidate stored in the multi-candidate store. The carried
@@ -152,7 +152,7 @@ where
     ///
     /// **Per-store scope (test hermeticity).** Per-store, never a
     /// process-global. `cfg`-gated to `test` / `debug_assertions`.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     publish_post_push_pre_register_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
 }
 
@@ -196,7 +196,7 @@ where
             retention_gate: RwLock::new(()),
             next_seq: AtomicU64::new(1),
             per_slot_cap: per_slot_cap.max(1),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             publish_post_push_pre_register_gate: parking_lot::Mutex::new(None),
         }
     }
@@ -211,7 +211,7 @@ where
     /// `invalidate_canonical`). The test calls `barrier.wait()` twice:
     /// once to release the publisher into the parked state, once to
     /// release it from the parked state.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub(crate) fn test_arm_publish_post_push_pre_register_gate(
         &self,
@@ -375,7 +375,7 @@ where
             // references — the `retention_gate.write()` acquire in
             // `invalidate_canonical` must block on the parked publisher's
             // read guard. `None` (the production default) is a no-op.
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             {
                 let gate = self.publish_post_push_pre_register_gate.lock().clone();
                 if let Some(barrier) = gate {
@@ -559,9 +559,9 @@ where
         // N). Test/debug instrumentation only — gated to match the
         // capture-token module (absent in release), so the production hot
         // path pays zero cost.
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         let visited = drained.len() as u64;
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         crate::capture_token::with_active_capture(|t| {
             t.record_counter("invalidate_canonical_entries_visited", visited);
         });
@@ -616,7 +616,7 @@ where
     /// Test-only direct admission bypassing the cooperative flight slot —
     /// installs a candidate and registers its reverse index exactly as the
     /// cold publish-core path. Mirrors the prior `insert_for_test`.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn insert_for_test(
         &self,
         key: K,

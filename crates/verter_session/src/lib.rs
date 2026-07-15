@@ -349,36 +349,35 @@ pub use crate::typeinfo::oracle_core::gen::{run_oracle_gen, upgrade_snapshots_to
 
 // Test harness module — defines the per-request `CaptureToken` API
 // consumed by counter assertions across the verter_session test suite.
-// Capture-token test/diagnosis instrumentation. Gated `cfg(any(test,
-// debug_assertions))` — the same gate as `mod tests` / `mod for_tests`
-// below — so it is wholly absent from `cargo build --release`
-// (`debug_assertions` is OFF there). Integration tests in
-// `crates/verter_session/tests/*.rs` build the lib WITHOUT `cfg(test)`
-// but WITH `debug_assertions`, so the `debug_assertions` arm keeps the
-// instrumentation reachable for them. Production hooks
-// (`with_active_capture(..)`) at the recording sites carry the matching
-// `#[cfg(any(test, debug_assertions))]` so release pays zero cost (the
-// hook is not even compiled in) instead of the prior one-TLS-lookup.
-#[cfg(any(test, debug_assertions))]
+// Capture-token test/diagnosis instrumentation. Gated by the explicit
+// `test-support` feature used by this crate's dev-only self dependency;
+// ordinary debug builds are production builds and must not expose it.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod capture_token;
 
 // Test-support submodules accessible to integration tests under
-// `crates/verter_session/tests/*.rs`. Gated `cfg(any(test,
-// debug_assertions))` so release builds do not extend the public
-// surface (`debug_assertions` is OFF in `cargo build --release`).
+// `crates/verter_session/tests/*.rs`. Gated by explicit test support so
+// ordinary debug builds do not extend the public surface.
 // The submodules host reusable harnesses (e.g. the TLS observer
 // propagation harness) that integration tests would otherwise need
 // to copy-paste; routing them through one named module makes the
 // test-only entry points easy to grep and audit.
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 pub mod tests;
 
 // `for_tests` re-export shim for integration tests under
-// `crates/verter_session/tests/*.rs`. Same `cfg(any(test, debug_assertions))`
-// gate as `mod tests`: invisible in release because `debug_assertions` is
-// OFF in `cargo build --release`. Body lives in `for_tests.rs`.
-#[cfg(any(test, debug_assertions))]
+// `crates/verter_session/tests/*.rs`. Same explicit test-support gate as
+// `mod tests`; absent from every ordinary production build profile.
+#[cfg(any(test, feature = "test-support"))]
 pub mod for_tests;
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod projection_bench_support {
+    pub use crate::project_semantic_dispatch::locator_view::{
+        ProjectionBenchCase, ProjectionBenchHarness,
+    };
+}
 
 pub use host_audit_runtime::{
     ActiveRegistration, AuditRequestRegistration, AuditRuntimeSnapshot, HostAuditRuntime,
@@ -828,6 +827,7 @@ pub struct VerterHost {
     /// `Stateless` and increments for `Session`. Per-host so a `Session`
     /// compute on one host never increments the counter another host's
     /// routing test reads.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) compile_tier_prefetch_invocations: std::sync::atomic::AtomicUsize,
     /// Per-host counter for `FactReadSetFinalise::Overflow` hits at the
     /// `install_fact_tracer` boundary. Monotonically increasing for the

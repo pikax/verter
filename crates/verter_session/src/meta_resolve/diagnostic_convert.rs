@@ -34,6 +34,16 @@ use verter_semantic::analysis::type_expand::{
 #[must_use]
 pub(crate) fn shallow_to_expansion(diag: &ShallowDiagnostic) -> ExpansionDiagnostic {
     match diag {
+        ShallowDiagnostic::ProjectionWorkLimit { root } => ExpansionDiagnostic {
+            reason: ExpansionStopReason::ProjectionWorkLimit,
+            context: format!("projection-work-limit@{:?}", root),
+            property_name: None,
+        },
+        ShallowDiagnostic::ConnectedQueryDepthLimit { root } => ExpansionDiagnostic {
+            reason: ExpansionStopReason::ConnectedQueryDepthLimit,
+            context: format!("connected-query-depth-limit@{:?}", root),
+            property_name: None,
+        },
         ShallowDiagnostic::DuplicateArmShortCircuited { node } => ExpansionDiagnostic {
             reason: ExpansionStopReason::IdempotentArm,
             context: format!("duplicate-arm-short-circuited@{:?}", node),
@@ -150,6 +160,21 @@ mod tests {
         let diag = ShallowDiagnostic::PathologicalInput { root: dummy_node() };
         let proj = shallow_to_expansion(&diag);
         assert_eq!(proj.reason, ExpansionStopReason::BudgetExceeded);
+    }
+
+    #[test]
+    fn operational_limits_map_to_distinguishable_public_expansion_contexts() {
+        let root = dummy_node();
+        let work = shallow_to_expansion(&ShallowDiagnostic::ProjectionWorkLimit { root });
+        let depth = shallow_to_expansion(&ShallowDiagnostic::ConnectedQueryDepthLimit { root });
+
+        assert_eq!(work.reason, ExpansionStopReason::ProjectionWorkLimit);
+        assert_eq!(depth.reason, ExpansionStopReason::ConnectedQueryDepthLimit);
+        assert_eq!(work.context, "projection-work-limit@SemanticNodeId(42)");
+        assert_eq!(
+            depth.context,
+            "connected-query-depth-limit@SemanticNodeId(42)"
+        );
     }
 
     #[test]

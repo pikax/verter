@@ -50,8 +50,8 @@ fn warm_hit_bubbles_facts_into_active_tracer() {
     // Install a tracer and call the observing variant — the warm hit must bubble
     // the stored fact into our tracer.
     let (result, finalise) = install_fact_tracer_for_tests(&host, || {
-        verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
-            db.get_or_resolve_route_observing_facts(rk("index.ts", "Bar"), &view, probe, || {
+        verter_session::for_tests::with_cacheability_scope_for_tests(&host, |_probe| {
+            db.get_or_resolve_route_observing_facts(rk("index.ts", "Bar"), &view, &host, || {
                 unreachable!("resolve closure must not be called on warm hit")
             })
         })
@@ -66,6 +66,7 @@ fn warm_hit_bubbles_facts_into_active_tracer() {
                 "tracer must contain the route's fact after warm hit; got {sig:?}"
             );
         }
+        FactReadSetFinalise::NonCacheable(_) => panic!("tracer unexpectedly non-cacheable"),
         FactReadSetFinalise::Overflow => panic!("tracer overflowed"),
     }
 }
@@ -80,11 +81,11 @@ fn cold_compute_bubbles_facts_after_resolve() {
 
     // Nothing pre-loaded — the resolve closure runs and returns facts.
     let (result, finalise) = install_fact_tracer_for_tests(&host, || {
-        verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
+        verter_session::for_tests::with_cacheability_scope_for_tests(&host, |_probe| {
             db.get_or_resolve_route_observing_facts(
                 rk("index.ts", "Baz"),
                 &view,
-                probe,
+                &host,
                 move || Some((resolved_route(), vec![fact_for_closure.clone()])),
             )
         })
@@ -99,6 +100,7 @@ fn cold_compute_bubbles_facts_after_resolve() {
                 "tracer must contain the route's fact after cold compute; got {sig:?}"
             );
         }
+        FactReadSetFinalise::NonCacheable(_) => panic!("tracer unexpectedly non-cacheable"),
         FactReadSetFinalise::Overflow => panic!("tracer overflowed"),
     }
 }
@@ -111,8 +113,8 @@ fn cold_miss_returns_none_and_tracer_empty() {
 
     // Resolve closure returns None — the route is unresolvable.
     let (result, finalise) = install_fact_tracer_for_tests(&host, || {
-        verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
-            db.get_or_resolve_route_observing_facts(rk("index.ts", "Unknown"), &view, probe, || {
+        verter_session::for_tests::with_cacheability_scope_for_tests(&host, |_probe| {
+            db.get_or_resolve_route_observing_facts(rk("index.ts", "Unknown"), &view, &host, || {
                 None
             })
         })
@@ -127,6 +129,9 @@ fn cold_miss_returns_none_and_tracer_empty() {
                 sig.is_empty(),
                 "tracer must be empty on unresolved route; got {sig:?}"
             );
+        }
+        FactReadSetFinalise::NonCacheable(_) => {
+            panic!("empty-path tracer unexpectedly non-cacheable")
         }
         FactReadSetFinalise::Overflow => panic!("tracer overflowed on empty path"),
     }
@@ -146,8 +151,8 @@ fn warm_hit_without_an_outer_tracer_still_returns_value() {
     // closure must still not run. (The funnel itself always runs inside a
     // cacheability scope — it requires the probe — so "no tracer at all" is no
     // longer reachable here by construction.)
-    let result = verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
-        db.get_or_resolve_route_observing_facts(rk("index.ts", "Qux"), &view, probe, || {
+    let result = verter_session::for_tests::with_cacheability_scope_for_tests(&host, |_probe| {
+        db.get_or_resolve_route_observing_facts(rk("index.ts", "Qux"), &view, &host, || {
             unreachable!("resolve closure must not be called on warm hit")
         })
     })

@@ -174,121 +174,124 @@ impl VerterHost {
         //    pipeline. An empty `imports` vector means the source
         //    truly has no import declarations or failed to parse;
         //    either case is "no admission required".
-        let bindings = collect_analyzed_bindings(&imports);
+        let db = self.project_type_store().resolved_import_facts();
+        let (_payload, admission_counts) = db.get_or_compute(key, || {
+            let bindings = collect_analyzed_bindings(&imports);
 
-        let mut import_clauses = Vec::with_capacity(bindings.len());
-        let mut specifier_resolutions: Vec<ResolvedSpecifier> = Vec::with_capacity(bindings.len());
-        let mut positive_bumps = 0u64;
-        let mut negative_bumps = 0u64;
-        let mut namespace_bumps = 0u64;
+            let mut import_clauses = Vec::with_capacity(bindings.len());
+            let mut specifier_resolutions: Vec<ResolvedSpecifier> =
+                Vec::with_capacity(bindings.len());
+            let mut positive_bumps = 0u64;
+            let mut negative_bumps = 0u64;
+            let mut namespace_bumps = 0u64;
 
-        for ClassifiedBinding {
-            specifier,
-            local_name,
-            imported_name,
-            space,
-        } in bindings
-        {
-            // Look up resolved canonical for this specifier from
-            // the freshly-admitted route map.
-            let resolved_canonical: Option<Arc<str>> = import_routes
-                .get(&specifier)
-                .and_then(|res| res.resolved_canonical_id.as_deref())
-                .map(Arc::from);
-            let is_resolved = resolved_canonical.is_some();
+            for ClassifiedBinding {
+                specifier,
+                local_name,
+                imported_name,
+                space,
+            } in bindings
+            {
+                // Look up resolved canonical for this specifier from
+                // the freshly-admitted route map.
+                let resolved_canonical: Option<Arc<str>> = import_routes
+                    .get(&specifier)
+                    .and_then(|res| res.resolved_canonical_id.as_deref())
+                    .map(Arc::from);
+                let is_resolved = resolved_canonical.is_some();
 
-            // `resolved_source_name` is NON-OPTIONAL. For positive
-            // entries it is the original exported name in the target
-            // module (`imported_name`). For negative entries it is
-            // also the original requested name — preserved so the
-            // validator can compare the requested binding shape on
-            // re-resolution.
-            let resolved_source_name = InternedName::from(imported_name.as_str());
+                // `resolved_source_name` is NON-OPTIONAL. For positive
+                // entries it is the original exported name in the target
+                // module (`imported_name`). For negative entries it is
+                // also the original requested name — preserved so the
+                // validator can compare the requested binding shape on
+                // re-resolution.
+                let resolved_source_name = InternedName::from(imported_name.as_str());
 
-            // Build the `Fact` lanes. `semantic_hash` is the
-            // structural fingerprint over
-            // `(specifier, binding, space, resolved_canonical_or_sentinel,
-            //   resolved_source_name)`. `display_hash` mixes a
-            // distinct display salt so the two lanes are populated
-            // separately (R13).
-            let fact_key_canonical: Arc<str> = match resolved_canonical.as_ref() {
-                Some(c) => Arc::clone(c),
-                None => Arc::from(UNRESOLVED_SENTINEL),
-            };
-            let mut buf: Vec<u8> = Vec::with_capacity(96);
-            buf.extend_from_slice(b"resolved-import-clause:");
-            buf.push(space.tag());
-            buf.extend_from_slice(specifier.as_bytes());
-            buf.push(0xFE);
-            buf.extend_from_slice(local_name.as_bytes());
-            buf.push(0xFE);
-            buf.extend_from_slice(imported_name.as_bytes());
-            buf.push(0xFE);
-            buf.extend_from_slice(fact_key_canonical.as_bytes());
-            let semantic_hash = hash_16(&buf);
+                // Build the `Fact` lanes. `semantic_hash` is the
+                // structural fingerprint over
+                // `(specifier, binding, space, resolved_canonical_or_sentinel,
+                //   resolved_source_name)`. `display_hash` mixes a
+                // distinct display salt so the two lanes are populated
+                // separately (R13).
+                let fact_key_canonical: Arc<str> = match resolved_canonical.as_ref() {
+                    Some(c) => Arc::clone(c),
+                    None => Arc::from(UNRESOLVED_SENTINEL),
+                };
+                let mut buf: Vec<u8> = Vec::with_capacity(96);
+                buf.extend_from_slice(b"resolved-import-clause:");
+                buf.push(space.tag());
+                buf.extend_from_slice(specifier.as_bytes());
+                buf.push(0xFE);
+                buf.extend_from_slice(local_name.as_bytes());
+                buf.push(0xFE);
+                buf.extend_from_slice(imported_name.as_bytes());
+                buf.push(0xFE);
+                buf.extend_from_slice(fact_key_canonical.as_bytes());
+                let semantic_hash = hash_16(&buf);
 
-            let mut display_buf: Vec<u8> = Vec::with_capacity(48);
-            display_buf.extend_from_slice(b"resolved-import-clause-display:");
-            display_buf.extend_from_slice(&semantic_hash);
-            display_buf.extend_from_slice(local_name.as_bytes());
-            let display_hash = hash_16(&display_buf);
+                let mut display_buf: Vec<u8> = Vec::with_capacity(48);
+                display_buf.extend_from_slice(b"resolved-import-clause-display:");
+                display_buf.extend_from_slice(&semantic_hash);
+                display_buf.extend_from_slice(local_name.as_bytes());
+                let display_hash = hash_16(&display_buf);
 
-            let fact = Arc::new(Fact {
-                key: FactKey::ResolvedImportClause {
+                let fact = Arc::new(Fact {
+                    key: FactKey::ResolvedImportClause {
+                        specifier: InternedSpecifier::from(specifier.as_str()),
+                        binding: InternedName::from(local_name.as_str()),
+                        space,
+                        resolved_canonical: Arc::clone(&fact_key_canonical),
+                        resolved_source_name: resolved_source_name.clone(),
+                    },
+                    semantic_hash,
+                    display_hash,
+                });
+
+                import_clauses.push(ResolvedImportClauseEntry {
                     specifier: InternedSpecifier::from(specifier.as_str()),
                     binding: InternedName::from(local_name.as_str()),
                     space,
-                    resolved_canonical: Arc::clone(&fact_key_canonical),
-                    resolved_source_name: resolved_source_name.clone(),
-                },
-                semantic_hash,
-                display_hash,
-            });
+                    resolved_canonical: resolved_canonical.clone(),
+                    resolved_source_name,
+                    fact,
+                });
 
-            import_clauses.push(ResolvedImportClauseEntry {
-                specifier: InternedSpecifier::from(specifier.as_str()),
-                binding: InternedName::from(local_name.as_str()),
-                space,
-                resolved_canonical: resolved_canonical.clone(),
-                resolved_source_name,
-                fact,
-            });
+                // Per-specifier resolutions (one per `(specifier, space)`).
+                specifier_resolutions.push(ResolvedSpecifier {
+                    specifier: InternedSpecifier::from(specifier.as_str()),
+                    resolved_canonical: resolved_canonical.clone(),
+                    space,
+                });
 
-            // Per-specifier resolutions (one per `(specifier, space)`).
-            specifier_resolutions.push(ResolvedSpecifier {
-                specifier: InternedSpecifier::from(specifier.as_str()),
-                resolved_canonical: resolved_canonical.clone(),
-                space,
-            });
-
-            if is_resolved {
-                positive_bumps += 1;
-                if matches!(space, SymbolSpace::Namespace) {
-                    namespace_bumps += 1;
+                if is_resolved {
+                    positive_bumps += 1;
+                    if matches!(space, SymbolSpace::Namespace) {
+                        namespace_bumps += 1;
+                    }
+                } else {
+                    negative_bumps += 1;
                 }
-            } else {
-                negative_bumps += 1;
             }
-        }
 
-        // 4. Admit through `insert_if_absent` (first-writer-wins).
-        let payload = Arc::new(ResolvedImportFacts {
-            import_clauses,
-            reexport_bindings: Vec::new(),
-            specifier_resolutions,
+            // 4. Return the cold payload to the DB owner. The DB invokes this
+            // closure only for a vacant key and performs the sole production
+            // write itself.
+            let payload = Arc::new(ResolvedImportFacts {
+                import_clauses,
+                reexport_bindings: Vec::new(),
+                specifier_resolutions,
+            });
+            (payload, (positive_bumps, negative_bumps, namespace_bumps))
         });
-        let admitted = self
-            .project_type_store()
-            .resolved_import_facts()
-            .insert_if_absent(key, payload);
+        let admitted = admission_counts.is_some();
 
         // 5. Bump provenance counters only on admission win. A
         //    duplicate (admitted=false) must NOT bump because the
         //    canonical recomputed and the existing entry already
         //    owns those admissions.
-        #[cfg(any(test, debug_assertions))]
-        if admitted {
-            let db = self.project_type_store().resolved_import_facts();
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some((positive_bumps, negative_bumps, namespace_bumps)) = admission_counts {
             for _ in 0..positive_bumps {
                 db.record_positive_admission();
             }
@@ -300,11 +303,9 @@ impl VerterHost {
             }
         }
 
-        // Suppress unused-warnings on release builds (no debug-assertions
-        // and no test). These counts are recorded as provenance signal in
-        // debug + test only; release-build hot path must not retain them.
-        #[cfg(not(any(test, debug_assertions)))]
-        let _ = (positive_bumps, negative_bumps, namespace_bumps);
+        // The metadata is observed only by test-support provenance counters.
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = admission_counts;
 
         admitted
     }

@@ -742,12 +742,12 @@ impl ResolverContext for crate::VerterHost {
         // In production, reaching this means a request-bound caller
         // missed plumbing. Tests route through the `#[cfg(test)]` arm
         // via a one-shot owned-view rebuild.
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
             crate::VerterHost::prepared_decl_bundle_with_store_view(self, &view, canonical_id)
         }
-        #[cfg(not(any(test, debug_assertions)))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             let _ = canonical_id;
             panic!(
@@ -763,7 +763,7 @@ impl ResolverContext for crate::VerterHost {
         canonical_id: &str,
         symbol_name: &str,
     ) -> Option<Arc<PreparedTypeDecl>> {
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
             crate::VerterHost::prepared_type_decl_with_store_view(
@@ -773,7 +773,7 @@ impl ResolverContext for crate::VerterHost {
                 symbol_name,
             )
         }
-        #[cfg(not(any(test, debug_assertions)))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             let _ = (canonical_id, symbol_name);
             panic!(
@@ -789,7 +789,7 @@ impl ResolverContext for crate::VerterHost {
         canonical_id: &str,
         symbol_name: &str,
     ) -> Option<Arc<PreparedValueDecl>> {
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
             crate::VerterHost::prepared_value_decl_with_store_view(
@@ -799,7 +799,7 @@ impl ResolverContext for crate::VerterHost {
                 symbol_name,
             )
         }
-        #[cfg(not(any(test, debug_assertions)))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             let _ = (canonical_id, symbol_name);
             panic!(
@@ -896,13 +896,13 @@ impl ResolverContext for crate::VerterHost {
         // at most across the entire test suite, ~1KB per view), which
         // is fully acceptable for `cfg(test)`-only paths. Production
         // builds reach the `cfg(not(test))` panic arm below.
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
             let leaked: &'static HostStoreView = Box::leak(Box::new(view));
             leaked as &dyn crate::resolver_core::StoreView
         }
-        #[cfg(not(any(test, debug_assertions)))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             panic!(
                 "ResolverContext::store_view() called on bare &VerterHost — \
@@ -934,7 +934,7 @@ impl ResolverContext for crate::VerterHost {
         // through the `#[cfg(test)]` arm via the one-shot owned-view
         // rebuild — exactly the same dispatch the bare wrapper used
         // to perform inline.
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
             crate::VerterHost::resolve_imported_type_root_with_store_view(
@@ -944,7 +944,7 @@ impl ResolverContext for crate::VerterHost {
                 imported_name,
             )
         }
-        #[cfg(not(any(test, debug_assertions)))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             let _ = (dep_canonical, imported_name);
             panic!(
@@ -967,7 +967,7 @@ impl ResolverContext for crate::VerterHost {
         // Bare-host arm: mirrors `resolve_imported_type_root` above — a
         // test/debug convenience over a one-shot owned view; reaching it
         // from production means a request-bound caller missed plumbing.
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
             crate::VerterHost::resolve_imported_type_root_with_facts_with_store_view(
@@ -977,7 +977,7 @@ impl ResolverContext for crate::VerterHost {
                 imported_name,
             )
         }
-        #[cfg(not(any(test, debug_assertions)))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             let _ = (dep_canonical, imported_name);
             panic!(
@@ -994,7 +994,7 @@ impl ResolverContext for crate::VerterHost {
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
             crate::VerterHost::resolve_named_type_export_target_with_store_view(
@@ -1004,7 +1004,7 @@ impl ResolverContext for crate::VerterHost {
                 requested_name,
             )
         }
-        #[cfg(not(any(test, debug_assertions)))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             let _ = (dep_canonical, requested_name);
             panic!(
@@ -1020,7 +1020,7 @@ impl ResolverContext for crate::VerterHost {
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
             crate::VerterHost::resolve_named_type_export_target_shallow_with_store_view(
@@ -1030,7 +1030,7 @@ impl ResolverContext for crate::VerterHost {
                 requested_name,
             )
         }
-        #[cfg(not(any(test, debug_assertions)))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             let _ = (dep_canonical, requested_name);
             panic!(
@@ -1046,7 +1046,7 @@ impl ResolverContext for crate::VerterHost {
         owner_canonical: &str,
         local_name: &str,
     ) -> Option<(String, String)> {
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
             crate::VerterHost::resolve_owner_direct_import_with_store_view(
@@ -1056,7 +1056,7 @@ impl ResolverContext for crate::VerterHost {
                 local_name,
             )
         }
-        #[cfg(not(any(test, debug_assertions)))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             let _ = (owner_canonical, local_name);
             panic!(
@@ -1099,7 +1099,7 @@ impl ResolverContext for crate::VerterHost {
         // `HostResolverContext::resolve_type_declaration_for_dep` or
         // `SessionResolverContext::resolve_type_declaration_for_dep`
         // (both route through `_with_context(host, ctx)`).
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-support"))]
         {
             crate::host_manage::jsdoc_resolve::resolve_type_declaration_with_context(
                 self,
@@ -1108,7 +1108,7 @@ impl ResolverContext for crate::VerterHost {
                 requested_name,
             )
         }
-        #[cfg(not(any(test, debug_assertions)))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             let _ = (dep_canonical, requested_name);
             panic!(
@@ -1246,6 +1246,21 @@ pub(crate) enum NonCacheableReadReason {
     UnobservableSource,
 }
 
+impl NonCacheableReadReason {
+    /// A non-cacheable READ taints the derivation basis, rather than merely
+    /// declining retention in one cache family, so every current read class
+    /// propagates through all enclosing cold-compute scopes.
+    #[inline]
+    fn propagation(self) -> super::fact_read_set::NonCacheablePropagation {
+        match self {
+            Self::FencedServe
+            | Self::LeaseMiss
+            | Self::UnrootableRoute
+            | Self::UnobservableSource => super::fact_read_set::NonCacheablePropagation::Transitive,
+        }
+    }
+}
+
 /// Mark every active tracer on the current thread's stack as having
 /// consumed a NON-CACHEABLE read — the by-value rail enclosing traced cold
 /// computes consult to refuse shared-cache admission. `reason` is the typed
@@ -1254,8 +1269,19 @@ pub(crate) enum NonCacheableReadReason {
 /// untyped suppress). No-op when the stack is empty (no traced compute is
 /// in scope).
 #[inline]
-pub(crate) fn note_non_cacheable_read_fan_out(_reason: NonCacheableReadReason) {
-    fact_tracer_tls::note_non_cacheable_read_fan_out();
+pub(crate) fn note_non_cacheable_read_fan_out(reason: NonCacheableReadReason) {
+    note_non_cacheable_propagation(reason.propagation());
+}
+
+/// Apply an already-classified refusal to the active tracer stack. Cache
+/// owners use this after a typed `ReturnOnly` result escapes its own tracing
+/// scope; ordinary read sites should use [`note_non_cacheable_read_fan_out`]
+/// so their closed reason enum selects the propagation policy.
+#[inline]
+pub(crate) fn note_non_cacheable_propagation(
+    propagation: super::fact_read_set::NonCacheablePropagation,
+) {
+    fact_tracer_tls::note_non_cacheable_read(propagation);
 }
 
 // ── `with_fact_tracer` installer ──────────────────────────────────────

@@ -385,7 +385,7 @@ defineProps<{ foo: string }>()
         .unwrap();
 
     let original_props = vec!["foo".to_string()];
-    let view = <VerterHost as ComponentMetaRequestHost>::snapshot_store_view(project.host());
+    let view = <VerterHost as ComponentMetaRequestHost>::snapshot_store_view_read(project.host()).0;
     let captured = <VerterHost as ComponentMetaRequestHost>::capture_component_meta_inputs(
         project.host(),
         "/src/App.vue",
@@ -412,6 +412,7 @@ defineProps<{ bar: number }>()
         // The fixed view is a current request-bound snapshot.
         true,
     )
+    .value
     .expect("component-meta should still resolve against captured owner inputs");
 
     let snapshot_props: Vec<String> = state
@@ -2577,7 +2578,7 @@ defineProps<Props>()
 }
 
 #[test]
-fn component_meta_reuses_runtime_symbol_cache_after_owner_only_change() {
+fn component_meta_owner_only_change_preserves_imported_symbol_result() {
     let project = make_project();
     project
         .upsert_base(
@@ -2600,14 +2601,10 @@ defineProps<Props>()
         )
         .unwrap();
 
-    project.host().resolver_runtime().reset_counters();
-
     let first = project
         .host()
         .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("first resolve should succeed");
-    let after_first = project.host().resolver_runtime().counter_snapshot();
-
     project
         .upsert_base(
             "/App.vue",
@@ -2623,8 +2620,6 @@ defineProps<Props>()
         .host()
         .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("second resolve should succeed after owner-only change");
-    let after_second = project.host().resolver_runtime().counter_snapshot();
-
     let first_props = prop_names_from_resolved(project.host(), "/App.vue", &first);
     let second_props = prop_names_from_resolved(project.host(), "/App.vue", &second);
 
@@ -2640,17 +2635,10 @@ defineProps<Props>()
         !second_props.contains(&"missing".to_string()),
         "owner-only recompute must not fabricate unrelated props"
     );
-    assert!(
-        after_first.node_cache_misses > 0,
-        "first resolve should populate the runtime symbol cache, got {:?}",
-        after_first
-    );
-    // NOTE: The legacy resolved_type_roots cache was removed in the
-    // routed-symbol refactor. Runtime routed-symbol nodes will restore
-    // cross-resolve cache reuse once the full service is wired.
-    // For now, verify the semantic result is correct rather than the
-    // cache hit count.
-    let _ = (after_first, after_second);
+    // The legacy `resolved_type_roots` runtime cache no longer owns this
+    // route, so its counters are intentionally not an assertion surface.
+    // The stable contract is behavioral: an owner-only template edit must
+    // recompute without losing or fabricating the imported symbol result.
 }
 
 #[test]

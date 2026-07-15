@@ -2488,9 +2488,12 @@ pub enum ProjectedTypeFact {
     /// authored body the projection starts from (for a macro payload member:
     /// the macro's STAMPED type-argument locator); `path` is the ordered
     /// member-name hop chain (for a property-style emit: the event name).
-    /// Raising it replays the base plus the path through the one shared
-    /// dispatch's EXISTING `ProjectPath` query — never a second resolver,
-    /// never a stored `TypeExpr` or graph node id.
+    /// Raising a stamped Vue macro type-argument base replays the SAME
+    /// one-level macro-surface producer used by publication, selects the first
+    /// member there (preserving generic substitution and heritage filtering),
+    /// then sends any remaining path through the shared `ProjectPath` query.
+    /// Other authored bases route the whole path through `ProjectPath`. No
+    /// second resolver, stored `TypeExpr`, or graph node id is introduced.
     MemberPath {
         /// The authored base body the projection starts from.
         base: AuthoredBodyLocator,
@@ -2704,12 +2707,11 @@ pub enum SemanticSourceFailure {
     /// surface member's value type, an index-signature key/value position)
     /// could not be represented in the available source vocabulary: no
     /// authored slot, no use-site slot, no reference identity, no closed
-    /// fact. Covers the whole no-faithful-source residue — a partial
-    /// materialization, an unknown-materializing resolver failure carrier,
-    /// an unresolved residual reference/import/typeof carrier, AND a
-    /// reached-but-unencodable structural value (a function / object /
-    /// non-empty tuple / composite): known structure without a faithful
-    /// source is still a FAILURE, never a fabricated `unknown` success.
+    /// fact. Covers the whole no-faithful-source residue — an operationally
+    /// partial materialization, an unknown-materializing resolver failure
+    /// carrier, or reached-but-unencodable structure. Stable unresolved
+    /// reference/import carriers are faithful Complete carriers and therefore
+    /// do NOT belong to this failure class.
     UnrepresentableRequiredMemberValue,
 }
 

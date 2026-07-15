@@ -249,9 +249,9 @@ impl FileArtifactKey {
     /// exercise the per-canonical retention sweep + the
     /// promotion-aware LRU floor. The production `pub(crate)`
     /// surface is unchanged; this `pub fn` exists only inside
-    /// `#[cfg(any(test, debug_assertions))]` so production
+    /// `#[cfg(any(test, feature = "test-support"))]` so production
     /// builds carry no public exposure of the base constructor.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn base_for_test(canonical: Arc<str>, content_hash: Hash16) -> Self {
         Self::base(canonical, content_hash)
     }
@@ -571,8 +571,7 @@ pub enum AugmentationPopulation {
 /// Carries the **exact** [`FileArtifactKey`] of the augmenter artifact
 /// scanned at index-population time — the full content-addressed
 /// identity, not just the canonical id. The augmentation-stitching
-/// consumer ([`crate::resolver_core::route_db::RouteDb::get_or_compute_effective_export_set`])
-/// re-fetches the augmenter's `.augmentations` through
+/// semantic augmentation stitcher re-fetches the augmenter's `.augmentations` through
 /// [`FileArtifactStore::get_artifacts`] keyed by this exact key — never
 /// a content-agnostic canonical-only scan, which (with lazy cache
 /// invalidation) could surface a different content version of the
@@ -922,7 +921,7 @@ impl FileArtifactStore {
 
     /// Test-only constructor that pins a specific schema version on the
     /// store. Used by `cache_invariant_migration` fixtures.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
         Self::with_counters_and_schema_version(
             Default::default(),
@@ -1160,7 +1159,7 @@ impl FileArtifactStore {
     }
 
     /// Test-only inspection of the per-key hit counter.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn hit_count(&self, key: &FileArtifactKey) -> u32 {
         self.hit_counters.get(key).map(|c| *c.value()).unwrap_or(0)
     }
@@ -1618,7 +1617,7 @@ impl FileArtifactStore {
 
     /// Test-only synthetic-entry inserter used exclusively by
     /// `cache_invariant_migration` fixtures.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
         let canonical: Arc<str> = Arc::from(marker);
         let indexed = Arc::new(IndexedReady::new_for_test([0u8; 16]));

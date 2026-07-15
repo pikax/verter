@@ -3360,6 +3360,28 @@ mod resolver_context_seal {
             }
         }
 
+        fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+            let entered_test = has_cfg_test(&item.attrs);
+            if entered_test {
+                self.cfg_test_depth += 1;
+            }
+            syn::visit::visit_item_impl(self, item);
+            if entered_test {
+                self.cfg_test_depth -= 1;
+            }
+        }
+
+        fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+            let entered_test = has_cfg_test(&item.attrs);
+            if entered_test {
+                self.cfg_test_depth += 1;
+            }
+            syn::visit::visit_impl_item_fn(self, item);
+            if entered_test {
+                self.cfg_test_depth -= 1;
+            }
+        }
+
         fn visit_use_path(&mut self, p: &'ast UsePath) {
             if self.cfg_test_depth > 0 {
                 return;
@@ -4812,6 +4834,11 @@ mod foundations_guards {
         // can reach it; release builds drop the entire module
         // because `debug_assertions` is OFF in release.
         "pub mod tests",
+        // Criterion-only projection primitive harness. The module is compiled
+        // solely by the explicit `test-support` feature used by the checked-in
+        // projection safety benchmark; default production builds do not expose
+        // it.
+        "pub mod projection_bench_support",
         // Test-only probe substrate for the content-addressed
         // `MapperFingerprint` primitive. Consumed by
         // `tests/cases/g_misc3/mapper_fingerprint_content_addressed.rs`. The
@@ -16135,7 +16162,7 @@ mod single_resolution_engine_guards {
     const READ_SURFACE_MEMBERS_DEF_ALLOWLIST: &[(&str, u32, &str)] = &[
         (
             "crates/verter_session/src/meta_resolve/projectors/mod.rs",
-            430,
+            431,
             "fn read_surface_members(",
         ),
         (
@@ -16251,7 +16278,7 @@ mod single_resolution_engine_guards {
             3,
         ),
         ("crates/verter_parser/src/utils/oxc/vue/script/setup.rs", 21),
-        ("crates/verter_session/src/decl_body_memo.rs", 3),
+        ("crates/verter_session/src/decl_body_memo.rs", 2),
         ("crates/verter_session/src/host_manage/jsdoc_resolve.rs", 3),
         (
             "crates/verter_session/src/host_manage/overlay_materialize.rs",
@@ -16321,10 +16348,6 @@ mod single_resolution_engine_guards {
         (
             "crates/verter_session/src/resolver_core/surface_projector.rs",
             2,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/symbol_resolver.rs",
-            3,
         ),
         // The imported-macro-type element projection: a THIN normalize of
         // shared-engine macro-surface results INTO the legacy compile-facing
@@ -16449,10 +16472,6 @@ mod single_resolution_engine_guards {
         (
             "crates/verter_session/src/resolver_core/surface_projector.rs",
             2,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/symbol_resolver.rs",
-            3,
         ),
         // The imported-macro-type element projection: constructs the legacy
         // `ResolvedElements` DTO FROM shared-engine macro-surface results (a

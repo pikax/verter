@@ -685,7 +685,7 @@ fn node_has_direct_macro_reference(
 /// `HostComponentMetaResolver`'s `ctx.resolve_named_type_export_target`
 /// reads route through the overlay-aware view rather than the
 /// panic-shimmed bare-host trait impl.
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 #[allow(dead_code)]
 pub(crate) fn resolve_type_declaration(
     host: &VerterHost,
@@ -707,43 +707,12 @@ pub(crate) fn resolve_type_declaration_with_context(
     requested_name: &str,
 ) -> ResolvedTypeDeclaration {
     let resolver = HostComponentMetaResolver { host, ctx };
-    let key =
-        crate::resolver_core::symbol_resolver::declaration_node_key(dep_canonical, requested_name);
-    let mut resolve_ctx = crate::resolver_core::symbol_resolver::ResolveContext::new();
-    let permissive_view = crate::resolver_core::PermissiveStoreView;
-    let result = host.resolver_runtime().symbol.resolve_node(
-        key,
-        &permissive_view,
-        &mut resolve_ctx,
-        |_| {
-            let declaration = crate::resolver_core::resolve_type_declaration(
-                &resolver,
-                dep_canonical,
-                requested_name,
-            );
-            let mut tracked_deps = std::collections::BTreeSet::new();
-            if !declaration.canonical_source.is_empty()
-                && declaration.canonical_source != dep_canonical
-            {
-                tracked_deps.insert(declaration.canonical_source.clone());
-            }
-
-            crate::resolver_core::symbol_resolver::SymbolNodeResult {
-                value: crate::resolver_core::symbol_resolver::SymbolNodeValue::Declaration(
-                    declaration,
-                ),
-                facts: host.current_dependency_fact_versions(dep_canonical, &tracked_deps),
-                diagnostics: Vec::new(),
-            }
-        },
-    );
-
-    match result.value {
-        crate::resolver_core::symbol_resolver::SymbolNodeValue::Declaration(declaration) => {
-            declaration
-        }
-        _ => unreachable!("declaration resolution must return a declaration node result"),
-    }
+    // Prepared declarations, route results, and the enclosing semantic query
+    // already own fact-validated retention. Do not add a second declaration
+    // cache here: its old `canonical#name` key had no content identity and was
+    // read through an accept-all view, so a same-name edit replayed stale
+    // declaration metadata into otherwise current outer queries.
+    crate::resolver_core::resolve_type_declaration(&resolver, dep_canonical, requested_name)
 }
 
 pub(crate) fn read_full_source(host: &VerterHost, canonical_source: &str) -> Option<String> {
@@ -940,7 +909,7 @@ pub(crate) fn resolve_jsdoc_tag_type(
     // request-bound `ctx` rather than `host: &VerterHost`. Passing
     // `host` here coerced into the bare-host
     // `<&VerterHost as ResolverContext>` impl, which panics under
-    // `cfg(not(any(test, debug_assertions)))` (release) once
+    // `cfg(not(any(test, feature = "test-support")))` (release) once
     // `project_expr_class_a_via_dispatch` reaches
     // `ctx.prepared_decl_bundle(...)` deeper in the call graph.
     let resolved =
