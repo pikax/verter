@@ -7277,10 +7277,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // path below so the caller sees a well-formed conditional node
         // rather than a partial distribution.
         if distributive {
-            if let Some(members) = graph.node_data(check).and_then(|data| match &*data {
-                SemanticNodeData::Union(members) => Some(Arc::clone(members)),
-                _ => None,
-            }) {
+            if let Some(members) = self.distributive_check_union_members(check) {
                 let mut per_member: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
                 let mut distribution_ok = true;
                 // Two-signal fold: accumulate the partiality of every
@@ -7617,6 +7614,65 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             _ => None,
         }
+    }
+
+    /// Union members of a DISTRIBUTIVE conditional's instantiated check
+    /// surface, or `None` when the check does not distribute.
+    ///
+    /// Distribution semantics follow the check's INSTANTIATED surface,
+    /// not the check node's raw shape: a naked-type-param check whose
+    /// binding substituted an `Alias` / `DeclRef` / `InstantiationRef`
+    /// CARRIER of a union (the defaulted-union type argument
+    /// `T extends SingleOrMultiple = SingleOrMultiple` of reka-ui's
+    /// `AccordionRootEmits`) distributes exactly like a raw `Union`
+    /// binding. The raw-`Union` fast path stays allocation-free; the
+    /// carrier shapes resolve through the shared structural-fact demand
+    /// primitive ([`Self::normalize_node_for_structural_fact_demand`] —
+    /// the same `ResolveDecl` / `Instantiate` delegation the relation
+    /// engine's own demand-resolve uses, under the relation engine's
+    /// `StructuralTransit` context so the union-ness read never reifies
+    /// publication member edges).
+    ///
+    /// Fail-closed on BOTH rails: a `Partial` demand (budget / cycle /
+    /// fault — the primitive folds the reasons into the active build
+    /// taint frame) and a resolved non-`Union` surface return `None`,
+    /// deferring to the tri-state oracle path. `TypeParam` / `Infer`
+    /// shells are STABLE STOPS of the deferred evaluator, so an OPEN
+    /// generic check never distributes over its constraint or default —
+    /// open conditionals stay deferred shells.
+    fn distributive_check_union_members(
+        &self,
+        check: SemanticNodeId,
+    ) -> Option<Arc<[SemanticNodeId]>> {
+        let union_members_of = |node: SemanticNodeId| {
+            self.graph().node_data(node).and_then(|data| match &*data {
+                SemanticNodeData::Union(members) => Some(Arc::clone(members)),
+                _ => None,
+            })
+        };
+        if let Some(members) = union_members_of(check) {
+            return Some(members);
+        }
+        // Only carrier / deferred-shell shapes can still hide a union;
+        // every other shape is already terminal for the union-ness fact.
+        let is_resolvable_shell = matches!(
+            self.graph().node_data(check).as_deref(),
+            Some(
+                SemanticNodeData::Alias(_)
+                    | SemanticNodeData::DeclRef { .. }
+                    | SemanticNodeData::InstantiationRef { .. }
+            )
+        );
+        if !is_resolvable_shell {
+            return None;
+        }
+        let resolved = self
+            .normalize_node_for_structural_fact_demand(
+                check,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )
+            .into_complete_node()?;
+        union_members_of(resolved)
     }
 
     /// Tri-state conditional branch selection — THE shared oracle for

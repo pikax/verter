@@ -30891,3 +30891,141 @@ defineProps<Props>()
         state.completeness
     );
 }
+
+/// Distributive-conditional truth over a DEFAULTED union type argument
+/// (the reka-ui `AccordionRootEmits` shape): the emit payload
+/// `(T extends 'single' ? string : string[]) | undefined` with
+/// `T extends SingleOrMultiple = SingleOrMultiple` (an ALIAS of
+/// `'single' | 'multiple'`) must distribute over the default binding's
+/// union constituents — `string | string[] | undefined` — not decide
+/// the whole union against `'single'` and collapse to the false branch
+/// (`string[] | undefined`, the arm-dropping wrong answer).
+#[test]
+fn distributive_conditional_over_aliased_defaulted_union_type_arg_distributes_emit_payload() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export type SingleOrMultiple = 'single' | 'multiple'
+export type RootEmits<T extends SingleOrMultiple = SingleOrMultiple> = {
+  'update:modelValue': [value: (T extends 'single' ? string : string[]) | undefined]
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { RootEmits } from './types'
+
+export interface AppEmits extends RootEmits {}
+
+defineEmits<AppEmits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("full meta should resolve");
+    let event = meta
+        .events
+        .iter()
+        .find(|event| event.name == "update:modelValue")
+        .expect("update:modelValue event should exist");
+    let payload_ty = demand_published_type(
+        project.host(),
+        "/App.vue",
+        event.payload.present(),
+        "update:modelValue payload",
+    );
+    let TypeExpr::Tuple { elements, .. } = &payload_ty else {
+        panic!("object-emits payload should materialize as a tuple, got {payload_ty:?}");
+    };
+    assert_eq!(elements.len(), 1, "model update has a single payload");
+    let members = flatten_union_arms(&elements[0].ty);
+    assert!(
+        members.len() > 1,
+        "the distributed conditional payload should be a union, got {:?}",
+        elements[0].ty
+    );
+    assert!(
+        members.contains(&&TypeExpr::Primitive(PrimitiveName::String)),
+        "distribution over the defaulted union keeps the `'single'` (true-branch) arm `string`, got {members:?}"
+    );
+    assert!(
+        members
+            .iter()
+            .any(|member| matches!(member, TypeExpr::Array { element, .. } if matches!(element.as_ref(), TypeExpr::Primitive(PrimitiveName::String)))),
+        "distribution over the defaulted union keeps the `'multiple'` (false-branch) arm `string[]`, got {members:?}"
+    );
+    assert!(
+        members.contains(&&TypeExpr::Primitive(PrimitiveName::Undefined)),
+        "the authored `| undefined` arm survives, got {members:?}"
+    );
+}
+
+/// Leaf union arms of `expr`, walking through nested `Union` layers (an
+/// authored `(A | B) | undefined` publishes the distributed inner union
+/// as a nested node — arm MEMBERSHIP is the semantic contract asserted
+/// here, not the nesting shape).
+fn flatten_union_arms(expr: &TypeExpr) -> Vec<&TypeExpr> {
+    match expr {
+        TypeExpr::Union(members) => members.iter().flat_map(flatten_union_arms).collect(),
+        other => vec![other],
+    }
+}
+
+/// Inline-default sibling of
+/// [`distributive_conditional_over_aliased_defaulted_union_type_arg_distributes_emit_payload`]:
+/// the default is the INLINE union `'a' | 'b'` (no alias indirection).
+/// Distribution must produce `string | string[]` here too.
+#[test]
+fn distributive_conditional_over_inline_defaulted_union_type_arg_distributes_emit_payload() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+type E<T = 'a' | 'b'> = { p: [payload: T extends 'a' ? string : string[]] }
+
+defineEmits<E>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("full meta should resolve");
+    let event = meta
+        .events
+        .iter()
+        .find(|event| event.name == "p")
+        .expect("p event should exist");
+    let payload_ty = demand_published_type(
+        project.host(),
+        "/App.vue",
+        event.payload.present(),
+        "p payload",
+    );
+    let TypeExpr::Tuple { elements, .. } = &payload_ty else {
+        panic!("object-emits payload should materialize as a tuple, got {payload_ty:?}");
+    };
+    let TypeExpr::Union(members) = &elements[0].ty else {
+        panic!(
+            "the distributed conditional payload should be a union, got {:?}",
+            elements[0].ty
+        );
+    };
+    assert!(
+        members.contains(&TypeExpr::Primitive(PrimitiveName::String))
+            && members
+                .iter()
+                .any(|member| matches!(member, TypeExpr::Array { element, .. } if matches!(element.as_ref(), TypeExpr::Primitive(PrimitiveName::String)))),
+        "distribution over the inline defaulted union produces `string | string[]`, got {members:?}"
+    );
+}
