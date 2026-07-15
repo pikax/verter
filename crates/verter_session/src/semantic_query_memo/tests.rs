@@ -192,6 +192,66 @@ fn intern_identity_invariant_holds_across_threads() {
     );
 }
 
+/// Spans are part of node identity. Two `Function` payloads that differ
+/// ONLY in `signature_span` must intern to DISTINCT ids; two identical
+/// (span-included) shapes must dedup. Discriminating against the
+/// fingerprint interner dropping spans from the content-`Eq` authority
+/// (which would alias provenance-distinct signatures).
+#[test]
+fn intern_span_participates_in_identity() {
+    let store = SemanticGraphStore::new();
+    let ret = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+    let mk = |end: u32| SemanticNodeData::Function {
+        params: Arc::from(Vec::<crate::semantic_query::FunctionParam>::new()),
+        return_type: ret,
+        type_parameters: Arc::from(Vec::<crate::semantic_query::TypeParamDecl>::new()),
+        signature_span: Some(verter_span::Span::new(0, end)),
+        return_type_span: None,
+    };
+    let id_a = store.intern_node(mk(10));
+    let id_a_again = store.intern_node(mk(10));
+    let id_b = store.intern_node(mk(20));
+    assert_eq!(
+        id_a, id_a_again,
+        "identical function shape (incl signature_span) must dedup to one id",
+    );
+    assert_ne!(
+        id_a, id_b,
+        "functions differing only in signature_span must stay distinct — \
+         spans are part of node identity",
+    );
+}
+
+/// `TypeParam::display_name` is EXCLUDED from node identity (F11): two
+/// `TypeParam` nodes with the same `decl` / `param_index` / `constraint`
+/// / `default` but different `display_name` must dedup to one id.
+/// Discriminating against the fingerprint including `display_name` (a
+/// derived `Hash` would), which would route the two renames into
+/// different buckets and defeat dedup even though their `Eq` is equal.
+#[test]
+fn intern_typeparam_display_name_excluded_from_identity() {
+    use crate::semantic_query::DeclIdentity;
+    let store = SemanticGraphStore::new();
+    let mk = |display: &str| SemanticNodeData::TypeParam {
+        decl: DeclIdentity {
+            canonical_id: Arc::from("/w/a.ts"),
+            whole_hash: [3u8; 16],
+            decl_name: Arc::from("T"),
+        },
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from(display),
+    };
+    let id1 = store.intern_node(mk("T"));
+    let id2 = store.intern_node(mk("TRenamed"));
+    assert_eq!(
+        id1, id2,
+        "TypeParam display_name is excluded from identity — same \
+         decl/index/constraint/default must dedup regardless of display_name",
+    );
+}
+
 /// Sharded-dedup invariant — `shard_index_for` is deterministic: identical
 /// `(data, scope)` pairs route to the same shard regardless of
 /// calling thread or program run. This is load-bearing for the

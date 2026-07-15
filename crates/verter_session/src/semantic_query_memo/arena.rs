@@ -11,9 +11,37 @@
 //! unbounded under repeated structural construction. Cross-scope
 //! same-payload interns stay distinct.
 //!
+//! **Fingerprint-narrowed dedup index.** Each `(payload, scope)` pair is
+//! reduced to a 64-bit [`structural_fingerprint`] once, up front, outside
+//! any lock. The per-shard dedup index is keyed by that fingerprint —
+//! `u64 -> bucket of candidates` — so intern lookups hash a single `u64`
+//! rather than re-walking the whole payload (a `SurfaceView` with every
+//! member + span) on the map probe. The fingerprint only NARROWS: each
+//! bucket holds the handful of nodes whose fingerprint collided, and a
+//! per-bucket content `Eq` over `(payload, scope)` is the identity
+//! authority. Two nodes intern to the same id **iff** they are structurally
+//! and scope equal (spans, accessibility, and `NodeScopeId` all included),
+//! so a fingerprint collision can never alias two distinct nodes — it only
+//! lengthens a bucket scan.
+//!
+//! **Single payload allocation.** On an intern-miss the payload is boxed
+//! into one `Arc` that is shared by refcount between the dense arena vec
+//! (`ArenaInner::nodes`, indexed by `id.0`) and the dedup bucket. The index
+//! holds an `Arc` handle, never a deep clone of the payload — so the graph
+//! carries exactly one copy of each node's body.
+//!
+//! **HashDoS-safe fingerprint.** Node payloads embed workspace-derived
+//! names (file paths, type names). A seedless hash would let an attacker
+//! craft names that force every node into one fingerprint bucket
+//! (`O(n)` per intern). The fingerprint therefore hashes through a
+//! process-seeded SipHash ([`RandomState`]), and the bucket map itself
+//! uses the std `RandomState` hasher — never `FxHash`. Fingerprints never
+//! cross a process / serialization boundary (they key only the in-memory,
+//! per-generation dedup index), so a per-process random seed is correct.
+//!
 //! **Sharded dedup index.** The dedup index lives on
 //! `[Mutex<ShardIndex>; NUM_SHARDS]` rather than inside `ArenaInner`.
-//! Payload hash + scope hash route to a specific shard; intern-hits
+//! The fingerprint's low bits route to a specific shard; intern-hits
 //! (the steady-state hot path) take only that shard's Mutex — so `K`
 //! threads interning payloads that route to distinct shards proceed
 //! in parallel. Intern-misses acquire the shard Mutex, then briefly
@@ -26,9 +54,12 @@
 //! [`SessionSolverHost`](crate::resolver_core::solver_host::SessionSolverHost)
 //! without threading scope through every call.
 
-use std::sync::Arc;
+use std::collections::hash_map::RandomState;
+use std::collections::HashMap;
+use std::hash::{BuildHasher, Hash, Hasher};
+use std::sync::{Arc, OnceLock};
 
-use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 use crate::instant::Instant;
 use crate::semantic_query::{NodeScopeId, SemanticNodeData, SemanticNodeId};
@@ -36,13 +67,43 @@ use crate::semantic_query::{NodeScopeId, SemanticNodeData, SemanticNodeId};
 pub(super) const NUM_SHARDS: usize = 16;
 pub(super) const SHARD_MASK: u64 = (NUM_SHARDS as u64) - 1;
 
-/// Per-shard dedup index. Routes keyed by
-/// `hash(payload, scope) & SHARD_MASK`; the same payload + scope
-/// always lands on the same shard, so intern-hits never race across
-/// shards.
+/// One entry in a fingerprint bucket: the shared payload `Arc` (the SAME
+/// allocation stored in [`ArenaInner::nodes`]), its origin scope, and the
+/// interned id. The payload and scope are retained so the bucket scan can
+/// content-`Eq` a query against candidates without touching `inner`.
+type NodeCandidate = (Arc<SemanticNodeData>, NodeScopeId, SemanticNodeId);
+
+/// Per-shard dedup index. Keyed by the structural fingerprint of
+/// `(payload, scope)`; each bucket holds the candidate nodes whose
+/// fingerprint routed here. A lookup content-`Eq`s the query
+/// `(payload, scope)` against the (usually single) candidate to confirm
+/// identity — the fingerprint only narrows.
+///
+/// The bucket map uses the std [`RandomState`] (SipHash) hasher, **not**
+/// `FxHash`: workspace-derived names in the payload feed the fingerprint,
+/// so a predictable hash would be a HashDoS vector.
 #[derive(Default)]
 pub(super) struct ShardIndex {
-    index: FxHashMap<(SemanticNodeData, NodeScopeId), SemanticNodeId>,
+    index: HashMap<u64, SmallVec<[NodeCandidate; 1]>>,
+}
+
+impl ShardIndex {
+    /// Return the interned id for the node structurally + scope equal to
+    /// `(data, scope)` within this shard, or `None`. The `fingerprint`
+    /// already selected the bucket; the per-candidate content `Eq` is the
+    /// identity authority that keeps a fingerprint collision from aliasing
+    /// two distinct nodes.
+    fn lookup(
+        &self,
+        fingerprint: u64,
+        data: &SemanticNodeData,
+        scope: &NodeScopeId,
+    ) -> Option<SemanticNodeId> {
+        let bucket = self.index.get(&fingerprint)?;
+        bucket.iter().find_map(|(cand_data, cand_scope, cand_id)| {
+            (cand_scope == scope && cand_data.as_ref() == data).then_some(*cand_id)
+        })
+    }
 }
 
 /// Interior state of [`NodeArena`]. Held behind an `RwLock` so reads of
@@ -58,17 +119,43 @@ pub(super) struct ArenaInner {
     scopes: Vec<Option<NodeScopeId>>,
 }
 
-/// Deterministic shard routing — `hash((data, scope)) & mask`. The
-/// same `(data, scope)` pair always routes to the same shard,
-/// regardless of the calling thread. FxHash picked for speed; the
-/// dedup key's own `Eq` implementation disambiguates collisions
-/// within a shard.
-pub(super) fn shard_index_for(data: &SemanticNodeData, scope: &NodeScopeId) -> usize {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = rustc_hash::FxHasher::default();
+/// Process-global seed for structural fingerprints. A single
+/// [`RandomState`] captured once per process — SipHash-quality and randomly
+/// seeded so workspace-derived names carried in node payloads cannot be
+/// used to force fingerprint (and thus bucket) collisions. Fingerprints are
+/// purely an in-memory, per-generation interning optimisation and never
+/// cross a process / serialization boundary, so a per-process random seed
+/// is correct.
+fn fingerprint_seed() -> &'static RandomState {
+    static SEED: OnceLock<RandomState> = OnceLock::new();
+    SEED.get_or_init(RandomState::new)
+}
+
+/// Structural fingerprint of `(data, scope)` — the 64-bit narrowing key for
+/// the dedup bucket index. Hashes the FULL structural identity (payload
+/// incl. spans, plus origin scope) through the node's own [`Hash`] impl, so
+/// equal `(data, scope)` pairs always fingerprint equal and land in the
+/// same bucket (Hash/Eq consistency is load-bearing for dedup). It only
+/// narrows candidates; per-bucket content `Eq` is the identity authority,
+/// so a fingerprint collision never aliases two distinct nodes.
+///
+/// Because it routes through [`fingerprint_seed`], the fingerprint of a
+/// given payload is stable within a process run but unpredictable across
+/// runs — the HashDoS defense.
+fn structural_fingerprint(data: &SemanticNodeData, scope: &NodeScopeId) -> u64 {
+    let mut hasher = fingerprint_seed().build_hasher();
     data.hash(&mut hasher);
     scope.hash(&mut hasher);
-    (hasher.finish() & SHARD_MASK) as usize
+    hasher.finish()
+}
+
+/// Deterministic shard routing for a `(data, scope)` pair — the low bits of
+/// its structural fingerprint. Test-only: production interning computes the
+/// fingerprint once in [`NodeArena::intern_with_fingerprint`] and derives
+/// the shard from it directly, never re-walking the payload here.
+#[cfg(test)]
+pub(super) fn shard_index_for(data: &SemanticNodeData, scope: &NodeScopeId) -> usize {
+    (structural_fingerprint(data, scope) & SHARD_MASK) as usize
 }
 
 pub(super) struct NodeArena {
@@ -76,8 +163,8 @@ pub(super) struct NodeArena {
     /// (`get`, `scope`) are concurrent and writers (intern-miss) briefly
     /// serialize to push a fresh slot.
     inner: parking_lot::RwLock<ArenaInner>,
-    /// Sharded dedup indexes. Each shard owns the key-range whose
-    /// `hash(payload, scope) & mask` lands on it.
+    /// Sharded dedup indexes. Each shard owns the fingerprint-range whose
+    /// low bits land on it.
     shards: [parking_lot::Mutex<ShardIndex>; NUM_SHARDS],
     /// Optional contention instrumentation. When present,
     /// `push_impl` records per-call counters and `inner.write()`
@@ -117,61 +204,84 @@ impl NodeArena {
     }
 
     fn push_impl(&self, data: SemanticNodeData, scope: NodeScopeId) -> SemanticNodeId {
+        // Fingerprint once, up front, outside every lock. Both shard
+        // routing and the bucket key derive from this single hash of the
+        // payload; the map probe then only hashes a `u64`.
+        let fingerprint = structural_fingerprint(&data, &scope);
+        self.intern_with_fingerprint(data, scope, fingerprint)
+    }
+
+    /// Core intern path. `fingerprint` narrows to a shard + bucket; the
+    /// per-bucket content `Eq` over `(data, scope)` is the identity
+    /// authority. Split out from [`push_impl`] so tests can force a
+    /// fingerprint — driving two distinct payloads into one bucket — and
+    /// assert the content-`Eq` split (collision safety).
+    fn intern_with_fingerprint(
+        &self,
+        data: SemanticNodeData,
+        scope: NodeScopeId,
+        fingerprint: u64,
+    ) -> SemanticNodeId {
         // Capture the discriminant before moving `data` so the
         // contention instrumentation can bucket per-variant pushes.
         let discriminant = data.discriminant_index();
+        let shard_idx = (fingerprint & SHARD_MASK) as usize;
 
-        // Sharded dedup hot path. Variants route to their shard and
-        // check for an existing id; the miss path acquires
+        // Sharded dedup hot path. The fingerprint routes to its shard and
+        // the bucket scan checks for an existing id; the miss path acquires
         // `inner.write()` briefly to push the new slot.
         let (id, is_miss, write_wait_ns) = {
-            let shard_idx = shard_index_for(&data, &scope);
-            let key = (data, scope);
+            let timing_on = verter_scheduler::request_context::current_timing_enabled();
             // Fast path: shard-hit. Shard Mutex is short-lived; parallel
             // across shards.
-            {
-                let timing_on = verter_scheduler::request_context::current_timing_enabled();
+            let lock_start = if timing_on {
+                Some(Instant::now())
+            } else {
+                None
+            };
+            let shard = self.shards[shard_idx].lock();
+            let lock_wait = lock_start
+                .map(|t| t.elapsed())
+                .unwrap_or(std::time::Duration::ZERO);
+            crate::host_manage::record_node_arena_lock_acquisition(lock_wait);
+            if let Some(existing) = shard.lookup(fingerprint, &data, &scope) {
+                (existing, false, 0u64)
+            } else {
+                drop(shard);
+                // Miss: re-acquire the shard (to serialize concurrent
+                // misses for the same key on this shard) and then
+                // briefly acquire inner.write() to allocate.
                 let lock_start = if timing_on {
                     Some(Instant::now())
                 } else {
                     None
                 };
-                let shard = self.shards[shard_idx].lock();
+                let mut shard = self.shards[shard_idx].lock();
                 let lock_wait = lock_start
                     .map(|t| t.elapsed())
                     .unwrap_or(std::time::Duration::ZERO);
                 crate::host_manage::record_node_arena_lock_acquisition(lock_wait);
-                if let Some(&existing) = shard.index.get(&key) {
+                if let Some(existing) = shard.lookup(fingerprint, &data, &scope) {
+                    // Another thread beat us to it.
                     (existing, false, 0u64)
                 } else {
-                    drop(shard);
-                    // Miss: re-acquire the shard (to serialize concurrent
-                    // misses for the same key on this shard) and then
-                    // briefly acquire inner.write() to allocate.
-                    let lock_start = if timing_on {
-                        Some(Instant::now())
-                    } else {
-                        None
-                    };
-                    let mut shard = self.shards[shard_idx].lock();
-                    let lock_wait = lock_start
-                        .map(|t| t.elapsed())
-                        .unwrap_or(std::time::Duration::ZERO);
-                    crate::host_manage::record_node_arena_lock_acquisition(lock_wait);
-                    if let Some(&existing) = shard.index.get(&key) {
-                        // Another thread beat us to it.
-                        (existing, false, 0u64)
-                    } else {
-                        let write_start = Instant::now();
-                        let mut inner = self.inner.write();
-                        let wait = write_start.elapsed().as_nanos() as u64;
-                        let id = SemanticNodeId(inner.nodes.len() as u64);
-                        inner.nodes.push(Arc::new(key.0.clone()));
-                        inner.scopes.push(Some(key.1.clone()));
-                        drop(inner);
-                        shard.index.insert(key, id);
-                        (id, true, wait)
-                    }
+                    let write_start = Instant::now();
+                    let mut inner = self.inner.write();
+                    let wait = write_start.elapsed().as_nanos() as u64;
+                    let id = SemanticNodeId(inner.nodes.len() as u64);
+                    // ONE payload allocation, shared by refcount between the
+                    // dense arena storage and the dedup bucket — the payload
+                    // is never deep-cloned into the index.
+                    let payload = Arc::new(data);
+                    inner.nodes.push(Arc::clone(&payload));
+                    inner.scopes.push(Some(scope.clone()));
+                    drop(inner);
+                    shard
+                        .index
+                        .entry(fingerprint)
+                        .or_default()
+                        .push((payload, scope, id));
+                    (id, true, wait)
                 }
             }
         };
@@ -248,13 +358,153 @@ impl NodeArena {
                 .map(|t| t.elapsed())
                 .unwrap_or(std::time::Duration::ZERO);
             crate::host_manage::record_node_arena_lock_acquisition(lock_wait);
-            shard.index.retain(|(_, scope), _| match scope {
-                // Invariant: Global scope is never dropped on invalidation.
-                NodeScopeId::Global => true,
-                NodeScopeId::File {
-                    canonical_id: c, ..
-                } => c.as_ref() != canonical_id,
+            shard.index.retain(|_fingerprint, bucket| {
+                bucket.retain(|(_, scope, _)| match scope {
+                    // Invariant: Global scope is never dropped on invalidation.
+                    NodeScopeId::Global => true,
+                    NodeScopeId::File {
+                        canonical_id: c, ..
+                    } => c.as_ref() != canonical_id,
+                });
+                // Drop now-empty buckets so the fingerprint index stays dense.
+                !bucket.is_empty()
             });
         }
+    }
+
+    /// Test-only: assert the dedup bucket holding `id` shares the SAME
+    /// `Arc` allocation as the dense arena vec — i.e. the payload was
+    /// interned once and shared by refcount, never deep-cloned into the
+    /// index. Returns `false` if `id` has no dense slot or no bucket entry.
+    #[cfg(test)]
+    pub(super) fn debug_bucket_shares_arena_arc(&self, id: SemanticNodeId) -> bool {
+        let arena_arc = match self.get(id) {
+            Some(arc) => arc,
+            None => return false,
+        };
+        for shard in self.shards.iter() {
+            let shard = shard.lock();
+            for bucket in shard.index.values() {
+                for (cand_arc, _scope, cand_id) in bucket.iter() {
+                    if *cand_id == id {
+                        return Arc::ptr_eq(cand_arc, &arena_arc);
+                    }
+                }
+            }
+        }
+        false
+    }
+}
+
+#[cfg(test)]
+mod arena_intern_tests {
+    use super::*;
+    use crate::semantic_query::PrimitiveKind;
+
+    fn file_scope(canonical: &str) -> NodeScopeId {
+        NodeScopeId::File {
+            canonical_id: Arc::from(canonical),
+            whole_hash: [7u8; 16],
+            local_scope: None,
+        }
+    }
+
+    /// Hash/`Eq` consistency under the seeded fingerprint: two `Eq`
+    /// payloads MUST fingerprint identically, else they would land in
+    /// different buckets and dedup would silently break. Discriminating
+    /// against a fingerprint inconsistent with the node's `Eq`.
+    #[test]
+    fn equal_nodes_share_fingerprint() {
+        let a = SemanticNodeData::Primitive(PrimitiveKind::String);
+        let b = SemanticNodeData::Primitive(PrimitiveKind::String);
+        assert_eq!(a, b);
+        assert_eq!(
+            structural_fingerprint(&a, &NodeScopeId::Global),
+            structural_fingerprint(&b, &NodeScopeId::Global),
+            "structurally-equal nodes must fingerprint equal (Hash/Eq consistency)",
+        );
+    }
+
+    /// Collision-bucket authority. Two structurally DISTINCT payloads,
+    /// forced into ONE fingerprint bucket via the intern seam, must NOT
+    /// alias: the fingerprint only narrows, the per-bucket content `Eq`
+    /// decides identity. Discriminating against dropping the content-`Eq`
+    /// (returning the first candidate) from the collision path.
+    #[test]
+    fn collision_bucket_disambiguates_distinct_payloads() {
+        let arena = NodeArena::default();
+        let a = SemanticNodeData::Primitive(PrimitiveKind::String);
+        let b = SemanticNodeData::Primitive(PrimitiveKind::Number);
+        let forced_fp = 0x00C0_FFEE_u64;
+
+        let id_a = arena.intern_with_fingerprint(a.clone(), NodeScopeId::Global, forced_fp);
+        let id_b = arena.intern_with_fingerprint(b.clone(), NodeScopeId::Global, forced_fp);
+        assert_ne!(
+            id_a, id_b,
+            "distinct payloads sharing one fingerprint bucket must get distinct ids (no aliasing)",
+        );
+
+        // Re-intern of each SAME payload into the SAME (collided) bucket
+        // still dedups to its own id.
+        let id_a2 = arena.intern_with_fingerprint(a, NodeScopeId::Global, forced_fp);
+        let id_b2 = arena.intern_with_fingerprint(b, NodeScopeId::Global, forced_fp);
+        assert_eq!(id_a, id_a2, "same payload in a collided bucket must dedup");
+        assert_eq!(id_b, id_b2, "same payload in a collided bucket must dedup");
+
+        // Each id resolves to its OWN payload (not the bucket-neighbour's).
+        assert!(matches!(
+            *arena.get(id_a).unwrap(),
+            SemanticNodeData::Primitive(PrimitiveKind::String)
+        ));
+        assert!(matches!(
+            *arena.get(id_b).unwrap(),
+            SemanticNodeData::Primitive(PrimitiveKind::Number)
+        ));
+    }
+
+    /// Scope is part of identity even inside a collided bucket. The SAME
+    /// payload at DIFFERENT scopes, forced into one bucket, must not alias.
+    /// Discriminating against dropping the scope compare from the bucket
+    /// content-`Eq`.
+    #[test]
+    fn collision_bucket_distinguishes_by_scope() {
+        let arena = NodeArena::default();
+        let payload = SemanticNodeData::Primitive(PrimitiveKind::Boolean);
+        let forced_fp = 0x0000_ABCD_u64;
+
+        let id_global =
+            arena.intern_with_fingerprint(payload.clone(), NodeScopeId::Global, forced_fp);
+        let id_file = arena.intern_with_fingerprint(payload, file_scope("/w/a.ts"), forced_fp);
+        assert_ne!(
+            id_global, id_file,
+            "same payload at different scopes in one bucket must get distinct ids (scope is identity)",
+        );
+    }
+
+    /// The dedup index shares the arena's payload `Arc` rather than a deep
+    /// clone — the graph-RSS win. Discriminating against re-introducing an
+    /// `Arc::new(data.clone())` into the bucket.
+    #[test]
+    fn payload_stored_once_shared_arc() {
+        let arena = NodeArena::default();
+        let id = arena.push(SemanticNodeData::Primitive(PrimitiveKind::String));
+        assert!(
+            arena.debug_bucket_shares_arena_arc(id),
+            "dedup index must share the arena's payload Arc, not a deep clone",
+        );
+    }
+
+    /// Append-only id stability: interning is dense + sequential, and a
+    /// re-intern of the same `(payload, scope)` returns the existing id
+    /// (no renumbering, no duplicate allocation).
+    #[test]
+    fn ids_are_dense_and_stable() {
+        let arena = NodeArena::default();
+        let a = arena.push(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let b = arena.push(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        assert_eq!(a.0 + 1, b.0, "ids allocate densely and sequentially");
+        let a_again = arena.push(SemanticNodeData::Primitive(PrimitiveKind::String));
+        assert_eq!(a, a_again, "re-intern returns the existing id");
+        assert_eq!(arena.len(), 2, "dedup does not allocate a new slot");
     }
 }
