@@ -14,6 +14,10 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 session_metrics = ["verter_session/session_metrics"]
+# Opt-in deep memory audit: compiles a counting #[global_allocator]
+# wrapper over System (see src/memory_audit.rs). Never enable for
+# timing benchmarks — counters add per-allocation overhead.
+memory_audit = []
 
 [dependencies]
 verter_audit = { path = "../verter_audit" }

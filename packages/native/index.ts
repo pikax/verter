@@ -95,6 +95,43 @@ export declare function processStyle(
 ): ProcessStyleResult;
 
 // =============================================================================
+// Opt-in deep memory audit (cargo feature `memory_audit`)
+//
+// Both functions are ALWAYS exported. Against a binary built WITHOUT
+// `--features memory_audit` (every regular/timing build),
+// `memoryAuditSnapshot()` returns `null` and
+// `memoryAuditResetHighWater()` returns `false` so callers can detect a
+// non-instrumented binary and fail loudly instead of reporting zeros.
+// Instrumented build: `pnpm --filter @verter/native run build:memory-audit`.
+// =============================================================================
+
+/** Counters from the instrumented counting global allocator. */
+export interface MemoryAuditSnapshot {
+  /** Allocating calls (alloc/alloc_zeroed/realloc) since process start. */
+  allocCount: number;
+  /** Deallocating calls (dealloc/realloc) since process start. */
+  deallocCount: number;
+  /** Total bytes requested by allocating calls (monotonic). */
+  allocatedBytesTotal: number;
+  /** Currently live heap bytes. */
+  liveBytes: number;
+  /** High-water mark of liveBytes since start or the last reset. */
+  peakLiveBytes: number;
+}
+
+/**
+ * Current allocator counters, or `null` when the loaded binary was
+ * built without the `memory_audit` cargo feature.
+ */
+export declare function memoryAuditSnapshot(): MemoryAuditSnapshot | null;
+
+/**
+ * Reset the live-bytes high-water mark to the current live-bytes level.
+ * Returns `false` when the loaded binary is not instrumented.
+ */
+export declare function memoryAuditResetHighWater(): boolean;
+
+// =============================================================================
 // Host-backed batch compile — VerterHost.compileMany
 //
 // Replaces the previous free-fn `compileBatch` (Rayon-direct,

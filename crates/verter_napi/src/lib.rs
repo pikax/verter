@@ -35,6 +35,7 @@ use verter_session as host;
 use verter_type_expr::TypeExpr;
 
 mod audit;
+mod memory_audit;
 mod meta;
 mod typeinfo;
 

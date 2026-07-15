@@ -37,6 +37,8 @@ const {
   Workspace,
   MetaProject,
   MetaSession,
+  memoryAuditSnapshot,
+  memoryAuditResetHighWater,
 } = nativeBinding;
 
 const ComponentMetaHost = MetaProject;
@@ -99,3 +101,8 @@ module.exports.ComponentMetaHost = ComponentMetaHost;
 module.exports.ComponentMetaSession = ComponentMetaSession;
 module.exports.MetaProject = MetaProject;
 module.exports.MetaSession = MetaSession;
+// Memory-audit surface (always exported by current binaries; resolves to
+// undefined against older prebuilt binaries, which memory-audit callers
+// treat as "non-instrumented" and fail loudly on).
+module.exports.memoryAuditSnapshot = memoryAuditSnapshot;
+module.exports.memoryAuditResetHighWater = memoryAuditResetHighWater;
