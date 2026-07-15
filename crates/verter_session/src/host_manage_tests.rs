@@ -7497,6 +7497,183 @@ fn resolve_eval_dependency_canonical_prefers_bundle_entry_declaration_companion_
 }
 
 #[test]
+fn resolve_eval_dependency_canonical_memoizes_positive_result_within_request_context() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/src/runtime/types/html.ts",
+        "export interface ButtonHTMLAttributes { disabled?: boolean }\n",
+    );
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    let rctx = crate::request_context::RequestContext::new(
+        4201,
+        Arc::from("/workspace/src/App.vue"),
+        false,
+        None,
+    );
+    let _guard = crate::request_context::RequestContextGuard::install(Arc::clone(&rctx));
+
+    let first = host.resolve_eval_dependency_canonical("/workspace/src/runtime/types/html");
+    assert_eq!(
+        first.as_deref(),
+        Some("/workspace/src/runtime/types/html.ts"),
+        "the first resolve must run the candidate walk and find the typed companion",
+    );
+    assert_eq!(
+        rctx.dep_canonical_memo
+            .lock()
+            .get("/workspace/src/runtime/types/html")
+            .map(String::as_str),
+        Some("/workspace/src/runtime/types/html.ts"),
+        "a positive resolution must populate the request-scoped memo",
+    );
+
+    ws.reset_exists();
+    let second = host.resolve_eval_dependency_canonical("/workspace/src/runtime/types/html");
+    assert_eq!(
+        second, first,
+        "the memoized resolve must return the same canonical as the cold walk",
+    );
+    assert_eq!(
+        ws.exists_count("/workspace/src/runtime/types/html.d.ts"),
+        0,
+        "a memo hit must not re-probe the .d.ts candidate — the candidate walk ran once per request",
+    );
+    assert_eq!(
+        ws.exists_count("/workspace/src/runtime/types/html.ts"),
+        0,
+        "a memo hit must not re-probe the resolved .ts candidate — the candidate walk ran once per request",
+    );
+}
+
+#[test]
+fn resolve_eval_dependency_canonical_resolves_without_request_context() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/src/runtime/types/html.ts",
+        "export interface ButtonHTMLAttributes { disabled?: boolean }\n",
+    );
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+    assert!(
+        crate::request_context::current_request_context().is_none(),
+        "precondition: no request context is installed on this thread",
+    );
+
+    let first = host.resolve_eval_dependency_canonical("/workspace/src/runtime/types/html");
+    assert_eq!(
+        first.as_deref(),
+        Some("/workspace/src/runtime/types/html.ts"),
+        "resolution must keep working with no request context installed",
+    );
+
+    // Without a request context there is no memo layer: a repeated call
+    // re-runs the candidate walk (no behavior change outside requests).
+    ws.reset_exists();
+    let second = host.resolve_eval_dependency_canonical("/workspace/src/runtime/types/html");
+    assert_eq!(second, first);
+    assert!(
+        ws.exists_count("/workspace/src/runtime/types/html.d.ts") >= 1,
+        "with no request context the candidate walk must re-run — no host-global memoization",
+    );
+}
+
+#[test]
+fn resolve_eval_dependency_canonical_does_not_memoize_negative_results() {
+    let ws = Arc::new(CountingWorkspace::new());
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    let rctx = crate::request_context::RequestContext::new(
+        4202,
+        Arc::from("/workspace/src/App.vue"),
+        false,
+        None,
+    );
+    let _guard = crate::request_context::RequestContextGuard::install(Arc::clone(&rctx));
+
+    let first = host.resolve_eval_dependency_canonical("/workspace/src/missing/nope");
+    assert!(
+        first.is_none(),
+        "a dependency with no on-disk candidate resolves to None",
+    );
+    assert!(
+        rctx.dep_canonical_memo.lock().is_empty(),
+        "a None resolution must NOT enter the request-scoped memo — mid-request \
+         artifact publication can turn a None into a hit, so negatives stay uncached",
+    );
+
+    // A later identical call must re-run the candidate walk (the None is
+    // not pinned for the rest of the request).
+    ws.reset_exists();
+    let second = host.resolve_eval_dependency_canonical("/workspace/src/missing/nope");
+    assert!(second.is_none());
+    assert!(
+        ws.exists_count("/workspace/src/missing/nope.d.ts") >= 1,
+        "a repeated None resolve must probe candidates again — negatives are not memoized",
+    );
+}
+
+#[test]
+fn resolve_eval_dependency_canonical_memo_is_isolated_per_request_context() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/src/runtime/types/html.ts",
+        "export interface ButtonHTMLAttributes { disabled?: boolean }\n",
+    );
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    {
+        let rctx1 = crate::request_context::RequestContext::new(
+            4203,
+            Arc::from("/workspace/src/App.vue"),
+            false,
+            None,
+        );
+        let _guard1 = crate::request_context::RequestContextGuard::install(Arc::clone(&rctx1));
+        let resolved = host.resolve_eval_dependency_canonical("/workspace/src/runtime/types/html");
+        assert_eq!(
+            resolved.as_deref(),
+            Some("/workspace/src/runtime/types/html.ts"),
+        );
+        assert_eq!(
+            rctx1.dep_canonical_memo.lock().len(),
+            1,
+            "the first request's memo holds the positive mapping",
+        );
+        // `_guard1` drops here — the first request is over.
+    }
+
+    let rctx2 = crate::request_context::RequestContext::new(
+        4204,
+        Arc::from("/workspace/src/Other.vue"),
+        false,
+        None,
+    );
+    let _guard2 = crate::request_context::RequestContextGuard::install(Arc::clone(&rctx2));
+    assert!(
+        rctx2.dep_canonical_memo.lock().is_empty(),
+        "a fresh request context starts with an empty memo — no cross-request sharing",
+    );
+
+    ws.reset_exists();
+    let resolved = host.resolve_eval_dependency_canonical("/workspace/src/runtime/types/html");
+    assert_eq!(
+        resolved.as_deref(),
+        Some("/workspace/src/runtime/types/html.ts"),
+    );
+    assert!(
+        ws.exists_count("/workspace/src/runtime/types/html.d.ts") >= 1,
+        "a fresh request context must not inherit the previous request's memo — \
+         the candidate walk re-runs once per request",
+    );
+    assert_eq!(
+        rctx2.dep_canonical_memo.lock().len(),
+        1,
+        "the second request populates its OWN memo from its own cold walk",
+    );
+}
+
+
+#[test]
 fn current_eval_state_normalizes_extensionless_canonical_before_fallback_load() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(

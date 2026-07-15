@@ -662,9 +662,37 @@ impl VerterHost {
     }
 
     pub(crate) fn resolve_eval_dependency_canonical(&self, dep_canonical: &str) -> Option<String> {
-        resolve_eval_dependency_canonical_with(dep_canonical, |candidate| {
+        // Request-scoped POSITIVE-ONLY memo
+        // (`RequestContext::dep_canonical_memo`). One request
+        // re-normalizes the same dependency canonicals tens of thousands
+        // of times, and every cold walk probes up to 14 candidate
+        // canonicals through `analysis_source_exists` (artifact store +
+        // scheduler + workspace VFS); a memo hit skips the whole walk.
+        // `None` results are deliberately NOT memoized — a mid-request
+        // artifact publication / load can turn a `None` into a hit, and
+        // a stale pinned `None` would misroute the rest of the request.
+        // Empty ids and raw import specifiers bypass the memo (mirroring
+        // the `normalized_analysis_canonical` guard); with no request
+        // context installed the behavior is unchanged.
+        let memo_ctx = if dep_canonical.is_empty() || is_raw_import_specifier_id(dep_canonical) {
+            None
+        } else {
+            crate::request_context::current_request_context()
+        };
+        if let Some(ctx) = memo_ctx.as_ref() {
+            if let Some(hit) = ctx.dep_canonical_memo.lock().get(dep_canonical).cloned() {
+                return Some(hit);
+            }
+        }
+        let resolved = resolve_eval_dependency_canonical_with(dep_canonical, |candidate| {
             self.analysis_source_exists(candidate)
-        })
+        });
+        if let (Some(ctx), Some(resolved)) = (memo_ctx.as_ref(), resolved.as_ref()) {
+            ctx.dep_canonical_memo
+                .lock()
+                .insert(dep_canonical.to_string(), resolved.clone());
+        }
+        resolved
     }
 
     pub(crate) fn normalized_analysis_canonical<'a>(
