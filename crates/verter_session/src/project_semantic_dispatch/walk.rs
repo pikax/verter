@@ -1249,20 +1249,33 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     continue;
                 }
                 SemanticNodeData::Object(surface) => {
-                    let needle = match segment {
-                        PathSegment::Member(name) => name.as_ref().to_string(),
-                        PathSegment::Index(IndexKey::String(s)) => s.as_ref().to_string(),
+                    // Borrowed needle: `Member` / string-literal `Index`
+                    // segments compare against the surface member names
+                    // directly (no per-hop String allocation); only the
+                    // canonicalised numeric / TypeNode spellings own their
+                    // rendering.
+                    let needle: std::borrow::Cow<'_, str> = match segment {
+                        PathSegment::Member(name) => std::borrow::Cow::Borrowed(name.as_ref()),
+                        PathSegment::Index(IndexKey::String(s)) => {
+                            std::borrow::Cow::Borrowed(s.as_ref())
+                        }
                         // Correct by construction: every producer folds
                         // to `IndexKey::Number` ONLY when the i64's
                         // `Display` IS the canonical `js_number_to_string`
                         // spelling (`build::integer_convention_index_key`),
                         // so rendering the needle with `i64::to_string`
                         // is exactly the published member name.
-                        PathSegment::Index(IndexKey::Number(n)) => n.to_string(),
+                        PathSegment::Index(IndexKey::Number(n)) => {
+                            std::borrow::Cow::Owned(n.to_string())
+                        }
                         PathSegment::Index(IndexKey::TypeNode(node)) => {
                             match self.dispatch.normalized_index_key_node(*node) {
-                                IndexKey::String(text) => text.as_ref().to_string(),
-                                IndexKey::Number(number) => number.to_string(),
+                                IndexKey::String(text) => {
+                                    std::borrow::Cow::Owned(text.as_ref().to_string())
+                                }
+                                IndexKey::Number(number) => {
+                                    std::borrow::Cow::Owned(number.to_string())
+                                }
                                 IndexKey::TypeNode(resolved) => {
                                     // G4.5 recovery: numeric literals outside
                                     // the i64 integer convention (`Foo[1.5]`,
@@ -1275,9 +1288,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                     match self.graph().node_data(resolved).as_deref() {
                                         Some(SemanticNodeData::Literal(
                                             crate::semantic_query::LiteralValue::Number(n),
-                                        )) => {
-                                            crate::project_semantic_dispatch::build::js_number_to_string(*n)
-                                        }
+                                        )) => std::borrow::Cow::Owned(
+                                            crate::project_semantic_dispatch::build::js_number_to_string(*n),
+                                        ),
                                         _ => {
                                             results.push(self.opaque_miss());
                                             return;
@@ -1297,14 +1310,31 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // must not resolve their value type. A non-public match is
                     // therefore treated as a miss (the member is not on the
                     // public surface this walker projects).
-                    let member = surface
-                        .members
-                        .iter()
-                        .find(|m| m.name.as_ref() == needle.as_str())
+                    //
+                    // Wide surfaces resolve the name through the store-side
+                    // member-ordinal sidecar (name → FIRST-occurrence
+                    // ordinal, identical to the linear `find`); the
+                    // visibility gate applies AFTER selection either way, so
+                    // a non-public first occurrence misses even when a later
+                    // public duplicate exists.
+                    let matched = if surface.members.len()
+                        > crate::semantic_query_memo::MEMBER_ORDINAL_INDEX_LINEAR_SCAN_MAX
+                    {
+                        self.graph()
+                            .member_ordinal_index(current, surface)
+                            .get(needle.as_ref())
+                            .map(|&ordinal| &surface.members[ordinal as usize])
+                    } else {
+                        surface
+                            .members
+                            .iter()
+                            .find(|m| m.name.as_ref() == needle.as_ref())
+                    };
+                    let member = matched
                         .filter(|m| m.visibility.is_public())
-                        .cloned();
+                        .map(|m| m.value);
                     match member {
-                        Some(m) => {
+                        Some(member_value) => {
                             let meta = match segment {
                                 PathSegment::Member(name) => OriginMeta::ProjectedMember {
                                     name: Arc::clone(name),
@@ -1317,13 +1347,13 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                 PathSegment::Index(_) => OriginEdgeKind::ProjectIndex,
                             };
                             self.graph().record_origin_edge(
-                                m.value,
+                                member_value,
                                 edge_kind,
                                 Arc::from(vec![current].into_boxed_slice()),
                                 meta,
                                 Arc::clone(self.fence),
                             );
-                            current = m.value;
+                            current = member_value;
                             index += 1;
                             // Record the linear member-step
                             // intermediate. `intermediate_nodes[i]` is the
@@ -3157,7 +3187,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         // surfaces) keeps the owned rebuild path.
         if let Some(data) = self.graph().node_data(node) {
             if let SemanticNodeData::Object(view) = &*data {
-                if view.has_index_signature == !view.index_signatures.is_empty() {
+                // Flag-consistency gate, minimised per clippy: `flag !=
+                // is_empty()` ⇔ `flag == !is_empty()` — i.e. the stored
+                // flag already equals what the rebuild would derive.
+                if view.has_index_signature != view.index_signatures.is_empty() {
                     // Keep the frame-depth probe truthful: this walk
                     // consumed the equivalent of the single root frame.
                     LAST_SHALLOW_WALKER_MAX_FRAMES.store(1, Ordering::Relaxed);
@@ -5290,7 +5323,7 @@ fn merge_value_nodes_recursive(
 /// (`None`) surface — a union with an unreadable / non-Object arm has no
 /// common Object members. Returns `None` only when the arm vector is empty
 /// (defensive).
-fn merge_union_surfaces(
+pub(super) fn merge_union_surfaces(
     graph: &SemanticGraphStore,
     arm_surfaces: &[Option<ShallowSurface>],
 ) -> Option<ShallowSurface> {
@@ -5306,54 +5339,40 @@ fn merge_union_surfaces(
     if live.is_empty() {
         return Some(ShallowSurface::empty());
     }
+    // One-pass per-name aggregation (replacing the retired
+    // O(arms × members²) per-name `find` loop): each arm contributes its
+    // FIRST occurrence of a name, in arm order — identical selection to
+    // the retired per-arm `find`.
+    let by_name = aggregate_union_members(&live);
+    // Emit in ARM-0 SOURCE ORDER, including duplicate-name occurrences —
+    // each arm-0 occurrence emits one row aggregated from the per-arm
+    // first occurrences, exactly as the retired per-name loop did.
     let mut members: Vec<ShallowSurfaceMember> = Vec::new();
     for first_member in &live[0].members {
-        let mut per_arm_values: Vec<SemanticNodeId> = Vec::with_capacity(live.len());
-        let mut per_arm_visibilities: Vec<verter_type_expr::MemberVisibility> =
-            Vec::with_capacity(live.len());
-        let mut optional_in_any = false;
-        let mut readonly_in_all = true;
-        let mut present_in_all = true;
-        for arm in &live {
-            match arm.members.iter().find(|m| m.name == first_member.name) {
-                Some(arm_member) => {
-                    per_arm_values.push(arm_member.value);
-                    per_arm_visibilities.push(arm_member.visibility);
-                    optional_in_any |= arm_member.optional;
-                    readonly_in_all &= arm_member.readonly;
-                }
-                None => {
-                    present_in_all = false;
-                    break;
-                }
-            }
-        }
-        if !present_in_all {
+        let Some(accum) = by_name.get(&first_member.name) else {
+            // Unreachable: arm 0's own members always aggregate.
+            continue;
+        };
+        // Common-member rule: a member survives iff present (by name) in
+        // EVERY resolvable arm.
+        if accum.declaring_arms != live.len() {
             continue;
         }
-        // Value type = union of the per-arm member values. A single shared
-        // value node stays as-is (no singleton union wrapper).
-        let value = if per_arm_values.len() == 1 {
-            per_arm_values[0]
-        } else {
-            graph.intern_node(SemanticNodeData::Union(Arc::from(
-                per_arm_values.into_boxed_slice(),
-            )))
-        };
         members.push(ShallowSurfaceMember {
             name: Arc::clone(&first_member.name),
-            value,
-            optional: optional_in_any,
-            readonly: readonly_in_all,
+            // Value type = union of the per-arm member values. A single
+            // shared value node stays as-is (no singleton union wrapper).
+            value: accum.value_node(graph),
+            optional: accum.optional_in_any,
+            readonly: accum.readonly_in_all,
             is_method: false,
-            // Union common-member (`(A|B)['k']`): aggregate the MOST-RESTRICTIVE
-            // accessibility across the per-arm contributors via the shared fold,
-            // so a member non-public in any arm is never synthesized as `Public`
-            // (matching the `_for_macro` sibling and TS member-access rules). For
-            // a single declaring arm the fold returns that arm's accessibility.
-            visibility: verter_type_expr::MemberVisibility::merge_member_visibility(
-                per_arm_visibilities,
-            ),
+            // Union common-member (`(A|B)['k']`): the MOST-RESTRICTIVE
+            // accessibility across the per-arm contributors via the shared
+            // fold, so a member non-public in any arm is never synthesized
+            // as `Public` (matching the `_for_macro` sibling and TS
+            // member-access rules). For a single declaring arm the fold
+            // returns that arm's accessibility.
+            visibility: accum.visibility,
             declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
             merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
             // Union common-member: the name appears in every arm, so there is
@@ -5370,6 +5389,92 @@ fn merge_union_surfaces(
         index_signatures: Vec::new(),
         keyspace: None,
     })
+}
+
+/// One-pass per-name aggregation state shared by the two union-arm merge
+/// rules. Absorbs each arm's FIRST occurrence of the name (the retired
+/// per-name `find` selection — a same-arm duplicate is ignored) in arm
+/// order.
+struct UnionMemberAccum {
+    /// Per-arm member value nodes in ARM ORDER. Deliberately NOT deduped:
+    /// two arms sharing one value node contribute it twice, exactly as
+    /// the retired per-arm `find` pushed.
+    values: Vec<SemanticNodeId>,
+    /// Most-restrictive accessibility across the DECLARING arms, folded
+    /// incrementally through the shared [`verter_type_expr::MemberVisibility::merge_member_visibility`]
+    /// rule (documented commutative + associative with the `Public`
+    /// identity, so the incremental fold equals the batch fold over the
+    /// contributor list).
+    visibility: verter_type_expr::MemberVisibility,
+    optional_in_any: bool,
+    readonly_in_all: bool,
+    /// Count of DISTINCT arms declaring the name.
+    declaring_arms: usize,
+    /// Last arm index absorbed — suppresses same-arm duplicates.
+    last_arm: usize,
+}
+
+impl UnionMemberAccum {
+    fn new() -> Self {
+        Self {
+            values: Vec::new(),
+            // The shared fold's identity: an empty contributor set folds
+            // to `Public`, and `most_restrictive(Public, x) == x`.
+            visibility: verter_type_expr::MemberVisibility::Public,
+            optional_in_any: false,
+            readonly_in_all: true,
+            declaring_arms: 0,
+            last_arm: usize::MAX,
+        }
+    }
+
+    fn absorb(&mut self, arm_index: usize, member: &ShallowSurfaceMember) {
+        if self.last_arm == arm_index {
+            // Same-arm duplicate: the first occurrence was already
+            // recorded (`find` semantics).
+            return;
+        }
+        self.last_arm = arm_index;
+        self.declaring_arms += 1;
+        self.values.push(member.value);
+        self.visibility = verter_type_expr::MemberVisibility::merge_member_visibility([
+            self.visibility,
+            member.visibility,
+        ]);
+        self.optional_in_any |= member.optional;
+        self.readonly_in_all &= member.readonly;
+    }
+
+    /// The merged member value: a single declaring arm's value stays
+    /// as-is; multiple arms union in arm order (no singleton wrapper).
+    fn value_node(&self, graph: &SemanticGraphStore) -> SemanticNodeId {
+        match self.values.as_slice() {
+            [single] => *single,
+            values => graph.intern_node(SemanticNodeData::Union(Arc::from(
+                values.to_vec().into_boxed_slice(),
+            ))),
+        }
+    }
+}
+
+/// Aggregate every live arm's members by name in ONE pass over the input
+/// (each arm contributing its first occurrence per name, in arm order).
+/// std `HashMap` on purpose: member names are authored strings, so the
+/// collision-safe default hasher applies — never `FxHash`.
+fn aggregate_union_members(
+    live: &[&ShallowSurface],
+) -> std::collections::HashMap<Arc<str>, UnionMemberAccum> {
+    let mut by_name: std::collections::HashMap<Arc<str>, UnionMemberAccum> =
+        std::collections::HashMap::with_capacity(live.first().map_or(0, |arm| arm.members.len()));
+    for (arm_index, arm) in live.iter().enumerate() {
+        for member in &arm.members {
+            by_name
+                .entry(Arc::clone(&member.name))
+                .or_insert_with(UnionMemberAccum::new)
+                .absorb(arm_index, member);
+        }
+    }
+    by_name
 }
 
 /// Merge per-arm union surfaces under the **Vue macro object-surface**
@@ -5397,7 +5502,7 @@ fn merge_union_surfaces(
 /// common-member rule, a non-Object (`None`) arm does NOT collapse the
 /// whole surface — the Object arms still contribute their members (a
 /// `{ a } | string` macro surface publishes `a`, optional).
-fn merge_union_surfaces_for_macro(
+pub(super) fn merge_union_surfaces_for_macro(
     graph: &SemanticGraphStore,
     arm_surfaces: &[Option<ShallowSurface>],
 ) -> Option<ShallowSurface> {
@@ -5413,63 +5518,46 @@ fn merge_union_surfaces_for_macro(
     // every member is effectively absent from it → optional on the union.
     let has_non_object_arm = arm_surfaces.iter().any(|s| s.is_none());
 
-    // Enumerate member names in first-seen order across all arms.
+    // One-pass per-name aggregation (replacing the retired
+    // O(names × arms × members) per-name `find` loop), emitting in
+    // first-seen order across all arms.
     let mut ordered_names: Vec<Arc<str>> = Vec::new();
-    let mut seen: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
-    for arm in &live {
+    let mut by_name: std::collections::HashMap<Arc<str>, UnionMemberAccum> =
+        std::collections::HashMap::with_capacity(live.first().map_or(0, |arm| arm.members.len()));
+    for (arm_index, arm) in live.iter().enumerate() {
         for member in &arm.members {
-            if seen.insert(Arc::clone(&member.name)) {
-                ordered_names.push(Arc::clone(&member.name));
-            }
+            by_name
+                .entry(Arc::clone(&member.name))
+                .or_insert_with(|| {
+                    ordered_names.push(Arc::clone(&member.name));
+                    UnionMemberAccum::new()
+                })
+                .absorb(arm_index, member);
         }
     }
 
     let mut members: Vec<ShallowSurfaceMember> = Vec::with_capacity(ordered_names.len());
     for name in &ordered_names {
-        let mut per_arm_values: Vec<SemanticNodeId> = Vec::with_capacity(live.len());
-        let mut per_arm_visibilities: Vec<verter_type_expr::MemberVisibility> =
-            Vec::with_capacity(live.len());
-        let mut optional_in_any = false;
-        let mut readonly_in_all = true;
-        let mut declaring_arms = 0usize;
-        for arm in &live {
-            if let Some(arm_member) = arm.members.iter().find(|m| &m.name == name) {
-                declaring_arms += 1;
-                per_arm_visibilities.push(arm_member.visibility);
-                per_arm_values.push(arm_member.value);
-                optional_in_any |= arm_member.optional;
-                readonly_in_all &= arm_member.readonly;
-            }
-        }
-        // Aggregate the MOST-RESTRICTIVE accessibility across EVERY declaring arm
-        // via the shared fold: the merged member is `Public` only when it is
-        // Public in EVERY declaring arm; a member non-public in any arm stays
-        // non-public (never synthesized Public). For a member declared by exactly
-        // one arm the fold returns that arm's accessibility.
-        let merged_visibility =
-            verter_type_expr::MemberVisibility::merge_member_visibility(per_arm_visibilities);
+        let Some(accum) = by_name.get(name) else {
+            // Unreachable: every ordered name was inserted with an accum.
+            continue;
+        };
         // Absent from at least one arm (a live arm without it, or a
         // non-Object arm) ⇒ optional on the merged surface.
-        if declaring_arms < arm_count || has_non_object_arm {
-            optional_in_any = true;
-        }
-        let value = if per_arm_values.len() == 1 {
-            per_arm_values[0]
-        } else {
-            graph.intern_node(SemanticNodeData::Union(Arc::from(
-                per_arm_values.into_boxed_slice(),
-            )))
-        };
+        let optional =
+            accum.optional_in_any || accum.declaring_arms < arm_count || has_non_object_arm;
         members.push(ShallowSurfaceMember {
             name: Arc::clone(name),
-            value,
-            optional: optional_in_any,
-            readonly: readonly_in_all,
+            value: accum.value_node(graph),
+            optional,
+            readonly: accum.readonly_in_all,
             is_method: false,
-            // Most-restrictive accessibility across all declaring arms (the
-            // shared merge rule): Public only when Public in every declaring
-            // arm.
-            visibility: merged_visibility,
+            // Most-restrictive accessibility across all DECLARING arms via
+            // the shared fold: `Public` only when Public in every declaring
+            // arm; a member non-public in any arm stays non-public (never
+            // synthesized Public). For a member declared by exactly one arm
+            // the fold returns that arm's accessibility.
+            visibility: accum.visibility,
             declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
             merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
             // Union arm-member: reached THROUGH the union, no single source

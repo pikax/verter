@@ -21257,3 +21257,629 @@ fn shallow_empty_path_intersection_root_still_rebuilds_merged_surface() {
         "intersection root must still synthesise the merged surface",
     );
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// Wide-surface member-hop semantics through the member-ordinal index.
+//
+// Surfaces wider than `MEMBER_ORDINAL_INDEX_LINEAR_SCAN_MAX` resolve path
+// hops through the store-side member-ordinal sidecar instead of a linear
+// scan. The sidecar must be semantically INVISIBLE: same member selected,
+// same first-occurrence-then-visibility-gate ordering, same misses.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Build a surface WIDER than the linear-scan crossover so the hop routes
+/// through the member-ordinal index, with `extra` members appended after
+/// the padding.
+fn wide_surface_with(
+    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    pad_value: SemanticNodeId,
+    extra: Vec<SurfaceMember>,
+) -> SemanticNodeId {
+    let mut members: Vec<SurfaceMember> = (0
+        ..crate::semantic_query_memo::MEMBER_ORDINAL_INDEX_LINEAR_SCAN_MAX + 1)
+        .map(|i| surface_member(&format!("pad{i}"), pad_value, false, false))
+        .collect();
+    members.extend(extra);
+    intern_object_with_members(graph, members)
+}
+
+/// A late-ordinal member on a wide surface resolves to ITS value (not a
+/// miss, not a sibling), and a missing name still misses.
+#[test]
+fn wide_surface_member_hop_resolves_late_ordinal_and_misses_absent() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let pad = primitive(&graph, PrimitiveKind::String);
+    let hit_value = primitive(&graph, PrimitiveKind::Number);
+    let base = wide_surface_with(
+        &graph,
+        pad,
+        vec![surface_member("target", hit_value, false, false)],
+    );
+
+    let hit = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(vec![PathSegment::Member(Arc::from("target"))].into_boxed_slice()),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Navigate,
+        ),
+    });
+    assert!(
+        matches!(hit, QueryResult::Value(SemanticQueryOutput { value, .. }) if value == hit_value),
+        "late-ordinal member on a wide surface must resolve to its value: {hit:?}"
+    );
+
+    let miss = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(vec![PathSegment::Member(Arc::from("absent"))].into_boxed_slice()),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Navigate,
+        ),
+    });
+    let miss_id = match miss {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("expected opaque miss value, got {other:?}"),
+    };
+    assert!(
+        matches!(
+            graph.node_data(miss_id).as_deref(),
+            Some(SemanticNodeData::Opaque(_))
+        ),
+        "absent member on a wide surface must stay an Opaque miss"
+    );
+}
+
+/// FIND-FIRST-then-visibility-gate ordering survives the indexed route:
+/// a duplicated name whose FIRST occurrence is non-public MISSES even
+/// though a LATER duplicate is public — exactly what the linear scan
+/// (`find` by name, then `filter` on visibility) produces. Discriminates
+/// against an index that maps a name to its first PUBLIC occurrence.
+#[test]
+fn wide_surface_duplicate_with_nonpublic_first_occurrence_stays_miss() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let pad = primitive(&graph, PrimitiveKind::String);
+    let private_value = primitive(&graph, PrimitiveKind::Number);
+    let public_value = primitive(&graph, PrimitiveKind::Boolean);
+
+    let mut private_dup = surface_member("dup", private_value, false, false);
+    private_dup.visibility = verter_type_expr::MemberVisibility::Private;
+    let public_dup = surface_member("dup", public_value, false, false);
+
+    // Private occurrence FIRST, public duplicate LAST.
+    let base = wide_surface_with(&graph, pad, vec![private_dup, public_dup]);
+
+    let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(vec![PathSegment::Member(Arc::from("dup"))].into_boxed_slice()),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Navigate,
+        ),
+    });
+    let id = match projected {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("expected a value (opaque) node, got {other:?}"),
+    };
+    assert_ne!(
+        id, public_value,
+        "the LATER public duplicate must not be selected (find-first semantics)"
+    );
+    assert_ne!(
+        id, private_value,
+        "the private member's value must never leak"
+    );
+    assert!(
+        matches!(
+            graph.node_data(id).as_deref(),
+            Some(SemanticNodeData::Opaque(_))
+        ),
+        "non-public first occurrence must produce an Opaque miss"
+    );
+}
+
+/// Numeric index hops (`Wide[3]`) resolve through the same needle path on
+/// a wide surface — the canonical `js_number_to_string` member name.
+#[test]
+fn wide_surface_numeric_index_hop_resolves_member() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let pad = primitive(&graph, PrimitiveKind::String);
+    let hit_value = primitive(&graph, PrimitiveKind::Number);
+    let base = wide_surface_with(
+        &graph,
+        pad,
+        vec![surface_member("3", hit_value, false, false)],
+    );
+
+    let hit = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(vec![PathSegment::Index(num_key(3))].into_boxed_slice()),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Navigate,
+        ),
+    });
+    assert!(
+        matches!(hit, QueryResult::Value(SemanticQueryOutput { value, .. }) if value == hit_value),
+        "numeric index hop must resolve the canonical member name: {hit:?}"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Union-arm surface merges: one-pass aggregation equivalence.
+//
+// `merge_union_surfaces` (TS common-member rule) and
+// `merge_union_surfaces_for_macro` (Vue macro member-union rule) must
+// preserve, independent of arm/member permutation:
+//   1. member ORDER (common: arm-0 source order; macro: first-seen order
+//      across arms in arm order),
+//   2. ACCESSIBILITY (most-restrictive fold across the contributing arms
+//      via the shared `merge_member_visibility` rule),
+//   3. synthesized-through-union neutrality (no own-body/heritage stamp,
+//      no is_method, no spans, no declaration_origin copied from inputs
+//      — a union-reached member never pretends to be own-body).
+//
+// The oracle below is the retired per-name `find` implementation kept
+// verbatim as the reference semantics; every permutation case asserts the
+// live implementation is field-for-field equal to it.
+// ──────────────────────────────────────────────────────────────────────────
+
+use crate::project_semantic_dispatch::walk::{
+    merge_union_surfaces, merge_union_surfaces_for_macro, ShallowSurface, ShallowSurfaceMember,
+};
+
+fn shallow_member_full(
+    name: &str,
+    value: SemanticNodeId,
+    optional: bool,
+    readonly: bool,
+    visibility: verter_type_expr::MemberVisibility,
+) -> ShallowSurfaceMember {
+    ShallowSurfaceMember {
+        name: Arc::from(name),
+        value,
+        optional,
+        readonly,
+        is_method: false,
+        visibility,
+        declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+        spans: Default::default(),
+        declaration_origin: None,
+    }
+}
+
+fn shallow_surface(members: Vec<ShallowSurfaceMember>) -> ShallowSurface {
+    ShallowSurface {
+        members,
+        call_signatures: Vec::new(),
+        construct_signatures: Vec::new(),
+        index_signatures: Vec::new(),
+        keyspace: None,
+    }
+}
+
+fn assert_shallow_surface_eq(actual: &ShallowSurface, expected: &ShallowSurface, context: &str) {
+    let actual_names: Vec<&str> = actual.members.iter().map(|m| m.name.as_ref()).collect();
+    let expected_names: Vec<&str> = expected.members.iter().map(|m| m.name.as_ref()).collect();
+    assert_eq!(
+        actual_names, expected_names,
+        "{context}: member ORDER must match the reference semantics"
+    );
+    assert_eq!(
+        actual.members, expected.members,
+        "{context}: member fields must match the reference semantics"
+    );
+    assert_eq!(
+        actual.call_signatures, expected.call_signatures,
+        "{context}: call signatures"
+    );
+    assert_eq!(
+        actual.construct_signatures, expected.construct_signatures,
+        "{context}: construct signatures"
+    );
+    assert_eq!(
+        actual.index_signatures, expected.index_signatures,
+        "{context}: index signatures"
+    );
+    assert_eq!(actual.keyspace, expected.keyspace, "{context}: keyspace");
+}
+
+/// Reference semantics for `merge_union_surfaces` — the retired per-name
+/// `find` implementation, kept verbatim.
+fn oracle_merge_union_surfaces(
+    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    arm_surfaces: &[Option<ShallowSurface>],
+) -> Option<ShallowSurface> {
+    if arm_surfaces.is_empty() {
+        return None;
+    }
+    if arm_surfaces.iter().any(|s| s.is_none()) {
+        return Some(ShallowSurface::empty());
+    }
+    let live: Vec<&ShallowSurface> = arm_surfaces.iter().filter_map(|s| s.as_ref()).collect();
+    if live.is_empty() {
+        return Some(ShallowSurface::empty());
+    }
+    let mut members: Vec<ShallowSurfaceMember> = Vec::new();
+    for first_member in &live[0].members {
+        let mut per_arm_values: Vec<SemanticNodeId> = Vec::with_capacity(live.len());
+        let mut per_arm_visibilities: Vec<verter_type_expr::MemberVisibility> =
+            Vec::with_capacity(live.len());
+        let mut optional_in_any = false;
+        let mut readonly_in_all = true;
+        let mut present_in_all = true;
+        for arm in &live {
+            match arm.members.iter().find(|m| m.name == first_member.name) {
+                Some(arm_member) => {
+                    per_arm_values.push(arm_member.value);
+                    per_arm_visibilities.push(arm_member.visibility);
+                    optional_in_any |= arm_member.optional;
+                    readonly_in_all &= arm_member.readonly;
+                }
+                None => {
+                    present_in_all = false;
+                    break;
+                }
+            }
+        }
+        if !present_in_all {
+            continue;
+        }
+        let value = if per_arm_values.len() == 1 {
+            per_arm_values[0]
+        } else {
+            graph.intern_node(SemanticNodeData::Union(Arc::from(
+                per_arm_values.into_boxed_slice(),
+            )))
+        };
+        members.push(ShallowSurfaceMember {
+            name: Arc::clone(&first_member.name),
+            value,
+            optional: optional_in_any,
+            readonly: readonly_in_all,
+            is_method: false,
+            visibility: verter_type_expr::MemberVisibility::merge_member_visibility(
+                per_arm_visibilities,
+            ),
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            spans: verter_type_expr::MemberSpans::default(),
+            declaration_origin: None,
+        });
+    }
+    Some(ShallowSurface {
+        members,
+        call_signatures: Vec::new(),
+        construct_signatures: Vec::new(),
+        index_signatures: Vec::new(),
+        keyspace: None,
+    })
+}
+
+/// Reference semantics for `merge_union_surfaces_for_macro` — the retired
+/// per-name `find` implementation, kept verbatim.
+fn oracle_merge_union_surfaces_for_macro(
+    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    arm_surfaces: &[Option<ShallowSurface>],
+) -> Option<ShallowSurface> {
+    if arm_surfaces.is_empty() {
+        return None;
+    }
+    let arm_count = arm_surfaces.len();
+    let live: Vec<&ShallowSurface> = arm_surfaces.iter().filter_map(|s| s.as_ref()).collect();
+    if live.is_empty() {
+        return Some(ShallowSurface::empty());
+    }
+    let has_non_object_arm = arm_surfaces.iter().any(|s| s.is_none());
+    let mut ordered_names: Vec<Arc<str>> = Vec::new();
+    let mut seen: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
+    for arm in &live {
+        for member in &arm.members {
+            if seen.insert(Arc::clone(&member.name)) {
+                ordered_names.push(Arc::clone(&member.name));
+            }
+        }
+    }
+    let mut members: Vec<ShallowSurfaceMember> = Vec::with_capacity(ordered_names.len());
+    for name in &ordered_names {
+        let mut per_arm_values: Vec<SemanticNodeId> = Vec::with_capacity(live.len());
+        let mut per_arm_visibilities: Vec<verter_type_expr::MemberVisibility> =
+            Vec::with_capacity(live.len());
+        let mut optional_in_any = false;
+        let mut readonly_in_all = true;
+        let mut declaring_arms = 0usize;
+        for arm in &live {
+            if let Some(arm_member) = arm.members.iter().find(|m| &m.name == name) {
+                declaring_arms += 1;
+                per_arm_visibilities.push(arm_member.visibility);
+                per_arm_values.push(arm_member.value);
+                optional_in_any |= arm_member.optional;
+                readonly_in_all &= arm_member.readonly;
+            }
+        }
+        let merged_visibility =
+            verter_type_expr::MemberVisibility::merge_member_visibility(per_arm_visibilities);
+        if declaring_arms < arm_count || has_non_object_arm {
+            optional_in_any = true;
+        }
+        let value = if per_arm_values.len() == 1 {
+            per_arm_values[0]
+        } else {
+            graph.intern_node(SemanticNodeData::Union(Arc::from(
+                per_arm_values.into_boxed_slice(),
+            )))
+        };
+        members.push(ShallowSurfaceMember {
+            name: Arc::clone(name),
+            value,
+            optional: optional_in_any,
+            readonly: readonly_in_all,
+            is_method: false,
+            visibility: merged_visibility,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            spans: verter_type_expr::MemberSpans::default(),
+            declaration_origin: None,
+        });
+    }
+    Some(ShallowSurface {
+        members,
+        call_signatures: Vec::new(),
+        construct_signatures: Vec::new(),
+        index_signatures: Vec::new(),
+        keyspace: None,
+    })
+}
+
+/// Build the permutation fixture arms. Three arms with overlapping,
+/// disjoint, duplicated, and visibility-mixed members; values are distinct
+/// primitives so value-union ORDER is observable.
+fn union_merge_fixture_arms(
+    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+) -> Vec<Option<ShallowSurface>> {
+    use verter_type_expr::MemberVisibility as V;
+    let s = primitive(graph, PrimitiveKind::String);
+    let n = primitive(graph, PrimitiveKind::Number);
+    let b = primitive(graph, PrimitiveKind::Boolean);
+    vec![
+        Some(shallow_surface(vec![
+            shallow_member_full("shared", s, false, true, V::Public),
+            shallow_member_full("dup", s, false, false, V::Public),
+            shallow_member_full("a_only", s, true, false, V::Public),
+            shallow_member_full("dup", n, true, true, V::Private),
+            shallow_member_full("mixed_vis", s, false, false, V::Public),
+        ])),
+        Some(shallow_surface(vec![
+            shallow_member_full("mixed_vis", n, false, false, V::Protected),
+            shallow_member_full("shared", n, true, true, V::Public),
+            shallow_member_full("b_only", n, false, true, V::Public),
+            shallow_member_full("dup", b, false, true, V::Public),
+        ])),
+        Some(shallow_surface(vec![
+            shallow_member_full("shared", b, false, false, V::Public),
+            shallow_member_full("dup", s, true, false, V::Public),
+            shallow_member_full("mixed_vis", b, false, false, V::Private),
+            shallow_member_full("c_only", b, true, true, V::Public),
+        ])),
+    ]
+}
+
+/// Every arm permutation of the fixture produces EXACTLY the oracle's
+/// output for BOTH union merge rules — order, accessibility, optionality,
+/// readonly, value-union arm order, and the synthesized-neutral fields.
+/// A non-Object arm variant rides along for the macro rule's
+/// absent-forces-optional semantics (and the common rule's collapse).
+#[test]
+fn union_surface_merges_match_reference_semantics_across_arm_permutations() {
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let arms = union_merge_fixture_arms(&graph);
+
+    let perms: [[usize; 3]; 6] = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    for perm in perms {
+        let permuted: Vec<Option<ShallowSurface>> = perm.iter().map(|&i| arms[i].clone()).collect();
+        // Plain permutation.
+        let actual =
+            merge_union_surfaces(&graph, &permuted).expect("non-empty arm vector yields a surface");
+        let expected =
+            oracle_merge_union_surfaces(&graph, &permuted).expect("oracle yields a surface");
+        assert_shallow_surface_eq(&actual, &expected, &format!("common-member perm {perm:?}"));
+
+        let actual_macro = merge_union_surfaces_for_macro(&graph, &permuted)
+            .expect("non-empty arm vector yields a surface");
+        let expected_macro = oracle_merge_union_surfaces_for_macro(&graph, &permuted)
+            .expect("oracle yields a surface");
+        assert_shallow_surface_eq(
+            &actual_macro,
+            &expected_macro,
+            &format!("macro-union perm {perm:?}"),
+        );
+
+        // With a trailing non-Object arm.
+        let mut with_none = permuted.clone();
+        with_none.push(None);
+        let actual_none = merge_union_surfaces(&graph, &with_none)
+            .expect("non-empty arm vector yields a surface");
+        let expected_none =
+            oracle_merge_union_surfaces(&graph, &with_none).expect("oracle yields a surface");
+        assert_shallow_surface_eq(
+            &actual_none,
+            &expected_none,
+            &format!("common-member+None perm {perm:?}"),
+        );
+        assert!(
+            actual_none.members.is_empty(),
+            "a non-Object arm collapses the common-member surface to empty"
+        );
+
+        let actual_macro_none = merge_union_surfaces_for_macro(&graph, &with_none)
+            .expect("non-empty arm vector yields a surface");
+        let expected_macro_none = oracle_merge_union_surfaces_for_macro(&graph, &with_none)
+            .expect("oracle yields a surface");
+        assert_shallow_surface_eq(
+            &actual_macro_none,
+            &expected_macro_none,
+            &format!("macro-union+None perm {perm:?}"),
+        );
+        assert!(
+            actual_macro_none.members.iter().all(|m| m.optional),
+            "a non-Object arm forces every macro-union member optional"
+        );
+    }
+
+    // Degenerate inputs stay pinned.
+    assert!(merge_union_surfaces(&graph, &[]).is_none());
+    assert!(merge_union_surfaces_for_macro(&graph, &[]).is_none());
+    let single = vec![arms[0].clone()];
+    let actual_single = merge_union_surfaces(&graph, &single).expect("single arm yields");
+    let expected_single = oracle_merge_union_surfaces(&graph, &single).expect("oracle yields");
+    assert_shallow_surface_eq(&actual_single, &expected_single, "single-arm common");
+    let actual_single_macro =
+        merge_union_surfaces_for_macro(&graph, &single).expect("single arm yields");
+    let expected_single_macro =
+        oracle_merge_union_surfaces_for_macro(&graph, &single).expect("oracle yields");
+    assert_shallow_surface_eq(
+        &actual_single_macro,
+        &expected_single_macro,
+        "single-arm macro",
+    );
+}
+
+/// Named pins on the three preserved properties (red-proof targets for
+/// any one-pass rewrite):
+///
+/// 1. ORDER — common rule follows arm-0 source order; macro rule follows
+///    first-seen order across arms.
+/// 2. ACCESSIBILITY — most-restrictive fold; macro folds DECLARING arms
+///    only.
+/// 3. Union-synthesized neutrality — a member reached THROUGH the union
+///    never keeps an own-body/heritage stamp, is_method, spans, or
+///    declaration_origin from its contributors.
+#[test]
+fn union_surface_merge_pins_order_accessibility_and_neutrality() {
+    use verter_type_expr::MemberVisibility as V;
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let s = primitive(&graph, PrimitiveKind::String);
+    let n = primitive(&graph, PrimitiveKind::Number);
+
+    // Non-neutral inputs: heritage-stamped, method-flagged, span- and
+    // origin-carrying members (witnessed via a constructed reduction
+    // context, exactly how the walker's heritage descent mints stamps).
+    let witness =
+        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow);
+    let heritage_stamp = witness.stamp_role(crate::semantic_query::MemberMergeRole::Heritage);
+    let mut zebra_a = shallow_member_full("zebra", s, false, false, V::Public);
+    zebra_a.merge_role = heritage_stamp;
+    zebra_a.is_method = true;
+    zebra_a.spans = verter_type_expr::MemberSpans::name_only(verter_span::Span::new(1, 5));
+    zebra_a.declaration_origin = Some(Arc::from("/w/origin_a.ts"));
+    let mut alpha_a = shallow_member_full("alpha", s, false, false, V::Public);
+    alpha_a.merge_role = heritage_stamp;
+    let arm_a = shallow_surface(vec![zebra_a, alpha_a]);
+
+    let mut zebra_b = shallow_member_full("zebra", n, false, false, V::Protected);
+    zebra_b.is_method = true;
+    let alpha_b = shallow_member_full("alpha", n, false, false, V::Public);
+    let beta_b = shallow_member_full("beta", n, false, false, V::Public);
+    let arm_b = shallow_surface(vec![alpha_b, beta_b, zebra_b]);
+
+    let arms = vec![Some(arm_a), Some(arm_b)];
+
+    // Common-member rule: order follows ARM 0 (zebra, alpha), not arm 1
+    // and not name order.
+    let common = merge_union_surfaces(&graph, &arms).expect("surface");
+    let common_names: Vec<&str> = common.members.iter().map(|m| m.name.as_ref()).collect();
+    assert_eq!(
+        common_names,
+        vec!["zebra", "alpha"],
+        "common-member rule must preserve arm-0 source order"
+    );
+    // Macro rule: first-seen order across arms in arm order.
+    let macro_merged = merge_union_surfaces_for_macro(&graph, &arms).expect("surface");
+    let macro_names: Vec<&str> = macro_merged
+        .members
+        .iter()
+        .map(|m| m.name.as_ref())
+        .collect();
+    assert_eq!(
+        macro_names,
+        vec!["zebra", "alpha", "beta"],
+        "macro rule must preserve first-seen order across arms"
+    );
+
+    // Accessibility: zebra is Public in arm 0 but Protected in arm 1 —
+    // the fold keeps the most restrictive.
+    let common_zebra = &common.members[0];
+    assert_eq!(
+        common_zebra.visibility,
+        V::Protected,
+        "most-restrictive accessibility fold across contributing arms"
+    );
+    let macro_zebra = &macro_merged.members[0];
+    assert_eq!(macro_zebra.visibility, V::Protected);
+    // Macro rule folds DECLARING arms only: beta is declared only in arm
+    // 1 (Public) — the absent arm 0 must not restrict it.
+    let macro_beta = macro_merged
+        .members
+        .iter()
+        .find(|m| m.name.as_ref() == "beta")
+        .expect("beta");
+    assert_eq!(
+        macro_beta.visibility,
+        V::Public,
+        "macro fold covers declaring arms only"
+    );
+    assert!(
+        macro_beta.optional,
+        "absent from one arm ⇒ optional on the macro union"
+    );
+
+    // Union-synthesized neutrality: the contributors carried heritage
+    // stamps, is_method, spans, and an origin — none survive through the
+    // union synthesis.
+    for member in common.members.iter().chain(macro_merged.members.iter()) {
+        assert_eq!(
+            member.merge_role,
+            crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            "union-synthesized member must not keep a contributor's role stamp"
+        );
+        assert!(
+            !member.is_method,
+            "union-synthesized member is not a method"
+        );
+        assert_eq!(
+            member.spans,
+            verter_type_expr::MemberSpans::default(),
+            "union-synthesized member carries no single declaration site"
+        );
+        assert_eq!(
+            member.declaration_origin, None,
+            "union-synthesized member carries no declaration file"
+        );
+    }
+
+    // Value-union arm order: zebra's merged value is Union([arm0, arm1]).
+    let zebra_value = graph
+        .node_data(common_zebra.value)
+        .expect("zebra value interned");
+    match &*zebra_value {
+        SemanticNodeData::Union(vals) => {
+            assert_eq!(vals.as_ref(), &[s, n], "per-arm value order preserved");
+        }
+        other => panic!("expected Union value, got {other:?}"),
+    }
+}

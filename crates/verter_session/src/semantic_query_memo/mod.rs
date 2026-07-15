@@ -51,6 +51,7 @@ mod family;
 mod hash_cons_memos;
 mod inflight;
 mod interner;
+mod member_index;
 mod reverse_index;
 mod stats;
 #[cfg(any(test, feature = "test-support"))]
@@ -73,6 +74,7 @@ pub use test_support::{
 pub use interner::DepSignatureInterner;
 #[cfg(test)]
 use interner::SWEEP_INTERVAL;
+pub use member_index::MEMBER_ORDINAL_INDEX_LINEAR_SCAN_MAX;
 
 use crate::semantic_query::demand::{cached_satisfies, MaterializedSet};
 use arena::NodeArena;
@@ -464,6 +466,17 @@ pub struct SemanticGraphStore {
             crate::semantic_query::ProjectionReductionContext,
         )>,
     >,
+    // Member-ordinal index sidecar for large interned `Object` surfaces —
+    // accessor, retention contract, and hashing rationale live in
+    // `member_index.rs`. IDENTITY-EXCLUDED: keys on the append-only
+    // `SemanticNodeId` (payloads immutable, ids never reused), so entries
+    // never go stale and no invalidation hook exists. The outer `DashMap`
+    // and the inner name map both use the collision-safe std default
+    // hasher (member names are authored strings — never FxHash).
+    pub(super) member_ordinal_index_memo:
+        DashMap<SemanticNodeId, Arc<member_index::MemberOrdinalIndex>>,
+    pub(super) member_ordinal_index_fifo:
+        parking_lot::Mutex<std::collections::VecDeque<SemanticNodeId>>,
 }
 
 /// Value-side relation admission decision. The relation engine supplies only
