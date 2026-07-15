@@ -43,7 +43,8 @@ pub(crate) fn make_test_vfs_workspace_with_resolver(
                         &root_cp,
                         "node_modules/**",
                     ),
-                )],
+                )]
+                .into(),
             };
             verter_workspace::workspace_snapshot::ProjectPayload::Configured {
                 tsconfig_path: verter_workspace::CanonicalPath::new(tsconfig),
@@ -61,7 +62,8 @@ pub(crate) fn make_test_vfs_workspace_with_resolver(
                 root: root_cp.clone(),
                 exclude: vec![verter_workspace::CompiledGlob::new(
                     verter_workspace::NormalizedGlob::new(&format!("{}/node_modules/**", root)),
-                )],
+                )]
+                .into(),
             },
         },
     };
@@ -129,7 +131,8 @@ pub(crate) fn make_test_vfs_workspace_from_registry(
                                 &root_cp,
                                 "node_modules/**",
                             ),
-                        )],
+                        )]
+                        .into(),
                     };
                     verter_workspace::workspace_snapshot::ProjectPayload::Configured {
                         tsconfig_path: verter_workspace::CanonicalPath::new(tsconfig),
@@ -150,7 +153,8 @@ pub(crate) fn make_test_vfs_workspace_from_registry(
                                 "{}/node_modules/**",
                                 p.root
                             )),
-                        )],
+                        )]
+                        .into(),
                     },
                 },
             };
@@ -211,7 +215,8 @@ pub(crate) fn make_test_vfs_workspace_with_resolver_and_projects(
                                 &root_cp,
                                 "node_modules/**",
                             ),
-                        )],
+                        )]
+                        .into(),
                     };
                     verter_workspace::workspace_snapshot::ProjectPayload::Configured {
                         tsconfig_path: verter_workspace::CanonicalPath::new(tsconfig),
@@ -232,7 +237,8 @@ pub(crate) fn make_test_vfs_workspace_with_resolver_and_projects(
                                 "{}/node_modules/**",
                                 root
                             )),
-                        )],
+                        )]
+                        .into(),
                     },
                 },
             };

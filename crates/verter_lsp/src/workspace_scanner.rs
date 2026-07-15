@@ -1979,7 +1979,8 @@ import Child from '@/Child.vue'
                             root: root.clone(),
                             exclude: vec![CompiledGlob::new(NormalizedGlob::new(
                                 "d:/project/node_modules/**",
-                            ))],
+                            ))]
+                            .into(),
                         },
                     },
                 },
@@ -2186,7 +2187,8 @@ defineProps<{ msg: string }>()
                     &root_cp,
                     "node_modules/**",
                 ),
-            )],
+            )]
+            .into(),
         };
         let projects = vec![verter_workspace::workspace_snapshot::OwnershipProject {
             id: verter_workspace::workspace_snapshot::ProjectId(0),

@@ -12,7 +12,9 @@
 
 use crate::canonical_path::CanonicalPath;
 use crate::normalized_glob::{CompiledGlob, NormalizedGlob};
-use rustc_hash::FxHashSet;
+use parking_lot::RwLock;
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::sync::{Arc, LazyLock};
 
 /// The set of file extensions a configured TypeScript project treats as
 /// members, modelled exactly the way TypeScript filters its default `**/*`
@@ -177,7 +179,11 @@ pub struct StaticMembershipSpec {
     /// Glob patterns. Builder fills default `["**/*"]` when needed.
     pub include: Vec<CompiledGlob>,
     /// Only filters `include`. Builder fills TS defaults when needed.
-    pub exclude: Vec<CompiledGlob>,
+    ///
+    /// A shared slice: the TS-default exclude set is memoized per root
+    /// ([`typescript_default_excludes`]) and shared by every membership
+    /// built for that root, so cloning a spec never recompiles globs.
+    pub exclude: Arc<[CompiledGlob]>,
 }
 
 /// Configured project membership: static spec + materialized file set.
@@ -229,7 +235,7 @@ impl ConfiguredMembership {
 pub struct FallbackMembership {
     pub root: CanonicalPath,
     /// Precompiled at membership construction — see [`StaticMembershipSpec`].
-    pub exclude: Vec<CompiledGlob>,
+    pub exclude: Arc<[CompiledGlob]>,
 }
 
 impl FallbackMembership {
@@ -352,22 +358,47 @@ impl StaticMembershipSpec {
     }
 }
 
+/// TypeScript's default exclude patterns, relative to a project root.
+const TYPESCRIPT_DEFAULT_EXCLUDE_PATTERNS: &[&str] =
+    &["node_modules/**", "bower_components/**", "jspm_packages/**"];
+
+/// Bound on distinct roots retained by the default-excludes memo. Real
+/// processes see a handful of project roots; the bound only protects
+/// long-lived processes that touch many transient roots (e.g. in-process
+/// test suites over temp dirs). On overflow the memo is cleared — a pure
+/// recompute, never a correctness change.
+const DEFAULT_EXCLUDES_MEMO_CAP: usize = 64;
+
+/// Process-wide per-root memo for [`typescript_default_excludes`]: the
+/// compiled set is a pure function of the root, and membership
+/// construction sites run hot (snapshot rebuilds, `IdeProjectConfig::new`,
+/// the workspace-default env-hash fallback), so each root compiles its
+/// three default-exclude globs exactly once per process.
+static DEFAULT_EXCLUDES_MEMO: LazyLock<RwLock<FxHashMap<CanonicalPath, Arc<[CompiledGlob]>>>> =
+    LazyLock::new(|| RwLock::new(FxHashMap::default()));
+
 /// TypeScript's default exclude patterns for a project root, precompiled.
-pub fn typescript_default_excludes(root: &CanonicalPath) -> Vec<CompiledGlob> {
-    vec![
-        CompiledGlob::new(NormalizedGlob::from_root_and_pattern(
-            root,
-            "node_modules/**",
-        )),
-        CompiledGlob::new(NormalizedGlob::from_root_and_pattern(
-            root,
-            "bower_components/**",
-        )),
-        CompiledGlob::new(NormalizedGlob::from_root_and_pattern(
-            root,
-            "jspm_packages/**",
-        )),
-    ]
+///
+/// Returns a shared `Arc` slice memoized per root: repeated calls for the
+/// same root hand out the same allocation instead of recompiling the glob
+/// set (see [`DEFAULT_EXCLUDES_MEMO`]).
+pub fn typescript_default_excludes(root: &CanonicalPath) -> Arc<[CompiledGlob]> {
+    if let Some(hit) = DEFAULT_EXCLUDES_MEMO.read().get(root) {
+        return Arc::clone(hit);
+    }
+
+    let compiled: Arc<[CompiledGlob]> = TYPESCRIPT_DEFAULT_EXCLUDE_PATTERNS
+        .iter()
+        .map(|pattern| CompiledGlob::new(NormalizedGlob::from_root_and_pattern(root, pattern)))
+        .collect();
+
+    let mut memo = DEFAULT_EXCLUDES_MEMO.write();
+    if memo.len() >= DEFAULT_EXCLUDES_MEMO_CAP && !memo.contains_key(root) {
+        memo.clear();
+    }
+    // `entry` keeps concurrent first-computers converging on ONE shared
+    // allocation: the losing thread returns the winner's Arc.
+    Arc::clone(memo.entry(root.clone()).or_insert(compiled))
 }
 
 #[cfg(test)]
