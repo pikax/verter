@@ -62,6 +62,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use dashmap::mapref::entry::Entry as CanonicalKeysEntry;
 use dashmap::DashMap;
 use smallvec::SmallVec;
 use verter_language::FileLanguage;
@@ -265,9 +266,10 @@ impl FileArtifactKey {
     /// `IndexedReady` can hold session-specific import routes resolved
     /// against an overlay-only helper the base workspace cannot see.
     ///
-    /// The store's **base canonical-wide scans**
-    /// ([`FileArtifactStore::get_any`], [`FileArtifactStore::get_artifacts_any`],
-    /// [`FileArtifactStore::snapshot_all`]) filter their iteration on
+    /// The store's **base canonical-wide reads**
+    /// ([`FileArtifactStore::get_any`], [`FileArtifactStore::get_artifacts_any`]
+    /// — via their canonical→keys index candidates — and the
+    /// [`FileArtifactStore::snapshot_all`] scan) filter on
     /// this predicate so a base `HostView` / `HostStoreView` reader can
     /// never observe an overlay-scoped artifact and derive base cache
     /// keys / route facts from another session's routes. A session-view
@@ -840,6 +842,44 @@ pub struct FileArtifactStore {
     /// payloads. Keys with the same canonical but different other
     /// dimensions coexist.
     artifacts: DashMap<FileArtifactKey, Arc<FileArtifacts>>,
+    /// Canonical-id → live [`FileArtifactKey`]s inverse index over
+    /// `self.artifacts`.
+    ///
+    /// Read fast-path for the per-canonical read surfaces
+    /// ([`Self::get_any`], [`Self::get_artifacts_any`],
+    /// [`Self::get_artifacts_for_content`]): they resolve the canonical's
+    /// candidate keys here and then read `self.artifacts` by EXACT key,
+    /// instead of scanning the whole store per lookup (that scan is
+    /// O(total live entries) per read and dominated warm read profiles).
+    ///
+    /// The value is the canonical's full live key SET — there is NO
+    /// at-most-one-base-key invariant to lean on: the legacy
+    /// [`Self::insert`] drains prior versions (so it leaves one base key
+    /// per canonical), but the content-addressed
+    /// [`Self::insert_artifacts`] deliberately lets multiple base-shape
+    /// variants of one canonical coexist (the per-canonical retention
+    /// sweep exists precisely to cap them), and overlay-scoped keys
+    /// share the canonical besides.
+    ///
+    /// Coherence discipline (mutation-site maintained, reader-tolerant):
+    ///
+    /// - Every `self.artifacts` insert routes through
+    ///   [`Self::insert_artifact_entry`] and every removal through the
+    ///   sole chokepoint ([`Self::evict_artifact_keys`]); BOTH hold the
+    ///   canonical's index-slot entry guard ACROSS the paired map+index
+    ///   mutation, so same-canonical mutation pairs serialize on the
+    ///   slot guard and the index can never end up permanently missing
+    ///   a live map entry (the harmful direction).
+    /// - Lock order is always index-slot guard → `self.artifacts` shard
+    ///   (map locks are only taken inside a call while the slot guard
+    ///   is held, never the reverse), so the pairing cannot deadlock.
+    /// - The whole-store schema reset clears this index FIRST, then the
+    ///   map: an insert racing the reset leaves at worst a DANGLING
+    ///   index key (listed here, absent from the map). Readers tolerate
+    ///   dangling keys by construction — they try every candidate key
+    ///   and skip ones whose exact read misses — so a dangling key
+    ///   costs one extra exact lookup, never a wrong result.
+    canonical_keys: DashMap<Arc<str>, SmallVec<[FileArtifactKey; 2]>>,
     /// Per-canonical last-access tick (monotonically increasing). Used by
     /// [`Self::evict_lru`] under explicit memory pressure to drop the
     /// oldest entries down to a configured floor.
@@ -937,6 +977,7 @@ impl FileArtifactStore {
     ) -> Self {
         Self {
             artifacts: DashMap::new(),
+            canonical_keys: DashMap::new(),
             last_access: DashMap::new(),
             access_tick: AtomicU64::new(0),
             hit_counters: DashMap::new(),
@@ -1078,7 +1119,8 @@ impl FileArtifactStore {
     /// Look up the cached **base** artifact for `canonical_id` without
     /// hash check.
     ///
-    /// This is a base canonical-wide scan: it matches `canonical` and
+    /// This is the base canonical-wide read: it resolves the
+    /// canonical's candidate keys through the canonical→keys index and
     /// filters to [`FileArtifactKey::is_base`] entries, so a
     /// session-overlay artifact published under an
     /// [`FileArtifactKey::overlay_scoped`] key is never surfaced to a
@@ -1091,11 +1133,15 @@ impl FileArtifactStore {
         }
         let mut result: Option<Arc<IndexedReady>> = None;
         let mut matched_key: Option<FileArtifactKey> = None;
-        for entry in self.artifacts.iter() {
-            if entry.key().canonical.as_ref() == canonical_id && entry.key().is_base() {
-                result = Some(Arc::clone(&entry.value().indexed));
-                matched_key = Some(entry.key().clone());
-                break;
+        if let Some(slot) = self.canonical_keys.get(canonical_id) {
+            for key in slot.value().iter().filter(|key| key.is_base()) {
+                // Exact read; a (benign) dangling index key just misses
+                // and the next candidate is tried.
+                if let Some(entry) = self.artifacts.get(key) {
+                    result = Some(Arc::clone(&entry.value().indexed));
+                    matched_key = Some(key.clone());
+                    break;
+                }
             }
         }
         if result.is_some() {
@@ -1173,6 +1219,31 @@ impl FileArtifactStore {
             .collect()
     }
 
+    /// THE sole `self.artifacts` insert combinator.
+    ///
+    /// Inserts the entry and mirrors `key` into the canonical→keys
+    /// index (`canonical_keys`) under the canonical's index-slot write
+    /// guard, so the pair is atomic with respect to every other
+    /// same-canonical mutation (they all serialize on the same slot
+    /// guard) and the index can never permanently miss a live map
+    /// entry. Lock order: index-slot guard → `self.artifacts` shard —
+    /// see the `canonical_keys` field docs for the full coherence
+    /// discipline.
+    fn insert_artifact_entry(
+        &self,
+        key: FileArtifactKey,
+        value: Arc<FileArtifacts>,
+    ) -> Option<Arc<FileArtifacts>> {
+        let mut slot = self
+            .canonical_keys
+            .entry(Arc::clone(&key.canonical))
+            .or_default();
+        if !slot.iter().any(|existing| existing == &key) {
+            slot.push(key.clone());
+        }
+        self.artifacts.insert(key, value)
+    }
+
     /// THE sole artifact-removal chokepoint.
     ///
     /// Every path that drops entries from `self.artifacts` funnels
@@ -1212,7 +1283,26 @@ impl FileArtifactStore {
             Vec::with_capacity(keys.len());
         let mut removed_augmentations: Vec<ModuleAugmentationFact> = Vec::new();
         for key in keys {
-            if let Some((removed_key, payload)) = self.artifacts.remove(key) {
+            // Paired map+index removal under the canonical's index-slot
+            // write guard (same serialization discipline as
+            // `insert_artifact_entry`; see the `canonical_keys` field
+            // docs). The key is dropped from the index unconditionally —
+            // under the slot guard, a map miss means the key is genuinely
+            // absent, so a (benign) dangling index key is self-healed
+            // here. A canonical with no slot still attempts the map
+            // remove so the map stays authoritative.
+            let removed_entry = match self.canonical_keys.entry(Arc::clone(&key.canonical)) {
+                CanonicalKeysEntry::Occupied(mut slot) => {
+                    let removed_entry = self.artifacts.remove(key);
+                    slot.get_mut().retain(|existing| existing != key);
+                    if slot.get().is_empty() {
+                        slot.remove();
+                    }
+                    removed_entry
+                }
+                CanonicalKeysEntry::Vacant(_) => self.artifacts.remove(key),
+            };
+            if let Some((removed_key, payload)) = removed_entry {
                 removed_augmentations.extend(payload.augmentations.iter().cloned());
                 self.hit_counters.remove(key);
                 removed.push((removed_key, payload));
@@ -1534,7 +1624,7 @@ impl FileArtifactStore {
         // reader can ever observe it absent. Otherwise insert (fresh content
         // or a base-visible change at the current key).
         if !current_key_is_base_equivalent {
-            self.artifacts.insert(current_key, payload);
+            self.insert_artifact_entry(current_key, payload);
         }
         if snapshot_changed {
             self.bump_artifact_generation();
@@ -1623,7 +1713,7 @@ impl FileArtifactStore {
         let indexed = Arc::new(IndexedReady::new_for_test([0u8; 16]));
         let payload = Arc::new(FileArtifacts::with_indexed(indexed));
         let key = FileArtifactKey::base(canonical, [0u8; 16]);
-        let prev = self.artifacts.insert(key, payload);
+        let prev = self.insert_artifact_entry(key, payload);
         if prev.is_none() {
             self.live_counter.fetch_add(1, Ordering::Relaxed);
         }
@@ -1735,24 +1825,31 @@ impl FileArtifactStore {
         if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
-        for entry in self.artifacts.iter() {
-            if entry.key().canonical.as_ref() == canonical
-                && entry.key().content_hash == content_hash
+        let mut matched: Option<(FileArtifactKey, Arc<FileArtifacts>)> = None;
+        if let Some(slot) = self.canonical_keys.get(canonical) {
+            for key in slot
+                .value()
+                .iter()
+                .filter(|key| key.content_hash == content_hash)
             {
-                let matched_key = entry.key().clone();
-                let value = entry.value().clone();
-                drop(entry);
-                self.bump_hit_counter(&matched_key);
-                return Some(value);
+                // Exact read; a (benign) dangling index key just misses
+                // and the next candidate is tried.
+                if let Some(entry) = self.artifacts.get(key) {
+                    matched = Some((key.clone(), entry.value().clone()));
+                    break;
+                }
             }
         }
-        None
+        let (matched_key, value) = matched?;
+        self.bump_hit_counter(&matched_key);
+        Some(value)
     }
 
     /// Look up the latest **base** `FileArtifacts` payload for
     /// `canonical`.
     ///
-    /// This is a base canonical-wide scan: it matches `canonical` and
+    /// This is the base canonical-wide read: it resolves the
+    /// canonical's candidate keys through the canonical→keys index and
     /// filters to [`FileArtifactKey::is_base`] entries, so a
     /// session-overlay artifact published under an
     /// [`FileArtifactKey::overlay_scoped`] key is never surfaced to a
@@ -1766,16 +1863,20 @@ impl FileArtifactStore {
         if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
-        for entry in self.artifacts.iter() {
-            if entry.key().canonical.as_ref() == canonical && entry.key().is_base() {
-                let matched_key = entry.key().clone();
-                let value = entry.value().clone();
-                drop(entry);
-                self.bump_hit_counter(&matched_key);
-                return Some(value);
+        let mut matched: Option<(FileArtifactKey, Arc<FileArtifacts>)> = None;
+        if let Some(slot) = self.canonical_keys.get(canonical) {
+            for key in slot.value().iter().filter(|key| key.is_base()) {
+                // Exact read; a (benign) dangling index key just misses
+                // and the next candidate is tried.
+                if let Some(entry) = self.artifacts.get(key) {
+                    matched = Some((key.clone(), entry.value().clone()));
+                    break;
+                }
             }
         }
-        None
+        let (matched_key, value) = matched?;
+        self.bump_hit_counter(&matched_key);
+        Some(value)
     }
 
     /// Insert (or replace) the payload for `key`.
@@ -1799,7 +1900,7 @@ impl FileArtifactStore {
         // gate can compare the replaced value against the incoming one without
         // re-fetching from the map.
         let artifacts_for_compare: Arc<FileArtifacts> = Arc::clone(&artifacts);
-        let prev = self.artifacts.insert(key, artifacts);
+        let prev = self.insert_artifact_entry(key, artifacts);
         // Demand-driven coherence — gated on augmentation-contribution
         // equivalence. A byte-identical reinsert of a module-augmentation file
         // leaves both the augmenter's `ModuleAugmentationFact` set AND its
@@ -2397,6 +2498,12 @@ impl crate::cache_schema::CacheSchemaVersioned for FileArtifactStore {
         // `AugmenterSet` can survive. (The per-key removal chokepoint
         // `evict_artifact_keys` covers every partial removal; this paired
         // clear covers the total reset.)
+        //
+        // The canonical→keys index clears FIRST: an insert racing this
+        // reset then leaves at worst a benign DANGLING index key (readers
+        // skip keys whose exact map read misses), never a live map entry
+        // the index is missing. See the `canonical_keys` field docs.
+        self.canonical_keys.clear();
         self.artifacts.clear();
         self.last_access.clear();
         self.augmentation_index.clear();
