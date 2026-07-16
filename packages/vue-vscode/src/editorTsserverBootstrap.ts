@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import {
   EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY,
+  EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY,
   EDITOR_TSSERVER_ATTESTATION_CONFIG_KEY,
   editorTsserverAttestationFileName,
   parseEditorTsserverAttestationReceipt,
@@ -35,6 +36,11 @@ export interface EditorTsserverBootstrapRuntime {
 
 export function typeProviderRoutesEditorTsserver(typeProvider: string | undefined): boolean {
   return typeProvider === "auto" || typeProvider === "shared-tsgo" || typeProvider === "tsserver";
+}
+
+/** The editor plugin owns carrier source features only after this tier attests. */
+export function editorTsserverOwnsCarrierSourceFeatures(lspArgs: readonly string[]): boolean {
+  return lspArgs.length > 0;
 }
 
 /** Select a carrier that can activate this plugin and belongs to the challenged workspace. */
@@ -86,6 +92,7 @@ export function planEditorTsserverBootstrap(opts: {
     pluginConfig: {
       enable: true,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
       [EDITOR_TSSERVER_ATTESTATION_CONFIG_KEY]: { directory, nonce },
     },
     lspArgs: [`--editor-tsserver-receipt=${receiptPath}`, `--editor-tsserver-nonce=${nonce}`],

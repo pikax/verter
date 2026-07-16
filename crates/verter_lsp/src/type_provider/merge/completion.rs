@@ -27,9 +27,19 @@ use super::position::tsx_range_to_carrier_range;
 /// - `class`, `id`, `key`, `ref`, `style` → no change
 /// - `data-*`, `aria-*` → no change
 pub fn jsx_prop_to_vue_attr(label: &str) -> Option<String> {
+    // TSGO decorates optional JSX properties in the display label (`onCustom?`,
+    // `optionalProp?`). `?` is type metadata, not source text: inserting it would
+    // produce an invalid Vue attribute. Strip it before every JSX-to-Vue spelling
+    // decision; returning `Some` for an otherwise-simple optional label ensures
+    // the cleaned spelling replaces the decorated display label.
+    let (label, had_optional_marker) = label
+        .strip_suffix('?')
+        .map(|label| (label, true))
+        .unwrap_or((label, false));
+
     // Already kebab-case or simple lowercase — no transformation
     if label.contains('-') || label.chars().all(|c| c.is_ascii_lowercase()) {
-        return None;
+        return had_optional_marker.then(|| label.to_string());
     }
 
     // Event handler: on* → @*
@@ -59,7 +69,7 @@ pub fn jsx_prop_to_vue_attr(label: &str) -> Option<String> {
         return Some(camel_to_kebab(label));
     }
 
-    None
+    had_optional_marker.then(|| label.to_string())
 }
 
 /// Convert a camelCase or PascalCase string to kebab-case.

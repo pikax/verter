@@ -86,7 +86,12 @@ pub(super) async fn reconcile_unowned_carrier_provider_file(
     let is_jsx = ide.map(|output| output.is_jsx).unwrap_or(false);
     let membership = carrier_publish
         .and_then(|publish| publish.coordinator)
-        .map(|coordinator| crate::external_ts::CarrierMembershipCtx { coordinator });
+        .map(|coordinator| crate::external_ts::CarrierMembershipCtx {
+            coordinator,
+            provider_delivery: carrier_publish
+                .expect("coordinator came from the publish context")
+                .provider_delivery,
+        });
     let decision =
         crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
             host: documents.host(),

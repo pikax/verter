@@ -35,6 +35,20 @@ pub(super) enum SupportedHtmlElement {
     /// `<h2>` — the css-scoping corpus's class-less scoped heading (the
     /// synthesized-scope-class golden surface).
     H2,
+    /// `<h3>` — a structural heading host.
+    H3,
+    /// `<main>` — the document's primary structural content host.
+    Main,
+    /// `<section>` — a generic structural section host.
+    Section,
+    /// `<header>` — a structural header host.
+    Header,
+    /// `<footer>` — a structural footer host.
+    Footer,
+    /// `<form>` — the standard form container.
+    Form,
+    /// `<img>` — the standard void image element.
+    Img,
     /// `<input>`.
     Input,
     /// `<p>`.
@@ -90,6 +104,13 @@ impl SupportedHtmlElement {
             "div" => Some(Self::Div),
             "h1" => Some(Self::H1),
             "h2" => Some(Self::H2),
+            "h3" => Some(Self::H3),
+            "main" => Some(Self::Main),
+            "section" => Some(Self::Section),
+            "header" => Some(Self::Header),
+            "footer" => Some(Self::Footer),
+            "form" => Some(Self::Form),
+            "img" => Some(Self::Img),
             "input" => Some(Self::Input),
             "p" => Some(Self::P),
             "span" => Some(Self::Span),
@@ -121,6 +142,13 @@ impl SupportedHtmlElement {
             Self::Div => "div",
             Self::H1 => "h1",
             Self::H2 => "h2",
+            Self::H3 => "h3",
+            Self::Main => "main",
+            Self::Section => "section",
+            Self::Header => "header",
+            Self::Footer => "footer",
+            Self::Form => "form",
+            Self::Img => "img",
             Self::Input => "input",
             Self::P => "p",
             Self::Span => "span",
@@ -179,6 +207,12 @@ pub(super) enum SupportedStaticAttr {
     /// `multiple=""` into the cloned template, the official `<select multiple>`
     /// form).
     SelectMultiple,
+    /// `action` on `<form>`.
+    FormAction,
+    /// `alt` on `<img>`.
+    ImageAlt,
+    /// `src` on `<img>`.
+    ImageSrc,
     /// `contenteditable` (global) — the editable-host marker attribute that the
     /// `bind:innerHTML` / `bind:textContent` / `bind:innerText` family rides on
     /// (serialized `contenteditable=""` into the template). It is NOT a DOM
@@ -256,6 +290,9 @@ impl SupportedStaticAttr {
             (SupportedHtmlElement::Input, "type") => Some(Self::InputType),
             (SupportedHtmlElement::Input, "disabled") => Some(Self::InputDisabled),
             (SupportedHtmlElement::Select, "multiple") => Some(Self::SelectMultiple),
+            (SupportedHtmlElement::Form, "action") => Some(Self::FormAction),
+            (SupportedHtmlElement::Img, "alt") => Some(Self::ImageAlt),
+            (SupportedHtmlElement::Img, "src") => Some(Self::ImageSrc),
             _ => None,
         }
     }
@@ -455,8 +492,9 @@ mod tests {
         // golden hosts (`h2` — the class-less scoped heading; `ul`/`li` — the
         // combinator/`{#each}` list surfaces).
         let expected = [
-            "a", "button", "div", "h1", "h2", "input", "p", "span", "video", "textarea", "select",
-            "option", "audio", "details", "meta", "link", "base", "ul", "li",
+            "a", "button", "div", "h1", "h2", "h3", "main", "section", "header", "footer", "form",
+            "img", "input", "p", "span", "video", "textarea", "select", "option", "audio",
+            "details", "meta", "link", "base", "ul", "li",
         ];
         let accepted: Vec<&str> = expected
             .into_iter()
@@ -464,16 +502,15 @@ mod tests {
             .collect();
         assert_eq!(accepted, expected);
         // A representative spread of out-of-allowlist tags is STILL rejected — including the
-        // still-demoted breadth (`optgroup` / `img` / `slot` / `datalist`) and
+        // still-demoted breadth (`optgroup` / `slot` / `datalist`) and
         // a reserved-word tag.
         for tag in [
             "optgroup",
-            "img",
             "slot",
             "datalist",
             "var",
             "class",
-            "section",
+            "article",
             "svg",
             "my-widget",
         ] {
@@ -493,12 +530,19 @@ mod tests {
         // is a COMPILE-TIME exhaustiveness guard: a NEW variant that is not added here
         // fails to compile (a non-exhaustive match), so the coverage can never silently
         // regress.
-        const ALL: [SupportedHtmlElement; 19] = [
+        const ALL: [SupportedHtmlElement; 26] = [
             SupportedHtmlElement::A,
             SupportedHtmlElement::Button,
             SupportedHtmlElement::Div,
             SupportedHtmlElement::H1,
             SupportedHtmlElement::H2,
+            SupportedHtmlElement::H3,
+            SupportedHtmlElement::Main,
+            SupportedHtmlElement::Section,
+            SupportedHtmlElement::Header,
+            SupportedHtmlElement::Footer,
+            SupportedHtmlElement::Form,
+            SupportedHtmlElement::Img,
             SupportedHtmlElement::Input,
             SupportedHtmlElement::P,
             SupportedHtmlElement::Span,
@@ -523,6 +567,13 @@ mod tests {
                 | SupportedHtmlElement::Div
                 | SupportedHtmlElement::H1
                 | SupportedHtmlElement::H2
+                | SupportedHtmlElement::H3
+                | SupportedHtmlElement::Main
+                | SupportedHtmlElement::Section
+                | SupportedHtmlElement::Header
+                | SupportedHtmlElement::Footer
+                | SupportedHtmlElement::Form
+                | SupportedHtmlElement::Img
                 | SupportedHtmlElement::Input
                 | SupportedHtmlElement::P
                 | SupportedHtmlElement::Span
@@ -612,6 +663,18 @@ mod tests {
             SupportedStaticAttr::classify("disabled", Input, None),
             Some(SupportedStaticAttr::InputDisabled)
         );
+        assert_eq!(
+            SupportedStaticAttr::classify("action", Form, Some("/submit")),
+            Some(SupportedStaticAttr::FormAction)
+        );
+        assert_eq!(
+            SupportedStaticAttr::classify("alt", Img, Some("description")),
+            Some(SupportedStaticAttr::ImageAlt)
+        );
+        assert_eq!(
+            SupportedStaticAttr::classify("src", Img, Some("image.png")),
+            Some(SupportedStaticAttr::ImageSrc)
+        );
         // The bindings-breadth static attrs (5c): `<select multiple>` (the
         // multi-select boolean) + `contenteditable` (the editable-host marker, any
         // element) bake into the cloned skeleton.
@@ -631,6 +694,11 @@ mod tests {
         assert_eq!(SupportedStaticAttr::classify("multiple", Div, None), None);
         // Per-tag attrs do NOT cross to the wrong element (`href` only on `<a>`).
         assert_eq!(SupportedStaticAttr::classify("href", Div, Some("/x")), None);
+        assert_eq!(
+            SupportedStaticAttr::classify("action", Div, Some("/x")),
+            None
+        );
+        assert_eq!(SupportedStaticAttr::classify("alt", Div, Some("x")), None);
         assert_eq!(
             SupportedStaticAttr::classify("type", Div, Some("text")),
             None

@@ -236,11 +236,11 @@ pub fn child_hover_target_at_offset(
     analysis: &FileAnalysisSnapshot,
 ) -> Option<ChildHoverTarget> {
     if let Some(template) = analysis.template.as_deref() {
-        if let Some(target) = component_event_hover_target(offset, template) {
+        if let Some(target) = component_event_hover_target(offset, template, analysis) {
             return Some(ChildHoverTarget::EventAttribute(target));
         }
 
-        if let Some(target) = component_tag_hover_target(offset, source, template) {
+        if let Some(target) = component_tag_hover_target(offset, source, template, analysis) {
             return Some(ChildHoverTarget::ComponentTag(target));
         }
     }
@@ -252,6 +252,7 @@ pub fn build_child_component_hover(
     component_name: &str,
     import_source: &str,
     child_analysis: &FileAnalysisSnapshot,
+    public_contract: Option<&verter_session::framework::api_projector::ComponentPublicContract>,
     public_api_code: Option<&str>,
     usage_props: &[ComponentUsagePropInfo],
 ) -> Hover {
@@ -266,7 +267,20 @@ pub fn build_child_component_hover(
     let mut lines = vec![format!("**`<{component_name}>`** (from `{import_source}`)")];
 
     let mut prop_lines = Vec::new();
-    if let Some(template) = template {
+    if let Some(contract) = public_contract {
+        for prop in &contract.props {
+            let optional_marker = if prop.optional || prop.has_default {
+                "?"
+            } else {
+                ""
+            };
+            let prop_type = prop.type_annotation.as_deref().unwrap_or("unknown");
+            prop_lines.push(format!(
+                "- `{}`{}: {}",
+                prop.name, optional_marker, prop_type
+            ));
+        }
+    } else if let Some(template) = template {
         if !template.prop_definitions.is_empty() {
             for prop in &template.prop_definitions {
                 let prop_type = prop
@@ -907,9 +921,10 @@ fn component_tag_hover_target(
     offset: u32,
     source: &str,
     template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+    analysis: &FileAnalysisSnapshot,
 ) -> Option<ComponentTagHoverTarget> {
     let comp = find_component_usage_at_tag_offset(offset, source, template)?;
-    let import_source = comp.import_source.clone()?;
+    let import_source = component_import_source(comp, analysis)?;
     let usage_props = comp
         .props
         .iter()
@@ -930,6 +945,7 @@ fn component_tag_hover_target(
 fn component_event_hover_target(
     offset: u32,
     template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+    analysis: &FileAnalysisSnapshot,
 ) -> Option<ComponentEventHoverTarget> {
     for el in &template.elements {
         if !el.is_component {
@@ -950,7 +966,7 @@ fn component_event_hover_target(
             let component = template.components.iter().find(|component| {
                 component.span.start == el.span.start && component.span.end == el.span.end
             })?;
-            let import_source = component.import_source.clone()?;
+            let import_source = component_import_source(component, analysis)?;
             let event_name = dir.argument.clone()?;
             return Some(ComponentEventHoverTarget {
                 component_name: component.name.clone(),
@@ -961,6 +977,34 @@ fn component_event_hover_target(
         }
     }
     None
+}
+
+/// Resolve the authored module source for a template component.
+///
+/// The template analyzer normally stamps `import_source` directly. During an
+/// editor/provider resync, however, a newly rebuilt template snapshot can
+/// temporarily retain the component usage while that optional convenience
+/// field is absent. The script import inventory remains authoritative and is
+/// enough to recover the same source by the component's local binding. Global
+/// components and unresolved tags still fail closed because they have no
+/// matching value import.
+fn component_import_source(
+    component: &verter_semantic::analysis::template::TemplateComponentUsage,
+    analysis: &FileAnalysisSnapshot,
+) -> Option<String> {
+    component.import_source.clone().or_else(|| {
+        analysis
+            .imports
+            .iter()
+            .filter(|import| !import.is_type_only)
+            .find(|import| {
+                import
+                    .bindings
+                    .iter()
+                    .any(|binding| !binding.is_type_only && binding.name == component.name)
+            })
+            .map(|import| import.source.clone())
+    })
 }
 
 fn find_component_usage_at_tag_offset<'a>(

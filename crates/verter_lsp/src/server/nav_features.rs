@@ -51,6 +51,10 @@ pub(super) async fn handle_hover(
         .statistics
         .timer("hover", Some(uri.as_str().to_string()));
 
+    if server.editor_owns_carrier_source_features() {
+        return Ok(None);
+    }
+
     // Virtual file: route directly through TSGO (position is already in TSX coordinates)
     if let Some(tp) = &server.type_provider {
         if let Some(vf_ctx) = server.virtual_file_context(uri) {
@@ -328,6 +332,7 @@ pub(super) async fn handle_completion(
         position.character,
         trigger_character
     );
+    let provider_only = server.provider_only_completions();
 
     // Check coalescing — skip stale requests superseded by newer keystrokes.
     if server
@@ -514,21 +519,53 @@ pub(super) async fn handle_completion(
         )
     })();
 
-    let verter_is_incomplete = verter_result
-        .as_ref()
-        .map(|r| r.is_incomplete)
-        .unwrap_or(false);
-    let verter_items = verter_result.map(|r| r.items);
+    // Provider-attribution E2E still computes Verter's template-visible NAME set,
+    // but only as a subtractive scope boundary. No Verter completion item is ever
+    // emitted in this mode: every surviving item, kind, detail, and resolve handle
+    // is owned by the selected TypeScript engine. Keeping the visibility boundary
+    // prevents carrier implementation scope (DOM globals and generated helpers)
+    // from masquerading as expressions users can actually name in a Vue template.
+    let provider_only_template_scope = provider_only.then(|| {
+        let mut scope = verter_result
+            .as_ref()
+            .map(|result| {
+                result
+                    .items
+                    .iter()
+                    .map(|item| item.label.clone())
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default();
+        if let (Some(doc), Some(analysis)) = (
+            server.documents.get(uri),
+            server.documents.get_analysis(uri),
+        ) {
+            if let (Some(cursor_offset), Some(template)) = (
+                doc.line_index.position_to_offset(position),
+                analysis.template.as_deref(),
+            ) {
+                scope.extend(template_lexical_scope_names(template, cursor_offset));
+            }
+        }
+        scope
+    });
+    let (verter_is_incomplete, verter_items) = if provider_only {
+        (false, None)
+    } else {
+        verter_result
+            .map(|result| (result.is_incomplete, Some(result.items)))
+            .unwrap_or((false, None))
+    };
 
     // Compute the cursor's source context once — template attribute, template
     // expression, script, or other.
-    let source_ctx = (|| {
+    let (source_ctx, source_expr_context) = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
         let blocks = scan_sfc_blocks(&doc.source);
         let offset = doc.line_index.position_to_offset(position)?;
         let context = classify_cursor_context(offset, &doc.source, &blocks, analysis.as_ref());
-        Some(match &context {
+        let source_ctx = match &context {
             CursorContext::Template(TemplateCursorContext::AttributeName { .. }) => {
                 CompletionSourceContext::TemplateAttr
             }
@@ -537,10 +574,34 @@ pub(super) async fn handle_completion(
             ) => CompletionSourceContext::TemplateExpression,
             CursorContext::Script => CompletionSourceContext::Script,
             _ => CompletionSourceContext::Other,
-        })
+        };
+        let expression_context = source_ctx.computes_expression_context().then(|| {
+            classify_expression_context_with_trigger(
+                &doc.source,
+                offset as usize,
+                trigger_character,
+            )
+        });
+        Some((source_ctx, expression_context))
     })()
-    .unwrap_or(CompletionSourceContext::Other);
+    .unwrap_or((CompletionSourceContext::Other, None));
     let is_template_attr_context = matches!(source_ctx, CompletionSourceContext::TemplateAttr);
+
+    // The attested editor tsserver plugin is the typed owner for all script
+    // completions and for template member lists. Script blocks must retain the
+    // complete TypeScript experience (locals, globals, and actionable
+    // auto-imports), while Verter owns bare template render-proxy scope.
+    // VS Code merges completion providers, so returning Verter's enclosing
+    // template scope for `obj.|` pollutes the plugin's precise properties with
+    // unrelated locals.
+    if matches!(
+        server.type_provider_kind,
+        crate::TypeProviderKind::EditorTsserver
+    ) && (matches!(source_ctx, CompletionSourceContext::Script)
+        || matches!(source_expr_context, Some(ExpressionContext::MemberAccess)))
+    {
+        return Ok(None);
+    }
 
     // Enhance with TypeProvider if available.
     // Extract all context synchronously — no DashMap guard held across await.
@@ -657,15 +718,15 @@ pub(super) async fn handle_completion(
                 // the correct set and the TypeProvider's globals are noise. In
                 // SCRIPT, by contrast, TS globals and imports ARE valid — never
                 // suppress the TypeProvider for a bare script identifier position.
-                let skip_type_provider =
-                    matches!(source_ctx, CompletionSourceContext::TemplateExpression)
-                        && expr_context
-                            .as_ref()
-                            .map(|ec| {
-                                matches!(ec, ExpressionContext::IdentifierExpected)
-                                    && identifier_prefix.is_none()
-                            })
-                            .unwrap_or(false);
+                let skip_type_provider = !provider_only
+                    && matches!(source_ctx, CompletionSourceContext::TemplateExpression)
+                    && expr_context
+                        .as_ref()
+                        .map(|ec| {
+                            matches!(ec, ExpressionContext::IdentifierExpected)
+                                && identifier_prefix.is_none()
+                        })
+                        .unwrap_or(false);
 
                 if skip_type_provider {
                     tracing::debug!(
@@ -749,6 +810,12 @@ pub(super) async fn handle_completion(
                             expr_context.as_ref(),
                             identifier_prefix.as_deref(),
                             verter_items.as_ref(),
+                            !provider_only,
+                            if matches!(source_ctx, CompletionSourceContext::TemplateExpression) {
+                                provider_only_template_scope.as_ref()
+                            } else {
+                                None
+                            },
                         );
 
                         if matches!(expr_context, Some(ExpressionContext::MemberAccess))
@@ -766,6 +833,15 @@ pub(super) async fn handle_completion(
                                     expr_context.as_ref(),
                                     identifier_prefix.as_deref(),
                                     verter_items.as_ref(),
+                                    !provider_only,
+                                    if matches!(
+                                        source_ctx,
+                                        CompletionSourceContext::TemplateExpression
+                                    ) {
+                                        provider_only_template_scope.as_ref()
+                                    } else {
+                                        None
+                                    },
                                 );
                                 if !retry_result.items.is_empty() {
                                     type_result = retry_result;

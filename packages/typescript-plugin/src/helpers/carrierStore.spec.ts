@@ -308,7 +308,6 @@ describe("DiskCarrierStoreReader.readyFileForSource", () => {
     expect(reader.companionForSource("d:/ws/src/A.vue")).toBe("d:/ws/src/A.vue.tsx");
     expect(reader.companionForSource("d:/ws/src/util.ts")).toBeUndefined();
   });
-
   it("uses the manifest IDE identity for a JavaScript Svelte carrier", () => {
     const manifest = baseManifest();
     manifest.projects["d:/ws/tsconfig.json"].owned_sources.push({
@@ -503,6 +502,23 @@ describe("DiskCarrierStoreReader project scoping (no cross-tsconfig leak)", () =
     // The case-fold must NOT collapse distinct projects: project A's reader
     // still cannot see project B's carrier.
     expect(readerUpperDrive.readyFile("d:/ws/b/src/B.svelte.tsx")).toBeUndefined();
+  });
+
+  it("resolves source and provider identities using the host filesystem case policy", () => {
+    const dir = track(makeStore(twoProjectManifest()));
+    const insensitive = new DiskCarrierStoreReader(dir, "D:\\ws\\a\\tsconfig.json", false);
+
+    expect(insensitive.companionForSource("D:\\WS\\A\\SRC\\A.VUE")).toBe("d:/ws/a/src/A.vue.tsx");
+    expect(insensitive.readyFileForSource("D:\\WS\\A\\SRC\\A.VUE")?.content_hash).toBe("a1");
+    expect(insensitive.readyFile("D:\\WS\\A\\SRC\\A.VUE.TSX")?.content_hash).toBe("a1");
+    expect(insensitive.ownedSourceFor("D:\\WS\\A\\SRC\\A.VUE")?.provider_uri).toBe(
+      "d:/ws/a/src/A.vue.tsx",
+    );
+
+    const sensitive = new DiskCarrierStoreReader(dir, "d:/ws/a/tsconfig.json", true);
+    expect(sensitive.readyFileForSource("D:/WS/A/SRC/A.VUE")).toBeUndefined();
+    expect(sensitive.readyFile("D:/WS/A/SRC/A.VUE.TSX")).toBeUndefined();
+    expect(sensitive.ownedSourceFor("D:/WS/A/SRC/A.VUE")).toBeUndefined();
   });
 
   it("an unknown project key resolves to an EMPTY scope (fail closed)", () => {

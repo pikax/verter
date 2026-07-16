@@ -503,14 +503,20 @@ impl PositionMapper {
     /// within the line's runs (sorted by `src_col`). O(log n).
     fn run_at_src(&self, line: u32, col: u32) -> Option<RunId> {
         let line_runs = self.by_src_line.get(line as usize)?;
-        let pos = line_runs.partition_point(|&i| self.runs[i as usize].src_col <= col);
-        let run_idx = *line_runs.get(pos.checked_sub(1)?)?;
-        let run = &self.runs[run_idx as usize];
-        if run.src_contains(line, col) {
-            Some(RunId(run_idx))
-        } else {
-            None
+        let end = line_runs.partition_point(|&i| self.runs[i as usize].src_col <= col);
+        let last_idx = *line_runs.get(end.checked_sub(1)?)?;
+        let glb_col = self.runs[last_idx as usize].src_col;
+        let start = line_runs.partition_point(|&i| self.runs[i as usize].src_col < glb_col);
+        for &run_idx in &line_runs[start..end] {
+            if self.runs[run_idx as usize].src_contains(line, col) {
+                // `by_src_line` is stable for equal source columns, so this is
+                // the earliest generated run. A duplicated source origin must
+                // route ordinary hover/definition requests to the retained
+                // authored script, never to a later ref-unwrapped alias.
+                return Some(RunId(run_idx));
+            }
         }
+        None
     }
 
     /// Map a generated TSX position back to the original carrier-source position.

@@ -1,16 +1,20 @@
 import type tsModule from "typescript/lib/tsserverlibrary";
 import path from "node:path";
+import { existsSync } from "node:fs";
 import {
   CARRIER_STORE_REFRESH_TOKEN_CONFIG_KEY,
   cleanupCarrierVirtualImportPath,
   containingFileAwareExists,
   editorOwnsCarrierMembership,
+  editorOwnsCarrierSourceFeatures,
+  e2eProviderOnlyCompletions,
   isCarrierCompanionPath,
   isModuleLevelDefinition,
   isRelativeVue,
   isRelativeVueTs,
   isVue,
   mapCarrierSourceOffsetToGenerated,
+  mapCarrierSourceOffsetToGeneratedAll,
   normalizePath,
   remapAllFileTextChanges,
   remapCarrierSpan,
@@ -47,13 +51,81 @@ interface ProcessEditorProjectRuntime {
   readonly projectKey: string;
   readonly projectService: tsModule.server.ProjectService;
   readonly languageService: tsModule.LanguageService;
+  /**
+   * Bound callbacks captured before this plugin decorates the LanguageService.
+   * A visible carrier can be opened through an inferred-project plugin factory
+   * while its companion belongs to a configured project. Calling the owning
+   * factory's decorated service from that request would either re-enter the
+   * plugin or reject the different service identity, so source features query
+   * the exact owner's original TypeScript program through these callbacks.
+   */
+  readonly sourceFeatures: {
+    readonly getReferencesAtPosition?: tsModule.LanguageService["getReferencesAtPosition"];
+    readonly findReferences?: tsModule.LanguageService["findReferences"];
+    readonly findRenameLocations?: tsModule.LanguageService["findRenameLocations"];
+  };
+  readonly remapContext: CarrierRemapContext;
+  readonly responseRemapEnabled: () => boolean;
   readonly getStore: () => DiskCarrierStoreReader;
   readonly readCompanion: (fileName: string) => string | undefined;
   readonly readSource: (fileName: string) => string | undefined;
   readonly editorOwnsMembership: () => boolean;
+  readonly ensureResponseSourceScriptInfo: (fileName: string) => boolean;
 }
 const processEditorProjectRuntimes = new Map<string, ProcessEditorProjectRuntime>();
 let processCurrentConfig: Record<string, unknown> | undefined;
+
+const SVELTE_JSX_RUNTIME_SUBPATHS = new Map<string, string>([
+  ["@verter/svelte-jsx/jsx-runtime", "jsx-runtime.d.ts"],
+  ["@verter/svelte-jsx/jsx-dev-runtime", "jsx-dev-runtime.d.ts"],
+  ["@verter/svelte-jsx/svg/jsx-runtime", "svg/jsx-runtime.d.ts"],
+  ["@verter/svelte-jsx/svg/jsx-dev-runtime", "svg/jsx-dev-runtime.d.ts"],
+  ["@verter/svelte-jsx/mathml/jsx-runtime", "mathml/jsx-runtime.d.ts"],
+  ["@verter/svelte-jsx/mathml/jsx-dev-runtime", "mathml/jsx-dev-runtime.d.ts"],
+]);
+
+/**
+ * Locate the types-only Svelte JSX authority shipped as this plugin's runtime
+ * dependency. pnpm development links place it beside the plugin workspace;
+ * the VSIX staging contract places it in the plugin's own node_modules; npm is
+ * also free to hoist it beside the scoped plugin package. Probe those concrete
+ * production layouts once per project and fail closed when none is complete.
+ */
+function findBundledSvelteJsxPackage(): string | undefined {
+  const pluginRoot = path.resolve(__dirname, "..");
+  const candidates = [
+    path.join(pluginRoot, "node_modules", "@verter", "svelte-jsx"),
+    path.resolve(pluginRoot, "..", "svelte-jsx"),
+  ];
+  let ancestor = pluginRoot;
+  for (;;) {
+    candidates.push(path.join(ancestor, "node_modules", "@verter", "svelte-jsx"));
+    const parent = path.dirname(ancestor);
+    if (parent === ancestor) break;
+    ancestor = parent;
+  }
+  for (const candidate of candidates) {
+    if (
+      existsSync(path.join(candidate, "package.json")) &&
+      existsSync(path.join(candidate, "jsx-runtime.d.ts"))
+    ) {
+      return path.resolve(candidate);
+    }
+  }
+  return undefined;
+}
+
+function isWithinDirectory(directory: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(directory), path.resolve(candidate));
+  return (
+    relative === "" ||
+    (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))
+  );
+}
+
+function sameStorePath(reader: DiskCarrierStoreReader, left: string, right: string): boolean {
+  return reader.canonicalPath(left) === reader.canonicalPath(right);
+}
 
 /**
  * The `@verter/typescript-plugin` is a THIN SYNCHRONOUS READER over the Rust
@@ -87,6 +159,186 @@ function manifestScriptKind(ts: typeof tsModule, kind: ManifestScriptKind): tsMo
   }
 }
 
+function asciiEqualsAt(source: string, offset: number, expectedLowercase: string): boolean {
+  if (offset < 0 || offset + expectedLowercase.length > source.length) return false;
+  for (let index = 0; index < expectedLowercase.length; index += 1) {
+    let code = source.charCodeAt(offset + index);
+    if (code >= 65 && code <= 90) code += 32;
+    if (code !== expectedLowercase.charCodeAt(index)) return false;
+  }
+  return true;
+}
+
+function isHtmlTagBoundary(source: string, offset: number): boolean {
+  if (offset >= source.length) return true;
+  const code = source.charCodeAt(offset);
+  return (
+    code === 47 ||
+    code === 62 ||
+    code === 9 ||
+    code === 10 ||
+    code === 12 ||
+    code === 13 ||
+    code === 32
+  );
+}
+
+function findHtmlTagEnd(source: string, start: number): number {
+  let quote = 0;
+  for (let offset = start; offset < source.length; offset += 1) {
+    const code = source.charCodeAt(offset);
+    if (quote !== 0) {
+      if (code === quote) quote = 0;
+      continue;
+    }
+    if (code === 34 || code === 39) {
+      quote = code;
+    } else if (code === 62) {
+      return offset;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Classify a raw SFC offset without interpreting the generated companion.
+ *
+ * HTML raw-text rules make the first matching `</script>` terminate a script
+ * block even when those bytes appear in JavaScript text. The scan therefore
+ * needs only quote-aware opening-tag handling plus comment skipping; it does
+ * not guess from generated TSX or project configuration. This serves Vue and
+ * Svelte carriers alike and does no source allocation on the completion path.
+ */
+function sfcScriptImportAnchor(source: string | undefined, position: number): number | null {
+  if (source === undefined || position < 0 || position > source.length) return null;
+  let offset = 0;
+  while (offset < source.length) {
+    const tagStart = source.indexOf("<", offset);
+    if (tagStart < 0 || tagStart > position) return null;
+    if (source.startsWith("<!--", tagStart)) {
+      const commentEnd = source.indexOf("-->", tagStart + 4);
+      if (commentEnd < 0) return null;
+      offset = commentEnd + 3;
+      continue;
+    }
+    if (
+      !asciiEqualsAt(source, tagStart + 1, "script") ||
+      !isHtmlTagBoundary(source, tagStart + 7)
+    ) {
+      offset = tagStart + 1;
+      continue;
+    }
+    const openEnd = findHtmlTagEnd(source, tagStart + 7);
+    if (openEnd < 0) return null;
+    let closeStart = source.indexOf("<", openEnd + 1);
+    while (
+      closeStart >= 0 &&
+      (!asciiEqualsAt(source, closeStart + 1, "/script") ||
+        !isHtmlTagBoundary(source, closeStart + 8))
+    ) {
+      closeStart = source.indexOf("<", closeStart + 1);
+    }
+    let contentStart = openEnd + 1;
+    if (source.charCodeAt(contentStart) === 13 && source.charCodeAt(contentStart + 1) === 10) {
+      contentStart += 2;
+    } else if (source.charCodeAt(contentStart) === 10 || source.charCodeAt(contentStart) === 13) {
+      contentStart += 1;
+    }
+    if (closeStart < 0) return position > openEnd ? contentStart : null;
+    if (position > openEnd && position <= closeStart) return contentStart;
+    const closeEnd = findHtmlTagEnd(source, closeStart + 8);
+    if (closeEnd < 0) return null;
+    offset = closeEnd + 1;
+  }
+  return null;
+}
+
+function isInsideSfcScript(source: string | undefined, position: number): boolean {
+  return sfcScriptImportAnchor(source, position) !== null;
+}
+
+function identifierPrefixAt(source: string | undefined, position: number): string | null {
+  if (source === undefined || position <= 0 || position > source.length) return null;
+  const lineStart = source.lastIndexOf("\n", position - 1) + 1;
+  const match = source.slice(lineStart, position).match(/[$_\p{ID_Continue}]+$/u);
+  if (match === null || !/^[$_\p{ID_Start}]/u.test(match[0])) return null;
+  return match[0];
+}
+
+function identifierSpanAt(source: string | undefined, position: number): tsModule.TextSpan | null {
+  if (source === undefined || position < 0 || position > source.length) return null;
+  const lineStart = source.lastIndexOf("\n", Math.max(0, position - 1)) + 1;
+  const nextLine = source.indexOf("\n", position);
+  const lineEnd = nextLine < 0 ? source.length : nextLine;
+  const left = source.slice(lineStart, position).match(/[$_\p{ID_Continue}]+$/u)?.[0] ?? "";
+  const right = source.slice(position, lineEnd).match(/^[$_\p{ID_Continue}]*/u)?.[0] ?? "";
+  const identifier = left + right;
+  if (identifier.length === 0 || !/^[$_\p{ID_Start}]/u.test(identifier)) return null;
+  return { start: position - left.length, length: identifier.length };
+}
+
+function isFrameworkAttributeNamePosition(source: string | undefined, position: number): boolean {
+  if (source === undefined || position <= 0 || position > source.length) return false;
+  const tagStart = source.lastIndexOf("<", position - 1);
+  if (tagStart < 0 || source.lastIndexOf(">", position - 1) > tagStart) return false;
+  const first = source.charCodeAt(tagStart + 1);
+  if (first === 47 || first === 33 || first === 63) return false;
+
+  let quote = 0;
+  let braceDepth = 0;
+  for (let offset = tagStart + 1; offset < position; offset++) {
+    const code = source.charCodeAt(offset);
+    if (quote !== 0) {
+      if (code === 92) offset += 1;
+      else if (code === quote) quote = 0;
+      continue;
+    }
+    if (code === 34 || code === 39) quote = code;
+    else if (code === 123) braceDepth += 1;
+    else if (code === 125 && braceDepth > 0) braceDepth -= 1;
+  }
+  return quote === 0 && braceDepth === 0;
+}
+
+function camelToKebab(value: string): string {
+  let result = "";
+  for (let index = 0; index < value.length; index++) {
+    const character = value[index];
+    if (character >= "A" && character <= "Z") {
+      if (index > 0) result += "-";
+      result += character.toLowerCase();
+    } else {
+      result += character;
+    }
+  }
+  return result;
+}
+
+function frameworkAttributeCompletionName(label: string): string {
+  const base = label.endsWith("?") ? label.slice(0, -1) : label;
+  if (base.startsWith("on") && base.length > 2 && /[A-Z]/.test(base[2])) {
+    return `@${camelToKebab(base.slice(2))}`;
+  }
+  return /[A-Z]/.test(base) ? camelToKebab(base) : base;
+}
+
+function isPureImportInsertion(ts: typeof tsModule, text: string): boolean {
+  const parsed = ts.createSourceFile(
+    "__verter_completion_import.ts",
+    text,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  ) as tsModule.SourceFile & { parseDiagnostics?: readonly tsModule.Diagnostic[] };
+  return (
+    (parsed.parseDiagnostics?.length ?? 0) === 0 &&
+    parsed.statements.length > 0 &&
+    parsed.statements.every(
+      (statement) => ts.isImportDeclaration(statement) || ts.isImportEqualsDeclaration(statement),
+    )
+  );
+}
+
 const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
   // The resolved store dir per configured project, recorded by `create` (which
   // has the plugin config) so `getExternalFiles` (which does NOT receive the
@@ -111,6 +363,8 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     // serve generated content under the source identity.
     let responseRemap = resolveResponseRemap(effectiveConfig);
     let editorOwnsMembership = editorOwnsCarrierMembership(effectiveConfig);
+    let editorOwnsSourceFeatures = editorOwnsCarrierSourceFeatures(effectiveConfig);
+    let providerOnlyCompletions = e2eProviderOnlyCompletions(effectiveConfig);
     let carrierStoreRefreshToken = effectiveConfig[CARRIER_STORE_REFRESH_TOKEN_CONFIG_KEY];
     const projectKey = info.project.getProjectName();
     processBoundProjects.add(projectKey);
@@ -122,16 +376,25 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     // carrier the host hooks serve comes ONLY from this project's manifest entry
     // — a sibling tsconfig's carrier (compiled under different `paths`/`types`/
     // `lib`) is never served here.
-    let store = new DiskCarrierStoreReader(storeDir, projectKey);
+    let store = new DiskCarrierStoreReader(
+      storeDir,
+      projectKey,
+      info.serverHost.useCaseSensitiveFileNames,
+    );
     // Assigned after the host hooks have captured their original implementations.
     // The configuration updater closes over this mutable context so every response
     // provider sees the same project-scoped reader as the live host hooks.
     let remapContext: CarrierRemapContext;
+    let invalidatedReadyVersions = store.readyFileVersions();
+    const pendingScriptInfoReloads = new Set<string>();
+    let pendingResolutionCacheClear = false;
     let refreshScheduled = false;
     processUpdateProjectConfig.set(projectKey, (config) => {
       const nextStoreDir = resolveCarrierStoreDir(config);
       const nextResponseRemap = resolveResponseRemap(config);
       const nextEditorOwnsMembership = editorOwnsCarrierMembership(config);
+      const nextEditorOwnsSourceFeatures = editorOwnsCarrierSourceFeatures(config);
+      const nextProviderOnlyCompletions = e2eProviderOnlyCompletions(config);
       const nextCarrierStoreRefreshToken = config[CARRIER_STORE_REFRESH_TOKEN_CONFIG_KEY];
       const storeChanged = nextStoreDir !== storeDir;
       const publicationAdvanced = !Object.is(
@@ -142,15 +405,23 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         storeChanged ||
         nextResponseRemap !== responseRemap ||
         nextEditorOwnsMembership !== editorOwnsMembership ||
+        nextEditorOwnsSourceFeatures !== editorOwnsSourceFeatures ||
+        nextProviderOnlyCompletions !== providerOnlyCompletions ||
         publicationAdvanced;
       storeDir = nextStoreDir;
       responseRemap = nextResponseRemap;
       editorOwnsMembership = nextEditorOwnsMembership;
+      editorOwnsSourceFeatures = nextEditorOwnsSourceFeatures;
+      providerOnlyCompletions = nextProviderOnlyCompletions;
       carrierStoreRefreshToken = nextCarrierStoreRefreshToken;
       processStoreDirByProject.set(projectKey, storeDir);
       processEditorOwnsCarrierMembershipByProject.set(projectKey, editorOwnsMembership);
       if (storeChanged) {
-        store = new DiskCarrierStoreReader(storeDir, projectKey);
+        store = new DiskCarrierStoreReader(
+          storeDir,
+          projectKey,
+          info.serverHost.useCaseSensitiveFileNames,
+        );
         if (remapContext !== undefined) {
           remapContext.reader = store;
         }
@@ -160,7 +431,17 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
             : "[Verter] carrier store removed; carrier serving disabled",
         );
       }
+      const nextReadyVersions = store.readyFileVersions();
+      for (const [providerPath, version] of nextReadyVersions) {
+        if (invalidatedReadyVersions.get(providerPath) !== version) {
+          pendingScriptInfoReloads.add(providerPath);
+        }
+      }
+      invalidatedReadyVersions = nextReadyVersions;
       if (!servingStateChanged) return;
+      if (publicationAdvanced || storeChanged) {
+        pendingResolutionCacheClear = true;
+      }
       // The configure request can arrive while tsserver is updating this project's
       // graph. Mutating that graph re-entrantly corrupts ConfiguredProject state.
       // Coalesce refreshes onto the next event-loop turn: the store swap is already
@@ -180,10 +461,41 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
           const configuredProject = info.project as typeof info.project & {
             getConfigFilePath?: () => tsModule.server.NormalizedPath;
           };
-          const projectService = info.project
-            .projectService as typeof info.project.projectService & {
+          const projectService = info.project.projectService as unknown as {
             reloadFileNamesOfConfiguredProject?: (project: typeof configuredProject) => boolean;
+            clearSemanticCache?: (project: typeof configuredProject) => void;
+            getScriptInfo?: (fileName: string) =>
+              | {
+                  reloadFromFile?: () => boolean;
+                }
+              | undefined;
           };
+          // A configured project may have cached Svelte's ambient `*.svelte`
+          // fallback before the authored carrier was published. Clearing only
+          // the target project's semantic/resolution cache is therefore the
+          // first refresh step; a dirty graph alone retains the stale module
+          // resolution. This private runtime method is present across supported
+          // TS 5.x/6.x and is deliberately invoked through this narrow cast.
+          if (pendingResolutionCacheClear) {
+            pendingResolutionCacheClear = false;
+            projectService.clearSemanticCache?.(configuredProject);
+          }
+          // External carrier roots are virtual: their ScriptInfos have no disk
+          // watcher that can observe the content-addressed blob swap. Refresh
+          // only companions whose manifest identity advanced, using the patched
+          // serverHost.readFile as the sole content authority, before rebuilding
+          // the configured graph. This covers both IDE roots and imported API
+          // carriers without reloading every carrier on each keystroke.
+          for (const providerPath of pendingScriptInfoReloads) {
+            pendingScriptInfoReloads.delete(providerPath);
+            try {
+              projectService.getScriptInfo?.(providerPath)?.reloadFromFile?.();
+            } catch (error) {
+              logger.info(
+                `[Verter] failed to reload carrier ScriptInfo ${providerPath}: ${String(error)}`,
+              );
+            }
+          }
           if (
             typeof configuredProject.getConfigFilePath === "function" &&
             typeof projectService.reloadFileNamesOfConfiguredProject === "function"
@@ -227,6 +539,25 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
     const _fileExists = info.serverHost.fileExists.bind(info.serverHost);
     const _readFile = info.serverHost.readFile.bind(info.serverHost);
+    const bundledSvelteJsxPackage = findBundledSvelteJsxPackage();
+    if (bundledSvelteJsxPackage === undefined) {
+      logger.info(
+        "[Verter] bundled @verter/svelte-jsx runtime is unavailable; Svelte JSX resolution fails closed",
+      );
+    }
+    const configuredProjectRoot =
+      projectKey.endsWith(".json") && !projectKey.startsWith("/dev/null/")
+        ? path.dirname(projectKey)
+        : directory;
+    const ownerResolutionAnchor = path.join(configuredProjectRoot, "__verter_svelte_owner__.tsx");
+    const ownerModuleResolutionHost: tsModule.ModuleResolutionHost = {
+      fileExists: _fileExists,
+      readFile: _readFile,
+      directoryExists: info.serverHost.directoryExists?.bind(info.serverHost),
+      getDirectories: info.serverHost.getDirectories?.bind(info.serverHost),
+      realpath: info.serverHost.realpath?.bind(info.serverHost),
+      useCaseSensitiveFileNames: info.serverHost.useCaseSensitiveFileNames,
+    };
 
     // ── carrier-store reads (the SOLE carrier-content authority) ───────────
 
@@ -315,18 +646,17 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     const _projectContainsFile = info.project.containsFile?.bind(info.project);
     if (_projectContainsFile) {
       info.project.containsFile = (fileName, requireOpen) => {
-        if (editorOwnsMembership) {
-          const companion = store.companionForSource(fileName);
-          if (companion !== undefined && store.readyFile(companion) !== undefined) {
-            return true;
-          }
-          // Open framework sources live in an inferred editor project while
-          // their companions live in the exact configured project. The inferred
-          // project can still answer through that process-level route, so keep
-          // `geterr` from discarding the source before the diagnostic wrapper.
-          if (editorOwnerForSource(fileName) !== undefined) {
-            return true;
-          }
+        if (editorOwnsMembership && editorOwnsSourceFeatures) {
+          // TypeScript's cross-project references/rename coordinator refuses to
+          // invoke a project's language-service provider until `containsFile`
+          // admits the request identity. A visible SFC is intentionally absent
+          // from the companion Program, so assign that *virtual request*
+          // membership to exactly the configured runtime that owns its ready
+          // companion. Inferred projects must return false for the same source:
+          // dual claims make TypeScript aggregate a remapped source span through
+          // a Program that has no raw SFC SourceFile.
+          const owner = editorOwnerForSource(fileName);
+          if (owner !== undefined) return owner === editorRuntime;
         }
         return _projectContainsFile(fileName, requireOpen);
       };
@@ -393,7 +723,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         return manifestScriptKind(ts, ready.script_kind);
       }
       const owned = store.ownedSourceFor(fileName);
-      if (owned && normalizePath(owned.provider_uri) === normalizePath(fileName)) {
+      if (owned && sameStorePath(store, owned.provider_uri, fileName)) {
         return manifestScriptKind(ts, owned.script_kind);
       }
       return _getScriptKind?.(fileName) ?? ts.ScriptKind.Unknown;
@@ -482,11 +812,47 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
           };
         }
 
+        const svelteJsxRuntime = SVELTE_JSX_RUNTIME_SUBPATHS.get(moduleName);
+        if (svelteJsxRuntime !== undefined) {
+          // The projection and JSX namespace are one versioned Verter unit.
+          // Never accept a consumer-installed shim that may not match this
+          // compiler/plugin version; use the plugin-owned runtime or fail closed.
+          if (bundledSvelteJsxPackage === undefined) return null;
+          const resolvedFileName = path.join(bundledSvelteJsxPackage, svelteJsxRuntime);
+          return existsSync(resolvedFileName)
+            ? {
+                extension: ts.Extension.Dts,
+                isExternalLibraryImport: true,
+                resolvedFileName,
+              }
+            : null;
+        }
+
+        if (
+          bundledSvelteJsxPackage !== undefined &&
+          isWithinDirectory(bundledSvelteJsxPackage, containingFile) &&
+          (moduleName === "svelte" || moduleName.startsWith("svelte/"))
+        ) {
+          // The shim lives with the editor plugin, outside the user's project,
+          // so a normal node_modules ancestor walk cannot see that project's
+          // Svelte install. Resolve its transitive imports from the exact owning
+          // configured-project root. A missing owner dependency is a hard miss;
+          // do not accidentally bind to a development/extension copy of Svelte.
+          return (
+            ts.resolveModuleName(
+              moduleName,
+              ownerResolutionAnchor,
+              info.project.getCompilerOptions(),
+              ownerModuleResolutionHost,
+            ).resolvedModule ?? null
+          );
+        }
+
         // An already-IDE-carrier-shaped relative specifier resolves to itself.
         if (isRelativeVueTs(moduleName)) {
           const resolved = path.resolve(path.dirname(containingFile), moduleName);
           return {
-            extension: ts.Extension.Ts,
+            extension: providerExtension(resolved),
             isExternalLibraryImport: false,
             resolvedFileName: resolved,
           };
@@ -560,6 +926,9 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         return moduleNames.map(({ text: moduleName }, index) => {
           try {
             const resolvedModule = moduleResolver(moduleName, () => resolvedModules[index] as any);
+            if (resolvedModule === null) {
+              return { resolvedModule: undefined };
+            }
             if (resolvedModule) {
               return { resolvedModule };
             }
@@ -572,8 +941,12 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       };
     }
 
-    // The IDE carrier is `.tsx`, so JSX must be enabled for the companion's
-    // generated JSX to type-check.
+    // IDE carriers contain JSX, so preserve it for TypeScript. A ready
+    // JavaScript carrier is a distinct `.jsx` external root; TypeScript drops
+    // such a root entirely unless `allowJs` is enabled. Turn that admission bit
+    // on only while this exact project owns a ready JSX carrier. `checkJs`
+    // remains untouched: the generated carrier opts into checking file-locally
+    // with `// @ts-check`, so unrelated project JavaScript is not reclassified.
     const _getCompilationSettings = info.languageServiceHost.getCompilationSettings.bind(
       info.languageServiceHost,
     );
@@ -585,10 +958,21 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       if (settings.jsx !== ts.JsxEmit.Preserve) {
         settings.jsx = ts.JsxEmit.Preserve;
       }
+      const hasReadyJsxCarrier = store
+        .readyIdeCompanions()
+        .some((provider) => store.readyFile(provider)?.script_kind === "JSX");
+      if (hasReadyJsxCarrier && settings.allowJs !== true) {
+        settings.allowJs = true;
+      }
       return settings;
     };
 
     const languageService = info.languageService;
+    const sourceFeatures: ProcessEditorProjectRuntime["sourceFeatures"] = {
+      getReferencesAtPosition: languageService.getReferencesAtPosition?.bind(languageService),
+      findReferences: languageService.findReferences?.bind(languageService),
+      findRenameLocations: languageService.findRenameLocations?.bind(languageService),
+    };
 
     // ── navigation-span remapping (store-backed source maps) ───────────────
 
@@ -623,15 +1007,59 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       projectKey,
       projectService: info.project.projectService,
       languageService,
+      sourceFeatures,
+      remapContext,
+      responseRemapEnabled: () => responseRemap,
       getStore: () => store,
       readCompanion: carrierContent,
       readSource: readOriginalSource,
       editorOwnsMembership: () => editorOwnsMembership,
+      ensureResponseSourceScriptInfo: (fileName) => {
+        const companion = store.companionForSource(fileName);
+        if (companion === undefined) return true;
+        if (info.project.projectService.getScriptInfo(fileName) !== undefined) return true;
+
+        const ready = store.readyFile(companion);
+        if (ready === undefined) return false;
+        const create = info.project.projectService.getOrCreateScriptInfoForNormalizedPath;
+        if (typeof create !== "function") return false;
+
+        // Protocol commands such as `references` serialize LanguageService
+        // spans through ProjectService and require a ScriptInfo for every target.
+        // An imported, unopened SFC is intentionally absent from the TypeScript
+        // Program even though its generated companion is present. Materialize a
+        // closed mixed-content ScriptInfo from the owning server host so the
+        // source-facing response remains serializable without pretending the raw
+        // SFC is an open/program member or leaking the companion path instead.
+        return (
+          create.call(
+            info.project.projectService,
+            ts.server.toNormalizedPath(fileName),
+            false,
+            undefined,
+            manifestScriptKind(ts, ready.script_kind),
+            true,
+            info.serverHost,
+          ) !== undefined
+        );
+      },
     };
     processEditorProjectRuntimes.set(projectKey, editorRuntime);
 
     function editorOwnerForSource(fileName: string): ProcessEditorProjectRuntime | undefined {
-      const candidates = [...processEditorProjectRuntimes.values()].filter((runtime) => {
+      // Most calls arrive on the configured project that owns the companion.
+      // Prefer that exact runtime before consulting process-wide candidates;
+      // stale inferred-project factories can coexist for the lifetime of
+      // tsserver and must never make an otherwise exact local owner ambiguous.
+      if (editorRuntime.editorOwnsMembership()) {
+        const localStore = editorRuntime.getStore();
+        const localCompanion = localStore.companionForSource(fileName);
+        if (localCompanion !== undefined && localStore.readyFile(localCompanion) !== undefined) {
+          return editorRuntime;
+        }
+      }
+      const runtimes = [...processEditorProjectRuntimes.values()];
+      const candidates = runtimes.filter((runtime) => {
         if (!runtime.editorOwnsMembership()) return false;
         const runtimeStore = runtime.getStore();
         const companion = runtimeStore.companionForSource(fileName);
@@ -671,6 +1099,55 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       return candidates.length === 1 ? candidates[0] : undefined;
     }
 
+    function protocolSafeMappedSpans<T extends tsModule.DocumentSpan>(
+      runtime: ProcessEditorProjectRuntime,
+      spans: readonly T[],
+    ): T[] {
+      return spans.filter((span) => runtime.ensureResponseSourceScriptInfo(span.fileName));
+    }
+
+    function protocolSafeReferencedSymbols(
+      runtime: ProcessEditorProjectRuntime,
+      symbols: readonly tsModule.ReferencedSymbol[],
+    ): tsModule.ReferencedSymbol[] {
+      const safe: tsModule.ReferencedSymbol[] = [];
+      for (const symbol of symbols) {
+        if (!runtime.ensureResponseSourceScriptInfo(symbol.definition.fileName)) continue;
+        safe.push({
+          ...symbol,
+          references: protocolSafeMappedSpans(runtime, symbol.references),
+        });
+      }
+      return safe;
+    }
+
+    /** Resolve a generated companion revisit to the configured project that published it. */
+    function editorOwnerForCompanion(fileName: string): ProcessEditorProjectRuntime | undefined {
+      if (editorRuntime.editorOwnsMembership() && editorRuntime.getStore().readyFile(fileName)) {
+        return editorRuntime;
+      }
+      const candidates = [...processEditorProjectRuntimes.values()].filter(
+        (runtime) =>
+          runtime.editorOwnsMembership() && runtime.getStore().readyFile(fileName) !== undefined,
+      );
+      if (candidates.length <= 1) return candidates[0];
+
+      const sources = candidates.map(
+        (runtime) => runtime.getStore().ownedSourceFor(fileName)?.source_uri,
+      );
+      const source = sources[0];
+      if (
+        source === undefined ||
+        sources.some(
+          (candidate) =>
+            candidate === undefined || !sameStorePath(candidates[0].getStore(), source, candidate),
+        )
+      ) {
+        return undefined;
+      }
+      return editorOwnerForSource(source);
+    }
+
     interface EditorCarrierPosition {
       runtime: ProcessEditorProjectRuntime;
       companion: string;
@@ -682,7 +1159,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       fileName: string,
       position: number,
     ): EditorCarrierPosition | null {
-      if (!editorOwnsMembership || !isVue(fileName)) return null;
+      if (!editorOwnsSourceFeatures || !isVue(fileName)) return null;
       const runtime = editorOwnerForSource(fileName);
       if (runtime === undefined) return null;
       const runtimeStore = runtime.getStore();
@@ -700,6 +1177,122 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         ? null
         : { runtime, companion, position: generatedPosition };
     }
+
+    /**
+     * Discover generated projections linked by an exact source-map origin.
+     * Vue's ref-unwrapped alias maps to the authored setup declaration, so a
+     * raw TypeScript reference/rename set containing either declaration yields
+     * both generated positions. This consumes already-returned spans and never
+     * performs a nested language-service query from inside an active provider
+     * callback (tsserver does not guarantee that reentrant path).
+     */
+    function linkedEditorCarrierPositionsFromSpans(
+      routed: EditorCarrierPosition,
+      spans: readonly { fileName: string; textSpan: tsModule.TextSpan }[],
+    ): number[] {
+      const positions = new Set<number>();
+      for (const span of spans) {
+        if (!sameStorePath(routed.runtime.getStore(), span.fileName, routed.companion)) continue;
+        const mapped = remapCarrierSpan(
+          routed.runtime.getStore(),
+          routed.companion,
+          span.textSpan,
+          routed.runtime.readCompanion,
+          routed.runtime.readSource,
+        );
+        if (mapped === null) continue;
+        for (const position of mapCarrierSourceOffsetToGeneratedAll(
+          routed.runtime.getStore(),
+          routed.companion,
+          mapped.fileName,
+          mapped.textSpan.start,
+          routed.runtime.readCompanion,
+          routed.runtime.readSource,
+        )) {
+          positions.add(position);
+        }
+      }
+      return [...positions];
+    }
+
+    function documentSpanKey(span: { fileName: string; textSpan: tsModule.TextSpan }): string {
+      return `${normalizePath(span.fileName)}\0${span.textSpan.start}\0${span.textSpan.length}`;
+    }
+
+    function dedupeDocumentSpans<T extends { fileName: string; textSpan: tsModule.TextSpan }>(
+      spans: readonly T[],
+    ): T[] {
+      const seen = new Set<string>();
+      return spans.filter((span) => {
+        const key = documentSpanKey(span);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+
+    /**
+     * Collapse duplicate rename targets while preferring an exact identifier
+     * replacement over TypeScript's shorthand-preservation decoration. Linked
+     * carrier projections can map both a generated object shorthand
+     * (`foo` -> `foo: next`) and the authored declaration (`foo` -> `next`) to
+     * the same source span. The plain location is the faithful source edit.
+     * A lone decorated location is retained: real authored shorthand syntax
+     * still needs TypeScript's prefix/suffix semantics.
+     */
+    function dedupeRenameLocations(
+      locations: readonly tsModule.RenameLocation[],
+    ): tsModule.RenameLocation[] {
+      const out: tsModule.RenameLocation[] = [];
+      const indexBySpan = new Map<string, number>();
+      const hasDecoration = (location: tsModule.RenameLocation): boolean =>
+        Boolean(location.prefixText) || Boolean(location.suffixText);
+      for (const location of locations) {
+        const key = documentSpanKey(location);
+        const existingIndex = indexBySpan.get(key);
+        if (existingIndex === undefined) {
+          indexBySpan.set(key, out.length);
+          out.push(location);
+        } else if (hasDecoration(out[existingIndex]) && !hasDecoration(location)) {
+          out[existingIndex] = location;
+        }
+      }
+      return out;
+    }
+
+    function mergeReferencedSymbolsByDefinition(
+      symbols: readonly tsModule.ReferencedSymbol[],
+    ): tsModule.ReferencedSymbol[] {
+      const merged = new Map<string, tsModule.ReferencedSymbol>();
+      for (const symbol of symbols) {
+        const key = documentSpanKey(symbol.definition);
+        const existing = merged.get(key);
+        if (existing === undefined) {
+          merged.set(key, {
+            ...symbol,
+            references: dedupeDocumentSpans(symbol.references),
+          });
+        } else {
+          existing.references = dedupeDocumentSpans([...existing.references, ...symbol.references]);
+        }
+      }
+      return [...merged.values()];
+    }
+
+    /**
+     * A selected non-editor provider still needs this plugin's project-membership
+     * and module-resolution hooks, but it is the sole owner of semantic features
+     * on the visible framework source. Returning the raw TypeScript service's
+     * answer would register a second provider against `.vue`; VS Code merges that
+     * answer with Verter's managed/shared provider and leaks globals, generated
+     * helpers, and non-actionable completion items. Source-feature wrappers must
+     * therefore fail closed while membership remains enabled.
+     */
+    const editorYieldsCarrierSourceFeatures = (fileName: string): boolean => {
+      if (!editorOwnsMembership || editorOwnsSourceFeatures) return false;
+      if (isVue(fileName)) return true;
+      return isCarrierCompanionPath(store, fileName);
+    };
 
     function editorCarrierSelection(
       fileName: string,
@@ -725,7 +1318,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         start === null ||
         end === null ||
         start.runtime !== end.runtime ||
-        normalizePath(start.companion) !== normalizePath(end.companion) ||
+        !sameStorePath(start.runtime.getStore(), start.companion, end.companion) ||
         end.position < start.position
       ) {
         return null;
@@ -735,6 +1328,79 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         companion: start.companion,
         selection: { pos: start.position, end: end.position },
       };
+    }
+
+    /** Map one companion response span back to the exact visible editor source. */
+    function editorSourceSpan(
+      routed: EditorCarrierPosition,
+      sourceFileName: string,
+      span: tsModule.TextSpan,
+    ): tsModule.TextSpan | null {
+      const mapped = remapCarrierSpan(
+        routed.runtime.getStore(),
+        routed.companion,
+        span,
+        routed.runtime.readCompanion,
+        routed.runtime.readSource,
+      );
+      return mapped !== null &&
+        sameStorePath(routed.runtime.getStore(), mapped.fileName, sourceFileName)
+        ? mapped.textSpan
+        : null;
+    }
+
+    function remapEditorCompletionChanges(
+      runtime: ProcessEditorProjectRuntime,
+      sourceFileName: string,
+      sourcePosition: number,
+      changes: readonly tsModule.FileTextChanges[],
+    ): tsModule.FileTextChanges[] {
+      const runtimeContext: CarrierRemapContext = {
+        reader: runtime.getStore(),
+        readCompanion: runtime.readCompanion,
+        readSource: runtime.readSource,
+        fileExists: _fileExists,
+      };
+      const sourceText = runtime.readSource(sourceFileName);
+      const importAnchor = sfcScriptImportAnchor(sourceText, sourcePosition);
+      const out: tsModule.FileTextChanges[] = [];
+      for (const change of changes) {
+        const mapped = remapAllFileTextChanges(runtimeContext, [change]);
+        if (mapped.length > 0) {
+          out.push(...mapped);
+          continue;
+        }
+
+        // TypeScript inserts a new import at generated offset zero, which is
+        // correctly unmapped when the companion starts with synthetic JSX and
+        // helper preambles. Recover only a syntactically pure import insertion,
+        // and only into the exact source script block that requested the
+        // completion. Every other unmappable edit remains dropped atomically.
+        const owned = runtime.getStore().ownedSourceFor(change.fileName);
+        if (
+          importAnchor === null ||
+          owned === undefined ||
+          !sameStorePath(runtime.getStore(), owned.provider_uri, change.fileName) ||
+          !sameStorePath(runtime.getStore(), owned.source_uri, sourceFileName) ||
+          change.textChanges.length === 0 ||
+          change.textChanges.some(
+            (edit) => edit.span.length !== 0 || !isPureImportInsertion(ts, edit.newText),
+          )
+        ) {
+          continue;
+        }
+        const existsRelToContaining = containingFileAwareExists(_fileExists, sourceFileName);
+        out.push({
+          ...change,
+          fileName: sourceFileName,
+          textChanges: change.textChanges.map((edit) => ({
+            ...edit,
+            span: { start: importAnchor, length: 0 },
+            newText: cleanupCarrierVirtualImportPath(edit.newText, existsRelToContaining),
+          })),
+        });
+      }
+      return out;
     }
 
     /**
@@ -750,7 +1416,8 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       method: "getSyntacticDiagnostics" | "getSemanticDiagnostics" | "getSuggestionDiagnostics",
       query: (target: string) => readonly T[],
     ): T[] {
-      if (!editorOwnsMembership || !isVue(fileName)) {
+      if (editorYieldsCarrierSourceFeatures(fileName)) return [];
+      if (!isVue(fileName)) {
         return [...query(fileName)];
       }
       const targetRuntime = editorOwnerForSource(fileName);
@@ -854,7 +1521,10 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       languageService.getEncodedSemanticClassifications?.bind(languageService);
     if (_getEncodedSemanticClassifications) {
       languageService.getEncodedSemanticClassifications = (fileName, span, format) => {
-        if (!editorOwnsMembership || !isVue(fileName)) {
+        if (editorYieldsCarrierSourceFeatures(fileName)) {
+          return { spans: [], endOfLineState: 0 as tsModule.EndOfLineState };
+        }
+        if (!isVue(fileName)) {
           return _getEncodedSemanticClassifications(fileName, span, format);
         }
         const routed = editorCarrierSelection(fileName, {
@@ -881,7 +1551,10 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
             routed.runtime.readCompanion,
             routed.runtime.readSource,
           );
-          if (mapped !== null && normalizePath(mapped.fileName) === normalizePath(fileName)) {
+          if (
+            mapped !== null &&
+            sameStorePath(routed.runtime.getStore(), mapped.fileName, fileName)
+          ) {
             mappedSpans.push(
               mapped.textSpan.start,
               mapped.textSpan.length,
@@ -893,6 +1566,65 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       };
     }
 
+    const _getDocumentHighlights = languageService.getDocumentHighlights?.bind(languageService);
+    if (_getDocumentHighlights) {
+      languageService.getDocumentHighlights = (fileName, position, filesToSearch) => {
+        if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
+        if (!isVue(fileName)) {
+          return _getDocumentHighlights(fileName, position, filesToSearch);
+        }
+        const routed = editorCarrierPosition(fileName, position);
+        if (routed === null) return undefined;
+        const targetStore = routed.runtime.getStore();
+        const mappedSearchFiles = [
+          ...new Set(
+            filesToSearch.map((candidate) => {
+              const companion = targetStore.companionForSource(candidate);
+              return companion !== undefined && targetStore.readyFile(companion) !== undefined
+                ? companion
+                : candidate;
+            }),
+          ),
+        ];
+        const result = routed.runtime.languageService.getDocumentHighlights(
+          routed.companion,
+          routed.position,
+          mappedSearchFiles,
+        );
+        if (result === undefined) return undefined;
+
+        const out: tsModule.DocumentHighlights[] = [];
+        for (const highlightedFile of result) {
+          if (!isCarrierCompanionPath(targetStore, highlightedFile.fileName)) {
+            out.push({
+              ...highlightedFile,
+              highlightSpans: [...highlightedFile.highlightSpans],
+            });
+            continue;
+          }
+          const bySource = new Map<string, tsModule.HighlightSpan[]>();
+          for (const highlight of highlightedFile.highlightSpans) {
+            const mapped = remapCarrierSpan(
+              targetStore,
+              highlightedFile.fileName,
+              highlight.textSpan,
+              routed.runtime.readCompanion,
+              routed.runtime.readSource,
+            );
+            if (mapped === null) continue;
+            const key = normalizePath(mapped.fileName);
+            const spans = bySource.get(key) ?? [];
+            spans.push({ ...highlight, textSpan: mapped.textSpan });
+            bySource.set(key, spans);
+          }
+          for (const [sourceFileName, highlightSpans] of bySource) {
+            out.push({ fileName: sourceFileName, highlightSpans });
+          }
+        }
+        return out.length > 0 ? out : undefined;
+      };
+    }
+
     function remapDefinitionLike<
       T extends {
         fileName: string;
@@ -900,6 +1632,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         contextSpan?: tsModule.TextSpan;
         originalTextSpan?: tsModule.TextSpan;
         kind?: string;
+        verterAliasTarget?: true;
       },
     >(definition: T): T | undefined {
       if (isVue(definition.fileName)) {
@@ -925,24 +1658,20 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         // `.vue.tsx` not on disk) would break go-to-def into the imported `.vue`.
         if (
           isCarrierCompanionPath(store, definition.fileName) &&
-          isModuleLevelDefinition(definition)
+          (isModuleLevelDefinition(definition) || definition.verterAliasTarget === true)
         ) {
           // Fail-closed-safe: if the source path can't be resolved, DROP the
           // definition (never surface the companion path).
           return remapModuleLevelCompanionToSource(store, definition);
         }
-        // FAIL CLOSED. A definition whose `fileName` IS a carrier companion
-        // (`Comp.vue.tsx`) but whose SPECIFIC-token span could not be mapped
-        // must NOT have its path rewritten to the bare `Comp.vue` while keeping
-        // the GENERATED-TSX span — that pairs a source path with a generated
-        // offset (navigation lands on the wrong token). Leave the companion path
-        // AND span intact (self-consistent) so nothing is mis-mapped. Only a
-        // NON-companion path (a plain `.ts`, a free-form display token) gets the
-        // display-only carrier-suffix cleanup, where there was no carrier span
-        // to map.
-        if (!store.readyFile(definition.fileName) && !store.ownedSourceFor(definition.fileName)) {
-          definition.fileName = fixCarrierImportPath(definition.fileName);
-        }
+        // FAIL CLOSED. A specific-token definition in a known companion whose
+        // span cannot map is not user-navigable. Drop it rather than leaking a
+        // private virtual path or pairing a source URI with a generated offset.
+        if (isCarrierCompanionPath(store, definition.fileName)) return undefined;
+
+        // A non-companion path is a real file/display token; cosmetic suffix
+        // cleanup remains safe because no carrier span is being reinterpreted.
+        definition.fileName = fixCarrierImportPath(definition.fileName);
         return definition;
       }
 
@@ -1090,6 +1819,18 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     const _getDefinitionAndBoundSpan =
       languageService.getDefinitionAndBoundSpan.bind(languageService);
     languageService.getDefinitionAndBoundSpan = (fileName, position) => {
+      if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
+      if (isVue(fileName)) {
+        const routed = editorCarrierPosition(fileName, position);
+        if (routed === null) return undefined;
+        const result = routed.runtime.languageService.getDefinitionAndBoundSpan(
+          routed.companion,
+          routed.position,
+        );
+        if (result === undefined) return undefined;
+        const textSpan = editorSourceSpan(routed, fileName, result.textSpan);
+        return textSpan === null ? undefined : { ...result, textSpan };
+      }
       const context = getProgramSourceContext(fileName);
       if (context) {
         const aliased = getAliasedNavigationResult(
@@ -1129,6 +1870,16 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
     const _getDefinitionAtPosition = languageService.getDefinitionAtPosition.bind(languageService);
     languageService.getDefinitionAtPosition = (fileName, position) => {
+      if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
+      if (isVue(fileName)) {
+        const routed = editorCarrierPosition(fileName, position);
+        return routed === null
+          ? undefined
+          : routed.runtime.languageService.getDefinitionAtPosition(
+              routed.companion,
+              routed.position,
+            );
+      }
       const context = getProgramSourceContext(fileName);
       if (context) {
         const aliased = getAliasedNavigationResult(
@@ -1164,6 +1915,16 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     const _getTypeDefinitionAtPosition =
       languageService.getTypeDefinitionAtPosition.bind(languageService);
     languageService.getTypeDefinitionAtPosition = (fileName, position) => {
+      if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
+      if (isVue(fileName)) {
+        const routed = editorCarrierPosition(fileName, position);
+        return routed === null
+          ? undefined
+          : routed.runtime.languageService.getTypeDefinitionAtPosition(
+              routed.companion,
+              routed.position,
+            );
+      }
       const context = getProgramSourceContext(fileName);
       if (context) {
         const aliased = getAliasedNavigationResult(
@@ -1188,7 +1949,8 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
     const _getQuickInfoAtPosition = languageService.getQuickInfoAtPosition.bind(languageService);
     languageService.getQuickInfoAtPosition = (fileName, position) => {
-      if (editorOwnsMembership && isVue(fileName)) {
+      if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
+      if (isVue(fileName)) {
         const routed = editorCarrierPosition(fileName, position);
         if (routed === null) return undefined;
         const quickInfo = routed.runtime.languageService.getQuickInfoAtPosition(
@@ -1203,7 +1965,10 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
           routed.runtime.readCompanion,
           routed.runtime.readSource,
         );
-        if (mapped === null || normalizePath(mapped.fileName) !== normalizePath(fileName)) {
+        if (
+          mapped === null ||
+          !sameStorePath(routed.runtime.getStore(), mapped.fileName, fileName)
+        ) {
           return undefined;
         }
         return { ...quickInfo, textSpan: mapped.textSpan };
@@ -1258,6 +2023,31 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       preferences,
       data,
     ) => {
+      if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
+      if (isVue(fileName)) {
+        const routed = editorCarrierPosition(fileName, position);
+        if (routed === null) return undefined;
+        const result = routed.runtime.languageService.getCompletionEntryDetails(
+          routed.companion,
+          routed.position,
+          entryName,
+          formatOptions,
+          source,
+          preferences,
+          data,
+        );
+        if (result?.codeActions && responseRemap) {
+          for (const action of result.codeActions) {
+            action.changes = remapEditorCompletionChanges(
+              routed.runtime,
+              fileName,
+              position,
+              action.changes,
+            );
+          }
+        }
+        return result;
+      }
       const result = _getCompletionEntryDetails(
         fileName,
         position,
@@ -1290,7 +2080,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
           // remap + inserted-import specifier rewrite) are a RESPONSE remap: gated
           // OFF on the verter_lsp-internal backend, where the Rust completion-resolve
           // / merge layer owns them. Raw companion edits pass through there.
-          if (responseRemap) {
+          if (responseRemap && !(editorOwnsMembership && isCarrierCompanionPath(store, fileName))) {
             action.changes = remapAllFileTextChanges(remapContext, action.changes);
           }
         }
@@ -1306,6 +2096,58 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
     const _getCompletionsAtPosition =
       languageService.getCompletionsAtPosition.bind(languageService);
+    const isMemberCompletionEntry = (entry: tsModule.CompletionEntry): boolean => {
+      switch (entry.kind) {
+        case ts.ScriptElementKind.memberVariableElement:
+        case ts.ScriptElementKind.memberFunctionElement:
+        case ts.ScriptElementKind.memberGetAccessorElement:
+        case ts.ScriptElementKind.memberSetAccessorElement:
+        case ts.ScriptElementKind.enumMemberElement:
+          return true;
+        default:
+          return false;
+      }
+    };
+    const isLocalTemplateScopeEntry = (entry: tsModule.CompletionEntry): boolean => {
+      if (
+        entry.source !== undefined ||
+        entry.kindModifiers?.split(",").includes(ts.ScriptElementKindModifier.ambientModifier) ===
+          true ||
+        entry.name.startsWith("___VERTER___") ||
+        entry.name.startsWith("$V_") ||
+        [
+          "__props",
+          "__emit",
+          "__slots",
+          "__expose",
+          "__returned",
+          "arguments",
+          "globalThis",
+          "undefined",
+        ].includes(entry.name)
+      ) {
+        return false;
+      }
+      switch (entry.kind) {
+        case ts.ScriptElementKind.moduleElement:
+        case ts.ScriptElementKind.classElement:
+        case ts.ScriptElementKind.localClassElement:
+        case ts.ScriptElementKind.enumElement:
+        case ts.ScriptElementKind.variableElement:
+        case ts.ScriptElementKind.localVariableElement:
+        case ts.ScriptElementKind.variableUsingElement:
+        case ts.ScriptElementKind.variableAwaitUsingElement:
+        case ts.ScriptElementKind.functionElement:
+        case ts.ScriptElementKind.localFunctionElement:
+        case ts.ScriptElementKind.parameterElement:
+        case ts.ScriptElementKind.alias:
+        case ts.ScriptElementKind.constElement:
+        case ts.ScriptElementKind.letElement:
+          return true;
+        default:
+          return false;
+      }
+    };
     languageService.getCompletionsAtPosition = (
       fileName,
       position,
@@ -1313,16 +2155,67 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       formattingSettings,
     ) => {
       let result: tsModule.CompletionInfo | undefined;
-      if (editorOwnsMembership && isVue(fileName)) {
+      if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
+      if (isVue(fileName)) {
         const routed = editorCarrierPosition(fileName, position);
         if (routed === null) return undefined;
-        const companionResult = routed.runtime.languageService.getCompletionsAtPosition(
+        const scriptOwned = isInsideSfcScript(routed.runtime.readSource(fileName), position);
+        let companionResult = routed.runtime.languageService.getCompletionsAtPosition(
           routed.companion,
           routed.position,
           options,
           formattingSettings,
         );
         if (companionResult === undefined) return undefined;
+        // Script blocks are wholly TypeScript-owned: locals, globals, module
+        // exports, and actionable auto-imports must behave like a regular
+        // `.ts`/`.js` file. In template expressions, only a true member list has
+        // enough expression context to be safe on the direct editor route;
+        // Verter owns bare render-proxy scope, attributes, and recovery there.
+        if (
+          !scriptOwned &&
+          (!companionResult.isMemberCompletion ||
+            companionResult.entries.some((entry) => !isMemberCompletionEntry(entry)))
+        ) {
+          const prefix =
+            identifierPrefixAt(routed.runtime.readSource(fileName), position) ??
+            (providerOnlyCompletions ? "" : null);
+          if (prefix === null) return undefined;
+          const lexicalEntries = companionResult.entries.filter(
+            (entry) => entry.name.startsWith(prefix) && isLocalTemplateScopeEntry(entry),
+          );
+          if (lexicalEntries.length === 0) return undefined;
+          companionResult = {
+            ...companionResult,
+            entries: lexicalEntries,
+            isGlobalCompletion: false,
+            isMemberCompletion: false,
+          };
+        }
+        if (
+          !scriptOwned &&
+          isFrameworkAttributeNamePosition(routed.runtime.readSource(fileName), position)
+        ) {
+          companionResult = {
+            ...companionResult,
+            entries: companionResult.entries.map((entry) => {
+              const name = frameworkAttributeCompletionName(entry.name);
+              if (name === entry.name) return entry;
+              return {
+                ...entry,
+                name,
+                kindModifiers: (entry.kindModifiers ?? "")
+                  .split(",")
+                  .filter((modifier) => modifier !== "optional")
+                  .join(","),
+                insertText:
+                  entry.insertText === undefined || entry.insertText === entry.name
+                    ? name
+                    : frameworkAttributeCompletionName(entry.insertText),
+              };
+            }),
+          };
+        }
         const mapSpan = (span: tsModule.TextSpan): tsModule.TextSpan | null => {
           const mapped = remapCarrierSpan(
             routed.runtime.getStore(),
@@ -1331,12 +2224,36 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
             routed.runtime.readCompanion,
             routed.runtime.readSource,
           );
-          return mapped !== null && normalizePath(mapped.fileName) === normalizePath(fileName)
+          return mapped !== null &&
+            sameStorePath(routed.runtime.getStore(), mapped.fileName, fileName)
             ? mapped.textSpan
             : null;
         };
+        const mapCompletionReplacementSpan = (
+          span: tsModule.TextSpan,
+        ): tsModule.TextSpan | null => {
+          const mapped = mapSpan(span);
+          if (mapped !== null) return mapped;
+
+          // JSX projections commonly map the authored identifier but leave the
+          // immediately-following generated delimiter synthetic. TypeScript's
+          // optional replacement span ends at that delimiter, so the generic
+          // two-endpoint mapper correctly refuses it. A completion request has
+          // an additional safe witness: the visible identifier containing the
+          // caret. Recover only when the generated replacement contains the
+          // routed caret and its mapped start is exactly that authored token's
+          // start. This never guesses across a source boundary or generated-only
+          // region, and keeps the generic span mapper strict for every other
+          // semantic feature.
+          const spanEnd = span.start + span.length;
+          if (routed.position < span.start || routed.position > spanEnd) return null;
+          const sourceIdentifier = identifierSpanAt(routed.runtime.readSource(fileName), position);
+          if (sourceIdentifier === null) return null;
+          const mappedStart = mapSpan({ start: span.start, length: 0 });
+          return mappedStart?.start === sourceIdentifier.start ? sourceIdentifier : null;
+        };
         const optionalReplacementSpan = companionResult.optionalReplacementSpan
-          ? mapSpan(companionResult.optionalReplacementSpan)
+          ? mapCompletionReplacementSpan(companionResult.optionalReplacementSpan)
           : undefined;
         if (companionResult.optionalReplacementSpan && optionalReplacementSpan === null) {
           return undefined;
@@ -1348,7 +2265,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
             entries.push(entry);
             continue;
           }
-          const replacementSpan = mapSpan(entry.replacementSpan);
+          const replacementSpan = mapCompletionReplacementSpan(entry.replacementSpan);
           if (replacementSpan !== null) entries.push({ ...entry, replacementSpan });
         }
         result = {
@@ -1388,8 +2305,39 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     const _getReferencesAtPosition = languageService.getReferencesAtPosition?.bind(languageService);
     if (_getReferencesAtPosition) {
       languageService.getReferencesAtPosition = (fileName, position) => {
-        const result = _getReferencesAtPosition(fileName, position);
-        if (!result || !responseRemap) {
+        if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
+        if (isVue(fileName)) {
+          const routed = editorCarrierPosition(fileName, position);
+          if (routed === null) return undefined;
+          const queryReferences = routed.runtime.sourceFeatures.getReferencesAtPosition;
+          if (queryReferences === undefined) return undefined;
+          const pending = [routed.position];
+          const queried = new Set<number>();
+          const rawReferences: tsModule.ReferenceEntry[] = [];
+          while (pending.length > 0) {
+            const linkedPosition = pending.shift()!;
+            if (queried.has(linkedPosition)) continue;
+            queried.add(linkedPosition);
+            const batch = queryReferences(routed.companion, linkedPosition) ?? [];
+            rawReferences.push(...batch);
+            for (const linked of linkedEditorCarrierPositionsFromSpans(routed, batch)) {
+              if (!queried.has(linked)) pending.push(linked);
+            }
+          }
+          const deduped = dedupeDocumentSpans(rawReferences);
+          const mapped = routed.runtime.responseRemapEnabled()
+            ? remapDocumentSpans(routed.runtime.remapContext, deduped)
+            : deduped;
+          return dedupeDocumentSpans(protocolSafeMappedSpans(routed.runtime, mapped));
+        }
+        const companionOwner = editorOwnsSourceFeatures
+          ? editorOwnerForCompanion(fileName)
+          : undefined;
+        const result = companionOwner?.sourceFeatures.getReferencesAtPosition
+          ? companionOwner.sourceFeatures.getReferencesAtPosition(fileName, position)
+          : _getReferencesAtPosition(fileName, position);
+        const shouldRemap = companionOwner?.responseRemapEnabled() ?? responseRemap;
+        if (!result || !shouldRemap) {
           // RAW passthrough on the verter_lsp-internal backend (Rust maps).
           return result;
         }
@@ -1397,15 +2345,72 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         // mapped back to source (path + span); an unmappable companion
         // reference (a generated-only region) is DROPPED. References in the
         // user's real `.ts` pass through unchanged.
-        return remapDocumentSpans(remapContext, result);
+        const responseRuntime = companionOwner ?? editorRuntime;
+        return dedupeDocumentSpans(
+          protocolSafeMappedSpans(
+            responseRuntime,
+            remapDocumentSpans(responseRuntime.remapContext, result),
+          ),
+        );
       };
     }
 
     const _findReferences = languageService.findReferences?.bind(languageService);
     if (_findReferences) {
       languageService.findReferences = (fileName, position) => {
-        const result = _findReferences(fileName, position);
-        if (!result || !responseRemap) {
+        if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
+        if (isVue(fileName)) {
+          const routed = editorCarrierPosition(fileName, position);
+          if (routed === null) return undefined;
+          const queryReferences = routed.runtime.sourceFeatures.findReferences;
+          if (queryReferences === undefined) return undefined;
+          const pending = [routed.position];
+          const queried = new Set<number>();
+          const rawMerged = new Map<string, tsModule.ReferencedSymbol>();
+          while (pending.length > 0) {
+            const linkedPosition = pending.shift()!;
+            if (queried.has(linkedPosition)) continue;
+            queried.add(linkedPosition);
+            const batch = queryReferences(routed.companion, linkedPosition) ?? [];
+            const spans = batch.flatMap((symbol) => [symbol.definition, ...symbol.references]);
+            for (const linked of linkedEditorCarrierPositionsFromSpans(routed, spans)) {
+              if (!queried.has(linked)) pending.push(linked);
+            }
+            for (const symbol of batch) {
+              const key = documentSpanKey(symbol.definition);
+              const existing = rawMerged.get(key);
+              if (existing === undefined) {
+                rawMerged.set(key, {
+                  ...symbol,
+                  references: dedupeDocumentSpans(symbol.references),
+                });
+              } else {
+                existing.references = dedupeDocumentSpans([
+                  ...existing.references,
+                  ...symbol.references,
+                ]);
+              }
+            }
+          }
+          if (!routed.runtime.responseRemapEnabled()) return [...rawMerged.values()];
+          const mapped: tsModule.ReferencedSymbol[] = [];
+          for (const symbol of rawMerged.values()) {
+            const remapped = remapReferencedSymbol(routed.runtime.remapContext, symbol);
+            if (remapped !== undefined) mapped.push(remapped);
+          }
+          const merged = mergeReferencedSymbolsByDefinition(
+            protocolSafeReferencedSymbols(routed.runtime, mapped),
+          );
+          return merged;
+        }
+        const companionOwner = editorOwnsSourceFeatures
+          ? editorOwnerForCompanion(fileName)
+          : undefined;
+        const result = companionOwner?.sourceFeatures.findReferences
+          ? companionOwner.sourceFeatures.findReferences(fileName, position)
+          : _findReferences(fileName, position);
+        const shouldRemap = companionOwner?.responseRemapEnabled() ?? responseRemap;
+        if (!result || !shouldRemap) {
           // RAW passthrough on the verter_lsp-internal backend (Rust maps).
           return result;
         }
@@ -1413,13 +2418,16 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         // entry. A symbol whose definition is an unmappable companion is
         // dropped entirely (fail closed).
         const out: tsModule.ReferencedSymbol[] = [];
+        const responseContext = companionOwner?.remapContext ?? remapContext;
         for (const symbol of result) {
-          const mapped = remapReferencedSymbol(remapContext, symbol);
+          const mapped = remapReferencedSymbol(responseContext, symbol);
           if (mapped !== undefined) {
             out.push(mapped);
           }
         }
-        return out;
+        return mergeReferencedSymbolsByDefinition(
+          protocolSafeReferencedSymbols(companionOwner ?? editorRuntime, out),
+        );
       };
     }
 
@@ -1427,6 +2435,16 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       languageService.getImplementationAtPosition?.bind(languageService);
     if (_getImplementationAtPosition) {
       languageService.getImplementationAtPosition = (fileName, position) => {
+        if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
+        if (isVue(fileName)) {
+          const routed = editorCarrierPosition(fileName, position);
+          return routed === null
+            ? undefined
+            : routed.runtime.languageService.getImplementationAtPosition(
+                routed.companion,
+                routed.position,
+              );
+        }
         const result = _getImplementationAtPosition(fileName, position);
         if (!result || !responseRemap) {
           // RAW passthrough on the verter_lsp-internal backend (Rust maps).
@@ -1436,11 +2454,52 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         // carrier companion maps back to source; an unmappable companion
         // location is dropped (fail closed). `ImplementationLocation` also
         // carries `displayParts`/`kind`, preserved by the in-place remap.
-        return remapDocumentSpans(remapContext, result);
+        return protocolSafeMappedSpans(editorRuntime, remapDocumentSpans(remapContext, result));
       };
     }
 
     // ── rename: companion locations → source (drop unmappable) ─────────────
+
+    const _getRenameInfo = languageService.getRenameInfo?.bind(languageService);
+    if (_getRenameInfo) {
+      languageService.getRenameInfo = (fileName, position, preferences) => {
+        if (editorYieldsCarrierSourceFeatures(fileName)) {
+          return {
+            canRename: false,
+            localizedErrorMessage: "The selected type provider owns this framework source.",
+          };
+        }
+        if (!isVue(fileName)) {
+          return _getRenameInfo(fileName, position, preferences);
+        }
+        const routed = editorCarrierPosition(fileName, position);
+        if (routed === null) {
+          return { canRename: false, localizedErrorMessage: "The source position is not ready." };
+        }
+        const result = routed.runtime.languageService.getRenameInfo(
+          routed.companion,
+          routed.position,
+          preferences,
+        );
+        if (!result.canRename) return result;
+        const triggerSpan = editorSourceSpan(routed, fileName, result.triggerSpan);
+        if (triggerSpan === null) {
+          return {
+            canRename: false,
+            localizedErrorMessage: "The source position cannot be renamed.",
+          };
+        }
+        const fileToRename = result.fileToRename
+          ? (routed.runtime.getStore().ownedSourceFor(result.fileToRename)?.source_uri ??
+            result.fileToRename)
+          : undefined;
+        return {
+          ...result,
+          triggerSpan,
+          ...(fileToRename === undefined ? {} : { fileToRename }),
+        };
+      };
+    }
 
     const _findRenameLocations = languageService.findRenameLocations?.bind(languageService) as
       | tsModule.LanguageService["findRenameLocations"]
@@ -1453,14 +2512,58 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         findInComments: boolean,
         preferences?: tsModule.UserPreferences | boolean,
       ) => {
-        const result = _findRenameLocations(
-          fileName,
-          position,
-          findInStrings,
-          findInComments,
-          preferences as tsModule.UserPreferences,
-        );
-        if (!result || !responseRemap) {
+        if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
+        if (isVue(fileName)) {
+          const routed = editorCarrierPosition(fileName, position);
+          if (routed === null) return undefined;
+          const queryRenameLocations = routed.runtime.sourceFeatures.findRenameLocations;
+          if (queryRenameLocations === undefined) return undefined;
+          const pending = [routed.position];
+          const queried = new Set<number>();
+          const rawLocations: tsModule.RenameLocation[] = [];
+          while (pending.length > 0) {
+            const linkedPosition = pending.shift()!;
+            if (queried.has(linkedPosition)) continue;
+            queried.add(linkedPosition);
+            const batch =
+              queryRenameLocations(
+                routed.companion,
+                linkedPosition,
+                findInStrings,
+                findInComments,
+                preferences as tsModule.UserPreferences,
+              ) ?? [];
+            rawLocations.push(...batch);
+            for (const linked of linkedEditorCarrierPositionsFromSpans(routed, batch)) {
+              if (!queried.has(linked)) pending.push(linked);
+            }
+          }
+          const deduped = dedupeRenameLocations(rawLocations);
+          const mapped = routed.runtime.responseRemapEnabled()
+            ? remapDocumentSpans(routed.runtime.remapContext, deduped)
+            : deduped;
+          return dedupeRenameLocations(protocolSafeMappedSpans(routed.runtime, mapped));
+        }
+        const companionOwner = editorOwnsSourceFeatures
+          ? editorOwnerForCompanion(fileName)
+          : undefined;
+        const result = companionOwner?.sourceFeatures.findRenameLocations
+          ? companionOwner.sourceFeatures.findRenameLocations(
+              fileName,
+              position,
+              findInStrings,
+              findInComments,
+              preferences as tsModule.UserPreferences,
+            )
+          : _findRenameLocations(
+              fileName,
+              position,
+              findInStrings,
+              findInComments,
+              preferences as tsModule.UserPreferences,
+            );
+        const shouldRemap = companionOwner?.responseRemapEnabled() ?? responseRemap;
+        if (!result || !shouldRemap) {
           // RAW passthrough on the verter_lsp-internal backend (Rust maps).
           return result;
         }
@@ -1469,7 +2572,13 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         // (an edit that would land in a generated-only region) is DROPPED so a
         // rename never produces a mis-located edit. Real `.ts` locations pass
         // through.
-        return remapDocumentSpans(remapContext, result);
+        const responseRuntime = companionOwner ?? editorRuntime;
+        return dedupeRenameLocations(
+          protocolSafeMappedSpans(
+            responseRuntime,
+            remapDocumentSpans(responseRuntime.remapContext, result),
+          ),
+        );
       };
     }
 
@@ -1485,7 +2594,8 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         kind,
         includeInteractiveActions,
       ) => {
-        if (editorOwnsMembership && isVue(fileName)) {
+        if (editorYieldsCarrierSourceFeatures(fileName)) return [];
+        if (isVue(fileName)) {
           const routed = editorCarrierSelection(fileName, positionOrRange);
           if (routed === null) return [];
           return routed.runtime.languageService.getApplicableRefactors(
@@ -1518,6 +2628,19 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         formatOptions,
         preferences,
       ) => {
+        if (editorYieldsCarrierSourceFeatures(fileName)) return [];
+        if (isVue(fileName)) {
+          const routed = editorCarrierSelection(fileName, { pos: start, end });
+          if (routed === null || typeof routed.selection === "number") return [];
+          return routed.runtime.languageService.getCodeFixesAtPosition(
+            routed.companion,
+            routed.selection.pos,
+            routed.selection.end,
+            errorCodes,
+            formatOptions,
+            preferences,
+          );
+        }
         const result = _getCodeFixesAtPosition(
           fileName,
           start,
@@ -1568,6 +2691,20 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         preferences,
         interactiveRefactorArguments,
       ) => {
+        if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
+        if (isVue(fileName)) {
+          const routed = editorCarrierSelection(fileName, positionOrRange);
+          if (routed === null) return undefined;
+          return routed.runtime.languageService.getEditsForRefactor(
+            routed.companion,
+            formatOptions,
+            routed.selection,
+            refactorName,
+            actionName,
+            preferences,
+            interactiveRefactorArguments,
+          );
+        }
         const result = _getEditsForRefactor(
           fileName,
           formatOptions,
@@ -1626,7 +2763,11 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     if (editorOwnsMembership) {
       const storeDir =
         processStoreDirByProject.get(projectKey) ?? resolveCarrierStoreDir(undefined);
-      const store = new DiskCarrierStoreReader(storeDir, projectKey);
+      const store = new DiskCarrierStoreReader(
+        storeDir,
+        projectKey,
+        ts.sys.useCaseSensitiveFileNames,
+      );
       const out = store.isAvailable() ? store.readyIdeCompanions() : [];
       project.projectService.logger.info(
         `[Verter] getExternalFiles(${projectKey}): editor owns sources; ${out.length} companion root(s)`,
@@ -1637,7 +2778,11 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     const storeDir = recorded ?? resolveCarrierStoreDir(undefined);
     // The reader is scoped to this project, so only its ready source identities
     // are admitted — never a sibling tsconfig's carriers.
-    const store = new DiskCarrierStoreReader(storeDir, projectKey);
+    const store = new DiskCarrierStoreReader(
+      storeDir,
+      projectKey,
+      ts.sys.useCaseSensitiveFileNames,
+    );
     if (!store.isAvailable()) {
       return [];
     }

@@ -91,6 +91,22 @@ fn test_from_json_empty_mappings() {
     assert!(mapper.tsx_to_carrier(ts(0, 0)).is_none());
 }
 
+#[test]
+fn source_lookup_prefers_the_earliest_generated_run_for_duplicate_origins() {
+    // An authored setup declaration is emitted once in the retained script and
+    // again as a later template-only ref-unwrapped alias. Both generated names
+    // deliberately map to the declaration token. Source requests must select
+    // the original script run; the later alias is joined only by
+    // references/rename logic that explicitly asks for linked projections.
+    let json = build_test_source_map("App.vue", "const count = 0", &[(0, 0, 0, 6), (1, 0, 0, 6)]);
+    let mapper = PositionMapper::from_json(&json).unwrap();
+
+    let mapped = mapper
+        .carrier_to_tsx(vue(0, 6))
+        .expect("the authored declaration has two exact generated projections");
+    assert_eq!(mapped.pos, ts(0, 0));
+}
+
 // ========================================================================
 // tsx_to_carrier (generated -> source)
 // ========================================================================

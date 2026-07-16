@@ -38,7 +38,7 @@ use std::sync::Arc;
 
 use verter_session::external_ts::{CarrierOwnershipResolution, ScriptKind, SnapshotRole};
 use verter_session::{IdeResponse, VerterHost};
-use verter_workspace::{FilesystemWorkspace, WorkspaceRead};
+use verter_workspace::FilesystemWorkspace;
 
 use crate::documents::DocumentRegistry;
 use crate::external_ts::{
@@ -53,17 +53,28 @@ use crate::provider_sync::{
 };
 use crate::server::block_in_place_guarded as block_in_place_if_available;
 
-/// The engine-specific membership context for a carrier sync.
-///
-/// `Some` ⇒ the tsserver engine: the carrier reaches tsserver as a configured-project
-/// member through the on-disk publish store + plugin, so the gateway runs the
-/// membership reconciliation through the [`CarrierPublishCoordinator`]. `None` ⇒ tsgo
-/// (no store): the gateway returns a [`CarrierSyncDecision::DirectOpen`] and the site
-/// opens the companion buffers directly.
+/// How the semantic provider receives carrier companions after durable editor
+/// membership has been reconciled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CarrierProviderDelivery {
+    /// The managed provider consumes explicit open/sync calls. This is the
+    /// managed/shared tsgo route; the editor's TypeScript service independently
+    /// consumes the durable store.
+    DirectOpen,
+    /// The semantic provider is itself backed by the durable store/plugin, so
+    /// no companion buffer is opened by the LSP.
+    StoreBacked,
+}
+
+/// The editor-membership context for a carrier sync, intentionally independent
+/// from how the managed semantic provider receives the same companions.
 pub(crate) struct CarrierMembershipCtx<'a> {
     /// The coordinator that drives the membership reconcile (the store-publish half).
     /// Ownership is resolved from the request's `vfs` (shared with tsgo), NOT here.
     pub coordinator: &'a CarrierPublishCoordinator,
+    /// Provider delivery remains direct for tsgo even though the editor store is
+    /// published in the same ownership transaction.
+    pub provider_delivery: CarrierProviderDelivery,
 }
 
 /// The inputs to one carrier-sync gateway pass.
@@ -287,14 +298,18 @@ impl OwnedCommitAuthorization {
     /// of the ordered `apply_owned` transaction, where BOTH companions are published to
     /// the store atomically, so its attestation is complete and `opened_kinds` is not
     /// re-applied.
-    pub(crate) fn confirm(
+    /// Confirm with sealed evidence of the exact IDE bytes delivered by a
+    /// successful direct provider open. Store-backed tsserver receipts were
+    /// already minted from their published bytes and ignore this value.
+    pub(crate) fn confirm_with_ide_surface(
         self,
         opened_kinds: &[crate::provider_sync::ProviderPathKind],
+        ide_surface: Option<crate::type_provider::project_sync::SyncedTsxSurface>,
     ) -> ProviderReadyReceipt {
         match self {
             OwnedCommitAuthorization::Ready(receipt) => receipt,
             OwnedCommitAuthorization::PendingDirectOpen(pending) => {
-                pending.confirm_opened(opened_kinds)
+                pending.confirm_opened_with_ide_surface(opened_kinds, ide_surface)
             }
         }
     }
@@ -521,7 +536,7 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
         // that a newer edit supersedes carries an OLDER revision than the newer pass and
         // is refused by the admission gate's compare-and-swap. (tsgo companion versions are
         // recorded post-open, so they are not a stable open-time revision.)
-        let source_revision = carrier_source_revision(req.vfs, req.canonical_id);
+        let source_revision = carrier_source_revision(req.host, req.canonical_id);
         let pending = PendingProviderReady::authorize(
             &binding,
             source_revision,
@@ -535,11 +550,12 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
         };
     };
 
-    // tsserver: PUBLISH the companions into the store the plugin reads (the carrier
-    // becomes a configured-project member), NOT a direct buffer open.
+    // Publish the companions into the editor-owned store independently of how
+    // the semantic provider consumes them. Managed tsgo continues with explicit
+    // buffer opens after this durable transaction; tsserver consumes the store.
     let transition =
         prepare_sync_transition(req.provider_sync_states, req.canonical_id, next_state);
-    let mut committed_state = transition.next;
+    let mut committed_state = transition.next.clone();
     let api = block_in_place_if_available(|| req.host.get_public_api(req.canonical_id));
 
     // A tsserver membership publish must advertise the COMPLETE companion set: the
@@ -605,27 +621,46 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
         .coordinator
         .reconcile_membership_with_resolution(
             req.canonical_id,
-            CarrierOwnershipResolution::Bound(binding),
-            companions,
+            CarrierOwnershipResolution::Bound(binding.clone()),
+            companions.clone(),
             req.reason,
         )
         .await
     {
         Ok(ReconcileOutcome::Advertised { receipt, .. }) => {
-            // The plugin serves both companions as configured-project members, so no
-            // direct provider open is pending: mark both kinds store-resident.
-            if committed_state.api_path.is_some() {
-                committed_state.set_background_loaded(ProviderPathKind::Api, true);
-            }
-            if committed_state.ide_path.is_some() {
-                committed_state.set_background_loaded(ProviderPathKind::Ide, true);
-            }
-            // Stamp the transaction's captured owner-loss barrier value onto the
-            // reconciler-minted receipt (minted with a placeholder epoch), so the admission
-            // gate validates the coherent captured epoch.
-            CarrierSyncDecision::Published {
-                committed_state,
-                receipt: receipt.stamped_with_intent_epoch(intent_epoch),
+            match membership.provider_delivery {
+                CarrierProviderDelivery::StoreBacked => {
+                    // The semantic provider consumes both store-resident
+                    // companions, so no direct provider I/O is pending.
+                    if committed_state.api_path.is_some() {
+                        committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                    }
+                    if committed_state.ide_path.is_some() {
+                        committed_state.set_background_loaded(ProviderPathKind::Ide, true);
+                    }
+                    CarrierSyncDecision::Published {
+                        committed_state,
+                        receipt: receipt.stamped_with_intent_epoch(intent_epoch),
+                    }
+                }
+                CarrierProviderDelivery::DirectOpen => {
+                    // Store publication is complete, but the managed tsgo actor
+                    // still requires direct companion buffers. Its independent
+                    // receipt is minted only after those opens succeed and
+                    // attests the exact provider-specialized IDE bytes.
+                    let source_revision = carrier_source_revision(req.host, req.canonical_id);
+                    let pending = PendingProviderReady::authorize(
+                        &binding,
+                        source_revision,
+                        intent_epoch,
+                        "tsgo",
+                        &companions,
+                    );
+                    CarrierSyncDecision::DirectOpen {
+                        transition,
+                        pending,
+                    }
+                }
             }
         }
         // Not advertised (fail-closed reconcile): the carrier is intentionally not a
@@ -649,9 +684,8 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
 /// transaction carries an OLDER revision than a newer pass and is refused. `0` when no
 /// published workspace is available (the transient bootstrap, where ownership resolves
 /// `NotReady` and no owned commit is minted).
-fn carrier_source_revision(vfs: Option<&FilesystemWorkspace>, canonical_id: &str) -> u64 {
-    vfs.map(|vfs| vfs.last_content_transition_generation(canonical_id))
-        .unwrap_or(0)
+fn carrier_source_revision(host: &VerterHost, canonical_id: &str) -> u64 {
+    host.last_content_transition_generation(canonical_id)
 }
 
 /// Build the carrier companion set (public-API + IDE) from the owner-resolved

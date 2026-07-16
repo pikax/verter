@@ -31,6 +31,7 @@ real_provider_test!(
         let edits = session.rename_edits(&uri, pos, "doubledValue").await;
         assert!(edits.is_some(), "rename doubled should return edits");
         let ws_edit = edits.unwrap();
+        assert_no_duplicate_edits(&ws_edit);
         let total = count_edits(&ws_edit);
         assert!(total >= 2, "rename doubled should have >= 2 edits, got: {total}");
 
@@ -39,6 +40,7 @@ real_provider_test!(
         let edits = session.rename_edits(&uri, pos, "counter").await;
         assert!(edits.is_some(), "rename count should return edits");
         let ws_edit = edits.unwrap();
+        assert_no_duplicate_edits(&ws_edit);
         let total = count_edits(&ws_edit);
         assert!(total >= 5, "rename count should have >= 5 edits, got: {total}");
 
@@ -47,8 +49,53 @@ real_provider_test!(
         let edits = session.rename_edits(&uri, pos, "inc").await;
         assert!(edits.is_some(), "rename increment should return edits");
         let ws_edit = edits.unwrap();
+        assert_no_duplicate_edits(&ws_edit);
         let total = count_edits(&ws_edit);
         assert!(total >= 3, "rename increment should have >= 3 edits, got: {total}");
+
+        // Exact editor-contract shape: local bindings repeated in both script and
+        // template produce one mutation per authored occurrence, never one static
+        // edit plus a duplicate provider edit for the same range.
+        let contract = session
+            .open_virtual(
+                "src/RenameContract.vue",
+                r#"<script setup lang="ts">
+import DirectChild from "./MyComp.vue";
+
+interface ContractValue {
+  label: string;
+  count: number;
+}
+
+const typedValue: ContractValue = { label: "typed", count: 1 };
+function renderTyped(): string {
+  return `${typedValue.label}:${typedValue.count}`;
+}
+</script>
+<template>
+  <main>
+    <button @click="renderTyped">{{ typedValue.label }}</button>
+    <DirectChild :foo="typedValue.label" />
+  </main>
+</template>
+"#,
+            )
+            .await;
+        let script_pos = session.find_position(&contract, "const typedValue", 6);
+        let script_edit = session
+            .rename_edits(&contract, script_pos, "typedDatum")
+            .await
+            .expect("script-origin contract rename returns edits");
+        assert_no_duplicate_edits(&script_edit);
+        assert_eq!(count_edits(&script_edit), 5, "{script_edit:?}");
+
+        let markup_pos = session.find_position(&contract, "{{ typedValue.label }}", 3);
+        let markup_edit = session
+            .rename_edits(&contract, markup_pos, "typedDatum")
+            .await
+            .expect("markup-origin contract rename returns edits");
+        assert_no_duplicate_edits(&markup_edit);
+        assert_eq!(count_edits(&markup_edit), 5, "{markup_edit:?}");
 
         // R6: prepare rename on v-if directive → rejected
         let pos = session.find_position(&uri, r#"v-if="selectedUser""#, 2);
@@ -820,6 +867,35 @@ fn count_edits(ws_edit: &tower_lsp_server::ls_types::WorkspaceEdit) -> usize {
         }
     }
     total
+}
+
+/// A rename transaction must never ask an editor to apply the same mutation
+/// twice. Duplicate edits can corrupt text when a client applies them
+/// sequentially even if the ranges and replacement spelling are identical.
+fn assert_no_duplicate_edits(ws_edit: &tower_lsp_server::ls_types::WorkspaceEdit) {
+    let mut seen = std::collections::HashSet::new();
+    if let Some(changes) = &ws_edit.changes {
+        for (uri, edits) in changes {
+            for edit in edits {
+                assert!(
+                    seen.insert(format!("{uri:?}:{:?}:{:?}", edit.range, edit.new_text)),
+                    "rename returned a duplicate edit: {ws_edit:?}"
+                );
+            }
+        }
+    }
+    if let Some(tower_lsp_server::ls_types::DocumentChanges::Edits(doc_edits)) =
+        &ws_edit.document_changes
+    {
+        for edit in doc_edits {
+            for operation in &edit.edits {
+                assert!(
+                    seen.insert(format!("{:?}:{operation:?}", edit.text_document.uri)),
+                    "rename returned a duplicate edit: {ws_edit:?}"
+                );
+            }
+        }
+    }
 }
 
 /// Count number of distinct files in a workspace edit.

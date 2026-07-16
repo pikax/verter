@@ -99,8 +99,12 @@ impl VerterLanguageServer {
     /// records through `record_and_version_carrier_companions` inside the
     /// carrier-sync gateway).
     ///
-    /// Records a fresh generation pinning the EXACT `ide_code` synced under
-    /// `ide_path`, together with the source map parsed from the SAME content.
+    /// Records a fresh generation pinning the EXACT provider bytes synced under
+    /// `ide_path`, together with the source map produced for the canonical IDE
+    /// artifact. Managed tsgo may replace the compiler-owned, wholly unmapped
+    /// first prelude line with its owner-bound Svelte JSX adapter; that preserves
+    /// every mapped coordinate while making the provider bytes intentionally
+    /// differ from `ide_code` on that one line.
     /// When the caller already holds the synced content's source map it passes
     /// it in `source_map_json`; otherwise (`None`) the live IDE artifact's map
     /// is used ONLY when its code byte-matches `ide_code`, so a snapshot never
@@ -128,6 +132,11 @@ impl VerterLanguageServer {
             }
         };
         let map_json = source_map_json.or(owned_map.as_deref());
+        let provider_code = self
+            .project_sync
+            .as_ref()
+            .and_then(|sync| sync.synced_tsx_content(ide_path))
+            .unwrap_or_else(|| std::sync::Arc::from(ide_code));
         let _ = crate::provider_surface_store::record_carrier_companion_surface(
             store,
             Some(&self.documents),
@@ -135,7 +144,7 @@ impl VerterLanguageServer {
             canonical_id,
             ide_path,
             crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
-            ide_code,
+            provider_code.as_ref(),
             map_json,
         );
     }
@@ -231,31 +240,42 @@ impl VerterLanguageServer {
         // tsserver: the carrier reaches the provider as a store-backed configured-
         // project member, so the gateway runs the membership reconcile. tsgo (no
         // coordinator) ⇒ `None` ⇒ the gateway returns a direct-open transition.
-        let membership = match (
-            matches!(self.type_provider_kind, crate::TypeProviderKind::Tsserver),
-            self.carrier_publish_coordinator.as_ref(),
-        ) {
-            (true, Some(coordinator)) => {
-                Some(crate::external_ts::CarrierMembershipCtx { coordinator })
-            }
-            _ => None,
-        };
-        crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
-            host: self.documents.host(),
-            vfs: vfs.as_deref(),
-            ownership_ready: snapshot.ownership_ready,
-            resolver: &snapshot.resolver,
-            provider_sync_states: &self.provider_sync_states,
-            provider_surfaces: self.documents.provider_surfaces(),
-            documents: Some(&self.documents),
-            canonical_id,
-            is_jsx,
-            ide,
-            membership,
-            admission: &self.carrier_transaction_coordinator,
-            reason: crate::external_ts::ReconcileReason::SourceSynced,
-        })
-        .await
+        let membership = self
+            .carrier_publish_coordinator
+            .as_ref()
+            .map(|coordinator| crate::external_ts::CarrierMembershipCtx {
+                coordinator,
+                provider_delivery: if matches!(
+                    self.type_provider_kind,
+                    crate::TypeProviderKind::Tsgo
+                ) {
+                    crate::external_ts::CarrierProviderDelivery::DirectOpen
+                } else {
+                    crate::external_ts::CarrierProviderDelivery::StoreBacked
+                },
+            });
+        let publishes_editor_membership = membership.is_some();
+        let decision =
+            crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
+                host: self.documents.host(),
+                vfs: vfs.as_deref(),
+                ownership_ready: snapshot.ownership_ready,
+                resolver: &snapshot.resolver,
+                provider_sync_states: &self.provider_sync_states,
+                provider_surfaces: self.documents.provider_surfaces(),
+                documents: Some(&self.documents),
+                canonical_id,
+                is_jsx,
+                ide,
+                membership,
+                admission: &self.carrier_transaction_coordinator,
+                reason: crate::external_ts::ReconcileReason::SourceSynced,
+            })
+            .await;
+        if publishes_editor_membership {
+            self.notify_editor_carrier_store_changed().await;
+        }
+        decision
     }
 
     /// The carrier provider paths for `canonical_id` for the CLOSE-only path (delete /
@@ -478,7 +498,12 @@ impl VerterLanguageServer {
         );
         // At least one kind opened: NOW mint the receipt (post-open), attesting EXACTLY
         // the kinds that actually opened this pass, and commit through the admission gate.
-        let receipt = pending.confirm_opened(synced_kinds);
+        let ide_surface = committed_state.ide_path.as_deref().and_then(|path| {
+            self.project_sync
+                .as_ref()
+                .and_then(|sync| sync.synced_tsx_surface(path))
+        });
+        let receipt = pending.confirm_opened_with_ide_surface(synced_kinds, ide_surface);
         // Gate the stale-path close on ADMISSION: a `Superseded` commit (a newer
         // transaction reclaimed the source, or an owner-loss advanced the barrier) requeues
         // and closes NOTHING — the computed stale paths may be the newer transaction's LIVE

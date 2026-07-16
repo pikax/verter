@@ -41,6 +41,8 @@ import type { PatchClient, NotificationParams } from "@verter/language-shared";
 import {
   CARRIER_STORE_REFRESH_TOKEN_CONFIG_KEY,
   EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY,
+  EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY,
+  E2E_PROVIDER_ONLY_COMPLETIONS_CONFIG_KEY,
   patchClient,
   NotificationType,
   RequestType,
@@ -91,6 +93,7 @@ import {
 } from "./nativePreviewRelayController";
 import {
   attestEditorTsserverBootstrap,
+  editorTsserverOwnsCarrierSourceFeatures,
   VERTER_TYPESCRIPT_PLUGIN_ID,
   planEditorTsserverBootstrap,
   receiptIncludesConfiguredProject,
@@ -165,6 +168,8 @@ async function activateExtension(context: ExtensionContext) {
   writeTimingMarker("activation_start", Date.now());
 
   log.info("Verter extension activating");
+  const e2eProviderOnlyCompletions =
+    process.env.VERTER_E2E_TEST === "1" && process.env.VERTER_E2E_PROVIDER_ONLY_COMPLETIONS === "1";
 
   const startupProbeConfig = readStartupProbeConfig();
   const startupProbe = startupProbeConfig ? new StartupProbe(startupProbeConfig, log) : undefined;
@@ -210,6 +215,10 @@ async function activateExtension(context: ExtensionContext) {
   // synchronized, causing the editor tsserver plugin to reload that configured
   // project's external roots and snapshots exactly once.
   let carrierStoreRefreshToken = 0;
+  // Membership/import resolution remains editor-owned on every route. Source
+  // features become editor-owned only after an exact tsserver project attests;
+  // managed/shared tsgo must not be merged with a second carrier provider.
+  let editorOwnsCarrierSourceFeatures = false;
 
   const getStartedClient = () => {
     if (!server) {
@@ -230,6 +239,8 @@ async function activateExtension(context: ExtensionContext) {
   const getTypeScriptPluginConfig = (): {
     enable: true;
     editorOwnsCarrierMembership: true;
+    editorOwnsCarrierSourceFeatures: boolean;
+    e2eProviderOnlyCompletions: boolean;
     carrierStoreRefreshToken: number;
     exposeBindingsTesting?: boolean;
     carrierStoreDir?: string;
@@ -237,12 +248,16 @@ async function activateExtension(context: ExtensionContext) {
     const pluginConfig: {
       enable: true;
       editorOwnsCarrierMembership: true;
+      editorOwnsCarrierSourceFeatures: boolean;
+      e2eProviderOnlyCompletions: boolean;
       carrierStoreRefreshToken: number;
       exposeBindingsTesting?: boolean;
       carrierStoreDir?: string;
     } = {
       enable: true,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: editorOwnsCarrierSourceFeatures,
+      [E2E_PROVIDER_ONLY_COMPLETIONS_CONFIG_KEY]: e2eProviderOnlyCompletions,
       [CARRIER_STORE_REFRESH_TOKEN_CONFIG_KEY]: carrierStoreRefreshToken,
     };
     const experimentalConfig = workspace.getConfiguration("verter.experimental");
@@ -359,6 +374,12 @@ async function activateExtension(context: ExtensionContext) {
     serverPromise = activateVueLanguageServer(context, log, startupProbe, {
       onReady: ensureDeferredFeaturesRegistered,
       onCarrierStoreReady: applyCarrierStoreDir,
+      onEditorCarrierSourceFeatureOwnership: (ownsSourceFeatures) => {
+        if (editorOwnsCarrierSourceFeatures === ownsSourceFeatures) return;
+        editorOwnsCarrierSourceFeatures = ownsSourceFeatures;
+        tsPluginConfigured = false;
+        void ensureTypeScriptPluginConfigured(undefined, true);
+      },
       onTypeProviderSyncComplete: () => {
         carrierStoreRefreshToken += 1;
         void ensureTypeScriptPluginConfigured(undefined, true);
@@ -539,6 +560,8 @@ export async function activateVueLanguageServer(
      * own TS server via `configurePlugin`.
      */
     onCarrierStoreReady?: (carrierStoreDir: string) => void;
+    /** Select exactly one editor-facing TypeScript owner for carrier features. */
+    onEditorCarrierSourceFeatureOwnership?: (ownsSourceFeatures: boolean) => void;
     /** Refresh the editor plugin after a durable carrier-store publication pass. */
     onTypeProviderSyncComplete?: () => void;
   },
@@ -566,6 +589,9 @@ export async function activateVueLanguageServer(
       ? await establishEditorTsserverPlugin(effectiveTypeProvider, rootPath, log)
       : NO_EDITOR_TSSERVER;
   context.subscriptions.push({ dispose: () => editorTsserver.dispose() });
+  options?.onEditorCarrierSourceFeatureOwnership?.(
+    editorTsserverOwnsCarrierSourceFeatures(editorTsserver.lspArgs),
+  );
 
   // CSS intellisense service — created after client, referenced by middleware closures
   let cssService: CssService | undefined;

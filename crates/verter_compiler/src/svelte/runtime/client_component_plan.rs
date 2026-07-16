@@ -103,9 +103,11 @@ impl<'a> SupportedClientIr<'a> {
         &self,
         c: &ComponentIrNode,
     ) -> Result<ClientNode, UnsupportedSvelteRuntimeSurface> {
-        // The static component callee MUST resolve to an admitted `.svelte`-component import
-        // (a non-reactive `ComponentImport` binding). A capitalized tag naming no such
-        // import is an unsupported component SOURCE — a dynamically-assigned / re-exported /
+        // The static component callee MUST resolve to an admitted immutable import:
+        // `ComponentImport` for a direct default `.svelte` import, or `ImportedValue`
+        // for a value imported through a TS/JS barrel. Both are live, non-writable
+        // module bindings and therefore sound bare component callees. A capitalized tag
+        // naming no such import is an unsupported component SOURCE — a dynamically-assigned /
         // globally-injected component whose callee semantics this vertical does not model —
         // so it fails CLOSED here rather than emitting a call on an unbound global. The
         // `<svelte:self>` recursion (its own compile-name) and the dynamic
@@ -123,9 +125,10 @@ impl<'a> SupportedClientIr<'a> {
         self.project_component_call(callee, &c.attrs, &c.slots, c.scope, c.span)
     }
 
-    /// Whether a static component tag name RESOLVES to an admitted `.svelte`-component
-    /// import (a [`BindingRuntimeKind::ComponentImport`](super::expr::BindingRuntimeKind)
-    /// binding). The WHOLE name must be a BARE identifier: a DOTTED name (`Ns.Comp`) is a
+    /// Whether a static component tag name RESOLVES to an admitted immutable value import
+    /// ([`BindingRuntimeKind::ComponentImport`](super::expr::BindingRuntimeKind) or
+    /// [`BindingRuntimeKind::ImportedValue`](super::expr::BindingRuntimeKind)). The WHOLE
+    /// name must be a BARE identifier: a DOTTED name (`Ns.Comp`) is a
     /// namespace/member-component source — an advanced form this vertical does not model — so
     /// it fails CLOSED on the dot even when the head segment IS an admitted import. A default
     /// `.svelte` import is a component FUNCTION, not a namespace object, so `.Comp` is a
@@ -144,7 +147,10 @@ impl<'a> SupportedClientIr<'a> {
                 .analysis
                 .bindings
                 .resolve_kind(&self.ir.analysis.scopes, scope, name),
-            Some(super::expr::BindingRuntimeKind::ComponentImport)
+            Some(
+                super::expr::BindingRuntimeKind::ComponentImport
+                    | super::expr::BindingRuntimeKind::ImportedValue
+            )
         )
     }
 

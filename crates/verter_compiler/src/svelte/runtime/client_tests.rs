@@ -223,6 +223,37 @@ fn hello_input_emits_the_full_section_1_2_module() {
 }
 
 #[test]
+fn standard_structural_html_hosts_emit_without_a_runtime_refusal() {
+    let rows = [
+        ("main", "<main><div></div></main>"),
+        ("section", "<section></section>"),
+        ("header", "<header></header>"),
+        ("footer", "<footer></footer>"),
+        ("h3", "<h3>heading</h3>"),
+        (
+            "img",
+            r#"<img data-intrinsic="img-tag" alt="intrinsic-img" src="x.png" />"#,
+        ),
+        (
+            "form",
+            r#"<form data-intrinsic="form-tag" action="/submit"></form>"#,
+        ),
+    ];
+
+    for (tag, source) in rows {
+        let js = emit(source, "StructuralHost.svelte");
+        assert!(
+            js.contains(&format!("<{tag}")),
+            "the emitted template must retain the standard `{tag}` host:\n{js}"
+        );
+        assert!(
+            js.contains("export default function StructuralHost"),
+            "the standard `{tag}` host must produce a client component:\n{js}"
+        );
+    }
+}
+
+#[test]
 fn pure_single_interpolation_has_no_nullish_coalesce() {
     // A PURE single `{count}` interpolation emits `$.set_text(text, $.get(count))`
     // — NOT `$.set_text(text, \`${$.get(count) ?? ''}\`)`. (Verified against the
@@ -5851,6 +5882,30 @@ fn component_emits_a_direct_call() {
     assert!(
         !js.contains("$.get(Foo)"),
         "the component callee must be a bare name, not $.get:\n{js}"
+    );
+}
+
+#[test]
+fn component_named_import_from_a_barrel_emits_a_direct_call() {
+    // Svelte component values are routinely re-exported through plain TS/JS
+    // barrels. At runtime a named import is still an immutable live import
+    // binding and is therefore a sound static component callee; the shallow
+    // compiler must not require the immediate specifier to end in `.svelte`.
+    let js = emit_result(
+        "<script>import { Child } from './public'; let { label } = $props();</script>\n<Child label={label} />\n",
+    )
+    .expect("a barrel-imported component emits a module");
+    assert!(
+        js.contains("import { Child } from './public';"),
+        "missing the authored barrel import:\n{js}"
+    );
+    assert!(
+        js.contains("Child($$anchor, {get label()") && js.contains("return $$props.label;"),
+        "missing the direct barrel-imported component call:\n{js}"
+    );
+    assert!(
+        !js.contains("$.get(Child)"),
+        "an imported component callee is a bare live import read:\n{js}"
     );
 }
 

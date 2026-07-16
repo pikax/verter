@@ -290,7 +290,29 @@ export class CarrierMapper {
     if (mappedStart === null) {
       return null;
     }
-    const mappedEnd = start === end ? mappedStart : this.mapGeneratedOffsetToSource(end);
+    let mappedEnd: { source: string; offset: number } | null =
+      start === end ? mappedStart : this.mapGeneratedOffsetToSource(end);
+    if (mappedEnd === null && end > start) {
+      // An end-exclusive boundary can legally be the first position in a
+      // sourceless segment: `[mappedToken, syntheticScaffold)`. Point mapping
+      // at that boundary must remain null, but the preceding generated code
+      // unit still proves the span covers only mapped content. Recover exactly
+      // one source code unit past that final mapped position. Extending even
+      // one generated code unit into the scaffold keeps `end - 1` unmapped and
+      // therefore still fails closed.
+      const finalMappedUnit = this.mapGeneratedOffsetToSource(end - 1);
+      if (finalMappedUnit !== null) {
+        const sourceIndex = this.resolveSourceIndex(finalMappedUnit.source);
+        const table =
+          sourceIndex === null ? null : this.sourceTableFor(sourceIndex, finalMappedUnit.source);
+        if (table !== null && finalMappedUnit.offset < table.text.length) {
+          mappedEnd = {
+            source: finalMappedUnit.source,
+            offset: finalMappedUnit.offset + 1,
+          };
+        }
+      }
+    }
     if (mappedEnd === null) {
       return null;
     }
@@ -396,6 +418,49 @@ export class CarrierMapper {
       }
     }
     return best;
+  }
+
+  /**
+   * Enumerate every generated run that faithfully contains one authored
+   * source position. Ordinary request routing deliberately returns only its
+   * strict GLB winner; linked IDE projections additionally need the original
+   * script run and any narrower ref-unwrapped template alias for the same
+   * authored declaration. Candidates remain extent-bounded, sorted, and
+   * deduplicated. An unmapped input yields an empty list, never a guess.
+   */
+  mapSourceOffsetToGeneratedAll(offset: number, source?: string): MappedGeneratedPosition[] {
+    const sourceIndex = this.resolveSourceIndex(source);
+    if (sourceIndex === null) return [];
+    const sourceName = this.map.sources[sourceIndex];
+    if (sourceName === null || sourceName === undefined) return [];
+    const table = this.sourceTableFor(sourceIndex, sourceName);
+    if (table === null || !Number.isInteger(offset) || offset < 0 || offset > table.text.length) {
+      return [];
+    }
+    const srcLine = lineForOffset(table.starts, offset);
+    const srcCol = offset - table.starts[srcLine];
+    if (srcCol > lineContentLength(table.text, table.starts, srcLine)) return [];
+
+    const lineSegments = this.forwardIndexFor(sourceIndex).get(srcLine);
+    if (lineSegments === undefined) return [];
+    const candidates: MappedGeneratedPosition[] = [];
+    const seenOffsets = new Set<number>();
+    for (const segment of lineSegments) {
+      if (segment.srcCol > srcCol) break;
+      const delta = srcCol - segment.srcCol;
+      if (delta >= segment.genExtent) continue;
+      const genColumn = segment.genCol + delta;
+      const genOffset = this.generatedLineStarts[segment.genLine] + genColumn;
+      if (seenOffsets.has(genOffset)) continue;
+      seenOffsets.add(genOffset);
+      candidates.push({
+        offset: genOffset,
+        line: segment.genLine + 1,
+        column: genColumn,
+      });
+    }
+    candidates.sort((left, right) => left.offset - right.offset);
+    return candidates;
   }
 
   /** The map source index a forward query targets (see step 1 above). */

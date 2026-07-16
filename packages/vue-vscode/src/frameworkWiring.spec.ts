@@ -62,6 +62,10 @@ describe("framework wiring (manifest-driven)", () => {
     expect(shouldConfigureTypeScriptPluginForLanguageId("typescriptreact")).toBe(true);
     expect(shouldConfigureTypeScriptPluginForLanguageId("javascript")).toBe(true);
     expect(shouldConfigureTypeScriptPluginForLanguageId("javascriptreact")).toBe(true);
+    // A framework document must publish the membership/source-owner policy
+    // before either editor TypeScript or the managed provider can answer it.
+    expect(shouldConfigureTypeScriptPluginForLanguageId("vue")).toBe(true);
+    expect(shouldConfigureTypeScriptPluginForLanguageId("svelte")).toBe(true);
     // A non-trigger language is not configured.
     expect(shouldConfigureTypeScriptPluginForLanguageId("plaintext")).toBe(false);
     expect(shouldConfigureTypeScriptPluginForLanguageId(undefined)).toBe(false);

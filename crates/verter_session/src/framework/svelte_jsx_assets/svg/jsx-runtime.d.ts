@@ -109,5 +109,7 @@ export namespace JSX {
   }
 
   // The official SVG-keyed intrinsic subset. This REPLACES the HTML table.
-  interface IntrinsicElements extends Pick<SvelteHTMLElements, SvelteSVGElementNames> {}
+  type IntrinsicElements = {
+    [Name in SvelteSVGElementNames]: SvelteHTMLElements[Name];
+  };
 }

@@ -675,6 +675,44 @@ fn svelte_public_api_resolves_local_props_interface_from_macro_locator() {
 }
 
 #[test]
+fn svelte_public_api_projection_exposes_resolved_props_for_editor_consumers() {
+    let host = host();
+    upsert_svelte(
+        &host,
+        "/EditorContract.svelte",
+        r#"<script lang="ts">
+interface Props { contractProp: string; optionalCount?: number }
+let { contractProp, optionalCount = 0 }: Props = $props();
+</script>
+<p>{contractProp}: {optionalCount}</p>
+"#,
+    );
+
+    let projection = host
+        .get_public_api_projection("/EditorContract.svelte")
+        .expect("Svelte public API projects");
+    let contract = projection
+        .contract
+        .expect("Svelte projector supplies a structured public contract");
+    let required = contract
+        .props
+        .iter()
+        .find(|prop| prop.name == "contractProp")
+        .expect("resolved contract prop");
+    assert_eq!(required.type_annotation.as_deref(), Some("string"));
+    assert!(!required.optional);
+    assert!(!required.has_default);
+    let optional = contract
+        .props
+        .iter()
+        .find(|prop| prop.name == "optionalCount")
+        .expect("resolved optional prop");
+    assert_eq!(optional.type_annotation.as_deref(), Some("number"));
+    assert!(optional.optional);
+    assert!(optional.has_default);
+}
+
+#[test]
 fn svelte_javascript_jsdoc_props_reach_the_declaration_import_surface() {
     // A no-lang component is authored JavaScript. Its JSDoc types must survive
     // the shallow Svelte facts and reach the declaration carrier consumed by a

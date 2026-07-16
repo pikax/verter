@@ -306,34 +306,13 @@ pub(crate) fn carrier_completion_member_boundary_offset(
     // `position_to_offset` would mis-land when non-ASCII text precedes it on the generated
     // line. Convert the UTF-16 column to a byte offset directly against the generated line
     // text (encoding-independent; a column inside a surrogate pair or past EOL rejects).
-    let anchor_byte_offset = |anchor: &TsPosition| -> Option<u32> {
-        let line_start = tsx_line_index.line_start(anchor.line as usize)?;
-        let line_end = tsx_line_index.line_end(anchor.line as usize)?;
-        let line_text = tsx_code.get(line_start as usize..line_end as usize)?;
-        let mut utf16_remaining = anchor.character;
-        let mut byte_col = 0u32;
-        for c in line_text.chars() {
-            if utf16_remaining == 0 {
-                break;
-            }
-            let units = c.len_utf16() as u32;
-            if units > utf16_remaining {
-                return None;
-            }
-            utf16_remaining -= units;
-            byte_col += c.len_utf8() as u32;
-        }
-        if utf16_remaining > 0 {
-            return None;
-        }
-        Some(line_start + byte_col)
-    };
-
     // Guard 3: at-cursor anchor. The run whose source extent ends exactly AT the cursor column
     // includes the member operator as its last source content; its generated endpoint is the
     // boundary just past the generated operator. Accept only on generated-suffix agreement.
     if let Some(anchor) = mapper.mapped_run_ending_at_src(position.line, cursor_col_utf16) {
-        if let Some(anchor_offset) = anchor_byte_offset(&anchor) {
+        if let Some(anchor_offset) =
+            ts_position_utf16_to_byte_offset(&anchor, tsx_line_index, tsx_code)
+        {
             if tsx_code
                 .get(..anchor_offset as usize)
                 .is_some_and(generated_operator_matches)
@@ -349,12 +328,39 @@ pub(crate) fn carrier_completion_member_boundary_offset(
     // on generated-prefix agreement, returning the endpoint plus the operator length.
     let receiver_col = cursor_col_utf16.checked_sub(op_len)?;
     let anchor = mapper.mapped_run_ending_at_src(position.line, receiver_col)?;
-    let anchor_offset = anchor_byte_offset(&anchor)?;
+    let anchor_offset = ts_position_utf16_to_byte_offset(&anchor, tsx_line_index, tsx_code)?;
     let generated_after = tsx_code.get(anchor_offset as usize..)?;
     if !generated_after.starts_with(op_str) {
         return None;
     }
     Some(anchor_offset + op_len)
+}
+
+fn ts_position_utf16_to_byte_offset(
+    position: &TsPosition,
+    tsx_line_index: &LineIndex,
+    tsx_code: &str,
+) -> Option<u32> {
+    let line_start = tsx_line_index.line_start(position.line as usize)?;
+    let line_end = tsx_line_index.line_end(position.line as usize)?;
+    let line_text = tsx_code.get(line_start as usize..line_end as usize)?;
+    let mut utf16_remaining = position.character;
+    let mut byte_col = 0u32;
+    for character in line_text.chars() {
+        if utf16_remaining == 0 {
+            break;
+        }
+        let units = character.len_utf16() as u32;
+        if units > utf16_remaining {
+            return None;
+        }
+        utf16_remaining -= units;
+        byte_col += character.len_utf8() as u32;
+    }
+    if utf16_remaining > 0 {
+        return None;
+    }
+    Some(line_start + byte_col)
 }
 
 /// Map a TSX byte offset range back to an LSP `Range` in the Vue source.
