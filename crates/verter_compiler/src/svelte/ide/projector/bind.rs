@@ -56,7 +56,7 @@ impl TemplateProjector<'_, '_> {
     /// 3. A FUNCTION binding `bind:x={get, set}` (top-level comma) → the F5
     ///    `__verter_bind_fn` checker (element value type from the bind-contract
     ///    table or the intrinsic attribute table; component value type via
-    ///    `InstanceType<typeof C>["$props"][K]`).
+    ///    the native Component Props generic).
     /// 4. A COMPONENT `bind:prop` (non-`this`) → the `$bindable`-prop path: strip
     ///    `bind:`, keep `prop={value}` checked against the component's `$props`.
     /// 5. An intrinsic binding IN the bind-contract table → the directional
@@ -107,6 +107,15 @@ impl TemplateProjector<'_, '_> {
         // strip the `bind:` prefix and keep `prop={value}` checked against the
         // component's `$props` member (the JSX `ElementAttributesProperty`).
         if is_component {
+            if is_valid_component_reference(&el.name) {
+                self.ct.prepend_left(
+                    attr.span.start,
+                    &format!(
+                        "{{...(__verter_component_binding({}, {:?}), {{}})}} ",
+                        el.name, dir.local
+                    ),
+                );
+            }
             self.rewrite_bind_to_attribute(attr, dir);
             return;
         }
@@ -126,7 +135,7 @@ impl TemplateProjector<'_, '_> {
     /// Project `bind:this={el}` (F4) — a host-instance assignment-compat check.
     ///
     /// The host-instance type is the element's DOM instance type for an intrinsic
-    /// (`__VerterHostEl<"tag">`), `InstanceType<typeof Name>` for a component, and
+    /// (`__VerterHostEl<"tag">`), native Component exports for a component, and
     /// the `Element` bound for a dynamic/special host. The check is INVARIANT and
     /// DISCRIMINATES a wrong element type (a `HTMLDivElement` local on an
     /// `<input>` FAILS, where a one-directional `V extends L` check would pass
@@ -254,8 +263,10 @@ impl TemplateProjector<'_, '_> {
     /// The host-instance type for a `bind:this` target.
     fn bind_this_host_type(&self, el: &SvelteElement, is_component: bool) -> String {
         if is_component && is_valid_component_reference(&el.name) {
-            // A component instance: `InstanceType<typeof Name>`.
-            format!("InstanceType<typeof {}>", el.name)
+            // Svelte 5 components are callable and expose their public
+            // instance exports as the native Component return type. The
+            // private helper also accepts class-shaped foreign components.
+            format!("__VerterComponentExports<typeof {}>", el.name)
         } else if matches!(el.kind, SvelteElementKind::Intrinsic)
             && is_bare_tag_identifier(&el.name)
         {
@@ -398,7 +409,7 @@ impl TemplateProjector<'_, '_> {
     /// The two value expressions stay mapped and are checked against the
     /// bind-target type `V` via `__verter_bind_fn<V>(get, set)`: `get` returns
     /// `V` (or `null`), `set` consumes `V`. The target type `V` is:
-    /// - a COMPONENT bind: `InstanceType<typeof C>["$props"]["prop"]` (the typing
+    /// - a COMPONENT bind: `__VerterComponentProps<typeof C>["prop"]` (the typing
     ///   is done in the projected TSX via TS — no Rust resolver call);
     /// - an element bind in the contract table: the contract's value type;
     /// - otherwise (an element name not in the table): inferred (`V` is left
@@ -426,7 +437,7 @@ impl TemplateProjector<'_, '_> {
         let (target_ty, readonly) = if is_component && is_valid_component_reference(&el.name) {
             (
                 Some(format!(
-                    "InstanceType<typeof {}>[\"$props\"][\"{}\"]",
+                    "__VerterComponentProps<typeof {}>[\"{}\"]",
                     el.name, dir.local
                 )),
                 false,
@@ -483,10 +494,15 @@ impl TemplateProjector<'_, '_> {
         self.rewrite_store_subs_in(expr);
         // `bind:x={` → `{...(CHECKER<V>(` ; the `get, set` expression pair stays
         // mapped ; trailing `}` → `), {})}`.
+        let binding_check = (is_component && is_valid_component_reference(&el.name))
+            .then(|| format!("__verter_component_binding({}, {:?}), ", el.name, dir.local));
         self.ct.overwrite(
             attr.span.start,
             expr.start,
-            &format!("{{...({checker_call}("),
+            &format!(
+                "{{...({}{checker_call}(",
+                binding_check.as_deref().unwrap_or_default()
+            ),
         );
         self.ct.overwrite(expr.end, attr.span.end, "), {})}");
     }

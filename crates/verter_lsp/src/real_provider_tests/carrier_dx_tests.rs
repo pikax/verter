@@ -180,10 +180,10 @@ async fn assert_carrier_dx_contract_tsserver(session: &RealProviderTestSession) 
 
     // ── (1) the component's real public surface flows into the `.ts` ──
     // Vue: the bare import resolves with NO false TS2307 (the import is a typed
-    // module, not an unresolved one). Svelte: the public instance surface flows —
-    // hover on the imported symbol surfaces the synthesized public component type
-    // (`__VerterPublicInstance`), which only exists when the Svelte carrier
-    // resolved. Both are resolution-dependent: a missing carrier yields TS2307
+    // module, not an unresolved one). Svelte: the public Component surface flows —
+    // hover on the imported symbol surfaces Svelte 5's native callable Component
+    // type, which only exists when the Svelte carrier resolved. Both are
+    // resolution-dependent: a missing carrier yields TS2307
     // (Vue) / a bare `any` import (Svelte).
     let consumer_diags = session
         .provider()
@@ -221,15 +221,22 @@ async fn assert_carrier_dx_contract_tsserver(session: &RealProviderTestSession) 
         .await
         .unwrap_or_default();
     assert!(
-        widget_hover.contains("__VerterPublicInstance")
-            || widget_hover.contains("__VerterPublicComponent")
+        widget_hover.contains("Component<")
+            || widget_hover.contains("Component<Props")
             || widget_type_defs
                 .iter()
                 .any(|d| d.path.ends_with("Widget.svelte")),
         "(1) Svelte: the component's public surface must flow into the `.ts` — hover on the \
-         imported `Widget` should surface the synthesized public component/instance type, or \
+         imported `Widget` should surface the native Svelte Component type, or \
          type-definition land in Widget.svelte; got hover={widget_hover:?}, type_defs={:?}",
         widget_type_defs.iter().map(|d| &d.path).collect::<Vec<_>>()
+    );
+    assert!(
+        !widget_hover.contains("__VerterPublicInstance")
+            && !widget_hover.contains("new (...args")
+            && !widget_hover.contains("new (options"),
+        "(1) Svelte: hover must not regress to Verter's retired class/constructor shim; \
+         got hover={widget_hover:?}"
     );
 
     // ── (3) find-all-references spans the `.ts` importer(s) AND reaches the component ──

@@ -212,7 +212,7 @@ export { asNumber };
 
 describe("wasm_svelte_declaration_carrier_parity (#9)", () => {
   const SVELTE_MAIN = `import SComp from "./Comp.svelte";
-type SP = InstanceType<typeof SComp>["$props"];
+type SP = Parameters<typeof SComp>[1];
 const bad: SP["count"] = "not-a-number";
 const good: SP["count"] = 1;
 export { bad, good };
@@ -272,9 +272,12 @@ export { bad, good };
     expect(diags.filter((d) => d.code === 2322)).toHaveLength(0);
   });
 
-  it("the Svelte declaration carrier references no `svelte` runtime types (framework-neutral wiring needs no svelte dependency)", () => {
+  it("the Svelte declaration carrier exposes only the official native Component contract", () => {
     const code = fixtures.compSvelte.decl!.code;
     expect(code).not.toMatch(/from\s+["']svelte["']/);
-    expect(code).not.toMatch(/import\(["']svelte/);
+    expect(code).toContain('import("svelte").Component<');
+    expect(code).not.toContain("__VerterPublicInstance");
+    expect(code).not.toContain("new (...args: any[])");
+    expect(code).not.toContain(": any");
   });
 });

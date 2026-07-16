@@ -2,7 +2,7 @@
 //!
 //! A `.svelte` component has no literal `export default` — the default export is
 //! the component value the compiler produces. This module synthesises a
-//! class-shaped `default` value symbol whose fabricated public instance is
+//! internal `default` carrier whose fabricated structural inventory is
 //! `{ $props: Props }` plus the exported instance-script members, exactly the
 //! way [`super::vue_default_synth`] synthesises the Vue SFC's `default`.
 //!
@@ -33,18 +33,18 @@ use super::vue_default_synth::{VUE_INSTANCE_PROPS_MEMBER, VUE_INSTANCE_SLOTS_MEM
 
 /// The synthesized instance member carrying the component's event map (the
 /// legacy `createEventDispatcher<E>` payload map). Mirrors Vue's `$emit` member
-/// role; the api-projector renders the shim `$events` index from it (UNIONed with
-/// the derived callback-prop events). A component with no dispatcher carries no
-/// `$events` member (the callback-prop events derive from `$props` at the shim).
+/// role. The API projector converts this legacy map to Svelte 5 callback props;
+/// it never exposes a public class-like `$events` instance member. A component
+/// with no dispatcher carries no `$events` inventory row.
 pub const SVELTE_INSTANCE_EVENTS_MEMBER: &str = "$events";
 
 /// Build the synthetic `default` value symbol for a `.svelte` scope from its
 /// parse-domain script candidates.
 ///
 /// EVERY `.svelte` file is a component, so this ALWAYS produces a default — a
-/// pure-markup component with no `$props()` and no exports still gets an instance
-/// whose `$props` is the empty object `{}`. The returned symbol mimics a userland
-/// `class default { ... }`: the fabricated instance shape
+/// pure-markup component with no `$props()` and no exports still gets an internal
+/// inventory whose `$props` is the empty object `{}`. The returned symbol's
+/// fabricated structural shape
 /// (`{ $props: Props, ...exported members }`) rides the annotation FACT as a
 /// synthesized CLOSED source ([`SemanticTypeSource::Synthesized`]). `Props` is
 /// the `$props()` candidate's authored PAYLOAD LOCATOR (runes mode — lowered on
@@ -143,7 +143,7 @@ fn payload_ref_fact(payload: &AuthoredTypePayloadRef) -> FactOrLocator {
     }
 }
 
-/// The snippet-typed slot members for the synthesized `$slots` instance member.
+/// The snippet-typed slot members for the internal `$slots` inventory row.
 ///
 /// Each parse-domain snippet candidate (`member_name`) becomes one slot key
 /// whose value is the honest `any` leaf. The PRECISE binding type lives in the

@@ -426,30 +426,27 @@ fn public_carrier_resolves_local_props_interface_through_deep_barrels() {
 import type { ComponentProps } from 'svelte';
 
 type FrameworkProps = ComponentProps<typeof LocalProps>;
-type InstanceProps = InstanceType<typeof LocalProps>['$props'];
+type NativeExports = ReturnType<typeof LocalProps>;
 type GenericFrameworkProps = ComponentProps<typeof GenericProps>;
 type JsFrameworkProps = ComponentProps<typeof JsProps>;
+const nativeComponent: import('svelte').Component<FrameworkProps, NativeExports, ''> = LocalProps;
 
 const frameworkGood: FrameworkProps = { title: 'ready' };
-const instanceGood: InstanceProps = { title: 'ready', count: 2 };
 const genericGood: GenericFrameworkProps = { enabled: true };
 const jsGood: JsFrameworkProps = { label: 'ready', count: 2 };
 
 // @ts-expect-error the framework-native Component leg retains `title: string`
 const frameworkBad: FrameworkProps = { title: 42 };
-// @ts-expect-error the construct/instance leg retains `count?: number`
-const instanceBad: InstanceProps = { title: 'ready', count: 'wrong' };
 // @ts-expect-error `$props<Props>()` resolves its local interface
 const genericBad: GenericFrameworkProps = { enabled: 'wrong' };
 // @ts-expect-error JavaScript/JSDoc props stay concrete on the import surface
 const jsBad: JsFrameworkProps = { label: 42 };
 
 void frameworkGood;
-void instanceGood;
 void genericGood;
 void jsGood;
+void nativeComponent;
 void frameworkBad;
-void instanceBad;
 void genericBad;
 void jsBad;
 "#;
@@ -480,8 +477,504 @@ void jsBad;
     assert!(
         ok,
         "the generated public carrier must preserve concrete local-interface props through both \
-         Svelte's ComponentProps and InstanceType after a deep barrel; the @ts-expect-error \
+         Svelte's ComponentProps and native Component assignability after a deep barrel; the @ts-expect-error \
          assertions discriminate concrete types from any/unknown:\n{out}\n\n{declaration}"
+    );
+}
+
+#[test]
+fn native_svelte_component_is_adapted_privately_at_template_use_sites() {
+    let projected = project(
+        r#"<script lang="ts">
+import Child from './Child.svelte';
+let value = 'ready';
+const onchange = (next: string) => { value = next };
+</script>
+<Child {value} {onchange} />"#,
+    );
+    let child = r#"import type { Component } from 'svelte';
+declare const Child: Component<
+  { value: string; onchange?: (value: string) => void },
+  { focus(): void },
+  'value'
+>;
+export default Child;
+"#;
+    let Some((ok, out)) = typecheck_projected(
+        &projected,
+        "NativeChildUse.svelte.tsx",
+        &[("Child.svelte.d.ts", child)],
+        true,
+    ) else {
+        skip_note("native Svelte Component template adapter");
+        return;
+    };
+    assert!(
+        ok,
+        "a native Svelte 5 Component must be privately adapted at its template use site:\n{out}\n{projected}"
+    );
+
+    let wrong_type = project(
+        r#"<script lang="ts">
+import Child from './Child.svelte';
+let value = 42;
+</script>
+<Child {value} />"#,
+    );
+    let Some((wrong_ok, wrong_out)) = typecheck_projected(
+        &wrong_type,
+        "NativeChildUseWrongType.svelte.tsx",
+        &[("Child.svelte.d.ts", child)],
+        true,
+    ) else {
+        return;
+    };
+    assert!(
+        !wrong_ok && (wrong_out.contains("number") || wrong_out.contains("value")),
+        "a native component must reject a wrong prop type:\n{wrong_out}"
+    );
+
+    let unknown_prop = project(
+        r#"<script lang="ts">
+import Child from './Child.svelte';
+</script>
+<Child value="ready" vueOnlyProp="no" />"#,
+    );
+    let Some((unknown_ok, unknown_out)) = typecheck_projected(
+        &unknown_prop,
+        "NativeChildUseUnknownProp.svelte.tsx",
+        &[("Child.svelte.d.ts", child)],
+        true,
+    ) else {
+        return;
+    };
+    assert!(
+        !unknown_ok && unknown_out.contains("vueOnlyProp"),
+        "component props must remain distinct from DOM/Vue attributes:\n{unknown_out}"
+    );
+}
+
+#[test]
+fn generic_native_component_template_use_preserves_cross_prop_constraints() {
+    // The child content deliberately keeps the private direct-call checker out
+    // of this projection. The valid/invalid pair therefore proves that the JSX
+    // adapter itself preserves the generic relationship for childful Svelte 5
+    // components instead of silently collapsing the props to a loose shape.
+    let child = r#"import type { ComponentInternals, Snippet } from 'svelte';
+declare const GenericList: {
+  <T extends { id: string }>(
+    internals: ComponentInternals,
+    props: { items: T[]; select: (item: T) => void; children?: Snippet }
+  ): {};
+  readonly z_$$bindings?: '';
+};
+export default GenericList;
+"#;
+    let good = project(
+        r#"<script lang="ts">
+import GenericList from './GenericList.svelte';
+const rows = [{ id: 'first', rank: 1 }];
+</script>
+<GenericList items={rows} select={(item) => item.id.toUpperCase()}>
+  <span>{rows[0]?.id}</span>
+</GenericList>"#,
+    );
+    let Some((good_ok, good_out)) = typecheck_projected(
+        &good,
+        "GenericNativeUse.svelte.tsx",
+        &[("GenericList.svelte.d.ts", child)],
+        true,
+    ) else {
+        skip_note("generic native component template inference");
+        return;
+    };
+    assert!(
+        good_ok,
+        "a generic native component must expose its authored constraint in template callbacks:\n{good_out}\n{good}"
+    );
+
+    let bad = project(
+        r#"<script lang="ts">
+import GenericList from './GenericList.svelte';
+const rows = [{ id: 'first', rank: 1 }];
+</script>
+<GenericList items={rows} select={(item: { id: string; rank: string }) => item.rank}>
+  <span>{rows[0]?.id}</span>
+</GenericList>"#,
+    );
+    let Some((bad_ok, bad_out)) = typecheck_projected(
+        &bad,
+        "GenericNativeUseBad.svelte.tsx",
+        &[("GenericList.svelte.d.ts", child)],
+        true,
+    ) else {
+        return;
+    };
+    assert!(
+        !bad_ok && (bad_out.contains("rank") || bad_out.contains("number")),
+        "generic template props must reject mutually inconsistent T constraints:\n{bad_out}\n{bad}"
+    );
+}
+
+#[test]
+fn intrinsic_elements_use_official_tag_specific_contracts() {
+    let good = project(
+        r#"<a href="/docs" target="_blank" onclick={(event) => event.currentTarget.href.toUpperCase()}>docs</a>
+<input value="ready" checked onchange={(event) => event.currentTarget.value.toUpperCase()} />"#,
+    );
+    let Some((good_ok, good_out)) =
+        typecheck_projected(&good, "TagSpecificGood.svelte.tsx", &[], true)
+    else {
+        skip_note("official Svelte tag-specific intrinsic contracts");
+        return;
+    };
+    assert!(
+        good_ok,
+        "anchor/input attributes and typed currentTarget must follow svelte/elements:\n{good_out}\n{good}"
+    );
+
+    for (name, source, needle) in [
+        ("DivInputAttr", "<div value=\"wrong\"></div>", "value"),
+        ("InputAnchorAttr", "<input href=\"/wrong\" />", "href"),
+        (
+            "InputTargetType",
+            "<input onchange={(event) => event.currentTarget.href.toUpperCase()} />",
+            "href",
+        ),
+    ] {
+        let projected = project(source);
+        let Some((ok, out)) =
+            typecheck_projected(&projected, &format!("{name}.svelte.tsx"), &[], true)
+        else {
+            return;
+        };
+        assert!(
+            !ok && out.contains(needle),
+            "{name} must be rejected by the exact official element contract:\n{out}\n{projected}"
+        );
+    }
+}
+
+#[test]
+fn svelte_jsx_namespace_remains_file_scoped() {
+    let projected = project("<div>scoped</div>");
+    let plain_ts = r#"// @ts-expect-error the Verter JSX namespace is module-scoped to the projected file
+type MustNotExist = JSX.IntrinsicElements;
+void (null as unknown as MustNotExist);
+"#;
+    let Some((ok, out)) = typecheck_projected(
+        &projected,
+        "ScopedJsx.svelte.tsx",
+        &[("plain.ts", plain_ts)],
+        true,
+    ) else {
+        skip_note("file-scoped Svelte JSX namespace");
+        return;
+    };
+    assert!(
+        ok,
+        "@verter/svelte-jsx must not merge a global JSX namespace into ordinary TS files:\n{out}"
+    );
+}
+
+#[test]
+fn native_component_bindings_honor_the_component_bindings_generic() {
+    let child = r#"import type { Component } from 'svelte';
+declare const Child: Component<
+  { value: string; fixed: string },
+  {},
+  'value'
+>;
+export default Child;
+"#;
+    let good = project(
+        r#"<script lang="ts">
+import Child from './Child.svelte';
+let value = 'ready';
+</script>
+<Child bind:value={value} fixed="fixed" />"#,
+    );
+    let Some((good_ok, good_out)) = typecheck_projected(
+        &good,
+        "NativeBindableGood.svelte.tsx",
+        &[("Child.svelte.d.ts", child)],
+        true,
+    ) else {
+        skip_note("native Svelte Component bindings generic");
+        return;
+    };
+    assert!(
+        good_ok,
+        "a key present in Component's Bindings generic must be bindable:\n{good_out}\n{good}"
+    );
+
+    let bad = project(
+        r#"<script lang="ts">
+import Child from './Child.svelte';
+let fixed = 'not bindable';
+</script>
+<Child value="ready" bind:fixed={fixed} />"#,
+    );
+    let Some((bad_ok, bad_out)) = typecheck_projected(
+        &bad,
+        "NativeBindableBad.svelte.tsx",
+        &[("Child.svelte.d.ts", child)],
+        true,
+    ) else {
+        return;
+    };
+    assert!(
+        !bad_ok && bad_out.contains("fixed"),
+        "a prop omitted from Component's Bindings generic must reject bind:fixed:\n{bad_out}\n{bad}"
+    );
+}
+
+#[test]
+fn native_component_bind_this_uses_the_component_exports_generic() {
+    let child = r#"import type { Component } from 'svelte';
+declare const Child: Component<{}, { focus(): void }, ''>;
+export default Child;
+"#;
+    let good = project(
+        r#"<script lang="ts">
+import Child from './Child.svelte';
+let child: { focus(): void };
+</script>
+<Child bind:this={child} />"#,
+    );
+    let Some((good_ok, good_out)) = typecheck_projected(
+        &good,
+        "NativeBindThisGood.svelte.tsx",
+        &[("Child.svelte.d.ts", child)],
+        true,
+    ) else {
+        skip_note("native Svelte Component exports generic");
+        return;
+    };
+    assert!(
+        good_ok,
+        "bind:this must use the native Component Exports generic:\n{good_out}\n{good}"
+    );
+
+    let bad = project(
+        r#"<script lang="ts">
+import Child from './Child.svelte';
+let child: number;
+</script>
+<Child bind:this={child} />"#,
+    );
+    let Some((bad_ok, bad_out)) = typecheck_projected(
+        &bad,
+        "NativeBindThisBad.svelte.tsx",
+        &[("Child.svelte.d.ts", child)],
+        true,
+    ) else {
+        return;
+    };
+    assert!(
+        !bad_ok && (bad_out.contains("focus") || bad_out.contains("number")),
+        "bind:this must reject a local incompatible with Component's Exports generic:\n{bad_out}\n{bad}"
+    );
+}
+
+#[test]
+fn native_component_legacy_on_directive_uses_callback_props() {
+    let child = r#"import type { Component } from 'svelte';
+declare const Child: Component<{
+  onselect?: (event: CustomEvent<number>) => void;
+}>;
+export default Child;
+"#;
+    let good = project(
+        r#"<script lang="ts">
+import Child from './Child.svelte';
+const select = (event: CustomEvent<number>) => event.detail.toFixed();
+</script>
+<Child on:select={select} />"#,
+    );
+    let Some((good_ok, good_out)) = typecheck_projected(
+        &good,
+        "NativeEventGood.svelte.tsx",
+        &[("Child.svelte.d.ts", child)],
+        true,
+    ) else {
+        skip_note("native Svelte callback-prop events");
+        return;
+    };
+    assert!(
+        good_ok,
+        "legacy on:select must resolve the native onselect callback prop:\n{good_out}\n{good}"
+    );
+
+    let wrong = project(
+        r#"<script lang="ts">
+import Child from './Child.svelte';
+const select = (event: CustomEvent<string>) => event.detail;
+</script>
+<Child on:select={select} />"#,
+    );
+    let Some((wrong_ok, wrong_out)) = typecheck_projected(
+        &wrong,
+        "NativeEventWrong.svelte.tsx",
+        &[("Child.svelte.d.ts", child)],
+        true,
+    ) else {
+        return;
+    };
+    assert!(
+        !wrong_ok && (wrong_out.contains("string") || wrong_out.contains("number")),
+        "native callback-prop event payloads must remain exact:\n{wrong_out}\n{wrong}"
+    );
+}
+
+#[test]
+fn generic_svelte_public_component_preserves_its_native_call_signature() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/GenericList.svelte";
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(canonical.to_string()),
+            input_id: canonical.to_string(),
+            source: Arc::from(
+                r#"<script lang="ts" generics="T extends { id: string }">
+let { items, select }: { items: T[]; select: (item: T) => void } = $props();
+</script>
+{#each items as item}<button onclick={() => select(item)}>{item.id}</button>{/each}
+"#,
+            ),
+            file_language: FileLanguage::svelte(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert generic Svelte component");
+    let declaration = host
+        .get_public_api_with_mode(canonical, PublicApiMode::Declaration, None)
+        .expect("generic Svelte declaration carrier")
+        .code;
+    assert!(
+        declaration.contains("<T extends { id: string }>")
+            && declaration.contains("import(\"svelte\").Component<")
+            && !declaration.contains("new ("),
+        "the declaration must retain the authored generic on a native callable surface:\n{declaration}"
+    );
+
+    let consumer = r#"import GenericList from './GenericList.svelte.verter';
+import type { Component, ComponentInternals, ComponentProps } from 'svelte';
+
+const native: Component<any, any, any> = GenericList;
+type Props = ComponentProps<typeof GenericList>;
+const constrainedProps: Props = {
+  items: [{ id: 'component-props' }],
+  select: (item) => item.id.toUpperCase()
+};
+const exports = GenericList(
+  null! as ComponentInternals,
+  {
+    items: [{ id: 'first', rank: 1 }],
+    select: (item) => item.rank.toFixed()
+  }
+);
+void native;
+void constrainedProps;
+void exports;
+
+GenericList(null! as ComponentInternals, {
+  // @ts-expect-error `select` forces a string rank, which conflicts with this item
+  items: [{ id: 'first', rank: 1 }],
+  select: (item: { id: string; rank: string }) => item.rank
+});
+"#;
+    let Some((ok, out)) = typecheck_projected(
+        &declaration,
+        "GenericList.svelte.verter.ts",
+        &[("consumer.ts", consumer)],
+        true,
+    ) else {
+        skip_note("generic native Svelte public component");
+        return;
+    };
+    assert!(
+        ok,
+        "the generic native component must preserve cross-prop inference and remain Component-assignable:\n{out}\n{declaration}"
+    );
+}
+
+#[test]
+fn svelte_public_component_preserves_bindings_events_snippets_and_exports() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/NativeSurface.svelte";
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(canonical.to_string()),
+            input_id: canonical.to_string(),
+            source: Arc::from(
+                r#"<script lang="ts">
+import type { Snippet } from 'svelte';
+let {
+  value = $bindable(''),
+  fixed,
+  row,
+  onsave
+}: {
+  value?: string;
+  fixed: string;
+  row: Snippet<[{ id: number }]>;
+  onsave?: (event: CustomEvent<string>) => void;
+} = $props();
+export function focus() {}
+void value; void fixed; void row; void onsave;
+</script>
+"#,
+            ),
+            file_language: FileLanguage::svelte(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert full native Svelte surface");
+    let declaration = host
+        .get_public_api_with_mode(canonical, PublicApiMode::Declaration, None)
+        .expect("native Svelte declaration")
+        .code;
+    let consumer = r#"import NativeSurface from './NativeSurface.svelte.verter';
+import type { Component, ComponentProps, Snippet } from 'svelte';
+
+type Props = ComponentProps<typeof NativeSurface>;
+type Exports = ReturnType<typeof NativeSurface>;
+type Bindings = NonNullable<typeof NativeSurface['z_$$bindings']>;
+
+const native: Component<Props, Exports, Bindings> = NativeSurface;
+const props: Props = {
+  fixed: 'fixed',
+  row: ((item: { id: number }) => void item.id) as unknown as Snippet<[{ id: number }]>,
+  onsave: (event) => event.detail.toUpperCase()
+};
+const binding: Bindings = 'value';
+declare const exports: Exports;
+void exports.focus;
+
+// @ts-expect-error `fixed` was not authored with $bindable
+const wrongBinding: Bindings = 'fixed';
+// @ts-expect-error dispatcher detail is string, not number
+const wrongEvent: NonNullable<Props['onsave']> = (event: CustomEvent<number>) => event.detail;
+void native; void props; void binding; void wrongBinding; void wrongEvent;
+"#;
+    let Some((ok, out)) = typecheck_projected(
+        &declaration,
+        "NativeSurface.svelte.verter.ts",
+        &[("consumer.ts", consumer)],
+        true,
+    ) else {
+        skip_note("complete native Svelte public surface");
+        return;
+    };
+    assert!(
+        ok,
+        "the public Component generics must preserve props, callback events, snippets, exports, and bindings:\n{out}\n{declaration}"
+    );
+    assert!(
+        !declaration.contains("new (")
+            && !declaration.contains("$props:")
+            && !declaration.contains("$events:")
+            && !declaration.contains("$slots:"),
+        "no class-shaped compatibility surface may leak into the public declaration:\n{declaration}"
     );
 }
 
@@ -2622,12 +3115,12 @@ fn fragment_close_tag_inside_a_descendant_string_literal_projects_valid_tsx() {
 #[test]
 fn svg_namespace_component_type_checks_svg_intrinsics_and_rejects_html_only_attrs() {
     // F10: a `<svelte:options namespace="svg" />` component projects with the
-    // svg-namespace pragma; its svg intrinsics (`<circle r={5} />`) check
-    // through the svg table. An HTML-only attribute (`value`) on an svg element
-    // FAILS — proving the svg table REPLACED the HTML table (svg-only).
+    // svg-namespace pragma; each intrinsic checks through its exact official
+    // `SvelteHTMLElements[name]` row. An HTML-only attribute (`value`) on an
+    // svg element FAILS, proving the svg table REPLACED the HTML table.
     let good = project(
         "<svelte:options namespace=\"svg\" />\n\
-         <svg viewBox=\"0 0 10 10\"><circle cx={1} cy={1} r={5} /></svg>",
+         <svg viewBox=\"0 0 10 10\"><circle cx={1} cy={1} r={5} onclick={(event) => event.currentTarget.cx.baseVal.valueOf()} /></svg>",
     );
     let Some((ok, out)) = typecheck_projected(&good, "SvgOk.svelte.tsx", &[], true) else {
         skip_note("svg namespace");
@@ -2635,12 +3128,12 @@ fn svg_namespace_component_type_checks_svg_intrinsics_and_rejects_html_only_attr
     };
     assert!(
         ok,
-        "svg intrinsics must type-check under the svg-namespace pragma:\n{out}"
+        "svg intrinsics and their typed currentTarget must come from the exact official SvelteHTMLElements rows:\n{out}"
     );
 
     // DISCRIMINATING: an HTML-only attribute (`value` — present on `<input>` in
-    // the HTML table, ABSENT from `SVGAttributes`) on an svg element FAILS,
-    // proving the svg table is in effect (not the HTML table).
+    // the HTML table, absent from `SvelteHTMLElements[\"circle\"]`) on an svg
+    // element FAILS, proving the official svg row is in effect.
     let bad = project(
         "<svelte:options namespace=\"svg\" />\n\
          <svg><circle value=\"nope\" /></svg>",
@@ -2650,8 +3143,53 @@ fn svg_namespace_component_type_checks_svg_intrinsics_and_rejects_html_only_attr
     };
     assert!(
         !bad_ok,
-        "an HTML-only attribute on an svg element must FAIL (svg table replaced \
-         the HTML table):\n{bad_out}"
+        "an HTML-only attribute on an svg element must FAIL (the official \
+         SvelteHTMLElements[\"circle\"] row is authoritative):\n{bad_out}"
+    );
+
+    let wrong_target = project(
+        "<svelte:options namespace=\"svg\" />\n\
+         <circle onclick={(event) => event.currentTarget.href} />",
+    );
+    let Some((target_ok, target_out)) =
+        typecheck_projected(&wrong_target, "SvgTargetBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !target_ok && target_out.contains("href"),
+        "the circle event currentTarget must remain SVGCircleElement, not an \
+         untyped or generic DOM event target:\n{target_out}"
+    );
+}
+
+#[test]
+fn mathml_namespace_keeps_a_closed_fallback_with_official_event_types() {
+    let good = project(
+        "<svelte:options namespace=\"mathml\" />\n\
+         <math onclick={(event) => event.currentTarget.ownerDocument}><mi mathcolor=\"red\">x</mi></math>",
+    );
+    let Some((good_ok, good_out)) = typecheck_projected(&good, "MathmlGood.svelte.tsx", &[], true)
+    else {
+        skip_note("MathML namespace fallback");
+        return;
+    };
+    assert!(
+        good_ok,
+        "MathML must retain its closed Verter vocabulary and Svelte DOMAttributes event base:\n{good_out}"
+    );
+
+    let bad = project(
+        "<svelte:options namespace=\"mathml\" />\n\
+         <math href=\"/not-a-math-attribute\"><mi>x</mi></math>",
+    );
+    let Some((bad_ok, bad_out)) = typecheck_projected(&bad, "MathmlBad.svelte.tsx", &[], true)
+    else {
+        return;
+    };
+    assert!(
+        !bad_ok && bad_out.contains("href"),
+        "MathML must not inherit HTML/SVG attributes through a permissive catch-all:\n{bad_out}"
     );
 }
 

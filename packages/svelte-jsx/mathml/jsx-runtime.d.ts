@@ -8,7 +8,7 @@
 //
 // `svelte/elements` ships NO MathML types, so this is a Verter-owned v1 table:
 // a CLOSED MathML tag set, each typed by a hand-written `MathMLAttributes`
-// base (aria + global + Svelte-true lowercase event attributes). Attribute
+// base (aria + global attributes) plus the official `DOMAttributes` event base.
 // values are typed with `unknown`/structured primitives — never `any` — so the
 // table remains a real (if permissive) contract. It REPLACES the HTML table
 // (mathml-only; no catch-all intrinsic index), so an HTML element FAILS,
@@ -18,10 +18,12 @@
 // `verter_session` mirrors it in-crate and byte-pins the mirror.
 
 import type { Snippet } from "svelte";
+import type { DOMAttributes } from "svelte/elements";
 
-// A Verter-owned MathML attribute base. Global MathML attributes + the
-// Svelte-true lowercase event attributes, typed with structured primitives.
-interface MathMLAttributes {
+// A Verter-owned MathML attribute base. Svelte's official DOMAttributes owns
+// lowercase events and their typed `currentTarget`; only MathML/global fields
+// are maintained here.
+interface MathMLAttributes extends DOMAttributes<MathMLElement> {
   children?: unknown;
   class?: string | undefined | null;
   id?: string | undefined | null;
@@ -32,9 +34,6 @@ interface MathMLAttributes {
   mathcolor?: string | undefined | null;
   mathsize?: string | undefined | null;
   scriptlevel?: number | string | undefined | null;
-  // Svelte-5 lowercase event attributes.
-  onclick?: ((event: unknown) => void) | undefined | null;
-  onkeydown?: ((event: unknown) => void) | undefined | null;
   // ARIA + data-* pass-through.
   role?: string | undefined | null;
   [dataAttr: `data-${string}`]: unknown;
@@ -45,10 +44,19 @@ export namespace JSX {
   // A projected element evaluates to a rendered snippet result.
   type Element = ReturnType<Snippet>;
 
+  type ElementType =
+    | keyof IntrinsicElements
+    | import("svelte").Component<any, any, any>
+    | ((props: any) => Element)
+    | (abstract new (...args: never[]) => ElementClass);
+
+  type LibraryManagedAttributes<Component, FallbackProps> =
+    Component extends import("svelte").Component<infer Props, any, any> ? Props : FallbackProps;
+
   // eslint-disable-next-line @typescript-eslint/no-empty-object-type
   interface ElementClass {}
 
-  // Component props are checked against the synth's `$props` member.
+  // Private fallback for class-shaped foreign components.
   interface ElementAttributesProperty {
     $props: {};
   }

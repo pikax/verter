@@ -32,6 +32,14 @@ The package exposes HTML, SVG, and MathML entrypoints:
 The declarations are the canonical source mirrored and byte-checked by the
 Rust host. Package and compiler versions must remain aligned.
 
+The namespace is private to each generated carrier. It admits Svelte 5's
+callable `Component<Props, Exports, Bindings>` for template checking without
+changing the public component module type or merging global JSX declarations.
+HTML and SVG attributes come from the owning project's official
+`svelte/elements` tables. Svelte does not currently publish a MathML element
+table, so that closed attribute vocabulary is Verter-owned while its event base
+still uses `DOMAttributes<MathMLElement>`.
+
 ## License
 
 MIT

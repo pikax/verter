@@ -7,81 +7,107 @@
 // namespace EXPORTED from this module (its `/svg/jsx-runtime` subpath) —
 // overriding the project-level `jsxImportSource` for that file only.
 //
-// The namespace is SVG-ONLY: `IntrinsicElements` is the SVG element set, each
-// typed by `svelte/elements`' exported `SVGAttributes` against the matching DOM
-// instance type. It REPLACES the HTML table — an HTML-only element or an
+// The namespace is SVG-ONLY: `IntrinsicElements` is the official SVG-keyed
+// subset of `svelte/elements`' `SvelteHTMLElements`. It REPLACES the HTML
+// table — an
 // HTML-only attribute on an svg element FAILS, proving the svg table is in
 // effect (there is no catch-all intrinsic index). `Element` /
-// `ElementAttributesProperty` / `ElementClass` are namespace-invariant (the
-// snippet-result element shape + the component `$props` contract).
+// component adaptation is namespace-invariant.
 //
 // Types-only: there is no runtime jsx factory here. This file is the SINGLE
 // hand-written content authority; `verter_session` mirrors it in-crate and
 // byte-pins the mirror.
 
 import type { Snippet } from "svelte";
-import type { SVGAttributes } from "svelte/elements";
+import type { SvelteHTMLElements } from "svelte/elements";
+
+// Svelte 5 publishes its SVG tag contracts as the SVG-keyed portion of
+// `SvelteHTMLElements`. Keep the namespace closed while inheriting every
+// attribute, event, and `currentTarget` detail from the official package.
+type SvelteSVGElementNames =
+  | "svg"
+  | "a"
+  | "animate"
+  | "animateMotion"
+  | "animateTransform"
+  | "circle"
+  | "clipPath"
+  | "defs"
+  | "desc"
+  | "ellipse"
+  | "feBlend"
+  | "feColorMatrix"
+  | "feComponentTransfer"
+  | "feComposite"
+  | "feConvolveMatrix"
+  | "feDiffuseLighting"
+  | "feDisplacementMap"
+  | "feDistantLight"
+  | "feDropShadow"
+  | "feFlood"
+  | "feFuncA"
+  | "feFuncB"
+  | "feFuncG"
+  | "feFuncR"
+  | "feGaussianBlur"
+  | "feImage"
+  | "feMerge"
+  | "feMergeNode"
+  | "feMorphology"
+  | "feOffset"
+  | "fePointLight"
+  | "feSpecularLighting"
+  | "feSpotLight"
+  | "feTile"
+  | "feTurbulence"
+  | "filter"
+  | "foreignObject"
+  | "g"
+  | "image"
+  | "line"
+  | "linearGradient"
+  | "marker"
+  | "mask"
+  | "metadata"
+  | "mpath"
+  | "path"
+  | "pattern"
+  | "polygon"
+  | "polyline"
+  | "radialGradient"
+  | "rect"
+  | "stop"
+  | "switch"
+  | "symbol"
+  | "text"
+  | "textPath"
+  | "tspan"
+  | "use"
+  | "view";
 
 export namespace JSX {
   // A projected element evaluates to a rendered snippet result — the same
   // shape the `{@render}`/`Snippet` machinery produces.
   type Element = ReturnType<Snippet>;
 
-  // Component tags are class-shaped through the synth; the empty bound keeps
-  // every projected component assignable as an element class.
+  type ElementType =
+    | keyof IntrinsicElements
+    | import("svelte").Component<any, any, any>
+    | ((props: any) => Element)
+    | (abstract new (...args: never[]) => ElementClass);
+
+  type LibraryManagedAttributes<Component, FallbackProps> =
+    Component extends import("svelte").Component<infer Props, any, any> ? Props : FallbackProps;
+
+  // Empty element-instance bound for the private class-shaped adapter.
   // eslint-disable-next-line @typescript-eslint/no-empty-object-type
   interface ElementClass {}
 
-  // Component props are checked against the synth's `$props` member.
+  // Private fallback for class-shaped foreign components.
   interface ElementAttributesProperty {
     $props: {};
   }
 
-  // The SVG intrinsic element set — Svelte-true attributes from
-  // `svelte/elements`' `SVGAttributes`, keyed by the SVG tag names against
-  // their DOM instance types. This REPLACES the HTML table (svg-only).
-  interface IntrinsicElements {
-    svg: SVGAttributes<SVGSVGElement>;
-    a: SVGAttributes<SVGAElement>;
-    circle: SVGAttributes<SVGCircleElement>;
-    clipPath: SVGAttributes<SVGClipPathElement>;
-    defs: SVGAttributes<SVGDefsElement>;
-    desc: SVGAttributes<SVGDescElement>;
-    ellipse: SVGAttributes<SVGEllipseElement>;
-    feBlend: SVGAttributes<SVGFEBlendElement>;
-    feColorMatrix: SVGAttributes<SVGFEColorMatrixElement>;
-    feComponentTransfer: SVGAttributes<SVGFEComponentTransferElement>;
-    feComposite: SVGAttributes<SVGFECompositeElement>;
-    feConvolveMatrix: SVGAttributes<SVGFEConvolveMatrixElement>;
-    feDiffuseLighting: SVGAttributes<SVGFEDiffuseLightingElement>;
-    feDisplacementMap: SVGAttributes<SVGFEDisplacementMapElement>;
-    feFlood: SVGAttributes<SVGFEFloodElement>;
-    feGaussianBlur: SVGAttributes<SVGFEGaussianBlurElement>;
-    feImage: SVGAttributes<SVGFEImageElement>;
-    feMerge: SVGAttributes<SVGFEMergeElement>;
-    feMorphology: SVGAttributes<SVGFEMorphologyElement>;
-    feOffset: SVGAttributes<SVGFEOffsetElement>;
-    feTile: SVGAttributes<SVGFETileElement>;
-    feTurbulence: SVGAttributes<SVGFETurbulenceElement>;
-    filter: SVGAttributes<SVGFilterElement>;
-    foreignObject: SVGAttributes<SVGForeignObjectElement>;
-    g: SVGAttributes<SVGGElement>;
-    image: SVGAttributes<SVGImageElement>;
-    line: SVGAttributes<SVGLineElement>;
-    linearGradient: SVGAttributes<SVGLinearGradientElement>;
-    marker: SVGAttributes<SVGMarkerElement>;
-    mask: SVGAttributes<SVGMaskElement>;
-    path: SVGAttributes<SVGPathElement>;
-    pattern: SVGAttributes<SVGPatternElement>;
-    polygon: SVGAttributes<SVGPolygonElement>;
-    polyline: SVGAttributes<SVGPolylineElement>;
-    radialGradient: SVGAttributes<SVGRadialGradientElement>;
-    rect: SVGAttributes<SVGRectElement>;
-    stop: SVGAttributes<SVGStopElement>;
-    symbol: SVGAttributes<SVGSymbolElement>;
-    text: SVGAttributes<SVGTextElement>;
-    textPath: SVGAttributes<SVGTextPathElement>;
-    tspan: SVGAttributes<SVGTSpanElement>;
-    use: SVGAttributes<SVGUseElement>;
-  }
+  // The official SVG-keyed intrinsic subset. This REPLACES the HTML table.
+  interface IntrinsicElements extends Pick<SvelteHTMLElements, SvelteSVGElementNames> {}
 }

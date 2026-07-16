@@ -697,6 +697,9 @@ impl TemplateProjector<'_, '_> {
         for attr in &el.attributes {
             self.project_attribute(el, attr);
         }
+        if matches!(el.kind, SvelteElementKind::Component) {
+            self.inject_native_component_call_check(el);
+        }
         // `let:` slot-prop directives introduce a binding scoped to this element's
         // CHILDREN (`<C let:item={$row}>{$row}</C>`). Collect each `let:` binding's
         // `$`-names and push them while projecting the children so a `$`-named
@@ -713,6 +716,114 @@ impl TemplateProjector<'_, '_> {
         }
         if pushed {
             self.pop_block_bindings();
+        }
+    }
+
+    /// Add a private direct-call check for a component's prop bag.
+    ///
+    /// Svelte 5's native component is callable as `(internals, props)`. The JSX
+    /// namespace adapter handles ordinary concrete components, while this
+    /// direct call preserves a generic component's own higher-rank inference:
+    /// `__verter_component(C)(internals, { items, render })` returns `C`
+    /// unchanged for native components, so TypeScript infers the component's
+    /// generic parameters from the authored prop object instead of first
+    /// collapsing them through a conditional `ComponentProps<C>` projection.
+    /// The check is an unmapped JSX spread and contributes no runtime props.
+    fn inject_native_component_call_check(&mut self, el: &SvelteElement) {
+        if !is_valid_component_reference(&el.name) {
+            return;
+        }
+        // A childful Svelte component passes a generated `children` Snippet,
+        // not the raw JSX child value. Fabricating that callable here would
+        // erase snippet parameters. Keep the JSX adapter authoritative for
+        // this shape; the typed gate covers both a valid generic use and a
+        // cross-prop mismatch while children are present.
+        if el.children.iter().any(|child| match child {
+            SvelteNode::Text(span) => !self.slice(*span).trim().is_empty(),
+            _ => true,
+        }) {
+            return;
+        }
+
+        let mut props = Vec::new();
+        for attr in &el.attributes {
+            match &attr.kind {
+                SvelteAttributeKind::Plain { name, value, .. } if !name.is_empty() => {
+                    if is_css_custom_property(name) {
+                        continue;
+                    }
+                    let key = format!("{name:?}");
+                    let value = match value {
+                        Some(SvelteAttributeValue::Expression(span)) => {
+                            let raw = self.slice(*span).to_string();
+                            format!("({})", self.rewrite_store_subs_in_text(&raw))
+                        }
+                        Some(SvelteAttributeValue::Text(span)) => {
+                            format!("{:?}", self.slice(*span))
+                        }
+                        Some(SvelteAttributeValue::Mixed(_)) => return,
+                        None => "true".to_string(),
+                    };
+                    props.push(format!("{key}: {value}"));
+                }
+                SvelteAttributeKind::Spread(span) => {
+                    let raw = self.slice(*span).trim().to_string();
+                    let expr = raw.strip_prefix("...").unwrap_or(&raw).trim().to_string();
+                    props.push(format!("...({})", self.rewrite_store_subs_in_text(&expr)));
+                }
+                SvelteAttributeKind::Directive(dir)
+                    if matches!(
+                        dir.kind,
+                        SvelteDirectiveKind::Bind | SvelteDirectiveKind::On
+                    ) && dir.local != "this" =>
+                {
+                    let Some(SvelteAttributeValue::Expression(span)) = &dir.value else {
+                        continue;
+                    };
+                    let value =
+                        if dir.kind == SvelteDirectiveKind::Bind && self.is_function_binding(dir) {
+                            match self.dialect {
+                                SvelteIdeDialect::TypeScript => format!(
+                                    "null! as __VerterComponentProps<typeof {}>[{:?}]",
+                                    el.name, dir.local
+                                ),
+                                SvelteIdeDialect::JavaScript => format!(
+                                "/** @type {{__VerterComponentProps<typeof {}>[{:?}]}} */ (null)",
+                                el.name, dir.local
+                            ),
+                            }
+                        } else {
+                            let raw = self.slice(*span).to_string();
+                            self.rewrite_store_subs_in_text(&raw)
+                        };
+                    let name = if dir.kind == SvelteDirectiveKind::On {
+                        format!("on{}", dir.local)
+                    } else {
+                        dir.local.clone()
+                    };
+                    props.push(format!("{name:?}: ({value})"));
+                }
+                _ => {}
+            }
+        }
+
+        let internals = match self.dialect {
+            SvelteIdeDialect::TypeScript => {
+                "null! as import(\"svelte\").ComponentInternals".to_string()
+            }
+            SvelteIdeDialect::JavaScript => {
+                "/** @type {import(\"svelte\").ComponentInternals} */ (null)".to_string()
+            }
+        };
+        let check = format!(
+            " {{...(__verter_component({})({}, {{ {} }}), {{}})}}",
+            el.name,
+            internals,
+            props.join(", ")
+        );
+        let close_offset = if el.self_closing { 2 } else { 1 };
+        if let Some(at) = el.open_span.end.checked_sub(close_offset) {
+            self.ct.prepend_left(at, &check);
         }
     }
 

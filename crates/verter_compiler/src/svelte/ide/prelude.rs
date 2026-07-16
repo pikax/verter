@@ -580,25 +580,62 @@ function __verter_bind_fn(get, set) {}
  */
 function __verter_bind_fn_read(get, set) {}
 /**
- * @template P
- * @param {{ new (...args: any[]): { $props: P } }} component
- * @returns {(props: P & { children?: unknown }) => ReturnType<import("svelte").Snippet>}
+ * @template C
+ * @typedef {C extends import("svelte").Component<infer P extends Record<string, any>, any, any> ? P : C extends { new (...args: any[]): { $props: infer P } } ? P : never} __VerterComponentProps
+ */
+/**
+ * @template C
+ * @typedef {C extends import("svelte").Component<any, infer E extends Record<string, any>, any> ? E : C extends { new (...args: any[]): infer I } ? I : never} __VerterComponentExports
+ */
+/**
+ * @template C
+ * @typedef {C extends import("svelte").Component<any, any, infer B extends PropertyKey> ? Exclude<B, ""> & string : keyof __VerterComponentProps<C> & string} __VerterComponentBindings
+ */
+/**
+ * @template C
+ * @template {__VerterComponentBindings<C>} K
+ * @param {C} component
+ * @param {K} name
+ * @returns {void}
+ */
+function __verter_component_binding(component, name) {}
+/**
+ * @template C
+ * @param {C} component
+ * @returns {C extends import("svelte").Component<any, any, any> ? C : C extends { new (...args: any[]): { $props: infer P extends Record<string, any> } } ? import("svelte").Component<P, __VerterComponentExports<C> & Record<string, any>, ""> : never}
+ */
+function __verter_component(component) {
+  return /** @type {C extends import("svelte").Component<any, any, any> ? C : C extends { new (...args: any[]): { $props: infer P extends Record<string, any> } } ? import("svelte").Component<P, __VerterComponentExports<C> & Record<string, any>, ""> : never} */ (/** @type {unknown} */ (component));
+}
+/**
+ * @template {import("svelte").Component<any, any, any> | { new (...args: any[]): { $props: any } }} C
+ * @param {C} component
+ * @returns {(props: __VerterComponentProps<C> & { children?: unknown }) => ReturnType<import("svelte").Snippet>}
  */
 function __verter_dynamic_component(component) {
-  return /** @type {(props: P & { children?: unknown }) => ReturnType<import("svelte").Snippet>} */ (
+  return /** @type {(props: __VerterComponentProps<C> & { children?: unknown }) => ReturnType<import("svelte").Snippet>} */ (
     function (props) { return /** @type {ReturnType<import("svelte").Snippet>} */ (/** @type {unknown} */ (null)); }
   );
 }
 /**
  * @template C
- * @typedef {(C extends { new (...args: any[]): infer I } ? I : never) extends { $events: infer E } ? E : {}} __VerterEventsOf
+ * @typedef {(C extends { new (...args: any[]): infer I } ? I : never) extends { $events: infer E } ? E : {}} __VerterLegacyEventsOf
  */
 /**
  * @template C
- * @template {keyof __VerterEventsOf<C> & string} K
+ * @typedef {{ [K in keyof __VerterComponentProps<C> & string]: K extends `on${infer E}` ? E : never }[keyof __VerterComponentProps<C> & string] | (keyof __VerterLegacyEventsOf<C> & string)} __VerterEventNames
+ */
+/**
+ * @template C
+ * @template {__VerterEventNames<C>} K
+ * @typedef {K extends keyof __VerterLegacyEventsOf<C> ? __VerterLegacyEventsOf<C>[K] : `on${K}` extends keyof __VerterComponentProps<C> ? NonNullable<__VerterComponentProps<C>[`on${K}`]> : never} __VerterEventHandler
+ */
+/**
+ * @template C
+ * @template {__VerterEventNames<C>} K
  * @param {C} component
  * @param {K} name
- * @param {__VerterEventsOf<C>[K]} handler
+ * @param {__VerterEventHandler<C, K>} handler
  * @returns {void}
  */
 function __verter_event(component, name, handler) {}
@@ -706,45 +743,63 @@ declare function __verter_bind_group_radio<L>(local: L extends readonly unknown[
 // The checker enforces get/set mutual consistency against the bind-target type
 // `V`: `get` returns `V` (or `null` for write-only), `set` consumes `V`. For an
 // element bind the projector passes `V` from the bind-contract table; for a
-// component bind it passes `InstanceType<typeof Child>["$props"][K]` (the typing
+// component bind it passes `__VerterComponentProps<typeof Child>[K]` (the typing
 // is done in the PROJECTED TSX via TS — no Rust resolver call). A READONLY
 // element binding routes to `__verter_bind_fn_read`, whose `get` is `null`-only
 // (a readonly function binding must be the write-only `{null, set}` form).
 declare function __verter_bind_fn<V>(get: (() => V) | null, set: (value: V) => void): void;
 declare function __verter_bind_fn_read<V>(get: null, set: (value: V) => void): void;
+type __VerterComponentProps<C> =
+  C extends import("svelte").Component<infer P extends Record<string, any>, any, any> ? P :
+  C extends abstract new (...args: never[]) => { $props: infer P } ? P :
+  never;
+type __VerterComponentExports<C> =
+  C extends import("svelte").Component<any, infer E extends Record<string, any>, any> ? E :
+  C extends abstract new (...args: never[]) => infer I ? I :
+  never;
+type __VerterComponentBindings<C> =
+  C extends import("svelte").Component<any, any, infer B extends PropertyKey> ? Exclude<B, ""> & string :
+  keyof __VerterComponentProps<C> & string;
+declare function __verter_component_binding<
+  C,
+  K extends __VerterComponentBindings<C>
+>(component: C, name: K): void;
+declare function __verter_component<C>(component: C):
+  C extends import("svelte").Component<any, any, any> ? C :
+  C extends abstract new (...args: never[]) => { $props: infer P extends Record<string, any> }
+    ? import("svelte").Component<P, __VerterComponentExports<C> & Record<string, any>, "">
+    : never;
 // --- F8 `<svelte:component this={C}>` / `<svelte:self>` dynamic component.
-// The `this` value must be a class-shaped component (an `abstract new (...) =>
-// { $props }` constructor — the synth shape every `.svelte`/`.vue` component
-// exposes). The props `P` are inferred DIRECTLY from the constructor's `$props`
-// return member (NOT via `InstanceType<C>["$props"]`, which does not narrow
-// over a generic `C` even at the call site — it stays `object`/`unknown`). The
-// helper returns a FUNCTION COMPONENT typed by `P` (so `<__VerterDyn prop={x}>`
-// checks `prop` against the component's own `$props`): a wrong prop FAILS, a
-// non-component `this` FAILS the constructor constraint. `children` is
+// The `this` value may be a native callable Svelte 5 Component or the private
+// class-shaped foreign-component adapter. Props are extracted through
+// `__VerterComponentProps<C>`, and the helper returns a JSX function component
+// typed by those props. A wrong prop or non-component `this` fails. `children` is
 // permitted (svelte components accept slotted children) without forcing it onto
 // the `$props` contract. The return type is `ReturnType<Snippet>` (the
 // projected-element shape), never the pragma-bound `JSX.Element` (which is not
 // in lexical scope in the prelude).
-declare function __verter_dynamic_component<P>(
-  component: abstract new (...args: never[]) => { $props: P },
-): (props: P & { children?: unknown }) => ReturnType<Snippet>;
+declare function __verter_dynamic_component<
+  C extends import("svelte").Component<any, any, any> | (abstract new (...args: never[]) => { $props: any })
+>(component: C): (props: __VerterComponentProps<C> & { children?: unknown }) => ReturnType<Snippet>;
 // --- F13 component `on:event={handler}` payload checking. A COMPONENT element's
 // `on:select={h}` projects to `{...(__verter_event(Child, "select", h), {})}` —
-// the helper extracts the component's `$events` map from its instance type and
-// constrains the event NAME to `keyof $events` (an unknown event name FAILS) and
-// the HANDLER to `$events[name]` (a wrong payload type FAILS). A component value
-// is class-shaped (`new (...) => { $events }`); a component WITHOUT a `$events`
-// member resolves to `{}` (no checkable events — every `on:` then FAILS the
-// `keyof {}` constraint, which is the correct behaviour for an event-less
-// component). This is the precise checked replacement for the rejected loose
-// `on:`→`onclick` verbatim projection on component elements (a payload-checked
-// event map, never an untyped event bag).
-type __VerterEventsOf<C> =
+// the helper resolves native Svelte 5 `on${event}` callback props. A private
+// `$events` fallback remains only for class-shaped foreign components. Unknown
+// names and wrong handler payloads fail; no untyped event bag is introduced.
+type __VerterLegacyEventsOf<C> =
   (C extends new (...args: any[]) => infer I ? I : never) extends { $events: infer E } ? E : {};
-declare function __verter_event<C, K extends keyof __VerterEventsOf<C> & string>(
+type __VerterCallbackEventNames<C> = {
+  [K in keyof __VerterComponentProps<C> & string]: K extends `on${infer E}` ? E : never
+}[keyof __VerterComponentProps<C> & string];
+type __VerterEventNames<C> = __VerterCallbackEventNames<C> | (keyof __VerterLegacyEventsOf<C> & string);
+type __VerterEventHandler<C, K extends __VerterEventNames<C>> =
+  K extends keyof __VerterLegacyEventsOf<C> ? __VerterLegacyEventsOf<C>[K] :
+  `on${K}` extends keyof __VerterComponentProps<C> ? NonNullable<__VerterComponentProps<C>[`on${K}`]> :
+  never;
+declare function __verter_event<C, K extends __VerterEventNames<C>>(
   component: C,
   name: K,
-  handler: __VerterEventsOf<C>[K],
+  handler: __VerterEventHandler<C, K>,
 ): void;
 // --- F11 store auto-subscription (`$store`) helpers. The projector rewrites
 // ONLY the `$` byte / `=` operator spans of a classified store-sub, preserving
@@ -848,36 +903,31 @@ mod tests {
 
     #[test]
     fn prelude_declares_the_dynamic_component_checker() {
-        // F8: the `<svelte:component>` / `<svelte:self>` dynamic-component
-        // checker is declared with the class-shaped-constructor constraint,
-        // inferring the props `P` DIRECTLY from the constructor's `{ $props: P }`
-        // return member (NOT via `InstanceType<C>["$props"]` — see the prelude
-        // comment for why that does not narrow over a generic `C`).
+        // F8 accepts native Svelte 5 Components and the private class-shaped
+        // foreign-component adapter, extracting props through one helper.
         let p = render_prelude(SvelteJsxNamespace::Html, true);
         assert!(p.contains("declare function __verter_dynamic_component"));
         assert!(
-            p.contains("abstract new (...args: never[]) => { $props: P }"),
-            "the props are inferred directly from the constructor's $props member"
+            p.contains("import(\"svelte\").Component<any, any, any> | (abstract new"),
+            "the dynamic checker accepts native and private class-shaped components"
         );
         assert!(
-            p.contains("(props: P & { children?: unknown })"),
-            "the returned function component is typed by the inferred $props"
+            p.contains("(props: __VerterComponentProps<C> & { children?: unknown })"),
+            "the returned function component uses the native-aware props extractor"
         );
     }
 
     #[test]
     fn prelude_declares_the_component_event_helper() {
-        // F13: the component `on:event` payload checker is declared. It extracts
-        // the component's `$events` map and constrains the event name to
-        // `keyof __VerterEventsOf<C>` and the handler to its indexed payload type.
+        // F13 resolves Svelte 5 callback props, retaining the private legacy
+        // `$events` fallback for foreign class-shaped components.
         let p = render_prelude(SvelteJsxNamespace::Html, true);
-        assert!(p.contains("type __VerterEventsOf<C>"));
-        assert!(p.contains(
-            "declare function __verter_event<C, K extends keyof __VerterEventsOf<C> & string>"
-        ));
+        assert!(p.contains("type __VerterCallbackEventNames<C>"));
+        assert!(p.contains("type __VerterLegacyEventsOf<C>"));
+        assert!(p.contains("declare function __verter_event<C, K extends __VerterEventNames<C>>"));
         assert!(
-            p.contains("handler: __VerterEventsOf<C>[K]"),
-            "the handler is typed by the indexed event payload"
+            p.contains("handler: __VerterEventHandler<C, K>"),
+            "the handler is typed by the native callback or legacy event payload"
         );
         // The loose `CustomEvent<any>` projection is NOT present.
         assert!(
