@@ -1407,13 +1407,12 @@ fn shadowed_block_rune_declarator_lowers_to_inner_binding() {
 
 #[test]
 fn await_expression_in_interpolation_fails_closed() {
-    // A non-identifier interpolation expression (here an IIFE wrapping an `await`) is
-    // the `build_template_chunk` breadth — it fails closed at the complex-interpolation
-    // gate before any async-rewrite gate. Only a bare reactive-signal /
-    // no-default-prop identifier read is the supported interpolation surface.
+    // The interpolation carrier is supported, but the nested `await` retains
+    // its own experimental-async refusal instead of being misreported as a
+    // generic interpolation-shape failure.
     assert_fail_closed(
         "<script>let p = $state(0); let n = $state(0);</script>\n<button onclick={() => n++}>{(async () => await p)()}</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComplexInterpolation { .. }),
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ExperimentalAsync { surface, .. } if *surface == "await"),
     );
 }
 
@@ -6455,10 +6454,7 @@ fn cross_script_redeclaration_rejects_with_exact_official_codes() {
         "the distinct-name cross-script control must keep compiling with its module import:\n{js}"
     );
     // (b) cross-script `var`/`var` and a module `var` + instance import are official-
-    // ACCEPTED (a prior `var` never trips the binder's duplicate check) — they must
-    // NOT reject as DeclarationDuplicate. (A module `var` statement itself stays
-    // fail-closed as an unsupported module-script item — an honest deferral, so the
-    // control asserts the refusal CHANNEL, not an emission.)
+    // ACCEPTED (a prior `var` never trips the binder's duplicate check).
     for (label, source) in [
         (
             "var + var",
@@ -6469,15 +6465,10 @@ fn cross_script_redeclaration_rejects_with_exact_official_codes() {
             "<script module>var x = 1;</script>\n<script>import { x } from './b.js';\nlet s = $state(0);</script>\n<p>{s}</p>\n",
         ),
     ] {
-        let err = emit_result(source).expect_err("a module `var` item stays fail-closed");
+        let js = emit_result(source).expect("an official-accepted var combination compiles");
         assert!(
-            !matches!(
-                &err,
-                ClientCompileError::OfficialReject(r)
-                    if r.rule == CoreOfficialValidationRule::DeclarationDuplicate
-            ),
-            "[{label}] an official-accepted `var` combination must not be over-rejected \
-             as DeclarationDuplicate, got {err:?}"
+            js.contains("export default function"),
+            "[{label}] an official-accepted `var` combination emits a module:\n{js}"
         );
     }
 }
@@ -6610,11 +6601,7 @@ fn module_namespace_member_read_frames_like_the_instance_slot() {
 }
 
 #[test]
-fn non_static_member_chains_on_imports_stay_fail_closed() {
-    // The narrow member admit covers STATIC member chains rooted at an import ONLY.
-    // A computed member, an optional chain, and a member rooted at a PLAIN local
-    // all stay the fail-closed complex-interpolation breadth — the import widening
-    // must not leak into the general member-interpolation surface.
+fn computed_optional_and_call_member_interpolations_use_the_shared_value_carrier() {
     for (label, interp) in [
         ("computed", "{NS['z']}"),
         ("optional", "{NS?.z}"),
@@ -6623,24 +6610,25 @@ fn non_static_member_chains_on_imports_stay_fail_closed() {
         let src = format!(
             "<script>import * as NS from './m.js'; let c = $state(0);</script>\n<p>{interp}</p>\n<button onclick={{() => c++}}>{{c}}</button>\n"
         );
-        assert_fail_closed_labeled(label, &src, |s| {
-            matches!(
-                s,
-                UnsupportedSvelteRuntimeSurface::ComplexInterpolation { .. }
-            )
-        });
+        let js = emit(&src, &format!("{label}.svelte"));
+        assert!(
+            js.contains("NS") && js.contains("$.set_text("),
+            "[{label}] the accepted member family must emit a text update:\n{js}"
+        );
+        assert!(
+            parses_as_js(&js),
+            "[{label}] output must be valid JS:\n{js}"
+        );
     }
-    // A static member rooted at a PLAIN LOCAL is untouched by the import widening.
-    assert_fail_closed(
+    let js = emit(
         "<script>let d = 1; let c = $state(0);</script>\n<p>{d.x}</p>\n<button onclick={() => c++}>{c}</button>\n",
-        |s| {
-            matches!(
-                s,
-                UnsupportedSvelteRuntimeSurface::ComplexInterpolation { .. }
-                    | UnsupportedSvelteRuntimeSurface::InstanceScriptItem { .. }
-            )
-        },
+        "plain-local.svelte",
     );
+    assert!(
+        js.contains("$.set_text(text, d.x)"),
+        "a plain-local member read uses the same live carrier:\n{js}"
+    );
+    assert!(parses_as_js(&js));
 }
 
 #[test]
@@ -10125,6 +10113,54 @@ fn client_source_map_preserves_instance_script_rewrite_tokens() {
         &module.code,
         generated_write,
         source_write,
+    );
+}
+
+#[test]
+fn client_source_map_preserves_member_and_memoized_call_interpolation_tokens() {
+    let source = "<script>let value = $state({ label: 'x' }); function label(v) { return v.label; }</script>\n<p>{value.label} {label(value)}</p><button onclick={() => value = { label: 'y' }}>+</button>\n";
+    let parsed = parse_svelte(source);
+    let opts = SvelteRuntimeOptions {
+        filename: Some("Interpolation.svelte".to_string()),
+        ..Default::default()
+    };
+    let alloc = Allocator::default();
+    let module = compile_client(source, &parsed, &opts, &alloc, false, true)
+        .expect("member and call interpolations compile with a map");
+    let map = oxc_sourcemap::OwnedSourceMap::from_json_string(
+        module.source_map.as_deref().expect("demanded JS map"),
+    )
+    .expect("valid JS map");
+
+    let generated_member = module
+        .code
+        .find("$.get(value).label")
+        .expect("member interpolation keeps its rewritten signal root")
+        + "$.get(".len();
+    let source_member = source
+        .find("value.label}")
+        .expect("authored member interpolation");
+    assert_generated_offset_maps_to_exact_source_offset(
+        &map,
+        &module.code,
+        generated_member,
+        source_member,
+    );
+
+    let generated_call = module
+        .code
+        .find("label($.get(value))")
+        .expect("call interpolation is represented by the dependency thunk")
+        + "label($.get(".len();
+    let source_call = source
+        .find("label(value)}")
+        .expect("authored call interpolation")
+        + "label(".len();
+    assert_generated_offset_maps_to_exact_source_offset(
+        &map,
+        &module.code,
+        generated_call,
+        source_call,
     );
 }
 
@@ -14555,40 +14591,151 @@ fn reactive_text_bare_signal_read_stays_inline() {
 // vertical, and (where the prior emit-by-default emitted divergent / invalid JS)
 // is RED against the pre-refactor tree.
 
+// @ai-generated - D-35 live/static interpolation parity against pinned Svelte 5.56.3.
 #[test]
-fn binary_constant_interpolation_fails_closed() {
-    // A `{1 + 1}` interpolation is a non-identifier (binary) expression — the
-    // `build_template_chunk` breadth, refused at the complex-interpolation gate.
-    // The component is runes-mode (the `$state` declarator) so the legacy refusal
-    // does not pre-empt the interpolation classification.
-    assert_fail_closed(
-        "<script>let n = $state(0);</script>\n<p>{1 + 1}</p>\n<button onclick={() => n++}>{n}</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComplexInterpolation { .. }),
-    );
+fn interpolation_expression_families_lower_through_the_shared_rewriter() {
+    let cases = [
+        (
+            "member",
+            "<script>let value = $state({ label: 'x' });</script>\n<p>{value.label}</p>\n",
+            "$.set_text(text,value.label)",
+            false,
+        ),
+        (
+            "optional-member",
+            "<script>let value = $state({ label: 'x' });</script>\n<p>{value?.label}</p>\n",
+            "$.set_text(text,value?.label)",
+            false,
+        ),
+        (
+            "call",
+            "<script>let value = $state(0); function label(v) { return v; }</script>\n<p>{label(value)}</p><button onclick={() => value++}>+</button>\n",
+            "$.set_text(text,$0),[()=>label($.get(value))]",
+            true,
+        ),
+        (
+            "binary",
+            "<script>let value = $state(0);</script>\n<p>{value + 1}</p><button onclick={() => value++}>+</button>\n",
+            "$.set_text(text,$.get(value)+1)",
+            false,
+        ),
+        (
+            "logical",
+            "<script>let value = $state(0);</script>\n<p>{value && 'yes'}</p><button onclick={() => value++}>+</button>\n",
+            "$.set_text(text,$.get(value)&&'yes')",
+            false,
+        ),
+        (
+            "conditional",
+            "<script>let value = $state(0);</script>\n<p>{value ? 'yes' : 'no'}</p><button onclick={() => value++}>+</button>\n",
+            "$.set_text(text,$.get(value)?'yes':'no')",
+            false,
+        ),
+        (
+            "template",
+            "<script>let value = $state(0);</script>\n<p>{`v=${value}`}</p><button onclick={() => value++}>+</button>\n",
+            "$.set_text(text,`v=${$.get(value)}`)",
+            false,
+        ),
+        (
+            "new",
+            "<script>let value = $state(0); class Box { constructor(v) { this.label = v; } }</script>\n<p>{new Box(value).label}</p><button onclick={() => value++}>+</button>\n",
+            "$.set_text(text,new Box($.get(value)).label)",
+            false,
+        ),
+    ];
+    for (name, source, expected, memoized) in cases {
+        let js = emit(source, &format!("{name}.svelte"));
+        let normalized = normalize_js_cosmetics(&js);
+        assert!(
+            normalized.contains(&nc(expected)),
+            "{name} interpolation must use the official rewritten text update:\n{js}"
+        );
+        assert_eq!(
+            normalized.contains("$.template_effect(($0)=>"),
+            memoized,
+            "only call-bearing interpolation values use the deps-array memoizer:\n{js}"
+        );
+        assert!(parses_as_js(&js), "{name} output must be valid JS:\n{js}");
+    }
 }
 
+// @ai-generated - D-35 static interpolation topology against pinned Svelte 5.56.3.
 #[test]
-fn non_reactive_const_interpolation_fails_closed() {
-    // A `{C}` read of an instance-script plain `const` is a bare identifier resolving
-    // to a NON-reactive binding — official static-folds it to `textContent`, a
-    // distinct topology. A separate reactive `$state` drives the onclick so the
-    // component reaches the interpolation classifier.
-    assert_fail_closed(
-        "<script>let n = $state(0); const C = 5;</script>\n<p>{C}</p>\n<button onclick={() => n++}>{n}</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::StaticInterpolation { .. }),
+fn static_interpolation_uses_text_content_or_node_value_without_an_effect() {
+    let sole = emit(
+        "<script>const C = 5;</script>\n<p>a {C} b</p>\n",
+        "sole.svelte",
     );
+    let normalized = normalize_js_cosmetics(&sole);
+    assert!(
+        normalized.contains(&nc("$.from_html(`<p></p>`)"))
+            && normalized.contains(&nc("p.textContent='a 5 b'")),
+        "a sole static text run must use the element textContent topology:\n{sole}"
+    );
+    assert!(
+        !normalized.contains("$.child(p)") && !normalized.contains("$.template_effect"),
+        "a sole static text run must not create a text-node walk or effect:\n{sole}"
+    );
+
+    let sibling = emit(
+        "<div><span>a</span>{1 + 2}<span>b</span></div>\n",
+        "sibling.svelte",
+    );
+    let normalized = normalize_js_cosmetics(&sibling);
+    assert!(
+        normalized.contains(&nc("text.nodeValue='3'")),
+        "a static run between siblings must initialize the reached text node:\n{sibling}"
+    );
+    assert!(
+        !normalized.contains("$.template_effect"),
+        "a static sibling run must not create an effect:\n{sibling}"
+    );
+    assert!(parses_as_js(&sole) && parses_as_js(&sibling));
 }
 
+// @ai-generated - D-35 folded/live run composition and block-alias rewriting.
 #[test]
-fn never_reassigned_state_interpolation_fails_closed() {
-    // A `{n}` read of a `$state` that is NEVER reassigned lowers (in official) to a
-    // plain `let n = 5;` and a STATIC `textContent` write, not a reactive op. A
-    // SEPARATE reactive `$state` drives the supported onclick (so the component is
-    // runes-mode + reactive without reassigning `n`).
-    assert_fail_closed(
-        "<script>let n = $state(5); let c = $state(0);</script>\n<button onclick={() => c++}>{n}</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::StaticInterpolation { .. }),
+fn interpolation_folding_composes_with_live_runs_and_block_aliases() {
+    let mixed = emit(
+        "<script>let value = $state(0);</script>\n<p>sum {1 + 2}: {value}</p><button onclick={() => value++}>+</button>\n",
+        "mixed.svelte",
     );
+    let normalized = normalize_js_cosmetics(&mixed);
+    assert!(
+        normalized.contains(&nc("$.set_text(text,`sum 3: ${$.get(value)??''}`)")),
+        "the static chunk must fold into the live text run without a second update:\n{mixed}"
+    );
+    assert_eq!(
+        normalized.matches("$.set_text(text,").count(),
+        1,
+        "one DOM text run must produce exactly one update:\n{mixed}"
+    );
+
+    let each = emit(
+        "<script>let items = $state([{ label: 'x' }]);</script>\n{#each items as item}<p>got {item.label}</p>{/each}\n",
+        "each.svelte",
+    );
+    let normalized = normalize_js_cosmetics(&each);
+    assert!(
+        normalized.contains(&nc("$.set_text(text,`got ${$.get(item).label??''}`)")),
+        "an each alias member must preserve the signal read before the member access:\n{each}"
+    );
+    assert!(
+        !normalized.contains("$.get(item.label)"),
+        "the member itself is never treated as the signal cell:\n{each}"
+    );
+
+    let await_block = emit(
+        "<script>let promise = $state(Promise.resolve({ label: 'x' }));</script>\n{#await promise then value}<p>got {value.label}</p>{/await}\n",
+        "await.svelte",
+    );
+    let normalized = normalize_js_cosmetics(&await_block);
+    assert!(
+        normalized.contains(&nc("$.set_text(text,`got ${$.get(value).label??''}`)")),
+        "an await alias member must preserve the alias signal read:\n{await_block}"
+    );
+    assert!(parses_as_js(&mixed) && parses_as_js(&each) && parses_as_js(&await_block));
 }
 
 #[test]
@@ -18218,17 +18365,23 @@ fn state_snapshot_argument_signal_read_still_rewrites() {
 }
 
 #[test]
-fn state_snapshot_in_template_interpolation_fails_closed_as_complex_not_rune() {
-    // `{$state.snapshot(o)}` as a BARE template interpolation is a COMPLEX
-    // interpolation (the interpolation surface admits only bare identifiers, and
-    // official emits the deferred `template_effect` form Verter does not produce). It
-    // fails closed as `ComplexInterpolation` — NOT the old `AdvancedRune`
-    // "$state.snapshot" refusal (the snapshot rune member is no longer refused; the
-    // interpolation CARRIER is the limit). Discriminating: the disposition CHANGED.
-    assert_fail_closed(
+fn state_snapshot_in_template_interpolation_uses_the_memoized_value_carrier() {
+    let js = emit(
         "<script>let o = $state({ a: 1 });</script>\n<button onclick={() => o.a++}>{$state.snapshot(o)}</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComplexInterpolation { .. }),
+        "App.svelte",
     );
+    let normalized = normalize_js_cosmetics(&js);
+    assert!(
+        normalized.contains(&nc(
+            "$.template_effect(($0)=>$.set_text(text,$0),[()=>$.snapshot(o)])"
+        )),
+        "snapshot interpolation must lower through the call-bearing deps carrier:\n{js}"
+    );
+    assert!(
+        !js.contains("$state.snapshot"),
+        "no raw rune survives:\n{js}"
+    );
+    assert!(parses_as_js(&js));
 }
 
 #[test]
@@ -19491,17 +19644,27 @@ fn effect_tracking_inside_effect_body_lowers() {
 }
 
 #[test]
-fn effect_tracking_inline_template_interpolation_fails_closed_at_carrier() {
-    // Inline `{$effect.tracking()}` rides the SAME interpolation expression path
-    // as any other call-bearing interpolation — which is the pre-existing
-    // ComplexInterpolation carrier boundary (the memoized-dep emission the
-    // official `$.template_effect(($0) => …, [() => $.effect_tracking()])` form
-    // needs is the interpolation-completion surface). It must FAIL CLOSED there —
-    // never a raw `$effect.tracking()` emission, never a mis-scoped plain read.
-    assert_fail_closed(
+fn effect_tracking_inline_template_interpolation_uses_the_memoized_value_carrier() {
+    let js = emit(
         "<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n<p>{$effect.tracking()}</p>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComplexInterpolation { .. }),
+        "App.svelte",
     );
+    let normalized = normalize_js_cosmetics(&js);
+    assert!(
+        normalized.contains(&nc("$.set_text(text_1,$0)"))
+            && normalized.contains(&nc("[()=>($.effect_tracking())]")),
+        "tracking interpolation must lower through the call-bearing deps carrier:\n{js}"
+    );
+    assert_eq!(
+        normalized.matches("$.template_effect(").count(),
+        1,
+        "adjacent text updates must share one template effect:\n{js}"
+    );
+    assert!(
+        !js.contains("$effect.tracking"),
+        "no raw rune survives:\n{js}"
+    );
+    assert!(parses_as_js(&js));
 }
 
 #[test]
@@ -24239,11 +24402,6 @@ fn runes_mode_reactive_statement_is_the_official_reject_explicit_and_inferred() 
         matches!(&err, ClientCompileError::OfficialReject(r) if r.official_code == "legacy_reactive_statement_invalid"),
         "inferred-runes `$:` must be legacy_reactive_statement_invalid: {err:?}"
     );
-    // NEGATIVE: neither is the static-interpolation misattribution.
-    assert!(
-        !matches!(&err, ClientCompileError::Unsupported(s) if s.diagnostic_code() == "svelte-runtime-unsupported-static-interpolation"),
-        "must not be the static-interpolation refusal: {err:?}"
-    );
 }
 
 #[test]
@@ -24793,16 +24951,19 @@ fn legacy_unwritten_let_is_preserved_without_promotion() {
 }
 
 #[test]
-fn legacy_template_read_only_let_stays_the_static_interpolation_refusal() {
-    // A template READ of a never-written legacy let is NOT reactive — official
-    // static-folds it to a `textContent` write (a distinct deferred topology),
-    // so the static-interpolation refusal stays.
-    assert_fail_closed("<script>let a = 1;</script>\n<p>{a}</p>\n", |s| {
-        matches!(
-            s,
-            UnsupportedSvelteRuntimeSurface::StaticInterpolation { .. }
-        )
-    });
+fn legacy_template_read_only_let_static_folds_to_text_content() {
+    let js = emit("<script>let a = 1;</script>\n<p>{a}</p>\n", "App.svelte");
+    let normalized = normalize_js_cosmetics(&js);
+    assert!(
+        normalized.contains(&nc("$.from_html(`<p></p>`)"))
+            && normalized.contains(&nc("p.textContent='1'")),
+        "a known read-only legacy local must use the static textContent topology:\n{js}"
+    );
+    assert!(
+        !js.contains("$.template_effect"),
+        "static text needs no effect:\n{js}"
+    );
+    assert!(parses_as_js(&js));
 }
 
 // ── `$:` legacy reactive statements: lowering + the malformed-sibling matrix ──

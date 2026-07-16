@@ -81,6 +81,26 @@ pub fn expr_has_call(
         Expression::ParenthesizedExpression(p) => &p.expression,
         other => other,
     };
+    Ok(expr_has_call_parsed(
+        inner,
+        scope,
+        bindings,
+        scopes,
+        declared_roots,
+    ))
+}
+
+/// Retained-AST form of [`expr_has_call`]. The lowering pipeline uses this
+/// entry point so final binding kinds can be applied without reparsing the
+/// authored expression.
+#[must_use]
+pub(super) fn expr_has_call_parsed(
+    expression: &Expression<'_>,
+    scope: ScopeId,
+    bindings: &BindingTable,
+    scopes: &ScopeGraph,
+    declared_roots: &rustc_hash::FxHashSet<String>,
+) -> bool {
     let mut scan = HasCallScan {
         declared_roots,
         bindings,
@@ -89,8 +109,8 @@ pub fn expr_has_call(
         deps: 0,
         found: false,
     };
-    scan.visit_expr(inner);
-    Ok(scan.found)
+    scan.visit_expr(expression);
+    scan.found
 }
 
 // ---------------------------------------------------------------------------
@@ -308,14 +328,30 @@ pub(super) fn expr_has_binding_impurity(
     let Some(Statement::ExpressionStatement(stmt)) = parsed.program.body.first() else {
         return Err(());
     };
+    Ok(expr_has_binding_impurity_parsed(
+        &stmt.expression,
+        scope,
+        bindings,
+        scopes,
+    ))
+}
+
+/// Retained-AST form of [`expr_has_binding_impurity`].
+#[must_use]
+pub(super) fn expr_has_binding_impurity_parsed(
+    expression: &Expression<'_>,
+    scope: ScopeId,
+    bindings: &BindingTable,
+    scopes: &ScopeGraph,
+) -> bool {
     let mut scan = BindingImpurityScan {
         bindings,
         scopes,
         scope,
         found: false,
     };
-    scan.visit_expr(&stmt.expression);
-    Ok(scan.found)
+    scan.visit_expr(expression);
+    scan.found
 }
 
 /// Walks an expression tree for the IMPURE portion of `has_state`: a MEMBER access

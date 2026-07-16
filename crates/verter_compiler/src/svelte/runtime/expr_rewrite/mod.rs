@@ -386,6 +386,26 @@ pub(super) fn rewrite_expression_full(
     )
 }
 
+/// Retained-AST form of [`rewrite_expression_full`]. Template expressions use
+/// this entry point so the source-preserving rewrite shares the canonical
+/// lowering parse with classification and reactive analysis.
+pub(super) fn rewrite_expression_full_parsed(
+    source: &str,
+    program: &Program<'_>,
+    scope: ScopeId,
+    context: RewriteContext<'_>,
+) -> Result<RewrittenExpr, UnsupportedSvelteRuntimeSurface> {
+    rewrite_expression_program(
+        source,
+        "",
+        scope,
+        context,
+        ExprDialect::Tsx,
+        RewriteRole::Value,
+        program,
+    )
+}
+
 /// Like [`rewrite_expression_full`] but in the STATEMENT role
 /// ([`RewriteRole::Statement`]): `source` is the EXPRESSION OF a statement (the
 /// instance-script effect-statement carrier), so a top-level `$effect(...)` /
@@ -501,7 +521,29 @@ fn rewrite_expression_dialect(
             span: VerterSpan::new(0, 0),
         });
     }
-    let Some(Statement::ExpressionStatement(stmt)) = parsed.program.body.first() else {
+    rewrite_expression_program(
+        source,
+        carrier_head_trivia,
+        scope,
+        context,
+        dialect,
+        role,
+        &parsed.program,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rewrite_expression_program(
+    source: &str,
+    carrier_head_trivia: &str,
+    scope: ScopeId,
+    context: RewriteContext<'_>,
+    dialect: ExprDialect,
+    role: RewriteRole,
+    program: &Program<'_>,
+) -> Result<RewrittenExpr, UnsupportedSvelteRuntimeSurface> {
+    let wrapped = format!("({source})");
+    let Some(Statement::ExpressionStatement(stmt)) = program.body.first() else {
         return Err(UnsupportedSvelteRuntimeSurface::DestructuringWrite {
             span: VerterSpan::new(0, 0),
         });
@@ -529,7 +571,7 @@ fn rewrite_expression_dialect(
         source,
         role,
         &wrapped,
-        &parsed.program.comments,
+        &program.comments,
         carrier_head_trivia,
     )?;
 

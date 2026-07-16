@@ -23,8 +23,7 @@ use super::client::UnsupportedSvelteRuntimeSurface;
 use super::client_allowlist::{is_svelte_reserved_word, SupportedHtmlElement, SupportedStaticAttr};
 use super::client_imports::UserImport;
 use super::client_shapes::{
-    self, ClientBindShape, ClientDynamicAttrShape, ClientEventHandlerShape,
-    ClientInterpolationShape, ClientPropsUsage,
+    self, ClientBindShape, ClientDynamicAttrShape, ClientEventHandlerShape, ClientPropsUsage,
 };
 use super::client_surface_element_query::{
     element_carries_is_attribute, element_has_class_directive, element_has_group_bind,
@@ -93,10 +92,6 @@ pub(super) struct ClassifiedClientSurface {
     /// (the static-literal case stays in `group_values`). Empty for a non-group component or
     /// a group with only static values.
     pub(super) group_dynamic_value_nodes: Vec<NodeId>,
-    /// The accepted interpolation shape per interpolation node — the FACT proving
-    /// the interpolation is a bare signal / no-default-prop read (the §1.2-class
-    /// reactive-text surface), carried so the plan reads a typed classification.
-    pub(super) interp_shapes: Vec<(NodeId, ClientInterpolationShape)>,
     /// The accepted dynamic-attribute / class / style shape per (node, attribute
     /// index) — the FACT a reactive-attribute / `$.set_class` / `$.set_style` /
     /// `$.autofocus` op consumes. The attribute index is the position of
@@ -427,7 +422,6 @@ impl ClientSyntaxSurface {
             bind_shapes: facts.bind_shapes,
             group_values: facts.group_values,
             group_dynamic_value_nodes: facts.group_dynamic_value_nodes,
-            interp_shapes: facts.interp_shapes,
             dynamic_attr_shapes: facts.dynamic_attr_shapes,
             html_nodes: facts.html_nodes,
             spread_elements: facts.spread_elements,
@@ -459,8 +453,6 @@ pub(super) struct SurfaceFacts {
     group_values: Vec<(NodeId, String)>,
     /// The `bind:group` input nodes carrying a DYNAMIC/mixed `value={…}`.
     group_dynamic_value_nodes: Vec<NodeId>,
-    /// The accepted interpolation shape per interpolation node.
-    interp_shapes: Vec<(NodeId, ClientInterpolationShape)>,
     /// The accepted dynamic-attr / class / style shape per (node, attribute index).
     dynamic_attr_shapes: Vec<(NodeId, usize, ClientDynamicAttrShape)>,
     /// The accepted `{@html}` node ids.
@@ -676,22 +668,17 @@ fn classify_node(
                 facts.borrow_mut().html_nodes.push(node_id);
                 return Ok(());
             }
-            // The interpolation expression must be a BARE signal / no-default-prop
-            // read (the §1.2-class reactive-text surface). A complex expression
-            // (binary / call / member / conditional / …) fails closed — its breadth is
-            // owned by the reactive-text/interpolation completion surface. The accepted
-            // shape is recorded as a fact for the plan.
+            // Accept the closed retained-AST text-chunk root vocabulary. A
+            // TypeScript-transparent root wrapper is admitted only for a TS component;
+            // unsupported roots retain the complex-interpolation refusal.
             let analyzed = ir.analysis.expressions.get(*expr);
-            let shape = client_shapes::classify_interpolation_shape(
-                analyzed.source,
-                analyzed.scope,
-                &ir.analysis.bindings,
-                &ir.analysis.scopes,
-                ir.analysis.scripts.grammar == crate::svelte::parser::ScriptBodyGrammar::Ts,
-                *span,
-            )?;
-            facts.borrow_mut().interp_shapes.push((node_id, shape));
-            Ok(())
+            let typescript_wrapper_allowed = !analyzed.template_chunk_has_typescript_wrapper
+                || ir.analysis.scripts.grammar == crate::svelte::parser::ScriptBodyGrammar::Ts;
+            if analyzed.template_chunk_root_kind.is_supported() && typescript_wrapper_allowed {
+                Ok(())
+            } else {
+                Err(UnsupportedSvelteRuntimeSurface::ComplexInterpolation { span: *span })
+            }
         }
         // A `<slot>` element — the block-semantic slot outlet: the official
         // analyze `SlotElement` rules + the fail-closed `let:` gate live in the

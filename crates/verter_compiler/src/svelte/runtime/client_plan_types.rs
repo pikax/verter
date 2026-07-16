@@ -35,15 +35,23 @@ pub(super) enum ClientNode {
         /// The comment text.
         text: String,
     },
-    /// A reactive escaped interpolation (`{expr}`). The reactivity decision was
-    /// made at build time (a non-reactive interpolation fails closed before the
-    /// plan is built), so every `ReactiveText` node in the plan IS reactive.
+    /// An escaped interpolation proven constant by the shared D-14 evaluator.
+    /// The emitter combines adjacent literal/static parts and initializes them
+    /// once through `textContent` or `nodeValue`.
+    StaticText {
+        span: Span,
+        expr: ExprId,
+        cooked: String,
+    },
+    /// A live escaped interpolation (`{expr}`), prepared once during planning.
     ReactiveText {
         /// The source span.
         span: Span,
         /// The interpolated expression id (into the IR expression arena; the plan
         /// reads it back through the build-time analysis for the op rewrite).
         expr: ExprId,
+        /// The mixed-run nullish coercion selected by `build_template_chunk`.
+        coalesce: super::reactive_fold::NullishCoalesce,
     },
     /// An intrinsic element. The element is a TYPED [`SupportedHtmlElement`] fact (the
     /// classifier's `try_from` proof), so the emitter reads the DOM var stem from
@@ -150,6 +158,20 @@ pub(super) enum ClientNode {
     /// from the enclosing body skeleton (`is_non_body_special`) and emits its `$.head(...)` at
     /// its fragment's pre-walk init stream (source-ordered with other non-rendering inits).
     Head(ClientHead),
+}
+
+/// One planned interpolation value, computed once before node/op projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum PlannedInterpolation {
+    Static {
+        /// Single-owner cooked text moved into the projected client node.
+        cooked: Option<String>,
+    },
+    Live {
+        /// Single-owner carrier moved into the runtime op after node projection.
+        value: Option<PreparedTemplateValue>,
+        coalesce: super::reactive_fold::NullishCoalesce,
+    },
 }
 
 /// A projected `<svelte:head>` — the `$.head('<hash>', ($$anchor) => { <body> })` call. The

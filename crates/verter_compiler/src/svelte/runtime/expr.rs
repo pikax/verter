@@ -427,7 +427,7 @@ impl ScopeGraph {
 }
 
 /// One reparsed, scope-annotated template expression.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AnalyzedExpr<'a> {
     /// The raw expression source text (borrowed from the component source).
     pub source: &'a str,
@@ -435,6 +435,11 @@ pub struct AnalyzedExpr<'a> {
     pub span: verter_span::Span,
     /// The lexical scope the expression is evaluated in.
     pub scope: ScopeId,
+    /// The canonical parsed expression program retained in the lowering
+    /// allocator. Client consumers that need expression structure must walk
+    /// this carrier instead of reparsing [`Self::source`]. `None` only for a
+    /// torn parse or a unit-test fixture built from precomputed facts.
+    pub parsed_program: Option<Program<'a>>,
     /// The free identifier references in the expression, in source order, paired
     /// with whether each is an assignment TARGET (a write) vs a read.
     pub references: Vec<ExprReference>,
@@ -458,6 +463,14 @@ pub struct AnalyzedExpr<'a> {
     /// a literal / template / binary value emits RAW, every other kind wraps in `$.clsx`).
     /// Computed on the same transparent-paren-unwrapped root.
     pub unwrapped_root_kind: UnwrappedRootKind,
+    /// The closed top-level expression family consumed by the client text-chunk
+    /// planner. Harvested from the same canonical expression parse as every
+    /// other fact, so interpolation acceptance never reparses or classifies raw
+    /// source text independently.
+    pub template_chunk_root_kind: TemplateChunkRootKind,
+    /// Whether reaching the template-chunk root crossed a TypeScript-only
+    /// transparent wrapper. Accepted only when the component script grammar is TS.
+    pub template_chunk_has_typescript_wrapper: bool,
     /// The ONE owned `bind:` target fact (classification / sequence presence / TS-wrapper
     /// validity / root identifier / plain-JS function-pair slices), computed ONCE from the
     /// SAME parse that produced this expression — the SINGLE authority every bind consumer
@@ -557,6 +570,30 @@ pub enum UnwrappedRootKind {
     /// array / sequence / unary / `new` / chain / private-field member / …) —
     /// wrapped in `$.clsx`, compound for `should_wrap_in_derived`.
     Other,
+}
+
+/// The top-level expression families owned by the Svelte client text-chunk
+/// lowering. This syntax fact is harvested by the canonical expression parse;
+/// binding-aware rewriting, memoization and constant folding happen later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemplateChunkRootKind {
+    Identifier,
+    Member,
+    Call,
+    Binary,
+    Logical,
+    Conditional,
+    Template,
+    New,
+    Literal,
+    Unsupported,
+}
+
+impl TemplateChunkRootKind {
+    #[must_use]
+    pub const fn is_supported(self) -> bool {
+        !matches!(self, Self::Unsupported)
+    }
 }
 
 /// An OWNED, arena-independent typed projection of a template expression's
@@ -660,16 +697,46 @@ impl<'a> AnalyzedExpr<'a> {
             source,
             span,
             scope,
+            parsed_program: None,
             references: facts.references,
             direct_zero_arg_call_callee: facts.direct_zero_arg_call_callee,
             unwrapped_is_sequence: facts.unwrapped_is_sequence,
             unwrapped_root_kind: facts.unwrapped_root_kind,
+            template_chunk_root_kind: facts.template_chunk_root_kind,
+            template_chunk_has_typescript_wrapper: facts.template_chunk_has_typescript_wrapper,
             bind_target: facts.bind_target,
             matcher_expr: facts.matcher_expr,
             render_callee: Ok(facts.render_callee),
             has_sync_member_or_assignment: Ok(facts.has_sync_member_or_assignment),
             render_dynamic_callee: facts.render_dynamic_callee,
         }
+    }
+
+    /// Build an analyzed expression while retaining the canonical parsed AST.
+    pub(crate) fn interned_with_program(
+        source: &'a str,
+        span: verter_span::Span,
+        scope: ScopeId,
+        facts: ExprAnalysisFacts,
+        parsed_program: Program<'a>,
+    ) -> Self {
+        Self {
+            parsed_program: Some(parsed_program),
+            ..Self::interned(source, span, scope, facts)
+        }
+    }
+
+    /// The wrapped program's single expression statement.
+    #[must_use]
+    pub(crate) fn parsed_expression(&self) -> Option<&Expression<'a>> {
+        self.parsed_program
+            .as_ref()?
+            .body
+            .first()
+            .and_then(|statement| match statement {
+                Statement::ExpressionStatement(statement) => Some(&statement.expression),
+                _ => None,
+            })
     }
 
     /// Build the analyzed expression for a TORN parse (the fragment did not parse cleanly):
@@ -682,10 +749,13 @@ impl<'a> AnalyzedExpr<'a> {
             source,
             span,
             scope,
+            parsed_program: None,
             references: Vec::new(),
             direct_zero_arg_call_callee: None,
             unwrapped_is_sequence: false,
             unwrapped_root_kind: UnwrappedRootKind::Other,
+            template_chunk_root_kind: TemplateChunkRootKind::Unsupported,
+            template_chunk_has_typescript_wrapper: false,
             bind_target: BindTargetFact::default(),
             matcher_expr: MatcherExpr::Other,
             render_callee: Err(()),
@@ -2414,6 +2484,10 @@ pub(crate) struct ExprAnalysisFacts {
     /// The KIND of the transparent-paren-unwrapped root (for the `class={…}` `$.clsx`
     /// decision).
     pub unwrapped_root_kind: UnwrappedRootKind,
+    /// The client text-chunk expression family, from the same parse.
+    pub template_chunk_root_kind: TemplateChunkRootKind,
+    /// Whether the root family was reached through a TypeScript-only wrapper.
+    pub template_chunk_has_typescript_wrapper: bool,
     /// The owned `bind:` target fact, derived from the SAME parsed expression (the
     /// structural fields reuse this parse; the function-pair plain-JS slices come from one
     /// optional `mjs` parse gated on sequence presence).
@@ -2443,12 +2517,21 @@ pub(crate) struct ExprAnalysisFacts {
 /// A fragment that does not parse cleanly yields `Err(())` so the caller can surface a
 /// parse diagnostic rather than silently returning no references.
 pub(crate) fn collect_expr_references(text: &str) -> Result<ExprAnalysisFacts, ()> {
-    use oxc_ast::ast::{Expression, Statement};
     let alloc = Allocator::default();
+    collect_expr_references_in(&alloc, text).map(|(facts, _)| facts)
+}
+
+/// Parse and analyze a template expression in the caller-owned lowering
+/// allocator, returning both the owned facts and the canonical AST carrier.
+pub(crate) fn collect_expr_references_in<'a>(
+    alloc: &'a Allocator,
+    text: &str,
+) -> Result<(ExprAnalysisFacts, Program<'a>), ()> {
+    use oxc_ast::ast::{Expression, Statement};
     // Wrap as a parenthesised expression statement so a bare expression body
     // (`count + 1`, `() => count++`, `box.a`) parses as a module statement.
-    let wrapped = format!("({text});");
-    let parsed = Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
+    let wrapped = alloc.alloc_str(&format!("({text})"));
+    let parsed = Parser::new(alloc, wrapped, SourceType::tsx()).parse();
     if parsed.panicked || !parsed.errors.is_empty() {
         return Err(());
     }
@@ -2473,18 +2556,31 @@ pub(crate) fn collect_expr_references(text: &str) -> Result<ExprAnalysisFacts, (
     // `SequenceExpression` (the BEHAVIORAL sequence-wrap signal) and its KIND (the `class={…}`
     // `$.clsx` decision). This is pure analysis: it never slices an emitted-source span (the
     // value printer keeps the author's parens verbatim, so no paren-removal slice is needed).
-    let (unwrapped_is_sequence, unwrapped_root_kind) = match body_expr {
+    let (
+        unwrapped_is_sequence,
+        unwrapped_root_kind,
+        template_chunk_root_kind,
+        template_chunk_has_typescript_wrapper,
+    ) = match body_expr {
         Some(expr) => {
             let mut inner = expr;
             while let Expression::ParenthesizedExpression(p) = inner {
                 inner = &p.expression;
             }
+            let (template_kind, has_typescript_wrapper) = template_chunk_root_kind_of(inner);
             (
                 matches!(inner, Expression::SequenceExpression(_)),
                 unwrapped_root_kind_of(inner),
+                template_kind,
+                has_typescript_wrapper,
             )
         }
-        None => (false, UnwrappedRootKind::Other),
+        None => (
+            false,
+            UnwrappedRootKind::Other,
+            TemplateChunkRootKind::Unsupported,
+            false,
+        ),
     };
     // The `bind:` target fact, derived from the SAME parsed `body_expr` (NO extra parse for
     // the structural fields). The plain-JS function-pair slices come from at most one
@@ -2492,7 +2588,7 @@ pub(crate) fn collect_expr_references(text: &str) -> Result<ExprAnalysisFacts, (
     // here so no downstream bind consumer re-parses the expression. A non-bind expression
     // (no `body_expr`, or a non-bind shape) yields the empty default fact.
     let bind_target = body_expr
-        .map(|expr| BindTargetFact::from_parsed_target(expr, &alloc, text))
+        .map(|expr| BindTargetFact::from_parsed_target(expr, alloc, text))
         .unwrap_or_default();
     // The owned matcher projection + the `{@render}` callee classification — both
     // lowered from the SAME parsed `body_expr` (the CSS selector-to-template matcher
@@ -2508,17 +2604,20 @@ pub(crate) fn collect_expr_references(text: &str) -> Result<ExprAnalysisFacts, (
     // The wrap-trigger + dynamic-callee lowering facts — from the SAME parse.
     let has_sync_member_or_assignment = body_expr.is_some_and(sync_member_or_assignment);
     let render_dynamic_callee = body_expr.and_then(collect_render_dynamic_callee_facts);
-    Ok(ExprAnalysisFacts {
+    let facts = ExprAnalysisFacts {
         references: collector.refs,
         direct_zero_arg_call_callee,
         unwrapped_is_sequence,
         unwrapped_root_kind,
+        template_chunk_root_kind,
+        template_chunk_has_typescript_wrapper,
         bind_target,
         matcher_expr,
         render_callee,
         has_sync_member_or_assignment,
         render_dynamic_callee,
-    })
+    };
+    Ok((facts, parsed.program))
 }
 
 /// The direct-zero-arg-identifier-call fact of ONE expression node: the node
@@ -2819,6 +2918,72 @@ fn unwrapped_root_kind_of(expr: &Expression) -> UnwrappedRootKind {
         }
         _ => UnwrappedRootKind::Other,
     }
+}
+
+/// Classify one transparent-root expression for the client text-chunk plan.
+/// Optional member/call expressions arrive as a `ChainExpression`; only the
+/// member/call chain families are admitted. Side-effecting and declaration-like
+/// expressions remain outside the current runtime surface.
+fn template_chunk_root_kind_of(expr: &Expression<'_>) -> (TemplateChunkRootKind, bool) {
+    use oxc_ast::ast::ChainElement;
+    let mut expression = expr;
+    let mut has_typescript_wrapper = false;
+    loop {
+        expression = match expression {
+            Expression::ParenthesizedExpression(node) => &node.expression,
+            Expression::TSAsExpression(node) => {
+                has_typescript_wrapper = true;
+                &node.expression
+            }
+            Expression::TSSatisfiesExpression(node) => {
+                has_typescript_wrapper = true;
+                &node.expression
+            }
+            Expression::TSNonNullExpression(node) => {
+                has_typescript_wrapper = true;
+                &node.expression
+            }
+            Expression::TSTypeAssertion(node) => {
+                has_typescript_wrapper = true;
+                &node.expression
+            }
+            Expression::TSInstantiationExpression(node) => {
+                has_typescript_wrapper = true;
+                &node.expression
+            }
+            _ => break,
+        };
+    }
+    let kind = match expression {
+        Expression::Identifier(_) => TemplateChunkRootKind::Identifier,
+        Expression::StaticMemberExpression(_)
+        | Expression::ComputedMemberExpression(_)
+        | Expression::PrivateFieldExpression(_) => TemplateChunkRootKind::Member,
+        Expression::CallExpression(_) => TemplateChunkRootKind::Call,
+        Expression::BinaryExpression(_) => TemplateChunkRootKind::Binary,
+        Expression::LogicalExpression(_) => TemplateChunkRootKind::Logical,
+        Expression::ConditionalExpression(_) => TemplateChunkRootKind::Conditional,
+        Expression::TemplateLiteral(_) => TemplateChunkRootKind::Template,
+        Expression::NewExpression(_) => TemplateChunkRootKind::New,
+        Expression::BooleanLiteral(_)
+        | Expression::NullLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BigIntLiteral(_)
+        | Expression::RegExpLiteral(_)
+        | Expression::StringLiteral(_) => TemplateChunkRootKind::Literal,
+        Expression::ChainExpression(chain) => match &chain.expression {
+            ChainElement::CallExpression(_) => TemplateChunkRootKind::Call,
+            ChainElement::StaticMemberExpression(_)
+            | ChainElement::ComputedMemberExpression(_)
+            | ChainElement::PrivateFieldExpression(_) => TemplateChunkRootKind::Member,
+            ChainElement::TSNonNullExpression(node) => {
+                has_typescript_wrapper = true;
+                template_chunk_root_kind_of(&node.expression).0
+            }
+        },
+        _ => TemplateChunkRootKind::Unsupported,
+    };
+    (kind, has_typescript_wrapper)
 }
 
 /// Collects free identifier references (read vs write) from a wrapped expression,

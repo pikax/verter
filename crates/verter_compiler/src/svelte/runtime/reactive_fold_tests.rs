@@ -32,6 +32,47 @@ fn classify(expr: &str, instance: &str) -> ChunkFold {
     super::mixed_chunk_fold(expr, root, &bindings, &scopes, Some(instance))
 }
 
+#[test]
+fn prepared_evaluator_reuses_one_initializer_index_across_interpolations() {
+    use oxc_allocator::Allocator;
+    use oxc_ast::ast::Statement;
+
+    let alloc = Allocator::default();
+    let instance = super::super::expr::reparse_module(&alloc, "const A = 1; const B = 2;")
+        .expect("instance script parses");
+    let first = super::super::expr::reparse_module(&alloc, "(A)").expect("first expression parses");
+    let second =
+        super::super::expr::reparse_module(&alloc, "(B)").expect("second expression parses");
+    let Statement::ExpressionStatement(first) = &first.body[0] else {
+        panic!("first carrier is an expression statement");
+    };
+    let Statement::ExpressionStatement(second) = &second.body[0] else {
+        panic!("second carrier is an expression statement");
+    };
+    let bindings = BindingTable::new();
+    let (scopes, root) = ScopeGraph::with_root();
+    let evaluator = super::PreparedChunkEvaluator::new(&bindings, &scopes, Some(&instance));
+
+    assert_eq!(evaluator.top_level_init_count(), 2);
+    assert_eq!(
+        evaluator.fold(&first.expression, root),
+        ChunkFold::Fold("1".into())
+    );
+    assert_eq!(
+        evaluator.fold(&second.expression, root),
+        ChunkFold::Fold("2".into())
+    );
+    assert_eq!(
+        evaluator.nullish_wrap(&first.expression, root, false),
+        super::NullishCoalesce::None
+    );
+    assert_eq!(
+        evaluator.top_level_init_count(),
+        2,
+        "multiple fold decisions reuse the same immutable initializer index"
+    );
+}
+
 /// `Some(folded_literal)` when `expr` FOLDS exactly; `None` for a `Live` chunk (plain or
 /// ledgered live-fallback). PANICS on a `Refuse` (a throwing chunk must be asserted with
 /// [`refuse_reason`], never via this helper — keeps a wrong-classification loud).

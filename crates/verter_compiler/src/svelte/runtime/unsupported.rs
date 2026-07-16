@@ -114,16 +114,6 @@ pub enum UnsupportedSvelteRuntimeSurface {
         /// The source span.
         span: Span,
     },
-    /// A NON-REACTIVE interpolation (`{1 + 1}` / `{moduleConst}` / a never-written
-    /// `$state` read) whose value never changes. The official compiler STATIC-FOLDS
-    /// it to a `node.textContent = '…'` write rather than a reactive
-    /// `$.template_effect`; static folding is a deferral-ledger follow-up, so a
-    /// non-reactive interpolation fails closed rather than emitting a divergent
-    /// reactive-text op.
-    StaticInterpolation {
-        /// The source span of the interpolation expression.
-        span: Span,
-    },
     /// A DESTRUCTURING assignment / update target outside the supported lvalue
     /// subset (`({ count } = obj)` / `[count] = arr`). The official compiler lowers
     /// it through a destructure closure (`$.set(count, obj.count, true)`); that
@@ -515,7 +505,6 @@ impl UnsupportedSvelteRuntimeSurface {
             Self::StyleCssModeUnsupported { .. } => "svelte-runtime-unsupported-style-css-mode",
             Self::CompileOptionUnsupported { option, .. } => option.code(),
             Self::NamespaceUnsupported { .. } => "svelte-runtime-unsupported-namespace",
-            Self::StaticInterpolation { .. } => "svelte-runtime-unsupported-static-interpolation",
             Self::DestructuringWrite { .. } => "svelte-runtime-unsupported-destructuring-write",
             Self::RootTextRegion { .. } => "svelte-runtime-unsupported-root-text-region",
             Self::ComplexInterpolation { .. } => "svelte-runtime-unsupported-complex-interpolation",
@@ -629,11 +618,6 @@ impl UnsupportedSvelteRuntimeSurface {
                      rather than emitted"
                 )
             }
-            Self::StaticInterpolation { .. } => {
-                "a non-reactive interpolation (the official compiler static-folds it to a \
-                 `textContent` write)"
-                    .to_string()
-            }
             Self::DestructuringWrite { .. } => {
                 "a destructuring assignment / update target".to_string()
             }
@@ -739,7 +723,6 @@ impl UnsupportedSvelteRuntimeSurface {
             | Self::StyleCssAnalysis { span, .. }
             | Self::StyleSelectorUnsupported { span, .. }
             | Self::StyleCssModeUnsupported { span }
-            | Self::StaticInterpolation { span }
             | Self::DestructuringWrite { span }
             | Self::RootTextRegion { span }
             | Self::ComplexInterpolation { span }

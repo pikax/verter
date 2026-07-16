@@ -12,6 +12,7 @@
 //!   instead of a backtick string; a rendered `<!>` anchor is a sparse-array hole,
 //!   a text child decodes to `node.data`, esrap's non-multiline array/object bytes).
 
+use super::client_plan_types::ClientNode;
 use super::css::types::CssScopeFacts;
 use super::entity_decode::{decode_text_entities, escape_html_attr_context};
 use super::html::{cannot_be_set_statically, is_custom_element, is_void_element};
@@ -30,13 +31,14 @@ pub(super) fn serialize_clean_items(
     items: &[CleanItem],
     ctx: CleanContext,
     css: Option<&CssScopeFacts>,
+    client_nodes: Option<&[ClientNode]>,
     html: &mut String,
 ) {
     for item in items {
         match item {
             CleanItem::TextRun { text, .. } => html.push_str(text),
             CleanItem::Node(id) => match ir.node(*id) {
-                IrNode::Element(el) => serialize_element(ir, el, *id, ctx, css, html),
+                IrNode::Element(el) => serialize_element(ir, el, *id, ctx, css, client_nodes, html),
                 // A RETAINED comment (only present under `preserveComments`) serializes
                 // as `<!--data-->` (a bare `<!>` for an empty `<!---->`) — the official
                 // `stringify` comment arm. The IR `text` is the FULL raw comment
@@ -67,6 +69,7 @@ fn serialize_element(
     node: NodeId,
     ctx: CleanContext,
     css: Option<&CssScopeFacts>,
+    client_nodes: Option<&[ClientNode]>,
     html: &mut String,
 ) {
     html.push('<');
@@ -89,7 +92,14 @@ fn serialize_element(
         return;
     }
     html.push('>');
-    serialize_element_children(ir, &el.children, ctx.for_children_of(&el.tag), css, html);
+    serialize_element_children(
+        ir,
+        &el.children,
+        ctx.for_children_of(&el.tag),
+        css,
+        client_nodes,
+        html,
+    );
     html.push_str("</");
     html.push_str(&el.tag);
     html.push('>');
@@ -108,13 +118,27 @@ fn serialize_element_children(
     children: &[NodeId],
     ctx: CleanContext,
     css: Option<&CssScopeFacts>,
+    client_nodes: Option<&[ClientNode]>,
     html: &mut String,
 ) {
     let items = clean_nodes(ir, children, ctx);
-    if is_sole_controlled(ir, &items) {
+    if is_sole_controlled(ir, &items) || is_sole_static_text_run(&items, client_nodes) {
         return;
     }
-    serialize_clean_items(ir, &items, ctx, css, html);
+    serialize_clean_items(ir, &items, ctx, css, client_nodes, html);
+}
+
+fn is_sole_static_text_run(items: &[CleanItem], client_nodes: Option<&[ClientNode]>) -> bool {
+    let (Some(client_nodes), [CleanItem::TextRun { interps, .. }]) = (client_nodes, items) else {
+        return false;
+    };
+    !interps.is_empty()
+        && interps.iter().all(|id| {
+            matches!(
+                client_nodes.get(id.0 as usize),
+                Some(ClientNode::StaticText { .. })
+            )
+        })
 }
 
 /// Whether a cleaned child sequence is EXACTLY one controlled `{#each}` / `{@html}`
@@ -363,6 +387,7 @@ pub(super) fn objectify_region(
     items: &[CleanItem],
     ctx: CleanContext,
     css: Option<&CssScopeFacts>,
+    client_nodes: Option<&[ClientNode]>,
 ) -> String {
     let mut elements: Vec<Option<String>> = Vec::new();
     // `as_tree`: if the first template node's type is `comment`, UNSHIFT a
@@ -379,7 +404,7 @@ pub(super) fn objectify_region(
             elements.push(None);
         }
     }
-    elements.extend(objectify_items(ir, items, ctx, css, false));
+    elements.extend(objectify_items(ir, items, ctx, css, client_nodes, false));
     render_js_array(&elements)
 }
 
@@ -391,12 +416,22 @@ fn objectify_items(
     items: &[CleanItem],
     ctx: CleanContext,
     css: Option<&CssScopeFacts>,
+    client_nodes: Option<&[ClientNode]>,
     strip_first_text_newline: bool,
 ) -> Vec<Option<String>> {
     items
         .iter()
         .enumerate()
-        .map(|(idx, item)| objectify_item(ir, item, ctx, css, strip_first_text_newline && idx == 0))
+        .map(|(idx, item)| {
+            objectify_item(
+                ir,
+                item,
+                ctx,
+                css,
+                client_nodes,
+                strip_first_text_newline && idx == 0,
+            )
+        })
         .collect()
 }
 
@@ -410,6 +445,7 @@ fn objectify_item(
     item: &CleanItem,
     ctx: CleanContext,
     css: Option<&CssScopeFacts>,
+    client_nodes: Option<&[ClientNode]>,
     strip_leading_newline: bool,
 ) -> Option<String> {
     match item {
@@ -424,7 +460,7 @@ fn objectify_item(
             Some(js_string_literal(&decoded))
         }
         CleanItem::Node(id) => match ir.node(*id) {
-            IrNode::Element(el) => Some(objectify_element(ir, el, *id, ctx, css)),
+            IrNode::Element(el) => Some(objectify_element(ir, el, *id, ctx, css, client_nodes)),
             // A kept comment (only present under `preserveComments`) → `['// data']`;
             // an empty `<!---->` → `null` (a hole), the official `objectify` comment arm.
             // `data` is the comment's INNER content (the IR `text` is the full raw comment).
@@ -459,6 +495,7 @@ fn objectify_element(
     node: NodeId,
     ctx: CleanContext,
     css: Option<&CssScopeFacts>,
+    client_nodes: Option<&[ClientNode]>,
 ) -> String {
     let mut elements: Vec<Option<String>> = vec![Some(js_string_literal(&el.tag))];
     let scope_hash = css.and_then(|facts| facts.hash_for(node));
@@ -466,10 +503,19 @@ fn objectify_element(
     let child_ctx = ctx.for_children_of(&el.tag);
     let child_items = clean_nodes(ir, &el.children, child_ctx);
     let strip_newline = el.tag == "pre" || el.tag == "textarea";
-    let children: Vec<Option<String>> = if is_sole_controlled(ir, &child_items) {
+    let children: Vec<Option<String>> = if is_sole_controlled(ir, &child_items)
+        || is_sole_static_text_run(&child_items, client_nodes)
+    {
         Vec::new()
     } else {
-        objectify_items(ir, &child_items, child_ctx, css, strip_newline)
+        objectify_items(
+            ir,
+            &child_items,
+            child_ctx,
+            css,
+            client_nodes,
+            strip_newline,
+        )
     };
     // The attrs slot rides ONLY when there are attributes OR children (else the element
     // is a bare `['name']`); with children but no attributes it is the literal `null`.

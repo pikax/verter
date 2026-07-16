@@ -4,11 +4,10 @@
 //! TYPED [`ClassifiedClientSurface`] (the proof the default-deny classifier
 //! accepted every surface) plus the broad [`SvelteRuntimeIr`], and projects a
 //! NARROW [`ClientModulePlan`] over a closed vocabulary — [`ClientNode`],
-//! [`ClientAttr`], [`ClientScriptItem`], [`ClientRuntimeOp`]. It decides whether
-//! each interpolation is ACTUALLY reactive (a non-reactive interpolation fails
-//! closed — the official compiler static-folds it), validates each bind lvalue, and
-//! rewrites every script item + op through the FALLIBLE expression rewriter (a
-//! refusal short-circuits the whole build).
+//! [`ClientAttr`], [`ClientScriptItem`], [`ClientRuntimeOp`]. It seals each
+//! interpolation as an exact static value or a prepared live carrier, validates
+//! each bind lvalue, and rewrites every script item + op through the FALLIBLE
+//! expression rewriter (a refusal short-circuits the whole build).
 //!
 //! Because the emitter ([`super::client`]) matches ONLY the narrow plan, no broad
 //! [`IrNode`] / [`AttrIr`] / [`RuntimeOp`] variant reaches emission — emit-by-default
@@ -21,9 +20,7 @@ use oxc_allocator::Allocator;
 use super::client::UnsupportedSvelteRuntimeSurface;
 use super::client_allowlist::SupportedHtmlElement;
 use super::client_codegen_helpers::op_target_node;
-use super::client_shapes::{
-    ClientBindShape, ClientDynamicAttrShape, ClientEventHandlerShape, ClientInterpolationShape,
-};
+use super::client_shapes::{ClientBindShape, ClientDynamicAttrShape, ClientEventHandlerShape};
 use super::client_surface::ClassifiedClientSurface;
 use super::events::{validate_event_modifiers, EventModifierError};
 use super::expr::{BindingRuntimeKind, ExprRefKind, ScopeId};
@@ -39,7 +36,8 @@ use verter_span::Span;
 pub(super) use super::client_plan_block_types::ClientBlock;
 pub(super) use super::client_plan_types::{
     AttrValue, ClientAttr, ClientBindTarget, ClientNode, ClientNodeId, ClientRuntimeOp,
-    ClientScriptItem, ElementLifecycleOp, EventEmit, EventEmitTarget, EventMode, RegionOps,
+    ClientScriptItem, ElementLifecycleOp, EventEmit, EventEmitTarget, EventMode,
+    PlannedInterpolation, RegionOps,
 };
 
 /// The narrow client module plan — the SOLE emitter input.
@@ -355,11 +353,10 @@ pub(super) struct SupportedClientIr<'a> {
     /// dynamic-value dependency read. Built from `classified.group_dynamic_value_nodes` by
     /// reading each node's `value` attr through the shared `attr_value_for`.
     pub(super) group_dynamic_values: Vec<(NodeId, super::client_plan_types::GroupDynamicValue)>,
-    /// The accepted interpolation shape per interpolation node (the classifier's
-    /// typed FACT) — proves each `ReactiveText` node is a bare signal /
-    /// no-default-prop read, so the plan reads a typed classification instead of
-    /// re-deriving reactivity.
-    pub(super) interp_shapes: Vec<(NodeId, ClientInterpolationShape)>,
+    /// One prepared static/live interpolation plan per broad node id. Raw-html
+    /// interpolations and non-interpolation nodes carry `None`. The retained
+    /// canonical AST is the structural authority.
+    pub(super) interpolations: Vec<Option<PlannedInterpolation>>,
     /// The accepted element fact per element node (the strict-allowlist `try_from`
     /// proof) — projected onto each [`ClientNode::Element`] so the emitter reads the
     /// DOM var stem from [`SupportedHtmlElement::var_stem`], never the raw tag.
@@ -513,7 +510,7 @@ impl<'a> SupportedClientIr<'a> {
             bind_shapes: classified.bind_shapes.clone(),
             group_values: classified.group_values.clone(),
             group_dynamic_values: Vec::new(),
-            interp_shapes: classified.interp_shapes.clone(),
+            interpolations: Vec::new(),
             element_facts: classified.element_facts.clone(),
             script_items: classified.script_items.clone(),
             html_nodes: classified.html_nodes.clone(),
@@ -608,14 +605,16 @@ impl<'a> SupportedClientIr<'a> {
             .map(|name| format!("const {name} = $.mutable_source();"))
             .collect();
 
-        // (2) The narrow node arena (mirrors the supported IR node space). The
-        // reactivity decision for each interpolation is made here: a non-reactive
-        // interpolation fails closed (the official compiler static-folds it).
-        let nodes = projection.build_nodes()?;
+        // (2) Prepare every interpolation exactly once, then project the narrow
+        // node arena from those sealed static/live dispositions.
+        projection.interpolations = projection.build_interpolation_plans()?;
+        let mut static_values = projection.take_static_values();
+        let nodes = projection.build_nodes(&mut static_values)?;
 
         // (3) The narrow ops (reactive text / binds / events), grouped per region, with
         // bind/event expressions rewritten through the fallible rewriter.
-        let region_ops = projection.build_ops(&nodes)?;
+        let mut interpolation_values = projection.take_interpolation_values();
+        let region_ops = projection.build_ops(&nodes, &mut interpolation_values)?;
 
         // (4) The custom-element payload: the module-epilogue create/define facts
         // plus the `$$exports` accessor pairs (one get/set per `$props()` member —
@@ -735,18 +734,110 @@ impl<'a> SupportedClientIr<'a> {
         })
     }
 
+    /// Prepare each escaped interpolation once through the shared authored-value
+    /// carrier and D-14 evaluator. A statically exact value becomes a one-shot
+    /// text initialization; every other supported value stays live and retains
+    /// its memoization/nullish facts. Compile-time throws remain typed refusals.
+    fn build_interpolation_plans(
+        &self,
+    ) -> Result<Vec<Option<PlannedInterpolation>>, UnsupportedSvelteRuntimeSurface> {
+        let mut plans = Vec::with_capacity(self.ir.nodes.len());
+        let evaluator = super::reactive_fold::PreparedChunkEvaluator::new(
+            &self.ir.analysis.bindings,
+            &self.ir.analysis.scopes,
+            self.ir.analysis.scripts.instance_program.as_ref(),
+        );
+        for node in &self.ir.nodes {
+            let IrNode::Interpolation { span, expr, escape } = node else {
+                plans.push(None);
+                continue;
+            };
+            if *escape == super::ir::EscapeMode::Raw {
+                plans.push(None);
+                continue;
+            }
+            let analyzed = self.ir.analysis.expressions.get(*expr);
+            let parsed = analyzed.parsed_expression().ok_or_else(|| {
+                UnsupportedSvelteRuntimeSurface::expression_fact_recovery("template-chunk-ast")
+            })?;
+            let value = self.prepare_template_value(
+                super::client_legacy_value::AuthoredExpr(*expr),
+                super::client_legacy_value::AuthoredValueSurface::ReactiveText,
+            )?;
+            let has_call = value.has_call();
+            if !has_call && !value.is_wrapped() {
+                match evaluator.fold(parsed, analyzed.scope) {
+                    super::reactive_fold::ChunkFold::Fold(cooked) => {
+                        plans.push(Some(PlannedInterpolation::Static {
+                            cooked: Some(cooked),
+                        }));
+                        continue;
+                    }
+                    super::reactive_fold::ChunkFold::Refuse(reason) => {
+                        return Err(UnsupportedSvelteRuntimeSurface::ConstFoldThrow {
+                            reason: reason.label(),
+                            span: *span,
+                        });
+                    }
+                    super::reactive_fold::ChunkFold::Live { .. } => {}
+                }
+            }
+            let coalesce = if value.is_wrapped() && !has_call {
+                super::reactive_fold::NullishCoalesce::Bare
+            } else {
+                evaluator.nullish_wrap(parsed, analyzed.scope, has_call)
+            };
+            plans.push(Some(PlannedInterpolation::Live {
+                value: Some(value),
+                coalesce,
+            }));
+        }
+        Ok(plans)
+    }
+
     /// Build the narrow node arena (one `ClientNode` per supported IR node, indexed
     /// by the SAME numeric id space so an op's `NodeId` maps to the same
-    /// `ClientNodeId`). The reactivity decision per interpolation is made here.
-    fn build_nodes(&self) -> Result<Vec<ClientNode>, UnsupportedSvelteRuntimeSurface> {
+    /// `ClientNodeId`). The sealed static/live disposition is projected here.
+    fn build_nodes(
+        &self,
+        static_values: &mut [Option<String>],
+    ) -> Result<Vec<ClientNode>, UnsupportedSvelteRuntimeSurface> {
         // The arena mirrors the IR node arena index-for-index (so `NodeId(n)` →
         // `ClientNodeId(n)`), letting the op projection map node ids trivially and
         // the emitter's walk read each named position's narrow node by IR id.
         let mut nodes = Vec::with_capacity(self.ir.nodes.len());
         for (idx, node) in self.ir.nodes.iter().enumerate() {
-            nodes.push(self.project_node(NodeId(idx as u32), node)?);
+            nodes.push(self.project_node(NodeId(idx as u32), node, static_values)?);
         }
         Ok(nodes)
+    }
+
+    /// Move each exact static interpolation value into a parallel single-owner
+    /// arena for node projection, avoiding a duplicate cooked string.
+    fn take_static_values(&mut self) -> Vec<Option<String>> {
+        self.interpolations
+            .iter_mut()
+            .map(|planned| match planned.as_mut() {
+                Some(PlannedInterpolation::Static { cooked }) => cooked.take(),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Move each prepared live interpolation value into a parallel single-owner
+    /// arena. Node projection keeps only disposition/coalescing facts; op
+    /// projection consumes each carrier from this arena without cloning mapped
+    /// text or source segments.
+    fn take_interpolation_values(
+        &mut self,
+    ) -> Vec<Option<super::client_legacy_value::PreparedTemplateValue>> {
+        self.interpolations
+            .iter_mut()
+            .map(|planned| match planned.as_mut() {
+                Some(PlannedInterpolation::Live { value, .. }) => value.take(),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Project one supported IR node into its narrow [`ClientNode`]. A node kind the
@@ -757,6 +848,7 @@ impl<'a> SupportedClientIr<'a> {
         &self,
         id: NodeId,
         node: &IrNode,
+        static_values: &mut [Option<String>],
     ) -> Result<ClientNode, UnsupportedSvelteRuntimeSurface> {
         match node {
             IrNode::Text { span, text } => Ok(ClientNode::Text {
@@ -778,21 +870,37 @@ impl<'a> SupportedClientIr<'a> {
                         expr: *expr,
                     });
                 }
-                // The classifier already proved this interpolation is a bare reactive
-                // signal / no-default-prop read (recorded as a `ClientInterpolationShape`
-                // fact); a non-reactive or complex interpolation failed closed there.
-                // A `ReactiveText` node with NO recorded shape is a classifier/plan
-                // divergence — fail closed defensively (never emit an unclassified
-                // interpolation).
-                if !self.interp_shapes.iter().any(|(n, _)| *n == id) {
-                    return Err(UnsupportedSvelteRuntimeSurface::ComplexInterpolation {
+                // The surface classifier accepted the retained-AST root family and
+                // the interpolation planner sealed its exact static/live disposition.
+                // A missing disposition is a classifier/plan divergence and fails closed.
+                match self
+                    .interpolations
+                    .get(id.0 as usize)
+                    .and_then(Option::as_ref)
+                {
+                    Some(PlannedInterpolation::Static { .. }) => Ok(ClientNode::StaticText {
                         span: *span,
-                    });
+                        expr: *expr,
+                        cooked: static_values
+                            .get_mut(id.0 as usize)
+                            .and_then(Option::take)
+                            .ok_or_else(|| {
+                                UnsupportedSvelteRuntimeSurface::expression_fact_recovery(
+                                    "prepared-static-interpolation",
+                                )
+                            })?,
+                    }),
+                    Some(PlannedInterpolation::Live { coalesce, .. }) => {
+                        Ok(ClientNode::ReactiveText {
+                            span: *span,
+                            expr: *expr,
+                            coalesce: *coalesce,
+                        })
+                    }
+                    None => {
+                        Err(UnsupportedSvelteRuntimeSurface::ComplexInterpolation { span: *span })
+                    }
                 }
-                Ok(ClientNode::ReactiveText {
-                    span: *span,
-                    expr: *expr,
-                })
             }
             // A `{@html expr}` raw-markup tag (accepted by the classifier) projects to a
             // `RawHtml` node so the DOM walk can reach its `<!>` anchor (or recognise it
@@ -1012,6 +1120,7 @@ impl<'a> SupportedClientIr<'a> {
     fn build_ops(
         &self,
         nodes: &[ClientNode],
+        interpolation_values: &mut [Option<super::client_legacy_value::PreparedTemplateValue>],
     ) -> Result<Vec<super::client_plan_types::RegionOps>, UnsupportedSvelteRuntimeSurface> {
         // The per-element first-op dedup sets are GLOBAL across regions: an element lives
         // in exactly one region, so a per-region set would be identical. (One coalesced
@@ -1033,7 +1142,13 @@ impl<'a> SupportedClientIr<'a> {
             let scope_lexical = region.scope;
             let mut ops = Vec::new();
             for &op_id in &region.local_ops {
-                if let Some(op) = self.project_scope_op(op_id, scope_lexical, &mut dedup, nodes)? {
+                if let Some(op) = self.project_scope_op(
+                    op_id,
+                    scope_lexical,
+                    &mut dedup,
+                    nodes,
+                    interpolation_values,
+                )? {
                     ops.push(op);
                 }
             }
@@ -1108,6 +1223,7 @@ impl<'a> SupportedClientIr<'a> {
         scope_lexical: ScopeId,
         dedup: &mut OpDedup,
         nodes: &[ClientNode],
+        interpolation_values: &mut [Option<super::client_legacy_value::PreparedTemplateValue>],
     ) -> Result<Option<ClientRuntimeOp>, UnsupportedSvelteRuntimeSurface> {
         // Skip an op targeting the `<svelte:options>` compile-option MARKER (a dead attr
         // that never reaches the DOM), and absorb a spread element's per-attribute ops
@@ -1140,18 +1256,35 @@ impl<'a> SupportedClientIr<'a> {
         let mut out = None;
         match self.ir.op(op_id) {
             RuntimeOp::ReactiveText { target, expr } => {
-                // Prepare the interpolation at BUILD time through the sole
-                // authored-value entry (fallible — an `await` / destructuring
-                // write inside `{…}` fails closed here, before the plan
-                // exists); the emitter only serializes the carrier.
-                let value = self.prepare_template_value(
-                    super::client_legacy_value::AuthoredExpr(*expr),
-                    super::client_legacy_value::AuthoredValueSurface::ReactiveText,
-                )?;
-                out = Some(ClientRuntimeOp::ReactiveText {
-                    target: ClientNodeId(target.0),
-                    value,
-                });
+                let target = *target;
+                let expr = *expr;
+                // The authored value was prepared exactly once before node
+                // projection. Transfer its single-owner carrier into the runtime
+                // op; the emitter only serializes it.
+                match self
+                    .interpolations
+                    .get(target.0 as usize)
+                    .and_then(Option::as_ref)
+                {
+                    Some(PlannedInterpolation::Live { .. }) => {
+                        out = Some(ClientRuntimeOp::ReactiveText {
+                            target: ClientNodeId(target.0),
+                            value: interpolation_values
+                                .get_mut(target.0 as usize)
+                                .and_then(Option::take)
+                                .ok_or_else(|| {
+                                    UnsupportedSvelteRuntimeSurface::expression_fact_recovery(
+                                        "prepared-interpolation-value",
+                                    )
+                                })?,
+                        });
+                    }
+                    Some(PlannedInterpolation::Static { .. }) => {}
+                    None => {
+                        let span = self.ir.analysis.expressions.get(expr).span;
+                        return Err(UnsupportedSvelteRuntimeSurface::ComplexInterpolation { span });
+                    }
+                }
             }
             RuntimeOp::Binding { target, bind } => {
                 out = Some(self.project_bind_op(*target, bind, scope_lexical)?);
@@ -1327,13 +1460,15 @@ impl<'a> SupportedClientIr<'a> {
         ) {
             return Ok(true);
         }
-        super::reactive_analysis::expr_has_binding_impurity(
-            analyzed.source,
+        let parsed = analyzed.parsed_expression().ok_or_else(|| {
+            UnsupportedSvelteRuntimeSurface::expression_fact_recovery("binding-impurity")
+        })?;
+        Ok(super::reactive_analysis::expr_has_binding_impurity_parsed(
+            parsed,
             analyzed.scope,
             &self.ir.analysis.bindings,
             &self.ir.analysis.scopes,
-        )
-        .map_err(|()| UnsupportedSvelteRuntimeSurface::expression_fact_recovery("binding-impurity"))
+        ))
     }
 
     /// Whether a template expression `has_call` (the official
@@ -1346,14 +1481,16 @@ impl<'a> SupportedClientIr<'a> {
         expr_id: ExprId,
     ) -> Result<bool, UnsupportedSvelteRuntimeSurface> {
         let analyzed = self.ir.analysis.expressions.get(expr_id);
-        super::reactive_analysis::expr_has_call(
-            analyzed.source,
+        let parsed = analyzed
+            .parsed_expression()
+            .ok_or_else(|| UnsupportedSvelteRuntimeSurface::expression_fact_recovery("has-call"))?;
+        Ok(super::reactive_analysis::expr_has_call_parsed(
+            parsed,
             analyzed.scope,
             &self.ir.analysis.bindings,
             &self.ir.analysis.scopes,
             &self.declared_roots,
-        )
-        .map_err(|()| UnsupportedSvelteRuntimeSurface::expression_fact_recovery("has-call"))
+        ))
     }
 
     /// Build the `bind:group` DYNAMIC/mixed value ([`GroupDynamicValue`]) for each recorded
