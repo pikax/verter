@@ -6,6 +6,8 @@ import ts from "typescript";
 import init from "./index";
 import {
   EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY,
+  EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY,
+  E2E_PROVIDER_ONLY_COMPLETIONS_CONFIG_KEY,
   EDITOR_TSSERVER_ATTESTATION_CONFIG_KEY,
   type Manifest,
 } from "@verter/language-shared";
@@ -111,6 +113,7 @@ function createInfo(
 ) {
   const logger = { info: () => {}, msg: () => {} };
   const normalize = (f: string) => f.replace(/\\/g, "/");
+  const scriptInfos = new Map<string, { fileName: string }>();
 
   const serverHost: any = {
     useCaseSensitiveFileNames: false,
@@ -140,11 +143,15 @@ function createInfo(
 
   const languageService: any = {
     getProgram: () => undefined,
-    getDefinitionAndBoundSpan: () => undefined,
-    getDefinitionAtPosition: () => undefined,
-    getTypeDefinitionAtPosition: () => undefined,
+    getDefinitionAndBoundSpan: (...a: any[]) =>
+      languageService.__lsImpl?.getDefinitionAndBoundSpan?.(...a),
+    getDefinitionAtPosition: (...a: any[]) =>
+      languageService.__lsImpl?.getDefinitionAtPosition?.(...a),
+    getTypeDefinitionAtPosition: (...a: any[]) =>
+      languageService.__lsImpl?.getTypeDefinitionAtPosition?.(...a),
     getQuickInfoAtPosition: (...a: any[]) =>
       languageService.__lsImpl?.getQuickInfoAtPosition?.(...a),
+    getDocumentHighlights: (...a: any[]) => languageService.__lsImpl?.getDocumentHighlights?.(...a),
     getApplicableRefactors: (...a: any[]) =>
       languageService.__lsImpl?.getApplicableRefactors?.(...a) ?? [],
     getEncodedSemanticClassifications: (...a: any[]) =>
@@ -152,7 +159,8 @@ function createInfo(
         spans: [],
         endOfLineState: 0,
       },
-    getCompletionEntryDetails: () => undefined,
+    getCompletionEntryDetails: (...a: any[]) =>
+      languageService.__lsImpl?.getCompletionEntryDetails?.(...a),
     getCompletionsAtPosition: (...a: any[]) =>
       languageService.__lsImpl?.getCompletionsAtPosition?.(...a),
     getSyntacticDiagnostics: (...a: any[]) =>
@@ -169,6 +177,7 @@ function createInfo(
     findReferences: (...a: any[]) => languageService.__lsImpl?.findReferences?.(...a),
     getImplementationAtPosition: (...a: any[]) =>
       languageService.__lsImpl?.getImplementationAtPosition?.(...a),
+    getRenameInfo: (...a: any[]) => languageService.__lsImpl?.getRenameInfo?.(...a),
     findRenameLocations: (...a: any[]) => languageService.__lsImpl?.findRenameLocations?.(...a),
     getCodeFixesAtPosition: (...a: any[]) =>
       languageService.__lsImpl?.getCodeFixesAtPosition?.(...a) ?? [],
@@ -185,7 +194,17 @@ function createInfo(
     getCurrentDirectory: () => process.cwd(),
     getCompilerOptions: () => ({}),
     getProjectName: () => projectName,
-    projectService: { logger },
+    projectService: {
+      logger,
+      getScriptInfo: (fileName: string) => scriptInfos.get(normalize(fileName).toLowerCase()),
+      getOrCreateScriptInfoForNormalizedPath: (fileName: string) => {
+        const normalized = normalize(fileName);
+        if (!serverHost.fileExists(normalized)) return undefined;
+        const scriptInfo = { fileName: normalized };
+        scriptInfos.set(normalized.toLowerCase(), scriptInfo);
+        return scriptInfo;
+      },
+    },
     getRootFiles: () => [],
     getFileNames: () => [],
     containsFile: () => false,
@@ -247,8 +266,35 @@ describe("host-proxy matrix: compiler options", () => {
 
     expect(proxied).toBe(settings);
     expect(proxied.jsx).toBe(ts.JsxEmit.Preserve);
+    expect(proxied.allowJs).toBeUndefined();
     expect(proxied.configFile).toBe(configFile);
     expect(Object.getOwnPropertyDescriptor(proxied, "configFile")?.enumerable).toBe(false);
+  });
+
+  it("admits a ready JavaScript carrier without enabling project-wide JS checking", () => {
+    const manifest = vueAndSvelteManifest();
+    const project = manifest.projects["d:/ws/tsconfig.json"];
+    const owned = project.owned_sources.find((entry) => entry.source_uri.endsWith("/A.vue"))!;
+    owned.provider_uri = "d:/ws/src/A.vue.jsx";
+    owned.script_kind = "JSX";
+    const ready = project.ready_files["d:/ws/src/A.vue.tsx"];
+    delete project.ready_files["d:/ws/src/A.vue.tsx"];
+    project.ready_files["d:/ws/src/A.vue.jsx"] = {
+      ...ready,
+      script_kind: "JSX",
+      blob_rel: "blobs/A.vue.jsx",
+    };
+    const dir = track(writeStore(manifest, { "blobs/A.vue.jsx": "export const x = 1;" }));
+    const info = createInfo(dir, { diskFiles: {} });
+    const settings: Record<string, unknown> = { strict: true };
+    info.languageServiceHost.getCompilationSettings = () => settings;
+
+    init({ typescript: ts } as any).create(info);
+    const proxied = info.languageServiceHost.getCompilationSettings();
+
+    expect(proxied).toBe(settings);
+    expect(proxied.allowJs).toBe(true);
+    expect(proxied.checkJs).toBeUndefined();
   });
 });
 
@@ -511,7 +557,73 @@ describe("host-proxy matrix: resolveModuleNameLiterals (in-project → IDE carri
     expect(result?.resolvedFileName).toBe("d:/ws/src/W.svelte.verter.ts");
     expect(result?.extension).toBe(ts.Extension.Ts);
     const snapshot = info.languageServiceHost.getScriptSnapshot(result!.resolvedFileName);
-    expect(snapshot.getText(0, snapshot.getLength())).toContain("class W");
+    expect(snapshot.getText(0, snapshot.getLength())).toBe(
+      "export default class W { declare $props: { label: string } }",
+    );
+  });
+
+  it("resolves the Svelte projection JSX runtime from the plugin-owned package", () => {
+    const dir = track(writeStore(vueAndSvelteManifest(), {}));
+    const info = createInfo(dir, { diskFiles: {} });
+    init({ typescript: ts } as any).create(info);
+
+    const resolved = resolveOne(info, "@verter/svelte-jsx/jsx-runtime", "d:/ws/src/W.svelte.tsx");
+
+    expect(resolved?.replace(/\\/g, "/")).toMatch(
+      /\/node_modules\/@verter\/svelte-jsx\/jsx-runtime\.d\.ts$/,
+    );
+    expect(ts.sys.fileExists(resolved!)).toBe(true);
+  });
+
+  it("resolves the plugin-owned JSX runtime's Svelte imports from the owner workspace", () => {
+    const owner = track(mkdtempSync(join(tmpdir(), "verter-svelte-owner-")));
+    const svelte = join(owner, "node_modules", "svelte");
+    mkdirSync(svelte, { recursive: true });
+    writeFileSync(
+      join(svelte, "package.json"),
+      JSON.stringify({
+        name: "svelte",
+        types: "./index.d.ts",
+        exports: {
+          ".": { types: "./index.d.ts" },
+          "./elements": { types: "./elements.d.ts" },
+        },
+      }),
+      "utf8",
+    );
+    writeFileSync(join(svelte, "index.d.ts"), "export interface Snippet {}\n", "utf8");
+    writeFileSync(
+      join(svelte, "elements.d.ts"),
+      "export interface SvelteHTMLElements { div: Record<string, unknown> }\n",
+      "utf8",
+    );
+
+    const info = createInfo(undefined, { diskFiles: {} }, join(owner, "tsconfig.json"));
+    info.project.getCurrentDirectory = () => owner;
+    info.project.getCompilerOptions = () => ({
+      module: ts.ModuleKind.ESNext,
+      moduleResolution: ts.ModuleResolutionKind.Bundler,
+    });
+    info.serverHost.fileExists = ts.sys.fileExists;
+    info.serverHost.readFile = ts.sys.readFile;
+    info.serverHost.directoryExists = ts.sys.directoryExists;
+    info.serverHost.getDirectories = ts.sys.getDirectories;
+    info.serverHost.realpath = ts.sys.realpath;
+    const priorCwd = process.cwd();
+    init({ typescript: ts } as any).create(info);
+    process.chdir(priorCwd);
+
+    const runtime = resolveOne(
+      info,
+      "@verter/svelte-jsx/jsx-runtime",
+      join(owner, "src", "W.svelte.tsx"),
+    );
+    expect(runtime).toBeDefined();
+    const resolved = resolveOne(info, "svelte/elements", runtime!);
+
+    expect(resolved?.replace(/\\/g, "/").toLowerCase()).toBe(
+      join(svelte, "elements.d.ts").replace(/\\/g, "/").toLowerCase(),
+    );
   });
 
   it("redirects a JavaScript .svelte import to the .svelte.jsx IDE carrier as JSX", () => {
@@ -528,6 +640,37 @@ describe("host-proxy matrix: resolveModuleNameLiterals (in-project → IDE carri
     )[0]?.resolvedModule;
     expect(result?.resolvedFileName).toBe("d:/ws/src/W.svelte.jsx");
     expect(result?.extension).toBe(ts.Extension.Jsx);
+  });
+
+  it("redirects a JavaScript .vue import to its manifest-owned JSX carrier", () => {
+    const manifest = vueAndSvelteManifest();
+    const project = manifest.projects["d:/ws/tsconfig.json"];
+    const owned = project.owned_sources.find((entry) => entry.source_uri.endsWith("/A.vue"))!;
+    owned.provider_uri = "d:/ws/src/A.vue.jsx";
+    owned.script_kind = "JSX";
+    const ready = project.ready_files["d:/ws/src/A.vue.tsx"];
+    delete project.ready_files["d:/ws/src/A.vue.tsx"];
+    project.ready_files["d:/ws/src/A.vue.jsx"] = {
+      ...ready,
+      script_kind: "JSX",
+      blob_rel: "blobs/A.vue.jsx",
+    };
+    const dir = track(writeStore(manifest, { "blobs/A.vue.jsx": "export default {};" }));
+    const info = createInfo(dir, { diskFiles: { "d:/ws/src/A.vue": "<template />" } });
+    init({ typescript: ts } as any).create(info);
+
+    const result = info.languageServiceHost.resolveModuleNameLiterals(
+      [{ text: "./A.vue" }],
+      "d:/ws/src/consumer.ts",
+      undefined,
+      undefined,
+      undefined,
+    );
+
+    expect(result[0]?.resolvedModule).toMatchObject({
+      resolvedFileName: "d:/ws/src/A.vue.jsx",
+      extension: ts.Extension.Jsx,
+    });
   });
 
   it("leaves a plain relative .ts import to TS's own resolution", () => {
@@ -611,7 +754,30 @@ describe("getExternalFiles = ready framework source identities only", () => {
     expect(companion.getText(0, companion.getLength())).toBe("export const A = 1;");
   });
 
-  it("marks a ready editor source answerable by its configured project without adding it as a root", () => {
+  it("assigns raw-source request membership to its exact configured companion project", () => {
+    const dir = track(
+      writeStore(vueAndSvelteManifest(), {
+        "blobs/A.vue.tsx": "export const A = 1;",
+        "blobs/W.svelte.tsx": "export const W = 1;",
+      }),
+    );
+    const info = createInfo(dir, { diskFiles: {} });
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+    };
+    init({ typescript: ts } as any).create(info);
+
+    // TypeScript's cross-project references/rename coordinator checks project
+    // membership before invoking a plugin provider. The configured companion
+    // owner is the one project that can answer the source request; no sibling
+    // inferred project may claim the same virtual request membership.
+    expect(info.project.containsFile("d:/ws/src/A.vue")).toBe(true);
+    expect(info.project.containsFile("d:/ws/src/Unknown.vue")).toBe(false);
+  });
+
+  it("does not infer source-feature ownership from carrier membership", () => {
     const dir = track(
       writeStore(vueAndSvelteManifest(), {
         "blobs/A.vue.tsx": "export const A = 1;",
@@ -625,8 +791,10 @@ describe("getExternalFiles = ready framework source identities only", () => {
     };
     init({ typescript: ts } as any).create(info);
 
-    expect(info.project.containsFile("d:/ws/src/A.vue")).toBe(true);
-    expect(info.project.containsFile("d:/ws/src/Unknown.vue")).toBe(false);
+    expect(info.project.containsFile("d:/ws/src/A.vue")).toBe(false);
+    expect(init({ typescript: ts } as any).getExternalFiles(info.project as any)).toContain(
+      "d:/ws/src/A.vue.tsx",
+    );
   });
 
   it("does not invalidate a project when configuration changes no serving state", async () => {
@@ -726,10 +894,28 @@ describe("getExternalFiles = ready framework source identities only", () => {
     };
     info.project.getConfigFilePath = () => "d:/ws/tsconfig.json";
     let targetedReloads = 0;
+    const reloadedScriptInfos: string[] = [];
+    const refreshOrder: string[] = [];
+    info.project.projectService.clearSemanticCache = (project: unknown) => {
+      expect(project).toBe(info.project);
+      refreshOrder.push("clear-resolution-cache");
+    };
+    info.project.projectService.getScriptInfo = (fileName: string) =>
+      fileName === "d:/ws/src/A.vue.tsx"
+        ? {
+            reloadFromFile: () => {
+              reloadedScriptInfos.push(fileName);
+              refreshOrder.push("reload-script-info");
+              return true;
+            },
+          }
+        : undefined;
     info.project.projectService.reloadFileNamesOfConfiguredProject = () => {
       targetedReloads++;
+      refreshOrder.push("reload-project-files");
       return true;
     };
+    info.project.refreshDiagnostics = () => refreshOrder.push("diagnostics");
     const plugin = init({ typescript: ts } as any);
     plugin.create(info);
 
@@ -759,9 +945,221 @@ describe("getExternalFiles = ready framework source identities only", () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(targetedReloads).toBe(1);
+    expect(reloadedScriptInfos).toEqual([companion]);
+    expect(refreshOrder).toEqual([
+      "clear-resolution-cache",
+      "reload-script-info",
+      "reload-project-files",
+      "diagnostics",
+    ]);
     expect(info.languageServiceHost.getScriptVersion(companion)).toBe("5:a2");
     const fresh = info.languageServiceHost.getScriptSnapshot(companion);
     expect(fresh.getText(0, fresh.getLength())).toBe("export const value = 'fresh';");
+  });
+
+  it("replaces a warm Svelte wildcard fallback with the authored Component contract through deep barrels", async () => {
+    const projectKey = "d:/ws/tsconfig.json";
+    const source = "d:/ws/src/Native.svelte";
+    const ide = `${source}.tsx`;
+    const api = `${source}.verter.ts`;
+    const directConsumer = "d:/ws/src/direct-consumer.ts";
+    const barrelOne = "d:/ws/src/level-one.ts";
+    const barrelTwo = "d:/ws/src/level-two.ts";
+    const barrelConsumer = "d:/ws/src/barrel-consumer.ts";
+    const svelteTypes = "d:/ws/node_modules/svelte/index.d.ts";
+    const diskFiles: Record<string, string> = {
+      [directConsumer]:
+        'import Native from "./Native.svelte";\n' +
+        'import type { ComponentProps } from "svelte";\n' +
+        "export const directProps: ComponentProps<typeof Native> = { contractProp: 42 };\n",
+      [barrelOne]: 'export { default as Native } from "./Native.svelte";\n',
+      [barrelTwo]: 'export * from "./level-one";\n',
+      [barrelConsumer]:
+        'import { Native } from "./level-two";\n' +
+        'import type { ComponentProps } from "svelte";\n' +
+        "export const barrelProps: ComponentProps<typeof Native> = { contractProp: 42 };\n",
+      [svelteTypes]:
+        'declare module "svelte" {\n' +
+        "  export type Component<Props extends Record<string, any> = {}, Exports extends Record<string, any> = {}, Bindings extends keyof Props | '' = string> = (internals: unknown, props: Props) => Exports;\n" +
+        "  export type ComponentProps<Comp> = Comp extends Component<infer Props, any, any> ? Props : Record<string, any>;\n" +
+        "  export interface LegacyComponentType { readonly legacy: true }\n" +
+        "}\n" +
+        'declare module "*.svelte" { import { LegacyComponentType } from "svelte"; const Comp: LegacyComponentType; export default Comp; }\n',
+    };
+    const initial: Manifest = {
+      epoch: 1,
+      host_version: "test",
+      projects: {
+        [projectKey]: { owned_sources: [], ready_files: {} },
+      },
+    };
+    const dir = track(writeStore(initial, {}));
+    const info = createInfo(dir, { diskFiles }, projectKey);
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      carrierStoreRefreshToken: 1,
+    };
+    info.project.getConfigFilePath = () => projectKey;
+    info.project.getCurrentDirectory = () => process.cwd();
+    info.project.getCompilerOptions = () => ({
+      strict: true,
+      noLib: true,
+      module: ts.ModuleKind.ESNext,
+      moduleResolution: ts.ModuleResolutionKind.Bundler,
+    });
+    let projectVersion = 0;
+    info.languageServiceHost.getCompilationSettings = info.project.getCompilerOptions;
+    info.languageServiceHost.getCurrentDirectory = info.project.getCurrentDirectory;
+    info.languageServiceHost.getDefaultLibFileName = () => "d:/ws/no-lib.d.ts";
+    info.languageServiceHost.getProjectVersion = () => String(projectVersion);
+    info.languageServiceHost.getScriptFileNames = () => Object.keys(diskFiles);
+    info.languageServiceHost.fileExists = info.serverHost.fileExists;
+    info.languageServiceHost.readFile = info.serverHost.readFile;
+    const relativeResolutions = new Map<string, string>([
+      [`${barrelTwo}|./level-one`, barrelOne],
+      [`${barrelConsumer}|./level-two`, barrelTwo],
+    ]);
+    info.languageServiceHost.resolveModuleNameLiterals = (
+      literals: readonly ts.StringLiteralLike[],
+      containingFile: string,
+    ) =>
+      literals.map((literal) => {
+        let resolved: string | undefined;
+        if (literal.text === "svelte") {
+          resolved = svelteTypes;
+        } else if (literal.text.startsWith(".")) {
+          const normalizedContaining = containingFile.replace(/\\/g, "/").toLowerCase();
+          resolved = relativeResolutions.get(`${normalizedContaining}|${literal.text}`);
+        }
+        return {
+          resolvedModule:
+            resolved === undefined
+              ? undefined
+              : {
+                  resolvedFileName: resolved,
+                  extension: ts.Extension.Ts,
+                  isExternalLibraryImport: resolved === svelteTypes,
+                },
+        };
+      });
+
+    const plugin = init({ typescript: ts } as any);
+    plugin.create(info);
+    expect(
+      info.languageServiceHost.resolveModuleNameLiterals(
+        [{ text: "./level-two" }],
+        barrelConsumer,
+        undefined,
+        info.project.getCompilerOptions(),
+        undefined,
+      )[0]?.resolvedModule?.resolvedFileName,
+    ).toBe(barrelTwo);
+    const realLanguageService = ts.createLanguageService(info.languageServiceHost);
+    info.languageService.__lsImpl = realLanguageService;
+    info.project.projectService.clearSemanticCache = (project: unknown) => {
+      expect(project).toBe(info.project);
+      projectVersion++;
+      realLanguageService.cleanupSemanticCache();
+    };
+    info.project.projectService.reloadFileNamesOfConfiguredProject = (project: unknown) => {
+      expect(project).toBe(info.project);
+      projectVersion++;
+      return true;
+    };
+
+    const before = info.languageService.getSemanticDiagnostics(directConsumer);
+    expect(before.some((diagnostic: ts.Diagnostic) => diagnostic.code === 2307)).toBe(false);
+    expect(before.some((diagnostic: ts.Diagnostic) => diagnostic.code === 2322)).toBe(false);
+    const directSource = diskFiles[directConsumer];
+    const directBinding = directSource.indexOf("Native");
+    const beforeQuickInfo = info.languageService.getQuickInfoAtPosition(
+      directConsumer,
+      directBinding + 1,
+    );
+    expect(ts.displayPartsToString(beforeQuickInfo?.displayParts)).toContain("LegacyComponentType");
+
+    const published: Manifest = {
+      epoch: 2,
+      host_version: "test",
+      projects: {
+        [projectKey]: {
+          owned_sources: [
+            {
+              source_uri: source,
+              provider_uri: ide,
+              role: "CarrierIde",
+              script_kind: "TSX",
+            },
+            {
+              source_uri: source,
+              provider_uri: api,
+              role: "CarrierApi",
+              script_kind: "TS",
+            },
+          ],
+          ready_files: {
+            [ide]: {
+              content_hash: "native-ide",
+              version: 1,
+              script_kind: "TSX",
+              role: "CarrierIde",
+              map_hash: "0",
+              blob_rel: "blobs/Native.svelte.tsx",
+            },
+            [api]: {
+              content_hash: "native-api",
+              version: 1,
+              script_kind: "TS",
+              role: "CarrierApi",
+              map_hash: "0",
+              blob_rel: "blobs/Native.svelte.verter.ts",
+            },
+          },
+        },
+      },
+    };
+    writeFileSync(join(dir, "blobs/Native.svelte.tsx"), "export {};\n", "utf8");
+    writeFileSync(
+      join(dir, "blobs/Native.svelte.verter.ts"),
+      'declare const Native: import("svelte").Component<{ contractProp: string }, {}, "">; export default Native;\n',
+      "utf8",
+    );
+    writeFileSync(join(dir, "manifest.json"), JSON.stringify(published), "utf8");
+
+    plugin.onConfigurationChanged!({
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      carrierStoreRefreshToken: 2,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const afterQuickInfo = info.languageService.getQuickInfoAtPosition(
+      directConsumer,
+      directBinding + 1,
+    );
+    const afterDisplay = ts.displayPartsToString(afterQuickInfo?.displayParts);
+    expect(afterDisplay).toContain("Component<");
+    expect(afterDisplay).not.toContain("LegacyComponentType");
+
+    for (const fileName of [directConsumer, barrelConsumer]) {
+      const diagnostics = info.languageService.getSemanticDiagnostics(fileName) as ts.Diagnostic[];
+      expect(diagnostics.some((diagnostic) => diagnostic.code === 2307)).toBe(false);
+      const hasContractError = diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === 2322 &&
+          ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n").includes("number"),
+      );
+      expect(
+        hasContractError,
+        diagnostics
+          .map(
+            (diagnostic) =>
+              `TS${diagnostic.code}: ${ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")}`,
+          )
+          .join("\n"),
+      ).toBe(true);
+    }
   });
 });
 
@@ -1016,6 +1414,7 @@ describe("editor-owned source diagnostic routing", () => {
     info.config = {
       carrierStoreDir: dir,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
     };
     const sourceFile = ts.createSourceFile(
       sourcePath,
@@ -1082,6 +1481,7 @@ describe("editor-owned source diagnostic routing", () => {
     configuredInfo.config = {
       carrierStoreDir: dir,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
     };
     const companionFile = ts.createSourceFile(
       companionPath,
@@ -1119,6 +1519,7 @@ describe("editor-owned source diagnostic routing", () => {
     inferredInfo.config = {
       carrierStoreDir: dir,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
     };
     const sourceFile = ts.createSourceFile(
       sourcePath,
@@ -1132,7 +1533,8 @@ describe("editor-owned source diagnostic routing", () => {
     });
     init({ typescript: ts } as any).create(inferredInfo);
 
-    expect(inferredInfo.project.containsFile(sourcePath)).toBe(true);
+    expect(configuredInfo.project.containsFile(sourcePath)).toBe(true);
+    expect(inferredInfo.project.containsFile(sourcePath)).toBe(false);
 
     const diagnostics = inferredInfo.languageService.getSemanticDiagnostics(sourcePath);
 
@@ -1143,6 +1545,132 @@ describe("editor-owned source diagnostic routing", () => {
       start: 6,
       length: 3,
     });
+  });
+
+  it("uses the configured owner runtime for inferred-project references and rename", () => {
+    const dir = track(writeStore(mappableManifest(), mappableBlobs()));
+    const sourcePath = "d:/ws/src/A.vue";
+    const requestPath = "D:\\ws\\src\\A.vue";
+    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourceText = "const foo = 1;\n";
+    const configuredInfo = createInfo(
+      dir,
+      { diskFiles: { [sourcePath]: sourceText } },
+      "d:/ws/tsconfig.json",
+    );
+    configuredInfo.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+    };
+    const configuredRequests: string[] = [];
+    const companionReference = () => ({
+      fileName: companionPath,
+      textSpan: { start: 6, length: 3 },
+      isWriteAccess: false,
+    });
+    configuredInfo.languageService.__lsImpl = {
+      getReferencesAtPosition: (fileName: string) => {
+        configuredRequests.push(`references:${fileName}`);
+        return [companionReference()];
+      },
+      findReferences: (fileName: string) => {
+        configuredRequests.push(`findReferences:${fileName}`);
+        const definition = {
+          ...companionReference(),
+          kind: ts.ScriptElementKind.constElement,
+          name: "foo",
+          containerKind: ts.ScriptElementKind.unknown,
+          containerName: "",
+        };
+        return [
+          { definition, references: [companionReference()] },
+          {
+            definition: { ...definition, contextSpan: { start: 0, length: 12 } },
+            references: [companionReference()],
+          },
+        ];
+      },
+      findRenameLocations: (fileName: string) => {
+        configuredRequests.push(`rename:${fileName}`);
+        return [{ ...companionReference(), prefixText: "foo: " }, companionReference()];
+      },
+    };
+    init({ typescript: ts } as any).create(configuredInfo);
+
+    const inferredInfo = createInfo(
+      dir,
+      { diskFiles: { [sourcePath]: sourceText } },
+      "/dev/null/inferredProject1*",
+    );
+    inferredInfo.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+    };
+    init({ typescript: ts } as any).create(inferredInfo);
+
+    const references = inferredInfo.languageService.getReferencesAtPosition(requestPath, 6);
+    const referencedSymbols = inferredInfo.languageService.findReferences(requestPath, 6);
+    const renameLocations = inferredInfo.languageService.findRenameLocations(
+      requestPath,
+      6,
+      false,
+      false,
+      {},
+    );
+    const companionReferences = inferredInfo.languageService.getReferencesAtPosition(
+      companionPath,
+      6,
+    );
+    const companionReferencedSymbols = inferredInfo.languageService.findReferences(
+      companionPath,
+      6,
+    );
+    const companionRenameLocations = inferredInfo.languageService.findRenameLocations(
+      companionPath,
+      6,
+      false,
+      false,
+      {},
+    );
+
+    expect(configuredRequests).toEqual([
+      `references:${companionPath}`,
+      `findReferences:${companionPath}`,
+      `rename:${companionPath}`,
+      `references:${companionPath}`,
+      `findReferences:${companionPath}`,
+      `rename:${companionPath}`,
+    ]);
+    expect(references).toMatchObject([{ fileName: sourcePath, textSpan: { start: 6, length: 3 } }]);
+    expect(referencedSymbols).toMatchObject([
+      {
+        definition: { fileName: sourcePath, textSpan: { start: 6, length: 3 } },
+        references: [{ fileName: sourcePath, textSpan: { start: 6, length: 3 } }],
+      },
+    ]);
+    expect(referencedSymbols).toHaveLength(1);
+    expect(referencedSymbols[0].references).toHaveLength(1);
+    expect(renameLocations).toMatchObject([
+      { fileName: sourcePath, textSpan: { start: 6, length: 3 } },
+    ]);
+    expect(renameLocations[0]).not.toHaveProperty("prefixText");
+    expect(companionReferences).toMatchObject([
+      { fileName: sourcePath, textSpan: { start: 6, length: 3 } },
+    ]);
+    expect(companionReferencedSymbols).toMatchObject([
+      {
+        definition: { fileName: sourcePath, textSpan: { start: 6, length: 3 } },
+        references: [{ fileName: sourcePath, textSpan: { start: 6, length: 3 } }],
+      },
+    ]);
+    expect(companionReferencedSymbols).toHaveLength(1);
+    expect(companionReferencedSymbols[0].references).toHaveLength(1);
+    expect(companionRenameLocations).toMatchObject([
+      { fileName: sourcePath, textSpan: { start: 6, length: 3 } },
+    ]);
+    expect(companionRenameLocations[0]).not.toHaveProperty("prefixText");
   });
 
   it("materializes the visible source diagnostic file when the configured Program omits raw Vue", () => {
@@ -1161,6 +1689,7 @@ describe("editor-owned source diagnostic routing", () => {
     info.config = {
       carrierStoreDir: dir,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
     };
     info.languageService.getProgram = () => ({
       getSourceFile: (fileName: string) => (fileName === companionPath ? companionFile : undefined),
@@ -1190,6 +1719,208 @@ describe("editor-owned source diagnostic routing", () => {
     });
   });
 
+  // @ai-generated - Proves every editor-facing semantic request stays on the configured
+  // companion Program and that generated paths/spans never leak back to the editor.
+  it("routes the semantic navigation and edit surface through the exact companion", () => {
+    const dir = track(writeStore(mappableManifest(), mappableBlobs()));
+    const sourcePath = "d:/ws/src/W.svelte";
+    const companionPath = "d:/ws/src/W.svelte.tsx";
+    const sourceText = "<script>\nconst bar = 1;\n</script>\n";
+    const sourcePosition = 15;
+    const companionPosition = 6;
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+    };
+
+    const requests = new Map<string, { fileName: string; start: number; end?: number }>();
+    const recordPosition = (method: string, fileName: string, position: number) => {
+      if (fileName !== companionPath) {
+        throw new Error(`${method} received raw editor source ${fileName}`);
+      }
+      requests.set(method, { fileName, start: position });
+    };
+    const definition = () => ({
+      fileName: companionPath,
+      textSpan: { start: companionPosition, length: 3 },
+      kind: ts.ScriptElementKind.constElement,
+      name: "bar",
+      containerKind: ts.ScriptElementKind.unknown,
+      containerName: "",
+    });
+    const reference = () => ({
+      fileName: companionPath,
+      textSpan: { start: companionPosition, length: 3 },
+      isWriteAccess: false,
+    });
+    const companionEdit = () => ({
+      fileName: companionPath,
+      textChanges: [{ span: { start: companionPosition, length: 3 }, newText: "next" }],
+    });
+
+    info.languageService.__lsImpl = {
+      getDefinitionAndBoundSpan: (fileName: string, position: number) => {
+        recordPosition("definitionAndBoundSpan", fileName, position);
+        return {
+          textSpan: { start: companionPosition, length: 3 },
+          definitions: [definition()],
+        };
+      },
+      getDefinitionAtPosition: (fileName: string, position: number) => {
+        recordPosition("definition", fileName, position);
+        return [definition()];
+      },
+      getTypeDefinitionAtPosition: (fileName: string, position: number) => {
+        recordPosition("typeDefinition", fileName, position);
+        return [definition()];
+      },
+      getReferencesAtPosition: (fileName: string, position: number) => {
+        recordPosition("references", fileName, position);
+        return [reference()];
+      },
+      findReferences: (fileName: string, position: number) => {
+        recordPosition("findReferences", fileName, position);
+        return [{ definition: definition(), references: [reference()] }];
+      },
+      getImplementationAtPosition: (fileName: string, position: number) => {
+        recordPosition("implementation", fileName, position);
+        return [definition()];
+      },
+      getRenameInfo: (fileName: string, position: number) => {
+        recordPosition("renameInfo", fileName, position);
+        return {
+          canRename: true,
+          displayName: "bar",
+          fullDisplayName: "bar",
+          kind: ts.ScriptElementKind.constElement,
+          kindModifiers: "",
+          triggerSpan: { start: companionPosition, length: 3 },
+        };
+      },
+      findRenameLocations: (fileName: string, position: number) => {
+        recordPosition("renameLocations", fileName, position);
+        return [reference()];
+      },
+      getCodeFixesAtPosition: (fileName: string, start: number, end: number) => {
+        if (fileName !== companionPath) {
+          throw new Error(`codeFixes received raw editor source ${fileName}`);
+        }
+        requests.set("codeFixes", { fileName, start, end });
+        return [{ fixName: "fix", description: "Fix", changes: [companionEdit()] }];
+      },
+      getEditsForRefactor: (
+        fileName: string,
+        _formatOptions: ts.FormatCodeSettings,
+        selection: number | ts.TextRange,
+      ) => {
+        if (fileName !== companionPath || typeof selection === "number") {
+          throw new Error(`refactor edits received an unrouted editor selection for ${fileName}`);
+        }
+        requests.set("refactorEdits", {
+          fileName,
+          start: selection.pos,
+          end: selection.end,
+        });
+        return { edits: [companionEdit()] };
+      },
+      getCompletionEntryDetails: (fileName: string, position: number) => {
+        recordPosition("completionDetails", fileName, position);
+        return {
+          name: "bar",
+          kind: ts.ScriptElementKind.constElement,
+          kindModifiers: "",
+          displayParts: [],
+          codeActions: [{ description: "Import", changes: [companionEdit()] }],
+        };
+      },
+    };
+    init({ typescript: ts } as any).create(info);
+
+    const definitionAndBoundSpan = info.languageService.getDefinitionAndBoundSpan(
+      sourcePath,
+      sourcePosition,
+    );
+    const definitions = info.languageService.getDefinitionAtPosition(sourcePath, sourcePosition);
+    const typeDefinitions = info.languageService.getTypeDefinitionAtPosition(
+      sourcePath,
+      sourcePosition,
+    );
+    const references = info.languageService.getReferencesAtPosition(sourcePath, sourcePosition);
+    const referencedSymbols = info.languageService.findReferences(sourcePath, sourcePosition);
+    const implementations = info.languageService.getImplementationAtPosition(
+      sourcePath,
+      sourcePosition,
+    );
+    const renameInfo = info.languageService.getRenameInfo(sourcePath, sourcePosition, {});
+    const renameLocations = info.languageService.findRenameLocations(
+      sourcePath,
+      sourcePosition,
+      false,
+      false,
+      {},
+    );
+    const fixes = info.languageService.getCodeFixesAtPosition(
+      sourcePath,
+      sourcePosition,
+      sourcePosition + 3,
+      [1],
+      {},
+      {},
+    );
+    const refactorEdits = info.languageService.getEditsForRefactor(
+      sourcePath,
+      {},
+      { pos: sourcePosition, end: sourcePosition + 3 },
+      "extract",
+      "function_scope_0",
+      {},
+    );
+    const completionDetails = info.languageService.getCompletionEntryDetails(
+      sourcePath,
+      sourcePosition,
+      "bar",
+      {},
+      undefined,
+      {},
+      undefined,
+    );
+
+    expect([...requests.values()]).toEqual(
+      expect.arrayContaining([
+        { fileName: companionPath, start: companionPosition },
+        { fileName: companionPath, start: companionPosition, end: companionPosition + 3 },
+      ]),
+    );
+    expect(requests.size).toBe(11);
+    expect(definitionAndBoundSpan.textSpan).toEqual({ start: sourcePosition, length: 3 });
+    expect(definitionAndBoundSpan.definitions[0].fileName).toBe(sourcePath);
+    expect(definitions[0]).toMatchObject({
+      fileName: sourcePath,
+      textSpan: { start: sourcePosition, length: 3 },
+    });
+    expect(typeDefinitions[0]).toMatchObject({
+      fileName: sourcePath,
+      textSpan: { start: sourcePosition, length: 3 },
+    });
+    expect(references[0]).toMatchObject({
+      fileName: sourcePath,
+      textSpan: { start: sourcePosition, length: 3 },
+    });
+    expect(referencedSymbols[0].definition.fileName).toBe(sourcePath);
+    expect(referencedSymbols[0].references[0].fileName).toBe(sourcePath);
+    expect(implementations[0].fileName).toBe(sourcePath);
+    expect(renameInfo).toMatchObject({
+      canRename: true,
+      triggerSpan: { start: sourcePosition, length: 3 },
+    });
+    expect(renameLocations[0].fileName).toBe(sourcePath);
+    expect(fixes[0].changes[0].fileName).toBe(sourcePath);
+    expect(refactorEdits.edits[0].fileName).toBe(sourcePath);
+    expect(completionDetails.codeActions[0].changes[0].fileName).toBe(sourcePath);
+  });
+
   it("routes quick info through the companion and maps its span back to the source", () => {
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
     const sourcePath = "d:/ws/src/A.vue";
@@ -1198,6 +1929,7 @@ describe("editor-owned source diagnostic routing", () => {
     info.config = {
       carrierStoreDir: dir,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
     };
     let requested: { fileName: string; position: number } | undefined;
     info.languageService.__lsImpl = {
@@ -1232,6 +1964,7 @@ describe("editor-owned source diagnostic routing", () => {
     info.config = {
       carrierStoreDir: dir,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
     };
     let requested: { fileName: string; selection: number | ts.TextRange } | undefined;
     info.languageService.__lsImpl = {
@@ -1263,6 +1996,7 @@ describe("editor-owned source diagnostic routing", () => {
     info.config = {
       carrierStoreDir: dir,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
     };
     let requested: { fileName: string; position: number } | undefined;
     info.languageService.__lsImpl = {
@@ -1270,13 +2004,13 @@ describe("editor-owned source diagnostic routing", () => {
         requested = { fileName, position };
         return {
           isGlobalCompletion: false,
-          isMemberCompletion: false,
+          isMemberCompletion: true,
           isNewIdentifierLocation: false,
           optionalReplacementSpan: { start: 6, length: 3 },
           entries: [
             {
               name: "foo",
-              kind: ts.ScriptElementKind.constElement,
+              kind: ts.ScriptElementKind.memberVariableElement,
               kindModifiers: "",
               sortText: "11",
               replacementSpan: { start: 6, length: 3 },
@@ -1295,6 +2029,588 @@ describe("editor-owned source diagnostic routing", () => {
     expect(completions?.entries[0].replacementSpan).toEqual({ start: 6, length: 3 });
   });
 
+  // @ai-generated - TypeScript replacement spans can end at a generated JSX
+  // delimiter even when the authored identifier itself has an exact origin.
+  it("keeps lexical completion when its generated replacement end is synthetic", () => {
+    const sourcePath = "d:/ws/src/A.vue";
+    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourceText = "{{ increment }}\n";
+    const manifest = mappableManifest();
+    const ready = manifest.projects["d:/ws/tsconfig.json"].ready_files[companionPath];
+    ready.blob_rel = "blobs/A.vue.tsx";
+    ready.map_hash = "completion-synthetic-end";
+    const dir = track(
+      writeStore(manifest, {
+        ...mappableBlobs(),
+        "blobs/A.vue.tsx": "increment}</>\n",
+        "maps/A.vue.json": JSON.stringify({
+          version: 3,
+          sources: [sourcePath],
+          sourcesContent: [sourceText],
+          names: [],
+          // Generated [0,9) maps to source [3,12); the JSX delimiter at
+          // generated column 9 is deliberately unmapped.
+          mappings: "AAAG,S",
+        }),
+      }),
+    );
+    const sourcePosition = sourceText.indexOf("increment") + "incr".length;
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+      [E2E_PROVIDER_ONLY_COMPLETIONS_CONFIG_KEY]: true,
+    };
+    info.languageService.__lsImpl = {
+      getCompletionsAtPosition: () => ({
+        isGlobalCompletion: false,
+        isMemberCompletion: false,
+        isNewIdentifierLocation: false,
+        optionalReplacementSpan: { start: 0, length: "increment".length },
+        entries: [
+          {
+            name: "increment",
+            kind: ts.ScriptElementKind.constElement,
+            kindModifiers: "",
+            sortText: "11",
+          },
+        ],
+      }),
+    };
+    init({ typescript: ts } as any).create(info);
+
+    const result = info.languageService.getCompletionsAtPosition(sourcePath, sourcePosition, {});
+
+    expect(result?.entries.map((entry: ts.CompletionEntry) => entry.name)).toEqual(["increment"]);
+    expect(result?.optionalReplacementSpan).toEqual({
+      start: sourceText.indexOf("increment"),
+      length: "increment".length,
+    });
+  });
+
+  // @ai-generated - The Verter LSP owns non-member carrier completion because it
+  // has the source-region context required for template scope and auto-import resolve.
+  // True member completion remains on the editor TypeScript route above.
+  it("yields non-member completion to the carrier completion owner", () => {
+    const sourcePath = "d:/ws/src/A.vue";
+    const companionPath = "d:/ws/src/A.vue.tsx";
+    const carrierText = "const view = <>{ foo }</>;\n";
+    const dir = track(
+      writeStore(mappableManifest(), {
+        ...mappableBlobs(),
+        "blobs/A.vue.tsx": carrierText,
+      }),
+    );
+    const position = carrierText.indexOf("foo") + 1;
+    const companionFile = ts.createSourceFile(
+      companionPath,
+      carrierText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: carrierText } });
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+    };
+    info.languageService.getProgram = () => ({
+      getSourceFile: (fileName: string) => (fileName === companionPath ? companionFile : undefined),
+    });
+    info.languageService.__lsImpl = {
+      getCompletionsAtPosition: () => ({
+        isGlobalCompletion: true,
+        isMemberCompletion: false,
+        isNewIdentifierLocation: false,
+        entries: [
+          {
+            name: "AbortController",
+            kind: ts.ScriptElementKind.varElement,
+            kindModifiers: "declare",
+            sortText: "11",
+          },
+        ],
+      }),
+    };
+    init({ typescript: ts } as any).create(info);
+
+    expect(info.languageService.getCompletionsAtPosition(sourcePath, position, {})).toBeUndefined();
+  });
+
+  it("keeps generated lexical locals for a typed template prefix without globals", () => {
+    const sourcePath = "d:/ws/src/A.vue";
+    const sourceText = "{{ sl }}\n";
+    const dir = track(writeStore(mappableManifest(), mappableBlobs()));
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+    };
+    info.languageService.__lsImpl = {
+      getCompletionsAtPosition: () => ({
+        isGlobalCompletion: false,
+        isMemberCompletion: false,
+        isNewIdentifierLocation: false,
+        entries: [
+          {
+            name: "slotItem",
+            kind: ts.ScriptElementKind.constElement,
+            kindModifiers: "",
+            sortText: "11",
+          },
+          {
+            name: "slotIndex",
+            kind: ts.ScriptElementKind.constElement,
+            kindModifiers: "",
+            sortText: "11",
+          },
+          {
+            name: "slice",
+            kind: ts.ScriptElementKind.functionElement,
+            kindModifiers: "declare",
+            sortText: "15",
+          },
+          {
+            name: "__props",
+            kind: ts.ScriptElementKind.constElement,
+            kindModifiers: "",
+            sortText: "11",
+          },
+          {
+            name: "globalThis",
+            kind: ts.ScriptElementKind.moduleElement,
+            kindModifiers: "",
+            sortText: "15",
+          },
+          {
+            name: "sleep",
+            kind: ts.ScriptElementKind.functionElement,
+            kindModifiers: "export",
+            sortText: "16",
+            source: "some-package",
+          },
+        ],
+      }),
+    };
+    init({ typescript: ts } as any).create(info);
+
+    const result = info.languageService.getCompletionsAtPosition(
+      sourcePath,
+      sourceText.indexOf("sl") + 2,
+      {},
+    );
+
+    expect(result?.entries.map((entry: ts.CompletionEntry) => entry.name)).toEqual([
+      "slotItem",
+      "slotIndex",
+    ]);
+    expect(result?.isGlobalCompletion).toBe(false);
+  });
+
+  it("keeps provider-owned lexical template scope at an empty prefix in attribution E2E", () => {
+    const sourcePath = "d:/ws/src/A.vue";
+    const sourceText = "{{  }}\n";
+    const manifest = mappableManifest();
+    manifest.projects["d:/ws/tsconfig.json"].ready_files["d:/ws/src/A.vue.tsx"].blob_rel =
+      "blobs/A.vue.tsx";
+    const dir = track(
+      writeStore(manifest, {
+        ...mappableBlobs(),
+        "blobs/A.vue.tsx": sourceText,
+      }),
+    );
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+      [E2E_PROVIDER_ONLY_COMPLETIONS_CONFIG_KEY]: true,
+    };
+    info.languageService.__lsImpl = {
+      getCompletionsAtPosition: () => ({
+        isGlobalCompletion: true,
+        isMemberCompletion: false,
+        isNewIdentifierLocation: false,
+        entries: [
+          {
+            name: "localValue",
+            kind: ts.ScriptElementKind.constElement,
+            kindModifiers: "",
+            sortText: "11",
+          },
+          {
+            name: "AbortController",
+            kind: ts.ScriptElementKind.varElement,
+            kindModifiers: ts.ScriptElementKindModifier.ambientModifier,
+            sortText: "15",
+          },
+          {
+            name: "computed",
+            kind: ts.ScriptElementKind.alias,
+            kindModifiers: "export",
+            sortText: "16",
+            source: "vue",
+          },
+        ],
+      }),
+    };
+    init({ typescript: ts } as any).create(info);
+
+    const result = info.languageService.getCompletionsAtPosition(sourcePath, 3, {});
+
+    expect(result?.entries.map((entry: ts.CompletionEntry) => entry.name)).toEqual(["localValue"]);
+    expect(result?.isGlobalCompletion).toBe(false);
+  });
+
+  it("normalizes TypeScript JSX prop labels for a framework attribute position", () => {
+    const sourcePath = "d:/ws/src/A.vue";
+    const sourceText = "<MyComp />\n";
+    const manifest = mappableManifest();
+    manifest.projects["d:/ws/tsconfig.json"].ready_files["d:/ws/src/A.vue.tsx"].blob_rel =
+      "blobs/A.vue.tsx";
+    const dir = track(
+      writeStore(manifest, {
+        ...mappableBlobs(),
+        "blobs/A.vue.tsx": sourceText,
+      }),
+    );
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+      [E2E_PROVIDER_ONLY_COMPLETIONS_CONFIG_KEY]: true,
+    };
+    info.languageService.__lsImpl = {
+      getCompletionsAtPosition: () => ({
+        isGlobalCompletion: false,
+        isMemberCompletion: true,
+        isNewIdentifierLocation: false,
+        entries: [
+          {
+            name: "onCustom?",
+            kind: ts.ScriptElementKind.memberVariableElement,
+            kindModifiers: "optional",
+            sortText: "11",
+          },
+          {
+            name: "modelValue?",
+            kind: ts.ScriptElementKind.memberVariableElement,
+            kindModifiers: "optional",
+            sortText: "11",
+          },
+        ],
+      }),
+    };
+    init({ typescript: ts } as any).create(info);
+
+    const result = info.languageService.getCompletionsAtPosition(sourcePath, 8, {});
+
+    expect(result?.entries.map((entry: ts.CompletionEntry) => entry.name)).toEqual([
+      "@custom",
+      "model-value",
+    ]);
+    expect(result?.entries.map((entry: ts.CompletionEntry) => entry.kindModifiers)).toEqual([
+      "",
+      "",
+    ]);
+  });
+
+  // The raw SFC ScriptInfo remains editor-owned, but its TypeScript semantics
+  // come from the mapped companion. Script positions therefore keep the
+  // complete TypeScript list (locals, globals, and actionable auto-imports),
+  // while the template-only ownership rule above continues to yield bare
+  // render-scope identifiers to Verter.
+  it("keeps actionable non-member completions on the TypeScript route inside script", () => {
+    const sourcePath = "d:/ws/src/A.vue";
+    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourceText =
+      '<script setup lang="ts">\ncomputed\n</script>\n<template>{{ computed }}</template>\n';
+    const companionText = "computed\n";
+    const manifest = mappableManifest();
+    const ready = manifest.projects["d:/ws/tsconfig.json"].ready_files[companionPath];
+    ready.blob_rel = "blobs/A.vue.tsx";
+    ready.map_hash = "script-completion-map";
+    const dir = track(
+      writeStore(manifest, {
+        ...mappableBlobs(),
+        "blobs/A.vue.tsx": companionText,
+        "maps/A.vue.json": JSON.stringify({
+          version: 3,
+          sources: [sourcePath],
+          names: [],
+          mappings: "AACA",
+        }),
+      }),
+    );
+    const sourcePosition = sourceText.indexOf("computed") + "computed".length;
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+    };
+    let requested: { fileName: string; position: number } | undefined;
+    info.languageService.__lsImpl = {
+      getCompletionsAtPosition: (fileName: string, position: number) => {
+        requested = { fileName, position };
+        return {
+          isGlobalCompletion: true,
+          isMemberCompletion: false,
+          isNewIdentifierLocation: false,
+          entries: [
+            {
+              name: "AbortController",
+              kind: ts.ScriptElementKind.varElement,
+              kindModifiers: "declare",
+              sortText: "11",
+            },
+            {
+              name: "computed",
+              kind: ts.ScriptElementKind.alias,
+              kindModifiers: "export",
+              sortText: "16",
+              source: "vue",
+              hasAction: true,
+            },
+          ],
+        };
+      },
+    };
+    init({ typescript: ts } as any).create(info);
+
+    const completions = info.languageService.getCompletionsAtPosition(
+      sourcePath,
+      sourcePosition,
+      {},
+    );
+
+    expect(requested).toEqual({ fileName: companionPath, position: "computed".length });
+    expect(completions?.entries.map((entry: ts.CompletionEntry) => entry.name)).toEqual([
+      "AbortController",
+      "computed",
+    ]);
+    expect(
+      completions?.entries.find((entry: ts.CompletionEntry) => entry.name === "computed"),
+    ).toMatchObject({
+      source: "vue",
+      hasAction: true,
+    });
+  });
+
+  it("keeps carrier membership but yields source features to a selected managed provider", () => {
+    const sourcePath = "d:/ws/src/A.vue";
+    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourceText =
+      '<script setup lang="ts">\nconst value = 1\n</script>\n<template>{{ value }}</template>\n';
+    const dir = track(writeStore(mappableManifest(), mappableBlobs()));
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: false,
+    };
+    const requests: string[] = [];
+    info.languageService.__lsImpl = {
+      getCompletionsAtPosition: (fileName: string) => {
+        requests.push(fileName);
+        return {
+          isGlobalCompletion: false,
+          isMemberCompletion: false,
+          isNewIdentifierLocation: false,
+          entries: [
+            {
+              name: "editor-source-control",
+              kind: ts.ScriptElementKind.constElement,
+              kindModifiers: "",
+              sortText: "11",
+            },
+          ],
+        };
+      },
+      getQuickInfoAtPosition: (fileName: string) => {
+        requests.push(`hover:${fileName}`);
+        return {
+          kind: ts.ScriptElementKind.constElement,
+          kindModifiers: "",
+          textSpan: { start: 0, length: 1 },
+          displayParts: [{ text: "editor-source-control", kind: "text" }],
+        };
+      },
+      getRenameInfo: (fileName: string) => {
+        requests.push(`rename-info:${fileName}`);
+        return {
+          canRename: true,
+          kind: ts.ScriptElementKind.constElement,
+          kindModifiers: "",
+          displayName: "editor-source-control",
+          fullDisplayName: "editor-source-control",
+          triggerSpan: { start: 0, length: 1 },
+        };
+      },
+      findRenameLocations: (fileName: string) => {
+        requests.push(`rename:${fileName}`);
+        return [{ fileName, textSpan: { start: 0, length: 1 } }];
+      },
+    };
+    init({ typescript: ts } as any).create(info);
+
+    const result = info.languageService.getCompletionsAtPosition(
+      sourcePath,
+      sourceText.indexOf("value"),
+      {},
+    );
+
+    expect(requests).toEqual([]);
+    expect(result).toBeUndefined();
+    expect(info.languageService.getQuickInfoAtPosition(companionPath, 0)).toBeUndefined();
+    expect(info.languageService.getRenameInfo(companionPath, 0, {}).canRename).toBe(false);
+    expect(
+      info.languageService.findRenameLocations(companionPath, 0, false, false, {}),
+    ).toBeUndefined();
+    expect(requests).toEqual([]);
+    expect(init({ typescript: ts } as any).getExternalFiles(info.project as any)).toContain(
+      "d:/ws/src/A.vue.tsx",
+    );
+  });
+
+  it("reanchors a generated-preamble auto-import edit into the owning script block", () => {
+    const sourcePath = "d:/ws/src/A.vue";
+    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourceText =
+      '<script setup lang="ts">\nconst doubled = computed(() => 1);\n</script>\n<template>{{ doubled }}</template>\n';
+    const companionText = "/** generated preamble */\nconst doubled = computed(() => 1);\n";
+    const manifest = mappableManifest();
+    const ready = manifest.projects["d:/ws/tsconfig.json"].ready_files[companionPath];
+    ready.blob_rel = "blobs/A.vue.tsx";
+    ready.map_hash = "auto-import-preamble-map";
+    const dir = track(
+      writeStore(manifest, {
+        ...mappableBlobs(),
+        "blobs/A.vue.tsx": companionText,
+        "maps/A.vue.json": JSON.stringify({
+          version: 3,
+          sources: [sourcePath],
+          names: [],
+          // Generated line 1 maps to source line 1; the generated preamble at
+          // line 0 deliberately has no source origin.
+          mappings: ";AACA",
+        }),
+      }),
+    );
+    const sourcePosition = sourceText.indexOf("computed") + "computed".length;
+    const companionPosition = companionText.indexOf("computed") + "computed".length;
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+    };
+    info.languageService.__lsImpl = {
+      getCompletionEntryDetails: (fileName: string, position: number) => {
+        expect({ fileName, position }).toEqual({
+          fileName: companionPath,
+          position: companionPosition,
+        });
+        return {
+          name: "computed",
+          kind: ts.ScriptElementKind.alias,
+          kindModifiers: "export",
+          displayParts: [],
+          codeActions: [
+            {
+              description: 'Add import from "vue"',
+              changes: [
+                {
+                  fileName: companionPath,
+                  textChanges: [
+                    {
+                      span: { start: 0, length: 0 },
+                      newText: 'import { computed } from "vue";\n',
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        };
+      },
+    };
+    init({ typescript: ts } as any).create(info);
+
+    const details = info.languageService.getCompletionEntryDetails(
+      sourcePath,
+      sourcePosition,
+      "computed",
+      {},
+      "vue",
+      {},
+      undefined,
+    );
+
+    expect(details?.codeActions).toHaveLength(1);
+    expect(details!.codeActions![0].changes).toEqual([
+      {
+        fileName: sourcePath,
+        textChanges: [
+          {
+            span: { start: sourceText.indexOf("\n") + 1, length: 0 },
+            newText: 'import { computed } from "vue";\n',
+          },
+        ],
+      },
+    ]);
+  });
+
+  // @ai-generated - A coarse carrier mapping can make tsserver label an in-scope
+  // identifier list as member completion. Mixed member/non-member kinds prove the
+  // response is not safe to merge into the editor's member list.
+  it("yields a falsely classified member list to the carrier completion owner", () => {
+    const sourcePath = "d:/ws/src/A.vue";
+    const companionPath = "d:/ws/src/A.vue.tsx";
+    const carrierText = "const view = <>{ foo.bar }</>;\n";
+    const dir = track(
+      writeStore(mappableManifest(), {
+        ...mappableBlobs(),
+        "blobs/A.vue.tsx": carrierText,
+      }),
+    );
+    const position = carrierText.indexOf("bar");
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: carrierText } });
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+    };
+    info.languageService.__lsImpl = {
+      getCompletionsAtPosition: () => ({
+        isGlobalCompletion: false,
+        isMemberCompletion: true,
+        isNewIdentifierLocation: false,
+        entries: [
+          {
+            name: "bar",
+            kind: ts.ScriptElementKind.memberVariableElement,
+            kindModifiers: "",
+            sortText: "11",
+          },
+          {
+            name: "count",
+            kind: ts.ScriptElementKind.constElement,
+            kindModifiers: "",
+            sortText: "11",
+          },
+        ],
+      }),
+    };
+    init({ typescript: ts } as any).create(info);
+
+    expect(info.languageService.getCompletionsAtPosition(sourcePath, position, {})).toBeUndefined();
+  });
+
   it("routes semantic classifications and maps every encoded span back", () => {
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
     const sourcePath = "d:/ws/src/A.vue";
@@ -1303,6 +2619,7 @@ describe("editor-owned source diagnostic routing", () => {
     info.config = {
       carrierStoreDir: dir,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
     };
     let requested: { fileName: string; span: ts.TextSpan } | undefined;
     info.languageService.__lsImpl = {
@@ -1325,6 +2642,52 @@ describe("editor-owned source diagnostic routing", () => {
     });
     expect(classifications).toEqual({ spans: [6, 3, 42], endOfLineState: 0 });
   });
+
+  it("routes document highlights through the companion without raw-source requests", () => {
+    const dir = track(writeStore(mappableManifest(), mappableBlobs()));
+    const sourcePath = "d:/ws/src/A.vue";
+    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourceText = "const foo = 1;\n";
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+    };
+    const requests: Array<{ fileName: string; position: number; files: string[] }> = [];
+    info.languageService.__lsImpl = {
+      getDocumentHighlights: (fileName: string, position: number, files: string[]) => {
+        requests.push({ fileName, position, files });
+        return [
+          {
+            fileName: companionPath,
+            highlightSpans: [
+              {
+                textSpan: { start: 6, length: 3 },
+                kind: ts.HighlightSpanKind.writtenReference,
+              },
+            ],
+          },
+        ];
+      },
+    };
+    init({ typescript: ts } as any).create(info);
+
+    const highlights = info.languageService.getDocumentHighlights(sourcePath, 6, [sourcePath]);
+
+    expect(requests).toEqual([{ fileName: companionPath, position: 6, files: [companionPath] }]);
+    expect(highlights).toEqual([
+      {
+        fileName: sourcePath,
+        highlightSpans: [
+          {
+            textSpan: { start: 6, length: 3 },
+            kind: ts.HighlightSpanKind.writtenReference,
+          },
+        ],
+      },
+    ]);
+  });
 });
 
 describe("companion→source RESPONSE remap wiring (the new nav hooks)", () => {
@@ -1338,6 +2701,30 @@ describe("companion→source RESPONSE remap wiring (the new nav hooks)", () => {
       "d:/ws/src/Consumer.ts": "import A from './A.vue';\n",
     };
   }
+
+  // @ai-generated - Prevents an unmappable generated definition from leaking a
+  // private companion path into the editor's merged definition picker.
+  it("drops an unmappable non-module companion definition", () => {
+    const dir = track(writeStore(mappableManifest(), mappableBlobs()));
+    const info = createInfo(dir, { diskFiles: diskWithSources() });
+    info.languageService.__lsImpl = {
+      getDefinitionAtPosition: () => [
+        {
+          fileName: "d:/ws/src/U.vue.tsx",
+          textSpan: { start: 0, length: 3 },
+          kind: ts.ScriptElementKind.constElement,
+          name: "generated",
+          containerKind: ts.ScriptElementKind.unknown,
+          containerName: "",
+        },
+      ],
+    };
+    init({ typescript: ts } as any).create(info);
+
+    const definitions = info.languageService.getDefinitionAtPosition("d:/ws/src/Consumer.ts", 9);
+
+    expect(definitions).toEqual([]);
+  });
 
   it("uses the reconfigured carrier store for response remapping", () => {
     const initialDir = track(

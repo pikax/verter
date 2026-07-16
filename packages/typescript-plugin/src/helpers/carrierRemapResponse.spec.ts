@@ -388,6 +388,50 @@ describe("remapReferencedSymbol (findReferences grouping)", () => {
     expect(out!.references.some((r) => r.fileName.includes(".vue.tsx"))).toBe(false);
   });
 
+  it("drops an unmappable same-companion ref for a concrete local definition", () => {
+    const absoluteBlobs = blobs();
+    absoluteBlobs["maps/A.vue.json"] = JSON.stringify({
+      ...MAPPABLE_V3,
+      sources: ["d:/ws/src/A.vue"],
+    });
+    const ctx = ctxFor(track(writeStore(manifest(), absoluteBlobs)), {
+      "d:/ws/src/A.vue": "const foo = 1;\n",
+    });
+    const symbol = {
+      definition: {
+        fileName: "d:/ws/src/A.vue.tsx",
+        textSpan: { start: 6, length: 3 },
+        displayParts: [],
+        kind: "const",
+        name: "foo",
+        containerKind: "",
+        containerName: "",
+      },
+      references: [
+        {
+          fileName: "d:/ws/src/A.vue.tsx",
+          textSpan: { start: 6, length: 3 },
+          isWriteAccess: true,
+        },
+        {
+          fileName: "d:/ws/src/A.vue.tsx",
+          textSpan: { start: 999, length: 3 },
+          isWriteAccess: false,
+        },
+      ],
+    };
+
+    const out = remapReferencedSymbol(ctx, symbol);
+
+    expect(out).toBeDefined();
+    expect(out!.definition.fileName).toBe("d:/ws/src/A.vue");
+    expect(out!.references).toHaveLength(1);
+    expect(out!.references[0]).toMatchObject({
+      fileName: "d:/ws/src/A.vue",
+      textSpan: { start: 6, length: 3 },
+    });
+  });
+
   it("DROPS the whole symbol when its definition is an unmappable NON-module companion (kind const)", () => {
     const ctx = ctxFor(track(writeStore(manifest(), blobs())));
     const symbol = {

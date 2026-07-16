@@ -81,6 +81,15 @@ export interface Manifest {
  * leaks into this interface.
  */
 export interface CarrierStoreReader {
+  /**
+   * Canonicalize a path under the owning host filesystem's identity policy.
+   * Readers that omit this optional capability retain exact normalized-path
+   * comparisons; Node editor readers provide it so Windows drive/case variants
+   * still address the same published source without weakening case-sensitive
+   * hosts.
+   */
+  canonicalPath?(fileName: string): string;
+
   /** Whether the store backing this reader is configured/available at all. */
   isAvailable(): boolean;
 

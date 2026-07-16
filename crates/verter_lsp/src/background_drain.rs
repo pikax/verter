@@ -73,6 +73,9 @@ pub(super) struct CarrierPublishCtx<'a> {
     /// The tsserver publish coordinator (drives the store-publish membership), or
     /// `None` for tsgo direct-open. Ownership is resolved from `vfs` for BOTH engines.
     pub(super) coordinator: Option<&'a crate::external_ts::CarrierPublishCoordinator>,
+    /// The managed semantic provider's delivery leg is independent from the
+    /// editor membership store.
+    pub(super) provider_delivery: crate::external_ts::CarrierProviderDelivery,
     /// The published filesystem workspace — the SINGLE ownership-resolution source for
     /// both engines.
     pub(super) vfs: Arc<verter_workspace::FilesystemWorkspace>,
@@ -122,6 +125,11 @@ pub(super) async fn drain_pending_snapshot_provider_sync(
     // carrier-companion open) and when no coordinator is wired.
     let carrier_publish = CarrierPublishCtx {
         coordinator: carrier_publish_coordinator,
+        provider_delivery: if is_tsgo {
+            crate::external_ts::CarrierProviderDelivery::DirectOpen
+        } else {
+            crate::external_ts::CarrierProviderDelivery::StoreBacked
+        },
         vfs: Arc::clone(&vfs_handle),
         ownership_ready: snapshot.ownership_ready,
     };
@@ -223,6 +231,11 @@ pub(super) async fn resync_aliased_imports_for_open_files(
     // its `coordinator` is `None` for tsgo.
     let carrier_publish = vfs_handle.map(|vfs| CarrierPublishCtx {
         coordinator: carrier_publish_coordinator,
+        provider_delivery: if is_tsgo {
+            crate::external_ts::CarrierProviderDelivery::DirectOpen
+        } else {
+            crate::external_ts::CarrierProviderDelivery::StoreBacked
+        },
         vfs,
         ownership_ready: snapshot
             .as_ref()
@@ -598,7 +611,7 @@ pub(super) fn owner_path_config_for_source(
     let tsconfig_path = owner.tsconfig_path.as_deref()?;
     let ws =
         verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
-    verter_workspace::config::raw_paths_json(&ws, tsconfig_path)
+    crate::svelte_assets::owner_provider_path_config(&ws, tsconfig_path, &owner.root)
 }
 
 pub(crate) async fn configure_provider_paths_for_source(
@@ -610,18 +623,6 @@ pub(crate) async fn configure_provider_paths_for_source(
     let Some((base_url, paths)) = owner_path_config_for_source(snapshot, canonical_id) else {
         return;
     };
-
-    // Re-inject the Svelte IDE-projection assets on EVERY
-    // provider path-config — a subsequent owned sync sends the supplied `paths`
-    // verbatim, so without re-injection it would OVERWRITE the startup-injected
-    // `@verter/svelte-jsx` + `svelte/*` rows and strand a `.svelte.tsx`/`.jsx` module
-    // resolution. The owner project root is the per-project resolution anchor.
-    let owner_root = snapshot
-        .resolver
-        .nearest_config_for_path(canonical_id)
-        .map(|o| o.root.clone())
-        .unwrap_or_default();
-    let paths = crate::svelte_assets::inject_svelte_paths(paths, &owner_root);
 
     let result = if background {
         sync.configure_paths_background(&base_url, paths).await
@@ -854,13 +855,16 @@ pub(super) async fn sync_open_unresolved_carrier_provider_file(
         Ok(()) => {
             // Record a fresh generation pinning the EXACT IDE bytes just synced
             // (interactive queries capture this surface).
+            let provider_code = sync
+                .synced_tsx_content(&ide_path)
+                .unwrap_or_else(|| std::sync::Arc::clone(&ide.code));
             crate::provider_surface_store::record_carrier_ide_surface(
                 provider_surfaces,
                 Some(documents),
                 documents.host(),
                 canonical_id,
                 &ide_path,
-                &ide.code,
+                provider_code.as_ref(),
                 ide.source_map.as_deref(),
             );
             true
@@ -976,7 +980,12 @@ async fn apply_owner_resolved_carrier_sync(
     let is_jsx = ide.map(|output| output.is_jsx).unwrap_or(false);
     let membership = carrier_publish
         .and_then(|publish| publish.coordinator)
-        .map(|coordinator| crate::external_ts::CarrierMembershipCtx { coordinator });
+        .map(|coordinator| crate::external_ts::CarrierMembershipCtx {
+            coordinator,
+            provider_delivery: carrier_publish
+                .expect("coordinator came from the publish context")
+                .provider_delivery,
+        });
     match crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
         host: documents.host(),
         vfs: carrier_publish.map(|publish| publish.vfs.as_ref()),
@@ -1080,13 +1089,16 @@ async fn apply_owner_resolved_carrier_sync(
                         synced.push(ProviderPathKind::Ide);
                         // Record a fresh generation pinning the EXACT IDE bytes just
                         // synced (interactive queries capture this surface).
+                        let provider_code = sync
+                            .synced_tsx_content(&ide_path)
+                            .unwrap_or_else(|| std::sync::Arc::clone(&ide.code));
                         crate::provider_surface_store::record_carrier_ide_surface(
                             documents.provider_surfaces(),
                             Some(documents),
                             documents.host(),
                             canonical_id,
                             &ide_path,
-                            &ide.code,
+                            provider_code.as_ref(),
                             ide.source_map.as_deref(),
                         );
                     }
@@ -1104,7 +1116,11 @@ async fn apply_owner_resolved_carrier_sync(
                     genuinely_stale_after_sync(&stale_paths, &committed_state, &synced);
                 // A kind opened: NOW mint the receipt (post-open), attesting EXACTLY the
                 // kinds that actually opened this pass, and commit through the coordinator.
-                let receipt = pending.confirm_opened(&synced);
+                let ide_surface = committed_state
+                    .ide_path
+                    .as_deref()
+                    .and_then(|path| sync.synced_tsx_surface(path));
+                let receipt = pending.confirm_opened_with_ide_surface(&synced, ide_surface);
                 if carrier_coordinator.admit_owned(
                     provider_sync_states,
                     canonical_id,

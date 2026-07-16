@@ -119,6 +119,18 @@ impl VerterHost {
         self.workspace.read().clone()
     }
 
+    /// The authoritative per-canonical content-transition generation for this
+    /// host's live workspace.
+    ///
+    /// External consumers that order async work produced from host content must
+    /// read the revision from this authority rather than from a separate resolver
+    /// snapshot workspace. [`Self::notify_upsert`] and the other host lifecycle
+    /// mutations advance this generation in lockstep with the content they expose.
+    #[must_use]
+    pub fn last_content_transition_generation(&self, canonical_id: &str) -> u64 {
+        self.ws().last_content_transition_generation(canonical_id)
+    }
+
     pub(crate) fn current_store_view_epoch(&self) -> u64 {
         self.store_view_epoch
             .load(std::sync::atomic::Ordering::Relaxed)

@@ -1077,16 +1077,20 @@ impl VerterLanguageServer {
                     &target.import_source,
                     Some(&target.component_name),
                 )?;
-                let public_api = self
+                let projection = self
                     .documents
                     .host()
-                    .get_public_api(&child.canonical_id)
-                    .map(|api| api.code.to_string());
+                    .get_public_api_projection(&child.canonical_id);
                 Some(hover::build_child_component_hover(
                     &target.component_name,
                     &target.import_source,
                     &child.analysis,
-                    public_api.as_deref(),
+                    projection
+                        .as_ref()
+                        .and_then(|projection| projection.contract.as_ref()),
+                    projection
+                        .as_ref()
+                        .map(|projection| projection.response.code.as_ref()),
                     &target.usage_props,
                 ))
             }
@@ -1098,16 +1102,20 @@ impl VerterLanguageServer {
                     &target.import_source,
                     &target.binding_name,
                 )?;
-                let public_api = self
+                let projection = self
                     .documents
                     .host()
-                    .get_public_api(&crate::documents::uri_to_canonical_id(&child.uri))
-                    .map(|api| api.code.to_string());
+                    .get_public_api_projection(&crate::documents::uri_to_canonical_id(&child.uri));
                 Some(hover::build_child_component_hover(
                     &target.binding_name,
                     &target.import_source,
                     &child.analysis,
-                    public_api.as_deref(),
+                    projection
+                        .as_ref()
+                        .and_then(|projection| projection.contract.as_ref()),
+                    projection
+                        .as_ref()
+                        .map(|projection| projection.response.code.as_ref()),
                     &[],
                 ))
             }

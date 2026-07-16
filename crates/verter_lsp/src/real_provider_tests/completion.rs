@@ -5,6 +5,62 @@ use tower_lsp_server::LanguageServer;
 
 use crate::test_harness::{real_provider_test, RealProviderTestSession};
 
+#[tokio::test(flavor = "multi_thread")]
+async fn svelte_contract_tsgo_template_completion_survives_provider_specialization() {
+    use crate::test_harness::{TestProviderKind, TestSessionBuilder};
+
+    let Some(session) = TestSessionBuilder::new(TestProviderKind::Tsgo)
+        .fixture("svelte-contract")
+        .build()
+        .await
+    else {
+        return;
+    };
+    let uri = session.open_fixture_file("src/App.svelte").await;
+    session.ensure_synced(&uri).await;
+    let position = session.find_nth_position(&uri, "renderTyped", 1, 0);
+    let mut matching = None;
+    for _ in 0..16 {
+        let response = session
+            .server()
+            .completion(tower_lsp_server::ls_types::CompletionParams {
+                text_document_position: tower_lsp_server::ls_types::TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: uri.clone() },
+                    position,
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+                context: Some(tower_lsp_server::ls_types::CompletionContext {
+                    trigger_kind: tower_lsp_server::ls_types::CompletionTriggerKind::INVOKED,
+                    trigger_character: None,
+                }),
+            })
+            .await
+            .expect("completion request succeeds");
+        let items = match response {
+            Some(tower_lsp_server::ls_types::CompletionResponse::Array(items)) => items,
+            Some(tower_lsp_server::ls_types::CompletionResponse::List(list)) => list.items,
+            None => Vec::new(),
+        };
+        matching = items.into_iter().find(|item| item.label == "renderTyped");
+        if matching.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    let matching = matching.expect(
+        "the managed tsgo Svelte carrier must stay capturable and offer renderTyped completion",
+    );
+    assert!(
+        matches!(
+            matching.kind,
+            Some(kind) if kind != tower_lsp_server::ls_types::CompletionItemKind::TEXT
+        ),
+        "the Svelte readiness completion must be semantically typed, not Text: {matching:?}"
+    );
+    session.shutdown().await;
+}
+
 /// Provider-materialization prerequisite probe.
 ///
 /// Opens a throw-away virtual SFC whose `<script setup>` block performs a DIRECT,

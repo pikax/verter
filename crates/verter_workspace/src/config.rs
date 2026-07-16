@@ -705,7 +705,10 @@ fn is_solution_style_tsconfig(ws: &dyn WorkspaceRead, tsconfig_path: &str) -> bo
 // Raw Paths Extraction (for tsserver configure_paths)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Extract the raw `baseUrl` and `paths` JSON from a tsconfig.
+/// Extract the effective `baseUrl` and raw `paths` JSON from a tsconfig.
+/// A readable config with no paths still returns its directory (or explicit
+/// baseUrl) plus an empty object so provider-owned resolution rows can be
+/// layered onto an otherwise clean project.
 pub fn raw_paths_json(
     ws: &dyn WorkspaceRead,
     tsconfig_path: &str,
@@ -746,7 +749,7 @@ fn raw_paths_json_inner(
         (Some(paths), None, None) => Some((tsconfig_dir, paths)),
         (None, Some(base_url), Some((_, inherited_paths))) => Some((base_url, inherited_paths)),
         (None, _, Some(inherited)) => Some(inherited),
-        (None, _, None) => {
+        (None, own_base_url, None) => {
             if let Some(refs) = json.get("references").and_then(|v| v.as_array()) {
                 for ref_entry in refs {
                     if let Some(ref_path) = ref_entry.get("path").and_then(|v| v.as_str()) {
@@ -761,7 +764,7 @@ fn raw_paths_json_inner(
                     }
                 }
             }
-            None
+            Some((own_base_url.unwrap_or(tsconfig_dir), serde_json::json!({})))
         }
     }
 }

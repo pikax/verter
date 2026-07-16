@@ -52,5 +52,7 @@ export namespace JSX {
 
   // Intrinsic (lowercase) elements and their attributes are Svelte-true —
   // sourced from `svelte/elements`, never Vue's intrinsic table.
-  interface IntrinsicElements extends SvelteHTMLElements {}
+  type IntrinsicElements = {
+    [Name in keyof SvelteHTMLElements]: SvelteHTMLElements[Name];
+  };
 }

@@ -224,6 +224,22 @@ describe("CarrierMapper.mapGeneratedSpanToSource — same-source endpoints or DR
     expect(m.mapGeneratedSpanToSource(32, 36)).toEqual({ source: "A.vue", start: 7, end: 11 });
   });
 
+  // @ai-generated - Distinguishes an exact mapped-token end from included synthetic bytes.
+  it("maps an exact token whose exclusive end begins a sourceless segment", () => {
+    const m = mainMapper();
+    // [13, 19) covers exactly `foo();`. Column 6 is also the start of the
+    // sourceless ` bar();` extent, so point mapping at 19 remains null while
+    // the span's end-exclusive boundary is valid.
+    expect(m.mapGeneratedOffsetToSource(19)).toBeNull();
+    expect(m.mapGeneratedSpanToSource(13, 19)).toEqual({
+      source: "A.vue",
+      start: 0,
+      end: 6,
+    });
+    // Extending one code unit into synthetic text must still fail closed.
+    expect(m.mapGeneratedSpanToSource(13, 20)).toBeNull();
+  });
+
   it("maps a zero-length span (caret) at a mapped point", () => {
     const m = mainMapper();
     expect(m.mapGeneratedSpanToSource(15, 15)).toEqual({ source: "A.vue", start: 2, end: 2 });
@@ -376,6 +392,20 @@ describe("CarrierMapper.mapSourceOffsetToGenerated — strict fail-closed forwar
       readSourceText: (s) => (s === "A.vue" ? "msg\n" : undefined),
     });
     expect(m.mapSourceOffsetToGenerated(1)).toEqual({ offset: 1, line: 1, column: 1 });
+  });
+
+  // @ai-generated - Proves linked projections retain both the original run and a narrower alias.
+  it("enumerates every containing generated run for an authored source position", () => {
+    const m = new CarrierMapper({
+      map: v3(["A.vue"], [[[0, 0, 0, 0]], [[4, 0, 0, 6], [14]]]),
+      generatedText: "const typedValue\n    typedValue }\n",
+      readSourceText: (source) => (source === "A.vue" ? "const typedValue\n" : undefined),
+    });
+    expect(m.mapSourceOffsetToGeneratedAll(6)).toEqual([
+      { offset: 6, line: 1, column: 6 },
+      { offset: 21, line: 2, column: 4 },
+    ]);
+    expect(m.mapSourceOffsetToGeneratedAll(18)).toEqual([]);
   });
 
   it("fails closed for out-of-range offsets and unknown sources", () => {

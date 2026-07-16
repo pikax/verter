@@ -26,7 +26,10 @@ use verter_type_expr::facts::{
     FactOrLocator, LeafTypeFact, ResolvedLocalShape, SemanticTypeSource,
 };
 
-use crate::framework::api_projector::{ComponentApiProjector, ComponentApiProjectorCtx};
+use crate::framework::api_projector::{
+    ComponentApiProjection, ComponentApiProjector, ComponentApiProjectorCtx,
+    ComponentPublicContract, ComponentPublicProp,
+};
 use crate::types::{PublicApiMode, TscResponse};
 
 /// The Svelte component-API projector.
@@ -34,7 +37,7 @@ use crate::types::{PublicApiMode, TscResponse};
 pub struct SvelteComponentApiProjector;
 
 impl ComponentApiProjector for SvelteComponentApiProjector {
-    fn render_api(&self, cx: ComponentApiProjectorCtx<'_>) -> Option<TscResponse> {
+    fn render_api(&self, cx: ComponentApiProjectorCtx<'_>) -> Option<ComponentApiProjection> {
         let ComponentApiProjectorCtx {
             host,
             resolved_canonical,
@@ -172,8 +175,9 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
                 shallow,
             )
         });
-        let resolved_props_text =
+        let resolved_props =
             resolver_ctx.and_then(|ctx| resolve_public_props_text(host, ctx, resolved_canonical));
+        let resolved_props_text = resolved_props.as_ref().map(|props| props.text.clone());
         let props_text = captured_props_text
             .or_else(|| resolved_props_text.clone())
             .unwrap_or(shallow_props_text);
@@ -253,11 +257,19 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             out.line(&format!("export declare const {name}: unknown;"));
         }
 
-        Some(TscResponse {
-            code: Arc::from(out.finish().as_str()),
-            source_map: None,
+        Some(ComponentApiProjection {
+            response: TscResponse {
+                code: Arc::from(out.finish().as_str()),
+                source_map: None,
+            },
+            contract: resolved_props.map(|props| ComponentPublicContract { props: props.props }),
         })
     }
+}
+
+struct ResolvedPublicProps {
+    text: String,
+    props: Vec<ComponentPublicProp>,
 }
 
 /// Read the authored Svelte tooling `generics="..."` declaration from the
@@ -354,7 +366,7 @@ fn resolve_public_props_text(
     host: &crate::VerterHost,
     ctx: &dyn crate::resolver_core::ResolverContext,
     owner: &str,
-) -> Option<String> {
+) -> Option<ResolvedPublicProps> {
     use crate::typeinfo::framework_surface::{ResolvedOutcome, SvelteSurfaceSource};
 
     let runes = crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface(
@@ -383,25 +395,40 @@ fn resolve_public_props_text(
         return None;
     }
 
-    let fields = props
+    let contract_props = props
         .fields
         .iter()
         .map(|field| {
-            let name = render_property_name(&field.analysis.name);
-            let optional = if field.analysis.is_optional { "?" } else { "" };
-            let ty = field
-                .analysis
-                .type_annotation
-                .as_deref()
-                .unwrap_or("unknown");
+            let has_default = props
+                .prop_defaults
+                .iter()
+                .any(|default| default.key == field.analysis.name);
+            ComponentPublicProp {
+                name: field.analysis.name.clone(),
+                type_annotation: field.analysis.type_annotation.clone(),
+                optional: field.analysis.is_optional || has_default,
+                has_default,
+            }
+        })
+        .collect::<Vec<_>>();
+    let fields = contract_props
+        .iter()
+        .map(|field| {
+            let name = render_property_name(&field.name);
+            let optional = if field.optional { "?" } else { "" };
+            let ty = field.type_annotation.as_deref().unwrap_or("unknown");
             format!("{name}{optional}: {ty}")
         })
         .collect::<Vec<_>>();
-    if fields.is_empty() {
-        Some("{}".to_string())
+    let text = if fields.is_empty() {
+        "{}".to_string()
     } else {
-        Some(format!("{{ {} }}", fields.join("; ")))
-    }
+        format!("{{ {} }}", fields.join("; "))
+    };
+    Some(ResolvedPublicProps {
+        text,
+        props: contract_props,
+    })
 }
 
 /// Resolve a legacy `createEventDispatcher<Events>()` map through the shared

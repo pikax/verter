@@ -18,7 +18,9 @@
 //! `svelte` install gets NO `svelte` rows and fails CLOSED (module-not-found +
 //! the typed `svelte-package-missing` diagnostic).
 
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tower_lsp_server::ls_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
 
@@ -31,6 +33,67 @@ use verter_session::framework::svelte_jsx_assets::{
     SVELTE_JSX_SVG_RUNTIME_SPECIFIER,
 };
 
+const SVELTE_JSX_HTML_PRAGMA: &str = "/** @jsxImportSource @verter/svelte-jsx */\n";
+const SVELTE_JSX_SVG_PRAGMA: &str = "/** @jsxImportSource @verter/svelte-jsx/svg */\n";
+const SVELTE_JSX_MATHML_PRAGMA: &str = "/** @jsxImportSource @verter/svelte-jsx/mathml */\n";
+
+#[derive(Debug, Clone, Copy)]
+enum SvelteJsxAssetNamespace {
+    Html,
+    Svg,
+    MathMl,
+}
+
+impl SvelteJsxAssetNamespace {
+    fn from_carrier(content: &str) -> Option<(Self, &'static str)> {
+        if content.starts_with(SVELTE_JSX_HTML_PRAGMA) {
+            Some((Self::Html, SVELTE_JSX_HTML_PRAGMA))
+        } else if content.starts_with(SVELTE_JSX_SVG_PRAGMA) {
+            Some((Self::Svg, SVELTE_JSX_SVG_PRAGMA))
+        } else if content.starts_with(SVELTE_JSX_MATHML_PRAGMA) {
+            Some((Self::MathMl, SVELTE_JSX_MATHML_PRAGMA))
+        } else {
+            None
+        }
+    }
+
+    fn directory(self) -> &'static str {
+        match self {
+            Self::Html => "",
+            Self::Svg => "svg",
+            Self::MathMl => "mathml",
+        }
+    }
+
+    fn runtime(self) -> &'static str {
+        match self {
+            Self::Html => SVELTE_JSX_RUNTIME_DTS,
+            Self::Svg => SVELTE_JSX_SVG_RUNTIME_DTS,
+            Self::MathMl => SVELTE_JSX_MATHML_RUNTIME_DTS,
+        }
+    }
+}
+
+/// Exact provider bytes for a managed-tsgo Svelte carrier plus the classic JSX
+/// adapter they import. The carrier rewrite replaces one generated prelude line
+/// with one generated prelude line, preserving every source-map coordinate.
+pub(crate) struct PreparedManagedTsgoSvelteCarrier {
+    pub(crate) content: String,
+    #[cfg(test)]
+    pub(crate) shim_path: PathBuf,
+    #[cfg(test)]
+    pub(crate) shim_content: String,
+}
+
+#[derive(Debug)]
+struct ResolvedSveltePackage {
+    root: PathBuf,
+    main_types: PathBuf,
+    elements_types: PathBuf,
+    version: String,
+    package_json: Vec<u8>,
+}
+
 /// The typed Verter diagnostic code for a missing `svelte` package install.
 /// Emitted on a `.svelte` source file whose owner workspace
 /// has no `svelte` install — the shim's `import … from "svelte"` then fails
@@ -41,9 +104,261 @@ pub(crate) const SVELTE_PACKAGE_MISSING_CODE: &str = "svelte-package-missing";
 /// subdirectory under the system temp dir (NOT the user workspace). The
 /// version stamp keeps the copy matched to the projection the compiler emits.
 fn host_shim_dir() -> PathBuf {
-    std::env::temp_dir()
-        .join("verter-host")
-        .join(concat!("svelte-jsx-", env!("CARGO_PKG_VERSION")))
+    let mut identity = blake3::Hasher::new();
+    for asset in [
+        SVELTE_JSX_RUNTIME_DTS,
+        SVELTE_JSX_DEV_RUNTIME_DTS,
+        SVELTE_JSX_SVG_RUNTIME_DTS,
+        SVELTE_JSX_SVG_DEV_RUNTIME_DTS,
+        SVELTE_JSX_MATHML_RUNTIME_DTS,
+        SVELTE_JSX_MATHML_DEV_RUNTIME_DTS,
+    ] {
+        identity.update(&(asset.len() as u64).to_le_bytes());
+        identity.update(asset.as_bytes());
+    }
+    let asset_key = &identity.finalize().to_hex()[..16];
+    std::env::temp_dir().join("verter-host").join(format!(
+        "svelte-jsx-{}-{asset_key}",
+        env!("CARGO_PKG_VERSION")
+    ))
+}
+
+fn invalid_package(message: impl Into<String>) -> std::io::Error {
+    std::io::Error::new(ErrorKind::InvalidData, message.into())
+}
+
+fn exported_types(value: &serde_json::Value) -> Option<&str> {
+    match value {
+        serde_json::Value::String(target) => Some(target),
+        serde_json::Value::Array(entries) => entries.iter().find_map(exported_types),
+        serde_json::Value::Object(conditions) => conditions
+            .get("types")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| conditions.get("svelte").and_then(exported_types))
+            .or_else(|| conditions.get("import").and_then(exported_types))
+            .or_else(|| conditions.get("default").and_then(exported_types)),
+        _ => None,
+    }
+}
+
+fn resolve_declaration_target(
+    package_root: &Path,
+    target: &str,
+    label: &str,
+) -> std::io::Result<PathBuf> {
+    let relative = target.strip_prefix("./").unwrap_or(target);
+    if Path::new(relative).is_absolute()
+        || relative.split(['/', '\\']).any(|segment| segment == "..")
+    {
+        return Err(invalid_package(format!(
+            "Svelte {label} declaration target escapes its package: {target}"
+        )));
+    }
+    let path = package_root.join(relative);
+    if !path.is_file() {
+        return Err(invalid_package(format!(
+            "Svelte {label} declaration target does not exist: {}",
+            path.display()
+        )));
+    }
+    std::fs::canonicalize(path)
+}
+
+fn resolve_svelte_package(candidate: &Path) -> std::io::Result<ResolvedSveltePackage> {
+    let package_json_path = candidate.join("package.json");
+    let package_json = std::fs::read(&package_json_path)?;
+    let manifest: serde_json::Value = serde_json::from_slice(&package_json)
+        .map_err(|error| invalid_package(format!("invalid Svelte package.json: {error}")))?;
+    if manifest.get("name").and_then(serde_json::Value::as_str) != Some("svelte") {
+        return Err(invalid_package(format!(
+            "package at {} is not named `svelte`",
+            candidate.display()
+        )));
+    }
+    let version = manifest
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid_package("Svelte package.json has no string version"))?;
+    if version.split('.').next() != Some("5") {
+        return Err(invalid_package(format!(
+            "unsupported Svelte version {version}; Verter supports Svelte 5"
+        )));
+    }
+
+    let exports = manifest.get("exports");
+    let main_target = exports
+        .and_then(|value| value.get("."))
+        .and_then(exported_types)
+        .or_else(|| manifest.get("types").and_then(serde_json::Value::as_str))
+        .ok_or_else(|| invalid_package("Svelte package has no public type declaration target"))?;
+    let elements_target = exports
+        .and_then(|value| value.get("./elements"))
+        .and_then(exported_types)
+        .ok_or_else(|| invalid_package("Svelte package has no `./elements` type export"))?;
+
+    let root = std::fs::canonicalize(candidate)?;
+    let main_types = resolve_declaration_target(&root, main_target, "root")?;
+    let elements_types = resolve_declaration_target(&root, elements_target, "elements")?;
+    Ok(ResolvedSveltePackage {
+        root,
+        main_types,
+        elements_types,
+        version: version.to_owned(),
+        package_json,
+    })
+}
+
+fn nearest_svelte_for_carrier(
+    provider_path: &str,
+) -> std::io::Result<Option<ResolvedSveltePackage>> {
+    let mut directory = Path::new(provider_path).parent();
+    while let Some(current) = directory {
+        let candidate = current.join("node_modules/svelte");
+        if candidate.join("package.json").is_file() {
+            return resolve_svelte_package(&candidate).map(Some);
+        }
+        directory = current.parent();
+    }
+    Ok(None)
+}
+
+fn normalized_module_path(path: &Path) -> String {
+    verter_span::path::canonicalize_path_cow(&path.to_string_lossy()).into_owned()
+}
+
+fn owner_asset_key(
+    namespace: SvelteJsxAssetNamespace,
+    package: &ResolvedSveltePackage,
+    runtime: &str,
+) -> String {
+    let mut identity = blake3::Hasher::new();
+    for field in [
+        env!("CARGO_PKG_VERSION").as_bytes(),
+        namespace.directory().as_bytes(),
+        package.version.as_bytes(),
+        normalized_module_path(&package.root).as_bytes(),
+        normalized_module_path(&package.main_types).as_bytes(),
+        normalized_module_path(&package.elements_types).as_bytes(),
+        package.package_json.as_slice(),
+        runtime.as_bytes(),
+    ] {
+        identity.update(&(field.len() as u64).to_le_bytes());
+        identity.update(field);
+    }
+    identity.finalize().to_hex()[..24].to_owned()
+}
+
+fn owner_bound_runtime(source: &str, package: &ResolvedSveltePackage) -> std::io::Result<String> {
+    let svelte = serde_json::to_string(&normalized_module_path(&package.main_types))
+        .expect("a filesystem path always serializes as a JSON string");
+    let elements = serde_json::to_string(&normalized_module_path(&package.elements_types))
+        .expect("a filesystem path always serializes as a JSON string");
+    let elements_count = source.matches("\"svelte/elements\"").count();
+    let svelte_count = source.matches("\"svelte\"").count();
+    if elements_count == 0 || svelte_count == 0 {
+        return Err(invalid_package(
+            "canonical Svelte JSX runtime no longer has the expected official type imports",
+        ));
+    }
+    let rewritten = source
+        .replace("\"svelte/elements\"", &elements)
+        .replace("\"svelte\"", &svelte);
+    if rewritten.contains("\"svelte") || rewritten.contains("'svelte") {
+        return Err(invalid_package(
+            "canonical Svelte JSX runtime gained an unhandled bare Svelte import",
+        ));
+    }
+    Ok(rewritten)
+}
+
+fn classic_jsx_adapter() -> &'static str {
+    r#"import type { JSX as __VerterAutomaticJSX } from "./jsx-runtime";
+export function h(...args: unknown[]): __VerterAutomaticJSX.Element;
+export const Fragment: unique symbol;
+export namespace JSX {
+  type Element = __VerterAutomaticJSX.Element;
+  type ElementType = __VerterAutomaticJSX.ElementType;
+  type LibraryManagedAttributes<Component, FallbackProps> =
+    __VerterAutomaticJSX.LibraryManagedAttributes<Component, FallbackProps>;
+  type ElementClass = __VerterAutomaticJSX.ElementClass;
+  type ElementAttributesProperty = __VerterAutomaticJSX.ElementAttributesProperty;
+  type IntrinsicElements = __VerterAutomaticJSX.IntrinsicElements;
+}
+"#
+}
+
+fn collision_free_binding(asset_key: &str, content: &str) -> String {
+    for nonce in 0_u64.. {
+        let suffix = if nonce == 0 {
+            asset_key.to_owned()
+        } else {
+            blake3::hash(format!("{asset_key}\0{nonce}").as_bytes()).to_hex()[..24].to_owned()
+        };
+        let candidate = format!("__verter_svelte_jsx_{suffix}");
+        if !content.contains(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("the unbounded hash namespace always has a collision-free identifier")
+}
+
+/// Specialize a compiler-owned Svelte IDE carrier for managed tsgo without
+/// mutating the consumer's tsconfig or workspace. Native tsgo currently treats
+/// `workspace/didChangeConfiguration` as user preferences, so configured-project
+/// compiler options cannot carry Verter's private JSX runtime. The provider
+/// buffer instead imports an owner-bound classic JSX adapter from Verter's host
+/// cache. Its nested JSX namespace aliases the same canonical runtime types, and
+/// its absolute, quoted imports resolve paths containing spaces on every host.
+///
+/// `Ok(None)` means the content is not a Svelte JSX carrier, or its normal Node
+/// ancestor walk finds no Svelte install. In the latter case the original bare
+/// import source remains unresolved and the public `svelte-package-missing`
+/// diagnostic explains the fail-closed outcome.
+pub(crate) fn prepare_managed_tsgo_svelte_carrier(
+    provider_path: &str,
+    content: &str,
+) -> std::io::Result<Option<PreparedManagedTsgoSvelteCarrier>> {
+    let Some((asset_namespace, pragma)) = SvelteJsxAssetNamespace::from_carrier(content) else {
+        return Ok(None);
+    };
+    let Some(package) = nearest_svelte_for_carrier(provider_path)? else {
+        return Ok(None);
+    };
+
+    let runtime = owner_bound_runtime(asset_namespace.runtime(), &package)?;
+    let key = owner_asset_key(asset_namespace, &package, &runtime);
+    let factory_namespace = collision_free_binding(&key, content);
+    let mut directory = host_shim_dir().join("owners").join(&key);
+    let namespace_directory = asset_namespace.directory();
+    if !namespace_directory.is_empty() {
+        directory.push(namespace_directory);
+    }
+    std::fs::create_dir_all(&directory)?;
+
+    write_if_changed(&directory.join("jsx-runtime.d.ts"), &runtime)?;
+    let shim_content = classic_jsx_adapter();
+    let shim_path = directory.join("classic.d.ts");
+    write_if_changed(&shim_path, shim_content)?;
+
+    // Import the declaration module through its extensionless module specifier.
+    // Direct value imports ending in `.d.ts` are rejected by TypeScript (TS2846).
+    let shim_specifier = shim_path.with_extension("");
+    let import_path = serde_json::to_string(&normalized_module_path(&shim_specifier))
+        .expect("a filesystem path always serializes as a JSON string");
+    let provider_intro = format!(
+        "/** @jsxRuntime classic */ /** @jsx {factory_namespace}.h */ /** @jsxFrag {factory_namespace}.Fragment */ import * as {factory_namespace} from {import_path};\n"
+    );
+    let mut prepared = String::with_capacity(content.len() - pragma.len() + provider_intro.len());
+    prepared.push_str(&provider_intro);
+    prepared.push_str(&content[pragma.len()..]);
+
+    Ok(Some(PreparedManagedTsgoSvelteCarrier {
+        content: prepared,
+        #[cfg(test)]
+        shim_path,
+        #[cfg(test)]
+        shim_content: shim_content.to_owned(),
+    }))
 }
 
 /// Materialize the embedded `@verter/svelte-jsx` shim into the host data
@@ -90,12 +405,81 @@ pub(crate) fn materialize_svelte_jsx_shim() -> std::io::Result<PathBuf> {
 
 /// Write `content` to `path` only when it differs from what is already there.
 fn write_if_changed(path: &Path, content: &str) -> std::io::Result<()> {
-    if let Ok(existing) = std::fs::read_to_string(path) {
-        if existing == content {
-            return Ok(());
+    match std::fs::read_to_string(path) {
+        Ok(existing) if existing == content => return Ok(()),
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                ErrorKind::AlreadyExists,
+                format!(
+                    "immutable Svelte JSX asset has unexpected bytes: {}",
+                    path.display()
+                ),
+            ));
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("Svelte JSX asset has no parent: {}", path.display()),
+        )
+    })?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "Svelte JSX asset has no UTF-8 file name: {}",
+                    path.display()
+                ),
+            )
+        })?;
+
+    let temp_path = loop {
+        let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(".{file_name}.{}.{}.tmp", std::process::id(), id));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut file) => {
+                if let Err(error) = file
+                    .write_all(content.as_bytes())
+                    .and_then(|()| file.sync_all())
+                {
+                    drop(file);
+                    let _ = std::fs::remove_file(&candidate);
+                    return Err(error);
+                }
+                drop(file);
+                break candidate;
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    };
+
+    match std::fs::rename(&temp_path, path) {
+        Ok(()) => Ok(()),
+        Err(rename_error) => {
+            // A concurrent process may have published the same content-addressed
+            // asset first. Accept only an exact byte match; otherwise fail closed.
+            let concurrent_match =
+                std::fs::read_to_string(path).is_ok_and(|existing| existing == content);
+            let _ = std::fs::remove_file(&temp_path);
+            if concurrent_match {
+                Ok(())
+            } else {
+                Err(rename_error)
+            }
         }
     }
-    std::fs::write(path, content)
 }
 
 /// Resolve the owner workspace's installed `svelte` package directory, if any.
@@ -106,12 +490,15 @@ fn write_if_changed(path: &Path, content: &str) -> std::io::Result<()> {
 /// caller passes the owner project root). When NO `svelte` is installed,
 /// returns `None` — no rows are injected and the shim's imports fail closed.
 pub(crate) fn resolve_owner_svelte(workspace_root: &str) -> Option<PathBuf> {
-    let candidate = PathBuf::from(workspace_root).join("node_modules/svelte");
-    if candidate.join("package.json").exists() {
-        Some(candidate)
-    } else {
-        None
+    let mut directory = Some(Path::new(workspace_root));
+    while let Some(current) = directory {
+        let candidate = current.join("node_modules/svelte");
+        if candidate.join("package.json").is_file() {
+            return Some(candidate);
+        }
+        directory = current.parent();
     }
+    None
 }
 
 /// Inject the svelte-jsx shim + transitive `svelte` rows into a `paths` JSON
@@ -177,6 +564,20 @@ pub(crate) fn inject_svelte_paths(
     }
 
     paths
+}
+
+/// Build the complete provider path environment for one configured owner.
+/// Provider-owned JSX assets are required even when the consumer tsconfig has
+/// no `baseUrl`/`paths`; `raw_paths_json` therefore supplies an empty base
+/// mapping for every readable config and this layer adds the version-matched
+/// Svelte runtime plus the owner's own Svelte dependency.
+pub(crate) fn owner_provider_path_config(
+    workspace: &dyn verter_workspace::WorkspaceRead,
+    tsconfig_path: &str,
+    owner_root: &str,
+) -> Option<(String, serde_json::Value)> {
+    let (base_url, paths) = verter_workspace::config::raw_paths_json(workspace, tsconfig_path)?;
+    Some((base_url, inject_svelte_paths(paths, owner_root)))
 }
 
 /// Produce the typed `svelte-package-missing` diagnostic for a `.svelte` source
@@ -294,6 +695,40 @@ mod tests {
         let obj = injected.as_object().unwrap();
         assert!(obj.contains_key("svelte"), "svelte row present");
         assert!(obj.contains_key("svelte/*"), "svelte/* row present");
+    }
+
+    #[test]
+    fn owner_provider_paths_inject_assets_when_tsconfig_has_no_paths() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("tsconfig.json"),
+            r#"{"compilerOptions":{"strict":true,"jsx":"preserve"},"include":["src"]}"#,
+        )
+        .unwrap();
+        let svelte_dir = tmp.path().join("node_modules/svelte");
+        std::fs::create_dir_all(&svelte_dir).unwrap();
+        std::fs::write(svelte_dir.join("package.json"), r#"{"name":"svelte"}"#).unwrap();
+        let workspace = verter_workspace::FilesystemWorkspace::new(
+            verter_workspace::FilesystemOptions::default(),
+        );
+        let root = tmp.path().to_string_lossy().replace('\\', "/");
+        let config = tmp
+            .path()
+            .join("tsconfig.json")
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        let (base_url, paths) = owner_provider_path_config(&workspace, &config, &root)
+            .expect("a readable clean tsconfig still needs provider assets");
+        let entries = paths.as_object().expect("provider paths are an object");
+
+        assert_eq!(
+            verter_span::path::canonicalize_path_cow(&base_url),
+            verter_span::path::canonicalize_path_cow(&root),
+        );
+        assert!(entries.contains_key("@verter/svelte-jsx/jsx-runtime"));
+        assert!(entries.contains_key("svelte"));
+        assert!(entries.contains_key("svelte/*"));
     }
 
     #[test]
@@ -522,6 +957,56 @@ mod tests {
             !ok_dropped,
             "removing the shim mapping must fail the pragma import \
              (module-not-found):\n{out_dropped}"
+        );
+    }
+
+    #[test]
+    fn managed_tsgo_carrier_uses_owner_bound_classic_jsx_without_project_paths() {
+        let Some(_) = locate_type_checker() else {
+            eprintln!("SKIP managed-tsgo JSX carrier: no tsgo/tsc in node_modules/.bin");
+            return;
+        };
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        vendor_svelte_into(root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let carrier_path = root.join("src/App.svelte.tsx");
+        let source = concat!(
+            "/** @jsxImportSource @verter/svelte-jsx */\n",
+            "import type { Component } from \"svelte\";\n",
+            "declare const Child: Component<{ label: string }>;\n",
+            "function render() { return (<div><Child label=\"ok\" /></div>); }\n",
+            "void render; export {};\n",
+        );
+
+        let prepared = prepare_managed_tsgo_svelte_carrier(&carrier_path.to_string_lossy(), source)
+            .expect("prepare managed-tsgo carrier")
+            .expect("Svelte carrier with an installed owner must be specialized");
+
+        assert_eq!(
+            prepared.content.lines().count(),
+            source.lines().count(),
+            "provider specialization must preserve every generated line/source-map coordinate"
+        );
+        assert!(prepared.content.starts_with("/** @jsxRuntime classic */"));
+        assert!(!prepared
+            .content
+            .contains("@jsxImportSource @verter/svelte-jsx"));
+        assert!(prepared.shim_path.starts_with(std::env::temp_dir()));
+        assert!(!prepared.shim_path.starts_with(root));
+        assert_eq!(
+            std::fs::read_to_string(&prepared.shim_path).expect("materialized classic shim"),
+            prepared.shim_content,
+            "the imported provider shim bytes must be exactly the materialized bytes"
+        );
+
+        std::fs::write(&carrier_path, &prepared.content).unwrap();
+        let (ok, out) = typecheck_with_paths(root, &serde_json::json!({}));
+        assert!(
+            ok,
+            "the owner-bound carrier must type-check without mutable paths/baseUrl settings; \
+             this covers SvelteHTMLElements intrinsics and callable Component props:\n{out}\n{}",
+            prepared.content
         );
     }
 }

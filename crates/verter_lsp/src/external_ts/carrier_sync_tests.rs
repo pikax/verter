@@ -17,7 +17,7 @@ use verter_session::external_ts::{
     WorkspaceProjectResolver,
 };
 use verter_session::file_artifact_store::ProjectIdentity;
-use verter_session::{HostConfig, VerterHost};
+use verter_session::{CompileProfile, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::canonical_path::CanonicalPath;
 use verter_workspace::config::{
     load_compiler_options, load_project_membership, load_project_references,
@@ -90,6 +90,37 @@ fn test_binding(tsconfig: &str) -> ProjectBinding {
         ProjectId(0),
         SnapshotGeneration(1),
     )
+}
+
+#[test]
+fn carrier_source_revision_tracks_the_host_content_authority() {
+    let canonical = "/workspace/src/App.vue";
+    let workspace: Arc<dyn verter_workspace::WorkspaceAccess> =
+        Arc::new(MemoryWorkspace::new(MemoryOptions {
+            roots: vec!["/workspace".to_string()],
+            default_resolve_extensions: None,
+        }));
+    let host = VerterHost::new(HostConfig::default(), workspace);
+
+    assert_eq!(carrier_source_revision(&host, canonical), 0);
+    host.notify_upsert(
+        canonical,
+        Arc::<str>::from("<script>let count = 1;</script>"),
+    );
+    let first = carrier_source_revision(&host, canonical);
+    assert!(
+        first > 0,
+        "the first host content transition advances the receipt revision"
+    );
+
+    host.notify_upsert(
+        canonical,
+        Arc::<str>::from("<script>let count = 2;</script>"),
+    );
+    assert!(
+        carrier_source_revision(&host, canonical) > first,
+        "a subsequent edit must mint a strictly newer carrier receipt"
+    );
 }
 
 #[test]
@@ -247,6 +278,91 @@ fn commit_stamps_committed_ide_surface_and_gates_uncommitted_capture() {
     assert!(
         !committed.authorizes_carrier_ide_capture(stamp.content_hash, [9u8; 16]),
         "a surface whose source-map differs from the committed stamp must be refused"
+    );
+}
+
+#[tokio::test]
+async fn direct_open_receipt_attests_the_exact_provider_specialized_ide_surface() {
+    let owner = tempfile::tempdir().expect("temporary Svelte owner");
+    let svelte_dir = owner.path().join("node_modules/svelte");
+    std::fs::create_dir_all(&svelte_dir).expect("Svelte package directory");
+    std::fs::write(
+        svelte_dir.join("package.json"),
+        r#"{"name":"svelte","version":"5.0.0","types":"./index.d.ts","exports":{".":{"types":"./index.d.ts"},"./elements":{"types":"./elements.d.ts"}}}"#,
+    )
+    .expect("Svelte package manifest");
+    std::fs::write(
+        svelte_dir.join("index.d.ts"),
+        "export type Snippet = () => unknown;\n",
+    )
+    .expect("Svelte root types");
+    std::fs::write(
+        svelte_dir.join("elements.d.ts"),
+        "export interface SvelteHTMLElements { div: {}; }\n",
+    )
+    .expect("Svelte element types");
+    let ide_path = owner.path().join("src/App.svelte.tsx");
+    std::fs::create_dir_all(ide_path.parent().expect("IDE parent")).expect("IDE parent directory");
+    let ide_path = ide_path.to_string_lossy().into_owned();
+    let compiler_surface = "/** @jsxImportSource @verter/svelte-jsx */\nconst view = <div />;\n";
+
+    let provider = MockTypeProvider::new();
+    let sync = crate::type_provider::project_sync::ProjectSync::new_with_kind(
+        Arc::new(provider.clone()),
+        crate::ProjectSyncMode::FullProject,
+        crate::TypeProviderKind::Tsgo,
+    );
+    sync.open_tsx(&ide_path, compiler_surface)
+        .await
+        .expect("provider open succeeds");
+    let exact_surface = sync
+        .synced_tsx_surface(&ide_path)
+        .expect("successful open mints exact surface evidence");
+    assert_ne!(
+        exact_surface.content().as_ref(),
+        compiler_surface,
+        "the test must exercise provider specialization, not byte-identical Vue behavior"
+    );
+
+    let binding = test_binding("/workspace/tsconfig.json");
+    let receipt = PendingProviderReady::authorize(
+        &binding,
+        7,
+        0,
+        "tsgo",
+        &[ide_companion(&ide_path, compiler_surface, None, 7)],
+    )
+    .confirm_opened_with_ide_surface(&[ProviderPathKind::Ide], Some(exact_surface.clone()));
+    let fingerprint = receipt
+        .companions()
+        .iter()
+        .find(|companion| companion.role == verter_session::external_ts::SnapshotRole::CarrierIde)
+        .expect("IDE companion is attested");
+    let exact_hash =
+        crate::provider_surface_store::ContentHash::of(exact_surface.content()).to_hash16();
+    let compiler_hash =
+        crate::provider_surface_store::ContentHash::of(compiler_surface).to_hash16();
+    assert_eq!(fingerprint.content_hash, exact_hash);
+    assert_ne!(fingerprint.content_hash, compiler_hash);
+
+    let states = DashMap::new();
+    let state = ProviderSyncState {
+        owner_binding: ProviderOwnerBinding::Owned("/workspace/tsconfig.json".to_owned()),
+        ide_path: Some(ide_path),
+        ide_background_loaded: true,
+        ..Default::default()
+    };
+    commit_carrier_provider_state(&states, "/workspace/src/App.svelte", state, &receipt);
+    let committed = states
+        .get("/workspace/src/App.svelte")
+        .expect("specialized carrier state commits");
+    assert!(
+        committed.authorizes_carrier_ide_capture(exact_hash, [0; 16]),
+        "the committed receipt authorizes the exact provider/store surface"
+    );
+    assert!(
+        !committed.authorizes_carrier_ide_capture(compiler_hash, [0; 16]),
+        "the pre-adaptation compiler surface is not misreported as provider authority"
     );
 }
 
@@ -786,6 +902,7 @@ async fn owned_carrier_compiling_to_empty_companions_retracts_stale_advertisemen
         ide: None,
         membership: Some(CarrierMembershipCtx {
             coordinator: &coord,
+            provider_delivery: CarrierProviderDelivery::StoreBacked,
         }),
         admission: &admission,
         reason: ReconcileReason::SourceSynced,
@@ -808,6 +925,84 @@ async fn owned_carrier_compiling_to_empty_companions_retracts_stale_advertisemen
         !carrier_ready_in_store(&ws_root, &tsconfig, &provider),
         "an owned carrier that compiled to EMPTY companions MUST be retracted from the \
          store's ready_files (so the plugin stops advertising it); the stale row lingered"
+    );
+}
+
+#[tokio::test]
+async fn managed_tsgo_reconcile_publishes_editor_membership_and_keeps_direct_open() {
+    let ws_root = unique_ws_root();
+    let tsconfig = format!("{ws_root}/tsconfig.json");
+    let source = format!("{ws_root}/src/Comp.vue");
+    let vfs: Arc<dyn verter_workspace::WorkspaceAccess> =
+        Arc::new(MemoryWorkspace::new(MemoryOptions {
+            roots: vec![ws_root.clone()],
+            default_resolve_extensions: None,
+        }));
+    let host = VerterHost::new(HostConfig::default(), vfs);
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: source.clone(),
+            source: Arc::from(
+                "<script setup lang=\"ts\">defineProps<{ label: string }>()</script><template><div>{{ label }}</div></template>",
+            ),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("load carrier");
+    let profile = CompileProfile::default();
+    let _ = host.ensure_ide_compiled(&source, &profile);
+    let ide = host.get_ide(&source, &profile).expect("IDE projection");
+
+    let fs =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(
+        project_binding_snapshot(&ws_root, &tsconfig),
+    )));
+    let resolver = NativeProjectResolver::new(vec![IdeProjectConfig::new(
+        ws_root.clone(),
+        ws_root.clone(),
+        Some(tsconfig.clone()),
+    )]);
+    let backend = Arc::new(TsserverEngineBackend::with_default_host_version());
+    let coordinator = CarrierPublishCoordinator::new_editor_owned(
+        Arc::clone(&backend),
+        default_carrier_store_host_version(),
+    );
+    let states = DashMap::new();
+    let surfaces = ProviderSurfaceStore::new();
+    let admission = CarrierTransactionCoordinator::new();
+
+    let decision = reconcile_carrier_source(CarrierSyncRequest {
+        host: &host,
+        vfs: Some(&fs),
+        ownership_ready: true,
+        resolver: &resolver,
+        provider_sync_states: &states,
+        provider_surfaces: &surfaces,
+        documents: None,
+        canonical_id: &source,
+        is_jsx: ide.is_jsx,
+        ide: Some(&ide),
+        membership: Some(CarrierMembershipCtx {
+            coordinator: &coordinator,
+            provider_delivery: CarrierProviderDelivery::DirectOpen,
+        }),
+        admission: &admission,
+        reason: ReconcileReason::SourceSynced,
+    })
+    .await;
+
+    let CarrierSyncDecision::DirectOpen { transition, .. } = decision else {
+        panic!("managed tsgo must retain direct provider delivery after store publication");
+    };
+    let ide_path = transition.next.ide_path.expect("IDE path");
+    let api_path = transition.next.api_path.expect("API path");
+    assert!(carrier_ready_in_store(&ws_root, &tsconfig, &ide_path));
+    assert!(carrier_ready_in_store(&ws_root, &tsconfig, &api_path));
+    assert!(
+        states.get(&source).is_none(),
+        "provider state may commit only after the direct opens succeed"
     );
 }
 
@@ -1085,6 +1280,7 @@ async fn ambiguous_carrier_sync_registers_and_queries_no_provider() {
         ide: None,
         membership: Some(CarrierMembershipCtx {
             coordinator: &coord,
+            provider_delivery: CarrierProviderDelivery::StoreBacked,
         }),
         admission: &admission,
         reason: ReconcileReason::SourceSynced,

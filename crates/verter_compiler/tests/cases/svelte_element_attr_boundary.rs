@@ -64,8 +64,9 @@ fn emits_main(source: &str) -> bool {
 /// css-scoping golden hosts (the synthesized-scope-class heading + the
 /// combinator/`{#each}` list surfaces).
 const SUPPORTED_ELEMENTS: &[&str] = &[
-    "a", "audio", "base", "button", "details", "div", "h1", "h2", "input", "li", "link", "meta",
-    "option", "p", "select", "span", "textarea", "ul", "video",
+    "a", "audio", "base", "button", "details", "div", "footer", "form", "h1", "h2", "h3", "header",
+    "img", "input", "li", "link", "main", "meta", "option", "p", "section", "select", "span",
+    "textarea", "ul", "video",
 ];
 
 /// The full HTML tag universe (the TS DOM lib `HTMLElementTagNameMap`,
@@ -321,8 +322,7 @@ fn element_matrix_supports_exactly_the_core_tags() {
     expected.sort_unstable();
     assert_eq!(
         supported, expected,
-        "the element allowlist must support EXACTLY {{a, audio, base, button, details, div, h1, \
-         h2, input, li, link, meta, option, p, select, span, textarea, ul, video}} — a tag cloned \
+        "the element allowlist must support exactly the committed typed set — a tag cloned \
          into a Main outside that set is a leak; a tag in the set failing to emit is an \
          over-reach. (`span` is the plain inline structural host the component-slot / \
          `{{#snippet}}`-body fixtures need; `meta` / `link` / `base` are the `<svelte:head>` \
@@ -331,10 +331,9 @@ fn element_matrix_supports_exactly_the_core_tags() {
     // Belt-and-suspenders on the cardinality (the convergence count gate).
     assert_eq!(
         supported.len(),
-        19,
-        "exactly nineteen elements are in the client-core allowlist (the §1.2 / bind-host \
-         tags + span + the head metadata void elements meta/link/base + the css-scoping \
-         hosts h2/ul/li)"
+        26,
+        "exactly twenty-six elements are in the client-core allowlist, including the \
+         standard structural hosts required by framework/editor parity"
     );
 }
 

@@ -2082,6 +2082,9 @@ impl VerterHost {
         let view = crate::session_view::HostViewRef::new(self);
         let fixed = self.capture_batch_fixed_view(&view);
         self.render_public_api_items(canonical_ids, PublicApiMode::Public, None, &fixed, &view)
+            .into_iter()
+            .map(|projection| projection.map(|projection| projection.response))
+            .collect()
     }
 
     /// The shared per-item public-API render body (scalar `N=1` + batch `N`).
@@ -2099,7 +2102,7 @@ impl VerterHost {
         profile: Option<&CompileProfile>,
         fixed: &crate::resolver_store::BatchFixedView,
         view: &dyn crate::session_view::SessionView,
-    ) -> Vec<Option<TscResponse>> {
+    ) -> Vec<Option<crate::framework::api_projector::ComponentApiProjection>> {
         canonical_ids
             .iter()
             .map(|canonical_id| {
@@ -2196,6 +2199,32 @@ impl VerterHost {
             std::slice::from_ref(&canonical_id),
             mode,
             profile,
+            &fixed,
+            &view,
+        )
+        .into_iter()
+        .next()
+        .flatten()
+        .map(|projection| projection.response)
+    }
+
+    /// Generate the public declaration and its framework-owned structured
+    /// contract from one coherent projector invocation.
+    ///
+    /// Editor consumers use the sidecar instead of reparsing generated
+    /// declaration text. Adapters that do not expose a structured contract
+    /// retain their existing declaration-only behavior through `contract:
+    /// None`.
+    pub fn get_public_api_projection(
+        &self,
+        canonical_id: &str,
+    ) -> Option<crate::framework::api_projector::ComponentApiProjection> {
+        let view = crate::session_view::HostViewRef::new(self);
+        let fixed = self.capture_batch_fixed_view(&view);
+        self.render_public_api_items(
+            std::slice::from_ref(&canonical_id),
+            PublicApiMode::Public,
+            None,
             &fixed,
             &view,
         )

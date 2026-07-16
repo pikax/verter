@@ -73,14 +73,18 @@ export function isCarrierComponentImport(
   );
 }
 
-/** The set of language ids the built-in TypeScript plugin is configured for. */
-const TYPESCRIPT_PLUGIN_TRIGGER_LANGUAGE_IDS = new Set(BASE_TYPESCRIPT_LANGUAGE_IDS);
+/** The set of language ids that must publish editor TypeScript plugin policy. */
+const TYPESCRIPT_PLUGIN_TRIGGER_LANGUAGE_IDS = new Set([
+  ...BASE_TYPESCRIPT_LANGUAGE_IDS,
+  ...CLIENT_FRAMEWORK_LANGUAGE_IDS,
+]);
 
 /**
  * Whether opening a document with this language id should configure the
  * built-in VS Code TypeScript-server plugin (`_typescript.configurePlugin`).
- * That plugin operates on the TS/JS surface, so the trigger set is the
- * manifest's `BASE_TYPESCRIPT_LANGUAGE_IDS` (the TS/JS language ids).
+ * Plain TS/JS needs carrier import membership. Framework sources additionally
+ * need the selected source-feature owner published before any editor provider
+ * can answer the document. Both sets come from the generated client manifest.
  */
 export function shouldConfigureTypeScriptPluginForLanguageId(
   languageId: string | undefined,

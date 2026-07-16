@@ -295,6 +295,14 @@ pub struct VerterLanguageServer {
     /// triggers a completion request. By incrementing this counter, stale requests can
     /// detect they've been superseded and skip the expensive type provider call.
     completion_generation: std::sync::atomic::AtomicU64,
+    /// E2E attribution seam for TypeScript-provider completion parity. Verter still
+    /// owns carrier generation, synchronization, and source mapping, but its native
+    /// completion producer contributes no items and cannot act as a provider fallback.
+    ///
+    /// This is deliberately gated by both `VERTER_E2E_TEST=1` and
+    /// `VERTER_E2E_PROVIDER_ONLY_COMPLETIONS=1`; normal product launches cannot enable
+    /// it accidentally through a single generic environment variable.
+    provider_only_completions: std::sync::atomic::AtomicBool,
     /// Canonical IDs needing **interactive IDE sync** (set by did_change, cleared by
     /// `ensure_current_file_synced`). Only the IDE TSX path is flushed on hover/completion.
     needs_ide_sync: Arc<DashSet<String>>,
@@ -380,6 +388,14 @@ pub struct VerterLanguageServer {
     carrier_transaction_coordinator: Arc<crate::external_ts::CarrierTransactionCoordinator>,
 }
 
+fn e2e_provider_only_completions_enabled() -> bool {
+    matches!(std::env::var("VERTER_E2E_TEST").as_deref(), Ok("1"))
+        && matches!(
+            std::env::var("VERTER_E2E_PROVIDER_ONLY_COMPLETIONS").as_deref(),
+            Ok("1")
+        )
+}
+
 impl VerterLanguageServer {
     pub fn new(client: Client, config: LspConfig) -> Self {
         let project_sync = config.type_provider.as_ref().map(|tp| {
@@ -405,12 +421,22 @@ impl VerterLanguageServer {
             parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
         > = Arc::new(parking_lot::RwLock::new(None));
 
-        // The live carrier-publish coordinator: built ONLY for the tsserver engine
-        // (tsgo uses the project-bound `--api` direct carrier-companion open instead).
-        // It holds a `TsserverEngineBackend` whose store dir is derived from the SAME
-        // shared resolver the tsserver spawn uses to point the plugin at the store,
-        // so the LSP publishes exactly the store the plugin reads.
+        // The live editor-membership publisher. Managed tsgo still opens its own
+        // companion buffers directly, but VS Code's TypeScript service is a
+        // separate consumer and requires the same durable carrier store for
+        // imports from ordinary `.ts`/`.js` files.
         let carrier_publish_coordinator = match (&config.type_provider, config.type_provider_kind) {
+            (Some(_), crate::TypeProviderKind::Tsgo) => {
+                let backend = Arc::new(
+                    crate::external_ts::TsserverEngineBackend::with_default_host_version(),
+                );
+                Some(
+                    crate::external_ts::CarrierPublishCoordinator::new_editor_owned(
+                        backend,
+                        crate::external_ts::default_carrier_store_host_version(),
+                    ),
+                )
+            }
             (Some(provider), crate::TypeProviderKind::Tsserver) => {
                 let backend = Arc::new(
                     crate::external_ts::TsserverEngineBackend::with_default_host_version(),
@@ -488,6 +514,9 @@ impl VerterLanguageServer {
             suggest_tsgo: config.suggest_tsgo,
             suppress_imported_carrier_prewarm: config.suppress_imported_carrier_prewarm,
             completion_generation: std::sync::atomic::AtomicU64::new(0),
+            provider_only_completions: std::sync::atomic::AtomicBool::new(
+                e2e_provider_only_completions_enabled(),
+            ),
             needs_ide_sync,
             needs_deferred_sync,
             pending_snapshot_provider_sync,
@@ -507,6 +536,29 @@ impl VerterLanguageServer {
             carrier_publish_coordinator,
             carrier_transaction_coordinator,
         }
+    }
+
+    pub(super) fn provider_only_completions(&self) -> bool {
+        self.provider_only_completions
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The attested editor tsserver plugin owns carrier hover, navigation, and
+    /// rename directly in VS Code. The LSP has no local TypeProvider in this
+    /// topology and must not register a competing partial answer for the same
+    /// request; VS Code selects a single rename provider and can otherwise hide
+    /// the editor plugin's complete script+template edit set.
+    pub(super) fn editor_owns_carrier_source_features(&self) -> bool {
+        matches!(
+            self.type_provider_kind,
+            crate::TypeProviderKind::EditorTsserver
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_provider_only_completions_for_test(&self, enabled: bool) {
+        self.provider_only_completions
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Compute verter diagnostics (host errors + lint rules + component usage) for a document.

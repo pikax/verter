@@ -1763,6 +1763,59 @@ fn merge_references_both_present() {
     assert_eq!(result.unwrap().len(), 2);
 }
 
+/// An editor-owned tsserver plugin may already map current-companion reference
+/// spans back onto the visible carrier source before the Rust merge receives
+/// them. Those offsets index the captured current carrier, so they must use its
+/// line index directly and must not depend on the external workspace reader.
+#[test]
+fn merge_references_accepts_provider_pre_remapped_current_carrier_locations() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+    let source_start = carrier_li
+        .position_to_offset(&Position {
+            line: 5,
+            character: 6,
+        })
+        .expect("fixture source position exists");
+    let verter = Some(vec![Location {
+        uri: "file:///test.vue".parse().unwrap(),
+        range: Range::default(),
+    }]);
+
+    let result = merge_references(
+        verter,
+        vec![TypeLocation {
+            path: "/test.vue".to_string(),
+            start: source_start,
+            end: source_start + 3,
+        }],
+        "/test.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+    )
+    .expect("the provider-remapped source reference survives");
+
+    assert_eq!(result.len(), 2);
+    assert!(result.iter().any(|location| {
+        location.uri.as_str() == "file:///test.vue"
+            && location.range
+                == Range {
+                    start: Position {
+                        line: 5,
+                        character: 6,
+                    },
+                    end: Position {
+                        line: 5,
+                        character: 9,
+                    },
+                }
+    }));
+}
+
 /// @ai-generated — Empty refs from both returns None
 #[test]
 fn merge_references_neither() {
@@ -3990,15 +4043,43 @@ fn merge_semantic_tokens_cross_line_filtered() {
 
 // ── Rename merge tests ────────────────────────────────────────────
 
-/// @ai-generated — Verter-only rename returns as-is
+/// Canonicalizes one logical file across drive-case URI variants while retaining
+/// distinct files and distinct ranges.
 #[test]
 fn merge_rename_verter_only() {
     let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
     let verter = Some(WorkspaceEdit {
         changes: Some({
             let mut m = std::collections::HashMap::new();
+            for uri in [
+                "file:///D:/workspace/test.vue",
+                "file:///d:/workspace/test.vue",
+            ] {
+                m.insert(
+                    uri.parse().unwrap(),
+                    vec![TextEdit {
+                        range: Range::default(),
+                        new_text: "newName".to_string(),
+                    }],
+                );
+            }
+            m.get_mut(&"file:///d:/workspace/test.vue".parse().unwrap())
+                .expect("lower-drive entry")
+                .push(TextEdit {
+                    range: Range {
+                        start: Position {
+                            line: 1,
+                            character: 0,
+                        },
+                        end: Position {
+                            line: 1,
+                            character: 1,
+                        },
+                    },
+                    new_text: "newName".to_string(),
+                });
             m.insert(
-                "file:///test.vue".parse().unwrap(),
+                "file:///E:/workspace/test.vue".parse().unwrap(),
                 vec![TextEdit {
                     range: Range::default(),
                     new_text: "newName".to_string(),
@@ -4023,7 +4104,99 @@ fn merge_rename_verter_only() {
         PositionEncodingKind::UTF16,
         &no_source,
     );
-    assert!(result.is_some());
+    let result = result.expect("rename remains available");
+    assert_eq!(
+        result.changes.as_ref().map(std::collections::HashMap::len),
+        Some(2)
+    );
+    let mut per_file = result
+        .changes
+        .as_ref()
+        .expect("rename changes")
+        .values()
+        .map(Vec::len)
+        .collect::<Vec<_>>();
+    per_file.sort_unstable();
+    assert_eq!(per_file, vec![1, 2]);
+    assert_eq!(
+        result
+            .changes
+            .as_ref()
+            .map(|changes| changes.values().map(Vec::len).sum::<usize>()),
+        Some(3),
+        "a distinct range and a distinct file must survive canonical deduplication"
+    );
+}
+
+/// Rename locations already mapped by an editor-owned tsserver plugin carry
+/// current-carrier paths and offsets. They are safe to edit through the pinned
+/// current carrier line index even when the external workspace reader does not
+/// expose mixed-content carrier bytes.
+#[test]
+fn merge_rename_accepts_provider_pre_remapped_current_carrier_locations() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+    let source_start = carrier_li
+        .position_to_offset(&Position {
+            line: 5,
+            character: 6,
+        })
+        .expect("fixture source position exists");
+    let uri: Uri = "file:///test.vue".parse().unwrap();
+    let verter = Some(WorkspaceEdit {
+        changes: Some({
+            let mut changes = std::collections::HashMap::new();
+            changes.insert(
+                uri.clone(),
+                vec![TextEdit {
+                    range: Range::default(),
+                    new_text: "next".to_string(),
+                }],
+            );
+            changes
+        }),
+        ..Default::default()
+    });
+
+    let result = merge_rename_locations(
+        verter,
+        vec![RenameLocation {
+            path: "/test.vue".to_string(),
+            start: source_start,
+            end: source_start + 3,
+        }],
+        "next",
+        "/test.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None,
+        None,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+    )
+    .expect("the provider-remapped source rename survives");
+
+    let edits = result
+        .changes
+        .as_ref()
+        .and_then(|changes| changes.get(&uri))
+        .expect("current carrier edit set exists");
+    assert_eq!(edits.len(), 2);
+    assert!(edits.iter().any(|edit| {
+        edit.range
+            == Range {
+                start: Position {
+                    line: 5,
+                    character: 6,
+                },
+                end: Position {
+                    line: 5,
+                    character: 9,
+                },
+            }
+            && edit.new_text == "next"
+    }));
 }
 
 /// @ai-generated — Empty rename from both returns None
@@ -6135,6 +6308,18 @@ fn test_jsx_event_to_vue_custom() {
     assert_eq!(
         jsx_prop_to_vue_attr("onCustomEvent"),
         Some("@custom-event".to_string())
+    );
+}
+
+#[test]
+fn test_jsx_optional_event_marker_is_not_inserted_into_vue_source() {
+    assert_eq!(
+        jsx_prop_to_vue_attr("onCustom?"),
+        Some("@custom".to_string())
+    );
+    assert_eq!(
+        jsx_prop_to_vue_attr("optionalProp?"),
+        Some("optional-prop".to_string())
     );
 }
 

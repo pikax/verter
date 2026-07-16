@@ -310,6 +310,18 @@ impl PendingProviderReady {
         self,
         opened_kinds: &[crate::provider_sync::ProviderPathKind],
     ) -> ProviderReadyReceipt {
+        self.confirm_opened_with_ide_surface(opened_kinds, None)
+    }
+
+    /// Mint the post-open receipt using the exact successfully delivered IDE
+    /// surface when the provider specialized it. The evidence value is sealed
+    /// by `ProjectSync`; callers cannot fabricate it before a successful open.
+    /// A path-mismatched value never substitutes another companion.
+    pub(crate) fn confirm_opened_with_ide_surface(
+        self,
+        opened_kinds: &[crate::provider_sync::ProviderPathKind],
+        ide_surface: Option<crate::type_provider::project_sync::SyncedTsxSurface>,
+    ) -> ProviderReadyReceipt {
         use crate::provider_sync::ProviderPathKind;
         let attests = |role: SnapshotRole| {
             opened_kinds.iter().any(|kind| {
@@ -320,11 +332,19 @@ impl PendingProviderReady {
                 )
             })
         };
-        let attested: Vec<CarrierCompanion> = self
+        let mut attested: Vec<CarrierCompanion> = self
             .companions
             .into_iter()
             .filter(|companion| attests(companion.role))
             .collect();
+        if let Some(surface) = ide_surface {
+            if let Some(companion) = attested.iter_mut().find(|companion| {
+                companion.role == SnapshotRole::CarrierIde
+                    && companion.provider_uri.as_ref() == surface.path()
+            }) {
+                companion.content = Arc::clone(surface.content());
+            }
+        }
         ProviderReadyReceipt::mint(
             &self.binding,
             self.source_revision,

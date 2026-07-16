@@ -48,10 +48,47 @@ fn rewrite_action_specifier(
 
 // ── References merge ────────────────────────────────────────────────
 
+/// Resolve a location that an editor-owned TypeScript plugin has already
+/// translated from the current IDE companion onto the visible carrier source.
+///
+/// These offsets index the captured carrier bytes, not the TSX/JSX bytes and
+/// not an arbitrary external file. Reuse the request's pinned carrier line
+/// index so mixed-content sources do not depend on a second workspace read.
+/// This route is intentionally limited to the current carrier-IDE projection;
+/// foreign paths and self-file projections retain their existing strict paths.
+fn resolve_pre_remapped_current_carrier_range(
+    path: &str,
+    start: u32,
+    end: u32,
+    current_ide_path: &str,
+    carrier_line_index: &LineIndex,
+    carrier_source_exists: &dyn Fn(&str) -> bool,
+) -> Option<(Uri, Range)> {
+    if end < start || !is_carrier_ide_path(current_ide_path) {
+        return None;
+    }
+    let current_carrier_path = normalize_carrier_path(current_ide_path, carrier_source_exists);
+    if current_carrier_path == current_ide_path
+        || verter_span::path::canonicalize_path_cow(path)
+            != verter_span::path::canonicalize_path_cow(current_carrier_path)
+    {
+        return None;
+    }
+    Some((
+        path_to_uri(current_carrier_path)?,
+        Range {
+            start: carrier_line_index.offset_to_position(start)?,
+            end: carrier_line_index.offset_to_position(end)?,
+        },
+    ))
+}
+
 /// Merge verter references with TypeProvider references.
 ///
 /// Strategy:
 /// - Combine verter in-file refs with TypeProvider cross-file refs.
+/// - A current-companion result already mapped by an editor-owned plugin onto
+///   the visible carrier uses the pinned current carrier line index directly.
 /// - A carrier IDE target (`{carrier}.tsx`/`.jsx`) maps its byte offsets back to the carrier
 ///   source through the single shared strict mapper ([`resolve_carrier_ide_range_strict`]): the
 ///   in-context mapper for the queried file (same canonical path as `current_tsx_path`), the
@@ -85,6 +122,23 @@ pub fn merge_references(
     let mut result = verter_refs.unwrap_or_default();
 
     for loc in &type_refs {
+        if let Some((uri, range)) = resolve_pre_remapped_current_carrier_range(
+            &loc.path,
+            loc.start,
+            loc.end,
+            current_tsx_path,
+            carrier_line_index,
+            carrier_source_exists,
+        ) {
+            let dup = result
+                .iter()
+                .any(|existing| existing.uri == uri && existing.range.start == range.start);
+            if !dup {
+                result.push(Location { uri, range });
+            }
+            continue;
+        }
+
         // For carrier IDE targets, map back to carrier-source positions through the single shared
         // strict mapper, split by canonical identity: the CURRENT request's TSX uses the in-context
         // mapper; a FOREIGN carrier `.tsx` requires its own context via the external resolver and is
@@ -158,6 +212,8 @@ pub fn merge_references(
 /// Strategy:
 /// - Start with verter's same-file WorkspaceEdit.
 /// - Add TypeProvider's cross-file rename locations as additional TextEdits.
+/// - A current-companion result already mapped by an editor-owned plugin onto
+///   the visible carrier uses the pinned current carrier line index directly.
 /// - A carrier IDE target (`{carrier}.tsx`/`.jsx`) maps its TSX byte offsets back to the carrier
 ///   source through the single shared strict mapper ([`resolve_carrier_ide_range_strict`]): the
 ///   in-context mapper for the queried file, the external resolver for a foreign component (a
@@ -204,6 +260,27 @@ pub fn merge_rename_locations(
         .get_or_insert_with(std::collections::HashMap::new);
 
     for loc in &type_locations {
+        if let Some((uri, range)) = resolve_pre_remapped_current_carrier_range(
+            &loc.path,
+            loc.start,
+            loc.end,
+            current_tsx_path,
+            carrier_line_index,
+            carrier_source_exists,
+        ) {
+            let edits = changes.entry(uri).or_default();
+            if !edits
+                .iter()
+                .any(|existing| existing.range.start == range.start)
+            {
+                edits.push(TextEdit {
+                    range,
+                    new_text: new_name.to_string(),
+                });
+            }
+            continue;
+        }
+
         // FAIL CLOSED: a carrier-IDE mapping failure DROPS the rename edit — a `Range::default()`
         // rename edit would write the new name at line 0 of the wrong file and CORRUPT it. Routes
         // through the single shared strict mapper, split by canonical identity: the CURRENT request's
@@ -352,11 +429,93 @@ pub fn merge_rename_locations(
         }
     }
 
+    // Canonicalize the complete transaction, including edits supplied by the
+    // static rename half before provider locations were merged. Editors apply a
+    // WorkspaceEdit literally; duplicate replacements at one range can corrupt
+    // the second application rather than behaving idempotently.
+    dedupe_rename_workspace_edit(&mut edit);
+
     // Return None if no edits
-    if changes.is_empty() {
+    if edit
+        .changes
+        .as_ref()
+        .is_none_or(std::collections::HashMap::is_empty)
+    {
         None
     } else {
         Some(edit)
+    }
+}
+
+/// Canonicalize a rename transaction at its public boundary.
+///
+/// This is intentionally callable after the static/provider completeness gate:
+/// some requests legitimately have no provider context and therefore never run
+/// through [`merge_rename_locations`]. They still must not expose duplicate
+/// mutations to the editor.
+pub fn dedupe_rename_workspace_edit(edit: &mut WorkspaceEdit) {
+    fn text_edit_key(uri: &Uri, edit: &TextEdit) -> String {
+        format!(
+            "{}:{}:{}:{}:{}:{}",
+            uri.as_str(),
+            edit.range.start.line,
+            edit.range.start.character,
+            edit.range.end.line,
+            edit.range.end.character,
+            edit.new_text
+        )
+    }
+
+    if let Some(changes) = edit.changes.take() {
+        #[allow(clippy::mutable_key_type)]
+        let mut coalesced: std::collections::HashMap<Uri, Vec<TextEdit>> =
+            std::collections::HashMap::new();
+        for (uri, edits) in changes {
+            let canonical_uri = if uri.as_str().starts_with("file:") {
+                let path = verter_span::file_uri_to_path(uri.as_str());
+                let identity = verter_span::InjectedPathKey::new(&path);
+                crate::uri::path_to_file_uri(identity.as_str()).unwrap_or(uri)
+            } else {
+                uri
+            };
+            coalesced.entry(canonical_uri).or_default().extend(edits);
+        }
+        edit.changes = Some(coalesced);
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    if let Some(changes) = edit.changes.as_mut() {
+        for (uri, edits) in changes {
+            edits.retain(|candidate| seen.insert(text_edit_key(uri, candidate)));
+        }
+    }
+    match edit.document_changes.as_mut() {
+        Some(DocumentChanges::Edits(document_edits)) => {
+            for document_edit in document_edits {
+                let uri = &document_edit.text_document.uri;
+                document_edit.edits.retain(|candidate| match candidate {
+                    OneOf::Left(text_edit) => seen.insert(text_edit_key(uri, text_edit)),
+                    OneOf::Right(annotated) => {
+                        seen.insert(format!("{}:{annotated:?}", uri.as_str()))
+                    }
+                });
+            }
+        }
+        Some(DocumentChanges::Operations(operations)) => {
+            for operation in operations {
+                let DocumentChangeOperation::Edit(document_edit) = operation else {
+                    continue;
+                };
+                let uri = &document_edit.text_document.uri;
+                document_edit.edits.retain(|candidate| match candidate {
+                    OneOf::Left(text_edit) => seen.insert(text_edit_key(uri, text_edit)),
+                    OneOf::Right(annotated) => {
+                        seen.insert(format!("{}:{annotated:?}", uri.as_str()))
+                    }
+                });
+            }
+        }
+        None => {}
     }
 }
 

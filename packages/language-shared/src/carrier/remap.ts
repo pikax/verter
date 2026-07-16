@@ -40,6 +40,10 @@ export interface RemappedSpan {
 
 const parsedMapCache = new Map<string, TraceMap | null>();
 
+function storePathKey(reader: CarrierStoreReader, fileName: string): string {
+  return reader.canonicalPath?.(fileName) ?? normalizePath(fileName);
+}
+
 /**
  * Parse (and cache by `map_hash`) the V3 source map for a ready carrier. A
  * missing/unparseable map caches `null` so a repeated lookup does not re-read.
@@ -152,6 +156,53 @@ export function mapCarrierSourceOffsetToGenerated(
   readCompanionText: (providerPath: string) => string | undefined,
   readSourceText: (sourcePath: string) => string | undefined,
 ): number | null {
+  const mapper = carrierMapperForSourceRequest(
+    reader,
+    providerPath,
+    readCompanionText,
+    readSourceText,
+  );
+  if (mapper === null) return null;
+  const publishedSource = reader.ownedSourceFor(sourcePath)?.source_uri ?? sourcePath;
+  return (
+    mapper.mapSourceOffsetToGenerated(sourceOffset, normalizePath(publishedSource))?.offset ?? null
+  );
+}
+
+/**
+ * Return every exact generated projection of one authored source position.
+ * Used by editor-owned semantic navigation to join an original Vue setup
+ * declaration with its ref-unwrapped template alias. The ordinary one-position
+ * router above remains deterministic and strict; callers opt into this broader
+ * linked-projection set only after TypeScript proves a declaration target.
+ */
+export function mapCarrierSourceOffsetToGeneratedAll(
+  reader: CarrierStoreReader,
+  providerPath: string,
+  sourcePath: string,
+  sourceOffset: number,
+  readCompanionText: (providerPath: string) => string | undefined,
+  readSourceText: (sourcePath: string) => string | undefined,
+): number[] {
+  const mapper = carrierMapperForSourceRequest(
+    reader,
+    providerPath,
+    readCompanionText,
+    readSourceText,
+  );
+  if (mapper === null) return [];
+  const publishedSource = reader.ownedSourceFor(sourcePath)?.source_uri ?? sourcePath;
+  return mapper
+    .mapSourceOffsetToGeneratedAll(sourceOffset, normalizePath(publishedSource))
+    .map((position) => position.offset);
+}
+
+function carrierMapperForSourceRequest(
+  reader: CarrierStoreReader,
+  providerPath: string,
+  readCompanionText: (providerPath: string) => string | undefined,
+  readSourceText: (sourcePath: string) => string | undefined,
+): CarrierMapper | null {
   const ready = reader.readyFile(providerPath);
   if (!ready || ready.map_rel === undefined) {
     return null;
@@ -164,13 +215,11 @@ export function mapCarrierSourceOffsetToGenerated(
   if (companionText === undefined) {
     return null;
   }
-  const normalizedSource = normalizePath(sourcePath);
-  const mapper = new CarrierMapper({
+  return new CarrierMapper({
     map,
     generatedText: companionText,
     readSourceText: (source) => readSourceText(normalizePath(source)),
   });
-  return mapper.mapSourceOffsetToGenerated(sourceOffset, normalizedSource)?.offset ?? null;
 }
 
 /** Test/maintenance hook: drop the parsed-map cache. */
@@ -230,7 +279,10 @@ export function isCarrierCompanionPath(reader: CarrierStoreReader, fileName: str
   // `ownedSourceFor` also matches a SOURCE path (`source_uri`); a companion is
   // specifically the `provider_uri`. A bare source path is NOT a companion (it
   // is already the target we map TO), so require the matched provider identity.
-  return owned !== undefined && normalizePath(owned.provider_uri) === normalizePath(fileName);
+  return (
+    owned !== undefined &&
+    storePathKey(reader, owned.provider_uri) === storePathKey(reader, fileName)
+  );
 }
 
 /**
@@ -245,7 +297,10 @@ export function sourceForCarrierCompanion(
   provider: string,
 ): string | undefined {
   const owned = reader.ownedSourceFor(provider);
-  if (owned === undefined || normalizePath(owned.provider_uri) !== normalizePath(provider)) {
+  if (
+    owned === undefined ||
+    storePathKey(reader, owned.provider_uri) !== storePathKey(reader, provider)
+  ) {
     return undefined;
   }
   return normalizePath(owned.source_uri);
@@ -518,6 +573,7 @@ export function remapReferencedSymbol<
   // Capture whether the definition started on a carrier companion BEFORE the
   // remap mutates `symbol.definition` in place.
   const defStartedOnCompanion = isCarrierCompanionPath(ctx.reader, symbol.definition.fileName);
+  const definitionIsModuleLevel = isModuleLevelDefinition(symbol.definition);
   const definition = remapDocumentSpan(ctx, symbol.definition);
   if (definition === undefined) {
     return undefined;
@@ -534,7 +590,7 @@ export function remapReferencedSymbol<
   symbol.references = remapDocumentSpansWithModuleFallback(
     ctx,
     symbol.references,
-    movedToSource ? definition.fileName : undefined,
+    movedToSource && definitionIsModuleLevel ? definition.fileName : undefined,
   );
   return symbol;
 }

@@ -3765,6 +3765,37 @@ fn get_export_span_follows_reexport_to_vue_full_paths() {
 }
 
 #[test]
+fn get_export_span_follows_two_level_reexport_to_svelte_default() {
+    let host = make_host();
+
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: None,
+        input_id: "/project/BarrelChild.svelte".to_string(),
+        source: Arc::from(
+            "<script lang=\"ts\">\nlet { label }: { label: string } = $props();\n</script>\n<p>{label}</p>",
+        ),
+        file_language: FileLanguage::svelte(),
+        aliases: Vec::new(),
+    })
+    .expect("load Svelte child");
+    upsert_ts(
+        &host,
+        "/project/level-one.ts",
+        "export { default as BarrelChild } from './BarrelChild.svelte';\n",
+    );
+    upsert_ts(
+        &host,
+        "/project/level-two.ts",
+        "export * from './level-one';\n",
+    );
+
+    let result = host
+        .get_export_span_follow_reexports("/project/level-two.ts", "BarrelChild")
+        .expect("two export hops must reach the Svelte component default");
+    assert_eq!(result, ("/project/BarrelChild.svelte".to_string(), 0, 0));
+}
+
+#[test]
 fn get_export_span_follows_named_reexport() {
     let host = make_host();
 

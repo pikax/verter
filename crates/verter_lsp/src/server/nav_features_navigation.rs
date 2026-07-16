@@ -43,6 +43,10 @@ pub(super) async fn handle_goto_definition(
 
     server.ensure_provider_synced(uri).await;
 
+    if server.editor_owns_carrier_source_features() {
+        return Ok(None);
+    }
+
     // Virtual file: route directly through TSGO (position is already in TSX coordinates)
     if let Some(tp) = &server.type_provider {
         if let Some(vf_ctx) = server.virtual_file_context(uri) {
@@ -473,6 +477,10 @@ pub(super) async fn handle_references(
         include_declaration
     );
 
+    if server.editor_owns_carrier_source_features() {
+        return Ok(None);
+    }
+
     // Virtual file: route directly through TSGO
     if let Some(tp) = &server.type_provider {
         if let Some(vf_ctx) = server.virtual_file_context(uri) {
@@ -646,6 +654,10 @@ pub(super) async fn handle_prepare_rename(
     let uri = &params.text_document.uri;
     let position = &params.position;
 
+    if server.editor_owns_carrier_source_features() {
+        return Ok(None);
+    }
+
     // Virtual file: not supported (no Verter rename context for generated code)
     if server.documents.get_virtual_source_uri(uri).is_some() {
         return Ok(None);
@@ -691,6 +703,10 @@ pub(super) async fn handle_rename(
     // pin the resulting generations under the fence.
     if !server.is_self_file_projection(uri) {
         server.ensure_provider_synced(uri).await;
+    }
+
+    if server.editor_owns_carrier_source_features() {
+        return Ok(None);
     }
 
     let verter_result = (|| {
@@ -920,11 +936,12 @@ pub(super) async fn handle_rename(
     // `.vue` usage at their EXACT full ranges, or the whole rename fails closed
     // (returns no edit) — never a usage-only / decl-only partial. A `NotChildProp`
     // result is returned untouched. See `gate_cross_file_child_prop_rename`.
-    Ok(gate_cross_file_child_prop_rename(
-        result,
-        &rename_class,
-        new_name,
-    ))
+    Ok(
+        gate_cross_file_child_prop_rename(result, &rename_class, new_name).map(|mut edit| {
+            merge::dedupe_rename_workspace_edit(&mut edit);
+            edit
+        }),
+    )
 }
 
 /// Inject Verter's SYNTHESIZED child-declaration carrier rename location into the

@@ -394,6 +394,149 @@ fn test_hover_on_component_shows_prop_constness() {
 }
 
 #[test]
+fn child_component_hover_recovers_import_source_from_script_binding() {
+    let source = "<template><DirectChild /></template>\n<script setup lang=\"ts\">\nimport DirectChild from \"./components/DirectChild.vue\";\n</script>\n";
+    let component_start = source.find("<DirectChild").expect("component tag") as u32;
+    let import_binding_start =
+        source.find("import DirectChild").expect("default import") as u32 + "import ".len() as u32;
+    let analysis = FileAnalysisSnapshot {
+        imports: vec![AnalyzedImport {
+            source: "./components/DirectChild.vue".to_string(),
+            is_type_only: false,
+            bindings: vec![AnalyzedImportBinding {
+                name: "DirectChild".to_string(),
+                kind: ImportBindingKind::Default,
+                imported_name: Some("default".to_string()),
+                is_type_only: false,
+                vue_api: None,
+                span: verter_span::Span::new(
+                    import_binding_start,
+                    import_binding_start + "DirectChild".len() as u32,
+                ),
+            }],
+            span: verter_span::Span::default(),
+            resolved_canonical_id: Some("/workspace/components/DirectChild.vue".to_string()),
+        }],
+        template: Some(
+            TemplateAnalysisSnapshot {
+                components: vec![
+                    verter_semantic::analysis::template::TemplateComponentUsage {
+                        name: "DirectChild".to_string(),
+                        import_source: None,
+                        is_dynamic: false,
+                        props: Vec::new(),
+                        has_spread: false,
+                        slots_used: Vec::new(),
+                        static_classes: Vec::new(),
+                        has_dynamic_class: false,
+                        dynamic_classes: Vec::new(),
+                        v_models: Vec::new(),
+                        bindings: Vec::new(),
+                        events: Vec::new(),
+                        span: verter_span::Span::new(
+                            component_start,
+                            component_start + "<DirectChild />".len() as u32,
+                        ),
+                    },
+                ],
+                ..Default::default()
+            }
+            .into(),
+        ),
+        ..Default::default()
+    };
+
+    let target = child_hover_target_at_offset(component_start + 1, source, &analysis)
+        .expect("the script import must recover a component hover target");
+    let ChildHoverTarget::ComponentTag(target) = target else {
+        panic!("expected component-tag target");
+    };
+    assert_eq!(target.component_name, "DirectChild");
+    assert_eq!(target.import_source, "./components/DirectChild.vue");
+
+    let mut unresolved = analysis;
+    unresolved.imports.clear();
+    assert!(
+        child_hover_target_at_offset(component_start + 1, source, &unresolved).is_none(),
+        "a global or unresolved component must not fabricate an import source",
+    );
+}
+
+#[test]
+fn svelte_child_component_hover_reads_native_component_props() {
+    use verter_semantic::analysis::template::AnalyzedPropDefinition;
+    use verter_session::framework::api_projector::{ComponentPublicContract, ComponentPublicProp};
+
+    let child_analysis = FileAnalysisSnapshot {
+        template: Some(
+            TemplateAnalysisSnapshot {
+                prop_definitions: vec![AnalyzedPropDefinition {
+                    name: "contractProp".to_owned(),
+                    type_annotation: None,
+                    has_default: false,
+                    is_required: true,
+                    is_boolean: false,
+                    used_in_template: true,
+                    used_in_script: true,
+                    span: verter_span::Span::new(0, 0),
+                }],
+                ..Default::default()
+            }
+            .into(),
+        ),
+        ..Default::default()
+    };
+    let public_contract = ComponentPublicContract {
+        props: vec![
+            ComponentPublicProp {
+                name: "contractProp".to_owned(),
+                type_annotation: Some("ContractValue<T>".to_owned()),
+                optional: false,
+                has_default: false,
+            },
+            ComponentPublicProp {
+                name: "optionalCount".to_owned(),
+                type_annotation: Some("number".to_owned()),
+                optional: true,
+                has_default: true,
+            },
+            ComponentPublicProp {
+                name: "onselect".to_owned(),
+                type_annotation: Some("(value: string) => void".to_owned()),
+                optional: true,
+                has_default: false,
+            },
+        ],
+    };
+
+    let hover = build_child_component_hover(
+        "DirectChild",
+        "./DirectChild.svelte",
+        &child_analysis,
+        Some(&public_contract),
+        None,
+        &[],
+    );
+    let HoverContents::Markup(markup) = hover.contents else {
+        panic!("expected markdown child-component hover");
+    };
+    assert!(
+        markup.value.contains("`contractProp`: ContractValue<T>"),
+        "the structured Svelte contract must preserve an aliased generic prop type:\n{}",
+        markup.value
+    );
+    assert!(
+        !markup.value.contains("`contractProp`: unknown"),
+        "a resolved native Svelte prop must not degrade to unknown:\n{}",
+        markup.value
+    );
+    assert!(markup.value.contains("`optionalCount`?: number"));
+    assert!(markup
+        .value
+        .contains("`onselect`?: (value: string) => void"));
+}
+
+#[test]
 fn test_hover_on_component_with_no_props() {
     let source =
         "<template>\n  <Popup />\n</template>\n\n<script setup>\nimport Popup from './Popup.vue'\n</script>\n";

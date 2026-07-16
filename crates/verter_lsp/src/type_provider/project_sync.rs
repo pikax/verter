@@ -1,8 +1,32 @@
+use std::borrow::Cow;
 use std::sync::Arc;
+
+use dashmap::DashMap;
 
 use crate::type_provider::protocol::TypeProviderError;
 use crate::type_provider::traits::TypeProvider;
 use crate::{ProjectSyncMode, TypeProviderKind};
+
+/// Immutable evidence of the exact carrier bytes a provider operation
+/// successfully delivered. Its fields are private: only `ProjectSync`, which
+/// observes the successful provider result, can mint this value. The tsgo
+/// post-open receipt consumes it so membership cannot attest pre-adaptation
+/// compiler bytes while the engine serves an owner-specialized carrier.
+#[derive(Clone)]
+pub(crate) struct SyncedTsxSurface {
+    path: Arc<str>,
+    content: Arc<str>,
+}
+
+impl SyncedTsxSurface {
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub(crate) fn content(&self) -> &Arc<str> {
+        &self.content
+    }
+}
 
 /// Syncs project files to a `TypeProvider`.
 ///
@@ -33,6 +57,10 @@ pub struct ProjectSync {
     provider: Arc<dyn TypeProvider>,
     mode: ProjectSyncMode,
     kind: TypeProviderKind,
+    /// Last successfully delivered carrier bytes, keyed by provider path.
+    /// Shared across clones because server/background producers must record the
+    /// same immutable provider surface that the engine actually received.
+    synced_tsx_contents: Arc<DashMap<String, Arc<str>>>,
 }
 
 impl ProjectSync {
@@ -52,6 +80,7 @@ impl ProjectSync {
             // `--api` checker's configured-project `open_project`). tsserver's
             // store-publish suppression is opt-in via `new_with_kind`.
             kind: TypeProviderKind::Tsgo,
+            synced_tsx_contents: Arc::new(DashMap::new()),
         }
     }
 
@@ -67,7 +96,37 @@ impl ProjectSync {
             provider,
             mode,
             kind,
+            synced_tsx_contents: Arc::new(DashMap::new()),
         }
+    }
+
+    fn record_synced_tsx_content(&self, path: &str, content: &str) {
+        self.synced_tsx_contents
+            .insert(path.to_owned(), Arc::from(content));
+    }
+
+    fn retract_synced_tsx_content(&self, path: &str) {
+        self.synced_tsx_contents.remove(path);
+    }
+
+    /// Return the immutable bytes from the most recent successful carrier sync.
+    /// A provider-surface snapshot must use this value rather than independently
+    /// re-running provider specialization, which could observe a changed owner
+    /// installation between the provider call and surface publication.
+    pub(crate) fn synced_tsx_content(&self, path: &str) -> Option<Arc<str>> {
+        self.synced_tsx_contents
+            .get(path)
+            .map(|entry| Arc::clone(entry.value()))
+    }
+
+    /// Mint post-open evidence only for a path whose last provider operation
+    /// completed successfully and remains live in the exact-byte ledger.
+    pub(crate) fn synced_tsx_surface(&self, path: &str) -> Option<SyncedTsxSurface> {
+        self.synced_tsx_content(path)
+            .map(|content| SyncedTsxSurface {
+                path: Arc::from(path),
+                content,
+            })
     }
 
     /// Whether a contentful carrier-companion open (`open_tsx`/`sync_tsx`/
@@ -80,6 +139,36 @@ impl ProjectSync {
     #[inline]
     fn carrier_companion_open_suppressed(&self) -> bool {
         matches!(self.kind, TypeProviderKind::Tsserver)
+    }
+
+    /// Produce the exact carrier bytes owned by this provider topology.
+    ///
+    /// Managed/editor-owned tsgo cannot add compiler options to a configured
+    /// project through `workspace/didChangeConfiguration`; native tsgo treats
+    /// that payload as user preferences. Svelte's compiler-owned automatic JSX
+    /// runtime is therefore adapted to an owner-bound classic JSX namespace in
+    /// the provider buffer. Vue and every non-tsgo topology remain byte-for-byte
+    /// unchanged. Callers that record a provider surface use this method first so
+    /// the recorded bytes are the exact bytes delivered to the engine.
+    pub(crate) fn prepare_tsx_content<'a>(
+        &self,
+        tsx_path: &str,
+        tsx_content: &'a str,
+    ) -> Result<Cow<'a, str>, TypeProviderError> {
+        if !matches!(self.kind, TypeProviderKind::Tsgo) {
+            return Ok(Cow::Borrowed(tsx_content));
+        }
+        crate::svelte_assets::prepare_managed_tsgo_svelte_carrier(tsx_path, tsx_content)
+            .map(|prepared| {
+                prepared.map_or(Cow::Borrowed(tsx_content), |prepared| {
+                    Cow::Owned(prepared.content)
+                })
+            })
+            .map_err(|error| {
+                TypeProviderError::new(format!(
+                    "failed to prepare Svelte JSX provider assets for {tsx_path}: {error}"
+                ))
+            })
     }
 
     /// Load a Vue file's TSX into the type provider for import resolution only.
@@ -95,7 +184,12 @@ impl ProjectSync {
         if self.carrier_companion_open_suppressed() {
             return Ok(());
         }
-        self.provider.load_file(tsx_path, tsx_content).await
+        let content = self.prepare_tsx_content(tsx_path, tsx_content)?;
+        let result = self.provider.load_file(tsx_path, &content).await;
+        if result.is_ok() {
+            self.record_synced_tsx_content(tsx_path, &content);
+        }
+        result
     }
 
     /// Sync a Vue file's TSX representation to the type provider.
@@ -111,7 +205,12 @@ impl ProjectSync {
         if self.carrier_companion_open_suppressed() {
             return Ok(());
         }
-        self.provider.update_file(tsx_path, tsx_content).await
+        let content = self.prepare_tsx_content(tsx_path, tsx_content)?;
+        let result = self.provider.update_file(tsx_path, &content).await;
+        if result.is_ok() {
+            self.record_synced_tsx_content(tsx_path, &content);
+        }
+        result
     }
 
     /// Open a new TSX file in the type provider.
@@ -128,13 +227,22 @@ impl ProjectSync {
         if self.carrier_companion_open_suppressed() {
             return Ok(());
         }
-        self.provider.open_file(tsx_path, tsx_content).await
+        let content = self.prepare_tsx_content(tsx_path, tsx_content)?;
+        let result = self.provider.open_file(tsx_path, &content).await;
+        if result.is_ok() {
+            self.record_synced_tsx_content(tsx_path, &content);
+        }
+        result
     }
 
     /// Close a TSX file in the type provider. Active for every engine — a close
     /// is provider state cleanup, never a carrier-content authority.
     pub async fn close_tsx(&self, tsx_path: &str) -> Result<(), TypeProviderError> {
-        self.provider.close_file(tsx_path).await
+        let result = self.provider.close_file(tsx_path).await;
+        if result.is_ok() {
+            self.retract_synced_tsx_content(tsx_path);
+        }
+        result
     }
 
     /// Register a published carrier companion with the provider so its queries
@@ -252,9 +360,12 @@ impl ProjectSync {
         if self.carrier_companion_open_suppressed() {
             return Ok(());
         }
-        self.provider
-            .load_file_background(tsx_path, tsx_content)
-            .await
+        let content = self.prepare_tsx_content(tsx_path, tsx_content)?;
+        let result = self.provider.load_file_background(tsx_path, &content).await;
+        if result.is_ok() {
+            self.record_synced_tsx_content(tsx_path, &content);
+        }
+        result
     }
 
     pub async fn open_tsx_background(
@@ -265,9 +376,12 @@ impl ProjectSync {
         if self.carrier_companion_open_suppressed() {
             return Ok(());
         }
-        self.provider
-            .open_file_background(tsx_path, tsx_content)
-            .await
+        let content = self.prepare_tsx_content(tsx_path, tsx_content)?;
+        let result = self.provider.open_file_background(tsx_path, &content).await;
+        if result.is_ok() {
+            self.record_synced_tsx_content(tsx_path, &content);
+        }
+        result
     }
 
     pub async fn sync_tsx_background(
@@ -278,13 +392,23 @@ impl ProjectSync {
         if self.carrier_companion_open_suppressed() {
             return Ok(());
         }
-        self.provider
-            .update_file_background(tsx_path, tsx_content)
-            .await
+        let content = self.prepare_tsx_content(tsx_path, tsx_content)?;
+        let result = self
+            .provider
+            .update_file_background(tsx_path, &content)
+            .await;
+        if result.is_ok() {
+            self.record_synced_tsx_content(tsx_path, &content);
+        }
+        result
     }
 
     pub async fn close_tsx_background(&self, tsx_path: &str) -> Result<(), TypeProviderError> {
-        self.provider.close_file_background(tsx_path).await
+        let result = self.provider.close_file_background(tsx_path).await;
+        if result.is_ok() {
+            self.retract_synced_tsx_content(tsx_path);
+        }
+        result
     }
 
     pub async fn load_dts_background(
@@ -370,7 +494,12 @@ impl ProjectSync {
         if self.carrier_companion_open_suppressed() {
             return Ok(());
         }
-        self.provider.load_file_normal(tsx_path, tsx_content).await
+        let content = self.prepare_tsx_content(tsx_path, tsx_content)?;
+        let result = self.provider.load_file_normal(tsx_path, &content).await;
+        if result.is_ok() {
+            self.record_synced_tsx_content(tsx_path, &content);
+        }
+        result
     }
 
     pub async fn open_tsx_normal(
@@ -381,7 +510,12 @@ impl ProjectSync {
         if self.carrier_companion_open_suppressed() {
             return Ok(());
         }
-        self.provider.open_file_normal(tsx_path, tsx_content).await
+        let content = self.prepare_tsx_content(tsx_path, tsx_content)?;
+        let result = self.provider.open_file_normal(tsx_path, &content).await;
+        if result.is_ok() {
+            self.record_synced_tsx_content(tsx_path, &content);
+        }
+        result
     }
 
     pub async fn sync_tsx_normal(
@@ -392,13 +526,20 @@ impl ProjectSync {
         if self.carrier_companion_open_suppressed() {
             return Ok(());
         }
-        self.provider
-            .update_file_normal(tsx_path, tsx_content)
-            .await
+        let content = self.prepare_tsx_content(tsx_path, tsx_content)?;
+        let result = self.provider.update_file_normal(tsx_path, &content).await;
+        if result.is_ok() {
+            self.record_synced_tsx_content(tsx_path, &content);
+        }
+        result
     }
 
     pub async fn close_tsx_normal(&self, tsx_path: &str) -> Result<(), TypeProviderError> {
-        self.provider.close_file_normal(tsx_path).await
+        let result = self.provider.close_file_normal(tsx_path).await;
+        if result.is_ok() {
+            self.retract_synced_tsx_content(tsx_path);
+        }
+        result
     }
 
     pub async fn load_dts_normal(
@@ -446,6 +587,67 @@ mod tests {
     use super::*;
     use crate::type_provider::mock::{FailingTypeProvider, MockCall, MockTypeProvider};
 
+    #[tokio::test]
+    async fn managed_tsgo_records_the_exact_svelte_carrier_delivered_to_the_provider() {
+        let owner = tempfile::tempdir().expect("temporary Svelte owner");
+        let svelte_dir = owner.path().join("node_modules/svelte");
+        std::fs::create_dir_all(&svelte_dir).expect("Svelte package directory");
+        std::fs::write(
+            svelte_dir.join("package.json"),
+            r#"{"name":"svelte","version":"5.0.0","types":"./index.d.ts","exports":{".":{"types":"./index.d.ts"},"./elements":{"types":"./elements.d.ts"}}}"#,
+        )
+            .expect("Svelte package marker");
+        std::fs::write(
+            svelte_dir.join("index.d.ts"),
+            "export type Snippet = () => unknown;\n",
+        )
+        .expect("Svelte public declarations");
+        std::fs::write(
+            svelte_dir.join("elements.d.ts"),
+            "export interface SvelteHTMLElements { div: {}; }\n",
+        )
+        .expect("Svelte elements declarations");
+        let provider_path = owner.path().join("src/Component.svelte.tsx");
+        std::fs::create_dir_all(provider_path.parent().expect("provider parent"))
+            .expect("provider parent directory");
+        let provider_path = provider_path.to_string_lossy().into_owned();
+        let source = "/** @jsxImportSource @verter/svelte-jsx */\nconst view = <div />;\n";
+
+        let mock = MockTypeProvider::new();
+        let sync = ProjectSync::new_with_kind(
+            Arc::new(mock.clone()),
+            ProjectSyncMode::FullProject,
+            TypeProviderKind::Tsgo,
+        );
+
+        sync.open_tsx(&provider_path, source)
+            .await
+            .expect("managed tsgo open succeeds");
+        let calls = mock.file_sync_calls();
+        let delivered = match calls.as_slice() {
+            [MockCall::OpenFile { path, content }] => {
+                assert_eq!(path, &provider_path);
+                content.as_str()
+            }
+            other => panic!("expected one provider open, got {other:?}"),
+        };
+        assert_ne!(delivered, source, "the managed tsgo carrier is specialized");
+        assert_eq!(delivered.lines().count(), source.lines().count());
+        assert_eq!(
+            sync.synced_tsx_content(&provider_path).as_deref(),
+            Some(delivered),
+            "surface consumers observe the exact bytes delivered to tsgo"
+        );
+
+        sync.close_tsx(&provider_path)
+            .await
+            .expect("managed tsgo close succeeds");
+        assert!(
+            sync.synced_tsx_content(&provider_path).is_none(),
+            "a closed provider buffer cannot remain an authoritative surface"
+        );
+    }
+
     fn make_sync(mock: &MockTypeProvider, mode: ProjectSyncMode) -> ProjectSync {
         ProjectSync::new(Arc::new(mock.clone()), mode)
     }
@@ -458,6 +660,7 @@ mod tests {
             provider: Arc::new(FailingTypeProvider::new(&provider.error_message)),
             mode,
             kind: TypeProviderKind::Tsgo,
+            synced_tsx_contents: Arc::new(DashMap::new()),
         }
     }
 

@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   attestEditorTsserverBootstrap,
+  editorTsserverOwnsCarrierSourceFeatures,
   VERTER_TYPESCRIPT_PLUGIN_ID,
   planEditorTsserverBootstrap,
   receiptIncludesConfiguredProject,
@@ -40,6 +41,7 @@ describe("editor tsserver bootstrap", () => {
     expect(plan.pluginConfig).toEqual({
       enable: true,
       editorOwnsCarrierMembership: true,
+      editorOwnsCarrierSourceFeatures: true,
       editorTsserverAttestation: { directory: plan.directory, nonce: NONCE },
     });
     expect(plan.lspArgs).toEqual([
@@ -214,5 +216,15 @@ describe("editor tsserver bootstrap", () => {
     expect(typeProviderRoutesEditorTsserver("tsgo")).toBe(false);
     expect(typeProviderRoutesEditorTsserver("extension")).toBe(false);
     expect(typeProviderRoutesEditorTsserver("off")).toBe(false);
+  });
+
+  it("owns carrier source features only after an editor-tsserver receipt is selected", () => {
+    expect(editorTsserverOwnsCarrierSourceFeatures([])).toBe(false);
+    expect(
+      editorTsserverOwnsCarrierSourceFeatures([
+        "--editor-tsserver-receipt=/tmp/receipt.json",
+        "--editor-tsserver-nonce=nonce",
+      ]),
+    ).toBe(true);
   });
 });

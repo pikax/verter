@@ -2360,6 +2360,15 @@ impl VerterHost {
             return None;
         }
 
+        // Framework component files synthesize one semantic default export.
+        // Adapters without an authored source token for that value still need
+        // an honest definition anchor so export-graph traversal can terminate
+        // at the component instead of aborting at the final barrel hop. Keep
+        // Vue's established, more precise binding/macro selection above.
+        if file_language.is_framework_carrier() && binding_name == "default" {
+            return Some((0, 0));
+        }
+
         if let Some(sig) = export_signatures.iter().find(|s| s.name == binding_name) {
             if sig.reexport_source.is_some() {
                 return None;

@@ -238,13 +238,17 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
     // its own statement so the `RwLockReadGuard` is dropped BEFORE any await. tsgo
     // (no coordinator) ⇒ `None` ⇒ the gateway returns a direct-open transition.
     let vfs = deps.vfs_workspace.read().clone();
-    let membership = match (
-        matches!(deps.type_provider_kind, crate::TypeProviderKind::Tsserver),
-        deps.carrier_publish_coordinator.as_ref(),
-    ) {
-        (true, Some(coordinator)) => Some(crate::external_ts::CarrierMembershipCtx { coordinator }),
-        _ => None,
-    };
+    let membership = deps
+        .carrier_publish_coordinator
+        .as_ref()
+        .map(|coordinator| crate::external_ts::CarrierMembershipCtx {
+            coordinator,
+            provider_delivery: if matches!(deps.type_provider_kind, crate::TypeProviderKind::Tsgo) {
+                crate::external_ts::CarrierProviderDelivery::DirectOpen
+            } else {
+                crate::external_ts::CarrierProviderDelivery::StoreBacked
+            },
+        });
 
     // Route the freshly-debounced carrier through the SINGLE carrier-sync gateway:
     // tsserver PUBLISHES the companions into the store the plugin reads (refreshing
@@ -318,13 +322,17 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                             synced_kinds.push(ProviderPathKind::Ide);
                             // Record a fresh generation pinning the EXACT IDE bytes
                             // just synced (interactive queries capture this surface).
+                            let provider_code = deps
+                                .project_sync
+                                .synced_tsx_content(&ide_path)
+                                .unwrap_or_else(|| std::sync::Arc::clone(&ide.code));
                             crate::provider_surface_store::record_carrier_ide_surface(
                                 deps.documents.provider_surfaces(),
                                 Some(&deps.documents),
                                 deps.documents.host(),
                                 canonical_id,
                                 &ide_path,
-                                &ide.code,
+                                provider_code.as_ref(),
                                 ide.source_map.as_deref(),
                             );
                         }
@@ -374,7 +382,11 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                     genuinely_stale_after_sync(&stale_paths, &committed_state, &synced_kinds);
                 // A kind opened: NOW mint the receipt (post-open), attesting EXACTLY the
                 // kinds that actually opened this pass, and commit through the coordinator.
-                let receipt = pending.confirm_opened(&synced_kinds);
+                let ide_surface = committed_state
+                    .ide_path
+                    .as_deref()
+                    .and_then(|path| deps.project_sync.synced_tsx_surface(path));
+                let receipt = pending.confirm_opened_with_ide_surface(&synced_kinds, ide_surface);
                 // Gate the stale-path close on ADMISSION: a `Superseded` commit (a newer
                 // transaction reclaimed the source, or an owner-loss advanced the barrier)
                 // requeues and closes NOTHING — the computed stale paths may be the newer
@@ -431,6 +443,18 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
             }
         }
     }
+    if deps.carrier_publish_coordinator.is_some() {
+        deps.client
+            .send_notification::<crate::server::protocol_types::TypeProviderSyncComplete>(
+                crate::server::protocol_types::TypeProviderSyncCompleteParams {
+                    gen: deps
+                        .documents
+                        .host()
+                        .last_content_transition_generation(canonical_id),
+                },
+            )
+            .await;
+    }
     tracing::info!("sync_coordinator: SYNC_DONE {canonical_id}");
 }
 
@@ -481,13 +505,17 @@ async fn preserve_open_unresolved_carrier(
                 ide_synced = true;
                 // Record a fresh generation pinning the EXACT IDE bytes just
                 // synced (interactive queries capture this surface).
+                let provider_code = deps
+                    .project_sync
+                    .synced_tsx_content(&ide_path)
+                    .unwrap_or_else(|| std::sync::Arc::clone(&ide.code));
                 crate::provider_surface_store::record_carrier_ide_surface(
                     deps.documents.provider_surfaces(),
                     Some(&deps.documents),
                     deps.documents.host(),
                     canonical_id,
                     &ide_path,
-                    &ide.code,
+                    provider_code.as_ref(),
                     ide.source_map.as_deref(),
                 );
             }

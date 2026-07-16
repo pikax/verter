@@ -865,8 +865,15 @@ async fn sync_file_to_provider(
     // tsserver carrier's state WITHOUT publishing its membership (and never retracted
     // on owner-loss) — gap E. The gateway closes that: the receipt is required to
     // commit, and only a reconcile mints it. `None` coordinator ⇒ tsgo direct-open.
-    let membership = carrier_publish_coordinator
-        .map(|coordinator| crate::external_ts::CarrierMembershipCtx { coordinator });
+    let membership =
+        carrier_publish_coordinator.map(|coordinator| crate::external_ts::CarrierMembershipCtx {
+            coordinator,
+            provider_delivery: if is_tsgo {
+                crate::external_ts::CarrierProviderDelivery::DirectOpen
+            } else {
+                crate::external_ts::CarrierProviderDelivery::StoreBacked
+            },
+        });
     let decision =
         crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
             host,
@@ -975,13 +982,16 @@ async fn sync_file_to_provider(
                         // synced (interactive queries capture this surface). The
                         // background scan has no `DocumentRegistry`; the carrier
                         // source resolves host/VFS-only.
+                        let provider_code = sync
+                            .synced_tsx_content(&tsx_path)
+                            .unwrap_or_else(|| std::sync::Arc::clone(&ide.code));
                         crate::provider_surface_store::record_carrier_ide_surface(
                             provider_surfaces,
                             None,
                             host,
                             canonical_id,
                             &tsx_path,
-                            &ide.code,
+                            provider_code.as_ref(),
                             ide.source_map.as_deref(),
                         );
                     }
@@ -994,7 +1004,11 @@ async fn sync_file_to_provider(
                     genuinely_stale_after_sync(&stale_paths, &committed_state, &synced_kinds);
                 // A kind opened: NOW mint the receipt (post-open), attesting EXACTLY the
                 // kinds that actually opened this pass, and commit through the coordinator.
-                let receipt = pending.confirm_opened(&synced_kinds);
+                let ide_surface = committed_state
+                    .ide_path
+                    .as_deref()
+                    .and_then(|path| sync.synced_tsx_surface(path));
+                let receipt = pending.confirm_opened_with_ide_surface(&synced_kinds, ide_surface);
                 // Gate the stale-path close on ADMISSION and never drop the outcome: a
                 // `Superseded` commit (a newer transaction reclaimed the source, or an
                 // owner-loss advanced the barrier) re-queues the source and closes NOTHING —

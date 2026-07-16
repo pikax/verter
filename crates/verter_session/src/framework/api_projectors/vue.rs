@@ -7,15 +7,16 @@
 //! collection. The host's public-API entry and this leg converge on that one
 //! body.
 
-use crate::framework::api_projector::{ComponentApiProjector, ComponentApiProjectorCtx};
-use crate::types::TscResponse;
+use crate::framework::api_projector::{
+    ComponentApiProjection, ComponentApiProjector, ComponentApiProjectorCtx,
+};
 
 /// The Vue component-API projector.
 #[derive(Debug, Default)]
 pub struct VueComponentApiProjector;
 
 impl ComponentApiProjector for VueComponentApiProjector {
-    fn render_api(&self, cx: ComponentApiProjectorCtx<'_>) -> Option<TscResponse> {
+    fn render_api(&self, cx: ComponentApiProjectorCtx<'_>) -> Option<ComponentApiProjection> {
         let ComponentApiProjectorCtx {
             host,
             resolved_canonical,
@@ -40,5 +41,10 @@ impl ComponentApiProjector for VueComponentApiProjector {
         // batch-shared cold seed + session view ride on `render_seed` so the
         // macro-deps path takes ZERO per-call store-view reads.
         host.render_vue_public_api_legacy(resolved_canonical, mode, profile, render_seed)
+            .map(|response| ComponentApiProjection {
+                response,
+                // Preserve the established Vue public/hover contract exactly.
+                contract: None,
+            })
     }
 }

@@ -18,6 +18,39 @@ use verter_language::FileLanguage;
 use crate::types::{CompileProfile, PublicApiMode, TscResponse};
 use crate::VerterHost;
 
+/// One resolved public prop exposed to editor/host consumers alongside a
+/// framework component's declaration carrier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentPublicProp {
+    /// Authored public prop name.
+    pub name: String,
+    /// Best safe resolved display type. `None` is an honest unresolved row.
+    pub type_annotation: Option<String>,
+    /// Whether callers may omit the prop.
+    pub optional: bool,
+    /// Whether the framework captured an authored runtime default.
+    pub has_default: bool,
+}
+
+/// Framework-neutral public component contract produced from semantic facts,
+/// never reconstructed by parsing the generated declaration text.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ComponentPublicContract {
+    /// Public prop rows in the framework surface's stable source order.
+    pub props: Vec<ComponentPublicProp>,
+}
+
+/// One projector result: the declaration response plus its structured public
+/// contract when the adapter provides one.
+#[derive(Debug, Clone)]
+pub struct ComponentApiProjection {
+    /// Generated public declaration surface.
+    pub response: TscResponse,
+    /// Semantic public contract. `None` preserves adapters whose established
+    /// public surface has not opted into this sidecar.
+    pub contract: Option<ComponentPublicContract>,
+}
+
 /// One framework's public-API projection policy.
 ///
 /// The host selects the impl by the canonical's resolved
@@ -27,7 +60,7 @@ use crate::VerterHost;
 pub trait ComponentApiProjector: Send + Sync {
     /// Render the component's public-API surface for the requested mode, or
     /// `None` when this component projects no public-API virtual file.
-    fn render_api(&self, cx: ComponentApiProjectorCtx<'_>) -> Option<TscResponse>;
+    fn render_api(&self, cx: ComponentApiProjectorCtx<'_>) -> Option<ComponentApiProjection>;
 }
 
 /// The public-API projection context.

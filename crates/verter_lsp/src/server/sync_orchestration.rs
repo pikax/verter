@@ -480,15 +480,11 @@ impl VerterLanguageServer {
                 );
             }
         }
-        self.notify_editor_carrier_store_changed().await;
         true
     }
 
-    async fn notify_editor_carrier_store_changed(&self) {
-        if !matches!(
-            self.type_provider_kind,
-            crate::TypeProviderKind::EditorTsserver
-        ) {
+    pub(super) async fn notify_editor_carrier_store_changed(&self) {
+        if self.carrier_publish_coordinator.is_none() {
             return;
         }
         let generation = self
@@ -932,8 +928,21 @@ impl VerterLanguageServer {
             _ => false,
         };
         let needs_sync = self.needs_ide_sync.remove(&canonical_id).is_some();
+        // A committed provider state records path liveness, not source freshness.
+        // The normal `did_change` path also marks `needs_ide_sync`, but recovery
+        // must remain correct when the live registry advances independently (for
+        // example an external host update or a request racing an edit). Require
+        // the current immutable provider surface to match the open document
+        // before accepting the loaded-state fast path.
+        let provider_surface_matches_live_source =
+            self.capture_provider_request_surface(uri).is_some();
 
-        if !needs_sync && has_committed_state && ide_already_synced && !needs_owner_reconcile {
+        if !needs_sync
+            && has_committed_state
+            && ide_already_synced
+            && !needs_owner_reconcile
+            && provider_surface_matches_live_source
+        {
             return; // IDE is fresh
         }
 
@@ -968,7 +977,7 @@ impl VerterLanguageServer {
         // STILL opened below (tsserver `geterr` runs on open buffers) — membership
         // (plugin) + open buffer (diagnostics) complement. tsgo: returns `DirectOpen`
         // (no store) with a PENDING authorization; the receipt is minted from it AFTER
-        // the IDE open below (`authorization.confirm()`). An owner-loss
+        // the IDE open below (`authorization.confirm_with_ide_surface()`). An owner-loss
         // (`NotReady`/`Unresolved`) RETRACTS the membership inside the gateway and
         // yields no authorization (the open-document liveness commit below is
         // membership-free).
@@ -1148,7 +1157,12 @@ impl VerterLanguageServer {
                     // API companion is opened by the dedicated background API-sync task /
                     // served by the tsserver store), so the receipt attests ONLY the IDE
                     // kind — a partial open never stamps a companion this pass did not open.
-                    let receipt = authorization.confirm(&[ProviderPathKind::Ide]);
+                    let ide_surface = self
+                        .project_sync
+                        .as_ref()
+                        .and_then(|sync| sync.synced_tsx_surface(&ide_path));
+                    let receipt = authorization
+                        .confirm_with_ide_surface(&[ProviderPathKind::Ide], ide_surface);
                     // The owner is the receipt's bound tsconfig (the gateway's resolved
                     // owner), NOT a re-projection — the `carrier_close_state` helper is
                     // owner-INDEPENDENT and only computes the provider paths.

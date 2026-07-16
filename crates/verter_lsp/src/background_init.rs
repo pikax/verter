@@ -247,7 +247,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
 
         for (project_root, tsconfig_path) in &configured_projects {
             if let Some((base_url, paths)) =
-                verter_workspace::config::raw_paths_json(&*ws, tsconfig_path)
+                crate::svelte_assets::owner_provider_path_config(&*ws, tsconfig_path, project_root)
             {
                 tracing::info!(
                     "configuring tsserver paths for {} via {} (baseUrl: {})",
@@ -262,7 +262,6 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                 // resolved against THIS OWNER PROJECT's install (absent → fail
                 // closed). The owner project root is the per-project resolution
                 // anchor for multi-`svelte` monorepos.
-                let paths = crate::svelte_assets::inject_svelte_paths(paths, project_root);
                 if let Err(e) = tp.configure_paths(&base_url, paths).await {
                     tracing::warn!("failed to configure tsserver paths: {e}");
                 }

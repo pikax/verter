@@ -2771,6 +2771,437 @@ fn editor_tsserver_constructs_store_publication_without_a_local_provider() {
 }
 
 #[tokio::test]
+async fn managed_tsgo_constructs_both_direct_provider_sync_and_editor_store_publication() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
+    let host_for_server = Arc::clone(&host);
+    let provider_for_server = Arc::clone(&provider);
+    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&provider_for_server)),
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsgo,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_reason: Some("managed tsgo".into()),
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let server = service.inner();
+
+    assert!(
+        server.project_sync.is_some(),
+        "managed tsgo must retain its direct companion-buffer delivery leg"
+    );
+    assert!(
+        server.carrier_publish_coordinator.is_some(),
+        "the editor plugin also requires durable carrier membership on managed tsgo"
+    );
+}
+
+// @ai-generated - Proves editor tsserver owns carrier hover, navigation, and rename.
+#[tokio::test(flavor = "multi_thread")]
+async fn editor_tsserver_yields_navigation_and_rename_to_the_editor_plugin() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: None,
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::EditorTsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_reason: Some("attested editor project".into()),
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let server = service.inner();
+    let source = "<script setup lang=\"ts\">\nconst count = 1\n</script>\n<template><div>{{ count }}</div></template>\n";
+    let uri = open_test_vue(server, "/workspace/src/App.vue", source);
+    let position = find_document_position(server, &uri, "{{ count", 3);
+
+    let hover = super::nav_features::handle_hover(server, hover_params(&uri, position))
+        .await
+        .expect("hover request succeeds");
+    assert!(
+        hover.is_none(),
+        "the LSP must not compete with the attested editor hover provider, got {hover:?}"
+    );
+
+    let definition = super::nav_features_navigation::handle_goto_definition(
+        server,
+        goto_definition_params(&uri, position),
+    )
+    .await
+    .expect("definition request succeeds");
+    assert!(
+        definition.is_none(),
+        "the LSP must not compete with the attested editor definition provider, got {definition:?}"
+    );
+
+    let references = super::nav_features_navigation::handle_references(
+        server,
+        ReferenceParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            context: ReferenceContext {
+                include_declaration: true,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        },
+    )
+    .await
+    .expect("references request succeeds");
+    assert!(
+        references.is_none(),
+        "the LSP must not compete with the attested editor references provider, got {references:?}"
+    );
+
+    let prepare = super::nav_features_navigation::handle_prepare_rename(
+        server,
+        TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position,
+        },
+    )
+    .await
+    .expect("prepare-rename request succeeds");
+    assert!(
+        prepare.is_none(),
+        "the LSP must not claim the editor plugin's rename position, got {prepare:?}"
+    );
+
+    let rename = super::nav_features_navigation::handle_rename(
+        server,
+        RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position,
+            },
+            new_name: "renamed".into(),
+            work_done_progress_params: Default::default(),
+        },
+    )
+    .await
+    .expect("rename request succeeds");
+    assert!(
+        rename.is_none(),
+        "the LSP must not compete with the attested editor rename provider, got {rename:?}"
+    );
+}
+
+/// The editor-owned tsserver route has no local provider buffers: its only
+/// content authority is the durable carrier store consumed by the editor
+/// plugin. A live source edit must therefore take the same membership/publish
+/// branch as managed tsserver, not the direct-open branch used by tsgo.
+#[tokio::test(flavor = "multi_thread")]
+async fn editor_tsserver_live_publish_refreshes_durable_carrier_content() {
+    use crate::external_ts::{default_carrier_store_host_version, CarrierPublishStore};
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let workspace_root = format!("/verter_editor_live_{nanos}/ws");
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+    let canonical_id = format!("{workspace_root}/src/App.vue");
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: None,
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::EditorTsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_reason: Some("attested editor project".into()),
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let server = service.inner();
+    install_test_resolver_for_root(server, &workspace_root, Some(&tsconfig));
+
+    let initial = "<script setup lang=\"ts\">\nconst resolved = 1\n</script>\n<template><div>{{ resolved }}</div></template>\n";
+    let uri = open_test_vue(server, &canonical_id, initial);
+    assert!(server.publish_carrier_to_external_ts(&canonical_id).await);
+
+    let store = CarrierPublishStore::open(default_carrier_store_host_version(), &workspace_root);
+    let initial_manifest = store.current_manifest();
+    let initial_ide = initial_manifest
+        .projects
+        .get(&tsconfig)
+        .and_then(|project| {
+            project.ready_files.iter().find_map(|(provider, ready)| {
+                (provider.ends_with(".vue.tsx")).then_some(ready.clone())
+            })
+        })
+        .expect("editor-owned initial publish must materialize the IDE carrier");
+
+    let updated = "<script setup lang=\"ts\">\nconst resolved = 1\nunresolvedAfterEdit\n</script>\n<template><div>{{ resolved }}</div></template>\n";
+    let update = server.documents.did_change(&uri, 2, updated);
+    assert!(
+        update.changed,
+        "the edit must invalidate the compiled carrier"
+    );
+    assert!(server.publish_carrier_to_external_ts(&canonical_id).await);
+
+    let updated_manifest = store.current_manifest();
+    let updated_ide = updated_manifest
+        .projects
+        .get(&tsconfig)
+        .and_then(|project| {
+            project.ready_files.iter().find_map(|(provider, ready)| {
+                (provider.ends_with(".vue.tsx")).then_some(ready.clone())
+            })
+        })
+        .expect("editor-owned live publish must retain the IDE carrier");
+    assert_ne!(
+        updated_ide.content_hash, initial_ide.content_hash,
+        "a live edit must replace the durable carrier bytes read by the editor plugin"
+    );
+}
+
+/// In the editor-owned topology the TypeScript plugin is the typed member-list
+/// owner. Verter still owns bare template-scope completions, but returning that
+/// same outer scope for `obj.|` makes VS Code merge unrelated bindings into the
+/// plugin's precise property list.
+#[tokio::test(flavor = "multi_thread")]
+async fn editor_tsserver_completion_yields_member_access_but_keeps_bare_scope() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: None,
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::EditorTsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_reason: Some("attested editor project".into()),
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let server = service.inner();
+    let source = "<script setup lang=\"ts\">\nconst obj = { field: 1 }\nconst outer = 2\n</script>\n<template><div>{{ obj }} {{ obj.field }}</div></template>\n";
+    let uri = open_test_vue(server, "/workspace/src/App.vue", source);
+    let line_index = server
+        .documents
+        .get(&uri)
+        .expect("open document")
+        .line_index
+        .clone();
+
+    let bare_offset = source.find("{{ obj }}").expect("bare interpolation") + "{{ obj".len();
+    let bare_position = line_index
+        .offset_to_position(bare_offset as u32)
+        .expect("bare source position");
+    let bare = completion_labels(
+        super::nav_features::handle_completion(
+            server,
+            completion_params(&uri, bare_position, None),
+        )
+        .await
+        .expect("bare completion succeeds"),
+    );
+    assert!(
+        bare.iter().any(|label| label == "obj") && bare.iter().any(|label| label == "outer"),
+        "Verter must retain the bare template scope, got {bare:?}"
+    );
+
+    let member_offset = source.find("obj.field").expect("member access") + "obj.".len();
+    let member_position = line_index
+        .offset_to_position(member_offset as u32)
+        .expect("member source position");
+    let member = super::nav_features::handle_completion(
+        server,
+        completion_params(&uri, member_position, Some(".")),
+    )
+    .await
+    .expect("member completion succeeds");
+    assert!(
+        member.is_none(),
+        "editor-owned member access must yield to the TypeScript plugin, got {:?}",
+        completion_labels(member)
+    );
+
+    let script_offset = source.find("const outer").expect("script declaration") + "const out".len();
+    let script_position = line_index
+        .offset_to_position(script_offset as u32)
+        .expect("script source position");
+    let script = super::nav_features::handle_completion(
+        server,
+        completion_params(&uri, script_position, None),
+    )
+    .await
+    .expect("script completion succeeds");
+    assert!(
+        script.is_none(),
+        "editor-owned script completion must yield to the TypeScript plugin, got {:?}",
+        completion_labels(script)
+    );
+
+    let recovery_source = "<script setup lang=\"ts\">\nconst count = 1\nfunction safeAction() { return count }\nconst broken =\n</script>\n<template><div>{{ cou }} {{ safeA }}</div></template>\n";
+    let recovery_uri = open_test_vue(server, "/workspace/src/Recovery.vue", recovery_source);
+    let recovery_index = server
+        .documents
+        .get(&recovery_uri)
+        .expect("open recovery document")
+        .line_index
+        .clone();
+    for (probe, prefix, expected) in [
+        ("{{ cou }}", "{{ cou", "count"),
+        ("{{ safeA }}", "{{ safeA", "safeAction"),
+    ] {
+        let offset = recovery_source.find(probe).expect("recovery probe") + prefix.len();
+        let position = recovery_index
+            .offset_to_position(offset as u32)
+            .expect("recovery source position");
+        let labels = completion_labels(
+            super::nav_features::handle_completion(
+                server,
+                completion_params(&recovery_uri, position, None),
+            )
+            .await
+            .expect("recovery completion succeeds"),
+        );
+        assert!(
+            labels.iter().any(|label| label == expected),
+            "a trailing broken declaration must retain earlier `{expected}` in template scope, got {labels:?}"
+        );
+    }
+}
+
+/// Provider-parity extension E2E must attribute every completion item to the
+/// selected TypeScript engine. Verter still owns carrier generation, sync, and
+/// source mapping, but its native completion producer is disabled for this rail.
+/// This test is the behavioral discriminator: the ordinary template producer
+/// would contribute `localValue`, while the mock provider contributes that label
+/// as a Function plus an out-of-scope global. A bare identifier position proves
+/// the provider is queried; the Function kind proves the surviving item came from
+/// it, and the missing global proves the subtractive template visibility boundary.
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_only_completion_mode_emits_no_verter_native_items() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+    server.set_provider_only_completions_for_test(true);
+
+    let source = "<script setup lang=\"ts\">\nconst localValue = 1\n</script>\n<template><div>{{  }}</div></template>\n";
+    let uri = open_test_vue(server, "/workspace/src/ProviderOnly.vue", source);
+    let position = find_document_position(server, &uri, "{{  }}", "{{ ".len());
+    set_type_completions_at_vue_position(
+        server,
+        &provider,
+        &uri,
+        position,
+        vec![
+            mock_completion(
+                "localValue",
+                crate::type_provider::protocol::CompletionKind::Function,
+            ),
+            mock_completion(
+                "AbortController",
+                crate::type_provider::protocol::CompletionKind::Class,
+            ),
+        ],
+    );
+
+    let response = server
+        .completion(completion_params(&uri, position, None))
+        .await
+        .expect("provider-only completion request should succeed");
+    let items = match response {
+        Some(CompletionResponse::Array(items)) => items,
+        Some(CompletionResponse::List(list)) => list.items,
+        None => Vec::new(),
+    };
+
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>(),
+        vec!["localValue"],
+        "the provider-only rail must retain only provider items visible in template scope"
+    );
+    assert_eq!(
+        items[0].kind,
+        Some(CompletionItemKind::FUNCTION),
+        "the surviving completion kind must come from the provider, not Verter's native local"
+    );
+    assert!(
+        provider
+            .calls()
+            .iter()
+            .any(|call| matches!(call, MockCall::GetCompletions { .. })),
+        "the provider-only rail must issue a real provider completion query"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_only_completion_keeps_typed_slot_lexical_locals() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+    server.set_provider_only_completions_for_test(true);
+
+    let source = "<script setup lang=\"ts\">\nconst outer = 1\n</script>\n<template><TypedSlot v-slot=\"{ slotItem, slotIndex: index, ...rest }\"><p>{{ sl }}</p></TypedSlot></template>\n";
+    let uri = open_test_vue(server, "/workspace/src/ProviderSlot.vue", source);
+    let position = find_document_position(server, &uri, "{{ sl }}", "{{ sl".len());
+    set_type_completions_at_vue_position(
+        server,
+        &provider,
+        &uri,
+        position,
+        vec![
+            mock_completion(
+                "slotItem",
+                crate::type_provider::protocol::CompletionKind::Variable,
+            ),
+            mock_completion(
+                "window",
+                crate::type_provider::protocol::CompletionKind::Variable,
+            ),
+        ],
+    );
+
+    let labels = completion_labels(
+        server
+            .completion(completion_params(&uri, position, None))
+            .await
+            .expect("provider-only slot completion should succeed"),
+    );
+    assert_eq!(
+        labels,
+        vec!["slotItem"],
+        "slot locals come from the provider while ambient globals stay outside template scope"
+    );
+}
+
+#[tokio::test]
 async fn initialized_returns_before_background_configure_paths_completes() {
     let temp_root = std::env::temp_dir().join(format!(
         "verter-lsp-init-{}",
@@ -5995,7 +6426,13 @@ const outerLabel = 'outer'
 async fn completion_synthesizes_dot_trigger_for_member_access_without_trigger_character() {
     let provider = Arc::new(DotTriggerRequiredCompletionProvider);
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let service = make_hover_test_service(type_provider);
+    // The provider identifies as tsgo, so exercise the direct-open surface. A
+    // tsserver-kind service would route this synthetic provider through the
+    // process-wide on-disk publish store; parallel unit tests using the same
+    // `/workspace/src/App.vue` identity could then replace its manifest between
+    // publish and capture. That is neither the provider contract under test nor
+    // a hermetic request surface.
+    let service = make_hover_test_service_tsgo(type_provider);
     let server = service.inner();
     install_test_resolver(server);
 
@@ -6020,6 +6457,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false, handler: () => {} }]
 
     let uri = open_test_vue(server, "/workspace/src/App.vue", source);
     let position = find_document_position(server, &uri, "action.disabled", 7);
+    let _ctx = synced_type_provider_context(server, &uri);
 
     let labels = completion_labels(
         server
@@ -11220,6 +11658,7 @@ async fn sync_pending_carrier_provider_file_hydrates_codegen_blockers_before_syn
         configured_owner_vfs(&workspace_id, &format!("{workspace_id}/tsconfig.app.json"));
     let carrier_publish = crate::server::background_drain::CarrierPublishCtx {
         coordinator: None,
+        provider_delivery: crate::external_ts::CarrierProviderDelivery::DirectOpen,
         vfs: Arc::clone(&owner_vfs),
         ownership_ready: true,
     };
@@ -11344,6 +11783,7 @@ defineProps<{ msg: string }>()
     let owner_vfs = configured_owner_vfs(&workspace_id, &tsconfig);
     let carrier_publish = crate::server::background_drain::CarrierPublishCtx {
         coordinator: None,
+        provider_delivery: crate::external_ts::CarrierProviderDelivery::DirectOpen,
         vfs: Arc::clone(&owner_vfs),
         ownership_ready: true,
     };
