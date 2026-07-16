@@ -209,40 +209,82 @@ fn follow_reexport_chain_from_graph<R: ExportGraphResolver>(
     binding_name: &str,
     visited: &mut FxHashSet<(String, String)>,
 ) -> Option<(String, u32, u32)> {
-    if !visited.insert((canonical_id.to_string(), binding_name.to_string())) {
+    let visit_key = (canonical_id.to_string(), binding_name.to_string());
+    if !visited.insert(visit_key.clone()) {
         return None;
     }
 
-    let surface = resolver.export_surface(canonical_id)?;
+    // `visited` is the active recursion path, not a global negative cache. A
+    // wildcard branch that misses must release its entries so later source-order
+    // branches can legitimately revisit them through a non-cyclic route.
+    let result = (|| {
+        let surface = resolver.export_surface(canonical_id)?;
 
-    if let Some(local_span) = resolver.local_export_span(canonical_id, binding_name) {
-        if local_span.start > 0
-            || local_span.end > 0
-            || surface.file_language.is_framework_carrier()
-        {
-            return Some((canonical_id.to_string(), local_span.start, local_span.end));
+        if let Some(local_span) = resolver.local_export_span(canonical_id, binding_name) {
+            if local_span.start > 0
+                || local_span.end > 0
+                || surface.file_language.is_framework_carrier()
+            {
+                return Some((canonical_id.to_string(), local_span.start, local_span.end));
+            }
         }
-    }
 
-    if surface.file_language.is_framework_carrier() {
-        return None;
-    }
+        if surface.file_language.is_framework_carrier() {
+            return None;
+        }
 
-    let sig = surface
-        .export_signatures
-        .iter()
-        .find(|sig| sig.name == binding_name)?;
+        if let Some(sig) = surface
+            .export_signatures
+            .iter()
+            .find(|sig| sig.name == binding_name)
+        {
+            if let (Some(source), Some(local_name)) = (&sig.reexport_source, &sig.reexport_local) {
+                let target_canonical =
+                    resolver.resolve_reexport_target(canonical_id, source, sig)?;
+                return follow_reexport_chain_from_graph(
+                    resolver,
+                    &target_canonical,
+                    local_name,
+                    visited,
+                );
+            }
 
-    if let (Some(source), Some(local_name)) = (&sig.reexport_source, &sig.reexport_local) {
-        let target_canonical = resolver.resolve_reexport_target(canonical_id, source, sig)?;
-        return follow_reexport_chain_from_graph(resolver, &target_canonical, local_name, visited);
-    }
+            return (sig.span.start > 0 || sig.span.end > 0)
+                .then(|| (canonical_id.to_string(), sig.span.start, sig.span.end));
+        }
 
-    if sig.span.start > 0 || sig.span.end > 0 {
-        Some((canonical_id.to_string(), sig.span.start, sig.span.end))
-    } else {
+        // ECMAScript export-star deliberately excludes `default`. A default
+        // export remains navigable only through an explicit re-export such as
+        // `export { default as Widget } from './Widget.vue'`.
+        if binding_name == "default" {
+            return None;
+        }
+
+        for sig in surface
+            .export_signatures
+            .iter()
+            .filter(|sig| sig.name == "*")
+        {
+            let Some(source) = sig.reexport_source.as_deref() else {
+                continue;
+            };
+            let Some(target_canonical) =
+                resolver.resolve_reexport_target(canonical_id, source, sig)
+            else {
+                continue;
+            };
+            if let Some(resolved) =
+                follow_reexport_chain_from_graph(resolver, &target_canonical, binding_name, visited)
+            {
+                return Some(resolved);
+            }
+        }
+
         None
-    }
+    })();
+
+    visited.remove(&visit_key);
+    result
 }
 
 fn collect_resolved_exports_from_graph<R: ExportGraphResolver>(
@@ -557,6 +599,262 @@ mod tests {
         assert_eq!(
             get_export_span_follow_reexports_from_graph(&resolver, "/src/App.vue", "default"),
             Some(("/src/App.vue".to_string(), 0, 0))
+        );
+    }
+
+    // @ai-generated - Verifies span navigation across a two-level export-star chain.
+    #[test]
+    fn get_export_span_follows_two_wildcard_hops_to_terminal_declaration() {
+        let mut resolver = TestResolver::default();
+        resolver.surfaces.insert(
+            "/src/index.ts".to_string(),
+            ExportSurface {
+                file_language: verter_language::FileLanguage::script_ts(),
+                export_signatures: vec![export_sig(
+                    "*",
+                    false,
+                    Span::default(),
+                    Some("./middle"),
+                    None,
+                )],
+            },
+        );
+        resolver.surfaces.insert(
+            "/src/middle.ts".to_string(),
+            ExportSurface {
+                file_language: verter_language::FileLanguage::script_ts(),
+                export_signatures: vec![export_sig(
+                    "*",
+                    false,
+                    Span::default(),
+                    Some("./leaf"),
+                    None,
+                )],
+            },
+        );
+        resolver.surfaces.insert(
+            "/src/leaf.ts".to_string(),
+            ExportSurface {
+                file_language: verter_language::FileLanguage::script_ts(),
+                export_signatures: vec![export_sig("Widget", false, Span::new(41, 47), None, None)],
+            },
+        );
+        resolver.local_spans.insert(
+            ("/src/leaf.ts".to_string(), "Widget".to_string()),
+            Span::new(41, 47),
+        );
+        resolver.routes.insert(
+            ("/src/index.ts".to_string(), "./middle".to_string(), false),
+            "/src/middle.ts".to_string(),
+        );
+        resolver.routes.insert(
+            ("/src/middle.ts".to_string(), "./leaf".to_string(), false),
+            "/src/leaf.ts".to_string(),
+        );
+
+        assert_eq!(
+            get_export_span_follow_reexports_from_graph(&resolver, "/src/index.ts", "Widget"),
+            Some(("/src/leaf.ts".to_string(), 41, 47))
+        );
+    }
+
+    // @ai-generated - Verifies source-order backtracking after a wildcard miss.
+    #[test]
+    fn get_export_span_backtracks_from_first_wildcard_miss_to_second_success() {
+        let mut resolver = TestResolver::default();
+        resolver.surfaces.insert(
+            "/src/index.ts".to_string(),
+            ExportSurface {
+                file_language: verter_language::FileLanguage::script_ts(),
+                export_signatures: vec![
+                    export_sig("*", false, Span::default(), Some("./missing"), None),
+                    export_sig("*", false, Span::default(), Some("./found"), None),
+                ],
+            },
+        );
+        resolver.surfaces.insert(
+            "/src/missing.ts".to_string(),
+            ExportSurface {
+                file_language: verter_language::FileLanguage::script_ts(),
+                export_signatures: vec![export_sig("Other", false, Span::new(5, 10), None, None)],
+            },
+        );
+        resolver.surfaces.insert(
+            "/src/found.ts".to_string(),
+            ExportSurface {
+                file_language: verter_language::FileLanguage::script_ts(),
+                export_signatures: vec![export_sig("Widget", false, Span::new(21, 27), None, None)],
+            },
+        );
+        resolver.local_spans.insert(
+            ("/src/found.ts".to_string(), "Widget".to_string()),
+            Span::new(21, 27),
+        );
+        resolver.routes.insert(
+            ("/src/index.ts".to_string(), "./missing".to_string(), false),
+            "/src/missing.ts".to_string(),
+        );
+        resolver.routes.insert(
+            ("/src/index.ts".to_string(), "./found".to_string(), false),
+            "/src/found.ts".to_string(),
+        );
+
+        assert_eq!(
+            get_export_span_follow_reexports_from_graph(&resolver, "/src/index.ts", "Widget"),
+            Some(("/src/found.ts".to_string(), 21, 27))
+        );
+        assert_eq!(
+            resolver.surface_reads.borrow().as_slice(),
+            &["/src/index.ts", "/src/missing.ts", "/src/found.ts"],
+            "wildcard branches must be tried in source order until one resolves",
+        );
+    }
+
+    // @ai-generated - Verifies wildcard cycles terminate without poisoning sibling branches.
+    #[test]
+    fn get_export_span_wildcard_cycle_terminates_and_backtracks() {
+        let mut resolver = TestResolver::default();
+        resolver.surfaces.insert(
+            "/src/index.ts".to_string(),
+            ExportSurface {
+                file_language: verter_language::FileLanguage::script_ts(),
+                export_signatures: vec![
+                    export_sig("*", false, Span::default(), Some("./cycle"), None),
+                    export_sig("*", false, Span::default(), Some("./leaf"), None),
+                ],
+            },
+        );
+        resolver.surfaces.insert(
+            "/src/cycle.ts".to_string(),
+            ExportSurface {
+                file_language: verter_language::FileLanguage::script_ts(),
+                export_signatures: vec![export_sig(
+                    "*",
+                    false,
+                    Span::default(),
+                    Some("./index"),
+                    None,
+                )],
+            },
+        );
+        resolver.surfaces.insert(
+            "/src/leaf.ts".to_string(),
+            ExportSurface {
+                file_language: verter_language::FileLanguage::script_ts(),
+                export_signatures: vec![export_sig("Widget", false, Span::new(61, 67), None, None)],
+            },
+        );
+        resolver.local_spans.insert(
+            ("/src/leaf.ts".to_string(), "Widget".to_string()),
+            Span::new(61, 67),
+        );
+        resolver.routes.insert(
+            ("/src/index.ts".to_string(), "./cycle".to_string(), false),
+            "/src/cycle.ts".to_string(),
+        );
+        resolver.routes.insert(
+            ("/src/cycle.ts".to_string(), "./index".to_string(), false),
+            "/src/index.ts".to_string(),
+        );
+        resolver.routes.insert(
+            ("/src/index.ts".to_string(), "./leaf".to_string(), false),
+            "/src/leaf.ts".to_string(),
+        );
+
+        assert_eq!(
+            get_export_span_follow_reexports_from_graph(&resolver, "/src/index.ts", "Widget"),
+            Some(("/src/leaf.ts".to_string(), 61, 67))
+        );
+    }
+
+    // @ai-generated - Verifies export-star does not forward ECMAScript default exports.
+    #[test]
+    fn get_export_span_does_not_forward_default_through_wildcard() {
+        let mut resolver = TestResolver::default();
+        resolver.surfaces.insert(
+            "/src/index.ts".to_string(),
+            ExportSurface {
+                file_language: verter_language::FileLanguage::script_ts(),
+                export_signatures: vec![export_sig(
+                    "*",
+                    false,
+                    Span::default(),
+                    Some("./leaf"),
+                    None,
+                )],
+            },
+        );
+        resolver.surfaces.insert(
+            "/src/leaf.ts".to_string(),
+            ExportSurface {
+                file_language: verter_language::FileLanguage::script_ts(),
+                export_signatures: vec![export_sig(
+                    "default",
+                    false,
+                    Span::new(71, 78),
+                    None,
+                    None,
+                )],
+            },
+        );
+        resolver.local_spans.insert(
+            ("/src/leaf.ts".to_string(), "default".to_string()),
+            Span::new(71, 78),
+        );
+        resolver.routes.insert(
+            ("/src/index.ts".to_string(), "./leaf".to_string(), false),
+            "/src/leaf.ts".to_string(),
+        );
+
+        assert_eq!(
+            get_export_span_follow_reexports_from_graph(&resolver, "/src/index.ts", "default"),
+            None,
+            "ECMAScript export-star never forwards the default export",
+        );
+    }
+
+    // @ai-generated - Verifies an explicit default alias remains navigable.
+    #[test]
+    fn get_export_span_follows_explicit_default_alias() {
+        let mut resolver = TestResolver::default();
+        resolver.surfaces.insert(
+            "/src/index.ts".to_string(),
+            ExportSurface {
+                file_language: verter_language::FileLanguage::script_ts(),
+                export_signatures: vec![export_sig(
+                    "Widget",
+                    false,
+                    Span::default(),
+                    Some("./leaf"),
+                    Some("default"),
+                )],
+            },
+        );
+        resolver.surfaces.insert(
+            "/src/leaf.ts".to_string(),
+            ExportSurface {
+                file_language: verter_language::FileLanguage::script_ts(),
+                export_signatures: vec![export_sig(
+                    "default",
+                    false,
+                    Span::new(81, 88),
+                    None,
+                    None,
+                )],
+            },
+        );
+        resolver.local_spans.insert(
+            ("/src/leaf.ts".to_string(), "default".to_string()),
+            Span::new(81, 88),
+        );
+        resolver.routes.insert(
+            ("/src/index.ts".to_string(), "./leaf".to_string(), false),
+            "/src/leaf.ts".to_string(),
+        );
+
+        assert_eq!(
+            get_export_span_follow_reexports_from_graph(&resolver, "/src/index.ts", "Widget"),
+            Some(("/src/leaf.ts".to_string(), 81, 88))
         );
     }
 

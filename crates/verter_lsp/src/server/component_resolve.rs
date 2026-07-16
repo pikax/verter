@@ -5,11 +5,8 @@
 //! building, barrel re-export following, and template-contract
 //! definition resolution (props, events, v-model, slots).
 //!
-//! All methods were moved verbatim from `server.rs` (now `server/mod.rs`)
-//! lines 1641-2515 + the trio (resolve_component, resolve_component_context,
-//! child_hover_for_target). No behaviour change. The sibling lives as a
-//! private child module under `server/mod.rs` so it sees the parent's
-//! private struct fields without visibility widening.
+//! The sibling lives as a private child module under `server/mod.rs` so it sees
+//! the parent's private struct fields without visibility widening.
 
 use std::collections::HashSet;
 
@@ -25,11 +22,187 @@ use super::child_prop_rename::ChildPropUsageClass;
 use super::server_utils::{
     event_name_match_rank, extract_word_at_offset, goto_response_from_locations,
     is_default_export_component_carrier, listener_prop_candidates, location_from_span,
-    push_unique_location, resolve_component_for, resolve_import_path, to_pascal_case,
+    push_unique_location, resolve_import_path, to_pascal_case,
 };
 use super::{ResolvedComponentDocument, VerterLanguageServer};
 
+/// Build the canonical candidates for an imported component in semantic
+/// authority order. The analysis snapshot records the resolution used to
+/// compile the parent; a later workspace/provider state must not displace that
+/// identity. Workspace resolution remains the recovery path for snapshots that
+/// lack a resolved import, and lexical resolution is the final compatibility
+/// fallback for not-yet-indexed relative files.
+fn imported_component_canonical_candidates(
+    parent_canonical_id: &str,
+    parent_analysis: Option<&verter_session::FileAnalysisSnapshot>,
+    import_source: &str,
+    workspace_resolved: Option<String>,
+) -> Vec<String> {
+    let mut candidates = Vec::with_capacity(3);
+    let mut push_unique = |candidate: String| {
+        if !candidates.iter().any(|existing| existing == &candidate) {
+            candidates.push(candidate);
+        }
+    };
+
+    if let Some(resolved) = parent_analysis
+        .and_then(|analysis| {
+            analysis
+                .imports
+                .iter()
+                .find(|import| import.source == import_source)
+        })
+        .and_then(|import| import.resolved_canonical_id.clone())
+    {
+        push_unique(resolved);
+    }
+
+    if let Some(resolved) = workspace_resolved {
+        push_unique(resolved);
+    }
+
+    let lexical = if import_source.starts_with('.') {
+        let parent_dir = parent_canonical_id
+            .rsplit_once('/')
+            .map(|(dir, _)| dir)
+            .unwrap_or(parent_canonical_id);
+        resolve_import_path(parent_dir, import_source)
+    } else {
+        import_source.to_string()
+    };
+    push_unique(lexical);
+
+    candidates
+}
+
 impl VerterLanguageServer {
+    /// Ensure a resolved component carrier is present and its analysis-facing
+    /// compile has run. `ensure_compiled` is content/profile cached, so this is
+    /// cheap on warm hovers while still making unopened imported carriers
+    /// reliable.
+    fn ensure_component_ready(
+        &self,
+        canonical_id: &str,
+    ) -> Option<verter_session::FileAnalysisSnapshot> {
+        let host = self.documents.host();
+        if host.get_source(canonical_id).is_none() && !host.ensure_loaded(canonical_id) {
+            return None;
+        }
+
+        if is_default_export_component_carrier(canonical_id) {
+            let profile = self.documents.tsx_profile.read().clone();
+            // ANALYSIS-facing side effect: this is intentionally the shared
+            // compile path, which also leaves the exact carrier public API ready
+            // for the hover builder. Main-less Svelte carriers may return a
+            // missing-main result after publishing analysis, so read the
+            // authoritative analysis store regardless of the return value.
+            let _ = host.ensure_compiled(canonical_id, &profile);
+        }
+
+        host.get_analysis(canonical_id)
+    }
+
+    fn imported_component_export_name<'a>(
+        parent_analysis: Option<&'a verter_session::FileAnalysisSnapshot>,
+        import_source: &str,
+        local_binding_name: Option<&'a str>,
+    ) -> Option<&'a str> {
+        let local_binding_name = local_binding_name?;
+        parent_analysis
+            .and_then(|analysis| {
+                analysis
+                    .imports
+                    .iter()
+                    .find(|import| import.source == import_source)
+            })
+            .and_then(|import| {
+                import
+                    .bindings
+                    .iter()
+                    .find(|binding| binding.name == local_binding_name)
+            })
+            .and_then(|binding| binding.imported_name.as_deref())
+            .or(Some(local_binding_name))
+    }
+
+    /// Resolve one imported component identity through the single canonical
+    /// candidate path shared by tag hovers, component usages, and import
+    /// bindings.
+    fn resolve_imported_component_canonical_id(
+        &self,
+        parent_uri: &Uri,
+        parent_analysis: Option<&verter_session::FileAnalysisSnapshot>,
+        import_source: &str,
+        local_binding_name: Option<&str>,
+    ) -> Option<String> {
+        let parent_canonical_id = uri_to_canonical_id(parent_uri);
+        let workspace_resolved = self.resolve_import_specifier(&parent_canonical_id, import_source);
+        let candidates = imported_component_canonical_candidates(
+            &parent_canonical_id,
+            parent_analysis,
+            import_source,
+            workspace_resolved,
+        );
+        let export_name = Self::imported_component_export_name(
+            parent_analysis,
+            import_source,
+            local_binding_name,
+        );
+
+        for candidate in candidates {
+            if is_default_export_component_carrier(&candidate) {
+                if self.ensure_component_ready(&candidate).is_some() {
+                    return Some(candidate);
+                }
+                continue;
+            }
+
+            // Barrel export surfaces are populated by the shared host load.
+            if self.documents.host().get_source(&candidate).is_none()
+                && !self.documents.host().ensure_loaded(&candidate)
+            {
+                continue;
+            }
+            let Some(export_name) = export_name else {
+                continue;
+            };
+            let Some((resolved_id, _, _)) = self
+                .documents
+                .host()
+                .get_export_span_follow_reexports(&candidate, export_name)
+            else {
+                continue;
+            };
+            if is_default_export_component_carrier(&resolved_id)
+                && self.ensure_component_ready(&resolved_id).is_some()
+            {
+                return Some(resolved_id);
+            }
+        }
+
+        None
+    }
+
+    fn resolved_component_document(
+        &self,
+        child_canonical_id: &str,
+    ) -> Option<ResolvedComponentDocument> {
+        let child_analysis = self
+            .documents
+            .host()
+            .get_analysis(child_canonical_id)
+            .or_else(|| self.ensure_component_ready(child_canonical_id))?;
+        let child_source = self.documents.host().get_source(child_canonical_id)?;
+        let child_line_index = LineIndex::new(&child_source, self.documents.encoding());
+        let child_uri = crate::uri::path_to_file_uri(child_canonical_id)?;
+
+        Some(ResolvedComponentDocument {
+            uri: child_uri,
+            analysis: child_analysis,
+            line_index: child_line_index,
+        })
+    }
+
     pub(super) fn resolve_import_specifier(
         &self,
         parent_canonical_id: &str,
@@ -69,49 +242,15 @@ impl VerterLanguageServer {
         component: &verter_semantic::analysis::template::TemplateComponentUsage,
     ) -> Option<ResolvedComponentDocument> {
         let import_source = component.import_source.as_ref()?;
-        let parent_canonical_id = uri_to_canonical_id(parent_uri);
         let binding_name = self.component_import_binding_name(parent_analysis, component);
-        let import = parent_analysis
-            .imports
-            .iter()
-            .find(|import| import.source == *import_source);
-        let mut resolved_targets = Vec::new();
-        if let Some(resolved) = import.and_then(|entry| entry.resolved_canonical_id.clone()) {
-            resolved_targets.push(resolved);
-        }
-        if let Some(resolved) = self.resolve_import_specifier(&parent_canonical_id, import_source) {
-            if !resolved_targets
-                .iter()
-                .any(|candidate| candidate == &resolved)
-            {
-                resolved_targets.push(resolved);
-            }
-        }
+        let child_canonical_id = self.resolve_imported_component_canonical_id(
+            parent_uri,
+            Some(parent_analysis),
+            import_source,
+            binding_name.as_deref(),
+        )?;
 
-        let child_canonical_id = resolved_targets.into_iter().find_map(|resolved_target| {
-            if is_default_export_component_carrier(&resolved_target) {
-                return Some(resolved_target);
-            }
-
-            binding_name.as_deref().and_then(|binding| {
-                self.documents
-                    .host()
-                    .get_export_span_follow_reexports(&resolved_target, binding)
-                    .map(|(resolved_id, _, _)| resolved_id)
-                    .filter(|resolved_id| is_default_export_component_carrier(resolved_id))
-            })
-        })?;
-
-        let child_analysis = self.documents.host().get_analysis(&child_canonical_id)?;
-        let child_source = self.documents.host().get_source(&child_canonical_id)?;
-        let child_line_index = LineIndex::new(&child_source, self.documents.encoding());
-        let child_uri = crate::uri::path_to_file_uri(&child_canonical_id)?;
-
-        Some(ResolvedComponentDocument {
-            uri: child_uri,
-            analysis: child_analysis,
-            line_index: child_line_index,
-        })
+        self.resolved_component_document(&child_canonical_id)
     }
 
     pub(super) fn resolve_component_document_for_import_binding(
@@ -121,46 +260,14 @@ impl VerterLanguageServer {
         import_source: &str,
         binding_name: &str,
     ) -> Option<ResolvedComponentDocument> {
-        let parent_canonical_id = uri_to_canonical_id(parent_uri);
-        let import = parent_analysis
-            .imports
-            .iter()
-            .find(|import| import.source == import_source);
-        let mut resolved_targets = Vec::new();
-        if let Some(resolved) = import.and_then(|entry| entry.resolved_canonical_id.clone()) {
-            resolved_targets.push(resolved);
-        }
-        if let Some(resolved) = self.resolve_import_specifier(&parent_canonical_id, import_source) {
-            if !resolved_targets
-                .iter()
-                .any(|candidate| candidate == &resolved)
-            {
-                resolved_targets.push(resolved);
-            }
-        }
+        let child_canonical_id = self.resolve_imported_component_canonical_id(
+            parent_uri,
+            Some(parent_analysis),
+            import_source,
+            Some(binding_name),
+        )?;
 
-        let child_canonical_id = resolved_targets.into_iter().find_map(|resolved_target| {
-            if is_default_export_component_carrier(&resolved_target) {
-                return Some(resolved_target);
-            }
-
-            self.documents
-                .host()
-                .get_export_span_follow_reexports(&resolved_target, binding_name)
-                .map(|(resolved_id, _, _)| resolved_id)
-                .filter(|resolved_id| is_default_export_component_carrier(resolved_id))
-        })?;
-
-        let child_analysis = self.documents.host().get_analysis(&child_canonical_id)?;
-        let child_source = self.documents.host().get_source(&child_canonical_id)?;
-        let child_line_index = LineIndex::new(&child_source, self.documents.encoding());
-        let child_uri = crate::uri::path_to_file_uri(&child_canonical_id)?;
-
-        Some(ResolvedComponentDocument {
-            uri: child_uri,
-            analysis: child_analysis,
-            line_index: child_line_index,
-        })
+        self.resolved_component_document(&child_canonical_id)
     }
 
     pub(super) fn collect_component_event_definition_locations(
@@ -916,114 +1023,30 @@ impl VerterLanguageServer {
         None
     }
 
-    /// Resolve a child component's analysis from an import source path.
-    ///
-    /// Tries three strategies:
-    /// 1. Relative imports → resolve against the parent's directory
-    /// 2. Path alias resolution via tsconfig.json
-    /// 3. Direct lookup (bare specifiers)
-    pub(super) fn resolve_component(
-        &self,
-        parent_uri: &Uri,
-        import_source: &str,
-    ) -> Option<verter_session::FileAnalysisSnapshot> {
-        let canonical_id = uri_to_canonical_id(parent_uri);
-        resolve_component_for(self.documents.host(), &canonical_id, import_source)
-    }
-
     /// Resolve a child component with full context for cross-file editing.
     ///
-    /// When `component_name` is provided and the import resolves to a non-`.vue`
-    /// file (e.g. a barrel `index.ts`), follows re-export chains via
-    /// `get_export_span_follow_reexports` to reach the terminal `.vue` file.
+    /// The parent's compiled import identity is authoritative. Workspace and
+    /// lexical candidates are recovery paths only; barrel traversal resolves to
+    /// the terminal framework carrier before source or analysis is read.
     pub(super) fn resolve_component_context(
         &self,
         parent_uri: &Uri,
         import_source: &str,
         component_name: Option<&str>,
     ) -> Option<crate::features::cross_file::ChildComponentContext> {
-        let canonical_id = uri_to_canonical_id(parent_uri);
-
-        // Resolve the child's canonical ID
-        let mut child_canonical_id = self
-            .resolve_import_specifier(&canonical_id, import_source)
-            .unwrap_or_else(|| {
-                if import_source.starts_with('.') {
-                    let parts: Vec<&str> = canonical_id.split('/').collect();
-                    let dir = parts[..parts.len().saturating_sub(1)].join("/");
-                    resolve_import_path(&dir, import_source)
-                } else {
-                    import_source.to_string()
-                }
-            });
-
-        // Follow barrel re-export chains: if the resolved file is not a .vue file
-        // and we know the component name, look up the re-export chain to find the
-        // terminal .vue file (e.g. ./components/index.ts → ./components/Button.vue).
-        if !is_default_export_component_carrier(&child_canonical_id) {
-            if let Some(name) = component_name {
-                // Ensure the barrel file is loaded so we can inspect its exports
-                if self
-                    .documents
-                    .host()
-                    .get_analysis(&child_canonical_id)
-                    .is_none()
-                {
-                    self.documents.host().ensure_loaded(&child_canonical_id);
-                }
-                if let Some((resolved_id, _, _)) = self
-                    .documents
-                    .host()
-                    .get_export_span_follow_reexports(&child_canonical_id, name)
-                {
-                    if is_default_export_component_carrier(&resolved_id) {
-                        child_canonical_id = resolved_id;
-                    }
-                }
-            }
-        }
-
-        if self
-            .documents
-            .host()
-            .get_source(&child_canonical_id)
-            .is_none()
-            || self
-                .documents
-                .host()
-                .get_analysis(&child_canonical_id)
-                .is_none()
-        {
-            if !self.documents.host().ensure_loaded(&child_canonical_id) {
-                return None;
-            }
-            // ANALYSIS-facing (NOT IDE-sync): this drives the shared compile so
-            // the imported component's analysis is populated, then reads
-            // `get_analysis` below — it does NOT consume IDE TSX. The result is
-            // ignored; the compile side-effect lands the analysis before any
-            // (Main-less-carrier) `MissingVirtualNode`, so a Svelte child's
-            // analysis still resolves. Kept on `ensure_compiled` deliberately.
-            let profile = self.documents.tsx_profile.read().clone();
-            let _ = self
-                .documents
-                .host
-                .ensure_compiled(&child_canonical_id, &profile);
-        }
+        let parent_analysis = self.documents.get_analysis(parent_uri);
+        let child_canonical_id = self.resolve_imported_component_canonical_id(
+            parent_uri,
+            parent_analysis.as_ref(),
+            import_source,
+            component_name,
+        )?;
 
         let analysis = self
-            .resolve_component(parent_uri, import_source)
-            .or_else(|| self.documents.host().get_analysis(&child_canonical_id))?;
-
-        // If the analysis came from the barrel file but we resolved to a .vue file,
-        // prefer the .vue file's analysis for accurate prop/emit information.
-        let analysis = if is_default_export_component_carrier(&child_canonical_id) {
-            self.documents
-                .host()
-                .get_analysis(&child_canonical_id)
-                .unwrap_or(analysis)
-        } else {
-            analysis
-        };
+            .documents
+            .host()
+            .get_analysis(&child_canonical_id)
+            .or_else(|| self.ensure_component_ready(&child_canonical_id))?;
 
         // Get the child's source
         let child_source_arc = self.documents.host().get_source(&child_canonical_id)?;
@@ -1133,6 +1156,42 @@ mod canonicalize_provider_path_tests {
         assert_eq!(
             VerterLanguageServer::canonicalize_provider_path(" /a/b/c.ts "),
             "/a/b/c.ts"
+        );
+    }
+}
+
+#[cfg(test)]
+mod imported_component_candidate_tests {
+    use super::imported_component_canonical_candidates;
+    use verter_semantic::analysis::AnalyzedImport;
+
+    // @ai-generated - Verifies parent-analysis identity outranks mutable fallbacks.
+    #[test]
+    fn analysis_identity_precedes_competing_workspace_and_lexical_fallbacks() {
+        let mut analysis = verter_session::FileAnalysisSnapshot::default();
+        analysis.imports.push(AnalyzedImport {
+            source: "../shared/DirectChild".to_string(),
+            is_type_only: false,
+            bindings: Vec::new(),
+            span: verter_span::Span::default(),
+            resolved_canonical_id: Some("/workspace/src/shared/DirectChild.vue".to_string()),
+        });
+
+        let candidates = imported_component_canonical_candidates(
+            "/workspace/src/feature/DirectParent.vue",
+            Some(&analysis),
+            "../shared/DirectChild",
+            Some("/workspace/src/shared/DirectChild.vue.tsx".to_string()),
+        );
+
+        assert_eq!(
+            candidates,
+            vec![
+                "/workspace/src/shared/DirectChild.vue".to_string(),
+                "/workspace/src/shared/DirectChild.vue.tsx".to_string(),
+                "/workspace/src/shared/DirectChild".to_string(),
+            ],
+            "the analysis-owned canonical import identity must survive later provider/workspace state",
         );
     }
 }

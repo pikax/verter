@@ -4612,6 +4612,102 @@ import MyComp from './MyComp.vue'
     );
 }
 
+// @ai-generated - Guards canonical child resolution across sequential parent sync/query state.
+#[tokio::test]
+async fn component_tag_hover_keeps_analysis_resolved_child_across_two_parents() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let child_source = r#"<script setup lang="ts">
+defineProps<{ contractProp: string }>()
+</script>
+<template><div /></template>
+"#;
+    let parent_source = r#"<script setup lang="ts">
+import ContractChild from '../shared/ContractChild'
+</script>
+<template><ContractChild /></template>
+"#;
+
+    open_test_vue(
+        server,
+        "/workspace/src/shared/ContractChild.vue",
+        child_source,
+    );
+    let first_parent = open_test_vue(
+        server,
+        "/workspace/src/feature-a/ParentA.vue",
+        parent_source,
+    );
+    let second_parent = open_test_vue(
+        server,
+        "/workspace/src/feature-b/ParentB.vue",
+        parent_source,
+    );
+
+    let position = Position {
+        line: 3,
+        character: 12,
+    };
+    for parent_uri in [&first_parent, &second_parent] {
+        let analysis = server
+            .documents
+            .get_analysis(parent_uri)
+            .expect("parent analysis should exist");
+        assert_eq!(
+            analysis.imports[0].resolved_canonical_id.as_deref(),
+            Some("/workspace/src/shared/ContractChild.vue"),
+            "analysis must retain the canonical child identity for each parent",
+        );
+    }
+
+    set_type_hover_at_vue_position(
+        server,
+        &provider,
+        &first_parent,
+        position,
+        "PROVIDER_MODULE_FALLBACK",
+    );
+    let first_text = hover_text(
+        server
+            .hover(hover_params(&first_parent, position))
+            .await
+            .expect("first parent hover request should succeed"),
+    );
+    assert!(
+        first_text.contains("contractProp") && first_text.contains("string"),
+        "the first parent should resolve the child contract, got: {first_text}",
+    );
+
+    // The first request establishes provider sync and exercises every host route
+    // that used to influence the second parent's workspace fallback. The second
+    // request must still use its analysis-owned canonical import identity.
+    set_type_hover_at_vue_position(
+        server,
+        &provider,
+        &second_parent,
+        position,
+        "PROVIDER_MODULE_FALLBACK",
+    );
+    let second_text = hover_text(
+        server
+            .hover(hover_params(&second_parent, position))
+            .await
+            .expect("second parent hover request should succeed"),
+    );
+    assert!(
+        second_text.contains("contractProp") && second_text.contains("string"),
+        "the second parent should retain the same child contract, got: {second_text}",
+    );
+    assert!(
+        !second_text.contains("PROVIDER_MODULE_FALLBACK"),
+        "child resolution must not drift into the provider's module fallback: {second_text}",
+    );
+}
+
 #[tokio::test]
 async fn hover_prefers_child_component_summary_over_import_alias_on_vue_import_binding() {
     let provider = Arc::new(MockTypeProvider::new());
