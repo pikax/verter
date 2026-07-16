@@ -160,6 +160,53 @@ pub struct VueMacroSurface {
     /// The query level this surface was resolved at (always
     /// [`TypeInfoQueryLevel::FullMetadata`] for a macro surface).
     pub level: TypeInfoQueryLevel,
+    /// SURFACE-COMPOSITION reference arms (heritage `extends` parents,
+    /// intersection / union arms) the shallow walker dropped as unresolvable
+    /// while synthesising `surface` — name-sorted, deduplicated. The
+    /// compile-facing collector classifies each arm (import-backed vs
+    /// ambient) and tiers import-backed misses as fatal; ambient names stay
+    /// silent.
+    pub(crate) unresolved_surface_arms: Vec<UnresolvedSurfaceArm>,
+}
+
+/// One unresolvable SURFACE-COMPOSITION reference arm dropped during macro
+/// surface synthesis: the arm's head name plus the canonical file whose
+/// declaration authored it (the file whose import bindings classify the miss
+/// as import-backed vs ambient).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnresolvedSurfaceArm {
+    /// The reference's head name as written (`NotFound` in `extends NotFound`).
+    pub(crate) name: Arc<str>,
+    /// Canonical id of the file whose declaration authored the arm.
+    pub(crate) owner_canonical: Arc<str>,
+}
+
+/// Extract the unresolved SURFACE-COMPOSITION arm facts from a projection's
+/// walker diagnostics, name-sorted (then by declaring file) and deduplicated
+/// so consumers emit deterministically ordered reports.
+fn unresolved_surface_arms_from_diags(
+    diags: &[crate::project_semantic_dispatch::walk::ShallowDiagnostic],
+) -> Vec<UnresolvedSurfaceArm> {
+    let mut arms: Vec<UnresolvedSurfaceArm> = diags
+        .iter()
+        .filter_map(|diag| match diag {
+            crate::project_semantic_dispatch::walk::ShallowDiagnostic::UnresolvedSurfaceArm {
+                name,
+                owner_canonical,
+            } => Some(UnresolvedSurfaceArm {
+                name: Arc::clone(name),
+                owner_canonical: Arc::clone(owner_canonical),
+            }),
+            _ => None,
+        })
+        .collect();
+    arms.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then_with(|| a.owner_canonical.cmp(&b.owner_canonical))
+    });
+    arms.dedup();
+    arms
 }
 
 impl VueMacroSurface {
@@ -391,6 +438,7 @@ impl VerterHost {
             base,
             Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
             ProjectionReductionContext::published(ProjectionMode::Shallow),
+            None,
         )
     }
 
@@ -484,6 +532,8 @@ impl VerterHost {
                 macro_index: request.macro_index,
                 macro_call_span: mac.span,
                 level: request.level,
+                // The empty model surface projects nothing — no arms.
+                unresolved_surface_arms: Vec::new(),
             });
         }
 
@@ -553,8 +603,19 @@ impl VerterHost {
             ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
         );
 
-        let surface =
-            self.project_shallow_surface_from_base(ctx, &dispatch, base, path, terminal_context)?;
+        // Collect the walker's side-band diagnostics so unresolvable
+        // SURFACE-COMPOSITION arms (heritage / intersection / union) the
+        // shallow synthesis dropped ride the resolved surface to the
+        // compile-facing collector.
+        let mut walker_diagnostics = Vec::new();
+        let surface = self.project_shallow_surface_from_base(
+            ctx,
+            &dispatch,
+            base,
+            path,
+            terminal_context,
+            Some(&mut walker_diagnostics),
+        )?;
 
         Some(VueMacroSurface {
             surface,
@@ -563,6 +624,7 @@ impl VerterHost {
             macro_index: request.macro_index,
             macro_call_span: mac.span,
             level: request.level,
+            unresolved_surface_arms: unresolved_surface_arms_from_diags(&walker_diagnostics),
         })
     }
 
@@ -657,6 +719,7 @@ pub(crate) fn navigate_param_to_object_surface(
             base,
             Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
             ProjectionReductionContext::published(ProjectionMode::Shallow),
+            None,
         )
 }
 

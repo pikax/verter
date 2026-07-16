@@ -14,8 +14,8 @@ use crate::analysis::exports::extract_export_signatures_from_program;
 use crate::analysis::imports::analyze_import_declaration;
 
 use crate::analysis::macros::{
-    collect_type_references, resolve_macro_type_references, stamp_macro_payload_locators,
-    try_extract_macro_from_expr, try_extract_macro_from_var_decl,
+    classify_macro_type_reference_roles, resolve_macro_type_references,
+    stamp_macro_payload_locators, try_extract_macro_from_expr, try_extract_macro_from_var_decl,
 };
 use crate::analysis::scope::AnalysisScope;
 use crate::analysis::types::*;
@@ -96,45 +96,6 @@ fn statement_declares_interface_app_config(stmt: &Statement<'_>) -> bool {
         }
         _ => false,
     }
-}
-
-fn is_builtin_heritage_utility(name: &str) -> bool {
-    matches!(
-        name,
-        "Pick"
-            | "Omit"
-            | "Partial"
-            | "Required"
-            | "Readonly"
-            | "Record"
-            | "Extract"
-            | "Exclude"
-            | "NonNullable"
-            | "ReturnType"
-            | "Parameters"
-            | "ConstructorParameters"
-            | "InstanceType"
-            | "Awaited"
-    )
-}
-
-fn collect_heritage_dependency_names(heritage: &TSInterfaceHeritage<'_>) -> Vec<String> {
-    let mut refs = Vec::new();
-
-    if let Expression::Identifier(id) = &heritage.expression {
-        let name = id.name.as_str();
-        if heritage.type_arguments.is_none() || !is_builtin_heritage_utility(name) {
-            refs.push(name.to_string());
-        }
-    }
-
-    if let Some(type_args) = &heritage.type_arguments {
-        for param in &type_args.params {
-            refs.extend(collect_type_references(param));
-        }
-    }
-
-    refs
 }
 
 /// O(1) lookup map from local binding name → (import source index, vue_api).
@@ -317,7 +278,6 @@ fn build_script_analysis_inner(
     let mut first_await_offset: Option<u32> = None;
     let mut options_api: Option<AnalyzedOptionsApi> = None;
     let mut const_string_values: FxHashMap<String, Vec<String>> = FxHashMap::default();
-    let mut local_type_deps: FxHashMap<String, Vec<String>> = FxHashMap::default();
 
     for stmt in &program.body {
         match stmt {
@@ -349,49 +309,27 @@ fn build_script_analysis_inner(
                     ));
                 }
 
-                if let Some(decl) = &decl.declaration {
-                    match decl {
-                        Declaration::TSInterfaceDeclaration(iface) => {
-                            let mut bases = Vec::new();
-                            for heritage in &iface.extends {
-                                bases.extend(collect_heritage_dependency_names(heritage));
-                            }
-                            if !bases.is_empty() {
-                                local_type_deps.insert(iface.id.name.to_string(), bases);
-                            }
+                if let Some(Declaration::VariableDeclaration(var_decl)) = &decl.declaration {
+                    for vd in &var_decl.declarations {
+                        if let Some(ref init) = vd.init {
+                            let binding_name = match &vd.id {
+                                BindingPattern::BindingIdentifier(id) => Some(id.name.as_str()),
+                                _ => None,
+                            };
+                            try_extract_store_call(
+                                init,
+                                &imports,
+                                &import_map,
+                                Some(VarDeclContext {
+                                    binding_name,
+                                    destructured_props: &[],
+                                    _is_exported: true,
+                                }),
+                                &mut store_usages,
+                                &mut store_definitions,
+                                content,
+                            );
                         }
-                        Declaration::TSTypeAliasDeclaration(alias) => {
-                            let refs = collect_type_references(&alias.type_annotation);
-                            if !refs.is_empty() {
-                                local_type_deps.insert(alias.id.name.to_string(), refs);
-                            }
-                        }
-                        Declaration::VariableDeclaration(var_decl) => {
-                            for vd in &var_decl.declarations {
-                                if let Some(ref init) = vd.init {
-                                    let binding_name = match &vd.id {
-                                        BindingPattern::BindingIdentifier(id) => {
-                                            Some(id.name.as_str())
-                                        }
-                                        _ => None,
-                                    };
-                                    try_extract_store_call(
-                                        init,
-                                        &imports,
-                                        &import_map,
-                                        Some(VarDeclContext {
-                                            binding_name,
-                                            destructured_props: &[],
-                                            _is_exported: true,
-                                        }),
-                                        &mut store_usages,
-                                        &mut store_definitions,
-                                        content,
-                                    );
-                                }
-                            }
-                        }
-                        _ => {}
                     }
                 }
             }
@@ -591,21 +529,6 @@ fn build_script_analysis_inner(
                 }
             }
 
-            Statement::TSInterfaceDeclaration(iface) => {
-                let mut bases = Vec::new();
-                for heritage in &iface.extends {
-                    bases.extend(collect_heritage_dependency_names(heritage));
-                }
-                if !bases.is_empty() {
-                    local_type_deps.insert(iface.id.name.to_string(), bases);
-                }
-            }
-            Statement::TSTypeAliasDeclaration(alias) => {
-                let refs = collect_type_references(&alias.type_annotation);
-                if !refs.is_empty() {
-                    local_type_deps.insert(alias.id.name.to_string(), refs);
-                }
-            }
             Statement::ForOfStatement(for_of) if for_of.r#await => {
                 if first_await_offset.is_none() {
                     first_await_offset = Some(for_of.span.start);
@@ -645,7 +568,9 @@ fn build_script_analysis_inner(
         stamp_macro_payload_locators(mac, u32::try_from(macro_index).unwrap_or(u32::MAX));
     }
 
-    let macro_type_deps = derive_macro_type_deps(&macros, &imports, &import_map, &local_type_deps);
+    let macro_type_ref_roles = classify_macro_type_reference_roles(program, &macros);
+    let macro_type_deps =
+        derive_macro_type_deps(&macros, &imports, &import_map, &macro_type_ref_roles);
 
     let mut flags = derive_flags(&imports, &macros, &bindings, &macro_type_deps);
     if first_await_offset.is_some() {
@@ -2528,102 +2453,41 @@ fn detect_composable_return_shape(
 /// Check if an expression contains an `await` expression at any nesting depth.
 /// Walks the expression tree but stops at function/arrow boundaries (those
 /// create their own async context and don't make the *setup* async).
-/// Match macro type references against import bindings to produce dependency entries.
-/// Also follows local type chains (extends/intersection) to discover transitive deps.
+/// Match the role-classified macro type references (see
+/// [`classify_macro_type_reference_roles`]) against import bindings to
+/// produce tiered dependency entries. Only SURFACE and MEMBER positions
+/// produce a dependency; nested references never enter `macro_type_deps`
+/// (runtime codegen does not need them).
 fn derive_macro_type_deps(
     macros: &[AnalyzedMacro],
     imports: &[AnalyzedImport],
     import_map: &ImportBindingMap,
-    local_type_deps: &FxHashMap<String, Vec<String>>,
+    type_ref_roles: &[Vec<(String, MacroTypeDepUsage)>],
 ) -> Vec<MacroTypeDep> {
     let mut deps = Vec::new();
-    let mut seen_deps = FxHashSet::default();
 
     for (macro_index, m) in macros.iter().enumerate() {
         if !m.is_type_based {
             continue;
         }
-        for type_ref_name in &m.type_references {
-            // Direct import match
+        let Some(roles) = type_ref_roles.get(macro_index) else {
+            continue;
+        };
+        for (type_ref_name, usage) in roles {
             if let Some(source) = import_map.source(imports, type_ref_name) {
-                if seen_deps.insert((type_ref_name.clone(), m.kind, macro_index)) {
-                    deps.push(MacroTypeDep {
-                        type_name: type_ref_name.clone(),
-                        import_source: source.to_string(),
-                        macro_kind: m.kind,
-                        macro_index,
-                        macro_span: m.span,
-                    });
-                }
-            } else {
-                // Follow local type chains to find transitive imported deps
-                collect_transitive_deps(
-                    type_ref_name,
-                    m.kind,
-                    imports,
-                    import_map,
-                    local_type_deps,
+                deps.push(MacroTypeDep {
+                    type_name: type_ref_name.clone(),
+                    import_source: source.to_string(),
+                    macro_kind: m.kind,
                     macro_index,
-                    m.span,
-                    &mut deps,
-                    &mut seen_deps,
-                    &mut FxHashSet::default(),
-                );
+                    macro_span: m.span,
+                    usage: *usage,
+                });
             }
         }
     }
 
     deps
-}
-
-/// Recursively follow local type extends/refs to find transitively imported types.
-#[allow(clippy::too_many_arguments)]
-fn collect_transitive_deps(
-    type_name: &str,
-    macro_kind: AnalyzedMacroKind,
-    imports: &[AnalyzedImport],
-    import_map: &ImportBindingMap,
-    local_type_deps: &FxHashMap<String, Vec<String>>,
-    macro_index: usize,
-    macro_span: verter_span::Span,
-    deps: &mut Vec<MacroTypeDep>,
-    seen_deps: &mut FxHashSet<(String, AnalyzedMacroKind, usize)>,
-    visited: &mut FxHashSet<String>,
-) {
-    if !visited.insert(type_name.to_string()) {
-        return; // Avoid cycles
-    }
-
-    if let Some(base_refs) = local_type_deps.get(type_name) {
-        for base_name in base_refs {
-            if let Some(source) = import_map.source(imports, base_name) {
-                // Found an imported base type
-                if seen_deps.insert((base_name.clone(), macro_kind, macro_index)) {
-                    deps.push(MacroTypeDep {
-                        type_name: base_name.clone(),
-                        import_source: source.to_string(),
-                        macro_kind,
-                        macro_index,
-                        macro_span,
-                    });
-                }
-            } else {
-                // Base is also local — recurse
-                collect_transitive_deps(
-                    base_name,
-                    macro_kind,
-                    imports,
-                    import_map,
-                    local_type_deps,
-                    macro_index,
-                    macro_span,
-                    deps,
-                    seen_deps,
-                    visited,
-                );
-            }
-        }
-    }
 }
 
 fn derive_flags(

@@ -26,6 +26,7 @@ use verter_semantic::analysis::type_expand::{
 /// | `OpenConditional`           | `IndeterminateConditional` |
 /// | `PathologicalInput`         | `BudgetExceeded`           |
 /// | `UnionArmEmpty`             | `EmptyUnionArm`            |
+/// | `UnresolvedSurfaceArm`      | `UnresolvedReference`      |
 ///
 /// Variant payload data (node ids, declaration identities, error
 /// details) is preserved through `ExpansionDiagnostic.context` —
@@ -87,6 +88,14 @@ pub(crate) fn shallow_to_expansion(diag: &ShallowDiagnostic) -> ExpansionDiagnos
             reason: ExpansionStopReason::EmptyUnionArm,
             context: format!("union-arm-empty@{:?}#{}", union_node, arm_index),
             property_name: None,
+        },
+        ShallowDiagnostic::UnresolvedSurfaceArm {
+            name,
+            owner_canonical,
+        } => ExpansionDiagnostic {
+            reason: ExpansionStopReason::UnresolvedReference,
+            context: format!("unresolved-surface-arm::{}::{}", owner_canonical, name),
+            property_name: Some(name.to_string()),
         },
     }
 }
@@ -231,6 +240,27 @@ mod tests {
         assert_eq!(proj.reason, ExpansionStopReason::EmptyUnionArm);
         assert!(proj.context.contains("union-arm-empty"));
         assert!(proj.context.contains("#3"));
+    }
+
+    #[test]
+    fn shallow_to_expansion_maps_unresolved_surface_arm_to_unresolved_reference() {
+        let diag = ShallowDiagnostic::UnresolvedSurfaceArm {
+            name: std::sync::Arc::from("NotFoundHeritage"),
+            owner_canonical: std::sync::Arc::from("/src/types.ts"),
+        };
+        let proj = shallow_to_expansion(&diag);
+        assert_eq!(proj.reason, ExpansionStopReason::UnresolvedReference);
+        assert_eq!(proj.property_name.as_deref(), Some("NotFoundHeritage"));
+        assert!(
+            proj.context.contains("unresolved-surface-arm"),
+            "context must surface the variant name; observed `{}`",
+            proj.context,
+        );
+        assert!(
+            proj.context.contains("/src/types.ts"),
+            "context must carry the arm's declaring file; observed `{}`",
+            proj.context,
+        );
     }
 
     #[test]

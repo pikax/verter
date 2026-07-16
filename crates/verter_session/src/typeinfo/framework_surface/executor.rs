@@ -655,6 +655,7 @@ impl ExecutorResolveCtx<'_> {
             decl,
             Arc::from(path.to_vec().into_boxed_slice()),
             ProjectionReductionContext::published(ProjectionMode::Shallow),
+            None,
         ) {
             Some(surface) => ResolvedOutcome::Resolved(surface),
             None => ResolvedOutcome::Missing,

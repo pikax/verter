@@ -258,6 +258,9 @@ fn macro_surface_shell(
             macro_index: 0,
             macro_call_span: verter_span::Span::default(),
             level: TypeInfoQueryLevel::FullMetadata,
+            // The Svelte shell wraps an already-navigated surface; the
+            // compile-facing surface-arm channel is Vue-collector-only.
+            unresolved_surface_arms: Vec::new(),
         },
         _seal: SvelteSurfaceSeal,
     }

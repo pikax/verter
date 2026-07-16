@@ -162,6 +162,18 @@ pub enum ShallowDiagnostic {
         union_node: SemanticNodeId,
         arm_index: usize,
     },
+    /// A SURFACE-COMPOSITION reference arm (a heritage `extends` parent,
+    /// an intersection / union arm) failed to resolve during shallow-mode
+    /// synthesis, so the walker dropped its contribution. Carries the
+    /// reference's head name plus the canonical file whose declaration
+    /// authored the arm, so consumers can classify the miss (import-backed
+    /// vs ambient) without re-walking. Never emitted for the ROOT node —
+    /// a root-level miss is the caller's missing-dependency channel and
+    /// must not double-report.
+    UnresolvedSurfaceArm {
+        name: Arc<str>,
+        owner_canonical: Arc<str>,
+    },
 }
 
 /// Build output threaded through `build_project_path` so the dispatch
@@ -4003,12 +4015,29 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     local_scope: None,
                 };
                 let name = Arc::clone(&identity.decl_name);
+                let target_canonical = Arc::clone(&identity.canonical_id);
                 drop(data);
+                // Declaring file of the AUTHORING reference (the interning
+                // scope) for the unresolved-arm report; the identity's
+                // canonical (the resolution target) is the fallback for a
+                // node with no scope sidecar.
+                let ref_owner = self
+                    .graph()
+                    .node_scope(cur)
+                    .and_then(|scope| scope.canonical_file())
+                    .or(Some(target_canonical));
                 match self.execute_read_folding_partial(SemanticQueryKey::ResolveDecl(
-                    ResolveDeclKey { scope, name },
+                    ResolveDeclKey {
+                        scope,
+                        name: Arc::clone(&name),
+                    },
                 )) {
                     QueryResult::Value(resolved) => {
                         if resolved == cur {
+                            // Self-resolve: the declaration never
+                            // materialises past its own carrier — an
+                            // unresolvable surface arm.
+                            self.note_unresolved_surface_arm(target, name, ref_owner);
                             self.contribute_surface(
                                 target,
                                 root_contribution,
@@ -4034,7 +4063,19 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             });
                         }
                     }
-                    QueryResult::Recursive(_) | QueryResult::Error(_) => {
+                    QueryResult::Recursive(_) => {
+                        // A recursion back-edge is a cycle, not an
+                        // unresolvable reference — the cycle channel owns it.
+                        self.contribute_surface(
+                            target,
+                            root_contribution,
+                            intersection_buffers,
+                            union_buffers,
+                            None,
+                        );
+                    }
+                    QueryResult::Error(_) => {
+                        self.note_unresolved_surface_arm(target, name, ref_owner);
                         self.contribute_surface(
                             target,
                             root_contribution,
@@ -4057,12 +4098,48 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             // top-level entry normalization; top-level normalization alone
             // cannot reach a carrier buried inside a composite.
             SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_) => {
+                // Head name + authoring scope for the unresolved-arm report,
+                // captured while the node data is on hand. A `BareRef` names
+                // its head directly; an `ImportType` reports its trailing
+                // qualifier segment (`import("m").G` → `G`), falling back to
+                // the module specifier for a bare module reference.
+                let head_name = data
+                    .bare_ref_head()
+                    .map(|(name, _)| Arc::clone(name))
+                    .or_else(|| {
+                        data.import_type_head().map(|(specifier, qualifier, _)| {
+                            qualifier
+                                .last()
+                                .cloned()
+                                .unwrap_or_else(|| Arc::clone(specifier))
+                        })
+                    });
+                let bare_scope_owner = data
+                    .bare_ref_head()
+                    .and_then(|(_, scope)| scope.canonical_file());
                 drop(data);
+                let ref_owner = bare_scope_owner.or_else(|| {
+                    self.graph()
+                        .node_scope(cur)
+                        .and_then(|scope| scope.canonical_file())
+                });
                 let resolved = self.dispatch.resolve_carrier_subject_node(
                     cur,
                     crate::semantic_query::ProjectionReductionContext::published(self.mode()),
                 );
-                if resolved == cur {
+                // The head resolving to ITSELF (the shared resolver
+                // re-interned the same unresolved carrier) or to an `Opaque`
+                // are both the honest unresolvable outcomes; report the
+                // dropped arm HERE, while the head name is still on hand —
+                // the `Opaque` catch-all below has already lost it.
+                let resolved_is_opaque = matches!(
+                    self.graph().node_data(resolved).as_deref(),
+                    Some(SemanticNodeData::Opaque(_))
+                );
+                if resolved == cur || resolved_is_opaque {
+                    if let Some(name) = head_name {
+                        self.note_unresolved_surface_arm(target, name, ref_owner);
+                    }
                     self.contribute_surface(
                         target,
                         root_contribution,
@@ -4240,6 +4317,31 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             index_signatures: Vec::new(),
             keyspace: None,
         }
+    }
+
+    /// Record a SURFACE-COMPOSITION reference arm the shallow walk is about
+    /// to drop as unresolvable. Root-target drops are NOT recorded — a
+    /// root-level miss is already the caller's missing-dependency channel
+    /// and must not double-report. A reference with no declaration-bound
+    /// owner file (a `Global`-scoped node) carries nothing to classify the
+    /// miss against and stays silent.
+    fn note_unresolved_surface_arm(
+        &mut self,
+        target: BufferTarget,
+        name: Arc<str>,
+        owner_canonical: Option<Arc<str>>,
+    ) {
+        if matches!(target, BufferTarget::Root) {
+            return;
+        }
+        let Some(owner_canonical) = owner_canonical else {
+            return;
+        };
+        self.walker_diagnostics
+            .push(ShallowDiagnostic::UnresolvedSurfaceArm {
+                name,
+                owner_canonical,
+            });
     }
 
     fn contribute_surface(

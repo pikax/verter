@@ -507,6 +507,9 @@ impl VerterHost {
             // This rail's consumer (the component-meta `ResolvedMacroMeta`)
             // publishes the keep-all `native_props` rows.
             crate::typeinfo::framework_surface::vue_exec::NativeProjection::Include,
+            // The component-meta rail surfaces unresolved arms through the
+            // expansion-diagnostics projection, not this elements DTO.
+            &mut Vec::new(),
         );
         use crate::typeinfo::framework_surface::vue_exec::NamedTypeElementsOutcome;
         let resolved = match outcome {

@@ -63,6 +63,80 @@ fn frontier_forbid_guard_is_thread_local() {
     );
 }
 
+/// A completely EMPTY .vue file (0 bytes — e.g. motion-vue's playground
+/// Home.vue) is a valid empty component. The host must serve a Main virtual
+/// node exporting `defineComponent({ __name })` with an empty public surface
+/// ($props: {}, no slots) — never `MissingVirtualNode`.
+#[test]
+fn empty_sfc_serves_empty_component_not_missing_virtual_node() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_vue(&host, "/src/Home.vue", "");
+
+    host.ensure_compiled("/src/Home.vue", &profile())
+        .expect("empty SFC must compile on the host lane");
+
+    let resp = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Home.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("empty SFC must serve a Main virtual node");
+    assert!(
+        resp.code.contains("defineComponent(") && resp.code.contains("export default"),
+        "empty SFC Main must export a defineComponent shell, got:\n{}",
+        resp.code
+    );
+    assert!(
+        resp.code.contains("__name: \"Home\""),
+        "empty SFC Main should carry the filename-derived __name, got:\n{}",
+        resp.code
+    );
+    assert!(
+        !resp.diagnostics.has_errors,
+        "empty SFC must compile without error diagnostics, got: {:?}",
+        resp.diagnostics.diagnostics
+    );
+    // Negative surface: nothing fabricated.
+    assert!(
+        !resp.code.contains("props:") && !resp.code.contains("slots"),
+        "empty SFC Main must not fabricate props/slots, got:\n{}",
+        resp.code
+    );
+
+    // The IDE lane serves a TSX artifact for the empty carrier too.
+    let has_tsx = host
+        .ensure_ide_compiled("/src/Home.vue", &profile())
+        .expect("empty SFC must compile on the IDE lane");
+    assert!(has_tsx, "empty SFC must produce an IDE artifact");
+    assert!(
+        host.get_ide("/src/Home.vue", &profile()).is_some(),
+        "empty SFC IDE artifact must be servable"
+    );
+
+    // The imported public surface is EMPTY: no props, no events, no slots.
+    let meta = host
+        .get_component_meta("/src/Home.vue")
+        .expect("empty SFC must publish component meta");
+    assert!(
+        meta.props.is_empty(),
+        "empty SFC has no props: {:?}",
+        meta.props
+    );
+    assert!(meta.events.is_empty(), "empty SFC has no events");
+    assert!(meta.slots.is_empty(), "empty SFC has no slots");
+
+    // A sibling importing the empty component keeps compiling.
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        "<script setup lang=\"ts\">\nimport Home from './Home.vue'\n</script>\n<template><Home /></template>",
+    );
+    host.ensure_compiled("/src/App.vue", &profile())
+        .expect("importing an empty SFC must compile");
+}
+
 fn compile_main_error(host: &VerterHost, canonical_id: &str) -> crate::DiagnosticsSnapshot {
     match host.get_virtual_file(VirtualQuery {
         raw_id: None,
@@ -4177,6 +4251,7 @@ fn type_import_reexport_prefers_declaration_companion_over_runtime_js() {
             "/workspace/src/Consumer.vue",
             0,
             "AccordionRootEmits",
+            &mut Vec::new(),
         )
     })
     .expect("external type resolution should produce a result");
@@ -4803,6 +4878,332 @@ fn vue_api_projector_rejects_a_non_carrier_vue_language() {
         "the Vue leg must reject a Vue-adapter non-carrier language before the legacy body, \
          even when the canonical is a loaded SFC that would otherwise render"
     );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// FOUND macro type argument whose SURFACE composition (heritage `extends`
+// parent, intersection / union arm) references an unresolvable IMPORT-BACKED
+// type. The dep type itself RESOLVES — the miss sits one level deeper, inside
+// the declaring file — so the legacy missing-root path stays silent; the
+// shared shallow walker reports the dropped arm and the collector tiers it as
+// a fatal error. Member-position references and non-import-backed (ambient)
+// heritage names must stay silent.
+// ───────────────────────────────────────────────────────────────────────────
+
+fn ensure_compiled_error(host: &VerterHost, canonical_id: &str) -> crate::DiagnosticsSnapshot {
+    match host.ensure_compiled(canonical_id, &profile()) {
+        Err(HostError::CompileError(failure)) => failure.diagnostics,
+        Err(other) => panic!("expected compile error, got {other:?}"),
+        Ok(()) => panic!("expected compile error, got successful compile"),
+    }
+}
+
+fn assert_compiles_without_macro_type_dep_diag(host: &VerterHost, canonical_id: &str) {
+    host.ensure_compiled(canonical_id, &profile())
+        .unwrap_or_else(|err| panic!("{canonical_id} must compile, got {err:?}"));
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(canonical_id.to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .unwrap_or_else(|err| panic!("{canonical_id} must serve a Main node, got {err:?}"));
+    assert!(
+        !response
+            .diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP"),
+        "{canonical_id} must not surface HOST_MISSING_MACRO_TYPE_DEP: {:?}",
+        response.diagnostics.diagnostics
+    );
+}
+
+/// Shared dep-file fixture: every `Found*` type RESOLVES, but its surface
+/// composition references a name imported from the missing module `./nope`.
+fn upsert_unresolved_surface_arm_types(host: &VerterHost) {
+    upsert_non_sfc(
+        host,
+        "/src/types.ts",
+        "import type { NotFoundHeritage, NotFoundArm, NotFoundUnionArm } from './nope'\n\
+         export interface FoundExtendsMissing extends NotFoundHeritage { a?: string }\n\
+         export interface Base { b?: number }\n\
+         export type FoundIntersectAlias = Base & NotFoundArm\n\
+         export type FoundUnionAlias = Base | NotFoundUnionArm",
+    );
+}
+
+fn surface_arm_sfc(type_name: &str) -> String {
+    format!(
+        "<script setup lang=\"ts\">\nimport type {{ {type_name} }} from './types'\nconst props = defineProps<{type_name}>()\n</script>\n<template><div/></template>"
+    )
+}
+
+#[test]
+fn found_macro_type_with_missing_heritage_parent_fails_compile() {
+    let host = strict_host();
+    upsert_unresolved_surface_arm_types(&host);
+    let source = surface_arm_sfc("FoundExtendsMissing");
+    upsert_vue(&host, "/src/A.vue", &source);
+
+    let diagnostics = ensure_compiled_error(&host, "/src/A.vue");
+    let missing = find_diag(&diagnostics, "HOST_MISSING_MACRO_TYPE_DEP");
+    assert_eq!(missing.severity, HostSeverity::Error);
+    assert!(
+        missing.message.contains("NotFoundHeritage"),
+        "heritage-arm miss must name the unresolved type: {}",
+        missing.message
+    );
+    assert!(
+        missing.message.contains("FoundExtendsMissing"),
+        "heritage-arm miss must name the resolved dep type: {}",
+        missing.message
+    );
+    // The diagnostic anchors to the SFC's owning import statement.
+    let import_start = source.find("import type").unwrap() as u32;
+    let import_end =
+        import_start + "import type { FoundExtendsMissing } from './types'".len() as u32;
+    assert_eq!(
+        missing.span,
+        Some(Span::new(import_start, import_end)),
+        "surface-arm miss span should point at the owning import"
+    );
+    // The intersection-arm miss belongs to FoundIntersectAlias, which this
+    // component does not consume.
+    assert!(
+        !diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("NotFoundArm")),
+        "unconsumed sibling types must not contribute arms: {:?}",
+        diagnostics.diagnostics
+    );
+}
+
+#[test]
+fn found_macro_type_with_missing_intersection_arm_fails_compile() {
+    let host = strict_host();
+    upsert_unresolved_surface_arm_types(&host);
+    upsert_vue(&host, "/src/B.vue", &surface_arm_sfc("FoundIntersectAlias"));
+
+    let diagnostics = ensure_compiled_error(&host, "/src/B.vue");
+    let missing = find_diag(&diagnostics, "HOST_MISSING_MACRO_TYPE_DEP");
+    assert_eq!(missing.severity, HostSeverity::Error);
+    assert!(
+        missing.message.contains("NotFoundArm"),
+        "intersection-arm miss must name the unresolved type: {}",
+        missing.message
+    );
+}
+
+#[test]
+fn found_macro_type_with_missing_union_arm_fails_compile() {
+    let host = strict_host();
+    upsert_unresolved_surface_arm_types(&host);
+    upsert_vue(&host, "/src/C.vue", &surface_arm_sfc("FoundUnionAlias"));
+
+    let diagnostics = ensure_compiled_error(&host, "/src/C.vue");
+    let missing = find_diag(&diagnostics, "HOST_MISSING_MACRO_TYPE_DEP");
+    assert_eq!(missing.severity, HostSeverity::Error);
+    assert!(
+        missing.message.contains("NotFoundUnionArm"),
+        "union-arm miss must name the unresolved type: {}",
+        missing.message
+    );
+}
+
+#[test]
+fn found_macro_type_with_member_level_missing_types_still_compiles() {
+    // MEMBER-position references to an unresolvable import degrade that
+    // member's runtime type to `null` — never a surface-arm error. Nested
+    // references are not collected at all.
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "import type { NotFound, NotFound2 } from './nope'\n\
+         export interface FoundMemberMissing { foo: NotFound }\n\
+         export interface FoundNestedMissing { foo: { test: NotFound2 } }",
+    );
+    upsert_vue(&host, "/src/A.vue", &surface_arm_sfc("FoundMemberMissing"));
+    upsert_vue(&host, "/src/B.vue", &surface_arm_sfc("FoundNestedMissing"));
+
+    assert_compiles_without_macro_type_dep_diag(&host, "/src/A.vue");
+    assert_compiles_without_macro_type_dep_diag(&host, "/src/B.vue");
+}
+
+#[test]
+fn found_macro_type_with_ambient_heritage_name_still_compiles() {
+    // The unresolved heritage name is NOT an import binding of the declaring
+    // file — it may be ambient / lib-provided, so the surface-arm error must
+    // not fire.
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface FoundGlobalHeritage extends SomeUndeclaredGlobal { a?: string }",
+    );
+    upsert_vue(&host, "/src/A.vue", &surface_arm_sfc("FoundGlobalHeritage"));
+
+    assert_compiles_without_macro_type_dep_diag(&host, "/src/A.vue");
+}
+
+#[test]
+fn found_macro_type_with_resolvable_heritage_chain_still_compiles() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface Base2 { b?: number }\n\
+         export interface FoundOk extends Base2 { a?: string }",
+    );
+    upsert_vue(&host, "/src/A.vue", &surface_arm_sfc("FoundOk"));
+
+    assert_compiles_without_macro_type_dep_diag(&host, "/src/A.vue");
+}
+
+/// A surface arm whose name is PROVABLY absent behind a star re-export
+/// barrel is fatal: the export-surface probe walks `export *` targets
+/// transitively, so a barrel does not shield a genuinely missing name.
+#[test]
+fn found_macro_type_arm_provably_absent_behind_star_barrel_fails_compile() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/empty-mod.ts",
+        "export interface Unrelated { u?: number }",
+    );
+    upsert_non_sfc(&host, "/src/barrel.ts", "export * from './empty-mod'");
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "import type { Ghost } from './barrel'\n\
+         export interface FoundGhostHeritage extends Ghost { a?: string }",
+    );
+    upsert_vue(&host, "/src/A.vue", &surface_arm_sfc("FoundGhostHeritage"));
+
+    let diagnostics = ensure_compiled_error(&host, "/src/A.vue");
+    assert!(
+        diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP" && d.message.contains("Ghost")),
+        "a provably-absent star-barrel arm must be fatal and name the arm: {:?}",
+        diagnostics.diagnostics
+    );
+}
+
+/// Control: a heritage parent that RESOLVES through a star re-export barrel
+/// compiles silently — the arm materialises, so no walker miss fires at all.
+#[test]
+fn found_macro_type_with_heritage_behind_star_reexport_compiles() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/base.ts",
+        "export interface BarrelBase { b?: number }",
+    );
+    upsert_non_sfc(&host, "/src/barrel.ts", "export * from './base'");
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "import type { BarrelBase } from './barrel'\n\
+         export interface FoundViaBarrel extends BarrelBase { a?: string }",
+    );
+    upsert_vue(&host, "/src/A.vue", &surface_arm_sfc("FoundViaBarrel"));
+
+    assert_compiles_without_macro_type_dep_diag(&host, "/src/A.vue");
+}
+
+/// HostBacked mirror of the render-lane member-position tier: a MEMBER
+/// annotation whose type import is missing compiles successfully, surfaces a
+/// WARNING, and the member's runtime type degrades to `null`.
+#[test]
+fn member_position_missing_macro_type_warns_and_degrades_on_host_lane() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/src/MemberMiss.vue",
+        "<script setup lang=\"ts\">\nimport type { Missing } from './nope'\nconst props = defineProps<{ foo: Missing }>()\n</script>\n<template><div>{{ foo }}</div></template>",
+    );
+
+    host.ensure_compiled("/src/MemberMiss.vue", &profile())
+        .expect("member-position miss must not abort the host lane");
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/MemberMiss.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("member-position miss must still serve a Main node");
+    let warning = response
+        .diagnostics
+        .diagnostics
+        .iter()
+        .find(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP")
+        .expect("member-position miss surfaces a HOST_MISSING_MACRO_TYPE_DEP diagnostic");
+    assert_eq!(
+        warning.severity,
+        HostSeverity::Warning,
+        "member-position miss is a warning, never fatal"
+    );
+    assert!(
+        response
+            .code
+            .contains("foo: { type: null, required: true }"),
+        "member with unresolvable type must degrade to `type: null`:\n{}",
+        response.code
+    );
+}
+
+#[test]
+fn found_macro_type_missing_surface_arm_error_repeats_on_recompile() {
+    // Cold/warm parity: re-demanding the same failed compile reproduces the
+    // same surface-arm error (the fact lives on the cached dispatch value and
+    // replays on warm reads).
+    let host = strict_host();
+    upsert_unresolved_surface_arm_types(&host);
+    upsert_vue(&host, "/src/A.vue", &surface_arm_sfc("FoundExtendsMissing"));
+
+    let cold = ensure_compiled_error(&host, "/src/A.vue");
+    let cold_missing = find_diag(&cold, "HOST_MISSING_MACRO_TYPE_DEP");
+    assert!(cold_missing.message.contains("NotFoundHeritage"));
+
+    let warm = ensure_compiled_error(&host, "/src/A.vue");
+    let warm_missing = find_diag(&warm, "HOST_MISSING_MACRO_TYPE_DEP");
+    assert_eq!(
+        cold_missing.message, warm_missing.message,
+        "recompile must reproduce the identical surface-arm error"
+    );
+    assert_eq!(warm_missing.severity, HostSeverity::Error);
+}
+
+/// Creating the previously-missing arm source CLEARS the error: the next
+/// compile resolves the heritage arm instead of replaying the stale
+/// dropped-arm fact from the surface memo.
+#[test]
+fn found_macro_type_surface_arm_error_clears_when_missing_source_appears() {
+    let host = strict_host();
+    upsert_unresolved_surface_arm_types(&host);
+    upsert_vue(&host, "/src/A.vue", &surface_arm_sfc("FoundExtendsMissing"));
+
+    let cold = ensure_compiled_error(&host, "/src/A.vue");
+    assert!(find_diag(&cold, "HOST_MISSING_MACRO_TYPE_DEP")
+        .message
+        .contains("NotFoundHeritage"));
+
+    // The missing module appears with the required exports.
+    upsert_non_sfc(
+        &host,
+        "/src/nope.ts",
+        "export interface NotFoundHeritage { inherited?: number }\n\
+         export interface NotFoundArm { arm?: number }\n\
+         export interface NotFoundUnionArm { u?: number }",
+    );
+
+    assert_compiles_without_macro_type_dep_diag(&host, "/src/A.vue");
 }
 
 #[test]

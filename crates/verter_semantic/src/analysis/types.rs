@@ -1,4 +1,4 @@
-﻿use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256};
 use verter_span::Span;
 use verter_type_expr::facts::ResolvedLocalShape;
 use verter_type_expr::locators::MacroPayloadLocator;
@@ -1565,6 +1565,31 @@ pub enum AnalyzedMacroKind {
     WithDefaults,
 }
 
+/// How a macro type argument references an imported type — the structural
+/// position drives the missing-dependency diagnostic tier.
+///
+/// References nested DEEPER than a top-level member annotation (e.g.
+/// `defineProps<{ foo: { test: X } }>()`) are never collected as deps at
+/// all: runtime codegen does not need them (the member's constructor is
+/// derivable without resolving them), so an unresolvable nested reference
+/// is silent.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum MacroTypeDepUsage {
+    /// The reference contributes the macro's top-level runtime SURFACE —
+    /// the direct type argument, an intersection/union arm, an `extends`
+    /// heritage parent, or an alias-chain hop. Unresolvable ⇒ the runtime
+    /// surface cannot be enumerated ⇒ error.
+    #[default]
+    Surface,
+    /// The reference is a top-level member's value annotation
+    /// (`defineProps<{ foo: X }>()`): unresolvable ⇒ that member's runtime
+    /// type degrades to `null` ⇒ warning.
+    Member,
+}
+
 /// Which imported types are used by which macros.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1579,6 +1604,12 @@ pub struct MacroTypeDep {
     pub macro_index: usize,
     /// Stable identity of the originating macro in the raw snapshot.
     pub macro_span: verter_span::Span,
+    /// Structural position of the reference inside the macro type argument
+    /// (missing-dependency severity tier). Defaults to [`MacroTypeDepUsage::Surface`]
+    /// — the conservative (fatal) tier — when the field is absent from a
+    /// serialized payload.
+    #[serde(default)]
+    pub usage: MacroTypeDepUsage,
 }
 
 /// Per-export signature for dependency files.

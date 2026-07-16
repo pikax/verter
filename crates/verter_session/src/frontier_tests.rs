@@ -68,6 +68,7 @@ fn resolve_type(
         macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind::DefineProps,
         macro_index: 0,
         macro_span: verter_span::Span::default(),
+        usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
     };
     let (resolved, _diagnostics, _tracked) =
         host.collect_external_types_from_loaded_files_for_test(owner, &[dep], &[], None);
