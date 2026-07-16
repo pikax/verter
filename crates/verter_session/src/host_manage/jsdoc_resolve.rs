@@ -130,16 +130,23 @@ impl crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaReso
         canonical_source: &str,
         resolved_name: &str,
     ) -> Option<crate::resolver_core::ResolvedLocalTypeSymbolMetadata> {
-        let analysis = self.ctx.external_type_analysis(canonical_source)?;
-        let symbol = analysis.local_type_symbol(resolved_name)?;
+        let serve = self.ctx.ensure_indexed_ready_serve(canonical_source)?;
+        self.ctx
+            .observe(crate::resolver_core::FactVersionRef::FileWholeHash {
+                canonical_id: canonical_source.to_owned(),
+                hash: serve.indexed.whole_hash,
+            });
+        // Record the declaration file before the symbol lookup so a genuine
+        // miss is invalidated when a later edit adds the requested symbol.
+        let symbol = serve.indexed.shallow_state.symbol(resolved_name)?;
         let kind = match symbol.kind {
-            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::TypeAlias => {
+            verter_semantic::analysis::type_eval::TypeDeclKind::Alias => {
                 crate::resolver_core::ResolvedDeclarationKind::TypeAlias
             }
-            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::Interface => {
+            verter_semantic::analysis::type_eval::TypeDeclKind::Interface => {
                 crate::resolver_core::ResolvedDeclarationKind::Interface
             }
-            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::Class => {
+            verter_semantic::analysis::type_eval::TypeDeclKind::Class => {
                 crate::resolver_core::ResolvedDeclarationKind::Class
             }
         };
@@ -715,9 +722,21 @@ pub(crate) fn resolve_type_declaration_with_context(
     crate::resolver_core::resolve_type_declaration(&resolver, dep_canonical, requested_name)
 }
 
-pub(crate) fn read_full_source(host: &VerterHost, canonical_source: &str) -> Option<String> {
-    host.read_analysis_source(canonical_source)
-        .map(|source| source.to_string())
+pub(crate) fn read_full_source(
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    canonical_source: &str,
+) -> Option<String> {
+    // JSDoc is semantic output derived from the declaration file's exact
+    // bytes. Read those bytes from the same current-content-pinned artifact
+    // whose hash roots the enclosing cache entry. Besides keeping source and
+    // version tear-free, `ensure_indexed_ready_serve` is overlay-aware and
+    // propagates a fenced serve as non-cacheable through the active tracer.
+    let serve = ctx.ensure_indexed_ready_serve(canonical_source)?;
+    ctx.observe(crate::resolver_core::FactVersionRef::FileWholeHash {
+        canonical_id: canonical_source.to_owned(),
+        hash: serve.indexed.whole_hash,
+    });
+    Some(serve.indexed.raw_source.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -736,7 +755,7 @@ pub(crate) fn resolve_jsdoc_block(
         return None;
     }
 
-    let source = read_full_source(host, canonical_source)?;
+    let source = read_full_source(ctx, canonical_source)?;
     let (description, tags) =
         verter_semantic::analysis::jsdoc::extract_jsdoc_near_offset(&source, span.start);
     if description.is_none() && tags.is_empty() {

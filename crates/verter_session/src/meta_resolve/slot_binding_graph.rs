@@ -373,16 +373,6 @@ fn accumulate_lowered_node_carrier_deps(
 /// Read the [`SurfaceView`] members backing `node`, if `node` resolves
 /// to a `SemanticNodeData::Object` shell. Empty for any other variant
 /// — callers treat the empty surface as "no enumerable members".
-fn read_surface_members(
-    ctx: &dyn ResolverContext,
-    surface_node: SemanticNodeId,
-) -> Vec<crate::semantic_query::SurfaceMember> {
-    match crate::project_semantic_dispatch::node_data_for(ctx, surface_node).as_deref() {
-        Some(SemanticNodeData::Object(view)) => view.members.iter().cloned().collect(),
-        _ => Vec::new(),
-    }
-}
-
 /// Returns `true` when the slot-param's underlying shape is one that
 /// the synthesis must NOT enumerate as a concrete object surface,
 /// because the shape's binding identity depends on a generic /
@@ -986,7 +976,7 @@ pub(crate) fn compute_bindings_via_graph(
             return out;
         }
     };
-    let slot_members = read_surface_members(ctx, slot_surface);
+    let slot_members = super::projectors::read_surface_members(ctx, slot_surface);
 
     for slot_member in slot_members.iter() {
         // Public-only publication: a `private` / `protected` class member
@@ -1100,7 +1090,7 @@ pub(crate) fn compute_bindings_via_graph(
                 continue;
             }
         };
-        let binding_members = read_surface_members(ctx, param_surface);
+        let binding_members = super::projectors::read_surface_members(ctx, param_surface);
 
         for binding in binding_members.iter() {
             // Public-only publication: a navigated class param's `private` /

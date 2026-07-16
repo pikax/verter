@@ -16968,71 +16968,6 @@ mod single_resolution_engine_guards {
         path_tokens + symbol_uses
     }
 
-    fn fmt_match(m: &(String, u32, String)) -> String {
-        format!("({:?}, {}, {:?})", m.0, m.1, m.2)
-    }
-
-    /// Line-precise bidirectional allowlist comparison. Fails on EITHER an
-    /// unallowlisted site OR a stale allowlist entry. (Same contract as
-    /// `typed_ir_resolver_guards::assert_exact_allowlist_match`.)
-    fn assert_exact_allowlist_match(
-        guard_name: &str,
-        actual: &[(String, u32, String)],
-        allowed: &[(&str, u32, &str)],
-    ) {
-        let actual_set: BTreeSet<(String, u32, String)> = actual.iter().cloned().collect();
-        let allowed_set: BTreeSet<(String, u32, String)> = allowed
-            .iter()
-            .map(|(p, ln, pat)| (p.to_string(), *ln, pat.to_string()))
-            .collect();
-
-        let unexpected: Vec<_> = actual_set
-            .iter()
-            .filter(|t| !allowed_set.contains(*t))
-            .map(fmt_match)
-            .collect();
-        let stale: Vec<_> = allowed_set
-            .iter()
-            .filter(|t| !actual_set.contains(*t))
-            .map(fmt_match)
-            .collect();
-
-        if unexpected.is_empty() && stale.is_empty() {
-            return;
-        }
-
-        let mut msg = format!("\n\n=== {guard_name} ===\n");
-        if !unexpected.is_empty() {
-            msg.push_str(
-                "\nUnallowlisted single-resolution-engine site introduced. A NEW \
-                 production use of a doomed symbol is forbidden while the second \
-                 engine is being deleted. Route through the canonical typed-IR \
-                 dispatch (SemanticQueryKey -> ProjectSemanticDispatch::execute) \
-                 instead. If this is a legitimately new site (it almost never is), \
-                 add it to the allowlist with a justification:\n",
-            );
-            for entry in &unexpected {
-                msg.push_str("    ");
-                msg.push_str(entry);
-                msg.push('\n');
-            }
-        }
-        if !stale.is_empty() {
-            msg.push_str(
-                "\nAllowlisted entry NOT FOUND in source — a later stage removed \
-                 this site (good!). Remove the stale entry so the ledger keeps \
-                 shrinking; line number may have shifted:\n",
-            );
-            for entry in &stale {
-                msg.push_str("    ");
-                msg.push_str(entry);
-                msg.push('\n');
-            }
-        }
-        msg.push('\n');
-        panic!("{msg}");
-    }
-
     /// Per-file OCCURRENCE-COUNT shrinking ledger. The allowlist is a map
     /// `file -> count`; `actual` is the observed `(file, count)` per production
     /// file (count > 0 only). The comparison fails on ANY of:
@@ -17355,40 +17290,33 @@ mod single_resolution_engine_guards {
     }
 
     // -----------------------------------------------------------------------
-    // Guard 2: duplicate `read_surface_members` — the split Stage 4 collapses.
+    // Guard 2: `read_surface_members` has one shared definition.
     //
-    // There are TWO copies of the node->members surface reader:
-    //   * `meta_resolve/projectors/mod.rs:418` (`pub(crate) fn ...`), whose
-    //     doc-comment says "Mirrors `slot_binding_graph::read_surface_members`",
-    //   * `meta_resolve/slot_binding_graph.rs:390` (`fn ...`).
-    // The consolidation collapses these to ONE shared reader. The guard scans
+    // The node->members surface reader is shared from
+    // `meta_resolve/projectors/mod.rs`; slot-binding synthesis calls the same
+    // function. The guard scans
     // the structural DEFINITION form (`line_contains_fn_definition` — the `fn`
     // keyword + name + optional generic params + `(`), so a generic-syntax
     // duplicate `fn read_surface_members<'a>(…)` or a whitespace-padded
     // `fn  read_surface_members (` is caught too (call sites and imports have no
-    // preceding `fn` token and are not scanned). A NEW third definition fails;
-    // when Stage 4 collapses to one, the allowlist shrinks to a single entry.
+    // preceding `fn` token and are not scanned). A second definition fails.
     // -----------------------------------------------------------------------
-    // Line numbers re-derived after the node-domain publication-reduce rework
-    // shifted both definitions (same two files, same duplicate pair — no new
-    // definition).
-    const READ_SURFACE_MEMBERS_DEF_ALLOWLIST: &[(&str, u32, &str)] = &[
-        (
-            "crates/verter_session/src/meta_resolve/projectors/mod.rs",
-            431,
-            "fn read_surface_members(",
-        ),
-        (
-            "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
-            411,
-            "fn read_surface_members(",
-        ),
-    ];
+    // Counts are keyed by file rather than source line: harmless comment edits
+    // do not change the contract, while an in-file duplicate still increments
+    // the count and a definition in any new file remains unallowlisted.
+    const READ_SURFACE_MEMBERS_DEF_ALLOWLIST: &[(&str, usize)] = &[(
+        "crates/verter_session/src/meta_resolve/projectors/mod.rs",
+        1,
+    )];
 
     #[test]
     fn no_new_duplicate_read_surface_members_definition() {
-        let actual = scan_fn_definition_sites("read_surface_members");
-        assert_exact_allowlist_match(
+        let mut counts = std::collections::BTreeMap::<String, usize>::new();
+        for (path, _, _) in scan_fn_definition_sites("read_surface_members") {
+            *counts.entry(path).or_default() += 1;
+        }
+        let actual: Vec<(String, usize)> = counts.into_iter().collect();
+        assert_exact_file_count_allowlist_match(
             "no_new_duplicate_read_surface_members_definition",
             &actual,
             READ_SURFACE_MEMBERS_DEF_ALLOWLIST,
@@ -18513,14 +18441,14 @@ mod tests {\n\
         // DEFINITION guard, using its ACTUAL allowlist (previously only the
         // shared `from_eager_meta` discriminator exercised the line-precise
         // comparator; this pins the `read_surface_members` ledger itself).
-        let real: Vec<(String, u32, String)> = READ_SURFACE_MEMBERS_DEF_ALLOWLIST
+        let real: Vec<(String, usize)> = READ_SURFACE_MEMBERS_DEF_ALLOWLIST
             .iter()
-            .map(|(p, ln, pat)| (p.to_string(), *ln, pat.to_string()))
+            .map(|(path, count)| (path.to_string(), *count))
             .collect();
 
         // Real allowlist against itself MUST pass.
         assert!(
-            !guard_reports_violation(|| assert_exact_allowlist_match(
+            !guard_reports_violation(|| assert_exact_file_count_allowlist_match(
                 "discriminator",
                 &real,
                 READ_SURFACE_MEMBERS_DEF_ALLOWLIST,
@@ -18528,35 +18456,43 @@ mod tests {\n\
             "read_surface_members guard must PASS when actual equals allowlist"
         );
 
-        // A planted THIRD definition at a non-allowlisted path MUST fire — this
-        // is the "new duplicate reader" trap Stage 4 protects.
+        // A planted second definition at a non-allowlisted path must fire.
         let mut planted = real.clone();
         planted.push((
             "crates/verter_session/src/meta_resolve/some_new_reader.rs".to_string(),
-            77,
-            "fn read_surface_members(".to_string(),
+            1,
         ));
         assert!(
-            guard_reports_violation(|| assert_exact_allowlist_match(
+            guard_reports_violation(|| assert_exact_file_count_allowlist_match(
                 "discriminator",
                 &planted,
                 READ_SURFACE_MEMBERS_DEF_ALLOWLIST,
             )),
-            "read_surface_members guard must FAIL on a planted THIRD definition \
-             — a guard that cannot fail is a stub"
+            "read_surface_members guard must FAIL on a planted second definition — \
+             a guard that cannot fail is a stub"
         );
 
-        // A stale entry (one definition removed by Stage 4) MUST fire so the
-        // ledger shrinks toward one shared reader.
-        let one_missing: Vec<(String, u32, String)> = real.iter().skip(1).cloned().collect();
+        // Growth inside the sanctioned file is also a duplicate.
+        let in_file_duplicate = vec![(real[0].0.clone(), real[0].1 + 1)];
         assert!(
-            guard_reports_violation(|| assert_exact_allowlist_match(
+            guard_reports_violation(|| assert_exact_file_count_allowlist_match(
+                "discriminator",
+                &in_file_duplicate,
+                READ_SURFACE_MEMBERS_DEF_ALLOWLIST,
+            )),
+            "read_surface_members guard must FAIL on in-file definition growth"
+        );
+
+        // A stale entry (the shared definition removed) MUST fire so the
+        // ledger cannot silently bless a missing canonical reader.
+        let one_missing: Vec<(String, usize)> = Vec::new();
+        assert!(
+            guard_reports_violation(|| assert_exact_file_count_allowlist_match(
                 "discriminator",
                 &one_missing,
                 READ_SURFACE_MEMBERS_DEF_ALLOWLIST,
             )),
-            "read_surface_members guard must FAIL on a stale allowlist entry — \
-             this forces the duplicate-reader ledger to shrink"
+            "read_surface_members guard must FAIL when its shared definition disappears"
         );
     }
 

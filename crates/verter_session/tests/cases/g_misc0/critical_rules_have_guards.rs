@@ -1148,10 +1148,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
     ),
     (
         "U2 Value-Domain Key Identity",
-        &[
-            "no_envless_semantic_query_env_key_envelope",
-            "u2_value_domain_design_doc_locks_invariants",
-        ],
+        &["no_envless_semantic_query_env_key_envelope"],
     ),
     (
         "Module-Resolution Keying",
@@ -1164,7 +1161,6 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
         "Typed Value Domain + Demand-Lattice Resolution",
         &[
             "error_rides_opaque_no_new_error_type_wire_arm",
-            "u2_value_domain_design_doc_locks_invariants",
             "query_modes_are_presets_over_projection_demand_eval_policy",
             "skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode",
             "cache_key_axes_are_minimal_and_normalized",

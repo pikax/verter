@@ -4800,6 +4800,23 @@ defineProps<Props>()
         state1.resolved_macros[0].declaration.canonical_source, "/types.ts",
         "should resolve to /types.ts"
     );
+    let initial_types_hash = project
+        .host()
+        .authoritative_current_content_hash("/types.ts")
+        .expect("the imported declaration must have a current authoritative hash");
+    assert!(
+        state1.fact_versions.iter().any(|fact| matches!(
+            fact,
+            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, hash }
+                if canonical_id == "/types.ts" && hash == &initial_types_hash
+        )),
+        "the dependency-backed identity/JSDoc read must root the exact imported file version; facts={:?}",
+        state1.fact_versions
+    );
+    assert!(
+        state1.resolved_macros[0].jsdoc.is_none(),
+        "the initial declaration has no JSDoc"
+    );
 
     // Change the dependency file
     project
@@ -4818,17 +4835,84 @@ export interface Props { a: string; b: number }"#,
         .resolve_component_meta("/App.vue", ProjectionMode::Identity)
         .expect("second `ProjectionMode::Identity` should return result");
 
+    // Assert+: the public identity carrier observes the dependency metadata edit.
+    assert_eq!(
+        state2.resolved_macros[0].declaration.canonical_source,
+        "/types.ts"
+    );
+    assert_eq!(
+        state2.resolved_macros[0]
+            .jsdoc
+            .as_ref()
+            .and_then(|jsdoc| jsdoc.description.as_deref()),
+        Some("Updated documentation"),
+        "the recomputed identity carrier must surface the dependency's updated JSDoc"
+    );
     let p = provenance(&project);
-    // Assert+: resolved state was recomputed (not served from stale cache)
     assert_eq!(
         p.component_meta_resolved_state_recomputes, 1,
         "`ProjectionMode::Identity` cache should invalidate when dependency changes, got recomputes={}",
         p.component_meta_resolved_state_recomputes
     );
-    // Assert-: the declaration source should still be correct
-    assert_eq!(
-        state2.resolved_macros[0].declaration.canonical_source,
-        "/types.ts"
+}
+
+#[test]
+fn identity_jsdoc_uses_overlay_source_and_roots_overlay_hash() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    }));
+    let upsert_base = |canonical: &str, source: &str| {
+        let _update = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some(canonical.to_owned()),
+                input_id: canonical.to_owned(),
+                source: Arc::from(source),
+                file_language: crate::LanguageRegistry::global()
+                    .classify_static(canonical)
+                    .static_resolution(),
+                aliases: Vec::new(),
+            })
+            .expect("the base fixture must upsert");
+    };
+    upsert_base(
+        "/types.ts",
+        r#"/** Base documentation */
+export interface Props { base: string }"#,
+    );
+    upsert_base(
+        "/App.vue",
+        r#"<script setup lang="ts">
+import { Props } from './types'
+defineProps<Props>()
+</script>"#,
+    );
+
+    let overlay_source = r#"/** Session documentation */
+export interface Props { overlay: number }"#;
+    let mut overlays = rustc_hash::FxHashMap::default();
+    overlays.insert("/types.ts".to_owned(), Arc::<str>::from(overlay_source));
+    let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
+
+    let resolved = host
+        .resolve_component_meta_with_view("/App.vue", ProjectionMode::Identity, &view)
+        .expect("the session component must resolve through its overlay view");
+    let description = resolved.resolved_macros[0]
+        .jsdoc
+        .as_ref()
+        .and_then(|jsdoc| jsdoc.description.as_deref());
+    assert_eq!(description, Some("Session documentation"));
+    assert_ne!(description, Some("Base documentation"));
+
+    let overlay_hash = crate::hash::hash_16(overlay_source.as_bytes());
+    assert!(
+        resolved.fact_versions.iter().any(|fact| matches!(
+            fact,
+            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, hash }
+                if canonical_id == "/types.ts" && hash == &overlay_hash
+        )),
+        "the JSDoc read must root the exact overlay source version; facts={:?}",
+        resolved.fact_versions
     );
 }
 

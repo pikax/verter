@@ -35,14 +35,12 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
-#[cfg(test)]
-use crate::semantic_query::SemanticGraphStats;
 use crate::semantic_query::{
     CacheRead, DepSignature, NodeScopeId, OriginEdge, OriginEdgeKind, QueryError, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
 #[cfg(test)]
-use crate::semantic_query::{PathSegment, ProjectionMode};
+use crate::semantic_query::{PathSegment, ProjectionMode, SemanticGraphStats};
 
 mod arena;
 mod budgeted_caches;
