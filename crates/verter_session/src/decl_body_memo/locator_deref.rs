@@ -9,7 +9,9 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::framework_facts::svelte::PropsAnnotationLowering;
+use verter_semantic::analysis::framework_facts::svelte::{
+    PropsAnnotationLowering, SvelteTypeArgumentLowering,
+};
 use verter_semantic::analysis::type_eval::AugmentationScopeKind;
 use verter_semantic::analysis::type_eval_build::LoweredSignatureParts;
 use verter_semantic::analysis::MacroFieldPayloadLowering;
@@ -75,10 +77,10 @@ pub(crate) enum LocatorBodyDerefError {
     /// No consumer demands an augmentation-scoped VALUE / namespace body
     /// through a locator; the deref fails closed rather than fabricating one.
     AugmentationBodySpaceUnrouted,
-    /// The macro generic type argument has exactly ONE sanctioned producer
-    /// (`macro_type_arg_hot_ref`, the sole query-free structural
-    /// macro-argument producer); a locator deref for it is rejected so a
-    /// second producer path for the same payload can never exist.
+    /// The macro generic type argument belongs to the analyzer-macro hot
+    /// mirror, and no disjoint framework script-fact provider recognized the
+    /// locator's ordinal. This remains a typed unroutable result rather than a
+    /// fabricated body.
     MacroTypeArgumentHasSoleHotMirrorProducer,
     /// No deref route exists for the whole-object-argument payload position
     /// (no producer mints it): the memo has no demand cell for it, so a
@@ -188,12 +190,29 @@ impl DeclBodyMemo {
 
         match locator {
             AuthoredBodyLocator::MacroPayload(payload) => match payload.payload {
-                // The macro generic type argument keeps its sole sanctioned
-                // producer (`macro_type_arg_hot_ref`); rejecting the deref
-                // here means a second producer path cannot come into
-                // existence.
+                // Analyzer macros use `macro_type_arg_hot_ref` as their sole
+                // producer. Framework script-fact providers do not occupy that
+                // inventory; Svelte replays its own retained-AST macro ordinal
+                // here. The two providers are structurally disjoint: a
+                // non-Svelte/Vue macro ordinal yields `NoMacroCall` and keeps
+                // the hot-mirror-only error.
                 MacroPayloadPosition::TypeArgument => {
-                    Err(LocatorBodyDerefError::MacroTypeArgumentHasSoleHotMirrorProducer)
+                    let lowering = transient_outcome(
+                        self.transient_svelte_type_argument_body(payload.macro_index),
+                    )?;
+                    match lowering.as_ref() {
+                        SvelteTypeArgumentLowering::TypeArgument(expr) => Ok(DerefedAuthoredBody {
+                            shape: DerefedBodyShape::Single(expr.clone()),
+                            type_parameters: Vec::new(),
+                            visibility: TypeParamVisibility::Body,
+                        }),
+                        SvelteTypeArgumentLowering::Unannotated => {
+                            Err(LocatorBodyDerefError::ValueAnnotationAbsent)
+                        }
+                        SvelteTypeArgumentLowering::NoMacroCall => {
+                            Err(LocatorBodyDerefError::MacroTypeArgumentHasSoleHotMirrorProducer)
+                        }
+                    }
                 }
                 // No deref route exists for the whole-object-argument
                 // position (no producer mints it); fail closed with the

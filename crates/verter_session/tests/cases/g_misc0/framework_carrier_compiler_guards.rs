@@ -11,11 +11,10 @@
 //!   descriptor has a registered `CarrierCompiler` in the compiler-side
 //!   registry (Vue-through-the-bridge satisfies it). RED if the registry
 //!   lands without the Vue bridge registration.
-//! - `non_vue_api_projector_has_no_dispatch_or_oxc` — a NON-Vue api-projector
-//!   leg (the Svelte declaration-shim renderer) renders PURELY over cached
-//!   shallow state: it must NOT call `ProjectSemanticDispatch` / `Instantiate`,
-//!   run OXC at render time, or reach query-time resolution. The Vue leg is the
-//!   sole exemption (it delegates to the deep legacy extraction body).
+//! - `non_vue_api_projector_has_no_dispatch_or_oxc` — the Svelte declaration
+//!   renderer consumes cached AST facts and the shared framework-surface
+//!   executor; it must not call `ProjectSemanticDispatch` / `Instantiate`
+//!   directly, run OXC at render time, or introduce a private resolver.
 //!
 //! Each guard is a discriminating check: it FAILS against a tree that
 //! violates the rule and PASSES against the landed final-state tree.
@@ -229,9 +228,11 @@ fn carrier_descriptors_have_compilers() {
     }
 }
 
-/// The render-time dispatch / OXC / query-resolution patterns forbidden inside a
-/// NON-Vue api-projector leg. A non-Vue projector renders PURELY over already-
-/// cached shallow state — it never re-resolves, re-parses, or dispatches.
+/// Private-engine / OXC patterns forbidden inside a non-Vue API projector.
+///
+/// An adapter may dereference its AST-captured locators through the shared
+/// framework-surface executor. It must not reparse source, call semantic
+/// dispatch directly, or grow a second type-resolution path.
 fn projector_dispatch_detectors() -> &'static [&'static str] {
     &[
         ".dispatch(",
@@ -249,18 +250,17 @@ fn projector_dispatch_detectors() -> &'static [&'static str] {
 
 #[test]
 fn non_vue_api_projector_has_no_dispatch_or_oxc() {
-    // The Svelte api-projector leg (the declaration-shim renderer) is a PURE
-    // render over cached shallow state. It must NOT call dispatch / Instantiate,
-    // run OXC, or reach query-time resolution at render time. The Vue leg is the
-    // SOLE exemption (it delegates to the deep legacy extraction).
+    // Svelte consumes cached shallow/script facts and may ask the shared
+    // framework-surface executor to dereference their typed locators. It must
+    // NOT call dispatch/Instantiate directly or run OXC at render time.
     let projector = strip_line_comments(&read_src(
         "crates/verter_session/src/framework/api_projectors/svelte.rs",
     ));
     for pattern in projector_dispatch_detectors() {
         assert!(
             !projector.contains(pattern),
-            "the Svelte api-projector must not `{pattern}` at render time — it renders \
-             purely over cached shallow state (no dispatch, no OXC, no query resolution)"
+            "the Svelte api-projector must not `{pattern}` at render time — use cached AST \
+             facts and the shared framework-surface executor"
         );
     }
     // Positive: it MUST read the cached shallow state (the pure-render input).
@@ -268,21 +268,10 @@ fn non_vue_api_projector_has_no_dispatch_or_oxc() {
         projector.contains("ensure_indexed_ready") || projector.contains("shallow_state"),
         "the Svelte api-projector must render over the cached shallow state"
     );
-    // F13 + F9: the `$events` / `$slots` shim members are rendered as STATIC TYPE
-    // TEXT (a derived mapped type + an exact key map) — TSGO resolves them at
-    // check time. The render adds NO dispatch / OXC (covered by the detector scan
-    // above); these positive assertions pin that the new surfaces are present and
-    // dispatch-free string renders.
-    assert!(
-        projector.contains("__VerterEventsSurface") && projector.contains("__VerterSlotsSurface"),
-        "the Svelte api-projector must render the $events / $slots shim surfaces"
-    );
-    assert!(
-        projector.contains("__VerterCallbackEvents"),
-        "the $events surface is the DERIVED callback-prop mapped type (TSGO resolves it)"
-    );
-    // NEGATIVE: the shim must NOT emit a loose `CustomEvent<any>` / `Record<…>`
-    // placeholder for the event/slot surfaces.
+    // Negative architecture invariant: the declaration must never encode a
+    // loose dispatcher payload. Behavioral public-carrier tests own the actual
+    // props/events/slots shape; this guard owns forbidden implementation
+    // dependencies only.
     assert!(
         !projector.contains("CustomEvent<any>"),
         "the Svelte api-projector must not emit a loose CustomEvent<any> event surface"

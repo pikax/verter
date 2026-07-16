@@ -22,9 +22,12 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 
 use verter_compiler::svelte::ide::project_svelte_ide;
 use verter_compiler::svelte::parser::parse_svelte;
+use verter_language::FileLanguage;
+use verter_session::{HostConfig, PublicApiMode, UpsertRequest, VerterHost};
 
 /// The crate's test-fixture root.
 fn gate_dir() -> PathBuf {
@@ -344,6 +347,141 @@ fn skip_note(name: &str) {
     eprintln!(
         "SKIP {name}: no tsgo/tsc in node_modules/.bin (hermetic machine); \
          run on a machine with the native-preview install to exercise the gate"
+    );
+}
+
+#[test]
+fn public_carrier_resolves_local_props_interface_through_deep_barrels() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/LocalProps.svelte";
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(canonical.to_string()),
+            input_id: canonical.to_string(),
+            source: Arc::from(
+                r#"<script lang="ts">
+  interface Props {
+    title: string;
+    count?: number;
+  }
+  let { title, count = 0 }: Props = $props();
+</script>
+<h1>{title}: {count}</h1>
+"#,
+            ),
+            file_language: FileLanguage::svelte(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert local-interface Svelte component");
+
+    let declaration = host
+        .get_public_api_with_mode(canonical, PublicApiMode::Declaration, None)
+        .expect("project Svelte declaration carrier")
+        .code;
+    let generic_canonical = "/GenericProps.svelte";
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(generic_canonical.to_string()),
+            input_id: generic_canonical.to_string(),
+            source: Arc::from(
+                r#"<script lang="ts">
+  interface Props { enabled: boolean }
+  let { enabled } = $props<Props>();
+</script>
+<p>{enabled}</p>
+"#,
+            ),
+            file_language: FileLanguage::svelte(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert generic-argument Svelte component");
+    let generic_declaration = host
+        .get_public_api_with_mode(generic_canonical, PublicApiMode::Declaration, None)
+        .expect("project generic-argument Svelte declaration carrier")
+        .code;
+
+    let js_canonical = "/JsProps.svelte";
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(js_canonical.to_string()),
+            input_id: js_canonical.to_string(),
+            source: Arc::from(
+                r#"<script>
+  /** @type {{ label: string, count?: number }} */
+  let { label, count = 0 } = $props();
+</script>
+<p>{label}: {count}</p>
+"#,
+            ),
+            file_language: FileLanguage::svelte(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert JavaScript/JSDoc Svelte component");
+    let js_declaration = host
+        .get_public_api_with_mode(js_canonical, PublicApiMode::Declaration, None)
+        .expect("project JavaScript/JSDoc Svelte declaration carrier")
+        .code;
+
+    let consumer = r#"import { GenericProps, JsProps, LocalProps } from './public';
+import type { ComponentProps } from 'svelte';
+
+type FrameworkProps = ComponentProps<typeof LocalProps>;
+type InstanceProps = InstanceType<typeof LocalProps>['$props'];
+type GenericFrameworkProps = ComponentProps<typeof GenericProps>;
+type JsFrameworkProps = ComponentProps<typeof JsProps>;
+
+const frameworkGood: FrameworkProps = { title: 'ready' };
+const instanceGood: InstanceProps = { title: 'ready', count: 2 };
+const genericGood: GenericFrameworkProps = { enabled: true };
+const jsGood: JsFrameworkProps = { label: 'ready', count: 2 };
+
+// @ts-expect-error the framework-native Component leg retains `title: string`
+const frameworkBad: FrameworkProps = { title: 42 };
+// @ts-expect-error the construct/instance leg retains `count?: number`
+const instanceBad: InstanceProps = { title: 'ready', count: 'wrong' };
+// @ts-expect-error `$props<Props>()` resolves its local interface
+const genericBad: GenericFrameworkProps = { enabled: 'wrong' };
+// @ts-expect-error JavaScript/JSDoc props stay concrete on the import surface
+const jsBad: JsFrameworkProps = { label: 42 };
+
+void frameworkGood;
+void instanceGood;
+void genericGood;
+void jsGood;
+void frameworkBad;
+void instanceBad;
+void genericBad;
+void jsBad;
+"#;
+
+    let Some((ok, out)) = typecheck_projected(
+        &declaration,
+        "LocalProps.svelte.verter.ts",
+        &[
+            (
+                "GenericProps.svelte.verter.ts",
+                generic_declaration.as_ref(),
+            ),
+            ("JsProps.svelte.verter.ts", js_declaration.as_ref()),
+            (
+                "level-one.ts",
+                "export { default as LocalProps } from './LocalProps.svelte.verter';\n\
+                 export { default as GenericProps } from './GenericProps.svelte.verter';\n\
+                 export { default as JsProps } from './JsProps.svelte.verter';\n",
+            ),
+            ("public.ts", "export * from './level-one';\n"),
+            ("consumer.ts", consumer),
+        ],
+        true,
+    ) else {
+        skip_note("Svelte public carrier local Props + deep barrels");
+        return;
+    };
+    assert!(
+        ok,
+        "the generated public carrier must preserve concrete local-interface props through both \
+         Svelte's ComponentProps and InstanceType after a deep barrel; the @ts-expect-error \
+         assertions discriminate concrete types from any/unknown:\n{out}\n\n{declaration}"
     );
 }
 

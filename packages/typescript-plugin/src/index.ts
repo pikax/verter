@@ -450,13 +450,12 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         );
     }
 
-    // ── module resolution: in-project `.vue`/`.svelte` → IDE carrier ───────
+    // ── module resolution: in-project `.vue`/`.svelte` → public carrier ────
 
     const ideCarrierForSource = (sourcePath: string): string | undefined =>
       store.companionForSource(sourcePath) ?? toIdeCarrierFileName(sourcePath) ?? undefined;
-
-    const extensionForIdeCarrier = (carrierPath: string): tsModule.Extension =>
-      carrierPath.endsWith(".jsx") ? ts.Extension.Jsx : ts.Extension.Tsx;
+    const importedCarrierForSource = (sourcePath: string): string | undefined =>
+      store.apiCompanionForSource(sourcePath) ?? ideCarrierForSource(sourcePath);
 
     const createModuleResolver =
       (containingFile: string) =>
@@ -467,7 +466,14 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
               failedLookupLocations: readonly string[];
             })
           | undefined,
-      ): tsModule.ResolvedModuleFull | undefined => {
+      ): tsModule.ResolvedModuleFull | null | undefined => {
+        const providerExtension = (provider: string): tsModule.Extension => {
+          const normalized = normalizePath(provider).toLowerCase();
+          if (normalized.endsWith(".jsx")) return ts.Extension.Jsx;
+          if (normalized.endsWith(".tsx")) return ts.Extension.Tsx;
+          if (normalized.endsWith(".js")) return ts.Extension.Js;
+          return ts.Extension.Ts;
+        };
         if (moduleName === "@verter/types" && !verterTypesInstalled) {
           return {
             extension: ts.Extension.Dts,
@@ -486,21 +492,19 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
           };
         }
 
-        // A relative bare `./Comp.vue` / `./Comp.svelte` import redirects (in this
-        // in-process tsserver plugin) to the COMPONENT IDE carrier
-        // (`Comp.vue.tsx` / `Comp.svelte.tsx`, derived from the `ide` column). NOT
-        // the `.verter.ts` API carrier (the cross-package target). The tsgo native
-        // engine instead resolves the bare import to the `.d.<ext>.ts` declaration
-        // carrier (`Comp.d.vue.ts`) via its basename-append probe — a separate
-        // surface this plugin's resolution hook does not produce.
+        // A relative bare `./Comp.vue` / `./Comp.svelte` import prefers the ready
+        // public API carrier. That is the consumer-facing TypeScript surface for
+        // direct and barrel imports; the JSX/TSX carrier remains editor-only. If
+        // public publication has not completed, retain the existing IDE fallback
+        // so an already-open project never resolves to an unreadable virtual file.
         if (isRelativeVue(moduleName)) {
           const resolved = path.resolve(path.dirname(containingFile), moduleName);
-          const ideCarrier = ideCarrierForSource(resolved);
-          if (ideCarrier) {
+          const importedCarrier = importedCarrierForSource(resolved);
+          if (importedCarrier) {
             return {
-              extension: extensionForIdeCarrier(ideCarrier),
+              extension: providerExtension(importedCarrier),
               isExternalLibraryImport: false,
-              resolvedFileName: ideCarrier,
+              resolvedFileName: importedCarrier,
             };
           }
           return;
@@ -527,14 +531,16 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         if (!carrierSource) {
           return;
         }
-        const ideCarrier = ideCarrierForSource(normalizePath(path.resolve(carrierSource)));
-        if (!ideCarrier) {
+        const importedCarrier = importedCarrierForSource(
+          normalizePath(path.resolve(carrierSource)),
+        );
+        if (!importedCarrier) {
           return;
         }
         return {
-          extension: extensionForIdeCarrier(ideCarrier),
+          extension: providerExtension(importedCarrier),
           isExternalLibraryImport: false,
-          resolvedFileName: ideCarrier,
+          resolvedFileName: importedCarrier,
         };
       };
 
@@ -1031,7 +1037,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       }
       if (isRelativeVue(moduleName)) {
         const resolved = path.resolve(path.dirname(containingFile), moduleName);
-        return ideCarrierForSource(resolved);
+        return importedCarrierForSource(resolved);
       }
       const result = ts.resolveModuleName(
         moduleName,

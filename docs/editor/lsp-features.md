@@ -145,6 +145,15 @@ rather than exposing the internal `.jsx` filename. The tsserver plugin selects
 the exact `.tsx` or `.jsx` identity recorded by the LSP manifest; it does not
 guess the source language from the `.svelte` extension.
 
+The Svelte declaration surface is a framework-native `svelte.Component<Props,
+Exports>` value. `$props<T>()`, `let { … }: T = $props()`, JavaScript/JSDoc
+props, callback props, snippet slots, and provenance-validated
+`createEventDispatcher<T>()` payloads are captured from the script AST. Local
+interfaces and aliases are dereferenced through Verter's shared type-resolution
+engine before the carrier is rendered, so `ComponentProps<typeof Component>`
+and the compatibility instance surface remain concrete without exposing
+generated `__Verter*` types or `.svelte.jsx`/`.svelte.tsx` implementation names.
+
 ::: warning TSGO Limitation
 TSGO has a known limitation: re-exported `.vue` components (e.g., barrel files) may lose their typing. This is why `auto` mode defaults to tsserver when a workspace TypeScript installation is found.
 :::
