@@ -112,7 +112,7 @@ mod tests {
 
     #[test]
     fn root_identity_equality_and_hash_stay_content_based() {
-        use std::hash::{BuildHasher, Hash, Hasher, RandomState};
+        use std::hash::{BuildHasher, RandomState};
         // Identities built from DIFFERENT allocation sources (borrowed str vs
         // shared Arc) are equal and hash identically: dedup is an allocation
         // concern only, never an identity semantic.
@@ -121,11 +121,7 @@ mod tests {
         let from_arc = ResolvedRootIdentity::new(arc, "MyProps");
         assert_eq!(from_str, from_arc);
         let state = RandomState::new();
-        let hash_of = |id: &ResolvedRootIdentity| {
-            let mut hasher = state.build_hasher();
-            id.hash(&mut hasher);
-            hasher.finish()
-        };
+        let hash_of = |id: &ResolvedRootIdentity| state.hash_one(id);
         assert_eq!(hash_of(&from_str), hash_of(&from_arc));
         // And distinct content must NOT collapse.
         let other = ResolvedRootIdentity::new("/src/types.ts", "OtherProps");
