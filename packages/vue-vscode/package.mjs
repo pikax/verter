@@ -7,8 +7,9 @@
  * <extensionPath>/node_modules/<name>, so we need it included.
  *
  * This script:
- * 1. Copies workspace deps to node_modules/ as real files (replaces pnpm symlinks)
- * 2. Patches workspace:^ versions so npm list succeeds
+ * 1. Materializes the complete production dependency graph as real files
+ *    (replaces pnpm symlinks, which npm otherwise treats as workspace roots)
+ * 2. Patches workspace ranges to the release version so npm list succeeds
  * 3. Temporarily sets vsce.dependencies = true in package.json
  * 4. Runs vsce package (which triggers esbuild.mjs via vscode:prepublish)
  * 5. Restores package.json
@@ -21,20 +22,12 @@
  * would install anywhere while carrying the host-arch shim. A bare `node package.mjs`
  * (no `--target`, no `--allow-universal`) fails closed during shim staging.
  */
-import {
-  readFileSync,
-  writeFileSync,
-  cpSync,
-  mkdirSync,
-  existsSync,
-  readdirSync,
-  lstatSync,
-  rmSync,
-} from "fs";
+import { readFileSync, writeFileSync } from "fs";
 import { execSync } from "child_process";
 import path from "path";
 import { fileURLToPath } from "url";
 import { stageShimBinary } from "./stage-bin.mjs";
+import { patchWorkspaceRanges, stageRuntimeDependencies } from "./stage-deps.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pkgPath = path.join(__dirname, "package.json");
@@ -79,52 +72,19 @@ const stagedShim = stageShimBinary({
 });
 console.log(`Staged ${stagedShim.basename} -> ${path.relative(__dirname, stagedShim.dest)}`);
 
-// --- Step 1: Copy workspace deps to node_modules/ with patched versions ---
-console.log("Preparing node_modules/ for VSIX packaging...");
-
-const nmVerter = path.join(__dirname, "node_modules", "@verter");
-
-// @verter/typescript-plugin
-const tsPluginSrc = path.resolve(__dirname, "..", "typescript-plugin");
-const tsPluginDst = path.join(nmVerter, "typescript-plugin");
-removeSafe(tsPluginDst);
-mkdirSync(tsPluginDst, { recursive: true });
-
-// Copy + patch package.json (replace workspace:^ with real version)
-const tsPluginPkg = JSON.parse(readFileSync(path.join(tsPluginSrc, "package.json"), "utf8"));
-patchWorkspaceDeps(tsPluginPkg, version);
-writeFileSync(path.join(tsPluginDst, "package.json"), JSON.stringify(tsPluginPkg, null, 2) + "\n");
-
-if (existsSync(path.join(tsPluginSrc, "dist"))) {
-  cpSync(path.join(tsPluginSrc, "dist"), path.join(tsPluginDst, "dist"), { recursive: true });
-}
-
-// @verter/native
-const nativeSrc = path.resolve(__dirname, "..", "native");
-const nativeDst = path.join(nmVerter, "native");
-removeSafe(nativeDst);
-mkdirSync(path.join(nativeDst, "dist"), { recursive: true });
-
-const nativePkg = JSON.parse(readFileSync(path.join(nativeSrc, "package.json"), "utf8"));
-patchWorkspaceDeps(nativePkg, version);
-writeFileSync(path.join(nativeDst, "package.json"), JSON.stringify(nativePkg, null, 2) + "\n");
-
-if (existsSync(path.join(nativeSrc, "index.js"))) {
-  cpSync(path.join(nativeSrc, "index.js"), path.join(nativeDst, "index.js"));
-}
-if (existsSync(path.join(nativeSrc, "dist"))) {
-  for (const file of readdirSync(path.join(nativeSrc, "dist"))) {
-    if (file.endsWith(".node") && !file.endsWith(".old")) {
-      cpSync(path.join(nativeSrc, "dist", file), path.join(nativeDst, "dist", file));
-    }
-  }
-}
-
-console.log("Workspace deps copied to node_modules/ with patched versions");
+// --- Step 1: Materialize an npm-compatible production dependency tree ---
+console.log("Preparing production node_modules/ for VSIX packaging...");
+stageRuntimeDependencies({
+  packageDir: __dirname,
+  workspaceRoot: repoRoot,
+  destinationNodeModules: path.join(__dirname, "node_modules"),
+  packageVersion: version,
+});
+console.log("Production dependency graph materialized as real package files");
 
 // --- Step 2: Patch package.json for vsce ---
 pkg.vsce.dependencies = true;
-patchWorkspaceDeps(pkg, version);
+patchWorkspaceRanges(pkg, version);
 
 writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
 console.log("package.json patched for vsce (dependencies: true, resolved versions)");
@@ -145,46 +105,5 @@ try {
     execSync("pnpm install", { stdio: "inherit", cwd: __dirname });
   } catch {
     console.warn("Warning: pnpm install failed — run it manually to restore symlinks");
-  }
-}
-
-// --- Helpers ---
-
-/** Replace all workspace:^ dependency values with a real version. */
-function patchWorkspaceDeps(pkgJson, ver) {
-  for (const field of [
-    "dependencies",
-    "devDependencies",
-    "peerDependencies",
-    "optionalDependencies",
-  ]) {
-    const deps = pkgJson[field];
-    if (!deps) continue;
-    for (const [name, value] of Object.entries(deps)) {
-      if (typeof value === "string" && value.startsWith("workspace:")) {
-        deps[name] = ver;
-      }
-    }
-  }
-}
-
-/** Remove a path that might be a symlink or real directory. */
-function removeSafe(p) {
-  if (!existsSync(p) && !lstatSafe(p)) return;
-  try {
-    const stat = lstatSync(p);
-    if (stat.isSymbolicLink()) {
-      rmSync(p);
-    } else {
-      rmSync(p, { recursive: true });
-    }
-  } catch {}
-}
-
-function lstatSafe(p) {
-  try {
-    return lstatSync(p);
-  } catch {
-    return null;
   }
 }

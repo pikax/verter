@@ -227,23 +227,28 @@ jobs:
             os: ubuntu-22.04
             vsce-target: linux-x64
             binary: verter-lsp
+            shim-binary: verter-relay-shim
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             use-cross: true
             vsce-target: linux-arm64
             binary: verter-lsp
+            shim-binary: verter-relay-shim
           - target: x86_64-apple-darwin
             os: macos-15-intel
             vsce-target: darwin-x64
             binary: verter-lsp
+            shim-binary: verter-relay-shim
           - target: aarch64-apple-darwin
             os: macos-15
             vsce-target: darwin-arm64
             binary: verter-lsp
+            shim-binary: verter-relay-shim
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             vsce-target: win32-x64
             binary: verter-lsp.exe
+            shim-binary: verter-relay-shim.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -267,18 +272,20 @@ jobs:
       - name: Install cargo-zigbuild
         if: matrix.use-cross
         run: cargo install cargo-zigbuild --locked
-      - name: Build LSP binary
+      - name: Build editor binaries
         run: |
           if [ "${{ matrix.use-cross }}" = "true" ]; then
-            cargo zigbuild --release --package verter_lsp --target ${{ matrix.target }}
+            cargo zigbuild --release --package verter_lsp --package verter_relay_shim --target ${{ matrix.target }}
           else
-            cargo build --release --package verter_lsp --target ${{ matrix.target }}
+            cargo build --release --package verter_lsp --package verter_relay_shim --target ${{ matrix.target }}
           fi
         shell: bash
       - uses: actions/upload-artifact@v6
         with:
           name: lsp-${{ matrix.vsce-target }}
-          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
+          path: |
+            target/${{ matrix.target }}/release/${{ matrix.binary }}
+            target/${{ matrix.target }}/release/${{ matrix.shim-binary }}
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
@@ -784,11 +791,20 @@ jobs:
             mkdir -p packages/vue-vscode/bin
             if [ "$platform" = "win32-x64" ]; then
               LSP_BIN="verter-lsp.exe"
+              SHIM_BIN="verter-relay-shim.exe"
             else
               LSP_BIN="verter-lsp"
+              SHIM_BIN="verter-relay-shim"
             fi
             cp "/tmp/lsp-artifacts/lsp-${platform}/${LSP_BIN}" "packages/vue-vscode/bin/${LSP_BIN}"
             chmod +x "packages/vue-vscode/bin/${LSP_BIN}" 2>/dev/null || true
+
+            # package.mjs validates the target-specific relay executable's
+            # format, architecture, and embedded Verter identity before it
+            # mutates the extension dependency tree.
+            SHIM_SOURCE="/tmp/lsp-artifacts/lsp-${platform}/${SHIM_BIN}"
+            test -f "$SHIM_SOURCE"
+            export VERTER_RELAY_SHIM_BINARY="$(realpath "$SHIM_SOURCE")"
 
             # --- Native binding ---
             # Place the platform's .node file where the esbuild prepareDeps() will find it
@@ -807,6 +823,7 @@ jobs:
             cd packages/vue-vscode
             node package.mjs --target "$platform" $PRE_RELEASE_FLAG
             cd "$GITHUB_WORKSPACE"
+            unset VERTER_RELAY_SHIM_BINARY
 
             # --- Move VSIX ---
             VSIX_FILE=$(ls packages/vue-vscode/*.vsix | head -1)

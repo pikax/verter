@@ -3,10 +3,10 @@
   "version": "0.0.1-beta.1",
   "description": "Verter-owned JSX namespace shim for the Svelte IDE TSX projection — typed via svelte/elements (Svelte-true intrinsics), the component $props contract, and the Snippet brand, with dedicated /svg and /mathml namespace entrypoints for `<svelte:options namespace>` components. Types-only, no runtime JS.",
   "keywords": [
-    "svelte",
     "jsx",
-    "verter",
-    "tsx"
+    "svelte",
+    "tsx",
+    "verter"
   ],
   "homepage": "https://verterjs.dev/",
   "license": "MIT",
@@ -27,9 +27,6 @@
   ],
   "type": "module",
   "sideEffects": false,
-  "scripts": {
-    "test": "echo \"no tests — @verter/svelte-jsx is a hand-written types-only shim (byte-pinned by the Rust freshness test)\""
-  },
   "types": "jsx-runtime.d.ts",
   "exports": {
     "./jsx-runtime": {
@@ -51,7 +48,15 @@
       "types": "./mathml/jsx-dev-runtime.d.ts"
     }
   },
+  "scripts": {
+    "test": "echo \"no tests — @verter/svelte-jsx is a hand-written types-only shim (byte-pinned by the Rust freshness test)\""
+  },
   "peerDependencies": {
     "svelte": ">=5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "svelte": {
+      "optional": true
+    }
   }
 }
