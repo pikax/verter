@@ -7,6 +7,7 @@ tsconfig.tsbuildinfo
 esbuild.mjs
 package.mjs
 stage-bin.mjs
+stage-deps.mjs
 
 # Old tsc output in dist/ (keep only esbuild bundle)
 dist/**

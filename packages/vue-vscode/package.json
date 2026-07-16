@@ -69,7 +69,6 @@
     "minimatch": "^10.2.5",
     "mocha": "^11.7.6",
     "source-map": "^0.7.6",
-    "typescript": "^5.9.3",
     "vite": "^8.0.14",
     "vscode-css-languageservice": "^6.3.10",
     "vscode-jsonrpc": "^8.2.1",

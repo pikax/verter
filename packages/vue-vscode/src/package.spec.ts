@@ -1,9 +1,12 @@
+import { execFileSync } from "node:child_process";
 import {
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   rmSync,
   writeFileSync,
@@ -516,13 +519,26 @@ describe("final bin/ invariant (F6): no tsgo, no stale opposite-platform shim", 
 // F6(b): the fail-closed shim staging must run BEFORE package.mjs mutates node_modules, so a
 // missing binary throws without leaving node_modules / package.json in a mutated state.
 describe("packaging pipeline ordering (F6b): stage before node_modules mutation", () => {
-  it("calls stageShimBinary before the first node_modules mutation in package.mjs", () => {
-    const src = readFileSync(fileURLToPath(new URL("../package.mjs", import.meta.url)), "utf8");
-    const stageAt = src.indexOf("stageShimBinary(");
-    const mutateAt = src.indexOf("removeSafe(tsPluginDst)");
-    expect(stageAt).toBeGreaterThanOrEqual(0);
-    expect(mutateAt).toBeGreaterThanOrEqual(0);
-    expect(stageAt).toBeLessThan(mutateAt);
+  it("leaves the manifest and pnpm dependency link untouched when target validation fails", () => {
+    const extensionDir = fileURLToPath(new URL("..", import.meta.url));
+    const packageScript = path.join(extensionDir, "package.mjs");
+    const manifestPath = path.join(extensionDir, "package.json");
+    const pluginPath = path.join(extensionDir, "node_modules", "@verter", "typescript-plugin");
+    const manifestBefore = readFileSync(manifestPath, "utf8");
+    const pluginTargetBefore = realpathSync(pluginPath);
+    expect(lstatSync(pluginPath).isSymbolicLink()).toBe(true);
+
+    expect(() =>
+      execFileSync(process.execPath, [packageScript, "--target", "solaris-sparc"], {
+        cwd: extensionDir,
+        env: { ...process.env, VERTER_RELAY_SHIM_BINARY: "" },
+        stdio: "pipe",
+      }),
+    ).toThrow();
+
+    expect(readFileSync(manifestPath, "utf8")).toBe(manifestBefore);
+    expect(lstatSync(pluginPath).isSymbolicLink()).toBe(true);
+    expect(realpathSync(pluginPath)).toBe(pluginTargetBefore);
   });
 });
 
