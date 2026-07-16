@@ -418,6 +418,13 @@ pub struct SemanticGraphStore {
     /// takes only shard mutexes and never re-enters `entries`, so the
     /// order holds.
     canonical_to_entries: CanonicalToEntries,
+    /// Store-owned hash-cons pool for dispatch dependency signatures.
+    /// Every warm candidate passes through this pool before admission, so
+    /// equivalent signatures share one allocation while live candidates keep
+    /// the pool's weak entries valid. Content equality, not pointer identity,
+    /// remains the semantic authority; candidate admission sequence identifies
+    /// individual reverse-index registrations.
+    dep_signature_interner: DepSignatureInterner,
     /// Global insertion-ordered total-size budget for the family memo.
     /// Each `FamilyKey` is built from content-derived `SemanticNodeId`s
     /// / a `DeclIdentity` embedding the file whole-hash, so a content
@@ -3161,12 +3168,13 @@ impl SemanticGraphStore {
         // the traced cross-file fact set. `warm_publish_one` records it
         // verbatim; it never reconstructs facts from the legacy fence.
         let read_set_signature = read_set_signature.clone();
+        let dispatch_dep_signature = self.dep_signature_interner.intern(dispatch_dep_signature);
         let validated_at_generation = ctx.project_type_store().project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
         let entry = MemoEntry {
             result: result.clone(),
             read_set_signature: read_set_signature.clone(),
-            dispatch_dep_signature: Arc::clone(dispatch_dep_signature),
+            dispatch_dep_signature: Arc::clone(&dispatch_dep_signature),
             self_root_canonicals: Arc::clone(self_root_canonicals),
             walker_diagnostics: Arc::clone(walker_diagnostics),
             satisfied_projection: satisfied_projection.clone(),
@@ -3259,7 +3267,7 @@ impl SemanticGraphStore {
             family,
             &populated_slots,
             &read_set_signature,
-            dispatch_dep_signature,
+            &dispatch_dep_signature,
             admission_seq,
         );
         drop(entries);
@@ -3358,6 +3366,7 @@ impl SemanticGraphStore {
         if self.inflight.lock().contains_key(&prepared) {
             return;
         }
+        let dispatch_dep_signature = self.dep_signature_interner.intern(&dispatch_dep_signature);
         let dispatch_dep_signature_clone = Arc::clone(&dispatch_dep_signature);
         let validated_at_generation = ctx.project_type_store().project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
@@ -3705,6 +3714,7 @@ impl SemanticGraphStore {
         let (family, slot) = family_and_slot(&key);
         let requested_path = requested_path_for_key(&key);
         let admission_seq = self.alloc_candidate_admission_seq();
+        let dispatch_dep_signature = self.dep_signature_interner.intern(&dispatch_dep_signature);
         let entry = MemoEntry {
             result,
             read_set_signature: read_set_signature.clone(),

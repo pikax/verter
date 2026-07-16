@@ -26,7 +26,7 @@
 //! re-entered a public `_with_audit` host method (records-store
 //! count would jump above one), and would PASS only when the entire
 //! component-meta synthesis stays on the raw
-//! `dispatch.execute_read(...) + accumulate_dispatch_dep_signature(...)`
+//! dispatch reads and their request-tracer dependency fan-out
 //! substrate.
 //!
 //! The fallthrough surface for this fixture is non-trivial: a single

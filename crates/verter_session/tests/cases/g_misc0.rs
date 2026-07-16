@@ -50,8 +50,6 @@ mod derived_raw_state_cached_resolved_meta_matrix_module_aug_index_shape;
 mod derived_raw_state_cached_resolved_meta_unrelated_edit_stays_warm;
 #[path = "g_misc0/dispatch_bridges_convert_project_generation.rs"]
 mod dispatch_bridges_convert_project_generation;
-#[path = "g_misc0/dispatch_dep_signature_dual_emit.rs"]
-mod dispatch_dep_signature_dual_emit;
 #[path = "g_misc0/env_hash_isolation.rs"]
 mod env_hash_isolation;
 #[path = "g_misc0/env_hashes_swap_atomically_on_snapshot_bump.rs"]
@@ -96,8 +94,6 @@ mod mcp_audit_e2e;
 mod mcp_audit_tls_propagation;
 #[path = "g_misc0/neutral_script_analysis_not_under_vue_path.rs"]
 mod neutral_script_analysis_not_under_vue_path;
-#[path = "g_misc0/no_accumulate_dispatch_dep_signature_outside_helpers.rs"]
-mod no_accumulate_dispatch_dep_signature_outside_helpers;
 #[path = "g_misc0/no_default_env_hashes_in_production.rs"]
 mod no_default_env_hashes_in_production;
 #[path = "g_misc0/no_legacy_compile_many_upsert_fanout.rs"]
@@ -132,8 +128,6 @@ mod semantic_analysis_audit_tls_propagation;
 mod semantic_graph_production_reads_validated;
 #[path = "g_misc0/single_language_classifier.rs"]
 mod single_language_classifier;
-#[path = "g_misc0/slot_binding_graph_dual_emit_arch_guard.rs"]
-mod slot_binding_graph_dual_emit_arch_guard;
 #[path = "g_misc0/slot_binding_graph_matrix_module_aug_index_shape.rs"]
 mod slot_binding_graph_matrix_module_aug_index_shape;
 #[path = "g_misc0/slot_binding_shallow_publication_tests.rs"]

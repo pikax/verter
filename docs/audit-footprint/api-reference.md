@@ -87,14 +87,14 @@ Six `u64` counters (decimal-string serialized, `string` in TS) on
 | `materialize_structure_cache_hits` | Subset satisfied by the materialiser's `MaterializeStructureDb` peek (warm cache).     |
 | `node_arena_lock_acquisitions`     | Lock acquisitions on the per-scope `NodeArena` dedup index.                            |
 | `family_map_lock_acquisitions`     | Lock acquisitions on the family-map dep-signature reverse index.                       |
-| `dep_signature_merges`             | Times a `dep_signature` was merged into the materialiser's `local_fence`.              |
-| `dep_signature_intern_hits`        | Subset of `dep_signature_merges` that hit an existing intern bucket (no allocation).   |
+| `dep_signature_merges`             | Non-empty dispatch dependency signatures published into the request fact tracer.       |
+| `dep_signature_intern_hits`        | Warm-candidate dependency signatures reused from the store-owned weak interner.         |
 
 Cache hit rate: `materialize_structure_cache_hits /
 materialize_structure_calls` — should be `> 0` on warm/cold-seq
-passes (warm peek satisfies repeat lookups). Intern hit rate:
-`dep_signature_intern_hits / dep_signature_merges` — exercises
-the content-hash bucketed `Weak`-ref interner.
+passes (warm peek satisfies repeat lookups). `dep_signature_intern_hits`
+independently measures allocations avoided by the content-hash bucketed
+`Weak`-reference interner; it is not a subset of request-tracer merge events.
 
 ### Cache-outcome enum
 

@@ -1170,7 +1170,7 @@ fn collect_node_root_identities(
 /// identities of `node` ([`collect_node_root_identities`]) and ORs the shared
 /// cached BFS ([`ref_root_reaches_transitive_cycle_node`]) over each, merging
 /// each root's cross-file fence entry (the scope self-entry and `__builtin__`
-/// roots are skipped) into the BFS-visited fence, which is dual-emitted via
+/// roots are skipped) into the BFS-visited fence, which is observed via
 /// `emit_dispatch_dep_signature_facts`. Takes `ctx` (the node carries resolved
 /// identities, so no name-resolution engine is needed).
 pub(crate) fn node_root_reaches_transitive_cycle_with_fence(

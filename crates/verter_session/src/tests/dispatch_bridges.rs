@@ -1,7 +1,7 @@
 //! Test-support shims for the dispatch DepSignature→fact bridges.
 //!
-//! `accumulate_dispatch_dep_signature` and `observe_fence_entry` are
-//! `pub(crate)` production helpers; integration tests under
+//! `dep_signature_to_fact_signature` and `observe_fence_entry` are
+//! crate-private production helpers; integration tests under
 //! `crates/verter_session/tests/*.rs` build as a separate crate and
 //! cannot reach them directly. These shims expose a discriminating
 //! probe of each bridge — the conversion the integration test
@@ -13,18 +13,9 @@
 use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
 use crate::semantic_query::DepSignature;
 
-/// Run `accumulate_dispatch_dep_signature` against `sig` and return
-/// the per-request accumulator contents it produced.
-///
-/// The accumulator is reset before the call and drained after, so the
-/// returned `Vec` is exactly the `FactVersionRef` set this one `sig`
-/// contributed. Used by `tests/cases/g_misc0/dispatch_bridges_convert_project_generation.rs`
-/// to assert the dispatch accumulator bridge converts a
-/// `ProjectGeneration` dep and still drops a `RouteGeneration` dep.
-pub fn accumulate_dispatch_dep_signature_for_tests(sig: &DepSignature) -> Vec<FactVersionRef> {
-    crate::meta_resolve::reset_dispatch_dep_signature_accumulator();
-    crate::meta_resolve::accumulate_dispatch_dep_signature(sig);
-    crate::meta_resolve::drain_dispatch_dep_signature_accumulator()
+/// Convert a dispatch signature through the production bridge.
+pub fn dispatch_dep_signature_facts_for_tests(sig: &DepSignature) -> Vec<FactVersionRef> {
+    crate::fact_signature_helpers::dep_signature_to_fact_signature(sig)
 }
 
 /// Run `observe_fence_entry` for every `(canonical, version)` pair in

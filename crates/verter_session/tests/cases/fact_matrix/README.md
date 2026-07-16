@@ -34,7 +34,7 @@ Block 1.8 (substrate-validation / fact-tracer fan-out discriminator):
 - `fallthrough` — `CachedFallthroughEntry.fact_versions`
 - `route_surface` — `BarrelRouteSurface.fact_dep_signature` /
   `EffectiveExportSetEntry.fact_dep_signature`
-- `slot_binding_graph` — fact-tracer fan-out via the dual-emit
+- `slot_binding_graph` — request fact-tracer fan-out via the
   helper (`emit_slot_binding_graph_dispatch_facts`)
 
 ## Fact-kinds (5)

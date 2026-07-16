@@ -1,6 +1,6 @@
 //! Matrix slice: `slot_binding_graph` × `module_augmentation_index_shape`.
 //!
-//! Discrimination: the slot-binding-graph dual-emit fact-tracer
+//! Discrimination: the slot-binding-graph request fact tracer
 //! fan-out substrate MUST deliver
 //! `FactVersionRef::RouteSurface(ModuleAugmentationIndexShape)` facts
 //! into every active `FactReadSet`. Slot-payload types depending on
@@ -52,6 +52,6 @@ fn slot_binding_graph_signature_carries_module_augmentation_index_shape() {
         "slot_binding_graph matrix slice: the fact-tracer \
          substrate MUST carry the `ModuleAugmentationIndexShape` fact \
          through the fan-out path emitted by the slot-binding-graph \
-         dual-emit helper. captured={captured:?}"
+         dependency path. captured={captured:?}"
     );
 }

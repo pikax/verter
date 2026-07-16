@@ -21,17 +21,10 @@
 //!    node back to `TypeExpr` and classifies its exactness via
 //!    `meta_resolve::exactness::classify_node`.
 //!
-//! All `dispatch.execute_read` calls must dual-emit their
-//! dep-signature into BOTH downstream channels via
-//! `emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature)`:
-//! (1) the legacy `DISPATCH_DEP_SIGNATURE_ACCUMULATOR` drained at
-//! `compute_component_meta_state_inner` into `state.fact_versions`,
-//! and (2) the `ACTIVE_TRACERS` stack captured by the outer
-//! `with_fact_tracer` scope. Dual-emit is the migration substrate
-//! that lets the `fact_dep_signature` producer source later flip
-//! from `state.fact_versions` to `read_set.finalise()` without
-//! losing coverage. The final-result cache validates warm hits
-//! against `fact_dep_signature` on both branches. Cycle and error
+//! All `dispatch.execute_read` calls publish their dependency evidence through
+//! `emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature)`.
+//! The request-level fact tracer finalises that evidence for both resolved-meta
+//! and final-result cache admission. Cycle and error
 //! branches publish a `MacroExpansionDiagnostics` envelope into
 //! `diag_sink` (per §7.5 silent-miss prevention).
 //!

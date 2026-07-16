@@ -30,61 +30,27 @@ use verter_semantic::analysis::type_expand::{
 };
 use verter_semantic::analysis::AnalyzedMacroKind;
 
-use super::dep_signature::accumulate_dispatch_dep_signature;
 use super::diagnostic_convert::shallow_diagnostics_to_macro_expansion;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::component_meta::ResolvedMacroMeta;
 use crate::resolver_core::component_meta_query_engine::ComponentMetaQueryEngine;
 use crate::resolver_core::ResolverContext;
 
-/// Paired emission helper for the seven dispatch-read fact observation
-/// sites in this file.
+/// Fact-tracer emission helper for dispatch reads in this file.
 ///
-/// The slot-binding-graph traversal has no result cache of its own;
-/// the dispatch reads' facts reach two downstream channels:
-///
-/// 1. The legacy `DISPATCH_DEP_SIGNATURE_ACCUMULATOR` (TLS), drained
-///    at `host_manage/component_meta_methods.rs::compute_component_meta_state_inner`
-///    and folded into `state.fact_versions` →
-///    `ComponentMetaResultEntry.fact_dep_signature` (via
-///    `publish_component_meta_cache_entry`).
-/// 2. The `ACTIVE_TRACERS` stack (also TLS), captured by the outer
-///    `with_fact_tracer` scope in `component_meta_entry.rs` — used for
-///    R20 overflow detection and (once the dual channels collapse) as
-///    the canonical `fact_dep_signature` source.
-///
-/// Dual-emit is the safe migration substrate: both channels receive
-/// the same dispatch facts so the curated signature retains coverage
-/// today AND the `fact_dep_signature` source can later switch from
-/// `state.fact_versions` to the tracer's `read_set.finalise()`
-/// without losing a single fact. The fact-tracer fan-out alone will
-/// suffice once the producer source flips to `read_set.finalise()`.
-///
-/// The function records two provenance counters
-/// (`slot_binding_graph_fact_tracer_emissions` and
-/// `slot_binding_graph_legacy_accumulator_emissions`) so tests can
-/// discriminate the dual-emit invariant under unrelated / related
-/// dep edits.
+/// The slot-binding-graph traversal has no result cache of its own, so its
+/// dispatch reads contribute evidence directly to the request-level tracer
+/// that owns the reusable component-meta signature. The local counter lets
+/// behavioral tests prove this traversal contributed evidence.
 fn emit_slot_binding_graph_dispatch_facts(
     ctx: &dyn ResolverContext,
     sig: &crate::semantic_query::DepSignature,
 ) {
     use std::sync::atomic::Ordering::Relaxed;
-    // Legacy: feed the per-request accumulator that drains into
-    // `state.fact_versions`.
-    accumulate_dispatch_dep_signature(sig);
-    if let Some(prov) = ctx.project_type_store().semantic_graph().provenance() {
-        prov.slot_binding_graph_legacy_accumulator_emissions
-            .fetch_add(1, Relaxed);
+    if !sig.is_empty() {
+        crate::host_manage::record_dep_signature_merge();
     }
 
-    // Fan into the `ACTIVE_TRACERS` stack so the outer
-    // `with_fact_tracer` captures the same facts. The bridge helper
-    // `dep_signature_to_fact_signature` converts
-    // `DepSignature` → `Vec<FactVersionRef>`; only
-    // `DepVersion::WholeHash` survives the conversion —
-    // route-generation / project-generation entries are R20-only
-    // signals and have no `FactVersionRef` equivalent.
     let bridged = crate::fact_signature_helpers::dep_signature_to_fact_signature(sig);
     crate::fact_signature_helpers::observe_fact_signature(&bridged);
     if let Some(prov) = ctx.project_type_store().semantic_graph().provenance() {
@@ -401,7 +367,6 @@ fn accumulate_lowered_node_carrier_deps(
         .map(|(canonical, hash)| (canonical, DepVersion::WholeHash(hash)))
         .collect();
     let signature: DepSignature = Arc::from(entries.into_boxed_slice());
-    // Dual-emit: legacy accumulator + fact-tracer fan-out.
     emit_slot_binding_graph_dispatch_facts(ctx, &signature);
 }
 
@@ -497,7 +462,6 @@ pub(crate) fn slot_param_root_is_symbolic_only(
                     ProjectionMode::Shallow,
                 ),
             });
-            // Dual-emit: legacy accumulator + fact-tracer fan-out.
             crate::request_context::observe_component_meta_read_suppress(&read);
             emit_slot_binding_graph_dispatch_facts(dispatch.ctx, &read.dep_signature);
             match read.value {

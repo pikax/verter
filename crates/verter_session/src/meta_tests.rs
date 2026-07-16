@@ -24008,9 +24008,9 @@ fn publication_reduce_path_admits_nothing_into_the_shared_type_expr_slot() {
 /// `DepSignature` carries a `DepVersion::ProjectGeneration` (built by
 /// `ProjectSemanticDispatch::dep_signature_for` /
 /// `project_generation_signature`). Those signatures fan through
-/// `emit_dispatch_dep_signature_facts` → `accumulate_dispatch_dep_signature`
-/// into the per-request accumulator, which `compute_component_meta_state_inner`
-/// drains and merges into `ResolvedComponentMetaState.fact_versions`.
+/// `emit_dispatch_dep_signature_facts` into the request-level fact tracer.
+/// The request host finalises that tracer into
+/// `ResolvedComponentMetaState.fact_versions`.
 ///
 /// `fact_versions` is the signature stored on the fact-only
 /// `cached_resolved_meta` sidecar (on `DerivedRawState`); a warm read
@@ -24018,11 +24018,11 @@ fn publication_reduce_path_admits_nothing_into_the_shared_type_expr_slot() {
 /// `StoreView::validates_fact_signature` alone — no legacy rail.
 /// `current_dependency_fact_versions` only emits `FileWholeHash` /
 /// `DerivedFactHash` facts, NEVER a `ProjectGeneration` fact, so the
-/// dispatch-accumulator drain is the only path that can root the
-/// project generation on the sidecar.
+/// request tracer is the path that roots the project generation on the
+/// sidecar.
 ///
 /// Discrimination: against the pre-fix tree
-/// `accumulate_dispatch_dep_signature` DROPS `ProjectGeneration`, so
+/// the dispatch bridge DROPS `ProjectGeneration`, so
 /// the sidecar's `fact_versions` carry no `ProjectGeneration` fact and
 /// a `bump_project_generation()` with unchanged file content leaves
 /// the fact-only sidecar warm (stale). The first assertion below
@@ -24089,7 +24089,7 @@ defineProps<{ data: Foo }>()
             _ => None,
         })
         .collect();
-    // DISCRIMINATING ASSERTION: pre-fix the dispatch accumulator drops
+    // DISCRIMINATING ASSERTION: dropping ProjectGeneration from the bridge
     // `ProjectGeneration`, so no `ProjectGeneration` fact reaches the
     // sidecar and this fails.
     assert!(
@@ -24097,8 +24097,8 @@ defineProps<{ data: Foo }>()
         "the fact-only `cached_resolved_meta` sidecar MUST carry a \
          FactVersionRef::ProjectGeneration fact after a cold \
          component-meta compute whose dispatch reads observed the \
-         project generation — `accumulate_dispatch_dep_signature` \
-         must CONVERT `DepVersion::ProjectGeneration`, not drop it. \
+         project generation — the dispatch bridge must CONVERT \
+         `DepVersion::ProjectGeneration`, not drop it. \
          sidecar fact_versions={:?}",
         cached.fact_versions
     );

@@ -41,7 +41,7 @@
 //!   upserted file's own-cache drain.
 //!
 //! Reference pattern: `import_route_writer_guard.rs` and
-//! `no_accumulate_dispatch_dep_signature_outside_helpers.rs`.
+//! the retired-accumulator architecture guard.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

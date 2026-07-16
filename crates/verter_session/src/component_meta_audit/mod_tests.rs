@@ -236,18 +236,14 @@ fn component_meta_payload_accessor_returns_none_for_other_kinds() {
 ///     (`FromA`, `FromB`) declared in two separate modules that BOTH
 ///     re-export their declaration through the SAME shared base module
 ///     (`/base.ts`). The shared base is therefore a route participant
-///     reached by two distinct import routes, so its whole-hash fact is
-///     observed/merged into the completion fence twice — the second
-///     merge is a redundant `(canonical, kind)` insert at the same
-///     version (the production `dep_signature_intern_hits` "intern
-///     hit"). The diamond makes the intern-hit a property of the import
-///     graph itself, independent of any single cache's self-rooting.
+///     reached by two distinct import routes, exercising repeated
+///     dependency-signature shapes in the semantic memo.
 ///   - which together force the substrate to: intern semantic
 ///     nodes (NodeArena push_impl shard locks), fold memoised
-///     dispatch reads' dep-signatures through the shared fan-in
-///     (`accumulate_dispatch_dep_signature` — dep_signature merges),
-///     and re-observe an already-accumulated fact via the second
-///     diamond route (intern hits).
+///     dispatch reads' dependency signatures through the shared
+///     request-tracer fan-in (`dep_signature_merges`),
+///     and reuse equivalent dependency signatures through the
+///     store-owned weak interner.
 fn run_probe_request() -> RequestAuditRecord {
     let host = crate::VerterHost::new_standalone(crate::types::HostConfig {
         analysis_level: crate::types::AnalysisLevel::Full,
@@ -369,20 +365,17 @@ fn audit_counter_smallest_reproducer() {
         cm.dep_signature_merges > 0,
         "smallest reproducer: dep_signature merges must increment when \
          the cold resolver folds a memoised dispatch read's dep-signature \
-         into the per-request accumulator. Production \
-         `accumulate_dispatch_dep_signature` (the sole drain of the shared \
-         `emit_dispatch_dep_signature_facts` fan-in) bumps the counter at \
-         every such fold — observing 0 means the audit hook is no longer \
+         into the request fact tracer. The shared dispatch fact-emission \
+         helpers bump the counter at every such fold — observing 0 means \
+         the audit hook is no longer \
          wired into the shared dispatch fan-in. Counter: {}",
         cm.dep_signature_merges,
     );
     assert!(
         cm.dep_signature_intern_hits > 0,
         "smallest reproducer: dep_signature intern-hits must increment \
-         when the shared dispatch fan-in (`accumulate_dispatch_dep_signature`) \
-         observes a fact already present in the per-request accumulator at the \
-         same version (the diamond's shared base reached through a second import \
-         route — redundant merge avoided). Counter: {}",
+         when the store-owned semantic signature interner reuses an existing \
+         canonical signature during the request. Counter: {}",
         cm.dep_signature_intern_hits,
     );
 }

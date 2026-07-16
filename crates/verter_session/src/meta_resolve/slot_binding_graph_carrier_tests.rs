@@ -1,4 +1,4 @@
-//! Carrier-arg descent for the slot-binding dep accumulator and the
+//! Carrier-arg descent for slot-binding dependency tracing and the
 //! free-type-param classifier.
 //!
 //! `accumulate_lowered_node_carrier_deps` records cross-file declaration
@@ -52,7 +52,7 @@ fn carrier_wrapping(
     }
 }
 
-// ── D3 — accumulate_lowered_node_carrier_deps descends carrier args ─────
+// ── accumulate_lowered_node_carrier_deps descends carrier args ──────────
 //
 // A cross-file `DeclRef` inside a carrier's `type_args` is a dep edge to its
 // declaring file. `accumulate_lowered_node_carrier_deps` must descend the
@@ -79,10 +79,13 @@ fn accumulate_carrier_deps_descends_carrier_args() {
         let decl_ref = graph.intern_node(SemanticNodeData::DeclRef { identity: dep_id });
         let carrier = carrier_wrapping(&graph, decl_ref, kind);
 
-        // Drain any prior accumulator state, run, then drain the result.
-        let _ = crate::meta_resolve::dep_signature::drain_dispatch_dep_signature_accumulator();
-        super::accumulate_lowered_node_carrier_deps(ctx, carrier, "/owner.vue");
-        let facts = crate::meta_resolve::dep_signature::drain_dispatch_dep_signature_accumulator();
+        let ((), finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
+            super::accumulate_lowered_node_carrier_deps(ctx, carrier, "/owner.vue");
+        });
+        let facts = match finalise {
+            crate::resolver_core::FactReadSetFinalise::Ok(facts) => facts,
+            other => panic!("carrier dependency tracing must be cacheable: {other:?}"),
+        };
 
         let saw_dep = facts.iter().any(|f| {
             matches!(
@@ -99,7 +102,7 @@ fn accumulate_carrier_deps_descends_carrier_args() {
     }
 }
 
-// ── E1 — node_contains_free_type_param descends carrier args ────────────
+// ── node_contains_free_type_param descends carrier args ─────────────────
 //
 // A free `TypeParam` inside a carrier's `type_args` means the node DOES
 // contain a free param (the conditional check is open). NEGATIVE: with the

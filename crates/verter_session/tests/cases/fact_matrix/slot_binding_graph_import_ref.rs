@@ -1,6 +1,6 @@
 //! Matrix slice: `slot_binding_graph` × `import_ref`.
 //!
-//! Discrimination: the slot-binding-graph dual-emit fact-tracer
+//! Discrimination: the slot-binding-graph request fact tracer
 //! fan-out substrate MUST deliver `FactKey::ImportRef` facts into
 //! every active `FactReadSet`. Slot-payload types that resolve
 //! through `import type { Slots } from './slots'` style references
@@ -50,7 +50,7 @@ fn slot_binding_graph_signature_carries_import_ref() {
         captured.iter().any(|f| f == &import_ref_fact),
         "slot_binding_graph matrix slice: the fact-tracer \
          substrate MUST carry the `ImportRef` fact through the fan-out \
-         path emitted by the slot-binding-graph dual-emit helper. \
+         path used by slot-binding-graph dependency tracing. \
          captured={captured:?}"
     );
 }

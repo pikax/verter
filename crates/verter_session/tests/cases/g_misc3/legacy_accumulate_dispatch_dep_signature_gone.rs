@@ -1,23 +1,9 @@
-//! Architecture guard — the legacy `accumulate_dispatch_dep_signature`
-//! helper is gone once the legacy dispatch accumulator is retired.
+//! Architecture guard for the retired dispatch dependency accumulator.
 //!
-//! The legacy `meta_resolve::dep_signature::accumulate_dispatch_dep_signature`
-//! helper predates the fact-tracer fan-out substrate. A dual-emit
-//! window pairs every legacy `accumulate_dispatch_dep_signature(sig)`
-//! call with an `observe_fact_signature(...)` call inside one of two
-//! helpers (`emit_slot_binding_graph_dispatch_facts`,
-//! `emit_dispatch_dep_signature_facts`), so both the curated
-//! `state.fact_versions` channel and the `ACTIVE_TRACERS` fan-out
-//! observe the same dep facts.
-//!
-//! Once the `state.fact_versions` channel is retired and every
-//! consumer reads from the tracer-finalised `ReadSetSignature.facts`
-//! only, the helper becomes dead code and is deleted.
-//!
-//! The helper still exists today and is actively invoked by the two
-//! dual-emit wrappers, so this guard sits `#[ignore]`'d until the
-//! symbol is deleted, at which point the `#[ignore]` line is removed
-//! alongside the producer.
+//! Component-meta cache signatures are owned by the request fact tracer.
+//! Reintroducing the former accumulator would create a second dependency
+//! authority and make admission or invalidation sensitive to which path a
+//! dispatch read happened to take.
 //!
 //! When activated, the guard scans
 //! `crates/verter_session/src/**/*.rs` (production source) for:
@@ -267,23 +253,10 @@ fn format_hits(hits: &[Hit]) -> String {
 // Production-tree guard (gated).
 // ---------------------------------------------------------------------------
 
-/// `accumulate_dispatch_dep_signature` (the helper definition AND
-/// every call site) is forbidden in production source once the legacy
-/// dispatch accumulator is retired.
-///
-/// Today the symbol still exists (the dual-emit wrappers
-/// `emit_slot_binding_graph_dispatch_facts` and
-/// `emit_dispatch_dep_signature_facts` still call it). The test sits
-/// `#[ignore]`'d until both helpers and the legacy drain are deleted.
-/// The fact-tracer fan-out (`observe_fact_signature`) is the sole
-/// dispatch-fact emission path after that.
-///
-/// Sibling guard: `no_accumulate_dispatch_dep_signature_outside_helpers.rs`
-/// pins down which helpers may CALL this symbol during the dual-emit
-/// window. That guard goes green now; THIS guard activates only when
-/// the symbol itself disappears.
+/// The retired accumulator symbol is forbidden in production source.
+/// Dispatch facts must flow through the request fact tracer so cache
+/// admission and invalidation share one dependency authority.
 #[test]
-#[ignore = "block-9 RED — closed by accumulate_dispatch_dep_signature deletion"]
 fn no_accumulate_dispatch_dep_signature_in_production() {
     let crate_root = workspace_root().join("crates/verter_session/src");
     let mut hits = Vec::new();
@@ -292,12 +265,10 @@ fn no_accumulate_dispatch_dep_signature_in_production() {
     }
     assert!(
         hits.is_empty(),
-        "`legacy_accumulate_dispatch_dep_signature_gone` violation (gated):\n{}\n\n\
-         `{SYMBOL}` is the legacy dispatch accumulator. Once it is \n\
-         retired, every dispatch fact emission must route \n\
-         through `observe_fact_signature(...)` via the fact-tracer \n\
-         fan-out only. Re-introducing the symbol — either as a function \n\
-         definition or as a call site — is a regression.",
+        "`legacy_accumulate_dispatch_dep_signature_gone` violation:\n{}\n\n\
+         `{SYMBOL}` is a retired dispatch accumulator. Dispatch facts must \n\
+         route through `observe_fact_signature(...)` via the request fact \n\
+         tracer. Re-introducing the symbol is a cache-correctness regression.",
         format_hits(&hits)
     );
 }
@@ -356,7 +327,8 @@ fn scanner_discriminating_property_fixtures() {
     );
 
     // Fixture E: `#[cfg(test)] mod` containing the symbol — ACCEPTED.
-    // Test scaffolding is exempt, mirroring the dual-emit window guard.
+    // Test scaffolding is exempt because the scanner's mutation controls use
+    // the retired symbol as deliberate input.
     let fixture_e = r#"
         #[cfg(test)]
         mod tests {
