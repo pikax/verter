@@ -13,6 +13,8 @@ export interface AliasedDefinitionInfo {
   isLocal: boolean;
   isAmbient: boolean;
   unverified: boolean;
+  /** Terminal target was reached through a real TypeScript alias chain. */
+  verterAliasTarget: true;
 }
 
 export interface AliasedNavigationResult {
@@ -57,16 +59,47 @@ function getAliasedSymbol(
   }
 
   const symbol = checker.getSymbolAtLocation(token);
-  if (!symbol || (symbol.flags & ts.SymbolFlags.Alias) === 0) {
-    return undefined;
-  }
+  if (!symbol) return undefined;
 
-  const aliased = checker.getAliasedSymbol(symbol);
-  if (!aliased || !aliased.declarations?.length) {
-    return undefined;
-  }
+  const isAlias = (symbol.flags & ts.SymbolFlags.Alias) !== 0;
+  const aliased = isAlias ? checker.getAliasedSymbol(symbol) : symbol;
+  if (!aliased) return undefined;
 
-  return { token, symbol: aliased };
+  const terminal = resolveModuleDefaultExport(ts, checker, aliased);
+  // A non-alias local/module reference with no default-export hop is not an
+  // aliased-navigation target. Preserve the language service's ordinary
+  // quick-info for it.
+  if (!isAlias && terminal === symbol) return undefined;
+  if (!terminal.declarations?.length) return undefined;
+
+  return { token, symbol: terminal };
+}
+
+/**
+ * Normalize a custom-extension default import whose checker alias terminates
+ * at the module symbol rather than at that module's `default` export.
+ *
+ * TypeScript normally performs this hop itself. Carrier redirects can retain
+ * the module symbol as the alias terminal, which makes quick-info display only
+ * `module "…"` even though the public carrier exports a concrete component.
+ * Following the checker's own export table preserves TypeScript authority and
+ * avoids parsing generated declaration text.
+ */
+export function resolveModuleDefaultExport(
+  ts: typeof tsModule,
+  checker: Pick<tsModule.TypeChecker, "getAliasedSymbol" | "getExportsOfModule">,
+  symbol: tsModule.Symbol,
+): tsModule.Symbol {
+  if ((symbol.flags & ts.SymbolFlags.Module) === 0) return symbol;
+
+  const exported = checker
+    .getExportsOfModule(symbol)
+    .find((candidate) => candidate.getName() === "default");
+  if (!exported) return symbol;
+  if ((exported.flags & ts.SymbolFlags.Alias) === 0) return exported;
+
+  const terminal = checker.getAliasedSymbol(exported);
+  return terminal.declarations?.length ? terminal : exported;
 }
 
 function toTextSpan(start: number, end: number): tsModule.TextSpan {
@@ -156,6 +189,7 @@ function buildDefinitionInfo(
     isLocal: true,
     isAmbient: isAmbientDeclaration(ts, declaration),
     unverified: false,
+    verterAliasTarget: true,
   };
 }
 
@@ -364,6 +398,7 @@ export function getModuleSpecifierNavigationResult(
         isLocal: false,
         isAmbient: false,
         unverified: false,
+        verterAliasTarget: true,
       },
     ],
   };

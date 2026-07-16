@@ -199,6 +199,72 @@ fn workspace_host_with_svelte(
 }
 
 #[test]
+fn public_api_resolves_local_dispatcher_interface_through_shared_surface() {
+    // The dispatcher macro mirrors `$props()`: capture owns its authored type
+    // locator and the public projector consumes the shared LegacyDispatcher
+    // surface. A local interface is intentionally not available by name in the
+    // generated declaration module, so the carrier must render its resolved
+    // event map rather than `Events`, `{}`, or `unknown`.
+    let component = "/workspace/Eventful.svelte";
+    let source = r#"<script lang="ts">
+      import { createEventDispatcher } from 'svelte';
+      let { label }: { label: string } = $props();
+      interface Events { save: string; update: [id: number] }
+      const dispatch = createEventDispatcher<Events>();
+      void dispatch; void label;
+    </script>
+    <button>save</button>"#;
+    let (host, _view) = workspace_host_with_svelte(
+        component,
+        source,
+        &[
+            (
+                "/workspace/node_modules/svelte/package.json",
+                r#"{"name":"svelte","version":"5.56.3","types":"index.d.ts"}"#,
+            ),
+            (
+                "/workspace/node_modules/svelte/index.d.ts",
+                "export declare function createEventDispatcher<E>(): (name: keyof E, detail: E[keyof E]) => void;\n",
+            ),
+        ],
+    );
+    let _ = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: Some(component.to_string()),
+            input_id: component.to_string(),
+            source: Arc::from(source),
+            file_language: verter_language::FileLanguage::svelte(),
+            aliases: Vec::new(),
+        })
+        .expect("load the component into the public-API runtime");
+    let facts = host
+        .resolve_svelte_script_facts(component)
+        .expect("resolved Svelte script facts");
+    assert!(
+        facts.dispatcher_events.is_some(),
+        "the package-backed createEventDispatcher import must validate before public projection: \
+         {facts:?}"
+    );
+
+    let declaration = host
+        .get_public_api_with_mode(component, crate::PublicApiMode::Declaration, None)
+        .expect("a dispatcher-bearing Svelte component projects a public API")
+        .code
+        .to_string();
+
+    assert!(
+        declaration.contains("save: string") && declaration.contains("update: [id: number]"),
+        "the local dispatcher interface must resolve into the public event map:\n{declaration}"
+    );
+    assert!(
+        declaration.contains("CustomEvent<")
+            && !declaration.contains("CustomEvent<any>")
+            && !declaration.contains("keyof (Events)"),
+        "the public event handlers must carry concrete dispatcher payloads without a local-name leak:\n{declaration}"
+    );
+}
+
+#[test]
 fn realized_snippet_call_signature_is_this_plus_rest_tuple() {
     // IMPL-VERIFY (discriminating): confirm the ACTUAL realized shape
     // a `Snippet<[item: Item, index: number]>` member lowers to through the

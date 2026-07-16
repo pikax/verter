@@ -322,9 +322,11 @@ impl ProjectSemanticDispatch<'_> {
 
     /// Raise an authored body locator to a transient graph handle.
     ///
-    /// The macro generic TYPE-ARGUMENT position routes through its sole
-    /// sanctioned producer (`macro_type_arg_hot_ref` — the memo rejects a
-    /// locator deref for it by design), mode-split like the per-FIELD arm:
+    /// The macro generic TYPE-ARGUMENT position first routes through the
+    /// analyzer-macro hot mirror (`macro_type_arg_hot_ref`). Framework
+    /// script-fact macros occupy a disjoint inventory and fall through to
+    /// their retained-AST locator provider (Svelte today). The hot-mirror arm
+    /// is mode-split like the per-FIELD arm:
     /// a terminal-demand caller (`Expanded` / `Identity`) completes
     /// carrier-head resolution through the one dispatch (the empty-path
     /// `ProjectPath` re-entry — [`ProjectSemanticDispatch::resolve_hot_handle_with_context`]),
@@ -357,29 +359,29 @@ impl ProjectSemanticDispatch<'_> {
         if let AuthoredBodyLocator::MacroPayload(payload) = locator {
             match payload.payload {
                 MacroPayloadPosition::TypeArgument => {
-                    let handle = crate::structural_carrier_producer::macro_type_arg_hot_ref(
+                    if let Some(handle) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
                         self.ctx,
                         payload.anchor.canonical_id.as_ref(),
                         payload.macro_index as usize,
-                    )?;
-                    // Terminal-demand mode split (mirroring the per-FIELD
-                    // arm below): `Expanded` / `Identity` complete the
-                    // carrier-head resolution through the one dispatch —
-                    // the same empty-path `ProjectPath` re-entry the
-                    // expansion sink drives — so a consumer demanding a
-                    // published type-argument source materialises the same
-                    // node the sink produced. Carrier/shell modes keep the
-                    // mode-neutral mirror handle (shallow-by-default).
-                    if matches!(
-                        context.mode,
-                        crate::semantic_query::ProjectionMode::Expanded
-                            | crate::semantic_query::ProjectionMode::Identity
                     ) {
-                        return Some(HotTypeRef::new(
-                            self.resolve_hot_handle_with_context(handle, context),
-                        ));
+                        // Terminal-demand mode split (mirroring the per-FIELD
+                        // arm below): `Expanded` / `Identity` complete the
+                        // carrier-head resolution through the one dispatch.
+                        if matches!(
+                            context.mode,
+                            crate::semantic_query::ProjectionMode::Expanded
+                                | crate::semantic_query::ProjectionMode::Identity
+                        ) {
+                            return Some(HotTypeRef::new(
+                                self.resolve_hot_handle_with_context(handle, context),
+                            ));
+                        }
+                        return Some(handle);
                     }
-                    return Some(handle);
+                    // Framework script-fact macros are not analyzer-macro
+                    // mirror rows. Fall through to the retained-AST locator
+                    // provider below (Svelte today); a genuine miss remains
+                    // an honest `None`.
                 }
                 // Mode split for a per-field payload: a terminal-demand
                 // caller (`Expanded` / `Identity`) resolves the INSTANTIATED

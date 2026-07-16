@@ -78,6 +78,16 @@ pub struct SveltePropsCandidate {
     /// never a raw `TypeExpr`, never fail-closed. `None` only when the
     /// component declares no props type.
     pub props_type: Option<AuthoredTypePayloadRef>,
+    /// Exact syntax display of the authored props type. Captured from the
+    /// OXC type node at the same time as [`Self::props_type`]; display-only,
+    /// never a resolution input. This lets public declaration projection
+    /// preserve function, snippet, conditional, and imported types without
+    /// reparsing or source scanning at render time.
+    pub props_type_display: Option<String>,
+    /// Syntactic type-reference names in [`Self::props_type_display`], produced
+    /// by the shared OXC type-reference visitor. The declaration projector
+    /// uses these only to retain required `import type` bindings.
+    pub props_type_references: Vec<String>,
     /// Whether the props type came from a `$props<T>()` generic argument
     /// (`true`) vs a `let {…}: T = $props()` annotation (`false`).
     pub from_generic_argument: bool,
@@ -153,6 +163,10 @@ pub struct SvelteScriptCandidates {
     /// raw `TypeExpr`, never fail-closed. `None` when no dispatcher (or no
     /// type argument) is declared.
     pub dispatcher_events: Option<AuthoredTypePayloadRef>,
+    /// Exact syntax display of the dispatcher event-map type argument.
+    pub dispatcher_events_display: Option<String>,
+    /// Syntactic type-reference names in the dispatcher event-map display.
+    pub dispatcher_event_references: Vec<String>,
     /// The module specifier `createEventDispatcher` was imported from (raw,
     /// un-validated). The resolved-validation half emits `dispatcher_events`
     /// ONLY when this source resolves to the `svelte` package — a userland
@@ -210,6 +224,10 @@ pub struct SvelteScriptFacts {
     /// payload hash; the session re-resolves it on demand). `None` for a
     /// legacy or props-less component.
     pub props_type: Option<AuthoredTypePayloadRef>,
+    /// Exact syntax display paired with [`Self::props_type`].
+    pub props_type_display: Option<String>,
+    /// Syntactic reference inventory paired with the props display.
+    pub props_type_references: Arc<[String]>,
     /// The `$bindable()` member names (the MODEL bindings).
     pub bindable_members: Arc<[String]>,
     /// Prop DEFAULT values (source-text + span), passed through verbatim from
@@ -227,6 +245,10 @@ pub struct SvelteScriptFacts {
     /// `svelte` package (provenance-validated; a userland look-alike
     /// contributes `None`).
     pub dispatcher_events: Option<AuthoredTypePayloadRef>,
+    /// Exact syntax display of the provenance-validated dispatcher map.
+    pub dispatcher_events_display: Option<String>,
+    /// Syntactic reference inventory of the validated dispatcher map.
+    pub dispatcher_event_references: Arc<[String]>,
     /// The exported instance-script members (the EXPOSE surface).
     pub instance_exports: Arc<[String]>,
 }
@@ -261,7 +283,12 @@ impl SvelteScriptProvider {
     /// `@type {T}` now occupies the same `TypeAnnotation` authored-payload
     /// position as the TypeScript spelling. Old candidate keys intentionally
     /// miss so a previously untyped cached JavaScript surface cannot stay warm.
-    pub const VERSION: u32 = 5;
+    ///
+    /// `6` — the OXC capture now retains an exact display string and typed
+    /// reference-name inventory for props and dispatcher payloads. This is
+    /// display/prelude data only; authored payload locators remain semantic
+    /// authority. Old candidate keys intentionally miss.
+    pub const VERSION: u32 = 6;
 }
 
 impl ScriptFactProvider for SvelteScriptProvider {
@@ -370,6 +397,16 @@ impl ScriptFactProvider for SvelteScriptProvider {
 
         let facts = SvelteScriptFacts {
             props_type: candidates.props.as_ref().and_then(|p| p.props_type.clone()),
+            props_type_display: candidates
+                .props
+                .as_ref()
+                .and_then(|p| p.props_type_display.clone()),
+            props_type_references: candidates
+                .props
+                .as_ref()
+                .map(|p| p.props_type_references.clone())
+                .unwrap_or_default()
+                .into(),
             bindable_members: candidates
                 .props
                 .as_ref()
@@ -385,6 +422,14 @@ impl ScriptFactProvider for SvelteScriptProvider {
             validated_snippet_members: validated_snippet_members.into(),
             legacy_props: candidates.legacy_props.clone().into(),
             dispatcher_events,
+            dispatcher_events_display: dispatcher_validated
+                .then(|| candidates.dispatcher_events_display.clone())
+                .flatten(),
+            dispatcher_event_references: if dispatcher_validated {
+                candidates.dispatcher_event_references.clone().into()
+            } else {
+                Arc::from([])
+            },
             instance_exports: candidates.instance_exports.clone().into(),
         };
 
@@ -949,6 +994,9 @@ fn capture_ordinal_macro_call(
                     MacroPayloadPosition::TypeArgument,
                 ));
                 candidate.from_generic_argument = true;
+                candidate.props_type_display = type_syntax_display(generic_ty, source);
+                candidate.props_type_references =
+                    crate::analysis::collect_type_references(generic_ty);
                 candidate.props_leaf_members =
                     leaf_members_from_lowered(&lower_ts_type(generic_ty, source));
             }
@@ -962,6 +1010,10 @@ fn capture_ordinal_macro_call(
                     macro_index,
                     MacroPayloadPosition::TypeAnnotation,
                 ));
+                candidate.props_type_display =
+                    type_syntax_display(&annotation.type_annotation, source);
+                candidate.props_type_references =
+                    crate::analysis::collect_type_references(&annotation.type_annotation);
                 candidate.props_leaf_members =
                     leaf_members_from_lowered(&lower_ts_type(&annotation.type_annotation, source));
             }
@@ -1012,6 +1064,9 @@ fn capture_ordinal_macro_call(
                         macro_index,
                         MacroPayloadPosition::TypeArgument,
                     ));
+                    out.dispatcher_events_display = type_syntax_display(first, source);
+                    out.dispatcher_event_references =
+                        crate::analysis::collect_type_references(first);
                     // The import SOURCE is capture inventory: recorded
                     // whenever a type argument is authored
                     // (resolved-validation gates the payload ref on it).
@@ -1020,6 +1075,18 @@ fn capture_ordinal_macro_call(
             }
         }
     }
+}
+
+/// Exact source display for one OXC type node. The span is produced by OXC and
+/// sliced directly; this is not a scan or a semantic input. Empty/out-of-range
+/// spans fail closed to `None`.
+fn type_syntax_display(ty: &TSType<'_>, source: &str) -> Option<String> {
+    let span = ty.span();
+    source
+        .get(span.start as usize..span.end as usize)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
 }
 
 /// Outcome of [`lower_props_annotation_at`] — the deref-side re-derivation of
@@ -1037,6 +1104,55 @@ pub enum PropsAnnotationLowering {
     /// out-of-range / drifted ordinal, or the ordinal of a non-`$props`
     /// macro call).
     NoPropsCall,
+}
+
+/// Outcome of [`lower_svelte_type_argument_at`] — the retained-AST
+/// re-derivation of a Svelte macro's first generic type argument.
+#[derive(Debug, Clone)]
+pub enum SvelteTypeArgumentLowering {
+    /// The addressed `$props<T>()` or tracked
+    /// `createEventDispatcher<T>()` call carries a first type argument.
+    TypeArgument(TypeExpr),
+    /// The addressed Svelte macro call exists but has no type argument.
+    Unannotated,
+    /// `macro_index` addresses no Svelte macro call.
+    NoMacroCall,
+}
+
+/// Lower the first generic type argument of the Svelte macro at
+/// `macro_index` from the retained script program.
+///
+/// Capture and dereference both use [`MacroOrdinalWalk`], so `$props()` and
+/// tracked `createEventDispatcher()` calls share one stable source-order
+/// address space. This is the Svelte provider for the framework-neutral
+/// [`MacroPayloadPosition::TypeArgument`] locator; it never reparses source.
+#[must_use]
+pub fn lower_svelte_type_argument_at(
+    program: &Program<'_>,
+    source: &str,
+    module_region: Option<(u32, u32)>,
+    macro_index: u32,
+) -> SvelteTypeArgumentLowering {
+    let mut walk = MacroOrdinalWalk::new();
+    let mut found = SvelteTypeArgumentLowering::NoMacroCall;
+    for stmt in &program.body {
+        walk.visit_statement(stmt, module_region, &mut |ordinal, call| {
+            if ordinal != macro_index {
+                return;
+            }
+            let ty = match call {
+                OrdinalMacroCall::Props { init, .. } => props_generic_argument_ts_type(init),
+                OrdinalMacroCall::Dispatcher { call, .. } => call
+                    .type_arguments
+                    .as_ref()
+                    .and_then(|args| args.params.first()),
+            };
+            found = ty
+                .map(|ty| SvelteTypeArgumentLowering::TypeArgument(lower_ts_type(ty, source)))
+                .unwrap_or(SvelteTypeArgumentLowering::Unannotated);
+        });
+    }
+    found
 }
 
 /// The lowered authored `$props()` binding-annotation payload at macro

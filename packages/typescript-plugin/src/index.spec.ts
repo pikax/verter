@@ -475,6 +475,45 @@ describe("host-proxy matrix: resolveModuleNameLiterals (in-project → IDE carri
     expect(resolved).not.toContain(".verter.ts");
   });
 
+  it("redirects a Svelte import to its public API carrier when both roles exist", () => {
+    const manifest = javascriptSvelteManifest();
+    const project = manifest.projects["d:/ws/tsconfig.json"];
+    project.owned_sources.push({
+      source_uri: "d:/ws/src/W.svelte",
+      provider_uri: "d:/ws/src/W.svelte.verter.ts",
+      role: "CarrierApi",
+      script_kind: "TS",
+    });
+    project.ready_files["d:/ws/src/W.svelte.verter.ts"] = {
+      content_hash: "wa1",
+      version: 4,
+      script_kind: "TS",
+      role: "CarrierApi",
+      map_hash: "0",
+      blob_rel: "blobs/W.svelte.verter.ts",
+    };
+    const dir = track(
+      writeStore(manifest, {
+        "blobs/W.svelte.verter.ts": "export default class W { declare $props: { label: string } }",
+      }),
+    );
+    const info = createInfo(dir, { diskFiles: {} });
+    init({ typescript: ts } as any).create(info);
+
+    const result = info.languageServiceHost.resolveModuleNameLiterals(
+      [{ text: "./W.svelte" }],
+      "d:/ws/src/consumer.ts",
+      undefined,
+      {},
+      undefined,
+    )[0]?.resolvedModule;
+
+    expect(result?.resolvedFileName).toBe("d:/ws/src/W.svelte.verter.ts");
+    expect(result?.extension).toBe(ts.Extension.Ts);
+    const snapshot = info.languageServiceHost.getScriptSnapshot(result!.resolvedFileName);
+    expect(snapshot.getText(0, snapshot.getLength())).toContain("class W");
+  });
+
   it("redirects a JavaScript .svelte import to the .svelte.jsx IDE carrier as JSX", () => {
     const dir = track(writeStore(javascriptSvelteManifest(), {}));
     const info = createInfo(dir, { diskFiles: {} });

@@ -7,11 +7,11 @@
 //! the host's public-API entry selects the projector by the canonical's
 //! resolved [`FileLanguage`](verter_language::FileLanguage) adapter id.
 //!
-//! The Vue leg is the EXEMPT legacy extraction: it delegates to the deep
-//! pipeline body (`render_vue_public_api_legacy`) that consumes cached TSC
-//! state and external-type collection. A static guard bans semantic dispatch /
-//! OXC / query-time resolution in NON-Vue projectors — the legacy Vue body is
-//! the sole exemption.
+//! The Vue leg is the legacy extraction: it delegates to the deep pipeline
+//! body (`render_vue_public_api_legacy`) that consumes cached TSC state and
+//! external-type collection. Adapter projectors may consume their cached AST
+//! facts and ask the shared framework-surface executor to dereference authored
+//! locators; they must not reparse source or introduce a private resolver.
 
 use verter_language::FileLanguage;
 
@@ -57,8 +57,9 @@ pub struct ComponentApiProjectorCtx<'a> {
     pub profile: Option<&'a CompileProfile>,
     /// The batch-shared cold seed + active session view (crate-private; least
     /// authority). `Some` on every host render path (scalar `N=1` and batch).
-    /// Vue consumes it for cross-file macro-type resolution; Svelte ignores it
-    /// (its shim renders purely from cached shallow state).
+    /// Vue consumes it for cross-file macro-type resolution. Svelte uses the
+    /// same request seed to dereference AST-captured `$props()` and dispatcher
+    /// locators through the shared framework-surface executor.
     pub(crate) render_seed: Option<PublicApiRenderSeed<'a>>,
 }
 

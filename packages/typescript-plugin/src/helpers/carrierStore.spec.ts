@@ -333,6 +333,65 @@ describe("DiskCarrierStoreReader.readyFileForSource", () => {
     expect(reader.readyFileForSource("d:/ws/src/JsWidget.svelte")?.script_kind).toBe("JSX");
     expect(reader.readyFileForSource("d:/ws/src/JsWidget.svelte")?.version).toBe(5);
   });
+
+  it("selects one public API carrier independently of a Svelte source dialect", () => {
+    const manifest = baseManifest();
+    const project = manifest.projects["d:/ws/tsconfig.json"];
+    project.owned_sources.push(
+      {
+        source_uri: "d:/ws/src/JsWidget.svelte",
+        provider_uri: "d:/ws/src/JsWidget.svelte.jsx",
+        role: "CarrierIde",
+        script_kind: "JSX",
+      },
+      {
+        source_uri: "d:/ws/src/JsWidget.svelte",
+        provider_uri: "d:/ws/src/JsWidget.svelte.verter.ts",
+        role: "CarrierApi",
+        script_kind: "TS",
+      },
+    );
+    project.ready_files["d:/ws/src/JsWidget.svelte.verter.ts"] = {
+      content_hash: "public-api",
+      version: 1,
+      script_kind: "TS",
+      role: "CarrierApi",
+      map_hash: "0",
+      blob_rel: "blobs/JsWidget.svelte.verter.ts",
+    };
+    const reader = new DiskCarrierStoreReader(track(makeStore(manifest)));
+
+    expect(reader.companionForSource("d:/ws/src/JsWidget.svelte")).toBe(
+      "d:/ws/src/JsWidget.svelte.jsx",
+    );
+    expect(reader.apiCompanionForSource("d:/ws/src/JsWidget.svelte")).toBe(
+      "d:/ws/src/JsWidget.svelte.verter.ts",
+    );
+
+    delete project.ready_files["d:/ws/src/JsWidget.svelte.verter.ts"];
+    const unreadyReader = new DiskCarrierStoreReader(track(makeStore(manifest)));
+    expect(unreadyReader.apiCompanionForSource("d:/ws/src/JsWidget.svelte")).toBeUndefined();
+  });
+
+  it("uses the manifest IDE identity for a JavaScript carrier", () => {
+    const manifest = baseManifest();
+    const project = manifest.projects["d:/ws/tsconfig.json"];
+    const owned = project.owned_sources.find((entry) => entry.source_uri.endsWith("/A.vue"));
+    expect(owned).toBeDefined();
+    owned!.provider_uri = "d:/ws/src/A.vue.jsx";
+    owned!.script_kind = "JSX";
+    const ready = project.ready_files["d:/ws/src/A.vue.tsx"];
+    delete project.ready_files["d:/ws/src/A.vue.tsx"];
+    project.ready_files["d:/ws/src/A.vue.jsx"] = {
+      ...ready,
+      script_kind: "JSX",
+      blob_rel: "blobs/blake3-aaaa.jsx",
+    };
+    const reader = new DiskCarrierStoreReader(track(makeStore(manifest)));
+
+    expect(reader.companionForSource("d:/ws/src/A.vue")).toBe("d:/ws/src/A.vue.jsx");
+    expect(reader.readyFileForSource("d:/ws/src/A.vue")?.script_kind).toBe("JSX");
+  });
 });
 
 describe("DiskCarrierStoreReader.ownedSourceFor", () => {

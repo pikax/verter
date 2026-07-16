@@ -410,20 +410,44 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
    * resolve a known-but-not-yet-ready source.
    */
   companionForSource(sourcePath: string): string | undefined {
+    const source = normalizePath(sourcePath);
     const manifest = this.readManifest();
-    const sourceKey = normalizePath(sourcePath);
     if (manifest) {
       for (const project of this.scopedProjectEntries(manifest)) {
-        const owned = project.owned_sources.find(
-          (entry) => entry.role === "CarrierIde" && normalizePath(entry.source_uri) === sourceKey,
+        const ownedIde = project.owned_sources.find(
+          (owned) => owned.role === "CarrierIde" && normalizePath(owned.source_uri) === source,
         );
-        if (owned) {
-          return normalizePath(owned.provider_uri);
+        if (ownedIde) {
+          return normalizePath(ownedIde.provider_uri);
         }
       }
     }
-    const companion = carrierSourceToCompanion(sourceKey);
+    const companion = carrierSourceToCompanion(source);
     return companion === null ? undefined : companion;
+  }
+
+  /**
+   * The ready public API companion for a carrier source. Imports prefer this
+   * role over the IDE TSX/JSX implementation carrier: source dialect is an
+   * editing concern while every consumer observes one TypeScript declaration
+   * surface (`$props`/`$events`/`$slots`) through direct and barrel imports. An
+   * owned but unpublished API companion is ignored so callers can retain their
+   * existing IDE fallback until the atomic publication becomes readable.
+   */
+  apiCompanionForSource(sourcePath: string): string | undefined {
+    const source = normalizePath(sourcePath);
+    const manifest = this.readManifest();
+    if (!manifest) return undefined;
+    for (const project of this.scopedProjectEntries(manifest)) {
+      const ownedApi = project.owned_sources.find(
+        (owned) => owned.role === "CarrierApi" && normalizePath(owned.source_uri) === source,
+      );
+      if (ownedApi) {
+        const provider = normalizePath(ownedApi.provider_uri);
+        if (project.ready_files[provider]?.role === "CarrierApi") return provider;
+      }
+    }
+    return undefined;
   }
 
   /**

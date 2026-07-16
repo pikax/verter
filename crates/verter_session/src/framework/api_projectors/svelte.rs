@@ -1,26 +1,25 @@
 #![deny(missing_docs)]
 //! The Svelte public-API projector leg.
 //!
-//! A PURE declaration-shim renderer over the carrier's SHALLOW inventory + the
-//! synthesized `default` symbol/export inventory. It runs NO `Instantiate`, NO
-//! semantic dispatch, and NO OXC at render time (static-guarded by
-//! `non_vue_api_projector_has_no_dispatch_or_oxc`): every input is already-cached
-//! shallow state. It produces the content behind the `Foo.svelte.verter.ts`
-//! api file.
+//! A declaration-shim renderer over the carrier's cached shallow inventory and
+//! typed Svelte script facts. OXC captures `$props()`/dispatcher authored
+//! payload locators once during analysis; this projector never reparses or
+//! scans source. Local aliases and interfaces are dereferenced through the one
+//! shared framework-surface executor, preserving its cycle, budget, and cache
+//! semantics. It produces the content behind `Foo.svelte.verter.ts`.
 //!
 //! Rendered declarations, in order:
 //! 1. the TYPE-ONLY import / re-export prelude — minimal `import type` lines
 //!    derived from the carrier's shallow import facts for every PRESERVED type
 //!    reference (unused imports dropped);
-//! 2. `type __VerterProps` — the `$props()` type / legacy export-let object (refs
-//!    preserved verbatim, never eagerly inlined);
-//! 3. `interface __VerterInstance { $props: __VerterProps; …instance exports }`;
-//! 4. `declare const __VerterComponent: { new (...args: any[]): __VerterInstance }`;
-//! 5. `export default __VerterComponent`.
+//! 2. an authored-name component value implementing Svelte 5's public
+//!    `Component<Props, Exports>` contract;
+//! 3. a precise construct/instance intersection carrying `$props`, `$events`,
+//!    `$slots`, and instance exports for JSX and legacy instance consumers;
+//! 4. the authored-name component value as the default export.
 //!
-//! `PublicApiMode::Testing` returns `None` (the testing surface is
-//! Vue-only). No new content cache — a pure cheap render over already-cached
-//! shallow inputs.
+//! `PublicApiMode::Testing` returns `None` (the testing surface is Vue-only).
+//! No projector-specific content cache is introduced.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -31,29 +30,6 @@ use verter_type_expr::facts::{
 
 use crate::framework::api_projector::{ComponentApiProjector, ComponentApiProjectorCtx};
 use crate::types::{PublicApiMode, TscResponse};
-
-/// The F13 derived-callback-event helper types rendered into every Svelte
-/// `.svelte.verter.ts` shim.
-///
-/// The `$events` map values are HANDLER types uniformly (the component `on:`
-/// helper checks `handler: $events[K]`), produced from the TWO event models:
-/// - `__VerterCallbackEvents<P>` — the DERIVED mapped type over the props `P`:
-///   each static key matching the `on${E}` callback convention (NON-EMPTY suffix
-///   `E`) whose value is function-like remaps to event `E` whose handler type is
-///   the callback function ITSELF (already a handler). A non-`on` key, an empty
-///   suffix, or a non-function value drops out (`never` key).
-/// - `__VerterDispatcherEvents<E>` — over the legacy `createEventDispatcher<E>`
-///   map, each event `K` with payload `E[K]` becomes the Svelte legacy handler
-///   shape `(e: CustomEvent<E[K]>) => void` (a legacy `on:save` handler receives
-///   the dispatched `CustomEvent`). The detail type is EXACT (`CustomEvent<E[K]>`,
-///   never `CustomEvent<any>`).
-///
-/// `__VerterFunction<T>` extracts the function arm of a (possibly optional)
-/// callback-prop value. TSGO resolves the mapped types at check time — the
-/// projector performs NO type resolution here.
-const EVENTS_HELPER_PRELUDE: &str = "type __VerterFunction<T> = Extract<NonNullable<T>, (...a: any[]) => any>;
-type __VerterCallbackEvents<P> = {\n  [K in keyof P as K extends `on${infer E}`\n    ? (E extends \"\" ? never : __VerterFunction<P[K]> extends never ? never : E)\n    : never]: __VerterFunction<P[K]>\n};
-type __VerterDispatcherEvents<E> = { [K in keyof E]: (e: CustomEvent<E[K]>) => void };";
 
 /// The Svelte component-API projector.
 #[derive(Debug, Default)]
@@ -67,10 +43,7 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             file_language,
             mode,
             profile: _,
-            // The Svelte shim renders purely from cached shallow state — it
-            // runs no cross-file macro-type resolution, so the batch-shared
-            // cold seed / session view is accepted and ignored here.
-            render_seed: _,
+            render_seed,
         } = cx;
 
         // Carrier-narrowness: the public-API surface is produced only for the
@@ -95,8 +68,9 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             PublicApiMode::Testing => return None,
         }
 
-        // Read the ALREADY-CACHED shallow state for the resolved canonical — NO
-        // OXC, NO Instantiate, NO dispatch at render time.
+        // Read the already-cached shallow state for the resolved canonical.
+        // Source parsing happened during analysis; this render never invokes
+        // OXC or scans the source text.
         let indexed = host.ensure_indexed_ready_serve(resolved_canonical)?.indexed;
         let shallow = &indexed.shallow_state;
 
@@ -142,6 +116,23 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             }
         }
 
+        // One request-bound resolver context for every authored payload this
+        // declaration needs. The AST capture already found `$props()` and the
+        // dispatcher; this context only dereferences/normalizes their typed
+        // locators through the shared semantic engine.
+        let resolver_ctx = render_seed.as_ref().map(|seed| {
+            crate::resolver_core::HostResolverContext::from_cold_seed(
+                host,
+                seed.cold_seed,
+                Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+            )
+        });
+        let resolver_ctx = resolver_ctx
+            .as_ref()
+            .map(|ctx| ctx as &dyn crate::resolver_core::ResolverContext);
+        let script_facts = resolver_ctx
+            .and_then(|ctx| host.resolve_svelte_script_facts_with_ctx(ctx, resolved_canonical));
+
         // Collect the PRESERVED type-reference names (leaf refs in the props
         // fact + the dispatcher event-map fact + export member facts) so the
         // prelude imports ONLY the referenced types (unused imports dropped).
@@ -155,6 +146,10 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         }
         for (_, ty) in &export_members {
             collect_fact_refs(ty, &mut referenced);
+        }
+        if let Some(facts) = script_facts.as_ref() {
+            referenced.extend(facts.props_type_references.iter().cloned());
+            referenced.extend(facts.dispatcher_event_references.iter().cloned());
         }
 
         let mut out = ShimBuilder::default();
@@ -171,70 +166,84 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             out.blank();
         }
 
-        // 2. `type __VerterProps = <props type>` — leaf refs preserved
-        //    verbatim, leaf-object surfaces rendered shallowly (member refs
-        //    un-inlined). An authored-payload LOCATOR carries no display text
-        //    — it renders the honest `unknown`, never a fabricated shape.
-        let props_text = props_type
+        // 2. Render the public component inputs. Leaf refs stay refs and object
+        //    surfaces stay shallow. Locator-backed local aliases/interfaces are
+        //    dereferenced through the shared Svelte surface executor; the
+        //    shallow fact remains the safe fallback for a genuine miss.
+        let shallow_props_text = props_type
             .map(render_shim_fact)
             .unwrap_or_else(|| "{}".to_string());
-        out.line(&format!("type __VerterProps = {props_text};"));
-
-        // The F13 derived-callback-event helpers. `$events` is a DERIVED,
-        // NON-AUTHORITATIVE compatibility index — `$props` stays authoritative for
-        // modern event correctness. The callback-prop events are a MAPPED type over
-        // `__VerterProps`: each `on${E}` key whose value is function-like maps to
-        // event `E` with the callback's parameters as the handler type. TSGO
-        // resolves the mapped type at check time (no projector-time dispatch).
-        out.line(EVENTS_HELPER_PRELUDE);
-        // The shim `$events` index: the derived callback-prop events UNIONed with
-        // the legacy dispatcher event map (when present). A consumer's
-        // `["$events"][K]` indexes the payload precisely; an unknown event name
-        // FAILS the `keyof` index.
-        let events_text = match events_type {
-            // The dispatcher map carries PAYLOAD types per event; wrap it in
-            // `__VerterDispatcherEvents` so its values become the legacy HANDLER
-            // shape `(e: CustomEvent<payload>) => void` — uniform with the
-            // callback-prop handlers so `$events[K]` is always a handler type.
-            Some(events) => format!(
-                "__VerterCallbackEvents<__VerterProps> & __VerterDispatcherEvents<{}>",
-                render_shim_fact(events)
-            ),
-            None => "__VerterCallbackEvents<__VerterProps>".to_string(),
-        };
-        out.line(&format!("type __VerterEventsSurface = {events_text};"));
+        let captured_props_text = script_facts.as_ref().and_then(|facts| {
+            captured_display_without_local_refs(
+                facts.props_type_display.as_deref(),
+                &facts.props_type_references,
+                shallow,
+            )
+        });
+        let resolved_props_text =
+            resolver_ctx.and_then(|ctx| resolve_public_props_text(host, ctx, resolved_canonical));
+        let props_text = captured_props_text
+            .or_else(|| resolved_props_text.clone())
+            .unwrap_or(shallow_props_text);
+        let component_props_text = object_type_text(&props_text)
+            .map(str::to_string)
+            .or(resolved_props_text)
+            .unwrap_or_else(|| render_component_props(props_type, &props_text));
+        let dispatcher_text = script_facts
+            .as_ref()
+            .and_then(|facts| {
+                captured_display_without_local_refs(
+                    facts.dispatcher_events_display.as_deref(),
+                    &facts.dispatcher_event_references,
+                    shallow,
+                )
+            })
+            .or_else(|| {
+                resolver_ctx
+                    .and_then(|ctx| resolve_public_dispatcher_text(host, ctx, resolved_canonical))
+            });
+        let events_text = render_public_events(&props_text, dispatcher_text.as_deref());
 
         // The shim `$slots` index: an EXACT key map whose values are the snippet
         // callables, rendered shallow as `__VerterProps[K]` (the snippet prop's own
         // `Snippet<…>` type — the precise binding type the consumer re-resolves).
         // A consumer's `["$slots"][K]` is name-exact; an unknown slot name FAILS.
-        let slots_text = if slot_keys.is_empty() {
-            "{}".to_string()
-        } else {
-            let entries: Vec<String> = slot_keys
-                .iter()
-                .map(|k| format!("{k}: __VerterProps[\"{k}\"]"))
-                .collect();
-            format!("{{ {} }}", entries.join("; "))
-        };
-        out.line(&format!("type __VerterSlotsSurface = {slots_text};"));
+        let slots_text = render_public_slots(&slot_keys, &props_text);
 
-        // 3. `interface __VerterInstance { $props; $events; $slots; …exports }`.
-        //    Each exported instance-script binding is an instance member. Its
-        //    VALUE type stays shallow (it is resolved on demand by a consumer);
-        //    the load-bearing contract is the member's PRESENCE on the instance.
-        out.line("interface __VerterInstance {");
-        out.line("  $props: __VerterProps;");
-        out.line("  $events: __VerterEventsSurface;");
-        out.line("  $slots: __VerterSlotsSurface;");
+        // 3. Build an authored-name public value. `Component<Props, Exports>` is
+        //    Svelte's framework-native import contract. The construct
+        //    intersection retains JSX/InstanceType compatibility without an
+        //    `any` argument list. Visible members are inlined deliberately so
+        //    TypeScript quick-info cannot leak internal projector aliases.
+        let component_name = public_component_name(
+            resolved_canonical,
+            referenced.iter().map(String::as_str).chain(
+                shallow
+                    .exports
+                    .keys()
+                    .map(String::as_str)
+                    .chain(export_members.iter().map(|(name, _)| *name)),
+            ),
+        );
+        let exports_text = render_member_object(&export_members);
+        out.line(&format!(
+            "declare const {component_name}: import(\"svelte\").Component<"
+        ));
+        out.line(&format!("  {component_props_text},"));
+        out.line(&format!("  {exports_text}"));
+        out.line("> & {");
+        out.line("  new (options?: object): {");
+        out.line(&format!("    $props: {props_text};"));
+        out.line(&format!("    $events: {events_text};"));
+        out.line(&format!("    $slots: {slots_text};"));
         for (name, _ty) in &export_members {
-            out.line(&format!("  {name}: unknown;"));
+            out.line(&format!("    {name}: unknown;"));
         }
-        out.line("}");
+        out.line("  };");
+        out.line("};");
 
-        // 4 + 5. The component value + default export.
-        out.line("declare const __VerterComponent: { new (...args: any[]): __VerterInstance };");
-        out.line("export default __VerterComponent;");
+        // 4. The component value is the module's default public API.
+        out.line(&format!("export default {component_name};"));
 
         // 6. `<script module>` exports as TOP-LEVEL named declarations. A
         //    top-level export of the shallow state that is NOT an INSTANCE member
@@ -259,6 +268,260 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             source_map: None,
         })
     }
+}
+
+/// Derive a stable user-facing class identity from the authored component file.
+/// Occupied imported/exported bindings are avoided deterministically so the
+/// declaration shim remains valid even when a component imports its namesake.
+fn public_component_name<'a>(
+    canonical: &str,
+    occupied: impl IntoIterator<Item = &'a str>,
+) -> String {
+    let file_name = canonical
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("SvelteComponent");
+    let stem = file_name.strip_suffix(".svelte").unwrap_or(file_name);
+    let mut base = String::new();
+    let mut capitalize = true;
+    for ch in stem.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' {
+            if base.is_empty() && ch.is_ascii_digit() {
+                base.push('_');
+            }
+            if capitalize && ch.is_ascii_lowercase() {
+                base.push(ch.to_ascii_uppercase());
+            } else {
+                base.push(ch);
+            }
+            capitalize = false;
+        } else {
+            capitalize = true;
+        }
+    }
+    if base.is_empty() || base == "default" {
+        base = "SvelteComponent".to_string();
+    }
+    let occupied: BTreeSet<&str> = occupied.into_iter().collect();
+    let mut candidate = base;
+    while occupied.contains(candidate.as_str()) {
+        candidate.push_str("Component");
+    }
+    candidate
+}
+
+/// Resolve the public props object through the one shared semantic dispatch.
+///
+/// This is required for the normal Svelte spelling `interface Props { … };
+/// let { … }: Props = $props()`: the shallow synthetic default intentionally
+/// carries only the authored payload locator, so rendering that locator as a
+/// finished `unknown` would erase the component's public contract. The same
+/// framework-surface executor used by component-meta performs the demand and
+/// preserves cache/partial semantics; this projector only formats its already
+/// resolved one-level rows. A partial outcome contributes its best safe rows
+/// and is never admitted by the executor's surface cache.
+fn resolve_public_props_text(
+    host: &crate::VerterHost,
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    owner: &str,
+) -> Option<String> {
+    use crate::typeinfo::framework_surface::{ResolvedOutcome, SvelteSurfaceSource};
+
+    let runes = crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface(
+        host,
+        ctx,
+        owner,
+        SvelteSurfaceSource::RunesProps,
+    );
+    let outcome = if matches!(runes, ResolvedOutcome::Missing) {
+        crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface(
+            host,
+            ctx,
+            owner,
+            SvelteSurfaceSource::LegacyExportLet,
+        )
+    } else {
+        runes
+    };
+    let props = outcome.value()?.props.as_ref()?;
+
+    // The display rows are exact for named properties. Index signatures carry
+    // semantic source positions whose faithful rendering belongs to a typed
+    // output materializer; until that vocabulary is exposed here, retain the
+    // locator-backed shallow fallback instead of silently dropping an index.
+    if !props.index_signatures.is_empty() {
+        return None;
+    }
+
+    let fields = props
+        .fields
+        .iter()
+        .map(|field| {
+            let name = render_property_name(&field.analysis.name);
+            let optional = if field.analysis.is_optional { "?" } else { "" };
+            let ty = field
+                .analysis
+                .type_annotation
+                .as_deref()
+                .unwrap_or("unknown");
+            format!("{name}{optional}: {ty}")
+        })
+        .collect::<Vec<_>>();
+    if fields.is_empty() {
+        Some("{}".to_string())
+    } else {
+        Some(format!("{{ {} }}", fields.join("; ")))
+    }
+}
+
+/// Resolve a legacy `createEventDispatcher<Events>()` map through the shared
+/// Svelte framework-surface executor.
+///
+/// This is the dispatcher twin of [`resolve_public_props_text`]. A local
+/// `interface Events` does not exist in the generated declaration module, so
+/// rendering the captured locator/name would be invalid. The shared executor
+/// dereferences it once and returns the one-level event rows; partial outcomes
+/// retain their best safe rows and are never admitted to the surface cache.
+fn resolve_public_dispatcher_text(
+    host: &crate::VerterHost,
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    owner: &str,
+) -> Option<String> {
+    use crate::typeinfo::framework_surface::SvelteSurfaceSource;
+
+    let outcome = crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface(
+        host,
+        ctx,
+        owner,
+        SvelteSurfaceSource::LegacyDispatcher,
+    );
+    let events = outcome.value()?.emits.as_ref()?;
+    if !events.index_signatures.is_empty() {
+        return None;
+    }
+
+    let fields = events
+        .fields
+        .iter()
+        .map(|field| {
+            let name = render_property_name(&field.analysis.name);
+            let payload = field.analysis.payload_type.as_deref().unwrap_or("unknown");
+            format!("{name}: {payload}")
+        })
+        .collect::<Vec<_>>();
+    if fields.is_empty() {
+        Some("{}".to_string())
+    } else {
+        Some(format!("{{ {} }}", fields.join("; ")))
+    }
+}
+
+/// Use the AST-captured type spelling only when every local reference it names
+/// is independently available in the generated module. A local interface/type
+/// alias is not copied into the declaration carrier, so that case deliberately
+/// falls through to the shared resolved object surface. Imported and ambient
+/// references remain valid and keep their exact authored spelling.
+fn captured_display_without_local_refs(
+    display: Option<&str>,
+    references: &[String],
+    shallow: &crate::resolver_core::shallow_file_state::ShallowFileState,
+) -> Option<String> {
+    let display = display?.trim();
+    if display.is_empty()
+        || references
+            .iter()
+            .any(|name| shallow.type_symbol_kind(name).is_some())
+    {
+        return None;
+    }
+    Some(display.to_string())
+}
+
+/// An inline object spelling is a valid `Component<Props>` generic argument.
+fn object_type_text(text: &str) -> Option<&str> {
+    let text = text.trim();
+    (text.starts_with('{') && text.ends_with('}')).then_some(text)
+}
+
+/// Render a property key as an identifier when safe, otherwise as a quoted
+/// TypeScript string-literal key.
+fn render_property_name(name: &str) -> String {
+    let mut chars = name.chars();
+    let identifier = chars
+        .next()
+        .is_some_and(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric());
+    if identifier {
+        name.to_string()
+    } else {
+        format!("{name:?}")
+    }
+}
+
+/// Render the props argument for Svelte's public [`Component`] contract.
+///
+/// Locator-backed props have no shallow display authority. The instance
+/// surface retains the honest `unknown`, while this generic leg uses the
+/// narrowest safe object bound accepted by Svelte 5's `Component` definition.
+fn render_component_props(props: Option<&FactOrLocator>, rendered: &str) -> String {
+    match props {
+        Some(FactOrLocator::Locator(_) | FactOrLocator::MacroPayload(_)) => {
+            "Record<string, unknown>".to_string()
+        }
+        _ => rendered.to_string(),
+    }
+}
+
+/// Render the component's public instance exports as an object surface.
+fn render_member_object(members: &[(&str, &FactOrLocator)]) -> String {
+    if members.is_empty() {
+        return "{}".to_string();
+    }
+    let fields = members
+        .iter()
+        .map(|(name, _ty)| format!("{name}: unknown"))
+        .collect::<Vec<_>>();
+    format!("{{ {} }}", fields.join("; "))
+}
+
+/// Render the compatibility `$events` instance surface without a generated
+/// alias that could leak through TypeScript quick-info. Callback props and
+/// legacy dispatcher payloads remain exact and are composed structurally.
+fn render_public_events(props: &str, dispatcher: Option<&str>) -> String {
+    let callback_events = if props.trim() == "unknown" {
+        "{}".to_string()
+    } else {
+        format!(
+            "{{ [K in keyof ({props}) as K extends `on${{infer E}}` \
+             ? (E extends \"\" ? never : Extract<NonNullable<({props})[K]>, (...a: never[]) => void> extends never ? never : E) \
+             : never]: Extract<NonNullable<({props})[K]>, (...a: never[]) => void> }}"
+        )
+    };
+    match dispatcher {
+        Some(events) => format!(
+            "{callback_events} & {{ [K in keyof ({events})]: (e: CustomEvent<({events})[K]>) => void }}"
+        ),
+        None => callback_events,
+    }
+}
+
+/// Render exact slot keys and preserve their prop-backed callable type whenever
+/// the shallow props fact is safely indexable.
+fn render_public_slots(slot_keys: &[&str], props: &str) -> String {
+    if slot_keys.is_empty() {
+        return "{}".to_string();
+    }
+    let entries = slot_keys
+        .iter()
+        .map(|key| {
+            if props.trim() == "unknown" {
+                format!("{key}: unknown")
+            } else {
+                format!("{key}: ({props})[\"{key}\"]")
+            }
+        })
+        .collect::<Vec<_>>();
+    format!("{{ {} }}", entries.join("; "))
 }
 
 /// A minimal line-oriented shim builder. The api-projector renders into it with
@@ -386,5 +649,20 @@ fn collect_fact_refs(fact: &FactOrLocator, out: &mut BTreeSet<String>) {
             }
         }
         FactOrLocator::Leaf(_) | FactOrLocator::Locator(_) | FactOrLocator::MacroPayload(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_events_preserve_callback_and_dispatcher_types() {
+        let props = "{ onselect: (id: number) => void; label: string }";
+        let events = render_public_events(props, Some("{ save: string }"));
+        assert!(events.contains("on${infer E}"));
+        assert!(events.contains("CustomEvent<({ save: string })[K]>"));
+        assert!(!events.contains("any"));
+        assert!(!events.contains("__Verter"));
     }
 }

@@ -40,7 +40,8 @@ use verter_parser::utils::oxc::script::raw_surface::{
 use verter_parser::utils::oxc::script::type_surface::collect_statement_dependency_names;
 use verter_semantic::analysis::decl_headers::DeclHeaderIndex;
 use verter_semantic::analysis::framework_facts::svelte::{
-    lower_props_annotation_at, PropsAnnotationLowering,
+    lower_props_annotation_at, lower_svelte_type_argument_at, PropsAnnotationLowering,
+    SvelteTypeArgumentLowering,
 };
 use verter_semantic::analysis::type_eval::{
     AugmentationScopeKind, EnumMemberValue, EvalEnv, FunctionSignature, TypeDeclBody, TypeDeclKind,
@@ -1801,6 +1802,53 @@ impl DeclBodyMemo {
                 tracing::error!(
                     canonical = %self.key.canonical,
                     "decl-body lease pin broken: transient $props-annotation re-borrow \
+                     missed the retained snapshot; failing closed to ReturnOnly"
+                );
+                DemandOutcome::LeaseMiss
+            }
+            Some(None) => DemandOutcome::Ready(None),
+            Some(Some(lowering)) => DemandOutcome::Ready(Some(Arc::new(lowering))),
+        }
+    }
+
+    /// Re-derive a Svelte `$props<T>()` / tracked
+    /// `createEventDispatcher<T>()` type argument at one demanded macro
+    /// ordinal from this memo's retained program.
+    ///
+    /// This is the framework-provider fallback for
+    /// [`MacroPayloadPosition::TypeArgument`] when the analyzer macro hot
+    /// mirror has no row. It replays the same Svelte macro-ordinal walk used at
+    /// capture and retains typed missing-vs-unannotated outcomes.
+    ///
+    /// [`MacroPayloadPosition::TypeArgument`]: verter_type_expr::locators::MacroPayloadPosition::TypeArgument
+    pub(crate) fn transient_svelte_type_argument_body(
+        &self,
+        macro_index: u32,
+    ) -> DemandOutcome<SvelteTypeArgumentLowering> {
+        let Some(service) = self.service.as_ref() else {
+            return DemandOutcome::Ready(None);
+        };
+        self.ensure_lease();
+        let module_region = self
+            .framework_parse
+            .as_deref()
+            .and_then(crate::parse::module_script_region);
+        let outcome = service.run_leased(&self.key, move |program| {
+            let program = program?;
+            let source = program.source_str();
+            let program = program.borrow_dependent();
+            Some(lower_svelte_type_argument_at(
+                program,
+                source,
+                module_region,
+                macro_index,
+            ))
+        });
+        match outcome {
+            None => {
+                tracing::error!(
+                    canonical = %self.key.canonical,
+                    "decl-body lease pin broken: transient Svelte type-argument re-borrow \
                      missed the retained snapshot; failing closed to ReturnOnly"
                 );
                 DemandOutcome::LeaseMiss

@@ -75,6 +75,21 @@ fn captures_props_destructuring_annotation_type() {
         payload.locator,
         macro_payload_locator(0, MacroPayloadPosition::TypeAnnotation)
     );
+    assert_eq!(props.props_type_display.as_deref(), Some("Props"));
+    assert_eq!(props.props_type_references, ["Props"]);
+}
+
+#[test]
+fn captures_exact_rich_props_display_and_typed_references() {
+    let c = capture(
+        "let { onselect, row }: { onselect: (id: number) => void; row: Snippet<[{ id: number }]> } = $props();",
+    );
+    let props = c.props.expect("props candidate");
+    assert_eq!(
+        props.props_type_display.as_deref(),
+        Some("{ onselect: (id: number) => void; row: Snippet<[{ id: number }]> }")
+    );
+    assert_eq!(props.props_type_references, ["Snippet"]);
 }
 
 #[test]
@@ -889,6 +904,8 @@ fn full_candidates() -> SvelteScriptCandidates {
         props: Some(SveltePropsCandidate {
             call_span: Span::new(10, 30),
             props_type: Some(payload_ref(0, MacroPayloadPosition::TypeArgument, 0x11)),
+            props_type_display: Some("Props".to_string()),
+            props_type_references: vec!["Props".to_string()],
             from_generic_argument: true,
             bindable_members: vec!["value".to_string()],
             prop_defaults: vec![AnalyzedDefaultValue {
@@ -910,6 +927,8 @@ fn full_candidates() -> SvelteScriptCandidates {
             has_default: true,
         }],
         dispatcher_events: Some(payload_ref(1, MacroPayloadPosition::TypeArgument, 0x22)),
+        dispatcher_events_display: Some("Events".to_string()),
+        dispatcher_event_references: vec!["Events".to_string()],
         dispatcher_import_source: Some("svelte".to_string()),
     }
 }
@@ -1213,6 +1232,42 @@ fn deref_accessor_module_region_gate_matches_capture() {
             }
             other => panic!("expected the instance annotation, got {other:?}"),
         }
+    });
+}
+
+#[test]
+fn svelte_type_argument_accessor_replays_props_and_dispatcher_ordinals() {
+    let src = "import { createEventDispatcher } from 'svelte';\n\
+               interface Props { title: string }\n\
+               interface Events { save: string }\n\
+               let { title } = $props<Props>();\n\
+               const dispatch = createEventDispatcher<Events>();\n";
+    with_program(src, |program| {
+        let SvelteTypeArgumentLowering::TypeArgument(props) =
+            lower_svelte_type_argument_at(program, src, None, 0)
+        else {
+            panic!("ordinal 0 must address the $props<Props>() argument");
+        };
+        assert!(matches!(
+            props,
+            TypeExpr::Ref { ref name, ref type_arguments }
+                if name.as_ref() == "Props" && type_arguments.is_empty()
+        ));
+
+        let SvelteTypeArgumentLowering::TypeArgument(events) =
+            lower_svelte_type_argument_at(program, src, None, 1)
+        else {
+            panic!("ordinal 1 must address the dispatcher<Events>() argument");
+        };
+        assert!(matches!(
+            events,
+            TypeExpr::Ref { ref name, ref type_arguments }
+                if name.as_ref() == "Events" && type_arguments.is_empty()
+        ));
+        assert!(matches!(
+            lower_svelte_type_argument_at(program, src, None, 2),
+            SvelteTypeArgumentLowering::NoMacroCall
+        ));
     });
 }
 
