@@ -59,7 +59,7 @@ use crate::tsc;
 use crate::utils::oxc::script::type_surface::RuntimeType;
 use crate::utils::oxc::vue::{MacroTypeParams, ScriptItem, ScriptMacro};
 
-use helpers::{extract_attrs, extract_block_ranges};
+use helpers::{empty_sfc_script_block, extract_attrs, extract_block_ranges};
 
 // ── Orchestrator ───────────────────────────────────────────────────
 
@@ -882,7 +882,15 @@ fn compile_inner(
                 attrs: Vec::new(),
             })
         } else {
-            None
+            // A completely empty SFC is a valid EMPTY component (see
+            // `empty_sfc_script_block`); anything else has no script block.
+            empty_sfc_script_block(
+                parsed,
+                &custom_blocks,
+                &component_name,
+                options.runtime_module_name.as_deref().unwrap_or("vue"),
+                script_duration_ms,
+            )
         };
     } // end if needs_script
 

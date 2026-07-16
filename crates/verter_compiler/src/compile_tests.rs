@@ -209,9 +209,12 @@ const msg = 'hello'
 #[test]
 fn empty_input_no_panic() {
     let result = compile_sfc("");
-    // No script or template, but should not panic
-    assert!(result.script.is_none());
+    // No template — but no panic, and an empty SFC emits the synthetic
+    // empty-component shell (`empty_sfc_compiles_to_empty_component_shell`
+    // pins its shape).
+    assert!(result.script.is_some());
     assert!(result.template.is_none());
+    assert!(result.errors.is_empty());
 }
 
 #[test]
@@ -1347,6 +1350,163 @@ const pageTitle = ref('')
         tpl.code.contains(r#""onUpdate:title""#),
         "v-model:title should emit onUpdate:title handler, got:
 {}",
+        tpl.code
+    );
+}
+
+/// A completely empty .vue file (e.g. motion-vue's playground Home.vue) is a
+/// valid Vue component — an EMPTY one. The compiler must emit a minimal
+/// component shell (`defineComponent({ __name })` + `export default`) so the
+/// bundler/host lane still exports a component instead of erroring.
+#[test]
+fn empty_sfc_compiles_to_empty_component_shell() {
+    for src in ["", "\n   \n", "<!-- comment only -->"] {
+        let result = compile_sfc(src);
+        assert!(
+            result.errors.is_empty(),
+            "empty SFC {src:?} must compile without errors, got: {:?}",
+            result.errors
+        );
+        let script = result
+            .script
+            .as_ref()
+            .unwrap_or_else(|| panic!("empty SFC {src:?} must emit a synthetic script shell"));
+        assert!(
+            script.code.contains("defineComponent("),
+            "empty SFC shell should wrap in defineComponent, got:\n{}",
+            script.code
+        );
+        assert!(
+            script.code.contains("__name: \"App\""),
+            "empty SFC shell should carry the filename-derived __name, got:\n{}",
+            script.code
+        );
+        assert!(
+            script.code.contains("export default"),
+            "empty SFC shell must export the component, got:\n{}",
+            script.code
+        );
+        // Negative surface: nothing else is fabricated.
+        assert!(result.template.is_none(), "empty SFC has no template block");
+        assert!(result.styles.is_empty(), "empty SFC has no style blocks");
+        assert!(
+            !script.code.contains("props:") && !script.code.contains("slots"),
+            "empty SFC shell must not fabricate props/slots, got:\n{}",
+            script.code
+        );
+    }
+}
+
+/// The empty-SFC shell must not leak into template-only components: those
+/// keep their existing no-synthetic-script shape (the main-module assembler
+/// owns their shell).
+#[test]
+fn template_only_sfc_still_emits_no_synthetic_script() {
+    let result = compile_sfc("<template><div>x</div></template>");
+    assert!(
+        result.script.is_none(),
+        "template-only SFC must not gain a synthetic script block, got:\n{:?}",
+        result.script.as_ref().map(|s| &s.code)
+    );
+    assert!(
+        result.template.is_some(),
+        "template block must still compile"
+    );
+}
+
+/// The empty component shell is also valid TSX input for the IDE lane.
+#[test]
+fn empty_sfc_tsx_output_is_valid() {
+    assert_tsx_parses("", "empty SFC");
+    assert_tsx_parses("<!-- comment only -->", "comment-only SFC");
+}
+
+/// `v-model="(myValue as string)"` — valid in the official Vue compiler
+/// (the TS cast unwraps to a plain identifier). With `force_js` the emitted
+/// render code must strip the TS cast (JS output), while still assigning to
+/// the underlying reference in the onUpdate handler.
+#[test]
+fn v_model_with_ts_cast_compiles_to_js_without_types() {
+    let result = compile_sfc(
+        r#"<template><MyComp v-model="(myValue as string)" /><input v-model="obj.val as string | number" /></template>
+<script setup lang="ts">
+import MyComp from './MyComp.vue'
+import { ref } from 'vue'
+const myValue = ref<string | number>('')
+const obj = ref({ val: '' })
+</script>"#,
+    );
+    assert!(
+        result
+            .errors
+            .iter()
+            .all(|e| e.code != "XVModelMalformedExpression"),
+        "TS-cast v-model must not be malformed, got: {:?}",
+        result.errors.iter().map(|e| &e.code).collect::<Vec<_>>()
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(
+        tpl.code.contains("modelValue:") && tpl.code.contains(r#""onUpdate:modelValue""#),
+        "cast v-model should expand to modelValue + onUpdate:modelValue, got:\n{}",
+        tpl.code
+    );
+    assert!(
+        tpl.code.contains("$event"),
+        "cast v-model update handler should assign from $event, got:\n{}",
+        tpl.code
+    );
+    // force_js output is JavaScript: the TS cast must not survive.
+    assert!(
+        !tpl.code.contains(" as string"),
+        "force_js output must strip TS casts from v-model expressions, got:\n{}",
+        tpl.code
+    );
+    assert!(
+        tpl.code.contains("myValue") && tpl.code.contains("obj.val"),
+        "the underlying references must survive cast stripping, got:\n{}",
+        tpl.code
+    );
+}
+
+/// Same input without `force_js` (TS render output): the authored cast is
+/// preserved verbatim — TypeScript accepts parenthesized `as` expressions as
+/// assignment targets, and downstream transpilers strip them.
+#[test]
+fn v_model_with_ts_cast_preserves_cast_in_ts_output() {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions::default();
+    let result = compile(
+        r#"<template><MyComp v-model="(myValue as string)" /></template>
+<script setup lang="ts">
+import MyComp from './MyComp.vue'
+import { ref } from 'vue'
+const myValue = ref<string | number>('')
+</script>"#,
+        &options,
+        &verter_opts,
+        &alloc,
+    );
+    assert!(
+        result
+            .errors
+            .iter()
+            .all(|e| e.code != "XVModelMalformedExpression"),
+        "TS-cast v-model must not be malformed, got: {:?}",
+        result.errors.iter().map(|e| &e.code).collect::<Vec<_>>()
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(
+        tpl.code.contains("as string"),
+        "TS output should preserve the authored cast, got:\n{}",
+        tpl.code
+    );
+    assert!(
+        tpl.code.contains(r#""onUpdate:modelValue""#) && tpl.code.contains("$event"),
+        "cast v-model should emit the update handler, got:\n{}",
         tpl.code
     );
 }
@@ -11599,6 +11759,28 @@ const msg = ref('Hello')
   <input v-model="msg" />
 </template>"#,
         "v-model on input",
+    );
+}
+
+/// TS-cast v-model forms must produce syntactically valid TSX on the IDE
+/// path — TypeScript accepts parenthesized casts and non-null assertions as
+/// assignment targets (`skipOuterExpressions`).
+#[test]
+fn tsx_parse_valid_v_model_ts_cast_forms() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+import Child from './Child.vue'
+import { ref } from 'vue'
+const msg = ref<string | number>('Hello')
+const obj = ref({ val: '' as string | number })
+</script>
+<template>
+  <input v-model="(msg as string)" />
+  <input v-model="obj.val as string" />
+  <input v-model="msg!" />
+  <Child v-model="(msg satisfies string | number)" />
+</template>"#,
+        "v-model with TS casts",
     );
 }
 
