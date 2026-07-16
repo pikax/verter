@@ -17420,7 +17420,6 @@ mod single_resolution_engine_guards {
         ),
         ("crates/verter_parser/src/utils/oxc/vue/script/setup.rs", 21),
         ("crates/verter_session/src/decl_body_memo.rs", 2),
-        ("crates/verter_session/src/host_manage/jsdoc_resolve.rs", 3),
         (
             "crates/verter_session/src/host_manage/overlay_materialize.rs",
             2,
