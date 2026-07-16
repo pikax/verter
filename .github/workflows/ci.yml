@@ -625,6 +625,8 @@ jobs:
           node-version: lts/*
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Test VS Code E2E harness units
+        run: pnpm --filter verter-vscode test:e2e:lib:unit
       - name: Prepare VS Code E2E artifacts
         run: pnpm --filter verter-vscode prepare:e2e
       - name: Upload editor integration binaries
@@ -664,9 +666,36 @@ jobs:
           - composite-paths
           - no-config
           - single-file
+          - vue-contract
+          - svelte-contract
+          - vue-parity
+          - svelte-parity
+          - mixed-parity
+          - multi-root-parity
+          - ecosystem-parity
         type_provider:
           - tsserver
           - tsgo
+          - shared-tsgo
+        exclude:
+          - fixture: single-project
+            type_provider: shared-tsgo
+          - fixture: barrel-exports
+            type_provider: shared-tsgo
+          - fixture: path-aliases
+            type_provider: shared-tsgo
+          - fixture: monorepo
+            type_provider: shared-tsgo
+          - fixture: tsconfig-extends
+            type_provider: shared-tsgo
+          - fixture: tsconfig-references
+            type_provider: shared-tsgo
+          - fixture: composite-paths
+            type_provider: shared-tsgo
+          - fixture: no-config
+            type_provider: shared-tsgo
+          - fixture: single-file
+            type_provider: shared-tsgo
         include:
           - fixture: editor-owned-project
             type_provider: tsserver
@@ -687,8 +716,6 @@ jobs:
           path: target/debug
       - name: Make editor integration binaries executable
         run: chmod +x target/debug/verter-lsp target/debug/verter-relay-shim
-      - name: Prewarm tsgo cache
-        run: npx -y @typescript/native-preview@latest --version
       - name: Download built extension
         uses: actions/download-artifact@v7
         with:

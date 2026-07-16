@@ -71,3 +71,118 @@ new<T extends string, T_show extends boolean = boolean>(): { ... }
 - Only root-level `v-if`/`v-else-if`/`v-else` elements are analyzed (not nested conditionals).
 - Each condition must reference exactly one prop. Multi-prop conditions are not supported.
 - The feature is experimental and its behavior may change.
+
+## Strict props vs fallthrough (Vue) and Svelte
+
+Verter’s Vue surface is **strict-first**:
+
+- Props that are neither **declared** nor proven by **fallthrough / root inheritance** are errors (unlike Volar’s looser unknown-prop acceptance).
+- When Verter **accepts** `class` / `data-*` / etc. on a wrapper that only declares e.g. `tone`, that is because fallthrough proved a native (or nested) root accepts them — not because unknown names are ignored.
+
+Svelte does **not** use Vue multi-hop fallthrough. Typed `$props()` are strict; extra attrs require an **author-declared** rest surface (`...rest`), not automatic inheritance.
+
+E2E contract: `packages/vue-vscode/e2e/STRICT_PROPS.md` and `parity/shared/strict-props.test.ts`.
+
+## Expose Bindings Testing (`.spec.ts` / test importers)
+
+**Setting:** `verter.experimental.exposeBindingsTesting` (default: `false`)
+
+**Also:** `@verter/typescript-plugin` option `exposeBindingsTesting` in `tsconfig.json` / `jsconfig.json`.
+
+Vue and Svelte are both first-class carriers. This experimental flag is **framework-aware**: it changes how **test files** resolve **Vue** component imports. Svelte keeps a single public instance shape (no testing virtual file).
+
+### What it does (Vue)
+
+When enabled, importers classified as **test files** resolve `.vue` imports to Verter’s **testing API** virtual file:
+
+| Importer kind        | Virtual file                     | Instance shape                                                                                   |
+| -------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------ |
+| App / library source | `Foo.vue.verter.ts` / public API | Public props, emits, **and** `defineExpose()` only                                               |
+| Test file            | `Foo.vue.__verter_test.ts`       | VTU-style debug surface: **all** `<script setup>` bindings, **not** narrowed by `defineExpose()` |
+
+That matches Vue Test Utils `wrapper.vm` property access in unit tests: internals are visible under types without weakening the public component type used by production code.
+
+### Test-file classification
+
+Shared across the TypeScript plugin and editor wiring (same heuristics for every framework):
+
+- Filename: `*.spec.*`, `*.test.*`
+- Directories: `__tests__/`, `__specs__/`
+- Plus Vitest / Vite / Jest include patterns when config can be read
+
+### Vue example
+
+```vue
+<!-- Counter.vue -->
+<script setup lang="ts">
+import { ref } from "vue";
+const count = ref(0);
+const hidden = ref("secret");
+defineExpose({ count });
+</script>
+```
+
+```ts
+// Counter.spec.ts  — testing surface (with the flag on)
+import Counter from "./Counter.vue";
+
+function probe(c: InstanceType<typeof Counter>) {
+  c.count; // ok
+  c.hidden; // ok under testing API (setup binding)
+}
+```
+
+```ts
+// useCounter.ts  — public surface (unchanged)
+import Counter from "./Counter.vue";
+
+function probe(c: InstanceType<typeof Counter>) {
+  c.count; // ok if exposed
+  // c.hidden — type error on the public surface
+}
+```
+
+### How to enable
+
+**VS Code / Verter extension** (workspace or user `settings.json`):
+
+```json
+{
+  "verter.experimental.exposeBindingsTesting": true
+}
+```
+
+The extension only forwards the flag into `@verter/typescript-plugin` when it is set **explicitly** (so a project `tsconfig` default can remain authoritative until you opt in from the editor).
+
+**TypeScript plugin** (`tsconfig.json`):
+
+```jsonc
+{
+  "compilerOptions": {
+    "plugins": [
+      {
+        "name": "@verter/typescript-plugin",
+        "exposeBindingsTesting": true,
+      },
+    ],
+  },
+}
+```
+
+### Svelte (first-class, different contract)
+
+|                      | Vue                                                   | Svelte                                                                                       |
+| -------------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| Public API virtual   | `*.vue.verter.ts`                                     | `*.svelte.verter.ts`                                                                         |
+| Testing API virtual  | `*.vue.__verter_test.ts` when flag on + test importer | **None** (`testing_api_suffix` is null)                                                      |
+| `*.spec.ts` importer | Testing / debug instance shape                        | **Same public shape** as app code                                                            |
+| Setting still valid? | Yes — enables dual surface                            | Yes — test-filename heuristics apply, but **no second Svelte instance surface is generated** |
+
+So enabling the flag in a mixed Vue+Svelte workspace is safe: Vue tests get VTU-style types; Svelte components keep a single public type for both app and test importers. There is no `.svelte.__verter_test.ts` name.
+
+### Known limitations
+
+- Experimental: virtual suffixes and config may change.
+- Vue-only testing content producer today (`PublicApiMode::Testing`); Svelte returns no testing virtual file by design until a future framework-neutral testing surface is designed.
+- Classification depends on test-file heuristics / test-runner config; exotic test layouts may need an explicit Vitest/Jest include pattern.
+- E2E coverage lives under `packages/vue-vscode/e2e/suite/parity/shared/testing-api-surface.test.ts` (vue-parity + svelte-parity fixtures).

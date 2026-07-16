@@ -285,37 +285,74 @@ export async function main(): Promise<void> {
   const extensionDevelopmentPath = path.resolve(__dirname, "../../../");
   const extensionTestsPath = path.resolve(__dirname, "./index");
 
-  const workspace = validateWorkspaceArg(process.env[DX_HARNESS_WORKSPACE_ENV]);
-  ensureAndVerifyDebugSettings(workspace, harnessSettingsWriter(harness));
+  // Prefer an explicit DX_HARNESS_* handoff; otherwise produce the committed
+  // keystroke auto-import scenario so CI can run always-on without a manual producer.
+  const {
+    hasCompleteScenarioEnv,
+    mergeScenarioEnv,
+    prepareCommittedKeystrokeWorkspace,
+    writeProducerReceipt,
+  } = await import("./dxCommittedScenario.js");
 
-  const vscodeVersion = readE2eEnv("VSCODE_VERSION") ?? "stable";
-  const vscodeExecutablePath = await resolveVscodeExecutablePath(vscodeVersion, {
-    explicitExecutablePath: readE2eEnv("VSCODE_EXECUTABLE"),
-  });
-  const lspBinaryPath = copyLspBinaryToTemp(extensionDevelopmentPath);
+  let disposeWorkspace: (() => void) | undefined;
+  let baseEnv: Record<string, string | undefined> = { ...process.env };
 
-  const logFile =
-    readE2eEnv("LOG_FILE") ?? path.join(os.tmpdir(), `verter-e2e-dx-${process.pid}.log`);
-  const timingFile =
-    readE2eEnv("TIMING_FILE") ?? path.join(os.tmpdir(), `verter-e2e-dx-timing-${process.pid}.json`);
+  let workspace: string;
+  if (hasCompleteScenarioEnv(process.env) && process.env[DX_HARNESS_WORKSPACE_ENV]) {
+    workspace = validateWorkspaceArg(process.env[DX_HARNESS_WORKSPACE_ENV]);
+    console.log(`DX scenario: using explicit DX_HARNESS_* handoff`);
+  } else {
+    const prepared = prepareCommittedKeystrokeWorkspace(extensionDevelopmentPath, {
+      installDeps: true,
+    });
+    disposeWorkspace = prepared.dispose;
+    workspace = prepared.workspace;
+    baseEnv = mergeScenarioEnv(baseEnv, prepared.env);
+    writeProducerReceipt(workspace, prepared.scenario);
+    console.log(`DX scenario: committed keystroke producer → ${workspace}`);
+  }
 
-  const launch = buildDxLaunch({
-    workspace,
-    extensionDevelopmentPath,
-    extensionTestsPath,
-    vscodeExecutablePath,
-    logFile,
-    baseEnv: process.env,
-    lspBinaryPath,
-    typeProvider: readE2eEnv("TYPE_PROVIDER"),
-    timingFile,
-  });
+  try {
+    ensureAndVerifyDebugSettings(workspace, harnessSettingsWriter(harness));
 
-  console.log(`DX extension-host run`);
-  console.log(`  workspace: ${workspace}`);
-  console.log(`  logFile:   ${logFile}`);
+    const vscodeVersion = readE2eEnv("VSCODE_VERSION") ?? "stable";
+    const vscodeExecutablePath = await resolveVscodeExecutablePath(vscodeVersion, {
+      explicitExecutablePath: readE2eEnv("VSCODE_EXECUTABLE"),
+    });
+    const lspBinaryPath = copyLspBinaryToTemp(extensionDevelopmentPath);
 
-  await runVsCodeTests(launch);
+    const logFile =
+      readE2eEnv("LOG_FILE") ?? path.join(os.tmpdir(), `verter-e2e-dx-${process.pid}.log`);
+    const timingFile =
+      readE2eEnv("TIMING_FILE") ??
+      path.join(os.tmpdir(), `verter-e2e-dx-timing-${process.pid}.json`);
+
+    const launch = buildDxLaunch({
+      workspace,
+      extensionDevelopmentPath,
+      extensionTestsPath,
+      vscodeExecutablePath,
+      logFile,
+      baseEnv,
+      lspBinaryPath,
+      typeProvider: readE2eEnv("TYPE_PROVIDER") ?? "tsserver",
+      timingFile,
+    });
+
+    // Ensure scenario env is present on the extension host even when produced.
+    Object.assign(launch.extensionTestsEnv, {
+      ...Object.fromEntries(Object.entries(baseEnv).filter(([k]) => k.startsWith("DX_HARNESS_"))),
+      [DX_HARNESS_WORKSPACE_ENV]: workspace,
+    });
+
+    console.log(`DX extension-host run`);
+    console.log(`  workspace: ${workspace}`);
+    console.log(`  logFile:   ${logFile}`);
+
+    await runVsCodeTests(launch);
+  } finally {
+    disposeWorkspace?.();
+  }
 }
 
 /**

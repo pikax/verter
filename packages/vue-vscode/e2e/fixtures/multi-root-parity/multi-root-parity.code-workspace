@@ -1,0 +1,9 @@
+{
+  "folders": [
+    { "name": "pkg-a", "path": "pkg-a" },
+    { "name": "pkg-b", "path": "pkg-b" },
+  ],
+  "settings": {
+    "verter.mcp.enabled": false,
+  },
+}

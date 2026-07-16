@@ -23,6 +23,12 @@ export interface RunSummary {
   failures?: number;
   executed?: number;
   rootHookError?: string | null;
+  passedTestIds?: string[];
+  pendingTestIds?: string[];
+  /** Detailed failure records (id + message); required for triage when failures > 0. */
+  failedTests?: Array<{ id?: string; err?: string; stack?: string }>;
+  fixture?: string;
+  loadedFiles?: string[];
 }
 
 /** The sidecar paths derived from a run's log file. */
@@ -57,6 +63,8 @@ export function clearRunArtifacts(logFile: string): void {
 
 /** Options for {@link enforceRunSummary}. */
 export interface EnforceRunSummaryOptions {
+  /** Fixture identity expected from the extension-host process. */
+  expectedFixture?: string;
   /**
    * The cross-process flush-lag poll window in ms (the summary is written as the runner's
    * LAST act, so it can be briefly invisible right after `runTests()` resolves). Default
@@ -65,6 +73,13 @@ export interface EnforceRunSummaryOptions {
   pollMs?: number;
   /** Poll interval in ms (default 200). */
   pollIntervalMs?: number;
+  /**
+   * Required behavioral test IDs for a release-critical run. Every required ID must
+   * pass exactly once, no extra ID may pass, and none may be pending.
+   */
+  requiredTestIds?: readonly string[];
+  /** Exact compiled suite-file inventory the fixture was required to load. */
+  requiredLoadedFiles?: readonly string[];
 }
 
 /**
@@ -96,12 +111,69 @@ export async function enforceRunSummary(
   }
   const summary = JSON.parse(fs.readFileSync(summaryPath, "utf-8")) as RunSummary;
   if ((summary.failures ?? 0) > 0) {
+    const failedDetail =
+      summary.failedTests && summary.failedTests.length > 0
+        ? summary.failedTests
+            .slice(0, 8)
+            .map((f) => `${f.id ?? "?"}: ${f.err ?? "unknown"}`)
+            .join(" || ")
+        : "no failedTests[] detail recorded (runner too old?)";
     throw new Error(
       `${label}: ${summary.failures} test(s) failed (per run summary)` +
-        (summary.rootHookError ? `; root hook error: ${summary.rootHookError}` : ""),
+        (summary.rootHookError ? `; root hook error: ${summary.rootHookError}` : "") +
+        `; details: ${failedDetail}`,
     );
   }
   if ((summary.executed ?? 0) === 0) {
     throw new Error(`${label}: run executed 0 tests (vacuous pass refused)`);
+  }
+  if (opts.expectedFixture && summary.fixture !== opts.expectedFixture) {
+    throw new Error(
+      `${label}: run summary fixture mismatch; expected ${opts.expectedFixture}, got ${String(summary.fixture)}`,
+    );
+  }
+  if (opts.requiredLoadedFiles) {
+    const required = [...opts.requiredLoadedFiles].sort();
+    const loaded = [...(summary.loadedFiles ?? [])].sort();
+    const requiredSet = new Set(required);
+    const loadedSet = new Set(loaded);
+    if (requiredSet.size !== required.length || loadedSet.size !== loaded.length) {
+      throw new Error(`${label}: loaded suite inventory contains duplicate paths`);
+    }
+    const missing = required.filter((file) => !loadedSet.has(file));
+    const unexpected = loaded.filter((file) => !requiredSet.has(file));
+    if (missing.length > 0 || unexpected.length > 0) {
+      throw new Error(
+        `${label}: loaded suite inventory mismatch` +
+          `; missing: ${missing.join(", ") || "none"}` +
+          `; unexpected: ${unexpected.join(", ") || "none"}`,
+      );
+    }
+  }
+  if (opts.requiredTestIds) {
+    const required = new Set(opts.requiredTestIds);
+    if (required.size !== opts.requiredTestIds.length) {
+      throw new Error(`${label}: required capability manifest itself contains duplicate IDs`);
+    }
+    const passed = summary.passedTestIds ?? [];
+    const pending = summary.pendingTestIds ?? [];
+    if (pending.length > 0) {
+      throw new Error(`${label}: pending test ID(s) in required run: ${pending.join(", ")}`);
+    }
+    const counts = new Map<string, number>();
+    for (const id of passed) counts.set(id, (counts.get(id) ?? 0) + 1);
+    const duplicates = [...counts]
+      .filter(([id, count]) => required.has(id) && count > 1)
+      .map(([id]) => id);
+    const missing = opts.requiredTestIds.filter((id) => (counts.get(id) ?? 0) === 0);
+    const unexpected = [...counts.keys()].filter((id) => !required.has(id));
+    if (duplicates.length > 0 || missing.length > 0 || unexpected.length > 0) {
+      throw new Error(
+        `${label}: capability contract mismatch` +
+          `; duplicate: ${duplicates.join(", ") || "none"}` +
+          `; missing: ${missing.join(", ") || "none"}` +
+          `; unexpected: ${unexpected.join(", ") || "none"}`,
+      );
+    }
   }
 }

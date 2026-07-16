@@ -1,0 +1,11 @@
+{
+  "name": "verter-e2e-vue-contract",
+  "private": true,
+  "dependencies": {
+    "verter": "file:../../../../..",
+    "vue": "3.5.40"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}

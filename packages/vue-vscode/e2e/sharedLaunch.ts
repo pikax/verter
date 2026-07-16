@@ -21,9 +21,9 @@ export { readE2eEnv } from "../src/e2eEnv";
  * Searches `target/{debug,release}` walking upward to the monorepo root, then
  * `dist/` and `bin/` inside the extension path. Returns `undefined` if not found.
  */
-export function findLspBinary(extensionPath: string): string | undefined {
+function findWorkspaceBinary(extensionPath: string, stem: string): string | undefined {
   const ext = process.platform === "win32" ? ".exe" : "";
-  const binaryName = `verter-lsp${ext}`;
+  const binaryName = `${stem}${ext}`;
 
   // Walk upward to find the monorepo root's target/ directory.
   let dir = extensionPath;
@@ -45,6 +45,86 @@ export function findLspBinary(extensionPath: string): string | undefined {
   const binPath = path.join(extensionPath, "bin", binaryName);
   if (fs.existsSync(binPath)) {
     return binPath;
+  }
+
+  return undefined;
+}
+
+export function findLspBinary(extensionPath: string): string | undefined {
+  return findWorkspaceBinary(extensionPath, "verter-lsp");
+}
+
+export interface FindWorkspaceRcTsgoOptions {
+  env?: Record<string, string | undefined>;
+  platform?: NodeJS.Platform;
+  arch?: string;
+}
+
+function rcTsgoPlatformPackage(platform: NodeJS.Platform, arch: string): string | undefined {
+  if (platform === "win32" && arch === "x64") return "typescript-win32-x64";
+  if (platform === "win32" && arch === "arm64") return "typescript-win32-arm64";
+  if (platform === "linux" && arch === "x64") return "typescript-linux-x64";
+  if (platform === "linux" && arch === "arm64") return "typescript-linux-arm64";
+  if (platform === "darwin" && arch === "x64") return "typescript-darwin-x64";
+  if (platform === "darwin" && arch === "arm64") return "typescript-darwin-arm64";
+  return undefined;
+}
+
+/**
+ * Resolve the pinned TypeScript RC native binary used by provider-parity E2E.
+ * This intentionally accepts only `@typescript/typescript-<platform>` packages;
+ * the retired `@typescript/native-preview-*` engine is protocol-incompatible and
+ * must never make a managed-tsgo rail appear available.
+ */
+export function findWorkspaceRcTsgoBinary(
+  extensionPath: string,
+  options: FindWorkspaceRcTsgoOptions = {},
+): string | undefined {
+  const env = options.env ?? process.env;
+  const explicit = env.VERTER_TSGO_BIN;
+  if (explicit) {
+    if (!fs.existsSync(explicit)) {
+      throw new Error(`Configured VERTER_TSGO_BIN does not exist: ${explicit}`);
+    }
+    return explicit;
+  }
+
+  const platform = options.platform ?? process.platform;
+  const arch = options.arch ?? process.arch;
+  const packageName = rcTsgoPlatformPackage(platform, arch);
+  if (!packageName) return undefined;
+  const binaryName = platform === "win32" ? "tsc.exe" : "tsc";
+  const pnpmPrefix = `@typescript+${packageName}@`;
+
+  let dir = path.resolve(extensionPath);
+  for (;;) {
+    const direct = path.join(dir, "node_modules", "@typescript", packageName, "lib", binaryName);
+    if (fs.existsSync(direct)) return direct;
+
+    const pnpmStore = path.join(dir, "node_modules", ".pnpm");
+    if (fs.existsSync(pnpmStore)) {
+      const packageDirs = fs
+        .readdirSync(pnpmStore, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && entry.name.startsWith(pnpmPrefix))
+        .map((entry) => entry.name)
+        .sort((left, right) => right.localeCompare(left, undefined, { numeric: true }));
+      for (const packageDir of packageDirs) {
+        const candidate = path.join(
+          pnpmStore,
+          packageDir,
+          "node_modules",
+          "@typescript",
+          packageName,
+          "lib",
+          binaryName,
+        );
+        if (fs.existsSync(candidate)) return candidate;
+      }
+    }
+
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
   }
 
   return undefined;

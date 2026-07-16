@@ -65,6 +65,9 @@ describe("VSIX runtime dependency staging", () => {
         expect(lstatSync(path.join(packagePath, "package.json")).isFile(), packagePath).toBe(true);
       }
       expect(existsSync(path.join(pluginModules, "svelte"))).toBe(false);
+      expect(
+        existsSync(path.join(pluginModules, "@verter", "svelte-jsx", "jsx-runtime.d.ts")),
+      ).toBe(true);
 
       const stagedPluginManifest = JSON.parse(
         readFileSync(path.join(pluginDir, "package.json"), "utf8"),

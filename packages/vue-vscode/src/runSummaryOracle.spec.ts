@@ -70,6 +70,17 @@ describe("enforceRunSummary result semantics", () => {
     ).rejects.toThrow(/2 test\(s\) failed/);
   });
 
+  it("includes failedTests detail in the failure message", async () => {
+    writeSummary({
+      failures: 1,
+      executed: 2,
+      failedTests: [{ id: "vue.foo", err: "PRODUCT_GAP ISSUE-x: boom" }],
+    });
+    await expect(enforceRunSummary(logFile, "vue-parity@tsserver", { pollMs: 0 })).rejects.toThrow(
+      /PRODUCT_GAP ISSUE-x: boom/,
+    );
+  });
+
   it("surfaces a root-hook error alongside the failure count", async () => {
     writeSummary({ failures: 1, executed: 0, rootHookError: "boom in beforeAll" });
     await expect(
@@ -89,5 +100,137 @@ describe("enforceRunSummary result semantics", () => {
     await expect(
       enforceRunSummary(logFile, "editor-owned-project@shared-tsgo", { pollMs: 0 }),
     ).resolves.toBeUndefined();
+  });
+
+  it("refuses pending tests for a required capability contract", async () => {
+    writeSummary({
+      failures: 0,
+      executed: 2,
+      passedTestIds: ["vue.ts.definition"],
+      pendingTestIds: ["vue.ts.rename"],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "vue-contract@tsserver", {
+        pollMs: 0,
+        requiredTestIds: ["vue.ts.definition", "vue.ts.rename"],
+      }),
+    ).rejects.toThrow(/pending test.*vue\.ts\.rename/i);
+  });
+
+  it("refuses any passed ID outside the complete required inventory", async () => {
+    writeSummary({
+      failures: 0,
+      executed: 3,
+      passedTestIds: [
+        "vue.clean-diagnostics.daily",
+        "vue.definition.markup-to-script",
+        "vue.extra.optional",
+      ],
+      pendingTestIds: [],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "vue-parity@tsserver", {
+        pollMs: 0,
+        requiredTestIds: ["vue.clean-diagnostics.daily", "vue.definition.markup-to-script"],
+      }),
+    ).rejects.toThrow(/unexpected: vue\.extra\.optional/);
+  });
+
+  it("refuses a missing required ID", async () => {
+    writeSummary({
+      failures: 0,
+      executed: 1,
+      passedTestIds: ["vue.extra.optional"],
+      pendingTestIds: [],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "vue-parity@tsgo", {
+        pollMs: 0,
+        requiredTestIds: ["vue.clean-diagnostics.daily"],
+      }),
+    ).rejects.toThrow(/missing: vue\.clean-diagnostics\.daily/);
+  });
+
+  it("refuses a missing or duplicate required capability contract ID", async () => {
+    writeSummary({
+      failures: 0,
+      executed: 3,
+      passedTestIds: ["vue.ts.definition", "vue.ts.definition", "vue.ts.rename"],
+      pendingTestIds: [],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "vue-contract@tsgo", {
+        pollMs: 0,
+        requiredTestIds: ["vue.ts.definition", "vue.ts.rename", "vue.ts.references"],
+      }),
+    ).rejects.toThrow(/duplicate.*vue\.ts\.definition.*missing.*vue\.ts\.references/i);
+  });
+
+  it("accepts exact required capability contract coverage", async () => {
+    writeSummary({
+      failures: 0,
+      executed: 2,
+      passedTestIds: ["svelte.js.definition", "svelte.js.rename"],
+      pendingTestIds: [],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "svelte-contract@shared-tsgo", {
+        pollMs: 0,
+        requiredTestIds: ["svelte.js.definition", "svelte.js.rename"],
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("attests the exact fixture and loaded suite-file inventory", async () => {
+    writeSummary({
+      failures: 0,
+      executed: 2,
+      fixture: "svelte-parity",
+      loadedFiles: ["parity/svelte/daily.test.js", "parity/svelte/matrix.test.js"],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "svelte-parity@tsgo", {
+        expectedFixture: "svelte-parity",
+        pollMs: 0,
+        requiredLoadedFiles: ["parity/svelte/daily.test.js", "parity/svelte/matrix.test.js"],
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("refuses missing, unexpected, duplicate, or wrong-fixture run inventory", async () => {
+    writeSummary({
+      failures: 0,
+      executed: 1,
+      fixture: "vue-parity",
+      loadedFiles: ["parity/vue/daily.test.js", "parity/vue/daily.test.js"],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "svelte-parity@shared-tsgo", {
+        expectedFixture: "svelte-parity",
+        pollMs: 0,
+        requiredLoadedFiles: ["parity/svelte/daily.test.js"],
+      }),
+    ).rejects.toThrow(/fixture mismatch/i);
+
+    writeSummary({
+      failures: 0,
+      executed: 1,
+      fixture: "svelte-parity",
+      loadedFiles: ["parity/svelte/daily.test.js", "parity/svelte/daily.test.js"],
+    });
+    await expect(
+      enforceRunSummary(logFile, "svelte-parity@shared-tsgo", {
+        expectedFixture: "svelte-parity",
+        pollMs: 0,
+        requiredLoadedFiles: ["parity/svelte/matrix.test.js"],
+      }),
+    ).rejects.toThrow(/duplicate paths/i);
   });
 });

@@ -1,0 +1,12 @@
+{
+  "name": "verter-e2e-mixed-parity",
+  "private": true,
+  "dependencies": {
+    "svelte": "5.56.3",
+    "verter": "file:../../../../..",
+    "vue": "3.5.40"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}

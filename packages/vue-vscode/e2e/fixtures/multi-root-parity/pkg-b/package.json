@@ -1,0 +1,11 @@
+{
+  "name": "verter-e2e-multi-root-b",
+  "private": true,
+  "dependencies": {
+    "svelte": "5.56.3",
+    "verter-vscode": "file:../../../.."
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}

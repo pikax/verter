@@ -88,11 +88,11 @@ The inline suppression syntax is stable:
 
 These features are behind opt-in flags and may change or be removed in any release without prior notice.
 
-| Feature                    | Setting                                        | Description                                                  |
-| -------------------------- | ---------------------------------------------- | ------------------------------------------------------------ |
-| Strict Slots               | `verter.experimental.strictSlots`              | Type-checks slot children against `defineSlots()` signatures |
-| Conditional Root Narrowing | `verter.experimental.conditionalRootNarrowing` | Narrows component root element type based on prop values     |
-| Expose Bindings Testing    | `verter.experimental.exposeBindingsTesting`    | Exposes binding type information for testing                 |
+| Feature                    | Setting                                        | Description                                                                                                                                                               |
+| -------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Strict Slots               | `verter.experimental.strictSlots`              | Type-checks slot children against `defineSlots()` signatures                                                                                                              |
+| Conditional Root Narrowing | `verter.experimental.conditionalRootNarrowing` | Narrows component root element type based on prop values                                                                                                                  |
+| Expose Bindings Testing    | `verter.experimental.exposeBindingsTesting`    | Vue: test importers get VTU-style testing API (`*.vue.__verter_test.ts`). Svelte: no testing virtual file (public surface only). See [Experimental](/guide/experimental). |
 
 ### `@verter/component-meta/compat` (Volar Drop-in)
 
