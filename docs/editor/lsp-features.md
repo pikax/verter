@@ -68,6 +68,22 @@ The following 10 modifiers can be applied to any token type:
 | Workspace Folders | `workspace/workspaceFolders`                           | Multi-root workspace support with change notifications   |
 | File Operations   | `workspace/didCreateFiles`, `workspace/didDeleteFiles` | Tracks file creation and deletion for cache invalidation |
 
+## Component Metadata Requests
+
+Verter exposes three namespaced requests for editor integrations and developer
+tools. They are Verter protocol extensions, not standard LSP methods:
+
+| Method | Result |
+| ------ | ------ |
+| `$/verter/getComponentMeta` | Full component metadata for a document, including the compatibility payload consumed by existing editor clients. |
+| `$/verter/getComponentMetaSurface` | Selective native surface data for requested component facets. |
+| `$/verter/getComponentMetaTypeExpansion` | One-layer expansion of a previously returned type handle. |
+
+The server validates request parameters and returns normal JSON-RPC errors for
+invalid or unavailable inputs. Projection safety limits retain their typed
+partial reason internally and are also published through the document
+diagnostic path; see [Release State and Known Limitations](/arch/release-state).
+
 ## Document Synchronization
 
 The server uses **incremental** text document synchronization (`TextDocumentSyncKind.Incremental`), meaning only the changed portions of a document are sent from the client on each edit. This minimizes communication overhead for large files.
@@ -88,7 +104,7 @@ The LSP binary is structured as follows:
 
 ```
 main.rs               -- stdio transport, CLI argument parsing
-server.rs              -- LSP message loop, request dispatch
+server/                -- LSP lifecycle, request dispatch, and custom methods
 documents/             -- Document tracking and incremental sync
 features/              -- Individual LSP feature handlers
 analysis/              -- Static analysis integration

@@ -5,12 +5,13 @@
 //! `typeinfo_additional_proof_rows.rs`, `typeinfo_parity_blocks.rs`) is
 //! produced from `scripts/gen-typeinfo-ignore-manifest.mjs`
 //! (`pnpm gen:typeinfo-manifest`) — the SOLE writer of all three files.
-//! The authoritative §10.4.1 row→block partition feeds ONLY each
+//! The authoritative machine-readable row→block partition at
+//! `scripts/manifests/typeinfo-row-block-partition.json` feeds ONLY each
 //! `IgnoredTestRow`'s `block_id` (joined with the live `#[ignore]`
 //! discovery and the Capability Map). The `AdditionalProofRow` table and
 //! the `TYPEINFO_PARITY_BLOCKS` block contracts (each block's
 //! required_guards/verification_labels/prereqs/mechanisms) come from the
-//! generator's own maps, NOT from §10.4.1. Whenever the generator
+//! generator's own maps, NOT from the row partition. Whenever the generator
 //! or its inputs change, the committed files must be regenerated and
 //! committed in the same change.
 //!

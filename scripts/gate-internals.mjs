@@ -23,12 +23,13 @@ import {
   readFileSync,
   existsSync,
   renameSync,
+  copyFileSync,
   statSync,
   readdirSync,
   realpathSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname, basename, sep, isAbsolute } from "node:path";
+import { join, dirname, basename, sep, isAbsolute, win32, posix } from "node:path";
 import { createHash } from "node:crypto";
 
 // ----------------------------------------------------------------------------------------------------
@@ -49,6 +50,99 @@ export const EXIT_USAGE = 127;
 
 export const IS_WINDOWS = process.platform === "win32";
 export const IS_MAC = process.platform === "darwin";
+
+// cargo-nextest's Windows archive contains test executables but omits their hashed PDB sidecars. Most
+// tests do not need a PDB at runtime, but verter_napi's allocation-site audit intentionally proves that
+// sampled frames resolve to the semantic caller name. Running that test from the extracted archive without
+// its matching PDB turns every frame into a raw address and makes the canonical gate differ from a direct
+// Cargo run. Keep the required set closed and explicit: copying every workspace PDB would duplicate several
+// gigabytes, while silently weakening the attribution assertion would stop testing the production contract.
+const WINDOWS_RUNTIME_SYMBOL_SUITES = Object.freeze(["verter_napi"]);
+
+/**
+ * Restore the closed set of runtime-required Windows PDBs beside their extracted test binaries.
+ *
+ * The filesystem operations are injectable so the gate self-test exercises the exact production path on
+ * every host without writing fake Windows paths. Returns an error instead of throwing for every malformed
+ * archive/suite/source shape; the production gate maps that to a loud setup failure before Surface 1.
+ */
+export function ensureRequiredWindowsDebugSidecars({
+  allSuites,
+  runnerTarget,
+  extractDir,
+  windows = IS_WINDOWS,
+  existsFn = existsSync,
+  copyFileFn = copyFileSync,
+}) {
+  if (!windows) return { copied: 0 };
+  if (!Array.isArray(allSuites))
+    return { error: "archive suite listing is not an array", copied: 0 };
+
+  const pathApi = windows ? win32 : posix;
+  const extractedTarget = pathApi.resolve(extractDir, "target");
+  let copied = 0;
+
+  for (const binaryId of WINDOWS_RUNTIME_SYMBOL_SUITES) {
+    const matches = allSuites.filter((suite) => suite && suite["binary-id"] === binaryId);
+    if (matches.length !== 1) {
+      return {
+        error: `required Windows symbol suite '${binaryId}' occurs ${matches.length} times in the archive (expected exactly 1)`,
+        copied,
+      };
+    }
+
+    const binaryPath = matches[0]["binary-path"];
+    if (typeof binaryPath !== "string" || !binaryPath.toLowerCase().endsWith(".exe")) {
+      return {
+        error: `required Windows symbol suite '${binaryId}' has no .exe binary path`,
+        copied,
+      };
+    }
+
+    const resolvedBinary = pathApi.resolve(binaryPath);
+    const relativeBinary = pathApi.relative(extractedTarget, resolvedBinary);
+    if (
+      relativeBinary === "" ||
+      relativeBinary === ".." ||
+      relativeBinary.startsWith(`..${pathApi.sep}`) ||
+      pathApi.isAbsolute(relativeBinary)
+    ) {
+      return {
+        error: `required Windows symbol suite '${binaryId}' escapes the extracted target tree: ${binaryPath}`,
+        copied,
+      };
+    }
+
+    const toPdb = (path) => `${path.slice(0, -4)}.pdb`;
+    const sourcePdb = toPdb(pathApi.join(pathApi.resolve(runnerTarget), relativeBinary));
+    const destinationPdb = toPdb(resolvedBinary);
+    if (existsFn(destinationPdb)) continue;
+    if (!existsFn(sourcePdb)) {
+      return {
+        error: `required Windows debug sidecar is missing for '${binaryId}': ${sourcePdb}`,
+        copied,
+      };
+    }
+
+    try {
+      copyFileFn(sourcePdb, destinationPdb);
+    } catch (error) {
+      return {
+        error: `could not copy required Windows debug sidecar for '${binaryId}': ${error && error.message ? error.message : error}`,
+        copied,
+      };
+    }
+    if (!existsFn(destinationPdb)) {
+      return {
+        error: `required Windows debug sidecar copy did not materialize for '${binaryId}': ${destinationPdb}`,
+        copied,
+      };
+    }
+    copied += 1;
+  }
+
+  return { copied };
+}
 
 // ----------------------------------------------------------------------------------------------------
 // Platform-aware `pnpm install --frozen-lockfile` command resolution (returns `{ cmd, args }`, plus

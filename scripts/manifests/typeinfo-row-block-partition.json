@@ -1,0 +1,2177 @@
+{
+  "schema": "verter.typeinfo-row-block-partition.v1",
+  "rows": [
+    {
+      "file": "function_advanced.rs",
+      "function": "function_advanced_call_construct_hybrid_constructor_parameters_uses_construct_signature",
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "function_advanced.rs",
+      "function": "function_advanced_call_construct_hybrid_instance_type_uses_construct_signature",
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "function_advanced.rs",
+      "function": "function_advanced_call_construct_hybrid_parameters_uses_call_signature",
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "function_advanced.rs",
+      "function": "function_advanced_call_construct_hybrid_return_type_uses_call_signature",
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "function_advanced.rs",
+      "function": "function_advanced_constructor_parameters_publishes_constructor_arg_tuple",
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "function_advanced.rs",
+      "function": "function_advanced_instance_type_publishes_constructor_return_shape",
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "function_advanced.rs",
+      "function": "function_advanced_return_type_of_overloaded_function_uses_last_overload",
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "index_signatures.rs",
+      "function": "index_signatures_numeric_index_publishes_signature",
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "capability": "IndexSignatures"
+    },
+    {
+      "file": "index_signatures.rs",
+      "function": "index_signatures_symbol_index_publishes_signature",
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "capability": "IndexSignatures"
+    },
+    {
+      "file": "module_features.rs",
+      "function": "module_features_namespace_geometry_vector_aliases_point",
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "capability": "ModuleFeatures"
+    },
+    {
+      "file": "substitution_types.rs",
+      "function": "substitution_types_sb15_recursive_generic_substitution",
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "capability": "TypeParameterFeatures"
+    },
+    {
+      "file": "typescript_rules.rs",
+      "function": "typescript_rules_awaited_recursively_unwraps_promises",
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "capability": "TypeScriptRules"
+    },
+    {
+      "file": "typescript_rules.rs",
+      "function": "typescript_rules_constructor_parameters_resolve_tuple",
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "capability": "TypeScriptRules"
+    },
+    {
+      "file": "typescript_rules.rs",
+      "function": "typescript_rules_instance_type_resolves_constructed_object",
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "capability": "TypeScriptRules"
+    },
+    {
+      "file": "utility_edge.rs",
+      "function": "utility_edge_non_nullable_strips_null_and_undefined",
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_top_bottom.rs",
+      "function": "utility_top_bottom_utb15_awaited_unknown_is_unknown",
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_top_bottom.rs",
+      "function": "utility_top_bottom_utb17_awaited_null_is_null",
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_top_bottom.rs",
+      "function": "utility_top_bottom_utb18_awaited_undefined_is_undefined",
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_top_bottom.rs",
+      "function": "utility_top_bottom_utb19_awaited_nested_promise_is_inner_primitive",
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_top_bottom.rs",
+      "function": "utility_top_bottom_utb21_non_nullable_unknown_is_empty_object",
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "variadic_tuples.rs",
+      "function": "variadic_tuple_concat_alias_produces_joined_literal_tuple",
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "capability": "TupleFeatures"
+    },
+    {
+      "file": "conditional_infer.rs",
+      "function": "conditional_infer_aliases_reduce_when_requested_directly",
+      "block": "U2.RELATION_INFER",
+      "capability": "ConditionalInfer"
+    },
+    {
+      "file": "conditional_infer.rs",
+      "function": "conditional_infer_tuple_pattern_resolves_each_slot",
+      "block": "U2.RELATION_INFER",
+      "capability": "ConditionalInfer"
+    },
+    {
+      "file": "modern_ts_features.rs",
+      "function": "satisfies_array_literal_widens_to_primitive_array",
+      "block": "U2.RELATION_INFER",
+      "capability": "ModernTsFeatures"
+    },
+    {
+      "file": "no_infer.rs",
+      "function": "no_infer_component_helper_pins_variant_from_props_argument",
+      "block": "U2.RELATION_INFER",
+      "capability": "ConditionalInfer"
+    },
+    {
+      "file": "no_infer.rs",
+      "function": "no_infer_literal_call_returns_pinned_literal_from_first_argument",
+      "block": "U2.RELATION_INFER",
+      "capability": "ConditionalInfer"
+    },
+    {
+      "file": "recursive_conditional.rs",
+      "function": "recursive_conditional_awaited_recursive_unwraps_nested_promises",
+      "block": "U2.RELATION_INFER",
+      "capability": "ConditionalInfer"
+    },
+    {
+      "file": "recursive_conditional.rs",
+      "function": "recursive_conditional_deep_partial_marks_every_nested_property_optional",
+      "block": "U2.RELATION_INFER",
+      "capability": "ConditionalInfer"
+    },
+    {
+      "file": "recursive_conditional.rs",
+      "function": "recursive_conditional_deep_readonly_marks_every_nested_property",
+      "block": "U2.RELATION_INFER",
+      "capability": "ConditionalInfer"
+    },
+    {
+      "file": "recursive_conditional.rs",
+      "function": "recursive_conditional_flatten_unwraps_three_deep_array_to_primitive",
+      "block": "U2.RELATION_INFER",
+      "capability": "ConditionalInfer"
+    },
+    {
+      "file": "relation_semantics.rs",
+      "function": "relation_any_extends_string_distributes_both_branches",
+      "block": "U2.RELATION_INFER",
+      "capability": "RelationSemantics"
+    },
+    {
+      "file": "relation_semantics.rs",
+      "function": "relation_distributive_conditional_over_union_emits_branch_union",
+      "block": "U2.RELATION_INFER",
+      "capability": "RelationSemantics"
+    },
+    {
+      "file": "relation_semantics.rs",
+      "function": "relation_fixed_tuple_assignable_to_first_plus_rest",
+      "block": "U2.RELATION_INFER",
+      "capability": "RelationSemantics"
+    },
+    {
+      "file": "relation_semantics.rs",
+      "function": "relation_infer_head_of_tuple_pattern",
+      "block": "U2.RELATION_INFER",
+      "capability": "RelationSemantics"
+    },
+    {
+      "file": "relation_semantics.rs",
+      "function": "relation_infer_params_of_function_preserves_optional_undefined",
+      "block": "U2.RELATION_INFER",
+      "capability": "RelationSemantics"
+    },
+    {
+      "file": "relation_semantics.rs",
+      "function": "relation_infer_tail_of_tuple_pattern",
+      "block": "U2.RELATION_INFER",
+      "capability": "RelationSemantics"
+    },
+    {
+      "file": "relation_semantics.rs",
+      "function": "relation_infer_value_of_object_property",
+      "block": "U2.RELATION_INFER",
+      "capability": "RelationSemantics"
+    },
+    {
+      "file": "relation_semantics.rs",
+      "function": "relation_never_via_generic_helper_collapses_to_never",
+      "block": "U2.RELATION_INFER",
+      "capability": "RelationSemantics"
+    },
+    {
+      "file": "relation_semantics.rs",
+      "function": "relation_optional_property_not_assignable_to_required",
+      "block": "U2.RELATION_INFER",
+      "capability": "RelationSemantics"
+    },
+    {
+      "file": "relation_semantics.rs",
+      "function": "relation_readonly_property_assignable_to_mutable",
+      "block": "U2.RELATION_INFER",
+      "capability": "RelationSemantics"
+    },
+    {
+      "file": "typescript_rules.rs",
+      "function": "typescript_rules_distributive_conditional_expands_each_union_arm",
+      "block": "U2.RELATION_INFER",
+      "capability": "TypeScriptRules"
+    },
+    {
+      "file": "indexed_utilities.rs",
+      "function": "direct_parameters_payload_extracts_function_argument",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "indexed_utilities.rs",
+      "function": "direct_parameters_second_extracts_number_argument",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "indexed_utilities.rs",
+      "function": "nested_indexed_utility_surface_resolves_all_terminal_members",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "indexed_utilities.rs",
+      "function": "nested_nonnullable_array_indexed_access_resolves_element",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "indexed_utilities.rs",
+      "function": "nested_parameters_nonnullable_indexed_payload_resolves",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "tuple_labels.rs",
+      "function": "tuple_labels_number_index_projects_all_elements_union",
+      "block": "U2.UTILITIES",
+      "capability": "TupleFeatures"
+    },
+    {
+      "file": "tuple_labels.rs",
+      "function": "tuple_labels_numeric_position_access_drops_label",
+      "block": "U2.UTILITIES",
+      "capability": "TupleFeatures"
+    },
+    {
+      "file": "tuple_labels.rs",
+      "function": "tuple_labels_numeric_position_access_on_optional_slot_carries_undefined",
+      "block": "U2.UTILITIES",
+      "capability": "TupleFeatures"
+    },
+    {
+      "file": "tuple_labels.rs",
+      "function": "tuple_labels_parameters_preserves_named_labels_and_optional_marker",
+      "block": "U2.UTILITIES",
+      "capability": "TupleFeatures"
+    },
+    {
+      "file": "utility_composition.rs",
+      "function": "utility_composition_resolves_deep_intersection_config",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_composition.rs",
+      "function": "utility_composition_resolves_required_pick_over_nested_nonnullable_payload",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_edge.rs",
+      "function": "utility_edge_omit_all_keys_yields_empty_object",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_edge.rs",
+      "function": "utility_edge_pick_all_keys_yields_input_shape",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_edge.rs",
+      "function": "utility_edge_pick_never_yields_empty_object",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_top_bottom.rs",
+      "function": "utility_top_bottom_utb01_return_type_of_any_is_any",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_top_bottom.rs",
+      "function": "utility_top_bottom_utb02_return_type_of_never_is_never",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_top_bottom.rs",
+      "function": "utility_top_bottom_utb07_parameters_of_any_is_unknown_array",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_top_bottom.rs",
+      "function": "utility_top_bottom_utb08_parameters_of_never_is_never",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_top_bottom.rs",
+      "function": "utility_top_bottom_utb11_constructor_parameters_any_is_unknown_array",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_top_bottom.rs",
+      "function": "utility_top_bottom_utb12_instance_type_any_is_any",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_top_bottom.rs",
+      "function": "utility_top_bottom_utb13_constructor_parameters_any_ctor_is_any_array",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_top_bottom.rs",
+      "function": "utility_top_bottom_utb14_awaited_any_is_any",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_top_bottom.rs",
+      "function": "utility_top_bottom_utb16_awaited_never_is_never",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_top_bottom.rs",
+      "function": "utility_top_bottom_utb20_non_nullable_any_is_any",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_top_bottom.rs",
+      "function": "utility_top_bottom_utb22_non_nullable_never_is_never",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_top_bottom.rs",
+      "function": "utility_top_bottom_utb23_non_nullable_null_undefined_is_never",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_top_bottom.rs",
+      "function": "utility_top_bottom_utb25_exclude_any_against_string_is_any",
+      "block": "U2.UTILITIES",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "variadic_tuples.rs",
+      "function": "variadic_tuple_head_of_sample_resolves_to_first_literal",
+      "block": "U2.UTILITIES",
+      "capability": "TupleFeatures"
+    },
+    {
+      "file": "variadic_tuples.rs",
+      "function": "variadic_tuple_init_of_sample_resolves_to_prefix_tuple",
+      "block": "U2.UTILITIES",
+      "capability": "TupleFeatures"
+    },
+    {
+      "file": "variadic_tuples.rs",
+      "function": "variadic_tuple_last_of_sample_resolves_to_terminal_literal",
+      "block": "U2.UTILITIES",
+      "capability": "TupleFeatures"
+    },
+    {
+      "file": "variadic_tuples.rs",
+      "function": "variadic_tuple_tail_of_sample_resolves_to_remaining_tuple",
+      "block": "U2.UTILITIES",
+      "capability": "TupleFeatures"
+    },
+    {
+      "file": "variadic_tuples.rs",
+      "function": "variadic_tuple_variadic_function_with_explicit_type_args_concatenates_tuples",
+      "block": "U2.UTILITIES",
+      "capability": "TupleFeatures"
+    },
+    {
+      "file": "branded_types.rs",
+      "function": "branded_key_access_projects_boolean_literal_brand_tag",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "ApparentTypes"
+    },
+    {
+      "file": "branded_types.rs",
+      "function": "branded_key_access_projects_literal_brand_tag",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "ApparentTypes"
+    },
+    {
+      "file": "decorators.rs",
+      "function": "decorators_identity_method_decorator_preserves_return_inference",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "ClassFeatures"
+    },
+    {
+      "file": "decorators.rs",
+      "function": "decorators_metadata_reader_describe_return_is_literal_union",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "ClassFeatures"
+    },
+    {
+      "file": "deep_path.rs",
+      "function": "deep_path_projection_resolves_terminal_without_losing_shape",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "PathProjection"
+    },
+    {
+      "file": "index_signatures.rs",
+      "function": "index_signatures_dual_numeric_key_returns_numeric_signature_value",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "IndexSignatures"
+    },
+    {
+      "file": "index_signatures.rs",
+      "function": "index_signatures_dual_string_key_returns_string_signature_value",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "IndexSignatures"
+    },
+    {
+      "file": "index_signatures.rs",
+      "function": "index_signatures_numeric_lookup_returns_signature_value",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "IndexSignatures"
+    },
+    {
+      "file": "index_signatures.rs",
+      "function": "index_signatures_symbol_lookup_returns_signature_value",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "IndexSignatures"
+    },
+    {
+      "file": "jsx.rs",
+      "function": "jsx_intrinsic_via_generic_lookup_div_resolves_to_div_shape",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "JsxResolution"
+    },
+    {
+      "file": "jsx.rs",
+      "function": "jsx_intrinsic_via_generic_lookup_span_resolves_to_span_shape",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "JsxResolution"
+    },
+    {
+      "file": "mode_boundary_invariants.rs",
+      "function": "mode_boundary_keyof_across_reexport_chain_resolves_all_keys",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "ModeBoundary"
+    },
+    {
+      "file": "modern_ts_features.rs",
+      "function": "import_attribute_simulated_string_literal_indexed_member",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "ModernTsFeatures"
+    },
+    {
+      "file": "module_features.rs",
+      "function": "module_features_typeof_import_default_resolves_value_shape",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "ModuleFeatures"
+    },
+    {
+      "file": "module_features.rs",
+      "function": "module_features_typeof_import_named_value_resolves_to_literal",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "ModuleFeatures"
+    },
+    {
+      "file": "typescript_rules.rs",
+      "function": "typescript_rules_indexed_access_reduces_terminal_property",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "TypeScriptRules"
+    },
+    {
+      "file": "typescript_rules.rs",
+      "function": "typescript_rules_keyof_materializes_literal_key_union",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "TypeScriptRules"
+    },
+    {
+      "file": "typescript_rules.rs",
+      "function": "typescript_rules_tuple_rest_element_resolves_array_element_type",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "TypeScriptRules"
+    },
+    {
+      "file": "union_key_access.rs",
+      "function": "union_key_access_keyof_self_projects_full_value_union",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "UnionDistribution"
+    },
+    {
+      "file": "union_key_access.rs",
+      "function": "union_key_access_two_key_union_projects_member_type_union",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "UnionDistribution"
+    },
+    {
+      "file": "wide_deep.rs",
+      "function": "wide_deep_flag_active_resolves_boolean_terminal",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "PathProjection"
+    },
+    {
+      "file": "wide_deep.rs",
+      "function": "wide_deep_projected_target_resolves_terminal_pick_intersection",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "PathProjection"
+    },
+    {
+      "file": "wide_deep.rs",
+      "function": "wide_deep_projected_token_resolves_literal_union",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "PathProjection"
+    },
+    {
+      "file": "wide_deep.rs",
+      "function": "wide_deep_row_flags_resolve_partial_record_surface",
+      "block": "U2.INDEXED_ACCESS",
+      "capability": "PathProjection"
+    },
+    {
+      "file": "mapped_modifiers.rs",
+      "function": "mapped_modifier_as_never_filter_drops_matching_keys",
+      "block": "U2.MAPPED_TEMPLATE",
+      "capability": "MappedTypes"
+    },
+    {
+      "file": "mapped_modifiers.rs",
+      "function": "mapped_modifier_as_rename_capitalize_rewrites_keys",
+      "block": "U2.MAPPED_TEMPLATE",
+      "capability": "MappedTypes"
+    },
+    {
+      "file": "mapped_modifiers.rs",
+      "function": "mapped_modifier_conditional_value_keeps_never_typed_members",
+      "block": "U2.MAPPED_TEMPLATE",
+      "capability": "MappedTypes"
+    },
+    {
+      "file": "mapped_modifiers.rs",
+      "function": "mapped_modifier_minus_optional_strips_optional_and_undefined",
+      "block": "U2.MAPPED_TEMPLATE",
+      "capability": "MappedTypes"
+    },
+    {
+      "file": "mapped_template.rs",
+      "function": "mapped_type_with_template_literal_key_remap_resolves_item_slot",
+      "block": "U2.MAPPED_TEMPLATE",
+      "capability": "MappedTypes"
+    },
+    {
+      "file": "mapped_template.rs",
+      "function": "mapped_type_with_template_literal_key_remap_resolves_remapped_slot",
+      "block": "U2.MAPPED_TEMPLATE",
+      "capability": "MappedTypes"
+    },
+    {
+      "file": "mapped_template.rs",
+      "function": "record_with_template_literal_key_union_projects_root_slot",
+      "block": "U2.MAPPED_TEMPLATE",
+      "capability": "MappedTypes"
+    },
+    {
+      "file": "mapped_template.rs",
+      "function": "template_literal_key_alias_projects_static_template_slot",
+      "block": "U2.MAPPED_TEMPLATE",
+      "capability": "MappedTypes"
+    },
+    {
+      "file": "mapped_template.rs",
+      "function": "template_literal_union_key_projects_static_slot_union",
+      "block": "U2.MAPPED_TEMPLATE",
+      "capability": "MappedTypes"
+    },
+    {
+      "file": "template_literal_inference.rs",
+      "function": "template_literal_key_remap_capitalises_each_event_key",
+      "block": "U2.MAPPED_TEMPLATE",
+      "capability": "TemplateLiteralInference"
+    },
+    {
+      "file": "template_literal_inference.rs",
+      "function": "template_literal_numeric_infer_extends_number_casts_to_literal",
+      "block": "U2.MAPPED_TEMPLATE",
+      "capability": "TemplateLiteralInference"
+    },
+    {
+      "file": "template_literal_inference.rs",
+      "function": "template_literal_split_on_dot_produces_segment_tuple",
+      "block": "U2.MAPPED_TEMPLATE",
+      "capability": "TemplateLiteralInference"
+    },
+    {
+      "file": "template_literal_inference.rs",
+      "function": "template_literal_strip_on_prefix_uncapitalises_remainder",
+      "block": "U2.MAPPED_TEMPLATE",
+      "capability": "TemplateLiteralInference"
+    },
+    {
+      "file": "template_literal_inference.rs",
+      "function": "template_literal_strip_returns_input_unchanged_when_prefix_missing",
+      "block": "U2.MAPPED_TEMPLATE",
+      "capability": "TemplateLiteralInference"
+    },
+    {
+      "file": "typescript_rules.rs",
+      "function": "typescript_rules_key_remap_exclude_filters_and_renames_keys",
+      "block": "U2.MAPPED_TEMPLATE",
+      "capability": "TypeScriptRules"
+    },
+    {
+      "file": "typescript_rules.rs",
+      "function": "typescript_rules_template_intrinsic_evaluates_union",
+      "block": "U2.MAPPED_TEMPLATE",
+      "capability": "TypeScriptRules"
+    },
+    {
+      "file": "utility_edge.rs",
+      "function": "utility_edge_readonly_required_composes_modifiers",
+      "block": "U2.MAPPED_TEMPLATE",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "utility_edge.rs",
+      "function": "utility_edge_required_strips_optional_markers",
+      "block": "U2.MAPPED_TEMPLATE",
+      "capability": "UtilityComposition"
+    },
+    {
+      "file": "apparent_types.rs",
+      "function": "apparent_types_ap01_string_length",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ApparentTypes"
+    },
+    {
+      "file": "apparent_types.rs",
+      "function": "apparent_types_ap02_string_to_upper_case",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ApparentTypes"
+    },
+    {
+      "file": "apparent_types.rs",
+      "function": "apparent_types_ap03_string_char_at",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ApparentTypes"
+    },
+    {
+      "file": "apparent_types.rs",
+      "function": "apparent_types_ap04_string_slice",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ApparentTypes"
+    },
+    {
+      "file": "apparent_types.rs",
+      "function": "apparent_types_ap05_number_to_fixed",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ApparentTypes"
+    },
+    {
+      "file": "apparent_types.rs",
+      "function": "apparent_types_ap06_number_to_string",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ApparentTypes"
+    },
+    {
+      "file": "apparent_types.rs",
+      "function": "apparent_types_ap07_number_to_exponential",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ApparentTypes"
+    },
+    {
+      "file": "apparent_types.rs",
+      "function": "apparent_types_ap08_array_length",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ApparentTypes"
+    },
+    {
+      "file": "apparent_types.rs",
+      "function": "apparent_types_ap09_array_map",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ApparentTypes"
+    },
+    {
+      "file": "apparent_types.rs",
+      "function": "apparent_types_ap10_array_filter",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ApparentTypes"
+    },
+    {
+      "file": "apparent_types.rs",
+      "function": "apparent_types_ap11_boolean_to_string",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ApparentTypes"
+    },
+    {
+      "file": "apparent_types.rs",
+      "function": "apparent_types_ap12_boolean_value_of",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ApparentTypes"
+    },
+    {
+      "file": "apparent_types.rs",
+      "function": "apparent_types_ap13_bigint_to_string",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ApparentTypes"
+    },
+    {
+      "file": "apparent_types.rs",
+      "function": "apparent_types_ap14_symbol_description",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ApparentTypes"
+    },
+    {
+      "file": "apparent_types.rs",
+      "function": "apparent_types_ap15_generic_constraint_length",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ApparentTypes"
+    },
+    {
+      "file": "branded_types.rs",
+      "function": "branded_double_intersection_collapses_to_never",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ApparentTypes"
+    },
+    {
+      "file": "branded_types.rs",
+      "function": "branded_symbol_key_access_projects_wrapped_value_type",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ApparentTypes"
+    },
+    {
+      "file": "branded_types.rs",
+      "function": "branded_unique_symbol_wrapper_publishes_branded_surface",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ApparentTypes"
+    },
+    {
+      "file": "call_resolution.rs",
+      "function": "call_resolution_abstract_constructor_instance_type_projects_class_shape",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "class_features.rs",
+      "function": "class_features_abstract_subclass_instance_includes_inherited_and_own_members",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ClassFeatures"
+    },
+    {
+      "file": "class_features.rs",
+      "function": "class_features_dog_sound_return_type_is_literal_woof",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ClassFeatures"
+    },
+    {
+      "file": "class_features.rs",
+      "function": "class_features_extends_plus_implements_projects_union_of_members",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ClassFeatures"
+    },
+    {
+      "file": "class_features.rs",
+      "function": "class_features_generic_subclass_substitutes_type_parameter_on_inherited_field",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ClassFeatures"
+    },
+    {
+      "file": "class_features.rs",
+      "function": "class_features_generic_subclass_with_own_type_param_substitutes_through_base",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ClassFeatures"
+    },
+    {
+      "file": "class_features.rs",
+      "function": "class_features_protected_inherited_member_drives_subclass_method_inference",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ClassFeatures"
+    },
+    {
+      "file": "class_features.rs",
+      "function": "class_features_static_generic_method_instantiation_projects_return_with_substitution",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ClassFeatures"
+    },
+    {
+      "file": "class_features.rs",
+      "function": "class_features_static_inheritance_resolves_inherited_field_type",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ClassFeatures"
+    },
+    {
+      "file": "class_features.rs",
+      "function": "class_features_static_inheritance_resolves_inherited_method_return",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ClassFeatures"
+    },
+    {
+      "file": "decorators.rs",
+      "function": "decorators_accessor_decorator_returning_same_target_publishes_public_property",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ClassFeatures"
+    },
+    {
+      "file": "decorators.rs",
+      "function": "decorators_identity_accessor_decorator_publishes_public_property",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ClassFeatures"
+    },
+    {
+      "file": "function_advanced.rs",
+      "function": "function_advanced_class_method_prototype_extraction_projects_parameters",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "function_advanced.rs",
+      "function": "function_advanced_class_method_prototype_extraction_projects_return",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "modern_ts_features.rs",
+      "function": "variance_annotation_in_substitution_through_consumer_consume_parameters",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "ModernTsFeatures"
+    },
+    {
+      "file": "substitution_types.rs",
+      "function": "substitution_types_sb14_default_type_arg_ignored_by_return_type",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "TypeParameterFeatures"
+    },
+    {
+      "file": "typescript_rules.rs",
+      "function": "typescript_rules_class_instance_type_includes_fields_and_methods",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "TypeScriptRules"
+    },
+    {
+      "file": "typescript_rules.rs",
+      "function": "typescript_rules_typeof_const_preserves_readonly_literals",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "TypeScriptRules"
+    },
+    {
+      "file": "unique_symbol.rs",
+      "function": "unique_symbol_indexed_access_via_typeof_returns_literal_value",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "UniqueSymbol"
+    },
+    {
+      "file": "unique_symbol.rs",
+      "function": "unique_symbol_string_key_access_returns_sibling_value",
+      "block": "U2.CLASS_SURFACES",
+      "capability": "UniqueSymbol"
+    },
+    {
+      "file": "enums.rs",
+      "function": "enum_const_enum_member_resolves_to_inlined_string_literal",
+      "block": "U2.ENUMS",
+      "capability": "EnumResolution"
+    },
+    {
+      "file": "enums.rs",
+      "function": "enum_discriminant_extract_projects_matching_arm_payload",
+      "block": "U2.ENUMS",
+      "capability": "EnumResolution"
+    },
+    {
+      "file": "enums.rs",
+      "function": "enum_keyof_typeof_numeric_yields_member_name_union",
+      "block": "U2.ENUMS",
+      "capability": "EnumResolution"
+    },
+    {
+      "file": "enums.rs",
+      "function": "enum_keyof_typeof_string_yields_member_name_union",
+      "block": "U2.ENUMS",
+      "capability": "EnumResolution"
+    },
+    {
+      "file": "enums.rs",
+      "function": "enum_numeric_member_resolves_to_branded_literal_zero",
+      "block": "U2.ENUMS",
+      "capability": "EnumResolution"
+    },
+    {
+      "file": "enums.rs",
+      "function": "enum_string_member_resolves_to_branded_string_literal",
+      "block": "U2.ENUMS",
+      "capability": "EnumResolution"
+    },
+    {
+      "file": "enums.rs",
+      "function": "enum_template_literal_over_string_enum_produces_value_union",
+      "block": "U2.ENUMS",
+      "capability": "EnumResolution"
+    },
+    {
+      "file": "modern_ts_features.rs",
+      "function": "import_attribute_simulated_resolves_imported_json_shape",
+      "block": "U2.MODULE_AUGMENTATION",
+      "capability": "ModernTsFeatures"
+    },
+    {
+      "file": "module_features.rs",
+      "function": "module_features_cjs_export_equals_resolves_to_carrier",
+      "block": "U2.MODULE_AUGMENTATION",
+      "capability": "ModuleFeatures"
+    },
+    {
+      "file": "module_features.rs",
+      "function": "module_features_namespace_interface_merge_namespace_value_resolves_to_literal",
+      "block": "U2.MODULE_AUGMENTATION",
+      "capability": "ModuleFeatures"
+    },
+    {
+      "file": "module_features.rs",
+      "function": "module_features_typeof_import_named_shape_resolves_to_interface",
+      "block": "U2.MODULE_AUGMENTATION",
+      "capability": "ModuleFeatures"
+    },
+    {
+      "file": "jsx.rs",
+      "function": "jsx_element_resolves_to_declared_interface_shape",
+      "block": "U2.JSX_FOUNDATIONS",
+      "capability": "JsxResolution"
+    },
+    {
+      "file": "jsx.rs",
+      "function": "jsx_factory_inferred_props_for_component_resolves",
+      "block": "U2.JSX_FOUNDATIONS",
+      "capability": "JsxResolution"
+    },
+    {
+      "file": "jsx.rs",
+      "function": "jsx_fc_props_includes_children_optional",
+      "block": "U2.JSX_FOUNDATIONS",
+      "capability": "JsxResolution"
+    },
+    {
+      "file": "jsx.rs",
+      "function": "jsx_intrinsic_augmented_custom_card_resolves_to_declared_shape",
+      "block": "U2.JSX_FOUNDATIONS",
+      "capability": "JsxResolution"
+    },
+    {
+      "file": "jsx.rs",
+      "function": "jsx_intrinsic_div_resolves_to_declared_shape",
+      "block": "U2.JSX_FOUNDATIONS",
+      "capability": "JsxResolution"
+    },
+    {
+      "file": "jsx.rs",
+      "function": "jsx_intrinsic_keys_resolves_to_string_literal_union",
+      "block": "U2.JSX_FOUNDATIONS",
+      "capability": "JsxResolution"
+    },
+    {
+      "file": "jsx.rs",
+      "function": "jsx_intrinsic_span_resolves_to_declared_shape",
+      "block": "U2.JSX_FOUNDATIONS",
+      "capability": "JsxResolution"
+    },
+    {
+      "file": "value_inference.rs",
+      "function": "value_inference_arrow_expression_body_publishes_return_shape",
+      "block": "U6.FLOW_RETURN_SUBSTRATE",
+      "capability": "ValueInference"
+    },
+    {
+      "file": "value_inference.rs",
+      "function": "value_inference_arrow_expression_body_substitutes_parameter_references",
+      "block": "U6.FLOW_RETURN_SUBSTRATE",
+      "capability": "ValueInference"
+    },
+    {
+      "file": "value_inference.rs",
+      "function": "value_inference_computed_block_callback_value_resolves_local_return_shape",
+      "block": "U6.FLOW_RETURN_SUBSTRATE",
+      "capability": "ValueInference"
+    },
+    {
+      "file": "value_inference.rs",
+      "function": "value_inference_computed_callback_object_value_resolves_from_callback_body",
+      "block": "U6.FLOW_RETURN_SUBSTRATE",
+      "capability": "ValueInference"
+    },
+    {
+      "file": "value_inference.rs",
+      "function": "value_inference_const_object_literal_expands_nested_shape",
+      "block": "U6.FLOW_RETURN_SUBSTRATE",
+      "capability": "ValueInference"
+    },
+    {
+      "file": "value_inference.rs",
+      "function": "value_inference_flow_variables_narrow_return_value_by_branch",
+      "block": "U6.FLOW_RETURN_SUBSTRATE",
+      "capability": "ValueInference"
+    },
+    {
+      "file": "value_inference.rs",
+      "function": "value_inference_function_body_return_union_from_return_statements",
+      "block": "U6.FLOW_RETURN_SUBSTRATE",
+      "capability": "ValueInference"
+    },
+    {
+      "file": "narrow_typeof.rs",
+      "function": "narrow_typeof_nt01_string_on_binary_union",
+      "block": "U6.NARROW_TYPEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_typeof.rs",
+      "function": "narrow_typeof_nt02_number_on_triple_union",
+      "block": "U6.NARROW_TYPEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_typeof.rs",
+      "function": "narrow_typeof_nt03_boolean_on_union",
+      "block": "U6.NARROW_TYPEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_typeof.rs",
+      "function": "narrow_typeof_nt04_object_on_union_keeps_no_null",
+      "block": "U6.NARROW_TYPEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_typeof.rs",
+      "function": "narrow_typeof_nt05_function_on_union",
+      "block": "U6.NARROW_TYPEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_typeof.rs",
+      "function": "narrow_typeof_nt06_undefined_on_union",
+      "block": "U6.NARROW_TYPEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_typeof.rs",
+      "function": "narrow_typeof_nt07_bigint_on_union",
+      "block": "U6.NARROW_TYPEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_typeof.rs",
+      "function": "narrow_typeof_nt08_symbol_on_union",
+      "block": "U6.NARROW_TYPEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_typeof.rs",
+      "function": "narrow_typeof_nt09_string_on_unknown",
+      "block": "U6.NARROW_TYPEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_typeof.rs",
+      "function": "narrow_typeof_nt10_string_on_unbound_generic",
+      "block": "U6.NARROW_TYPEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_typeof.rs",
+      "function": "narrow_typeof_nt11_negated_on_binary_union",
+      "block": "U6.NARROW_TYPEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_typeof.rs",
+      "function": "narrow_typeof_nt12_switch_exhaustive",
+      "block": "U6.NARROW_TYPEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_typeof.rs",
+      "function": "narrow_typeof_nt13_negated_guard_early_return",
+      "block": "U6.NARROW_TYPEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_typeof.rs",
+      "function": "narrow_typeof_nt14_compare_literal_var_does_not_narrow",
+      "block": "U6.NARROW_TYPEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_typeof.rs",
+      "function": "narrow_typeof_nt15_compound_and_property",
+      "block": "U6.NARROW_TYPEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_equality.rs",
+      "function": "narrow_equality_eq01_string_literal_on_literal_union",
+      "block": "U6.NARROW_EQUALITY",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_equality.rs",
+      "function": "narrow_equality_eq02_negated_string_literal_on_literal_union",
+      "block": "U6.NARROW_EQUALITY",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_equality.rs",
+      "function": "narrow_equality_eq03_number_literal_on_triple_union",
+      "block": "U6.NARROW_EQUALITY",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_equality.rs",
+      "function": "narrow_equality_eq04_boolean_true_on_boolean",
+      "block": "U6.NARROW_EQUALITY",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_equality.rs",
+      "function": "narrow_equality_eq05_null_on_nullable_string",
+      "block": "U6.NARROW_EQUALITY",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_equality.rs",
+      "function": "narrow_equality_eq06_undefined_on_optional_string",
+      "block": "U6.NARROW_EQUALITY",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_equality.rs",
+      "function": "narrow_equality_eq07_double_equals_null_on_nullish_string",
+      "block": "U6.NARROW_EQUALITY",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_equality.rs",
+      "function": "narrow_equality_eq08_string_literal_on_string_does_not_narrow",
+      "block": "U6.NARROW_EQUALITY",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_equality.rs",
+      "function": "narrow_equality_eq09_string_literal_on_primitive_union",
+      "block": "U6.NARROW_EQUALITY",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_equality.rs",
+      "function": "narrow_equality_eq10_two_unions_mutual_equality_does_not_narrow",
+      "block": "U6.NARROW_EQUALITY",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_equality.rs",
+      "function": "narrow_equality_eq11_impossible_compound_absorbs_never",
+      "block": "U6.NARROW_EQUALITY",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_equality.rs",
+      "function": "narrow_equality_eq12_property_equality_discriminant",
+      "block": "U6.NARROW_EQUALITY",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_equality.rs",
+      "function": "narrow_equality_eq13_as_const_literal_rhs",
+      "block": "U6.NARROW_EQUALITY",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_equality.rs",
+      "function": "narrow_equality_eq14_number_literal_on_number_does_not_narrow",
+      "block": "U6.NARROW_EQUALITY",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_equality.rs",
+      "function": "narrow_equality_eq15_nan_equality_does_not_narrow",
+      "block": "U6.NARROW_EQUALITY",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_truthiness.rs",
+      "function": "narrow_truthiness_tr01_string_or_undefined",
+      "block": "U6.NARROW_TRUTHINESS",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_truthiness.rs",
+      "function": "narrow_truthiness_tr02_string_or_null",
+      "block": "U6.NARROW_TRUTHINESS",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_truthiness.rs",
+      "function": "narrow_truthiness_tr03_string_or_nullish",
+      "block": "U6.NARROW_TRUTHINESS",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_truthiness.rs",
+      "function": "narrow_truthiness_tr04_string_no_nullable_does_not_narrow",
+      "block": "U6.NARROW_TRUTHINESS",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_truthiness.rs",
+      "function": "narrow_truthiness_tr05_number_literal_union",
+      "block": "U6.NARROW_TRUTHINESS",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_truthiness.rs",
+      "function": "narrow_truthiness_tr06_string_literal_union",
+      "block": "U6.NARROW_TRUTHINESS",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_truthiness.rs",
+      "function": "narrow_truthiness_tr07_boolean_union",
+      "block": "U6.NARROW_TRUTHINESS",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_truthiness.rs",
+      "function": "narrow_truthiness_tr08_negated_string_or_undefined",
+      "block": "U6.NARROW_TRUTHINESS",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_truthiness.rs",
+      "function": "narrow_truthiness_tr09_property_truthiness",
+      "block": "U6.NARROW_TRUTHINESS",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_truthiness.rs",
+      "function": "narrow_truthiness_tr10_early_return_guard",
+      "block": "U6.NARROW_TRUTHINESS",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_truthiness.rs",
+      "function": "narrow_truthiness_tr11_unknown_collapses_to_unknown",
+      "block": "U6.NARROW_TRUTHINESS",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_truthiness.rs",
+      "function": "narrow_truthiness_tr12_object_or_null",
+      "block": "U6.NARROW_TRUTHINESS",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_truthiness.rs",
+      "function": "narrow_truthiness_tr13_compound_and_chain",
+      "block": "U6.NARROW_TRUTHINESS",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_truthiness.rs",
+      "function": "narrow_truthiness_tr14_number_or_undefined_does_not_split_zero",
+      "block": "U6.NARROW_TRUTHINESS",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_truthiness.rs",
+      "function": "narrow_truthiness_tr15_optional_chain_truthiness",
+      "block": "U6.NARROW_TRUTHINESS",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_in_operator.rs",
+      "function": "narrow_in_operator_io01_binary_union",
+      "block": "U6.NARROW_IN",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_in_operator.rs",
+      "function": "narrow_in_operator_io02_shared_key",
+      "block": "U6.NARROW_IN",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_in_operator.rs",
+      "function": "narrow_in_operator_io03_else_branch",
+      "block": "U6.NARROW_IN",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_in_operator.rs",
+      "function": "narrow_in_operator_io04_intersection",
+      "block": "U6.NARROW_IN",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_in_operator.rs",
+      "function": "narrow_in_operator_io05_optional_property",
+      "block": "U6.NARROW_IN",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_in_operator.rs",
+      "function": "narrow_in_operator_io06_on_unknown",
+      "block": "U6.NARROW_IN",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_in_operator.rs",
+      "function": "narrow_in_operator_io07_on_object",
+      "block": "U6.NARROW_IN",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_in_operator.rs",
+      "function": "narrow_in_operator_io08_compound_conjunction",
+      "block": "U6.NARROW_IN",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_in_operator.rs",
+      "function": "narrow_in_operator_io09_negated",
+      "block": "U6.NARROW_IN",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_in_operator.rs",
+      "function": "narrow_in_operator_io10_three_arm_union",
+      "block": "U6.NARROW_IN",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_in_operator.rs",
+      "function": "narrow_in_operator_io11_generic_constrained",
+      "block": "U6.NARROW_IN",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_in_operator.rs",
+      "function": "narrow_in_operator_io12_reassignment_renarrowing",
+      "block": "U6.NARROW_IN",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_in_operator.rs",
+      "function": "narrow_in_operator_io13_class_vs_object",
+      "block": "U6.NARROW_IN",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_in_operator.rs",
+      "function": "narrow_in_operator_io14_template_literal_key",
+      "block": "U6.NARROW_IN",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_in_operator.rs",
+      "function": "narrow_in_operator_io15_symbol_key",
+      "block": "U6.NARROW_IN",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_instanceof.rs",
+      "function": "narrow_instanceof_in01_binary_union",
+      "block": "U6.NARROW_INSTANCEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_instanceof.rs",
+      "function": "narrow_instanceof_in02_class_plus_primitive",
+      "block": "U6.NARROW_INSTANCEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_instanceof.rs",
+      "function": "narrow_instanceof_in03_on_unknown",
+      "block": "U6.NARROW_INSTANCEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_instanceof.rs",
+      "function": "narrow_instanceof_in04_subclass_union",
+      "block": "U6.NARROW_INSTANCEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_instanceof.rs",
+      "function": "narrow_instanceof_in05_already_narrowed",
+      "block": "U6.NARROW_INSTANCEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_instanceof.rs",
+      "function": "narrow_instanceof_in06_abstract_class",
+      "block": "U6.NARROW_INSTANCEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_instanceof.rs",
+      "function": "narrow_instanceof_in07_else_reachability",
+      "block": "U6.NARROW_INSTANCEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_instanceof.rs",
+      "function": "narrow_instanceof_in08_interface_union",
+      "block": "U6.NARROW_INSTANCEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_instanceof.rs",
+      "function": "narrow_instanceof_in09_negated_early_return",
+      "block": "U6.NARROW_INSTANCEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_instanceof.rs",
+      "function": "narrow_instanceof_in10_intersection",
+      "block": "U6.NARROW_INSTANCEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_instanceof.rs",
+      "function": "narrow_instanceof_in11_generic_ctor",
+      "block": "U6.NARROW_INSTANCEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_instanceof.rs",
+      "function": "narrow_instanceof_in13_array_special_case",
+      "block": "U6.NARROW_INSTANCEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_instanceof.rs",
+      "function": "narrow_instanceof_in14_promise_special_case",
+      "block": "U6.NARROW_INSTANCEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_instanceof.rs",
+      "function": "narrow_instanceof_in15_nullable",
+      "block": "U6.NARROW_INSTANCEOF",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_discriminated_union.rs",
+      "function": "narrow_discriminated_union_du01_if_equality_discriminant",
+      "block": "U6.NARROW_DISCRIMINATED",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_discriminated_union.rs",
+      "function": "narrow_discriminated_union_du02_switch_discriminant",
+      "block": "U6.NARROW_DISCRIMINATED",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_discriminated_union.rs",
+      "function": "narrow_discriminated_union_du03_switch_default_never",
+      "block": "U6.NARROW_DISCRIMINATED",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_discriminated_union.rs",
+      "function": "narrow_discriminated_union_du04_negated_discriminant",
+      "block": "U6.NARROW_DISCRIMINATED",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_discriminated_union.rs",
+      "function": "narrow_discriminated_union_du05_multi_property_discriminant",
+      "block": "U6.NARROW_DISCRIMINATED",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_discriminated_union.rs",
+      "function": "narrow_discriminated_union_du06_nested_discriminant",
+      "block": "U6.NARROW_DISCRIMINATED",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_discriminated_union.rs",
+      "function": "narrow_discriminated_union_du07_number_literal_discriminant",
+      "block": "U6.NARROW_DISCRIMINATED",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_discriminated_union.rs",
+      "function": "narrow_discriminated_union_du08_boolean_literal_discriminant",
+      "block": "U6.NARROW_DISCRIMINATED",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_discriminated_union.rs",
+      "function": "narrow_discriminated_union_du09_destructure_correlation",
+      "block": "U6.NARROW_DISCRIMINATED",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_discriminated_union.rs",
+      "function": "narrow_discriminated_union_du10_in_guard_plus_discriminant",
+      "block": "U6.NARROW_DISCRIMINATED",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_discriminated_union.rs",
+      "function": "narrow_discriminated_union_du11_switch_per_arm_join",
+      "block": "U6.NARROW_DISCRIMINATED",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_discriminated_union.rs",
+      "function": "narrow_discriminated_union_du12_switch_fall_through",
+      "block": "U6.NARROW_DISCRIMINATED",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_discriminated_union.rs",
+      "function": "narrow_discriminated_union_du14_reassignment_re_narrowing",
+      "block": "U6.NARROW_DISCRIMINATED",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "narrow_discriminated_union.rs",
+      "function": "narrow_discriminated_union_du15_template_literal_discriminant",
+      "block": "U6.NARROW_DISCRIMINATED",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "substitution_types.rs",
+      "function": "substitution_types_sb01_bare_narrowing_of_generic",
+      "block": "U6.NARROW_SUBSTITUTION",
+      "capability": "TypeParameterFeatures"
+    },
+    {
+      "file": "substitution_types.rs",
+      "function": "substitution_types_sb02_narrowing_in_constrained_generic",
+      "block": "U6.NARROW_SUBSTITUTION",
+      "capability": "TypeParameterFeatures"
+    },
+    {
+      "file": "substitution_types.rs",
+      "function": "substitution_types_sb03_substitution_survives_method_calls",
+      "block": "U6.NARROW_SUBSTITUTION",
+      "capability": "TypeParameterFeatures"
+    },
+    {
+      "file": "substitution_types.rs",
+      "function": "substitution_types_sb04_narrowed_substitution_to_return_position",
+      "block": "U6.NARROW_SUBSTITUTION",
+      "capability": "TypeParameterFeatures"
+    },
+    {
+      "file": "substitution_types.rs",
+      "function": "substitution_types_sb05_compound_typeof_and_instanceof",
+      "block": "U6.NARROW_SUBSTITUTION",
+      "capability": "TypeParameterFeatures"
+    },
+    {
+      "file": "substitution_types.rs",
+      "function": "substitution_types_sb06_narrowing_widens_after_reassignment",
+      "block": "U6.NARROW_SUBSTITUTION",
+      "capability": "TypeParameterFeatures"
+    },
+    {
+      "file": "substitution_types.rs",
+      "function": "substitution_types_sb07_constraint_flow_apparent_type",
+      "block": "U6.NARROW_SUBSTITUTION",
+      "capability": "TypeParameterFeatures"
+    },
+    {
+      "file": "substitution_types.rs",
+      "function": "substitution_types_sb08_generic_in_conditional_no_distribute_on_unknown",
+      "block": "U6.NARROW_SUBSTITUTION",
+      "capability": "TypeParameterFeatures"
+    },
+    {
+      "file": "substitution_types.rs",
+      "function": "substitution_types_sb11_generic_narrowed_via_in_operator",
+      "block": "U6.NARROW_SUBSTITUTION",
+      "capability": "TypeParameterFeatures"
+    },
+    {
+      "file": "substitution_types.rs",
+      "function": "substitution_types_sb12_truthiness_on_t_or_undefined",
+      "block": "U6.NARROW_SUBSTITUTION",
+      "capability": "TypeParameterFeatures"
+    },
+    {
+      "file": "substitution_types.rs",
+      "function": "substitution_types_sb13_substitution_carried_across_destructure",
+      "block": "U6.NARROW_SUBSTITUTION",
+      "capability": "TypeParameterFeatures"
+    },
+    {
+      "file": "flow_invalidations.rs",
+      "function": "flow_invalidations_fi01_reassignment_invalidates_string_narrowing",
+      "block": "U6.NARROW_INVALIDATION",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "flow_invalidations.rs",
+      "function": "flow_invalidations_fi02_narrowing_preserved_across_opaque_call",
+      "block": "U6.NARROW_INVALIDATION",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "flow_invalidations.rs",
+      "function": "flow_invalidations_fi04_destructured_discriminant_preserves_correlation",
+      "block": "U6.NARROW_INVALIDATION",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "flow_invalidations.rs",
+      "function": "flow_invalidations_fi05_destructured_discriminant_loses_on_reassignment",
+      "block": "U6.NARROW_INVALIDATION",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "flow_invalidations.rs",
+      "function": "flow_invalidations_fi09_exhaustive_never_tail_does_not_widen_return",
+      "block": "U6.NARROW_INVALIDATION",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "flow_invalidations.rs",
+      "function": "flow_invalidations_fi08_asserts_narrows_dotted_member_path",
+      "block": "U6.PREDICATE_ASSERTION",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "substitution_types.rs",
+      "function": "substitution_types_sb09_asserts_x_is_string_on_generic",
+      "block": "U6.PREDICATE_ASSERTION",
+      "capability": "TypeParameterFeatures"
+    },
+    {
+      "file": "substitution_types.rs",
+      "function": "substitution_types_sb10_x_is_t_predicate_on_generic",
+      "block": "U6.PREDICATE_ASSERTION",
+      "capability": "TypeParameterFeatures"
+    },
+    {
+      "file": "call_resolution.rs",
+      "function": "call_resolution_extracted_prototype_method_call_returns_declared_return",
+      "block": "U6.CALL_RESOLVE",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "call_resolution.rs",
+      "function": "call_resolution_generic_infers_from_callback_return_type",
+      "block": "U6.CALL_RESOLVE",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "call_resolution.rs",
+      "function": "call_resolution_generic_infers_from_positional_argument_through_callback_signature",
+      "block": "U6.CALL_RESOLVE",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "call_resolution.rs",
+      "function": "call_resolution_generic_infers_object_literal_including_excess_properties",
+      "block": "U6.CALL_RESOLVE",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "call_resolution.rs",
+      "function": "call_resolution_optional_overload_picks_first_arity_matching_signature",
+      "block": "U6.CALL_RESOLVE",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "call_resolution.rs",
+      "function": "call_resolution_optional_overload_picks_two_arg_signature_when_required",
+      "block": "U6.CALL_RESOLVE",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "call_resolution.rs",
+      "function": "call_resolution_rest_overload_picks_rest_signature_when_required",
+      "block": "U6.CALL_RESOLVE",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "call_resolution.rs",
+      "function": "call_resolution_union_argument_picks_union_compatible_overload",
+      "block": "U6.CALL_RESOLVE",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "call_resolution.rs",
+      "function": "call_resolution_specific_literal_argument_picks_matching_overload_first",
+      "block": "U6.CALL_RESOLVE",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "call_resolution.rs",
+      "function": "call_resolution_specific_literal_argument_skips_non_matching_first_overload",
+      "block": "U6.CALL_RESOLVE",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "call_resolution.rs",
+      "function": "call_resolution_this_receiver_method_call_returns_declared_return",
+      "block": "U6.CALL_RESOLVE",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "const_type_param.rs",
+      "function": "const_type_param_route_call_preserves_readonly_tuple_with_literal_paths",
+      "block": "U6.CALL_RESOLVE",
+      "capability": "TypeParameterFeatures"
+    },
+    {
+      "file": "const_type_param.rs",
+      "function": "const_type_param_string_call_preserves_readonly_literal_string_tuple",
+      "block": "U6.CALL_RESOLVE",
+      "capability": "TypeParameterFeatures"
+    },
+    {
+      "file": "function_advanced.rs",
+      "function": "function_advanced_constrained_generic_infers_literal_under_as_const",
+      "block": "U6.CALL_RESOLVE",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "function_advanced.rs",
+      "function": "function_advanced_higher_order_composition_returns_concrete_function",
+      "block": "U6.CALL_RESOLVE",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "function_advanced.rs",
+      "function": "function_advanced_omit_this_parameter_returns_function_without_this",
+      "block": "U6.CALL_RESOLVE",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "function_advanced.rs",
+      "function": "function_advanced_overload_call_picks_matching_signature_return",
+      "block": "U6.CALL_RESOLVE",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "function_advanced.rs",
+      "function": "function_advanced_overload_generic_first_binds_to_literal_argument",
+      "block": "U6.CALL_RESOLVE",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "function_advanced.rs",
+      "function": "function_advanced_overload_generic_first_widens_t_to_string_for_string_argument",
+      "block": "U6.CALL_RESOLVE",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "function_advanced.rs",
+      "function": "function_advanced_this_parameter_type_returns_this_annotation",
+      "block": "U6.CALL_RESOLVE",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "function_advanced.rs",
+      "function": "function_advanced_void_callback_return_preserves_void",
+      "block": "U6.CALL_RESOLVE",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "call_resolution.rs",
+      "function": "call_resolution_contextual_callback_return_picks_first_overload",
+      "block": "U6.CONTEXTUAL_CALLBACK",
+      "capability": "CallResolution"
+    },
+    {
+      "file": "contextual_typing.rs",
+      "function": "contextual_typing_ct01_callback_parameter_from_contextual_signature",
+      "block": "U6.CONTEXTUAL_CALLBACK",
+      "capability": "ContextualTyping"
+    },
+    {
+      "file": "contextual_typing.rs",
+      "function": "contextual_typing_ct02_callback_return_type_published",
+      "block": "U6.CONTEXTUAL_CALLBACK",
+      "capability": "ContextualTyping"
+    },
+    {
+      "file": "contextual_typing.rs",
+      "function": "contextual_typing_ct03_object_literal_assignment_from_typed_target",
+      "block": "U6.CONTEXTUAL_CALLBACK",
+      "capability": "ContextualTyping"
+    },
+    {
+      "file": "contextual_typing.rs",
+      "function": "contextual_typing_ct04_object_literal_in_function_call",
+      "block": "U6.CONTEXTUAL_CALLBACK",
+      "capability": "ContextualTyping"
+    },
+    {
+      "file": "contextual_typing.rs",
+      "function": "contextual_typing_ct07_as_cast_erases_context",
+      "block": "U6.CONTEXTUAL_CALLBACK",
+      "capability": "ContextualTyping"
+    },
+    {
+      "file": "contextual_typing.rs",
+      "function": "contextual_typing_ct08_jsx_like_attribute_contextual_typing",
+      "block": "U6.CONTEXTUAL_CALLBACK",
+      "capability": "ContextualTyping"
+    },
+    {
+      "file": "contextual_typing.rs",
+      "function": "contextual_typing_ct09_discriminated_union_contextual_narrowing",
+      "block": "U6.CONTEXTUAL_CALLBACK",
+      "capability": "ContextualTyping"
+    },
+    {
+      "file": "contextual_typing.rs",
+      "function": "contextual_typing_ct10_array_literal_contextually_typed_as_tuple",
+      "block": "U6.CONTEXTUAL_CALLBACK",
+      "capability": "ContextualTyping"
+    },
+    {
+      "file": "contextual_typing.rs",
+      "function": "contextual_typing_ct11_as_const_readonly_modifier",
+      "block": "U6.CONTEXTUAL_CALLBACK",
+      "capability": "ContextualTyping"
+    },
+    {
+      "file": "contextual_typing.rs",
+      "function": "contextual_typing_ct12_function_expression_argument_from_contextual_signature",
+      "block": "U6.CONTEXTUAL_CALLBACK",
+      "capability": "ContextualTyping"
+    },
+    {
+      "file": "contextual_typing.rs",
+      "function": "contextual_typing_ct13_object_literal_as_cast_narrows_shape",
+      "block": "U6.CONTEXTUAL_CALLBACK",
+      "capability": "ContextualTyping"
+    },
+    {
+      "file": "contextual_typing.rs",
+      "function": "contextual_typing_ct14_satisfies_widens_to_target",
+      "block": "U6.CONTEXTUAL_CALLBACK",
+      "capability": "ContextualTyping"
+    },
+    {
+      "file": "contextual_typing.rs",
+      "function": "contextual_typing_ct15_contextual_type_via_type_parameter_constraint",
+      "block": "U6.CONTEXTUAL_CALLBACK",
+      "capability": "ContextualTyping"
+    },
+    {
+      "file": "flow_return_catalog.rs",
+      "function": "flow_return_ho09_keeps_unknown_declared_callback_result_opaque",
+      "block": "U6.CONTEXTUAL_CALLBACK",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "modern_ts_features.rs",
+      "function": "satisfies_widens_inner_value_to_primitive_without_as_const",
+      "block": "U6.VALUE_INFERENCE",
+      "capability": "ModernTsFeatures"
+    },
+    {
+      "file": "modern_ts_features.rs",
+      "function": "await_using_simulated_return_type_resolves_to_primitive",
+      "block": "U6.ASYNC_GENERATOR",
+      "capability": "ModernTsFeatures"
+    },
+    {
+      "file": "flow_return_catalog.rs",
+      "function": "flow_return_xf02_expands_imported_value_function_return",
+      "block": "U6.CROSS_FILE",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "flow_return_catalog.rs",
+      "function": "flow_return_xf04_expands_barrel_imported_value_function_return",
+      "block": "U6.CROSS_FILE",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "flow_return_catalog.rs",
+      "function": "flow_return_xf04_records_barrel_route_before_selected_leaf",
+      "block": "U6.CROSS_FILE",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "flow_return_catalog.rs",
+      "function": "flow_return_xf05_resolves_namespace_import_value_call",
+      "block": "U6.CROSS_FILE",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "flow_return_catalog.rs",
+      "function": "flow_return_xf06_keeps_value_type_namespace_separate",
+      "block": "U6.CROSS_FILE",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "flow_return_catalog.rs",
+      "function": "flow_return_xf09_terminates_cross_file_recursive_returns",
+      "block": "U6.CROSS_FILE",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "flow_invalidations.rs",
+      "function": "flow_invalidations_fi03_closure_capture_preserves_narrowing_at_return",
+      "block": "U6.LOOP_CLOSURE",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "flow_invalidations.rs",
+      "function": "flow_invalidations_fi06_finally_return_overrides_try_catch_returns",
+      "block": "U6.LOOP_CLOSURE",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "flow_invalidations.rs",
+      "function": "flow_invalidations_fi07_finally_without_return_preserves_try_catch",
+      "block": "U6.LOOP_CLOSURE",
+      "capability": "FlowNarrowing"
+    },
+    {
+      "file": "cross_file.rs",
+      "function": "cross_file_label_parameter_resolves_local_item",
+      "block": "U3.CACHE_FACT_MODEL",
+      "capability": "CrossFileResolution"
+    },
+    {
+      "file": "cross_file.rs",
+      "function": "cross_file_projected_extra_resolves_number_terminal",
+      "block": "U3.CACHE_FACT_MODEL",
+      "capability": "CrossFileResolution"
+    },
+    {
+      "file": "cross_file.rs",
+      "function": "cross_file_projected_item_resolves_local_extension",
+      "block": "U3.CACHE_FACT_MODEL",
+      "capability": "CrossFileResolution"
+    },
+    {
+      "file": "demand_boundary.rs",
+      "function": "demand_boundary_projection_into_selected_alias_loads_needed_but_not_unused",
+      "block": "U10.RESULT_DB",
+      "capability": "DemandBoundary"
+    },
+    {
+      "file": "demand_boundary.rs",
+      "function": "demand_boundary_terminal_projection_resolves_value_without_unused_branch",
+      "block": "U10.RESULT_DB",
+      "capability": "DemandBoundary"
+    },
+    {
+      "file": "expansion_boundaries.rs",
+      "function": "expansion_imported_projection_loads_selected_but_not_unselected_branch",
+      "block": "U10.RESULT_DB",
+      "capability": "ExpansionBoundaries"
+    },
+    {
+      "file": "expansion_boundaries.rs",
+      "function": "expansion_imported_terminal_projection_reduces_flag_without_unselected_branch",
+      "block": "U10.RESULT_DB",
+      "capability": "ExpansionBoundaries"
+    },
+    {
+      "file": "expansion_boundaries.rs",
+      "function": "expansion_inline_details_projection_expands_only_terminal_inline_path",
+      "block": "U10.RESULT_DB",
+      "capability": "ExpansionBoundaries"
+    },
+    {
+      "file": "expansion_boundaries.rs",
+      "function": "expansion_local_branch_projection_expands_target_without_sibling_meta",
+      "block": "U10.RESULT_DB",
+      "capability": "ExpansionBoundaries"
+    },
+    {
+      "file": "expansion_boundaries.rs",
+      "function": "expansion_omit_does_not_load_excluded_import",
+      "block": "U10.RESULT_DB",
+      "capability": "ExpansionBoundaries"
+    },
+    {
+      "file": "expansion_boundaries.rs",
+      "function": "expansion_pick_does_not_load_unpicked_imports",
+      "block": "U10.RESULT_DB",
+      "capability": "ExpansionBoundaries"
+    },
+    {
+      "file": "mode_boundary_invariants.rs",
+      "function": "mode_boundary_identity_does_not_materialize_alias_body",
+      "block": "U10.RESULT_DB",
+      "capability": "ModeBoundary"
+    },
+    {
+      "file": "mode_boundary_invariants.rs",
+      "function": "mode_boundary_keyof_deep_chain_is_bounded_in_expanded",
+      "block": "U10.RESULT_DB",
+      "capability": "ModeBoundary"
+    },
+    {
+      "file": "mode_boundary_invariants.rs",
+      "function": "mode_boundary_reexport_chain_resolves_imported_alias",
+      "block": "U10.RESULT_DB",
+      "capability": "ModeBoundary"
+    },
+    {
+      "file": "mode_boundary_invariants.rs",
+      "function": "mode_boundary_shallow_does_not_expand_member_bodies",
+      "block": "U10.RESULT_DB",
+      "capability": "ModeBoundary"
+    },
+    {
+      "file": "cache_invalidation.rs",
+      "function": "cache_invalidation_aug_patch_edit_surfaces_augmented_shape",
+      "block": "U11.PUBLIC_RELATION_SESSION",
+      "capability": "CacheInvalidation"
+    },
+    {
+      "file": "cache_invalidation.rs",
+      "function": "cache_invalidation_barrel_edit_excludes_prior_leaf_from_v2_footprint",
+      "block": "U11.PUBLIC_RELATION_SESSION",
+      "capability": "CacheInvalidation"
+    },
+    {
+      "file": "cache_invalidation.rs",
+      "function": "cache_invalidation_barrel_edit_redirects_route_to_new_leaf",
+      "block": "U11.PUBLIC_RELATION_SESSION",
+      "capability": "CacheInvalidation"
+    },
+    {
+      "file": "cache_invalidation.rs",
+      "function": "cache_invalidation_basic_selected_leaf_edit_flips_published_surface",
+      "block": "U11.PUBLIC_RELATION_SESSION",
+      "capability": "CacheInvalidation"
+    },
+    {
+      "file": "cache_invalidation.rs",
+      "function": "cache_invalidation_in_place_package_edit_flips_published_surface",
+      "block": "U11.PUBLIC_RELATION_SESSION",
+      "capability": "CacheInvalidation"
+    },
+    {
+      "file": "cache_invalidation.rs",
+      "function": "cache_invalidation_unselected_leaf_edit_keeps_warm_cache",
+      "block": "U11.PUBLIC_RELATION_SESSION",
+      "capability": "CacheInvalidation"
+    },
+    {
+      "file": "demand_boundary.rs",
+      "function": "demand_boundary_barrel_resolution_does_not_load_unrequested_reexport",
+      "block": "U11.PUBLIC_RELATION_SESSION",
+      "capability": "DemandBoundary"
+    },
+    {
+      "file": "footprint.rs",
+      "function": "typeinfo_footprint_is_attached_for_named_symbol_request",
+      "block": "U11.PUBLIC_RELATION_SESSION",
+      "capability": "AuditFootprint"
+    },
+    {
+      "file": "footprint.rs",
+      "function": "typeinfo_footprint_reports_requested_import_and_excludes_unprojected_branch",
+      "block": "U11.PUBLIC_RELATION_SESSION",
+      "capability": "AuditFootprint"
+    },
+    {
+      "file": "basic.rs",
+      "function": "component_like_slot_payload_extracts_parameters_from_nested_slot_property",
+      "block": "U14.MACRO_ADAPTER",
+      "capability": "MacroResolution"
+    },
+    {
+      "file": "menu_like.rs",
+      "function": "menu_like_model_value_resolves_nested_conditional_utilities",
+      "block": "U15.FINAL_LIFT",
+      "capability": "CompositeSurfaces"
+    },
+    {
+      "file": "menu_like.rs",
+      "function": "menu_like_slot_payload_extracts_item_and_model_value",
+      "block": "U15.FINAL_LIFT",
+      "capability": "CompositeSurfaces"
+    },
+    {
+      "file": "message_list_like.rs",
+      "function": "message_list_like_extracts_pick_from_inferred_array_element",
+      "block": "U15.FINAL_LIFT",
+      "capability": "CompositeSurfaces"
+    },
+    {
+      "file": "message_list_like.rs",
+      "function": "message_list_like_slot_remaps_payload_with_message_context",
+      "block": "U15.FINAL_LIFT",
+      "capability": "CompositeSurfaces"
+    },
+    {
+      "file": "table_like.rs",
+      "function": "table_like_dynamic_slot_projection_uses_template_literal_keys",
+      "block": "U15.FINAL_LIFT",
+      "capability": "CompositeSurfaces"
+    }
+  ]
+}

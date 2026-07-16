@@ -1,8 +1,7 @@
 //! Resolver coverage for utility-type mapped/conditional evaluation:
 //! the macro path must distribute through utility types.
 //!
-//! Source: `phase-00-tier1-mismatches.md` row 1 (`mapped_exclude`,
-//! line 28). TS spec §4.4: `Exclude<T,U> = T extends U ? never : T`
+//! TS spec §4.4: `Exclude<T,U> = T extends U ? never : T`
 //! distributes over the union T and removes every member matching U.
 //!
 //! The `Extract` / `Exclude` arms of `build_builtin_utility`

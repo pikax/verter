@@ -62,8 +62,6 @@ mod parse_stable_hash_invariance;
 mod path_precision_navigate_then_terminal;
 #[path = "g_misc1/pe4_evaluate_deferred_memo.rs"]
 mod pe4_evaluate_deferred_memo;
-#[path = "g_misc1/plan_h_to_r_mapping.rs"]
-mod plan_h_to_r_mapping;
 #[path = "g_misc1/semantic_graph_signature_builder_provenance.rs"]
 mod semantic_graph_signature_builder_provenance;
 #[path = "g_misc1/slot_binding_graph_matrix_import_ref.rs"]

@@ -55,7 +55,6 @@ mod svelte_compiler_block1_guards;
 mod svelte_jsx_shim_freshness;
 mod svelte_rune_module_guards;
 mod svelte_typecheck_gate;
-mod terminal_type_expr_authority_manifest;
 mod tracked_paths_are_portable;
 mod tracked_paths_no_machine_roots;
 mod ts_compat_single_spec;

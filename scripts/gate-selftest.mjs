@@ -166,6 +166,7 @@ import {
   analyzeNextestSurface,
   analyzeLibtestSurface,
   selectSessionSuites,
+  ensureRequiredWindowsDebugSidecars,
   isBuildTool,
   targetDirMatches,
   preparedSuccessLines,
@@ -1589,6 +1590,78 @@ async function main() {
       pass(
         "(xi) SURFACE-2 GATE: zero session suites => 127, lib-only (missing test kind) => 127, " +
           "1-lib+2-test => 0 (discriminating; a silent surface-2 skip is now a SETUP failure)",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (xi-b) WINDOWS ARCHIVE DEBUG-SIDECAR COMPLETENESS. cargo-nextest archives the executable test
+  //      artifact but currently omits its hashed PDB. The allocation-site audit deliberately verifies
+  //      named caller attribution, so the canonical archived surface must restore that sidecar from the
+  //      runner-owned build tree before nextest launches the test. This drives the real helper with an
+  //      injected filesystem: the required verter_napi PDB is copied to the matching extracted path;
+  //      a missing source PDB is a loud setup error; non-Windows runs perform no copy.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(xi-b) WINDOWS archive debug-sidecar completeness\n");
+  {
+    const suite = {
+      "binary-id": "verter_napi",
+      "binary-path": "C:\\gate\\extract\\target\\debug\\deps\\verter_napi-deadbeef.exe",
+    };
+    const source = "C:\\gate\\runner\\debug\\deps\\verter_napi-deadbeef.pdb";
+    const destination = "C:\\gate\\extract\\target\\debug\\deps\\verter_napi-deadbeef.pdb";
+    const copied = [];
+    const present = new Set([source]);
+    const result = ensureRequiredWindowsDebugSidecars({
+      allSuites: [suite],
+      runnerTarget: "C:\\gate\\runner",
+      extractDir: "C:\\gate\\extract",
+      windows: true,
+      existsFn: (path) => present.has(path),
+      copyFileFn: (from, to) => {
+        copied.push([from, to]);
+        present.add(to);
+      },
+    });
+    const missing = ensureRequiredWindowsDebugSidecars({
+      allSuites: [suite],
+      runnerTarget: "C:\\gate\\runner",
+      extractDir: "C:\\gate\\extract",
+      windows: true,
+      existsFn: () => false,
+      copyFileFn: () => {
+        throw new Error("copy must not run without the source PDB");
+      },
+    });
+    const nonWindowsCopies = [];
+    const nonWindows = ensureRequiredWindowsDebugSidecars({
+      allSuites: [suite],
+      runnerTarget: "C:\\gate\\runner",
+      extractDir: "C:\\gate\\extract",
+      windows: false,
+      existsFn: () => true,
+      copyFileFn: (...args) => nonWindowsCopies.push(args),
+    });
+    if (
+      result.error ||
+      result.copied !== 1 ||
+      copied.length !== 1 ||
+      copied[0][0] !== source ||
+      copied[0][1] !== destination ||
+      !missing.error ||
+      nonWindows.error ||
+      nonWindows.copied !== 0 ||
+      nonWindowsCopies.length !== 0
+    ) {
+      fail(
+        `(xi-b) sidecar helper mismatch: result=${JSON.stringify(result)} copied=${JSON.stringify(copied)} ` +
+          `missing=${JSON.stringify(missing)} nonWindows=${JSON.stringify(nonWindows)} ` +
+          `nonWindowsCopies=${JSON.stringify(nonWindowsCopies)}`,
+      );
+    } else {
+      pass(
+        "(xi-b) WINDOWS archive debug sidecar: required verter_napi PDB is copied beside the extracted " +
+          "test binary, missing source fails setup, and non-Windows execution is a no-op",
       );
     }
   }

@@ -37,8 +37,6 @@ mod module_augmentation;
 mod no_carrier_verdict_db;
 #[path = "g_misc2/no_empty_fact_signature_on_warm_write.rs"]
 mod no_empty_fact_signature_on_warm_write;
-#[path = "g_misc2/no_post_cutover_deferrals.rs"]
-mod no_post_cutover_deferrals;
 #[path = "g_misc2/path_precise_invalidation.rs"]
 mod path_precise_invalidation;
 #[path = "g_misc2/pe4_evaluate_depth_budget.rs"]
@@ -53,8 +51,6 @@ mod phase5_decomposition_tests;
 mod phase5_native_payload_parity;
 #[path = "g_misc2/phase5_q20_benchmark.rs"]
 mod phase5_q20_benchmark;
-#[path = "g_misc2/plan_rule_namespace.rs"]
-mod plan_rule_namespace;
 #[path = "g_misc2/process_rss_wasm.rs"]
 mod process_rss_wasm;
 #[path = "g_misc2/process_rss_windows.rs"]
