@@ -497,8 +497,9 @@ jobs:
       - name: Verify benchmark corpus against official Svelte goldens
         run: |
           node scripts/gen-svelte-goldens.mjs --check
-          cargo test -p verter_compiler --test svelte_client_emit_topology \
-            svelte_performance_manifest_is_oracle_proven_and_representative -- --exact
+          cargo test -p verter_compiler --test main \
+            cases::svelte_client_emit_topology::svelte_performance_manifest_is_oracle_proven_and_representative \
+            -- --exact
       - name: Build release native compiler
         run: pnpm run build:native
       - name: Compare Verter and official Svelte compilers
