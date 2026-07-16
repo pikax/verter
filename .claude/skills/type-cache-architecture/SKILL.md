@@ -270,6 +270,13 @@ never in the key. The rail per layer:
   (`BoundedCandidateMap<…, Hash16, …>`) + `ReadSetSignature.facts` +
   `validated_at_generation`; the owner `FileWholeHash` stays in the value facts.
 
+`ComponentMetaResultDb` and its resolved-meta sidecar take those facts from the
+finalized request fact tracer. Dispatch paths without their own cache boundary
+fan dependency signatures into that tracer; they must not maintain a parallel
+TLS accumulator or reconstruct a curated signature after the compute. A
+non-cacheable or overflowing tracer still returns the best computed value to the
+caller, carries the typed refusal rail, and skips every warm-cache write.
+
 In every case the live whole-hash / version is re-sourced at value-compute time
 via `ensure_indexed_ready_serve` and validated against the live `StoreView` on
 each warm hit — never carried in the content-free key. See the per-key-context

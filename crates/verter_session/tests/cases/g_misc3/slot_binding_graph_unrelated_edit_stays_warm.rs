@@ -1,19 +1,19 @@
-//! `slot_binding_graph` dual-emit NEGATIVE discriminator.
+//! Slot-binding-graph fact-tracer cache discrimination.
 //!
 //! Asserts that an unrelated dep edit (a sibling TS file that does
 //! NOT participate in the slot-binding-graph traversal of the Vue
-//! owner) does NOT advance the dual-emit counters on the second
+//! owner) does NOT advance the graph tracer counter on the second
 //! call beyond what the warm-cache fast-path requires.
 //!
 //! Concretely: after the first `get_component_meta` call primes
 //! `ComponentMetaResultDb` for the owner, the second call must hit
 //! the warm cache (`component_meta_result_cache_hits` advances) and
 //! MUST NOT re-run the slot-binding-graph traversal
-//! (so neither dual-emit counter advances between calls 1 and 2).
+//! (so the tracer counter does not advance between calls 1 and 2).
 //! Editing an UNRELATED file then forces a third call; the third
 //! call must STILL warm-hit (the unrelated edit's facts are not in
 //! the owner's `fact_dep_signature` so the per-domain validator
-//! passes), and the dual-emit counters must stay flat.
+//! passes), and the tracer counter must stay flat.
 //!
 //! Discrimination property: a regression that eagerly invalidates
 //! the warm cache on EVERY upsert (regardless of whether the
@@ -81,20 +81,15 @@ fn unrelated_edit_does_not_advance_slot_binding_graph_emission_counters() {
     let prov = host.provenance();
 
     // Prime call — cold compute populates the warm cache and
-    // exercises the dual-emit helper.
+    // exercises the graph fact-emission path.
     let _ = host
         .get_component_meta("/src/Comp.vue")
         .expect("first call resolves");
     let tracer_after_prime = prov.slot_binding_graph_fact_tracer_emissions.load(Relaxed);
-    let legacy_after_prime = prov
-        .slot_binding_graph_legacy_accumulator_emissions
-        .load(Relaxed);
     assert!(
-        tracer_after_prime >= 1 && legacy_after_prime >= 1,
-        "negative: prime call must have advanced both \
-         dual-emit counters (sanity floor — the positive test \
-         covers the lockstep delta in detail). \
-         tracer={tracer_after_prime} legacy={legacy_after_prime}"
+        tracer_after_prime >= 1,
+        "the prime call must publish slot-binding-graph dependencies \
+         to the request fact tracer; tracer={tracer_after_prime}"
     );
 
     let hits_before_warm = prov.component_meta_result_cache_hits.load(Relaxed);
@@ -110,17 +105,14 @@ fn unrelated_edit_does_not_advance_slot_binding_graph_emission_counters() {
     // `ComponentMetaResultDb` warm-hit fast-path returns the cached
     // entry BEFORE installing a `with_fact_tracer` scope (see
     // `component_meta_entry.rs:109-118`). The slot-binding-graph
-    // traversal does NOT run on a warm hit, so neither dual-emit
-    // counter advances.
+    // traversal does NOT run on a warm hit, so the tracer counter
+    // does not advance.
     let _ = host
         .get_component_meta("/src/Comp.vue")
         .expect("second call resolves via warm hit");
 
     let hits_after_unrelated = prov.component_meta_result_cache_hits.load(Relaxed);
     let tracer_after_unrelated = prov.slot_binding_graph_fact_tracer_emissions.load(Relaxed);
-    let legacy_after_unrelated = prov
-        .slot_binding_graph_legacy_accumulator_emissions
-        .load(Relaxed);
 
     assert!(
         hits_after_unrelated > hits_before_warm,
@@ -136,13 +128,5 @@ fn unrelated_edit_does_not_advance_slot_binding_graph_emission_counters() {
          fast-path returns before the slot-binding-graph traversal \
          runs. tracer_after_prime={tracer_after_prime} \
          tracer_after_unrelated={tracer_after_unrelated}"
-    );
-    assert_eq!(
-        legacy_after_unrelated, legacy_after_prime,
-        "an unrelated edit MUST NOT advance \
-         `slot_binding_graph_legacy_accumulator_emissions` — the \
-         warm-hit fast-path returns before the slot-binding-graph \
-         traversal runs. legacy_after_prime={legacy_after_prime} \
-         legacy_after_unrelated={legacy_after_unrelated}"
     );
 }

@@ -1,6 +1,6 @@
 //! Cross-consumer × fact-kind matrix slice — `ImportRef`.
 //!
-//! Verifies the slot-binding-graph dual-emit fact-tracer fan-out
+//! Verifies the slot-binding-graph fact-tracer fan-out
 //! substrate delivers `FactKey::ImportRef` facts (cross-file import
 //! relationships) into every active `FactReadSet`. The
 //! slot-binding-graph traversal lowers macro arguments that may
@@ -59,32 +59,6 @@ fn slot_binding_graph_fact_tracer_carries_import_ref() {
         captured.iter().any(|f| f == &import_ref_fact),
         "matrix slice: the fact-tracer substrate MUST carry \
          the `ImportRef` fact through the fan-out path emitted by the \
-         slot-binding-graph dual-emit helper. captured={captured:?}"
+         slot-binding-graph dependency path. captured={captured:?}"
     );
-
-    // Arch guard: the helper file must reference the
-    // `dep_signature_to_fact_signature` bridge so legacy whole-hash
-    // entries — which is all the bridge currently supports — are
-    // converted before fan-out. An `ImportRef` parse-domain fact
-    // becomes reachable through the tracer when the bridge is
-    // active in the helper.
-    let src = read_session_src("meta_resolve/slot_binding_graph.rs");
-    assert!(
-        src.contains("dep_signature_to_fact_signature"),
-        "matrix slice (arch guard): \
-         `slot_binding_graph.rs` MUST reference \
-         `dep_signature_to_fact_signature` as the bridge between \
-         the legacy `DepSignature` accumulator payload and the \
-         `Vec<FactVersionRef>` payload `observe_fact_signature` \
-         consumes. Without this bridge, `ImportRef` facts (and \
-         every other parse-domain fact-kind) silently bypass the \
-         fact tracer."
-    );
-}
-
-fn read_session_src(rel: &str) -> String {
-    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join(rel);
-    std::fs::read_to_string(&p).unwrap_or_else(|err| panic!("read {}: {err}", p.display()))
 }

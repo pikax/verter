@@ -1,4 +1,4 @@
-//! `accumulate_dispatch_dep_signature` and `observe_fence_entry` must
+//! The dispatch-signature bridge and `observe_fence_entry` must
 //! convert `DepVersion::ProjectGeneration` into a
 //! `FactVersionRef::ProjectGeneration` — the same conversion the
 //! sibling bridge `dep_signature_to_fact_signature` performs.
@@ -16,18 +16,13 @@
 //! validating source, so it is the sole dropped variant — a defensive
 //! floor. No production path constructs `DepVersion::RouteGeneration`.
 //!
-//! Discrimination property: against the pre-fix tree both bridges
-//! DROP `ProjectGeneration` (the `accumulate_dispatch_dep_signature`
-//! joint `RouteGeneration | ProjectGeneration` `continue` arm; the
-//! `observe_fence_entry` `WholeHash`-only arm) — the
-//! `project_generation_converts` assertions below FAIL. Post-fix both
-//! bridges convert it and the assertions PASS, while `RouteGeneration`
-//! stays dropped.
+//! The assertions discriminate `ProjectGeneration` conversion from the
+//! deliberately unsupported `RouteGeneration` mapping.
 
 use std::sync::Arc;
 
 use verter_session::for_tests::{
-    accumulate_dispatch_dep_signature_for_tests, observe_fence_entry_for_tests,
+    dispatch_dep_signature_facts_for_tests, observe_fence_entry_for_tests,
 };
 use verter_session::resolver_core::{FactReadSetFinalise, FactVersionRef};
 use verter_session::semantic_query::{DepSignature, DepVersion};
@@ -43,24 +38,24 @@ fn make_dep_sig(entries: Vec<(&str, DepVersion)>) -> DepSignature {
 }
 
 // ----------------------------------------------------------------------------
-// accumulate_dispatch_dep_signature
+// Dispatch signature bridge
 // ----------------------------------------------------------------------------
 
 #[test]
-fn accumulate_dispatch_converts_project_generation() {
+fn dispatch_bridge_converts_project_generation() {
     // A `ProjectGeneration` dep MUST land in the accumulator as a
     // `FactVersionRef::ProjectGeneration` carrying the same
     // generation. Pre-fix the joint `RouteGeneration | ProjectGeneration`
     // arm drops it and the accumulator is empty.
     let sig = make_dep_sig(vec![("x.ts", DepVersion::ProjectGeneration(77))]);
 
-    let result = accumulate_dispatch_dep_signature_for_tests(&sig);
+    let result = dispatch_dep_signature_facts_for_tests(&sig);
 
     assert_eq!(
         result.len(),
         1,
         "ProjectGeneration must convert to one FactVersionRef in the \
-         dispatch accumulator, not be dropped"
+         dispatch signature bridge, not be dropped"
     );
     assert_eq!(
         result[0],
@@ -71,21 +66,21 @@ fn accumulate_dispatch_converts_project_generation() {
 }
 
 #[test]
-fn accumulate_dispatch_drops_route_generation() {
+fn dispatch_bridge_drops_route_generation() {
     // `RouteGeneration` has no `FactVersionRef` peer — the dispatch
-    // accumulator drops it (defensive floor). The sibling `WholeHash`
+    // bridge drops it (defensive floor). The sibling `WholeHash`
     // entry still converts so the call is observably non-empty.
     let sig = make_dep_sig(vec![
         ("a.ts", DepVersion::RouteGeneration(9)),
         ("b.ts", DepVersion::WholeHash([3u8; 16])),
     ]);
 
-    let result = accumulate_dispatch_dep_signature_for_tests(&sig);
+    let result = dispatch_dep_signature_facts_for_tests(&sig);
 
     assert_eq!(
         result.len(),
         1,
-        "RouteGeneration must be dropped by the dispatch accumulator; \
+        "RouteGeneration must be dropped by the dispatch bridge; \
          only the WholeHash entry survives"
     );
     assert!(
@@ -106,10 +101,10 @@ fn accumulate_dispatch_drops_route_generation() {
 }
 
 #[test]
-fn accumulate_dispatch_mixed_signature_converts_project_drops_route() {
+fn dispatch_bridge_mixed_signature_converts_project_drops_route() {
     // A realistic dispatch dep-signature: a WholeHash for the keyed
     // canonical plus a ProjectGeneration plus a RouteGeneration. The
-    // accumulator keeps the WholeHash + ProjectGeneration and drops
+    // bridge keeps the WholeHash + ProjectGeneration and drops
     // only the RouteGeneration.
     let sig = make_dep_sig(vec![
         ("scope.ts", DepVersion::WholeHash([5u8; 16])),
@@ -117,7 +112,7 @@ fn accumulate_dispatch_mixed_signature_converts_project_drops_route() {
         ("route.ts", DepVersion::RouteGeneration(1)),
     ]);
 
-    let result = accumulate_dispatch_dep_signature_for_tests(&sig);
+    let result = dispatch_dep_signature_facts_for_tests(&sig);
 
     assert_eq!(
         result.len(),

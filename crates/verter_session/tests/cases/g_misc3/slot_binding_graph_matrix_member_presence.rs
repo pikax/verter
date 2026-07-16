@@ -1,6 +1,6 @@
 //! Slot-binding-graph fact-tracer matrix slice — `MemberPresence`.
 //!
-//! Asserts that the slot-binding-graph dual-emit fact-tracer
+//! Asserts that the slot-binding-graph fact-tracer
 //! fan-out substrate can deliver `FactKey::MemberPresence` facts
 //! into every active `FactReadSet` on the `ACTIVE_TRACERS` stack.
 //!
@@ -12,7 +12,7 @@
 //! `read_set.finalise()`'s `Ok(sig)` arm.
 //!
 //! Discrimination property: a regression that swapped
-//! `observe_fact_signature` for `accumulate_dispatch_dep_signature`
+//! `observe_fact_signature` for the dispatch dependency bridge
 //! alone in the slot-binding-graph helper would leave the tracer's
 //! `read_set` empty even though the legacy accumulator advanced —
 //! this test would FAIL because the synthesised `MemberPresence`
@@ -75,38 +75,7 @@ fn slot_binding_graph_fact_tracer_carries_member_presence() {
         captured.iter().any(|f| f == &presence_fact),
         "matrix slice: the fact-tracer substrate MUST carry \
          the `MemberPresence` fact through the fan-out path emitted \
-         by the slot-binding-graph dual-emit helper. captured={captured:?}"
-    );
-
-    // Source-grep arch guard: the slot-binding-graph helper at the
-    // top of `slot_binding_graph.rs` MUST contain both the bridge
-    // helper call and the fan-out call. A regression that dropped
-    // `observe_fact_signature` would not surface in the captured
-    // signature above (this test scope does not call the real
-    // helper) but would surface here.
-    let src = read_session_src("meta_resolve/slot_binding_graph.rs");
-    assert!(
-        src.contains("crate::fact_signature_helpers::observe_fact_signature(&bridged)"),
-        "matrix slice (arch guard): \
-         `emit_slot_binding_graph_dispatch_facts` in \
-         `slot_binding_graph.rs` MUST call \
-         `crate::fact_signature_helpers::observe_fact_signature(&bridged)` \
-         to fan slot-binding-graph dispatch facts into the active \
-         tracer stack — without this call the helper degenerates to \
-         the legacy single-channel emission and `MemberPresence` \
-         facts emitted by slot-binding-graph traversal never reach \
-         the outer `with_fact_tracer` scope's curated signature."
-    );
-    assert!(
-        src.contains("dep_signature_to_fact_signature(sig)"),
-        "matrix slice (arch guard): \
-         `emit_slot_binding_graph_dispatch_facts` MUST invoke the \
-         bridge helper \
-         `crate::fact_signature_helpers::dep_signature_to_fact_signature(sig)` \
-         before fanning out — direct calls to \
-         `observe_fact_signature(&legacy_dep_signature)` would fail \
-         to type-check (different element types) but a substituted \
-         empty slice would silently bypass coverage."
+         by the slot-binding-graph dependency path. captured={captured:?}"
     );
 
     // Also exercise the bridge function directly so the test
@@ -126,11 +95,4 @@ fn slot_binding_graph_fact_tracer_carries_member_presence() {
         "matrix slice: empty `DepSignature` must bridge to \
          empty `Vec<FactVersionRef>`. observed={bridged_empty:?}"
     );
-}
-
-fn read_session_src(rel: &str) -> String {
-    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join(rel);
-    std::fs::read_to_string(&p).unwrap_or_else(|err| panic!("read {}: {err}", p.display()))
 }

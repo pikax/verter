@@ -1,6 +1,6 @@
 //! Matrix slice: `slot_binding_graph` × `member`.
 //!
-//! Discrimination: the slot-binding-graph dual-emit fact-tracer
+//! Discrimination: the slot-binding-graph request fact tracer
 //! fan-out substrate MUST deliver `FactKey::Member` facts into every
 //! active `FactReadSet`.
 
@@ -48,7 +48,7 @@ fn slot_binding_graph_signature_carries_member() {
         captured.iter().any(|f| f == &member_fact),
         "slot_binding_graph matrix slice: the fact-tracer \
          substrate MUST carry the `Member` fact through the fan-out \
-         path emitted by the slot-binding-graph dual-emit helper. \
+         path used by slot-binding-graph dependency tracing. \
          captured={captured:?}"
     );
 }

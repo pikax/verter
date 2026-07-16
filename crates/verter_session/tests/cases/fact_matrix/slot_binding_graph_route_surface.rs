@@ -1,6 +1,6 @@
 //! Matrix slice: `slot_binding_graph` × `route_surface`.
 //!
-//! Discrimination: the slot-binding-graph dual-emit fact-tracer
+//! Discrimination: the slot-binding-graph request fact tracer
 //! fan-out substrate MUST deliver `RouteSurface` facts into every
 //! active `FactReadSet`. The legacy `DepSignature` accumulator only
 //! maps to `FileWholeHash`, so derived-domain `RouteSurface` facts
@@ -46,6 +46,6 @@ fn slot_binding_graph_signature_carries_route_surface() {
         "slot_binding_graph matrix slice: the fact-tracer \
          substrate MUST carry the `EffectiveExportSet` RouteSurface \
          fact through the fan-out path emitted by the \
-         slot-binding-graph dual-emit helper. captured={captured:?}"
+         slot-binding-graph dependency path. captured={captured:?}"
     );
 }

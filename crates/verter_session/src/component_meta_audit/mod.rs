@@ -900,10 +900,8 @@ pub fn emit_json(record: &RequestAuditRecord) -> String {
 /// `&[(Arc<str>, DepVersion)]` slice) into a per-frame `local_fence`.
 ///
 /// The `dep_signature_merges` / `dep_signature_intern_hits` audit
-/// counters are NOT bumped here — they are re-homed onto the shared
-/// dispatch fan-in
-/// ([`crate::meta_resolve::dep_signature::accumulate_dispatch_dep_signature`]),
-/// the path that survives the macro-object materialiser retirement.
+/// counters are NOT bumped here — they are owned by the shared dispatch
+/// fact fan-in and the semantic signature interner.
 /// This helper is now a pure fence merge for its remaining
 /// non-dispatch-fan-in callers.
 pub fn merge_dep_signature_into_local_fence(

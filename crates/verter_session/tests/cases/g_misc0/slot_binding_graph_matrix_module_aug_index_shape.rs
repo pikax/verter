@@ -1,6 +1,6 @@
-//! Slot-binding-graph dual-emit matrix — `ModuleAugmentationIndexShape`.
+//! Slot-binding-graph tracer matrix — `ModuleAugmentationIndexShape`.
 //!
-//! Verifies the slot-binding-graph dual-emit fact-tracer fan-out
+//! Verifies the slot-binding-graph fact-tracer fan-out
 //! substrate delivers `FactVersionRef::ModuleAugmentationIndexShape`
 //! facts — the per-project augmentation-index shape signature —
 //! into every active `FactReadSet`. Slot-payload types that depend
@@ -65,28 +65,7 @@ fn slot_binding_graph_fact_tracer_carries_module_aug_index_shape() {
         captured.iter().any(|f| f == &aug_index_fact),
         "Matrix slice: the fact-tracer substrate MUST carry \
          the `ModuleAugmentationIndexShape` fact through the fan-out \
-         path emitted by the slot-binding-graph dual-emit helper. \
+         path used by slot-binding-graph dependency tracing. \
          captured={captured:?}"
     );
-
-    // Arch guard: the helper must route through the same
-    // `observe_fan_out_borrowed` substrate the tracer captures, so
-    // augmentation-index shape shifts reach the captured signature.
-    let src = read_session_src("meta_resolve/slot_binding_graph.rs");
-    assert!(
-        src.contains("fact_signature_helpers::observe_fact_signature"),
-        "Matrix slice (arch guard): \
-         `slot_binding_graph.rs` MUST route through \
-         `fact_signature_helpers::observe_fact_signature` so the \
-         `ModuleAugmentationIndexShape` fact-kind (and every other \
-         derived-domain fact-kind the tracer carries) reaches the \
-         active tracer stack from slot-binding-graph dispatch reads."
-    );
-}
-
-fn read_session_src(rel: &str) -> String {
-    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join(rel);
-    std::fs::read_to_string(&p).unwrap_or_else(|err| panic!("read {}: {err}", p.display()))
 }

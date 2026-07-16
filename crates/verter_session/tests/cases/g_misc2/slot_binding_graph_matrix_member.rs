@@ -1,6 +1,6 @@
 //! `FactKey::Member` fan-out through the slot-binding-graph tracer.
 //!
-//! Verifies the slot-binding-graph dual-emit fact-tracer fan-out
+//! Verifies the slot-binding-graph fact-tracer fan-out
 //! substrate delivers `FactKey::Member` facts into every active
 //! `FactReadSet` on the `ACTIVE_TRACERS` stack — discriminating the
 //! substrate's ability to carry the path-precise R28 member-body
@@ -9,8 +9,7 @@
 //!
 //! Discrimination property: a regression that swapped
 //! `observe_fact_signature` for a no-op would leave the tracer's
-//! `read_set` empty even though the legacy accumulator advanced —
-//! this test would FAIL because the synthesised `Member` fact would
+//! `read_set` empty; this test would fail because the synthesised `Member` fact would
 //! never reach the tracer.
 
 #![cfg(test)]
@@ -57,29 +56,6 @@ fn slot_binding_graph_fact_tracer_carries_member() {
         captured.iter().any(|f| f == &member_fact),
         "the fact-tracer substrate MUST carry \
          the `Member` fact through the fan-out path emitted by the \
-         slot-binding-graph dual-emit helper. captured={captured:?}"
+         slot-binding-graph dependency path. captured={captured:?}"
     );
-
-    // Arch guard: ensure the slot-binding-graph helper still calls
-    // through `observe_fact_signature` so the slot-payload member
-    // body facts emitted by the dispatch's `ProjectPath` Shallow
-    // read on `param0_ty` (site 5) reach an active tracer scope.
-    let src = read_session_src("meta_resolve/slot_binding_graph.rs");
-    assert!(
-        src.contains("fn emit_slot_binding_graph_dispatch_facts"),
-        "arch guard: \
-         `slot_binding_graph.rs` MUST declare the dual-emit helper \
-         `emit_slot_binding_graph_dispatch_facts` so all five \
-         `accumulate_dispatch_dep_signature` call sites route \
-         through the same paired emission point. A missing helper \
-         would force ad-hoc paired emissions per site, defeating \
-         the arch guard's site-pairing check."
-    );
-}
-
-fn read_session_src(rel: &str) -> String {
-    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join(rel);
-    std::fs::read_to_string(&p).unwrap_or_else(|err| panic!("read {}: {err}", p.display()))
 }

@@ -33,9 +33,6 @@ use crate::meta_resolve::{
     RegistryMaterialization, ResolvedComponentMetaState,
 };
 use crate::meta_resolve::{
-    drain_dispatch_dep_signature_accumulator, reset_dispatch_dep_signature_accumulator,
-};
-use crate::meta_resolve::{
     next_component_meta_audit_request_id, request_source_performed_compute,
     should_skip_imported_registry_seed_refresh, trace_request_source, CapturedComponentMetaInputs,
     ResolvedComponentMetaComputeAudit, ResolvedTypeRegistryMeta,
@@ -838,12 +835,6 @@ impl VerterHost {
         // `compute_component_meta_state` constructs a bare-host ctx
         // via `with_bare_host_ctx_for_test` and is itself
         // `#[cfg(any(test, feature = "test-support"))]`-gated.
-        // Step 6.6.A: reset the per-request dep-signature accumulator
-        // so each compute call starts fresh. Inner materialize_until_stable
-        // calls accumulate dispatch-side facts; we drain + merge them
-        // into the published `fact_versions` below.
-        reset_dispatch_dep_signature_accumulator();
-
         let audit_enabled = self.config.audit_enabled;
         let mut audit_timings = if audit_enabled {
             captured
@@ -1125,20 +1116,7 @@ impl VerterHost {
                 parts.fact_versions.len(),
             ),
         );
-        // Step 6.6.A: drain accumulated dispatch dep_signatures and
-        // merge into fact_versions before publish. Each
-        // materialize_until_stable_full call inside the compute body
-        // pushed the dispatch round-trip's DepSignature into the
-        // thread-local accumulator; here we read + merge so warm
-        // cache validation captures the dependency graph the
-        // dispatch path discovered.
-        let mut merged_fact_versions = parts.fact_versions;
-        let dispatch_facts = drain_dispatch_dep_signature_accumulator();
-        for fact in dispatch_facts {
-            if !merged_fact_versions.contains(&fact) {
-                merged_fact_versions.push(fact);
-            }
-        }
+        let fact_versions = parts.fact_versions;
 
         // Step 9.1: SurfaceNodeIdentities sidecar — populated by the
         // audit-gated FieldKind closure inside
@@ -1187,7 +1165,7 @@ impl VerterHost {
             resolved_type_registry: parts.resolved_type_registry,
             resolved_type_registry_meta: parts.resolved_type_registry_meta,
             evaluated_types: parts.evaluated_types,
-            fact_versions: merged_fact_versions,
+            fact_versions,
             surface_identities,
             synthesis_diagnostics,
             completeness,

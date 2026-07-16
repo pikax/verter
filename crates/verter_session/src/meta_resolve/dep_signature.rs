@@ -1,139 +1,12 @@
-//! Per-request thread-local accumulators + test-only BFS counters.
+//! Dispatch fact fan-out plus test-only cycle-walk counters.
 //!
-//! Domain 6 — Step 6.6.A dep-signature accumulator + 3 accessors,
-//! plus `#[cfg(test)]` BFS counters for the cycle-walk regression suite.
-//!
-//! The counters are declared `pub(crate)` so test code anywhere in the crate
-//! can probe them. Sibling modules access them via `super::dep_signature::*`
-//! or through the shell's narrow re-exports.
-//!
-//! # Dual-emit migration substrate
-//!
-//! [`emit_dispatch_dep_signature_facts`] is the paired emission helper
-//! used by every component-meta dispatch read whose owner has no
-//! result cache of its own (the projector, materialiser,
-//! lowered-root cycle, and registry-materialise sites). It fans
-//! dispatch facts into BOTH downstream channels in lockstep, mirroring
-//! the [`super::slot_binding_graph::emit_slot_binding_graph_dispatch_facts`]
-//! pattern: the legacy `DISPATCH_DEP_SIGNATURE_ACCUMULATOR` (TLS,
-//! drained at `compute_component_meta_state_inner` and folded into
-//! `state.fact_versions` → `ComponentMetaResultEntry.fact_dep_signature`)
-//! AND the `ACTIVE_TRACERS` stack (captured by the outer
-//! `with_fact_tracer` scope). Dual-emit lets the curated signature
-//! retain coverage today while leaving room for the
-//! `fact_dep_signature` producer source to flip from
-//! `state.fact_versions` to the tracer's `read_set.finalise()` without
-//! losing a single fact.
+//! Dispatch reads that have no cache boundary of their own publish their
+//! dependency evidence into the active request tracer through
+//! [`emit_dispatch_dep_signature_facts`]. The request-level tracer is the sole
+//! component-meta signature authority; there is no parallel curated
+//! accumulator.
 
-thread_local! {
-    /// Step 6.6.A dep-signature accumulator.
-    ///
-    /// `materialize_component_meta_type_expr_until_stable_full` populates
-    /// this thread-local with each dispatch round-trip's
-    /// `DepSignature`; `compute_component_meta_state_inner` reads + clears
-    /// it before publish and merges the accumulated facts into
-    /// `ResolvedComponentMetaState.fact_versions` (D31). The thread-local
-    /// is request-scoped — the compute entry point clears it; if any
-    /// recursive materialize call accumulates without a matching read,
-    /// the next request's compute clears it before populating fresh
-    /// facts.
-    ///
-    /// **Why thread-local, not host-owned cache:** the accumulator is
-    /// transient per-request channel state, not a reusable cache. It
-    /// crosses caller boundaries (deep materialize stacks), but the
-    /// completion-fence design already uses thread-locals for the same
-    /// reason. CLAUDE.md "host-owned cache principle" applies to
-    /// reusable semantic caches, not request-scoped instrumentation
-    /// accumulators.
-    static DISPATCH_DEP_SIGNATURE_ACCUMULATOR: std::cell::RefCell<
-        Vec<crate::resolver_core::FactVersionRef>,
-    > = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// Reset the per-request dep-signature accumulator. Called at the
-/// entry of `compute_component_meta_state_inner` so each request
-/// starts with a clean slate.
-pub(crate) fn reset_dispatch_dep_signature_accumulator() {
-    DISPATCH_DEP_SIGNATURE_ACCUMULATOR.with(|cell| cell.borrow_mut().clear());
-}
-
-/// Drain the per-request dep-signature accumulator. Called at publish
-/// time in `compute_component_meta_state_inner` so accumulated facts
-/// merge into `ResolvedComponentMetaState.fact_versions` (Step 6.6.A).
-pub(crate) fn drain_dispatch_dep_signature_accumulator() -> Vec<crate::resolver_core::FactVersionRef>
-{
-    DISPATCH_DEP_SIGNATURE_ACCUMULATOR.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
-}
-
-/// Convert dispatch's `DepSignature` (canonical-id + DepVersion pairs)
-/// into session-layer `FactVersionRef` entries and merge them into the
-/// thread-local accumulator. Deduplicates against entries already in
-/// the accumulator on the way in (linear scan; the accumulator is
-/// short for a typical request).
-///
-/// Per-`DepVersion` mapping — identical to the sibling bridge
-/// [`crate::fact_signature_helpers::dep_signature_to_fact_signature`]:
-///
-/// - `WholeHash` → `FileWholeHash`.
-/// - `ProjectGeneration` → `FactVersionRef::ProjectGeneration` — the
-///   project-wide generation a sub-result depended on. The accumulator
-///   drains into `ResolvedComponentMetaState.fact_versions`, the
-///   signature on the fact-only `cached_resolved_meta` sidecar;
-///   dropping the project generation would let that sidecar validate a
-///   stale result against a superseded project shape.
-/// - `RouteGeneration` is **not expressible** as a `FactVersionRef` —
-///   there is no `FactVersionRef::RouteGeneration` variant and no
-///   authoritative validating source — so it is skipped. No production
-///   path constructs `DepVersion::RouteGeneration`; this arm is the
-///   defensive floor.
-pub(crate) fn accumulate_dispatch_dep_signature(sig: &crate::semantic_query::DepSignature) {
-    use crate::resolver_core::FactVersionRef;
-    use crate::semantic_query::DepVersion;
-
-    // Audit counters — re-homed onto the SHARED dispatch fan-in (this helper is
-    // the sole drain of `emit_dispatch_dep_signature_facts`). Each call folds one
-    // memoised dispatch read's `DepSignature` into the per-request accumulator,
-    // so it bumps `dep_signature_merges` once; an incoming entry already present
-    // (a fact re-observed through a second import route — the diamond intern-hit)
-    // is the `dep_signature_intern_hits` redundant-merge-avoided signal. The
-    // counters previously lived on the materialiser's per-frame local fence
-    // (`merge_dep_signature_into_local_fence`); the fan-in is the path that
-    // survives the materialiser retirement, so the audit signals stay live.
-    if !sig.is_empty() {
-        crate::host_manage::record_dep_signature_merge();
-    }
-
-    DISPATCH_DEP_SIGNATURE_ACCUMULATOR.with(|cell| {
-        let mut accumulator = cell.borrow_mut();
-        for (canonical, version) in sig.iter() {
-            let fact = match version {
-                DepVersion::WholeHash(hash) => FactVersionRef::FileWholeHash {
-                    canonical_id: canonical.as_ref().to_string(),
-                    hash: *hash,
-                },
-                DepVersion::ProjectGeneration(generation) => FactVersionRef::ProjectGeneration {
-                    generation: *generation,
-                },
-                DepVersion::RouteGeneration(_) => {
-                    // Route generation has no `FactVersionRef` peer and
-                    // no authoritative validating source — skip it.
-                    continue;
-                }
-            };
-            if accumulator.iter().any(|existing| existing == &fact) {
-                // Redundant merge avoided — the fact was already observed (e.g.
-                // a shared base reached through a second import route). This is
-                // the intern-hit the diamond fixture characterises.
-                crate::host_manage::record_dep_signature_intern_hit();
-            } else {
-                accumulator.push(fact);
-            }
-        }
-    });
-}
-
-/// Dual-emit helper for the dispatch dep-signature reads that have
-/// no result cache of their own.
+/// Publish facts for dispatch reads that have no result cache of their own.
 ///
 /// The six in-scope dispatch reads — three projector sites in
 /// `meta_resolve/projectors/mod.rs` (`resolve_macro_payload`,
@@ -144,55 +17,19 @@ pub(crate) fn accumulate_dispatch_dep_signature(sig: &crate::semantic_query::Dep
 /// `meta_resolve/graph_predicates.rs::node_root_reaches_transitive_cycle_with_fence`,
 /// and the registry-materialise site in
 /// `resolver_core/component_meta_query_engine/registry_decl.rs::materialize_member_surface_expr`
-/// — fan their dispatch facts through this helper so the same set of
-/// `DepSignature` entries reaches BOTH downstream channels in lockstep:
-///
-/// 1. The legacy [`DISPATCH_DEP_SIGNATURE_ACCUMULATOR`] (TLS), drained
-///    at `host_manage/component_meta_methods.rs::compute_component_meta_state_inner`
-///    and folded into `ResolvedComponentMetaState.fact_versions` →
-///    `ComponentMetaResultEntry.fact_dep_signature` via
-///    `publish_component_meta_cache_entry`.
-/// 2. The `ACTIVE_TRACERS` stack (also TLS), captured by the outer
-///    `with_fact_tracer` scope in `component_meta_entry.rs` — used for
-///    R20 overflow detection and (once the dual channels collapse) as
-///    the canonical `fact_dep_signature` source.
-///
-/// Dual-emit is the safe migration substrate: both channels receive
-/// the same dispatch facts so the curated signature retains coverage
-/// today AND the `fact_dep_signature` source can later switch from
-/// `state.fact_versions` to the tracer's `read_set.finalise()`
-/// without losing a single fact. The fact-tracer fan-out alone will
-/// suffice once the producer source flips.
-///
-/// Two provenance counters
-/// (`dispatch_dep_signature_fact_tracer_emissions` and
-/// `dispatch_dep_signature_legacy_accumulator_emissions`) advance in
-/// lockstep on every call so tests can discriminate the pairing —
-/// removing either channel would leave one counter at zero while the
-/// other still advanced, and the discriminating regression test
-/// `dispatch_dep_signature_dual_emit_in_lockstep` would FAIL.
+/// — fan their `DepSignature` through this helper. The bridge preserves
+/// `WholeHash` and `ProjectGeneration`; `RouteGeneration` has no validating
+/// fact representation and is deliberately omitted. The enclosing
+/// request-level tracer finalises and owns the reusable cache signature.
 pub(crate) fn emit_dispatch_dep_signature_facts(
     ctx: &dyn crate::resolver_core::ResolverContext,
     sig: &crate::semantic_query::DepSignature,
 ) {
     use std::sync::atomic::Ordering::Relaxed;
-    // Legacy: feed the per-request accumulator that drains into
-    // `state.fact_versions`.
-    accumulate_dispatch_dep_signature(sig);
-    if let Some(prov) = ctx.project_type_store().semantic_graph().provenance() {
-        prov.dispatch_dep_signature_legacy_accumulator_emissions
-            .fetch_add(1, Relaxed);
+    if !sig.is_empty() {
+        crate::host_manage::record_dep_signature_merge();
     }
 
-    // New: fan into the `ACTIVE_TRACERS` stack so the outer
-    // `with_fact_tracer` captures the same facts. The bridge helper
-    // converts `DepSignature` → `Vec<FactVersionRef>`: `WholeHash`
-    // entries become `FileWholeHash` and `ProjectGeneration` entries
-    // become `FactVersionRef::ProjectGeneration` (so an outer entry
-    // observing this sub-result through the tracer roots the project
-    // generation too). `RouteGeneration` has no `FactVersionRef`
-    // equivalent — the bridge drops it; no production path emits
-    // `DepVersion::RouteGeneration` on a memoised dispatch signature.
     let bridged = crate::fact_signature_helpers::dep_signature_to_fact_signature(sig);
     crate::fact_signature_helpers::observe_fact_signature(&bridged);
     if let Some(prov) = ctx.project_type_store().semantic_graph().provenance() {

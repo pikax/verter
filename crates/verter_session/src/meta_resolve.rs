@@ -67,22 +67,12 @@ mod slot_binding_graph_tests;
 #[cfg(test)]
 #[path = "meta_resolve/typed_ir_consumer_tests.rs"]
 mod typed_ir_consumer_tests;
+pub(crate) use dep_signature::emit_dispatch_dep_signature_facts;
 #[cfg(test)]
 pub(crate) use dep_signature::{
     bfs_compute_counter_for_test, reset_bfs_compute_counter_for_test,
     with_bfs_child_refs_observer_for_test, with_visited_counter,
 };
-pub(crate) use dep_signature::{
-    drain_dispatch_dep_signature_accumulator, emit_dispatch_dep_signature_facts,
-    reset_dispatch_dep_signature_accumulator,
-};
-// `accumulate_dispatch_dep_signature` is re-exported only for the
-// `for_tests` bridge shim that exercises the dispatch accumulator
-// directly; production callers route through
-// `emit_dispatch_dep_signature_facts`, enforced by the
-// `no_accumulate_dispatch_dep_signature_outside_helpers` guard.
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) use dep_signature::accumulate_dispatch_dep_signature;
 // Consumed by the Vue/Svelte normalizers in §5a SP2/SP3; the re-export lands now
 // (substrate-first) but has no production caller yet, so the import is unused on
 // the lib build until each method is wired.

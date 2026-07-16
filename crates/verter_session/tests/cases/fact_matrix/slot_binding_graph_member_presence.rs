@@ -1,6 +1,6 @@
 //! Matrix slice: `slot_binding_graph` × `member_presence`.
 //!
-//! Discrimination: the slot-binding-graph dual-emit fact-tracer
+//! Discrimination: the slot-binding-graph request fact tracer
 //! fan-out substrate MUST deliver `FactKey::MemberPresence` facts
 //! into every active `FactReadSet` on the `ACTIVE_TRACERS` stack.
 //! A regression dropping `observe_fact_signature` from the helper
@@ -50,7 +50,6 @@ fn slot_binding_graph_signature_carries_member_presence() {
         captured.iter().any(|f| f == &presence_fact),
         "slot_binding_graph matrix slice: the fact-tracer \
          substrate MUST carry the `MemberPresence` fact through the \
-         fan-out path emitted by the slot-binding-graph dual-emit \
-         helper. captured={captured:?}"
+         slot-binding dependency path. captured={captured:?}"
     );
 }

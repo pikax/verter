@@ -20,7 +20,7 @@
 // imports resolved through `meta_resolve` private siblings; after the
 // move, `super` is `host_manage`, so the rewrite goes via the parent
 // module's `pub(crate)`-re-exported surface.
-use crate::fact_signature_helpers::named_cacheability_scope;
+use crate::fact_signature_helpers::named_fact_tracer;
 use crate::host_manage::component_meta_trace_custom;
 use crate::meta_resolve::ResolvedComponentMetaState;
 use crate::resolver_core::{
@@ -37,6 +37,37 @@ use crate::instant::Instant;
 pub(crate) fn next_component_meta_audit_request_id() -> u64 {
     static NEXT_REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Attach the request tracer's finalized dependency evidence to the returned
+/// resolution and translate non-admission outcomes into the request driver's
+/// typed cache-refusal rail. This is the sole producer of the resolved-meta
+/// cache signature.
+fn component_meta_outcome_from_tracer(
+    mut value: Option<ResolvedComponentMetaState>,
+    finalise: crate::resolver_core::FactReadSetFinalise,
+) -> ComponentMetaComputeOutcome<ResolvedComponentMetaState> {
+    let cache_refusal = match finalise {
+        crate::resolver_core::FactReadSetFinalise::Ok(facts) => {
+            if let Some(resolved) = value.as_mut() {
+                resolved.fact_versions = facts.to_vec();
+            }
+            None
+        }
+        crate::resolver_core::FactReadSetFinalise::NonCacheable(facts) => {
+            if let Some(resolved) = value.as_mut() {
+                resolved.fact_versions = facts.to_vec();
+            }
+            Some(crate::resolver_core::fact_read_set::NonCacheablePropagation::Transitive)
+        }
+        crate::resolver_core::FactReadSetFinalise::Overflow => {
+            Some(crate::resolver_core::fact_read_set::NonCacheablePropagation::Transitive)
+        }
+    };
+    ComponentMetaComputeOutcome {
+        value,
+        cache_refusal,
+    }
 }
 
 pub(crate) fn trace_request_source(source: RequestSource) -> &'static str {
@@ -246,77 +277,76 @@ impl ComponentMetaRequestHost for VerterHost {
         store_view: Option<&Self::View>,
         base_is_current: bool,
     ) -> ComponentMetaComputeOutcome<Self::Resolution> {
-        let (value, non_cacheable) =
-            named_cacheability_scope!(self, TracerScope::ComponentMetaRequest, || {
-                // Consume the request-bound `store_view` to construct a
-                // `HostResolverContext` so the cold-compute pipeline binds
-                // overlay-aware reads to the same view the executor already
-                // snapshotted. The singleflight executor always supplies a
-                // view in production (`snapshot_view` builds one above);
-                // the `None` branch falls back to building a view here for
-                // robustness. `base_is_current` carries the executor snapshot's
-                // currentness so the `HostResolverContext` fails its nested
-                // warm-cache probes closed on a non-current seed.
-                let overlay =
-                    std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-                match store_view {
-                    Some(view) => {
-                        if let Some(captured) = captured {
-                            return self.compute_component_meta_state_from_captured_with_view_arg(
-                                canonical,
-                                mode,
-                                captured,
-                                view,
-                                &overlay,
-                                base_is_current,
-                            );
-                        }
-                        let whole_hash = self
-                            .current_or_read_whole_hash(canonical)
-                            .unwrap_or_default();
-                        self.compute_component_meta_state_with_view_arg(
+        let (value, finalise) = named_fact_tracer!(self, TracerScope::ComponentMetaRequest, || {
+            // Consume the request-bound `store_view` to construct a
+            // `HostResolverContext` so the cold-compute pipeline binds
+            // overlay-aware reads to the same view the executor already
+            // snapshotted. The singleflight executor always supplies a
+            // view in production (`snapshot_view` builds one above);
+            // the `None` branch falls back to building a view here for
+            // robustness. `base_is_current` carries the executor snapshot's
+            // currentness so the `HostResolverContext` fails its nested
+            // warm-cache probes closed on a non-current seed.
+            let overlay =
+                std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            match store_view {
+                Some(view) => {
+                    if let Some(captured) = captured {
+                        return self.compute_component_meta_state_from_captured_with_view_arg(
                             canonical,
                             mode,
-                            whole_hash,
+                            captured,
                             view,
                             &overlay,
                             base_is_current,
-                        )
+                        );
                     }
-                    None => {
-                        // Cold compute with no driver-supplied view: this runs
-                        // inside `run_stable_request`'s `compute`, whose `is_stable`
-                        // fence gates promotion. Seed from the cold-seed view AND
-                        // carry its currentness so the derived context fails its
-                        // nested warm-cache probes closed on a non-current seed.
-                        let cold_seed = self.resolver_store_view_read().into_cold_seed_view();
-                        let seed_is_current = cold_seed.is_current();
-                        let view = cold_seed.into_inner();
-                        if let Some(captured) = captured {
-                            return self.compute_component_meta_state_from_captured_with_view_arg(
-                                canonical,
-                                mode,
-                                captured,
-                                &view,
-                                &overlay,
-                                seed_is_current,
-                            );
-                        }
-                        let whole_hash = self
-                            .current_or_read_whole_hash(canonical)
-                            .unwrap_or_default();
-                        self.compute_component_meta_state_with_view_arg(
+                    let whole_hash = self
+                        .current_or_read_whole_hash(canonical)
+                        .unwrap_or_default();
+                    self.compute_component_meta_state_with_view_arg(
+                        canonical,
+                        mode,
+                        whole_hash,
+                        view,
+                        &overlay,
+                        base_is_current,
+                    )
+                }
+                None => {
+                    // Cold compute with no driver-supplied view: this runs
+                    // inside `run_stable_request`'s `compute`, whose `is_stable`
+                    // fence gates promotion. Seed from the cold-seed view AND
+                    // carry its currentness so the derived context fails its
+                    // nested warm-cache probes closed on a non-current seed.
+                    let cold_seed = self.resolver_store_view_read().into_cold_seed_view();
+                    let seed_is_current = cold_seed.is_current();
+                    let view = cold_seed.into_inner();
+                    if let Some(captured) = captured {
+                        return self.compute_component_meta_state_from_captured_with_view_arg(
                             canonical,
                             mode,
-                            whole_hash,
+                            captured,
                             &view,
                             &overlay,
                             seed_is_current,
-                        )
+                        );
                     }
+                    let whole_hash = self
+                        .current_or_read_whole_hash(canonical)
+                        .unwrap_or_default();
+                    self.compute_component_meta_state_with_view_arg(
+                        canonical,
+                        mode,
+                        whole_hash,
+                        &view,
+                        &overlay,
+                        seed_is_current,
+                    )
                 }
-            });
-        ComponentMetaComputeOutcome::from_owner_scope(value, non_cacheable)
+            }
+        });
+        component_meta_outcome_from_tracer(value, finalise)
     }
 
     fn store_component_meta_result(
@@ -414,8 +444,8 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
         store_view: Option<&Self::View>,
         base_is_current: bool,
     ) -> ComponentMetaComputeOutcome<Self::Resolution> {
-        let (value, non_cacheable) =
-            named_cacheability_scope!(self.host, TracerScope::ComponentMetaRequest, || {
+        let (value, finalise) =
+            named_fact_tracer!(self.host, TracerScope::ComponentMetaRequest, || {
                 // View-aware cold compute: thread the session view through a
                 // `SessionResolverContext` so the resolver-tier reads (prepared
                 // declarations, dep-source materialisation, registry+macro shapes)
@@ -483,7 +513,7 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
                         &self.overlay,
                     )
             });
-        ComponentMetaComputeOutcome::from_owner_scope(value, non_cacheable)
+        component_meta_outcome_from_tracer(value, finalise)
     }
 
     fn store_component_meta_result(

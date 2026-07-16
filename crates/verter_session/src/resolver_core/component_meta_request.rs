@@ -11,8 +11,9 @@ pub(crate) struct ComponentMetaComputeOutcome<R> {
     pub(crate) cache_refusal: Option<crate::resolver_core::fact_read_set::NonCacheablePropagation>,
 }
 
+#[cfg(test)]
 impl<R> ComponentMetaComputeOutcome<R> {
-    pub(crate) fn from_owner_scope(value: Option<R>, non_cacheable: bool) -> Self {
+    fn from_owner_scope(value: Option<R>, non_cacheable: bool) -> Self {
         Self {
             value,
             cache_refusal: non_cacheable.then_some(
