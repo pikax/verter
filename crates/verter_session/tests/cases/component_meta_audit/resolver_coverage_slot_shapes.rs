@@ -3,7 +3,6 @@
 //! parameter type must lower to `Primitive(String)`, not
 //! `Unknown { raw: "semanticMiss" }`.
 //!
-//! Source: `phase-00b-tier1-mismatches.md` row 1 (`fixture_slots_typed`).
 //! Slot macros: every key of T surfaces as a slot, with bindings
 //! extracted from each slot function's first parameter.
 //!

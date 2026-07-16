@@ -12,8 +12,7 @@
 //! companion `derivation_notes/<id>.md`. NO REFERENCE
 //! IMPLEMENTATION (Volar, vue-component-meta, vue-tsc, TSGo) was
 //! consulted while writing these constants. These values are the gate
-//! against which those reference implementations are later
-//! cross-checked (Tier 3, informational).
+//! against which reference implementations are later cross-checked.
 
 #![allow(clippy::needless_lifetimes)]
 
@@ -172,7 +171,6 @@ pub fn intersection_of_objects() -> SnapshotView {
 //
 //   Rule citation: Verter rule `./.claude/skills/type-resolution`
 //   ("user shadowing wins" / TS-first resolution priority).
-//   `phase-00-tier1-mismatches.md` row 5.
 pub fn userland_shadowing_pick() -> SnapshotView {
     shell(vec![
         required_prop("alpha", "string"),
@@ -190,7 +188,6 @@ pub fn userland_shadowing_pick() -> SnapshotView {
 //   left-to-right occurrence of the surviving members in T.
 //
 //   Rule citation: TS spec §4.4 (distributive conditional / Exclude).
-//   `phase-00-tier1-mismatches.md` row 1.
 pub fn mapped_exclude() -> SnapshotView {
     shell(vec![required_prop("kind", "\"a\" | \"c\"")])
 }
@@ -204,7 +201,6 @@ pub fn mapped_exclude() -> SnapshotView {
 //   the union in source order (`"a" | "b"`).
 //
 //   Rule citation: TS spec §4.4 (distributive conditional / Extract).
-//   `phase-00-tier1-mismatches.md` row 2.
 pub fn mapped_extract() -> SnapshotView {
     shell(vec![required_prop("kind", "\"a\" | \"b\"")])
 }
@@ -226,7 +222,6 @@ pub fn mapped_extract() -> SnapshotView {
 //
 //   Rule citation: TS spec §3.6 (generic substitution); CLAUDE.md
 //   "generic substitutions are part of semantic meaning".
-//   `phase-00-tier1-mismatches.md` row 4.
 pub fn generic_substitution_via_typeof() -> SnapshotView {
     shell(vec![required_prop("id", "string")])
 }
@@ -244,7 +239,7 @@ pub fn generic_substitution_via_typeof() -> SnapshotView {
 //   `[prefixA, prefixB]`.
 //
 //   Rule citation: TS spec §4.5 (template-literal types in mapped
-//   key positions). `phase-00-tier1-mismatches.md` row 3.
+//   key positions).
 pub fn template_literal_as_key() -> SnapshotView {
     shell(vec![
         required_prop("prefixA", "number"),
@@ -408,8 +403,7 @@ pub fn fixture_fallthrough_root_inherit() -> SnapshotView {
 //   Slots themselves are alphabetised — `default` before `named`.
 //
 //   Rule citation: Verter macros §slots
-//   (`./.claude/skills/component-meta`).
-//   `phase-00b-tier1-mismatches.md` row 1; handled via
+//   (`./.claude/skills/component-meta`). Handled via
 //   `ProjectSemanticDispatch::project_slot_binding_member` and
 //   the `expand_field_expr` SlotBinding branch.
 pub fn fixture_slots_typed() -> SnapshotView {
@@ -460,8 +454,7 @@ pub fn fixture_slots_typed() -> SnapshotView {
 //   alphabetically by name, so `count` precedes `modelValue`.
 //
 //   Rule citation: Verter macros §model
-//   (`./.claude/skills/component-meta`).
-//   `phase-00b-tier1-mismatches.md` row 2; handled via the
+//   (`./.claude/skills/component-meta`). Handled via the
 //   `expand_field_expr` `DefineModel` branch in
 //   `host_manage.rs::compute_evaluated_types*`.
 pub fn fixture_models() -> SnapshotView {
@@ -538,12 +531,9 @@ pub fn lookup_class_a_expected(fixture_id: &str) -> Option<SnapshotView> {
         "mapped_extract" => Some(mapped_extract()),
         "template_literal_as_key" => Some(template_literal_as_key()),
         // Value-member typeof, handled by the single-segment-first
-        // lookup in `shallow_lower_type_expr`'s `TypeExpr::TypeOf` arm
-        // (`phase-00-tier1-mismatches.md` row 4).
+        // lookup in `shallow_lower_type_expr`'s `TypeExpr::TypeOf` arm.
         "generic_substitution_via_typeof" => Some(generic_substitution_via_typeof()),
-        // component-meta property macros (see
-        // `phase-00b-tier1-mismatches.md` for `fixture_slots_typed`
-        // and `fixture_models`).
+        // Component-meta property macros.
         "fixture_props_with_defaults" => Some(fixture_props_with_defaults()),
         "fixture_events_typed" => Some(fixture_events_typed()),
         // slot-binding dispatch helper for `fixture_slots_typed`

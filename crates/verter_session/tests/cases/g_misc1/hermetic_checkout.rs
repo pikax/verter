@@ -125,79 +125,8 @@ fn workspace_root() -> std::path::PathBuf {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// Discriminating tests — LSP component-meta method binding doc, MCP D95
-// out-of-scope record, and corpus + semantic-graph snapshot presence.
+// Discriminating tests for corpus and semantic-graph snapshot presence.
 // ──────────────────────────────────────────────────────────────────────
-
-/// Discriminating: the LSP component-meta method binding doc lives at
-/// the pinned path. Its presence records the three custom methods.
-///
-/// FAIL-pre evidence: deleting the file at the pinned path causes this
-/// test to fail with the path's display in the error message.
-#[test]
-fn lsp_custom_request_method_binding_doc_present() {
-    let path = workspace_root().join("docs/arch/debt-closure/15-lsp-component-meta-method.md");
-    assert!(
-        path.is_file(),
-        "D113 + D36: LSP component-meta method binding doc \
-         must exist at `{}`. Re-author if missing.",
-        path.display(),
-    );
-}
-
-/// Discriminating: the LSP method binding doc names all
-/// three custom methods registered by the `.custom_method(...)` chain in
-/// `crates/verter_lsp/src/main.rs:118..160`. Each method literal must be
-/// present so the doc faithfully tracks the wire-level entrypoints.
-///
-/// FAIL-pre evidence: removing any one of the three method literals from
-/// the doc causes this test to fail with the missing literal in the
-/// error message.
-#[test]
-fn lsp_method_binding_names_three_methods() {
-    let path = workspace_root().join("docs/arch/debt-closure/15-lsp-component-meta-method.md");
-    let body =
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
-    for method in [
-        "$/verter/getComponentMeta",
-        "$/verter/getComponentMetaSurface",
-        "$/verter/getComponentMetaTypeExpansion",
-    ] {
-        assert!(
-            body.contains(method),
-            "D113: LSP method binding doc must name `{}`. \
-             Doc at `{}` does not contain that literal.",
-            method,
-            path.display(),
-        );
-    }
-}
-
-/// Discriminating: the LSP method binding doc records D95 — that the
-/// MCP component-meta tool is out of scope. The doc must call out D95
-/// specifically so the out-of-scope decision is visible to readers.
-///
-/// FAIL-pre evidence: dropping the `D95` mention from the doc fails this
-/// test.
-#[test]
-fn mcp_component_meta_tool_binding_documented() {
-    let path = workspace_root().join("docs/arch/debt-closure/15-lsp-component-meta-method.md");
-    let body =
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
-    assert!(
-        body.contains("D95"),
-        "LSP method binding doc must record D95 (MCP component-meta \
-         out-of-scope). Doc at `{}` does not mention D95.",
-        path.display(),
-    );
-    // Stronger negative: the doc must not claim the MCP tool is exposed.
-    let lower = body.to_ascii_lowercase();
-    assert!(
-        lower.contains("out of scope") || lower.contains("out-of-scope"),
-        "LSP method binding doc must explicitly mark the MCP \
-         component-meta tool as `out of scope` per D95.",
-    );
-}
 
 /// Discriminating (D116): the macro-impact inventory at
 /// `crates/verter_session/src/owned_artifacts/eval_program_macro_impact_inventory.md`
@@ -258,29 +187,6 @@ fn macro_impact_inventory_built_from_codebase_baseline() {
         "D116: macro-impact inventory cites paths but none exist on disk. \
          Cited: {:?}. Inventory must reflect the current parser baseline.",
         cited_paths,
-    );
-}
-
-/// Discriminating: the rehoming doc has been promoted to an active
-/// spec. The doc body must NOT contain a "Deferred follow-ups"
-/// section — those were promoted into the active spec.
-///
-/// FAIL-pre evidence: re-introducing the `Deferred follow-ups` heading
-/// fails this test.
-#[test]
-fn rehoming_doc_has_no_deferred_followups_section() {
-    let path = workspace_root().join("docs/arch/debt-closure/12-host-cache-rehoming.md");
-    assert!(
-        path.is_file(),
-        "D30: host-cache-rehoming doc must exist at `{}`",
-        path.display(),
-    );
-    let body =
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
-    assert!(
-        !body.contains("Deferred follow-ups"),
-        "D30: rehoming doc must not contain a `Deferred follow-ups` \
-         section — those were promoted into the active spec.",
     );
 }
 

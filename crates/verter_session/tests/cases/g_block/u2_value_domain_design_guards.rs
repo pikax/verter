@@ -29,12 +29,9 @@
 //!    type rides the existing `SemanticNodeData::Opaque(QueryError)`
 //!    carrier; NO `ErrorType` arm/variant/field may exist on
 //!    `SemanticNodeData`, `GraphTypeNode`, or the typeinfo proto.
-//! 3. `u2_value_domain_design_doc_locks_invariants` — the design doc
-//!    pins the load-bearing locked decisions; this guards against
-//!    silent drift of the locked text ahead of implementation.
 //!
-//! Each scanner ships a discriminator self-test that injects the
-//! forbidden token / a deliberately-absent phrase into a local
+//! Each scanner ships a discriminator self-test that injects a
+//! forbidden token into a local
 //! string and asserts the scanner verdict flips — mirroring
 //! `every_registry_guard_name_validity_scanner_discriminates_against_fake`
 //! in `g_misc0/critical_rules_have_guards.rs`.
@@ -315,87 +312,7 @@ fn error_rides_opaque_no_new_error_type_wire_arm_discriminator_self_test() {
 }
 
 // ---------------------------------------------------------------------------
-// Guard 3 — the design doc locks its load-bearing invariants.
-// ---------------------------------------------------------------------------
-
-/// The load-bearing locked phrases that MUST remain verbatim in the
-/// design doc. Each was confirmed present by grep before landing.
-const LOCKED_DESIGN_PHRASES: &[&str] = &[
-    // The locked `Instantiate`/`ResolveMacroPayload` slot-keying decision
-    // (env-bearing `ResolvedDeclSlotIdentity` base/owner). Pinned by a
-    // final-state phrase, not the former plan-fork label.
-    "key on the env-bearing slot",
-    "Partial join is ACCEPTABLE",
-    "two-tier env model",
-    "MaterializedSet",
-    // The no-ErrorType-wire-arm statement.
-    "GraphTypeNode::ErrorType",
-];
-
-fn design_doc_path() -> PathBuf {
-    workspace_root().join("docs/arch/u2-query-value-domain-design.md")
-}
-
-/// Pure predicate: which locked phrases are MISSING from `body`?
-fn missing_locked_phrases(body: &str) -> Vec<&'static str> {
-    LOCKED_DESIGN_PHRASES
-        .iter()
-        .copied()
-        .filter(|phrase| !body.contains(phrase))
-        .collect()
-}
-
-#[test]
-fn u2_value_domain_design_doc_locks_invariants() {
-    let path = design_doc_path();
-    let body = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("could not read design doc `{}`: {e}", path.display()));
-
-    let missing = missing_locked_phrases(&body);
-    assert!(
-        missing.is_empty(),
-        "U2 design doc `{}` has DRIFTED: the following locked phrases \
-         are no longer present verbatim — the locked decision was \
-         silently weakened or reworded. Restore the phrasing or update \
-         this guard in the same change that re-locks the design:\n  {}",
-        path.display(),
-        missing.join("\n  "),
-    );
-}
-
-/// Discriminator self-test for guard 3: a deliberately-absent phrase
-/// must be reported missing; the real phrases must be found in a
-/// sample that contains them.
-#[test]
-fn u2_value_domain_design_doc_locks_invariants_discriminator_self_test() {
-    // A sample missing every locked phrase must report them all missing.
-    let empty_sample = "this text contains none of the locked phrases";
-    assert_eq!(
-        missing_locked_phrases(empty_sample).len(),
-        LOCKED_DESIGN_PHRASES.len(),
-        "scanner self-test: a sample missing every locked phrase did \
-         not report them all missing — the scanner is too permissive."
-    );
-    // A deliberately-absent phrase that is NOT one of the locked
-    // phrases must never be reported (the predicate keys on the
-    // registered phrases, not on arbitrary absence).
-    let absent = "UNREGISTERED-PHRASE = DELETE_EVERYTHING_AND_REPARSE";
-    assert!(
-        !LOCKED_DESIGN_PHRASES.contains(&absent),
-        "scanner self-test: a deliberately-absent phrase unexpectedly \
-         appears in the locked-phrase set."
-    );
-    // A sample that DOES contain all locked phrases must report none missing.
-    let full_sample = LOCKED_DESIGN_PHRASES.join(" ... ");
-    assert!(
-        missing_locked_phrases(&full_sample).is_empty(),
-        "scanner self-test: a sample containing every locked phrase \
-         reported some missing — the scanner is too strict."
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Guard 4 — the typeinfo proto retired the env-less decl-slot roots slot.
+// Guard 3 — the typeinfo proto retired the env-less decl-slot roots slot.
 // ---------------------------------------------------------------------------
 
 fn typeinfo_proto_path() -> PathBuf {

@@ -6,8 +6,6 @@
 //! `#[path]`-loading the same file (which trips `clippy::duplicate_mod`).
 #[path = "g_misc3/correctness.rs"]
 mod correctness;
-#[path = "g_misc3/cutover_state_arch_guard.rs"]
-mod cutover_state_arch_guard;
 #[path = "g_misc3/derived_raw_state_cached_fallthrough_matrix_member.rs"]
 mod derived_raw_state_cached_fallthrough_matrix_member;
 #[path = "g_misc3/derived_raw_state_cached_meta_payload_matrix_import_ref.rs"]

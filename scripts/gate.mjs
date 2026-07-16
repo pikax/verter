@@ -200,6 +200,7 @@ import {
   preflightFreshnessTooling,
   pnpmInstallCommand,
   selectSessionSuites,
+  ensureRequiredWindowsDebugSidecars,
   deriveSuitePkgInfo,
   buildSuiteEnv,
   resolveSuiteBinary,
@@ -814,6 +815,20 @@ async function runGate(opts, ctx) {
   const buildMetaTargetDir =
     listJson["rust-build-meta"] && listJson["rust-build-meta"]["target-directory"];
   const allSuites = Object.values(listJson["rust-suites"] || {});
+  const sidecars = ensureRequiredWindowsDebugSidecars({
+    allSuites,
+    runnerTarget: ctx.runnerTarget,
+    extractDir,
+  });
+  if (sidecars.error) {
+    err(`Windows archive debug-sidecar setup failed: ${sidecars.error}`);
+    return EXIT_USAGE;
+  }
+  if (sidecars.copied > 0) {
+    log(
+      `restored ${sidecars.copied} runtime-required Windows PDB sidecar(s) beside archived tests`,
+    );
+  }
   log(
     `archive lists ${allSuites.length} suites; build-meta target-directory=${buildMetaTargetDir || "?"}`,
   );

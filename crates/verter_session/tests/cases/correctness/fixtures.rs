@@ -1,6 +1,6 @@
 //! Fixture registry. Each entry maps to one synthetic Vue
 //! project and a snapshot file. `class` discriminates the
-//! correctness ground-truth tier (Class A) from the regression
+//! rule-derived ground truth (Class A) from the regression
 //! baselines (Class B + C).
 //!
 //! The Class A fixtures (mapped-type + structural) carry hand-derived
@@ -228,8 +228,7 @@ defineProps<{ kind: Extract<'a' | 'b' | 'c', 'a' | 'b'> }>();
 //   (`sample`), succeeds, projects the remaining `["id"]` path
 //   through `ProjectPath { mode: Navigate }` to `string`, then
 //   substitutes `T → string` in the instantiation body. The
-//   materialised surface produces one required prop `id: string`,
-//   matching `phase-00-tier1-mismatches.md` row 4.
+//   materialised surface produces one required prop `id: string`.
 //
 //   Rule citation: TS spec §3.6 (generic substitution); CLAUDE.md
 //   "generic substitutions are part of semantic meaning". The fixture
@@ -290,7 +289,6 @@ defineEmits<{ click: [evt: string] }>();
 //   Two slots, each with a single typed binding on the slot
 //   function's first parameter Object literal. The binding types
 //   are primitives so no cross-file imports are needed.
-//   `phase-00b-tier1-mismatches.md` row 1.
 const FIXTURE_SLOTS_TYPED_VUE: &str = r#"<script setup lang="ts">
 defineSlots<{
   default(props: { item: string }): any;
@@ -305,7 +303,6 @@ defineSlots<{
 //   `modelValue`) and `defineModel<number>('count')`. Both
 //   optional, no defaults, surfacing as model + prop +
 //   update:<name> event triples per Vue's documented contract.
-//   `phase-00b-tier1-mismatches.md` row 2.
 const FIXTURE_MODELS_VUE: &str = r#"<script setup lang="ts">
 defineModel<string>();
 defineModel<number>('count');
@@ -716,8 +713,7 @@ pub const FIXTURES: &[CorrectnessFixture] = &[
         class: FixtureClass::ClassA,
     },
     // Class A fixture for the userland-shadow-pick case, handled by
-    // the resolver-context `ScopeShadowing` thread (recorded in
-    // `phase-00-tier1-mismatches.md` row 5).
+    // the resolver-context `ScopeShadowing` path.
     CorrectnessFixture {
         id: "userland_shadowing_pick",
         files: F_USERLAND_SHADOWING_PICK,
@@ -725,9 +721,7 @@ pub const FIXTURES: &[CorrectnessFixture] = &[
         class: FixtureClass::ClassA,
     },
     // Class A fixtures for the `Exclude` / `Extract` literal-type
-    // reduction (rows 1, 2) and the mapper `name_remap` +
-    // `TemplateLiteral` fold (row 3), recorded in
-    // `phase-00-tier1-mismatches.md` rows 1-3.
+    // reduction and the mapper `name_remap` + `TemplateLiteral` fold.
     CorrectnessFixture {
         id: "mapped_exclude",
         files: F_MAPPED_EXCLUDE,
@@ -748,8 +742,7 @@ pub const FIXTURES: &[CorrectnessFixture] = &[
     },
     // Class A fixture for the value-member typeof case, handled by the
     // single-segment-first lookup in `shallow_lower_type_expr`'s
-    // `TypeExpr::TypeOf` arm (recorded in
-    // `phase-00-tier1-mismatches.md` row 4).
+    // `TypeExpr::TypeOf` arm.
     CorrectnessFixture {
         id: "generic_substitution_via_typeof",
         files: F_GENERIC_SUBSTITUTION_VIA_TYPEOF,
@@ -758,10 +751,9 @@ pub const FIXTURES: &[CorrectnessFixture] = &[
     },
     // ── Class A — component-meta property macros ───────────────────
     //
-    // The `fixture_slots_typed` (slot binding type literals) and
-    // `fixture_models` (`defineModel<T>()` type T through the macro
-    // path) cases are documented in `phase-00b-tier1-mismatches.md`
-    // with rule citations and the diff.
+    // The `fixture_slots_typed` and `fixture_models` cases cover slot
+    // binding literals and `defineModel<T>()` propagation through the
+    // macro path.
     CorrectnessFixture {
         id: "fixture_props_with_defaults",
         files: F_FIXTURE_PROPS_WITH_DEFAULTS,
@@ -776,7 +768,6 @@ pub const FIXTURES: &[CorrectnessFixture] = &[
     },
     // ── slot-binding + defineModel fixtures ──────────────
     //
-    // Documented in `phase-00b-tier1-mismatches.md` rows 1-2:
     // - `fixture_slots_typed` via `project_slot_binding_member`.
     // - `fixture_models` via the `expand_field_expr` `DefineModel`
     //   branch.

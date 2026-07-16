@@ -11294,25 +11294,8 @@ mod general_test_archaeology {
         "crates/verter_session/tests/cases/architecture_guards.rs",
         // Detection guards: their job is to find the vocabulary, so their
         // needle arrays / regexes / docstrings name it.
-        "crates/verter_session/tests/cases/g_misc2/no_post_cutover_deferrals.rs",
-        "crates/verter_session/tests/cases/g_misc3/cutover_state_arch_guard.rs",
         "crates/verter_session/tests/cases/g_block/typeinfo_wire_surface_guards.rs",
         "crates/verter_session/tests/cases/g_misc2/is_facts_irrelevant_eligibility.rs",
-        // Module-declaration roots that `#[path]`/`mod`-include the
-        // `.cutover-state` guard modules above; the included filenames
-        // (`no_post_cutover_deferrals`, `cutover_state_arch_guard`) carry
-        // the term load-bearingly, so the declarations cannot be reworded.
-        "crates/verter_session/tests/cases/g_misc2.rs",
-        "crates/verter_session/tests/cases/g_misc3.rs",
-        // Fixture/provenance: cite or read real `phase-00*-tier1-mismatches.md`
-        // fixture files by name, or carry on-disk fixture row provenance.
-        "crates/verter_session/tests/cases/correctness/deferred_fixtures_rule_correct.rs",
-        "crates/verter_session/tests/cases/correctness/expected.rs",
-        "crates/verter_session/tests/cases/correctness/fixtures.rs",
-        "crates/verter_session/tests/cases/component_meta_audit/resolver_coverage_mapped_types.rs",
-        "crates/verter_session/tests/cases/component_meta_audit/resolver_coverage_slot_shapes.rs",
-        // Asserted `#[ignore]` reason pinned to a pending deletion.
-        "crates/verter_session/tests/cases/g_misc3/legacy_accumulate_dispatch_dep_signature_gone.rs",
         // Pre-existing audit-infrastructure wave-build vocabulary (the
         // audit substrate landed in numbered build waves; `Wave 3.A` /
         // `pre-Wave-3` cross-references that build narrative, which spans

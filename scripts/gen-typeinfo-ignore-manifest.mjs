@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Regenerate the two-table typeinfo manifest ledger (§10).
+ * Regenerate the checked typeinfo manifest data.
  *
  * Emits three checked-in, generated-not-hand-maintained files:
  *
@@ -13,20 +13,20 @@
  *    dominant mechanism + consumed mechanisms).
  *
  * Each `IgnoredTestRow`'s `block_id` is COMPUTED here from the
- * authoritative §10.4.1 row→block partition in
- * `docs/arch/native-typeinfo-parity.md` joined with the live
+ * authoritative machine-readable row→block partition in
+ * `scripts/manifests/typeinfo-row-block-partition.json` joined with the live
  * `#[ignore = "..."]` discovery + the Capability Map — NOT hand-typed
  * 362 times. The `AdditionalProofRow` table (file 2) and the
  * `TYPEINFO_PARITY_BLOCKS` DAG (file 3, with each block's
  * `required_guards`/`verification_labels`/prereqs/mechanisms) are
  * authored in this generator's own data maps (`buildAdditionalRows`,
  * `emitBlockRows`, `BLOCK_TO_REQUIRED_GUARDS`, `BLOCK_VERIFICATION_LABELS`,
- * the prereq/mechanism maps), NOT derived from §10.4.1. The Rust
+ * the prereq/mechanism maps), NOT derived from the row partition. The Rust
  * guard tests only diff/fail; they never write the generated source (repo
  * rule: generators are scripts, not tests).
  *
  * Run after adding / removing / renaming an ignored test, or after the
- * §10.4.1 partition changes:
+ * row partition changes:
  *
  *     node scripts/gen-typeinfo-ignore-manifest.mjs
  *     # or via pnpm:
@@ -236,7 +236,7 @@ const FILE_TO_SUBSTRATE = new Map([
   ["wide_deep.rs", "PathProjection"],
 ]);
 
-// ── Block-id text (from §10.4.1, e.g. `U2.RELATION_INFER`) -> the Rust
+// ── Block-id text (from the machine-readable row partition, e.g. `U2.RELATION_INFER`) -> the Rust
 //    `TypeInfoParityBlockId` variant. ──
 const BLOCK_TEXT_TO_VARIANT = new Map([
   ["U0.MANIFEST_SUBSTRATE", "U0ManifestSubstrate"],
@@ -1741,7 +1741,7 @@ function mechanismForRow(cap, file_, fn_name) {
         1,
         `split-capability row ${file_}::${fn_name} (capability ${pyRepr(cap)}) ` +
           `has no ROW_MECHANISM_OVERRIDE entry -- author its row-level ` +
-          `mechanism from §10.4.1 (do NOT fall back to a block-derived ` +
+          `mechanism from the row partition (do NOT fall back to a block-derived ` +
           `placeholder)`,
       );
     }
@@ -1805,9 +1805,9 @@ function proofForCapability(cap) {
 // -- LIFTED rows: the closed set of rows whose `#[ignore]` has been REMOVED
 //    (an oracle snapshot + `ORACLE_QUERY_SPECS` registry entry now back their
 //    `oracle::run_row` body), flipping `status` Ignored -> Lifted{block_id}.
-//    The row's `block_id` is NOT overridden here -- it comes from §10.4.1.
+//    The row's `block_id` is NOT overridden here -- it comes from the row partition.
 //    This override map carries ONLY the lift metadata that is NOT expressible
-//    in §10.4.1: the mechanism / proof / unblocker prose + the execution-true
+//    in the row partition: the mechanism / proof / unblocker prose + the execution-true
 //    `semantic_queries` / `consumed_mechanisms`. --
 const LIFTED_ROW_OVERRIDES = new Map([
   [
@@ -2611,55 +2611,62 @@ function extractSites(source) {
   return sites;
 }
 
-function parsePartition(docText) {
-  // Parse the §10.4.1 BEGIN/END coverage table region. Returns a Map
-  // `tkey(file, function) -> [blockText, capability]`.
-  const begin = "<!-- BEGIN U0 row→block coverage table";
-  const end = "<!-- END U0 row→block coverage table";
-  const bi = docText.indexOf(begin);
-  const ei = docText.indexOf(end);
-  if (bi < 0 || ei < 0) {
-    throw new SystemExit(1, "could not locate §10.4.1 coverage table BEGIN/END markers");
+function parsePartition(partitionText) {
+  // Parse the dedicated machine-readable input. Keeping executable
+  // ownership data out of an architecture narrative lets documentation
+  // evolve without silently changing the generated manifest authority.
+  let value;
+  try {
+    value = JSON.parse(partitionText);
+  } catch (error) {
+    throw new SystemExit(1, `typeinfo row partition is not valid JSON: ${error.message}`);
   }
-  const region = docText.slice(bi, ei);
+  if (value?.schema !== "verter.typeinfo-row-block-partition.v1" || !Array.isArray(value.rows)) {
+    throw new SystemExit(
+      1,
+      "typeinfo row partition must use schema verter.typeinfo-row-block-partition.v1 and carry a rows array",
+    );
+  }
+
   const out = new Map();
-  let currentBlock = null;
-  const blockHdr = /^\*\*`([A-Z0-9._]+)`\*\* \(\d+ rows?\):/;
-  const rowRe = /^- `([a-z0-9_]+\.rs)::([A-Za-z0-9_]+)` — `([A-Za-z]+)`/;
-  // Python: `region.splitlines()`. (The block/row regexes use explicit ASCII
-  // literal classes that match Python's `r"..."` byte-for-byte, so only the
-  // line split needs the Unicode-boundary fix.)
-  for (let line of splitLines(region)) {
-    // Python `str.strip()` (NOT JS `.trim()` — see `pyStrip`).
-    line = pyStrip(line);
-    const hm = line.match(blockHdr);
-    if (hm) {
-      currentBlock = hm[1];
-      continue;
+  for (const [index, row] of value.rows.entries()) {
+    const file_ = row?.file;
+    const fn_ = row?.function;
+    const block = row?.block;
+    const cap = row?.capability;
+    if (
+      typeof file_ !== "string" ||
+      !/^[a-z0-9_]+\.rs$/.test(file_) ||
+      typeof fn_ !== "string" ||
+      !/^[A-Za-z0-9_]+$/.test(fn_) ||
+      typeof block !== "string" ||
+      !BLOCK_TEXT_TO_VARIANT.has(block) ||
+      typeof cap !== "string" ||
+      !/^[A-Za-z]+$/.test(cap)
+    ) {
+      throw new SystemExit(1, `invalid typeinfo row partition entry at rows[${index}]`);
     }
-    const rm = line.match(rowRe);
-    if (rm && currentBlock !== null) {
-      const file_ = rm[1];
-      const fn_ = rm[2];
-      const cap = rm[3];
-      out.set(tkey(file_, fn_), [currentBlock, cap]);
+    const key = tkey(file_, fn_);
+    if (out.has(key)) {
+      throw new SystemExit(1, `duplicate typeinfo row partition entry: ${file_} :: ${fn_}`);
     }
+    out.set(key, [block, cap]);
   }
   return out;
 }
 
 const GENERATED_HEADER =
   "// Auto-generated by `scripts/gen-typeinfo-ignore-manifest.mjs`\n" +
-  "// (`pnpm gen:typeinfo-manifest`). DO NOT hand-edit. The §10.4.1\n" +
-  "// row->block partition in `docs/arch/native-typeinfo-parity.md`\n" +
+  "// (`pnpm gen:typeinfo-manifest`). DO NOT hand-edit. The machine-readable\n" +
+  "// row->block partition in `scripts/manifests/typeinfo-row-block-partition.json`\n" +
   "// is the authoritative source ONLY for each IgnoredTestRow's\n" +
   "// `block_id` (READ by the generator, joined with the live\n" +
   "// `#[ignore]` discovery + the Capability Map). This includes LIFTED\n" +
-  "// rows: their `block_id` comes from §10.4.1 too — there is NO\n" +
+  "// rows: their `block_id` comes from that partition too — there is NO\n" +
   "// generator-side block override. The AdditionalProofRow\n" +
   "// table and the TYPEINFO_PARITY_BLOCKS DAG (each block's\n" +
   "// required_guards/verification_labels/prereqs/mechanisms) are\n" +
-  "// authored in the generator's own data maps, NOT in §10.4.1.\n" +
+  "// authored in the generator's own data maps, NOT in the row partition.\n" +
   "// The Rust guards only diff/fail; they never write this file.\n";
 
 function emitIgnoredRows(rows) {
@@ -2836,8 +2843,10 @@ function main(checkOnly = false) {
     mkdirSync(outDir, { recursive: true });
   }
 
-  const doc = readTextNormalized(join(repoRoot, "docs/arch/native-typeinfo-parity.md"));
-  const partition = parsePartition(doc);
+  const partitionSource = readTextNormalized(
+    join(repoRoot, "scripts/manifests/typeinfo-row-block-partition.json"),
+  );
+  const partition = parsePartition(partitionSource);
 
   // Discover live ignore sites + reasons.
   const discovered = new Map();
@@ -2868,7 +2877,7 @@ function main(checkOnly = false) {
     return 3;
   }
 
-  // Cross-check discovery vs §10.4.1 partition.
+  // Cross-check discovery vs the machine-readable row partition.
   const discKeys = new Set(discovered.keys());
   const partKeys = new Set(partition.keys());
   const liftedKeys = new Set(LIFTED_ROW_OVERRIDES.keys());
@@ -2882,7 +2891,7 @@ function main(checkOnly = false) {
     process.stderr.write("error: lifted-row override set is inconsistent:\n");
     for (const k of liftedNotInPartition) {
       const [f, fnn] = k.split(" ");
-      process.stderr.write(`  lifted row absent from §10.4.1 partition: ${f} :: ${fnn}\n`);
+      process.stderr.write(`  lifted row absent from row partition: ${f} :: ${fnn}\n`);
     }
     for (const k of liftedStillIgnored) {
       const [f, fnn] = k.split(" ");
@@ -2895,7 +2904,7 @@ function main(checkOnly = false) {
     .filter((k) => !discKeys.has(k) && !liftedKeys.has(k))
     .sort(codePointCompare);
   if (onlyDisc.length > 0 || onlyPart.length > 0) {
-    process.stderr.write("error: §10.4.1 partition does not match the live ignore set:\n");
+    process.stderr.write("error: typeinfo row partition does not match the live ignore set:\n");
     for (const k of onlyDisc) {
       const [f, fnn] = k.split(" ");
       process.stderr.write(`  live-only (no partition row): ${f} :: ${fnn}\n`);
@@ -3015,7 +3024,7 @@ function main(checkOnly = false) {
         1,
         `mechanism/block disagreement: ${r.file}::${r.fn} has ` +
           `row-level mechanism ${r.mech} owned by ${owner}, but the ` +
-          `§10.4.1 partition places it in ${r.block}. Reconcile ` +
+          `the row partition places it in ${r.block}. Reconcile ` +
           `ROW_MECHANISM_OVERRIDE / CAPABILITY_TO_MECHANISM with the ` +
           `partition (do NOT derive mechanism from block).`,
       );
