@@ -420,7 +420,6 @@ pub(crate) fn empty_path() -> Arc<[PathSegment]> {
 /// to a `SemanticNodeData::Object` shell. Empty for any other variant
 /// — callers treat the empty surface as "no enumerable members".
 ///
-/// Mirrors `slot_binding_graph::read_surface_members`.
 pub(crate) fn read_surface_members(
     ctx: &dyn ResolverContext,
     surface_node: SemanticNodeId,

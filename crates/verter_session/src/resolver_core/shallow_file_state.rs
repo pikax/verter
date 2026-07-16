@@ -22,6 +22,7 @@ pub(crate) use verter_parser::utils::oxc::script::type_surface::AnalyzedExternal
 use verter_semantic::analysis::decl_headers::{TypeDeclHeader, ValueDeclHeader};
 use verter_semantic::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
 use verter_semantic::analysis::Hash16;
+use verter_span::Span;
 use verter_type_expr::TypeExpr;
 
 // ---------------------------------------------------------------------------
@@ -197,6 +198,8 @@ pub enum ExportTarget {
 pub struct ShallowTypeSymbol {
     /// Declaration kind (header fact).
     pub kind: TypeDeclKind,
+    /// Full declaration span of the last source-order contributor.
+    pub span: Span,
     /// Generic type-parameter NAMES, unioned across contributors in
     /// first-seen order. (The full `TypeParam` carriers — constraints /
     /// defaults — are body data, read through `type_decl`.)
@@ -214,6 +217,7 @@ impl ShallowTypeSymbol {
     fn from_header(header: &TypeDeclHeader) -> Self {
         Self {
             kind: header.kind,
+            span: header.span,
             type_param_names: header.type_params.iter().map(|p| p.name.clone()).collect(),
             member_names: header
                 .member_headers
