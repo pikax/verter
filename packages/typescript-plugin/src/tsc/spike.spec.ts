@@ -27,6 +27,11 @@ import { createReferenceFixture, type ReferenceFixture } from "./testFixtures";
 // =============================================================================
 
 const require_ = createRequire(__filename);
+// These rows execute a real composite TypeScript build. The root workspace test
+// command runs every package in parallel, so the default 5-second unit-test
+// timeout is not a valid bound under CI contention. Keep a finite integration
+// bound that still fails a wedged build instead of relying on an unbounded wait.
+const BUILD_MODE_INTEGRATION_TIMEOUT_MS = 20_000;
 
 function host(): InstanceType<typeof VerterHost> {
   return new VerterHost();
@@ -154,39 +159,43 @@ describe("§2.4 mirror-host spike — build mode diagnostic parity with tsc -b",
   });
 
   for (const framework of ["vue", "svelte"] as const) {
-    it(`[${framework}] build mode catches the cross-project paths-aliased type error, mapped to source`, () => {
-      const fx = track(crossProjectErrorFixture(framework));
-      const appExt = framework === "vue" ? "App.vue" : "App.svelte";
-      const appPath = path.join(fx.root, "packages/app/src", appExt);
+    it(
+      `[${framework}] build mode catches the cross-project paths-aliased type error, mapped to source`,
+      () => {
+        const fx = track(crossProjectErrorFixture(framework));
+        const appExt = framework === "vue" ? "App.vue" : "App.svelte";
+        const appPath = path.join(fx.root, "packages/app/src", appExt);
 
-      const result = runBatchTypecheck({
-        tsconfigPath: fx.appTsconfigPath,
-        carrierSources: [
-          {
-            sourcePath: appPath,
-            source: fs.readFileSync(appPath, "utf8"),
-            framework,
-            ownership: "Owned",
-            role: "ide",
-          },
-        ],
-        host: host(),
-      });
+        const result = runBatchTypecheck({
+          tsconfigPath: fx.appTsconfigPath,
+          carrierSources: [
+            {
+              sourcePath: appPath,
+              source: fs.readFileSync(appPath, "utf8"),
+              framework,
+              ownership: "Owned",
+              role: "ide",
+            },
+          ],
+          host: host(),
+        });
 
-      expect(result.buildMode).toBe(true);
+        expect(result.buildMode).toBe(true);
 
-      // The SAME TS2322 stock tsc -b reports on the .ts twin must surface here,
-      // mapped back to the carrier source.
-      const ts2322 = result.diagnostics.filter((d) => d.code === 2322);
-      expect(ts2322.length).toBeGreaterThan(0);
-      const mapped = ts2322.find((d) => d.mappedFromCarrier);
-      expect(mapped).toBeDefined();
-      expect(mapped!.fileName).toBe(appPath.replace(/\\/g, "/"));
-      // The error maps to the `makeLabel({ label: 42 })` line (source line 3).
-      const src = fs.readFileSync(appPath, "utf8");
-      const line = src.slice(0, mapped!.start!).split("\n").length;
-      expect(line).toBe(3);
-    });
+        // The SAME TS2322 stock tsc -b reports on the .ts twin must surface here,
+        // mapped back to the carrier source.
+        const ts2322 = result.diagnostics.filter((d) => d.code === 2322);
+        expect(ts2322.length).toBeGreaterThan(0);
+        const mapped = ts2322.find((d) => d.mappedFromCarrier);
+        expect(mapped).toBeDefined();
+        expect(mapped!.fileName).toBe(appPath.replace(/\\/g, "/"));
+        // The error maps to the `makeLabel({ label: 42 })` line (source line 3).
+        const src = fs.readFileSync(appPath, "utf8");
+        const line = src.slice(0, mapped!.start!).split("\n").length;
+        expect(line).toBe(3);
+      },
+      BUILD_MODE_INTEGRATION_TIMEOUT_MS,
+    );
   }
 
   it("build mode emits each referenced project's .d.ts INTO THE MIRROR (the consumed boundary)", () => {
