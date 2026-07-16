@@ -12,9 +12,9 @@
 //!   with members, OPTIONS is the only structurally-UNSUPPORTED kind (§9), a
 //!   runes callback prop stays PROPS / absent from EMITS, and identical requests
 //!   warm-hit a value-stable surface;
-//! - the Svelte api-content shim (`get_public_api`) — Svelte 5 `Component`
-//!   public value plus a precise construct/instance intersection, refs
-//!   preserved un-inlined, and the type-only prelude;
+//! - the Svelte api-content shim (`get_public_api`) — Svelte 5's native callable
+//!   `Component<Props, Exports, Bindings>`, refs preserved un-inlined, and the
+//!   type-only prelude;
 //!   `get_public_api_with_mode(Testing)` returns `None`;
 //! - synth parse-domain invariance.
 
@@ -207,7 +207,7 @@ fn ts_importing_svelte_resolves_public_type_and_circular_terminates() {
     upsert_ts(
         &host,
         "/use.ts",
-        "import A from './A.svelte';\ntype P = InstanceType<typeof A>['$props'];\nexport const x: P = { a: 'hi' };\n",
+        "import A from './A.svelte';\ntype P = import('svelte').ComponentProps<typeof A>;\nexport const x: P = { a: 'hi' };\n",
     );
 
     // The circular pair must INDEX without hanging (query-identity recursion).
@@ -585,22 +585,24 @@ fn svelte_get_public_api_renders_the_declaration_shim() {
     let code = api.code.as_ref();
 
     // The authored-name public value implements Svelte 5's native Component
-    // contract and retains a precise instance surface for JSX/InstanceType.
+    // contract without a constructable compatibility intersection.
     assert!(
         code.contains("declare const Shim: import(\"svelte\").Component<")
-            && code.contains("new (options?: object)")
             && code.contains("export default Shim"),
         "the shim exports a Svelte-native public component value:\n{code}"
     );
     assert!(
-        code.contains("$props: { props: WidgetProps }"),
-        "the construct surface carries the concrete props object:\n{code}"
+        code.contains("{ props: WidgetProps }") && code.contains("focus: unknown"),
+        "the native Component generics carry props and exports:\n{code}"
     );
     assert!(
         !code.contains("__VerterInstance")
             && !code.contains("__VerterProps")
-            && !code.contains("...args: any[]"),
-        "the public component must not expose a generated/any constructor:\n{code}"
+            && !code.contains("new (")
+            && !code.contains("$props:")
+            && !code.contains("$events:")
+            && !code.contains("$slots:"),
+        "the public component must not expose a generated/class-like instance:\n{code}"
     );
     // `focus` is an INSTANCE member, never a module named export.
     assert!(
@@ -723,7 +725,7 @@ let { title, count = 0 } = $props();
     upsert_ts(
         &host,
         "/consumer.ts",
-        "import { JsCard } from './level-two';\ntype Props = InstanceType<typeof JsCard>['$props'];\nexport const props: Props = { title: 'ready' };\n",
+        "import { JsCard } from './level-two';\ntype Props = import('svelte').ComponentProps<typeof JsCard>;\nexport const props: Props = { title: 'ready' };\n",
     );
     assert!(
         host.ensure_indexed_ready("/consumer.ts").is_some(),
@@ -737,24 +739,20 @@ let { title, count = 0 } = $props();
 // annotation-carried props type resolving through that route. RUN once the
 // verter_session lib compiles.
 #[test]
-fn svelte_get_public_api_renders_the_events_and_slots_shim_members() {
-    // F13 + F9: the `.svelte.ts` shim renders precise `$events` and `$slots`
-    // members so a consumer's `["$events"][K]` / `["$slots"][K]` indexes exactly.
-    // `$events` is the DERIVED callback-prop mapped type (UNIONed with the legacy
-    // dispatcher map); `$slots` is the exact snippet-key map. NEITHER is a loose
-    // `CustomEvent<any>` / `Record<string, any>` placeholder.
+fn svelte_get_public_api_renders_native_event_and_snippet_props() {
+    // F13 + F9: Svelte 5 exposes both callbacks and snippets through Props.
+    // Callback props and snippet props retain their authored exact types. No class-like
+    // `$events`/`$slots` compatibility surface may leak into the public type.
     let host = host();
     upsert_ts(
         &host,
         "/node_modules/svelte/index.d.ts",
-        "export type Snippet<T extends unknown[] = []> = (...args: T) => unknown;\nexport declare function createEventDispatcher<E>(): unknown;\n",
+        "export type Snippet<T extends unknown[] = []> = (...args: T) => unknown;\n",
     );
     let src = r#"<script lang="ts">
   import type { Snippet } from 'svelte';
-  import { createEventDispatcher } from 'svelte';
   let { label, onselect, row }: { label: string; onselect: (id: number) => void; row: Snippet<[{ id: number }]> } = $props();
-  const dispatch = createEventDispatcher<{ save: string }>();
-  void dispatch; void label; void onselect; void row;
+  void label; void onselect; void row;
 </script>
 "#;
     upsert_svelte(&host, "/EventsSlots.svelte", src);
@@ -764,43 +762,34 @@ fn svelte_get_public_api_renders_the_events_and_slots_shim_members() {
         .expect("a `.svelte` with props projects a public API");
     let code = api.code.as_ref();
 
-    // The construct surface carries `$events` and `$slots` members directly;
-    // no generated alias can leak through quick-info.
     assert!(
-        code.contains("$events:"),
-        "the instance surface carries $events:\n{code}"
+        code.contains("import(\"svelte\").Component<"),
+        "the public surface is the native callable Component:\n{code}"
     );
     assert!(
-        code.contains("$slots:"),
-        "the instance surface carries $slots:\n{code}"
+        code.contains("onselect: (id: number) => void"),
+        "native callback event props remain precise:\n{code}"
     );
-    // `$events` is the derived callback-prop mapped type over the visible props.
     assert!(
-        code.contains("K extends `on${infer E}`"),
-        "the $events surface derives callback events from the props:\n{code}"
+        code.contains("row: Snippet<[{ id: number }]>"),
+        "snippet props remain precise native props:\n{code}"
     );
-    // `$slots` is the EXACT snippet key map (`row: __VerterProps["row"]`).
     assert!(
-        code.contains("row:") || code.contains("row: unknown"),
-        "the $slots surface maps the exact snippet key to its precise type:\n{code}"
-    );
-    // NEGATIVE: no loose placeholder leaks into either surface.
-    assert!(
-        !code.contains("CustomEvent<any>"),
-        "no loose CustomEvent<any> in the shim:\n{code}"
+        !code.contains("$events:")
+            && !code.contains("$slots:")
+            && !code.contains("new (")
+            && !code.contains("CustomEvent<any>"),
+        "no class-like or loose compatibility surface leaks publicly:\n{code}"
     );
     assert!(
         !code.contains("Record<string, any>") && !code.contains("Record<string, boolean>"),
         "no loose Record<string, *> placeholder in the shim:\n{code}"
     );
-    // The mapped type is rendered directly (TSGO resolves it); generated
-    // public aliases must not appear in quick-info.
     assert!(
-        code.contains("Extract<NonNullable<")
-            && !code.contains("__VerterProps")
+        !code.contains("__VerterProps")
             && !code.contains("__VerterEventsSurface")
             && !code.contains("__VerterSlotsSurface"),
-        "the public surface inlines its mapped types without generated aliases:\n{code}"
+        "the public surface must not leak generated aliases:\n{code}"
     );
     assert!(
         code.contains("onselect: (id: number) => void")
@@ -840,7 +829,7 @@ fn svelte_get_public_api_declaration_mode_is_strictly_declaration_safe() {
     );
     assert!(
         decl.contains("declare const Card: import(\"svelte\").Component<")
-            && decl.contains("new (options?: object)"),
+            && !decl.contains("new ("),
         "declaration declares the Svelte-native component value:\n{decl}"
     );
     assert!(

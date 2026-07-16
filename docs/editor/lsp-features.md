@@ -145,14 +145,33 @@ rather than exposing the internal `.jsx` filename. The tsserver plugin selects
 the exact `.tsx` or `.jsx` identity recorded by the LSP manifest; it does not
 guess the source language from the `.svelte` extension.
 
-The Svelte declaration surface is a framework-native `svelte.Component<Props,
-Exports>` value. `$props<T>()`, `let { … }: T = $props()`, JavaScript/JSDoc
+The Svelte declaration surface is a framework-native callable
+`svelte.Component<Props, Exports, Bindings>` value. It does not expose a
+constructable class, `$props` instance shim, `__VerterPublicInstance`, or a
+Vue-shaped public type. Use Svelte's `ComponentProps<typeof Component>` for
+props and `ReturnType<typeof Component>` for instance exports; the third
+generic records the exact `$bindable()` keys (or `""` when none are bindable).
+Instance-script export names populate the `Exports` object; when the shallow
+carrier has no sound value-type fact, Verter keeps that member `unknown` rather
+than fabricating a callable or widening it to `any`.
+
+`$props<T>()`, `let { … }: T = $props()`, JavaScript/JSDoc
 props, callback props, snippet slots, and provenance-validated
 `createEventDispatcher<T>()` payloads are captured from the script AST. Local
 interfaces and aliases are dereferenced through Verter's shared type-resolution
 engine before the carrier is rendered, so `ComponentProps<typeof Component>`
-and the compatibility instance surface remain concrete without exposing
-generated `__Verter*` types or `.svelte.jsx`/`.svelte.tsx` implementation names.
+remains concrete without exposing generated `__Verter*` types or
+`.svelte.jsx`/`.svelte.tsx` implementation names. Authored component generics
+remain callable generics rather than being collapsed to `any`.
+
+Template checking uses a private, file-scoped adapter. HTML intrinsics come
+directly from `SvelteHTMLElements[tag]` in the workspace's installed
+`svelte/elements`, including tag-specific attributes and typed event
+`currentTarget`. The SVG namespace selects the official SVG-keyed subset of
+that table. Svelte 5 does not publish MathML element attributes, so Verter owns
+the closed MathML attribute table while reusing Svelte's official
+`DOMAttributes<MathMLElement>` event base. None of these declarations merge a
+global JSX namespace or alter the public `.svelte` module type.
 
 ::: warning TSGO Limitation
 TSGO has a known limitation: re-exported `.vue` components (e.g., barrel files) may lose their typing. This is why `auto` mode defaults to tsserver when a workspace TypeScript installation is found.

@@ -28,7 +28,14 @@ export interface Component<
   Exports extends Record<string, any> = {},
   Bindings extends keyof Props | "" = string,
 > {
-  (this: void, internals: ComponentInternals, props: Props): Exports;
+  (
+    this: void,
+    internals: ComponentInternals,
+    props: Props,
+  ): {
+    $on?(type: string, callback: (event: any) => void): () => void;
+    $set?(props: Partial<Props>): void;
+  } & Exports;
   z_$$bindings?: Bindings;
 }
 

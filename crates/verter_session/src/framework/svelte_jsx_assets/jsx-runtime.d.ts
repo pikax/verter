@@ -9,8 +9,9 @@
 // typed by `svelte/elements`' `SvelteHTMLElements` (lowercase event
 // attributes — `onclick`, `onchange`, `onintrostart` — NOT Vue's/React's
 // camelCase table), an element evaluates to `ReturnType<Snippet>`, and
-// component tags check their props through `ElementAttributesProperty
-// { $props }` against the class-shaped component synth's `$props` member.
+// native component tags are admitted through Svelte 5's callable `Component`
+// contract and `LibraryManagedAttributes`; `$props` is retained only for the
+// private class-shaped foreign-component adapter.
 //
 // Types-only: there is no runtime jsx factory here — the projection is never
 // executed, only type-checked. This file is the SINGLE hand-written content
@@ -24,14 +25,27 @@ export namespace JSX {
   // shape the `{@render}`/`Snippet` machinery produces.
   type Element = ReturnType<Snippet>;
 
-  // Component tags are class-shaped through the synth; the empty bound keeps
-  // every projected component assignable as an element class.
+  // Svelte 5 components are callable `(internals, props) => exports`, not
+  // JSX functions whose first parameter is the prop bag. Admit that native
+  // callable here and let `LibraryManagedAttributes` select its second
+  // generic as the use-site props. Legacy/class-shaped components remain an
+  // adapter-only input for mixed-framework templates; this namespace never
+  // changes either component's public module type.
+  type ElementType =
+    | keyof IntrinsicElements
+    | import("svelte").Component<any, any, any>
+    | ((props: any) => Element)
+    | (abstract new (...args: never[]) => ElementClass);
+
+  type LibraryManagedAttributes<Component, FallbackProps> =
+    Component extends import("svelte").Component<infer Props, any, any> ? Props : FallbackProps;
+
+  // Empty element-instance bound for the private class-shaped adapter.
   // eslint-disable-next-line @typescript-eslint/no-empty-object-type
   interface ElementClass {}
 
-  // Component props are checked against the synth's `$props` member: a
-  // `.svelte` component (and an imported `.vue` component) exposes `$props`
-  // on its class-shaped synth, so the JSX prop bag checks against it.
+  // Private fallback for a class-shaped foreign component. Native Svelte 5
+  // Components use `LibraryManagedAttributes` above.
   interface ElementAttributesProperty {
     $props: {};
   }

@@ -12,11 +12,9 @@
 //! 1. the TYPE-ONLY import / re-export prelude — minimal `import type` lines
 //!    derived from the carrier's shallow import facts for every PRESERVED type
 //!    reference (unused imports dropped);
-//! 2. an authored-name component value implementing Svelte 5's public
-//!    `Component<Props, Exports>` contract;
-//! 3. a precise construct/instance intersection carrying `$props`, `$events`,
-//!    `$slots`, and instance exports for JSX and legacy instance consumers;
-//! 4. the authored-name component value as the default export.
+//! 2. an authored-name component value implementing Svelte 5's native callable
+//!    `Component<Props, Exports, Bindings>` contract;
+//! 3. the authored-name component value as the default export.
 //!
 //! `PublicApiMode::Testing` returns `None` (the testing surface is Vue-only).
 //! No projector-specific content cache is introduced.
@@ -73,6 +71,7 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         // OXC or scans the source text.
         let indexed = host.ensure_indexed_ready_serve(resolved_canonical)?.indexed;
         let shallow = &indexed.shallow_state;
+        let component_generics = svelte_component_generics(&indexed);
 
         // The synthesized `default` carries the instance shape
         // (`{ $props: Props, …exports }`). A `.svelte` with no synth default
@@ -94,24 +93,17 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             return None;
         };
 
-        // Split the instance shape into the `$props` member fact, the synthesized
-        // `$events` (legacy dispatcher map) / `$slots` (snippet member keys)
-        // surfaces, and the instance-script export members.
+        // Split the instance shape into props, the legacy dispatcher map, and
+        // instance exports. Svelte 5 snippets remain ordinary Props members;
+        // the native callable Component has no class-like `$slots` member.
         let mut props_type: Option<&FactOrLocator> = None;
         let mut events_type: Option<&FactOrLocator> = None;
-        let mut slot_keys: Vec<&str> = Vec::new();
         let mut export_members: Vec<(&str, &FactOrLocator)> = Vec::new();
         for member in instance_members.iter() {
             match member.name.as_str() {
                 "$props" => props_type = Some(&member.ty),
                 "$events" => events_type = Some(&member.ty),
-                "$slots" => {
-                    if let FactOrLocator::LeafObject(slots) = &member.ty {
-                        for slot in slots.iter() {
-                            slot_keys.push(slot.name.as_str());
-                        }
-                    }
-                }
+                "$slots" => {}
                 _ => export_members.push((member.name.as_str(), &member.ty)),
             }
         }
@@ -202,19 +194,13 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
                 resolver_ctx
                     .and_then(|ctx| resolve_public_dispatcher_text(host, ctx, resolved_canonical))
             });
-        let events_text = render_public_events(&props_text, dispatcher_text.as_deref());
+        let component_props_text =
+            render_native_component_props(&component_props_text, dispatcher_text.as_deref());
+        let bindings_text = render_native_bindings(script_facts.as_deref());
 
-        // The shim `$slots` index: an EXACT key map whose values are the snippet
-        // callables, rendered shallow as `__VerterProps[K]` (the snippet prop's own
-        // `Snippet<…>` type — the precise binding type the consumer re-resolves).
-        // A consumer's `["$slots"][K]` is name-exact; an unknown slot name FAILS.
-        let slots_text = render_public_slots(&slot_keys, &props_text);
-
-        // 3. Build an authored-name public value. `Component<Props, Exports>` is
-        //    Svelte's framework-native import contract. The construct
-        //    intersection retains JSX/InstanceType compatibility without an
-        //    `any` argument list. Visible members are inlined deliberately so
-        //    TypeScript quick-info cannot leak internal projector aliases.
+        // 3. Build an authored-name public value. `Component<Props, Exports,
+        //    Bindings>` is Svelte 5's framework-native import contract. Visible
+        //    members are inlined so quick-info never leaks projector aliases.
         let component_name = public_component_name(
             resolved_canonical,
             referenced.iter().map(String::as_str).chain(
@@ -226,26 +212,30 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             ),
         );
         let exports_text = render_member_object(&export_members);
-        out.line(&format!(
-            "declare const {component_name}: import(\"svelte\").Component<"
-        ));
-        out.line(&format!("  {component_props_text},"));
-        out.line(&format!("  {exports_text}"));
-        out.line("> & {");
-        out.line("  new (options?: object): {");
-        out.line(&format!("    $props: {props_text};"));
-        out.line(&format!("    $events: {events_text};"));
-        out.line(&format!("    $slots: {slots_text};"));
-        for (name, _ty) in &export_members {
-            out.line(&format!("    {name}: unknown;"));
+        if let Some(generics) = component_generics {
+            let native = format!(
+                "import(\"svelte\").Component<{component_props_text}, {exports_text}, {bindings_text}>"
+            );
+            out.line(&format!("declare const {component_name}: {{"));
+            out.line(&format!(
+                "  <{generics}>(...args: Parameters<{native}>): ReturnType<{native}>;"
+            ));
+            out.line(&format!("  z_$$bindings?: {bindings_text};"));
+            out.line("};");
+        } else {
+            out.line(&format!(
+                "declare const {component_name}: import(\"svelte\").Component<"
+            ));
+            out.line(&format!("  {component_props_text},"));
+            out.line(&format!("  {exports_text},"));
+            out.line(&format!("  {bindings_text}"));
+            out.line(">;");
         }
-        out.line("  };");
-        out.line("};");
 
         // 4. The component value is the module's default public API.
         out.line(&format!("export default {component_name};"));
 
-        // 6. `<script module>` exports as TOP-LEVEL named declarations. A
+        // 5. `<script module>` exports as TOP-LEVEL named declarations. A
         //    top-level export of the shallow state that is NOT an INSTANCE member
         //    of the component is a module-script export — surface it as a
         //    top-level `export declare const` so the api file exposes the
@@ -270,7 +260,47 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
     }
 }
 
-/// Derive a stable user-facing class identity from the authored component file.
+/// Read the authored Svelte tooling `generics="..."` declaration from the
+/// typed parse carrier. The parser owns the attribute/value span; this is a
+/// direct parse-domain read over the indexed source, never a text rescan.
+fn svelte_component_generics(indexed: &crate::project_type_store::IndexedReady) -> Option<String> {
+    use verter_compiler::svelte::parser::template_ast::{
+        SvelteAttributeKind, SvelteAttributeValue,
+    };
+
+    let parsed = indexed
+        .framework_parse
+        .as_deref()
+        .and_then(crate::typeinfo::adapters::svelte::svelte_parse)?;
+    let script = parsed.instance_script.as_ref()?;
+    script.attributes.iter().find_map(|attribute| {
+        let SvelteAttributeKind::Plain {
+            name,
+            value: Some(value),
+            ..
+        } = &attribute.kind
+        else {
+            return None;
+        };
+        if name != "generics" {
+            return None;
+        }
+        // The parser classifies quoted values containing TypeScript punctuation
+        // as `Mixed`, while a simple identifier remains `Text`. In either case
+        // the value span is the parser-owned exact interior of the quotes.
+        let span = match value {
+            SvelteAttributeValue::Text(span) | SvelteAttributeValue::Mixed(span) => span,
+            SvelteAttributeValue::Expression(_) => return None,
+        };
+        let text = indexed
+            .raw_source
+            .get(span.start as usize..span.end as usize)?
+            .trim();
+        (!text.is_empty()).then(|| text.to_string())
+    })
+}
+
+/// Derive a stable user-facing component identity from the authored component file.
 /// Occupied imported/exported bindings are avoided deterministically so the
 /// declaration shim remains valid even when a component imports its namesake.
 fn public_component_name<'a>(
@@ -458,7 +488,7 @@ fn render_property_name(name: &str) -> String {
     }
 }
 
-/// Render the props argument for Svelte's public [`Component`] contract.
+/// Render the props argument for Svelte's public `Component` contract.
 ///
 /// Locator-backed props have no shallow display authority. The instance
 /// surface retains the honest `unknown`, while this generic leg uses the
@@ -479,49 +509,53 @@ fn render_member_object(members: &[(&str, &FactOrLocator)]) -> String {
     }
     let fields = members
         .iter()
+        // Synthesized exports are shallow Ref carriers to their value binding,
+        // not type-name references. Until the public value-type projection
+        // resolves that binding, `unknown` is the only sound declaration type.
         .map(|(name, _ty)| format!("{name}: unknown"))
         .collect::<Vec<_>>();
     format!("{{ {} }}", fields.join("; "))
 }
 
-/// Render the compatibility `$events` instance surface without a generated
-/// alias that could leak through TypeScript quick-info. Callback props and
-/// legacy dispatcher payloads remain exact and are composed structurally.
-fn render_public_events(props: &str, dispatcher: Option<&str>) -> String {
-    let callback_events = if props.trim() == "unknown" {
-        "{}".to_string()
-    } else {
-        format!(
-            "{{ [K in keyof ({props}) as K extends `on${{infer E}}` \
-             ? (E extends \"\" ? never : Extract<NonNullable<({props})[K]>, (...a: never[]) => void> extends never ? never : E) \
-             : never]: Extract<NonNullable<({props})[K]>, (...a: never[]) => void> }}"
-        )
-    };
+/// Compose legacy dispatcher events into the Svelte 5 callback-prop surface.
+///
+/// Native `Component` has no event generic. Svelte 5's
+/// public event model is callback props, so an authored legacy dispatcher map
+/// is represented as optional `on${name}` props whose handler receives the
+/// corresponding `CustomEvent<payload>`. Existing runes callback props and
+/// snippet props remain untouched in `props`.
+fn render_native_component_props(props: &str, dispatcher: Option<&str>) -> String {
     match dispatcher {
         Some(events) => format!(
-            "{callback_events} & {{ [K in keyof ({events})]: (e: CustomEvent<({events})[K]>) => void }}"
+            "({props}) & {{ [K in keyof ({events}) as K extends string ? `on${{K}}` : never]?: (event: CustomEvent<({events})[K]>) => void }}"
         ),
-        None => callback_events,
+        None => props.to_string(),
     }
 }
 
-/// Render exact slot keys and preserve their prop-backed callable type whenever
-/// the shallow props fact is safely indexable.
-fn render_public_slots(slot_keys: &[&str], props: &str) -> String {
-    if slot_keys.is_empty() {
-        return "{}".to_string();
+/// Render Svelte 5's third `Component` generic from the captured binding facts.
+///
+/// Runes components admit only explicitly `$bindable()` props. Legacy
+/// `export let` props are all bindable. An empty set is the native sentinel
+/// `""`, never the permissive default `string`.
+fn render_native_bindings(
+    facts: Option<&verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts>,
+) -> String {
+    let mut names = BTreeSet::new();
+    if let Some(facts) = facts {
+        names.extend(facts.bindable_members.iter().map(String::as_str));
+        if names.is_empty() {
+            names.extend(facts.legacy_props.iter().map(|prop| prop.name.as_str()));
+        }
     }
-    let entries = slot_keys
-        .iter()
-        .map(|key| {
-            if props.trim() == "unknown" {
-                format!("{key}: unknown")
-            } else {
-                format!("{key}: ({props})[\"{key}\"]")
-            }
-        })
-        .collect::<Vec<_>>();
-    format!("{{ {} }}", entries.join("; "))
+    if names.is_empty() {
+        return "\"\"".to_string();
+    }
+    names
+        .into_iter()
+        .map(|name| format!("{name:?}"))
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 /// A minimal line-oriented shim builder. The api-projector renders into it with
@@ -657,12 +691,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn public_events_preserve_callback_and_dispatcher_types() {
+    fn native_component_props_preserve_dispatcher_payloads_as_callbacks() {
         let props = "{ onselect: (id: number) => void; label: string }";
-        let events = render_public_events(props, Some("{ save: string }"));
-        assert!(events.contains("on${infer E}"));
-        assert!(events.contains("CustomEvent<({ save: string })[K]>"));
-        assert!(!events.contains("any"));
-        assert!(!events.contains("__Verter"));
+        let rendered = render_native_component_props(props, Some("{ save: string }"));
+        assert!(rendered.contains("on${K}"));
+        assert!(rendered.contains("CustomEvent<({ save: string })[K]>"));
+        assert!(rendered.contains("onselect: (id: number) => void"));
+        assert!(!rendered.contains("any"));
+        assert!(!rendered.contains("__Verter"));
     }
 }

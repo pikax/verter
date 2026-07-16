@@ -10,17 +10,16 @@
 /// Synthesise the Svelte component's PUBLIC-FACADE default export for the IDE
 /// carrier (the self-diagnostics surface). Mirrors the MINIMAL facade
 /// SHAPE the higher-layer API projector emits on the `.svelte.verter.ts` API
-/// carrier — a constructable component whose instance carries `$props` /
-/// `$events` / `$slots` — so the IDE/self-diagnostics surface carries the real
+/// carrier — a native callable Svelte 5 `Component<Props, Exports, Bindings>` —
+/// so the IDE/self-diagnostics surface carries the real
 /// public component type for the component's OWN editing (the two crates cannot
 /// share code; `verter_compiler` is the lower crate). An in-project consumer's
 /// bare `import Comp from "./Comp.svelte"` resolves to the `.d.svelte.ts`
 /// DECLARATION carrier (§2.2/§2.9), NOT this IDE carrier.
 ///
-/// `props_type` is the instance `$props()` annotation, derived SYNTACTICALLY
-/// (LOCAL — no resolver); `None` ⇒ a permissive `Record<string, unknown>`.
-/// `$events` / `$slots` stay permissive shells the consumer re-resolves through
-/// the precise API carrier. Template internals stay LOCAL. The `__VerterPublic*`
+/// `props_type` is the `$props()` annotation, derived SYNTACTICALLY (LOCAL — no
+/// resolver); `None` ⇒ a permissive `Record<string, unknown>`. Template
+/// internals stay LOCAL. The `__VerterPublic*`
 /// prefix avoids collision with user bindings or the `__VerterSelf*` contract.
 use super::super::SvelteIdeDialect;
 
@@ -29,17 +28,12 @@ pub(super) fn svelte_public_facade(props_type: Option<&str>, dialect: SvelteIdeD
     match dialect {
         SvelteIdeDialect::TypeScript => format!(
             "\ntype __VerterPublicProps = {props_ty};\n\
-             interface __VerterPublicInstance {{\n  \
-             $props: __VerterPublicProps;\n  \
-             $events: Record<string, unknown>;\n  \
-             $slots: Record<string, unknown>;\n}}\n\
-             declare const __VerterPublicComponent: {{ new (...args: any[]): __VerterPublicInstance }};\n\
+             declare const __VerterPublicComponent: import(\"svelte\").Component<__VerterPublicProps, {{}}, \"\">;\n\
              export default __VerterPublicComponent;\n",
         ),
         SvelteIdeDialect::JavaScript => format!(
             "\n/** @typedef {{{props_ty}}} __VerterPublicProps */\n\
-             /** @typedef {{{{ $props: __VerterPublicProps, $events: Record<string, unknown>, $slots: Record<string, unknown> }}}} __VerterPublicInstance */\n\
-             const __VerterPublicComponent = /** @type {{{{ new (...args: any[]): __VerterPublicInstance }}}} */ (/** @type {{any}} */ (class {{}}));\n\
+             const __VerterPublicComponent = /** @type {{import(\"svelte\").Component<__VerterPublicProps, {{}}, \"\">}} */ (/** @type {{unknown}} */ (null));\n\
              export default __VerterPublicComponent;\n",
         ),
     }

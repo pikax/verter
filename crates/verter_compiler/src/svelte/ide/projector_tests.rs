@@ -76,10 +76,21 @@ fn ide_carrier_exports_public_facade_default_with_typed_props() {
         "public facade $props must carry the syntactic annotation:\n{code}"
     );
     assert!(
-        code.contains("$props: __VerterPublicProps;")
-            && code.contains("$events: Record<string, unknown>;")
-            && code.contains("$slots: Record<string, unknown>;"),
-        "public instance must surface $props/$events/$slots:\n{code}"
+        code.contains(
+            "declare const __VerterPublicComponent: import(\"svelte\").Component<__VerterPublicProps"
+        ),
+        "public facade must use Svelte 5's native callable Component type:\n{code}"
+    );
+    let facade = code
+        .split_once("type __VerterPublicProps")
+        .map(|(_, facade)| facade)
+        .expect("public facade suffix");
+    assert!(
+        !facade.contains("__VerterPublicInstance")
+            && !facade.contains("new (...args:")
+            && !facade.contains("$events:")
+            && !facade.contains("$slots:"),
+        "the public facade must not leak a Vue-like/legacy class instance:\n{code}"
     );
     // The bare `export {};` module marker is REPLACED by the facade default —
     // the `export default` already makes the file a module.
@@ -533,7 +544,7 @@ fn bind_checked_stays_supported_no_diagnostic() {
 }
 
 #[test]
-fn bind_this_on_a_component_projects_an_instancetype_assignment_check() {
+fn bind_this_on_a_component_projects_the_native_exports_assignment_check() {
     // F4: `bind:this` on a COMPONENT binds the instance — checked against
     // `InstanceType<typeof MyComp>` (NOT the `$props` attribute path). NO bare
     // `this={…}` attribute, NO residue, NO diagnostic.
@@ -559,8 +570,8 @@ fn bind_this_on_a_component_projects_an_instancetype_assignment_check() {
     );
     assert!(
         projection.code.contains(
-            "(ref = (/** @type {InstanceType<typeof MyComp>} */ (/** @type {unknown} */ (null)))), \
-             __verter_bind_this_assignable((/** @type {InstanceType<typeof MyComp>} */ (/** @type {unknown} */ (null))), ref)"
+            "(ref = (/** @type {__VerterComponentExports<typeof MyComp>} */ (/** @type {unknown} */ (null)))), \
+             __verter_bind_this_assignable((/** @type {__VerterComponentExports<typeof MyComp>} */ (/** @type {unknown} */ (null))), ref)"
         ),
         "component instance invariant check present: {}",
         projection.code
@@ -883,7 +894,7 @@ fn function_binding_on_an_element_projects_the_fn_checker_with_the_table_type() 
 }
 
 #[test]
-fn function_binding_on_a_component_projects_the_instancetype_props_target() {
+fn function_binding_on_a_component_projects_the_native_props_target() {
     // F5: a component function binding derives `V` in TS from
     // `InstanceType<typeof Child>["$props"]["prop"]` — NO Rust resolver call.
     let source = "<Child bind:size={getSize, setSize} />";
@@ -897,7 +908,7 @@ fn function_binding_on_a_component_projects_the_instancetype_props_target() {
     assert!(!projection.code.contains("bind:size"), "no residue");
     assert!(
         projection.code.contains(
-            "(/** @type {(get: (() => InstanceType<typeof Child>[\"$props\"][\"size\"]) | null, set: (value: InstanceType<typeof Child>[\"$props\"][\"size\"]) => void) => void} */ (__verter_bind_fn))(getSize, setSize)"
+            "(/** @type {(get: (() => __VerterComponentProps<typeof Child>[\"size\"]) | null, set: (value: __VerterComponentProps<typeof Child>[\"size\"]) => void) => void} */ (__verter_bind_fn))(getSize, setSize)"
         ),
         "component function-binding props-target checker present: {}",
         projection.code

@@ -43,6 +43,26 @@ interface SvelteBaseAttributes<T extends EventTarget> {
   [dataAttr: `data-${string}`]: unknown;
 }
 
+// The official package exposes this shared event base separately. The
+// production MathML fallback extends it so event.currentTarget remains typed.
+export interface DOMAttributes<T extends EventTarget> {
+  children?: unknown;
+  onclick?: (event: DOMEvent<T> & MouseEvent) => void;
+  onchange?: (event: DOMEvent<T> & Event) => void;
+  oninput?: (event: DOMEvent<T> & Event) => void;
+  onkeydown?: (event: DOMEvent<T> & KeyboardEvent) => void;
+  onintrostart?: (event: DOMEvent<T> & Event) => void;
+  onoutroend?: (event: DOMEvent<T> & Event) => void;
+}
+
+interface HTMLAnchorAttributes extends SvelteBaseAttributes<HTMLAnchorElement> {
+  download?: string | boolean;
+  href?: string;
+  hreflang?: string;
+  rel?: string;
+  target?: "_self" | "_blank" | "_parent" | "_top" | (string & {});
+}
+
 interface HTMLInputAttributes<T extends EventTarget> extends SvelteBaseAttributes<T> {
   value?: string | number;
   type?: string;
@@ -95,6 +115,7 @@ export interface SVGAttributes<T extends EventTarget> {
 }
 
 export interface SvelteHTMLElements {
+  a: HTMLAnchorAttributes;
   div: SvelteBaseAttributes<HTMLDivElement>;
   span: SvelteBaseAttributes<HTMLSpanElement>;
   button: SvelteBaseAttributes<HTMLButtonElement>;
@@ -112,4 +133,62 @@ export interface SvelteHTMLElements {
   audio: SvelteBaseAttributes<HTMLAudioElement>;
   img: HTMLImgAttributes<HTMLImageElement>;
   details: SvelteBaseAttributes<HTMLDetailsElement>;
+  svg: SVGAttributes<SVGSVGElement>;
+  animate: SVGAttributes<SVGAnimateElement>;
+  animateMotion: SVGAttributes<SVGElement>;
+  animateTransform: SVGAttributes<SVGAnimateTransformElement>;
+  circle: SVGAttributes<SVGCircleElement>;
+  clipPath: SVGAttributes<SVGClipPathElement>;
+  defs: SVGAttributes<SVGDefsElement>;
+  desc: SVGAttributes<SVGDescElement>;
+  ellipse: SVGAttributes<SVGEllipseElement>;
+  feBlend: SVGAttributes<SVGFEBlendElement>;
+  feColorMatrix: SVGAttributes<SVGFEColorMatrixElement>;
+  feComponentTransfer: SVGAttributes<SVGFEComponentTransferElement>;
+  feComposite: SVGAttributes<SVGFECompositeElement>;
+  feConvolveMatrix: SVGAttributes<SVGFEConvolveMatrixElement>;
+  feDiffuseLighting: SVGAttributes<SVGFEDiffuseLightingElement>;
+  feDisplacementMap: SVGAttributes<SVGFEDisplacementMapElement>;
+  feDistantLight: SVGAttributes<SVGFEDistantLightElement>;
+  feDropShadow: SVGAttributes<SVGFEDropShadowElement>;
+  feFlood: SVGAttributes<SVGFEFloodElement>;
+  feFuncA: SVGAttributes<SVGFEFuncAElement>;
+  feFuncB: SVGAttributes<SVGFEFuncBElement>;
+  feFuncG: SVGAttributes<SVGFEFuncGElement>;
+  feFuncR: SVGAttributes<SVGFEFuncRElement>;
+  feGaussianBlur: SVGAttributes<SVGFEGaussianBlurElement>;
+  feImage: SVGAttributes<SVGFEImageElement>;
+  feMerge: SVGAttributes<SVGFEMergeElement>;
+  feMergeNode: SVGAttributes<SVGFEMergeNodeElement>;
+  feMorphology: SVGAttributes<SVGFEMorphologyElement>;
+  feOffset: SVGAttributes<SVGFEOffsetElement>;
+  fePointLight: SVGAttributes<SVGFEPointLightElement>;
+  feSpecularLighting: SVGAttributes<SVGFESpecularLightingElement>;
+  feSpotLight: SVGAttributes<SVGFESpotLightElement>;
+  feTile: SVGAttributes<SVGFETileElement>;
+  feTurbulence: SVGAttributes<SVGFETurbulenceElement>;
+  filter: SVGAttributes<SVGFilterElement>;
+  foreignObject: SVGAttributes<SVGForeignObjectElement>;
+  g: SVGAttributes<SVGGElement>;
+  image: SVGAttributes<SVGImageElement>;
+  line: SVGAttributes<SVGLineElement>;
+  linearGradient: SVGAttributes<SVGLinearGradientElement>;
+  marker: SVGAttributes<SVGMarkerElement>;
+  mask: SVGAttributes<SVGMaskElement>;
+  metadata: SVGAttributes<SVGMetadataElement>;
+  mpath: SVGAttributes<SVGElement>;
+  path: SVGAttributes<SVGPathElement>;
+  pattern: SVGAttributes<SVGPatternElement>;
+  polygon: SVGAttributes<SVGPolygonElement>;
+  polyline: SVGAttributes<SVGPolylineElement>;
+  radialGradient: SVGAttributes<SVGRadialGradientElement>;
+  rect: SVGAttributes<SVGRectElement>;
+  stop: SVGAttributes<SVGStopElement>;
+  switch: SVGAttributes<SVGSwitchElement>;
+  symbol: SVGAttributes<SVGSymbolElement>;
+  text: SVGAttributes<SVGTextElement>;
+  textPath: SVGAttributes<SVGTextPathElement>;
+  tspan: SVGAttributes<SVGTSpanElement>;
+  use: SVGAttributes<SVGUseElement>;
+  view: SVGAttributes<SVGViewElement>;
 }
