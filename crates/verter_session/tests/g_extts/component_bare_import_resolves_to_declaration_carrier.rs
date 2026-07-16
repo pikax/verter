@@ -141,17 +141,16 @@ fn naming_for_ext(ext: &str) -> verter_session::framework::descriptor::VirtualFi
         .unwrap_or_else(|| panic!("the `.{ext}` adapter must carry a virtual-file naming column"))
 }
 
-/// The IDE carrier (`Foo.vue.tsx`/`Foo.vue.jsx` for Vue's `JsxConditional`
-/// policy, `Foo.svelte.tsx` for Svelte's `Suffix` policy) is STILL composed — it
+/// The IDE carrier (`Foo.vue.tsx`/`Foo.vue.jsx` and
+/// `Foo.svelte.tsx`/`Foo.svelte.jsx`) is STILL composed — it
 /// is the self-diagnostics surface verter_lsp owns — but it is NOT what a bare
 /// framework-carrier import resolves to (the declaration carrier wins the probe,
 /// asserted above). This test pins that the IDE carrier composition survives,
 /// stays DISTINCT from the declaration target, and stays `.verter.`-free, WITHOUT
 /// claiming it is the bare-import-probe target — for BOTH Vue and Svelte.
 ///
-/// Vue's IDE carrier is DUAL (`.vue.tsx` AND `.vue.jsx`) because the Vue
-/// descriptor's `ide` column is `VirtualPathPolicy::JsxConditional`; Svelte's is
-/// the single `.svelte.tsx` (`VirtualPathPolicy::Suffix`). Both IDE identities are
+/// Both IDE carriers are DUAL (`.tsx` AND `.jsx`) because each descriptor's
+/// `ide` column is `VirtualPathPolicy::JsxConditional`. The IDE identities are
 /// composed from the PRODUCTION descriptor naming authority
 /// (`VirtualFileNaming::ide_carrier_identities`), NOT a self-constructed string.
 ///
@@ -205,8 +204,8 @@ fn ide_carrier_still_composed_distinct_from_declaration_target_and_verter_infix_
          {vue_ide_identities:?}"
     );
 
-    // ── Svelte: the `Suffix` IDE policy composes the single `.svelte.tsx`,
-    //    distinct from the `.d.svelte.ts` declaration target. ──
+    // ── Svelte: the conditional IDE policy composes `.svelte.tsx` and
+    //    `.svelte.jsx`, distinct from the declaration target. ──
     let naming = naming_for_ext("svelte");
     let carrier_source = "/ws/src/Foo.svelte";
 
@@ -216,6 +215,11 @@ fn ide_carrier_still_composed_distinct_from_declaration_target_and_verter_infix_
         ide_identities.contains(&"/ws/src/Foo.svelte.tsx".to_string()),
         "the production Svelte IDE carrier identity `/ws/src/Foo.svelte.tsx` must STILL be \
          composed (the self-diagnostics surface); got {ide_identities:?}"
+    );
+    assert!(
+        ide_identities.contains(&"/ws/src/Foo.svelte.jsx".to_string()),
+        "the production Svelte JavaScript IDE carrier identity `/ws/src/Foo.svelte.jsx` must \
+         STILL be composed; got {ide_identities:?}"
     );
 
     // The DECLARATION carrier — the bare-import resolution target — is DISTINCT

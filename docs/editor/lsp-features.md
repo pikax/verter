@@ -129,6 +129,22 @@ The LSP delegates TypeScript type checking to an external process. Two backends 
 
 Provider selection is configured via the `--type-provider` CLI arg or `verter.typeProvider` VS Code setting. See [Settings Reference](/editor/settings#type-provider) for details.
 
+### JavaScript and TypeScript component carriers
+
+Verter publishes an IDE carrier in the component's authored script language.
+Vue and Svelte components containing TypeScript use a `.tsx` carrier. A
+no-lang JavaScript Svelte component uses a `.jsx` carrier with `// @ts-check`
+and generated JSDoc declarations, so template expressions, runes, stores,
+bindings, transitions, and await blocks remain type-checked without requiring a
+project-wide `jsxImportSource` setting.
+
+JSDoc on a JavaScript `$props()` binding is also retained by Svelte's public
+declaration carrier. A bare `.svelte` import, including one reached through
+TypeScript re-export barrels, therefore uses the component declaration surface
+rather than exposing the internal `.jsx` filename. The tsserver plugin selects
+the exact `.tsx` or `.jsx` identity recorded by the LSP manifest; it does not
+guess the source language from the `.svelte` extension.
+
 ::: warning TSGO Limitation
 TSGO has a known limitation: re-exported `.vue` components (e.g., barrel files) may lose their typing. This is why `auto` mode defaults to tsserver when a workspace TypeScript installation is found.
 :::

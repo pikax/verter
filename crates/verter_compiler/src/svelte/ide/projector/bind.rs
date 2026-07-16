@@ -172,33 +172,46 @@ impl TemplateProjector<'_, '_> {
             // '$store'`. The target is a call, so the `typeof LOCAL` form would be
             // invalid — hence the read-bearing branch.
             self.ct.overwrite(expr.start, expr.end, &local);
-            self.ct.overwrite(
-                expr.end,
-                attr.span.end,
-                &format!(" = __verter_bind_rw<{host_ty}>({local})), {{}})}}"),
-            );
+            let check = match self.dialect {
+                super::SvelteIdeDialect::TypeScript => {
+                    format!("__verter_bind_rw<{host_ty}>({local})")
+                }
+                super::SvelteIdeDialect::JavaScript => format!(
+                    "(/** @type {{(value: {host_ty}) => {host_ty}}} */ (__verter_bind_rw))({local})"
+                ),
+            };
+            self.ct
+                .overwrite(expr.end, attr.span.end, &format!(" = {check}), {{}})}}"));
             return;
         }
         if is_type_query_safe_lvalue(&local) {
             // `bind:this={` → `{...((` ; the LOCAL (mapped) is the assignment
             // target ; trailing `}` → ` = (null! as Host)),
             // __verter_bind_this_assignable<Host, typeof LOCAL>(), {})}`.
-            self.ct.overwrite(
-                expr.end,
-                attr.span.end,
-                &format!(
+            let check = match self.dialect {
+                super::SvelteIdeDialect::TypeScript => format!(
                     " = (null! as {host_ty})), \
                      __verter_bind_this_assignable<{host_ty}, typeof {local}>(), {{}})}}"
                 ),
-            );
+                super::SvelteIdeDialect::JavaScript => format!(
+                    " = (/** @type {{{host_ty}}} */ (/** @type {{unknown}} */ (null)))), \
+                     __verter_bind_this_assignable((/** @type {{{host_ty}}} */ (/** @type {{unknown}} */ (null))), {local}), {{}})}}"
+                ),
+            };
+            self.ct.overwrite(expr.end, attr.span.end, &check);
         } else {
             // Non-`typeof`-safe lvalue (element access, …) — the read-bearing
             // invariant `LOCAL = __verter_bind_rw<Host>(LOCAL)`.
-            self.ct.overwrite(
-                expr.end,
-                attr.span.end,
-                &format!(" = __verter_bind_rw<{host_ty}>({local})), {{}})}}"),
-            );
+            let check = match self.dialect {
+                super::SvelteIdeDialect::TypeScript => {
+                    format!("__verter_bind_rw<{host_ty}>({local})")
+                }
+                super::SvelteIdeDialect::JavaScript => format!(
+                    "(/** @type {{(value: {host_ty}) => {host_ty}}} */ (__verter_bind_rw))({local})"
+                ),
+            };
+            self.ct
+                .overwrite(expr.end, attr.span.end, &format!(" = {check}), {{}})}}"));
         }
     }
 
@@ -227,11 +240,14 @@ impl TemplateProjector<'_, '_> {
         // rewritten in place; the pair stays a mapped chunk so the `$`-span overwrite
         // composes with the boundary `{...(CHECKER(` … `), {})}` wrap.
         self.rewrite_store_subs_in(expr);
-        self.ct.overwrite(
-            attr.span.start,
-            expr.start,
-            &format!("{{...(__verter_bind_fn<{host_ty}>("),
-        );
+        let checker = match self.dialect {
+            super::SvelteIdeDialect::TypeScript => format!("__verter_bind_fn<{host_ty}>"),
+            super::SvelteIdeDialect::JavaScript => format!(
+                "(/** @type {{(get: (() => {host_ty}) | null, set: (value: {host_ty}) => void) => void}} */ (__verter_bind_fn))"
+            ),
+        };
+        self.ct
+            .overwrite(attr.span.start, expr.start, &format!("{{...({checker}("));
         self.ct.overwrite(expr.end, attr.span.end, "), {})}");
     }
 
@@ -349,19 +365,29 @@ impl TemplateProjector<'_, '_> {
         match contract.direction {
             BindDirection::ReadWrite => {
                 self.ct.overwrite(attr.span.start, expr.start, "{...((");
-                self.ct.overwrite(
-                    expr.end,
-                    attr.span.end,
-                    &format!(" = __verter_bind_rw<{v}>({local})), {{}})}}"),
-                );
+                let check = match self.dialect {
+                    super::SvelteIdeDialect::TypeScript => {
+                        format!("__verter_bind_rw<{v}>({local})")
+                    }
+                    super::SvelteIdeDialect::JavaScript => format!(
+                        "(/** @type {{(value: {v}) => {v}}} */ (__verter_bind_rw))({local})"
+                    ),
+                };
+                self.ct
+                    .overwrite(expr.end, attr.span.end, &format!(" = {check}), {{}})}}"));
             }
             BindDirection::Read => {
                 self.ct.overwrite(attr.span.start, expr.start, "{...((");
-                self.ct.overwrite(
-                    expr.end,
-                    attr.span.end,
-                    &format!(" = __verter_bind_read<{v}>()), {{}})}}"),
-                );
+                let check = match self.dialect {
+                    super::SvelteIdeDialect::TypeScript => {
+                        format!("__verter_bind_read<{v}>()")
+                    }
+                    super::SvelteIdeDialect::JavaScript => {
+                        format!("(/** @type {{() => {v}}} */ (__verter_bind_read))()")
+                    }
+                };
+                self.ct
+                    .overwrite(expr.end, attr.span.end, &format!(" = {check}), {{}})}}"));
             }
         }
     }
@@ -439,7 +465,17 @@ impl TemplateProjector<'_, '_> {
         } else {
             "__verter_bind_fn"
         };
-        let type_arg = target_ty.map(|t| format!("<{t}>")).unwrap_or_default();
+        let checker_call = match (self.dialect, target_ty) {
+            (super::SvelteIdeDialect::TypeScript, Some(t)) => format!("{checker}<{t}>"),
+            (super::SvelteIdeDialect::TypeScript, None) => checker.to_string(),
+            (super::SvelteIdeDialect::JavaScript, Some(t)) if readonly => format!(
+                "(/** @type {{(get: null, set: (value: {t}) => void) => void}} */ ({checker}))"
+            ),
+            (super::SvelteIdeDialect::JavaScript, Some(t)) => format!(
+                "(/** @type {{(get: (() => {t}) | null, set: (value: {t}) => void) => void}} */ ({checker}))"
+            ),
+            (super::SvelteIdeDialect::JavaScript, None) => checker.to_string(),
+        };
         // F11 (P1-1): a store-sub in the `get, set` function-binding value pair
         // (`bind:x={() => $store, v => ($store = v)}`) is rewritten — the pair
         // stays a mapped chunk, so the `$`-span overwrite composes with the
@@ -450,7 +486,7 @@ impl TemplateProjector<'_, '_> {
         self.ct.overwrite(
             attr.span.start,
             expr.start,
-            &format!("{{...({checker}{type_arg}("),
+            &format!("{{...({checker_call}("),
         );
         self.ct.overwrite(expr.end, attr.span.end, "), {})}");
     }

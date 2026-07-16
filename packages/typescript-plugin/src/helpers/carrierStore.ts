@@ -396,8 +396,8 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
    * generated TSX carrier content — the membership-identity reconciliation.
    */
   readyFileForSource(sourcePath: string): ReadyFile | undefined {
-    const companion = carrierSourceToCompanion(sourcePath);
-    if (companion === null) {
+    const companion = this.companionForSource(sourcePath);
+    if (companion === undefined) {
       return undefined;
     }
     return this.readyFile(companion);
@@ -410,7 +410,19 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
    * resolve a known-but-not-yet-ready source.
    */
   companionForSource(sourcePath: string): string | undefined {
-    const companion = carrierSourceToCompanion(sourcePath);
+    const manifest = this.readManifest();
+    const sourceKey = normalizePath(sourcePath);
+    if (manifest) {
+      for (const project of this.scopedProjectEntries(manifest)) {
+        const owned = project.owned_sources.find(
+          (entry) => entry.role === "CarrierIde" && normalizePath(entry.source_uri) === sourceKey,
+        );
+        if (owned) {
+          return normalizePath(owned.provider_uri);
+        }
+      }
+    }
+    const companion = carrierSourceToCompanion(sourceKey);
     return companion === null ? undefined : companion;
   }
 

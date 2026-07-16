@@ -66,7 +66,7 @@ export const VIRTUAL_FILE_NAMING: Readonly<Record<string, VirtualFileNaming>> = 
   },
   FRAMEWORK_TAG_SVELTE: {
     carrierExtension: ".svelte",
-    ide: { kind: "suffix", suffix: ".tsx" },
+    ide: { kind: "jsxConditional", jsx: ".jsx", nonJsx: ".tsx" },
     importSurface: { kind: "suffix", suffix: ".verter.ts" },
     testingApiSuffix: null,
     sidecarSuffixes: [],

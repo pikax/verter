@@ -245,11 +245,9 @@ impl ProjectResolver {
     ///
     /// Returns `None` for non-carrier files. The carrier-extension set is
     /// derived from the language registry. `is_jsx` selects between `.tsx`
-    /// (TypeScript) and `.jsx` (JavaScript) output — a `.svelte` carrier always
-    /// reports `is_jsx = false`, so it always projects `.tsx` (the column's
-    /// `Fixed(".tsx")` policy), while a Vue `<script lang="jsx">` carrier
-    /// projects `.jsx` (the column's `JsxConditional` policy). This is a pure
-    /// path transform that does not require project ownership.
+    /// (TypeScript) and `.jsx` (JavaScript) output for both Vue and Svelte
+    /// component carriers. This is a pure path transform that does not require
+    /// project ownership.
     pub fn provider_ide_id_for_source(&self, source_id: &str, is_jsx: bool) -> Option<String> {
         let normalized_source = normalize_canonical_id(source_id);
         if !path_is_carrier(&normalized_source) {

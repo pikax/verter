@@ -16,6 +16,7 @@
 use super::*;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{Expression, VariableDeclarator};
+use oxc_ast::{Comment, CommentContent};
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
@@ -373,7 +374,8 @@ fn find_namespace_option(source: &str, el: &SvelteElement) -> Option<String> {
 /// excludes both). Two annotation forms contribute the contract type:
 ///
 /// - generic `$props<T>()` → the `<T>` type-argument text;
-/// - annotated `let … : T = $props()` → the declarator's type-annotation text.
+/// - annotated `let … : T = $props()` → the declarator's type-annotation text;
+/// - JavaScript `/** @type {T} */ let … = $props()` → the JSDoc payload.
 ///
 /// A catastrophically-unparseable fragment (`parsed.panicked`) yields `None`
 /// (fail-open). A RECOVERABLE parse error (`parsed.errors` non-empty, AST still
@@ -395,6 +397,7 @@ pub(super) fn extract_props_annotation(script: &str) -> Option<String> {
     }
     let mut collector = PropsRuneCollector {
         source: script,
+        comments: &parsed.program.comments,
         annotation: None,
     };
     collector.visit_program(&parsed.program);
@@ -410,6 +413,7 @@ fn is_props_rune_callee(expr: &Expression) -> bool {
 /// Collects the FIRST genuine `$props()` rune call's contract annotation text.
 struct PropsRuneCollector<'s> {
     source: &'s str,
+    comments: &'s [Comment],
     annotation: Option<String>,
 }
 
@@ -442,8 +446,70 @@ impl<'a> Visit<'a> for PropsRuneCollector<'_> {
                         return;
                     }
                 }
+                // JavaScript spelling: a leading JSDoc `@type {T}` governs
+                // the whole `$props()` binding. JSDoc payloads are inherently
+                // text; select the parser-classified leading JSDoc comment,
+                // then extract its balanced brace payload.
+                if let Some(text) =
+                    leading_jsdoc_type_payload(self.comments, decl.span.start, self.source)
+                {
+                    self.annotation = Some(text);
+                    return;
+                }
             }
         }
         walk::walk_variable_declarator(self, decl);
     }
+}
+
+/// The balanced `{T}` payload of a leading JSDoc `@type` block governing the
+/// variable declarator at `target_start`.
+fn leading_jsdoc_type_payload(
+    comments: &[Comment],
+    target_start: u32,
+    source: &str,
+) -> Option<String> {
+    let comment = comments.iter().rev().find(|comment| {
+        if comment.span.end > target_start
+            || !comment.is_block()
+            || !matches!(
+                comment.content,
+                CommentContent::Jsdoc | CommentContent::JsdocLegal
+            )
+        {
+            return false;
+        }
+        let Some(gap) = source.get(comment.span.end as usize..target_start as usize) else {
+            return false;
+        };
+        // A declaration-leading comment may attach to `export`/`let` rather
+        // than the declarator token. Permit only declaration modifiers between
+        // the comment and binding; any punctuation/other statement rejects it.
+        gap.split_whitespace().all(|token| {
+            matches!(
+                token,
+                "export" | "declare" | "const" | "let" | "var" | "using" | "await"
+            )
+        })
+    })?;
+    let raw = source.get(comment.span.start as usize..comment.span.end as usize)?;
+    let (at, _) = raw.match_indices("@type").find(|(index, _)| {
+        raw.as_bytes()
+            .get(index + "@type".len())
+            .is_some_and(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+    })?;
+    let payload = raw[at + "@type".len()..].trim_start().strip_prefix('{')?;
+    let mut depth = 0u32;
+    for (offset, ch) in payload.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' if depth == 0 => {
+                let text = payload[..offset].trim();
+                return (!text.is_empty()).then(|| text.to_string());
+            }
+            '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
 }

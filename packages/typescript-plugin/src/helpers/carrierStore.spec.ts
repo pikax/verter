@@ -308,6 +308,31 @@ describe("DiskCarrierStoreReader.readyFileForSource", () => {
     expect(reader.companionForSource("d:/ws/src/A.vue")).toBe("d:/ws/src/A.vue.tsx");
     expect(reader.companionForSource("d:/ws/src/util.ts")).toBeUndefined();
   });
+
+  it("uses the manifest IDE identity for a JavaScript Svelte carrier", () => {
+    const manifest = baseManifest();
+    manifest.projects["d:/ws/tsconfig.json"].owned_sources.push({
+      source_uri: "d:/ws/src/JsWidget.svelte",
+      provider_uri: "d:/ws/src/JsWidget.svelte.jsx",
+      role: "CarrierIde",
+      script_kind: "JSX",
+    });
+    manifest.projects["d:/ws/tsconfig.json"].ready_files["d:/ws/src/JsWidget.svelte.jsx"] = {
+      content_hash: "js1",
+      version: 5,
+      script_kind: "JSX",
+      role: "CarrierIde",
+      map_hash: "0",
+      blob_rel: "blobs/JsWidget.svelte.jsx",
+    };
+    const reader = new DiskCarrierStoreReader(track(makeStore(manifest)));
+
+    expect(reader.companionForSource("d:/ws/src/JsWidget.svelte")).toBe(
+      "d:/ws/src/JsWidget.svelte.jsx",
+    );
+    expect(reader.readyFileForSource("d:/ws/src/JsWidget.svelte")?.script_kind).toBe("JSX");
+    expect(reader.readyFileForSource("d:/ws/src/JsWidget.svelte")?.version).toBe(5);
+  });
 });
 
 describe("DiskCarrierStoreReader.ownedSourceFor", () => {

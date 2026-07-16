@@ -452,6 +452,12 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
     // ── module resolution: in-project `.vue`/`.svelte` → IDE carrier ───────
 
+    const ideCarrierForSource = (sourcePath: string): string | undefined =>
+      store.companionForSource(sourcePath) ?? toIdeCarrierFileName(sourcePath) ?? undefined;
+
+    const extensionForIdeCarrier = (carrierPath: string): tsModule.Extension =>
+      carrierPath.endsWith(".jsx") ? ts.Extension.Jsx : ts.Extension.Tsx;
+
     const createModuleResolver =
       (containingFile: string) =>
       (
@@ -489,10 +495,10 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         // surface this plugin's resolution hook does not produce.
         if (isRelativeVue(moduleName)) {
           const resolved = path.resolve(path.dirname(containingFile), moduleName);
-          const ideCarrier = toIdeCarrierFileName(resolved);
+          const ideCarrier = ideCarrierForSource(resolved);
           if (ideCarrier) {
             return {
-              extension: ts.Extension.Tsx,
+              extension: extensionForIdeCarrier(ideCarrier),
               isExternalLibraryImport: false,
               resolvedFileName: ideCarrier,
             };
@@ -521,12 +527,12 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         if (!carrierSource) {
           return;
         }
-        const ideCarrier = toIdeCarrierFileName(normalizePath(path.resolve(carrierSource)));
+        const ideCarrier = ideCarrierForSource(normalizePath(path.resolve(carrierSource)));
         if (!ideCarrier) {
           return;
         }
         return {
-          extension: ts.Extension.Tsx,
+          extension: extensionForIdeCarrier(ideCarrier),
           isExternalLibraryImport: false,
           resolvedFileName: ideCarrier,
         };
@@ -1025,7 +1031,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       }
       if (isRelativeVue(moduleName)) {
         const resolved = path.resolve(path.dirname(containingFile), moduleName);
-        return toIdeCarrierFileName(resolved) ?? undefined;
+        return ideCarrierForSource(resolved);
       }
       const result = ts.resolveModuleName(
         moduleName,

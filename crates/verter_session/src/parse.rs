@@ -337,15 +337,16 @@ pub(crate) fn absolutize_macro_payload_anchors(
     }
 }
 
-/// The OXC [`SourceType`] for a carrier artifact's eval-source — the first
-/// script region's resolved dialect (carrier scripts share one dialect), TS by
-/// default. So a `lang="tsx"` `.svelte` captures under TSX.
+/// The OXC [`SourceType`] for a carrier artifact's combined eval-source. Joins
+/// every script region because module and instance blocks may use different
+/// dialects; TS/JSX promote to the grammar capable of parsing the whole
+/// extracted program. Defaults to TS when the carrier has no script region.
 pub(crate) fn carrier_eval_source_type(
     framework_parse: Option<&verter_language::FrameworkParseArtifact>,
 ) -> SourceType {
     framework_parse
-        .and_then(|artifact| artifact.common.script_regions.first())
-        .map(|region| oxc_source_type_from_neutral(region.source_type))
+        .and_then(|artifact| combined_framework_script_source_type(&artifact.common.script_regions))
+        .map(oxc_source_type_from_neutral)
         .unwrap_or_else(SourceType::ts)
 }
 
@@ -535,11 +536,8 @@ fn build_svelte_snapshot_from_eval_source(
     // script dialect (the producer stamped `lang="ts"/"tsx"/"jsx"/"js"` onto the
     // script regions) so a `lang="tsx"` `.svelte` parses as TSX, not plain TS.
     // The eval-source's blanked geometry keeps every span carrier-absolute.
-    let source_type = artifact
-        .common
-        .script_regions
-        .first()
-        .map(|region| oxc_source_type_from_neutral(region.source_type))
+    let source_type = combined_framework_script_source_type(&artifact.common.script_regions)
+        .map(oxc_source_type_from_neutral)
         .unwrap_or_else(SourceType::ts);
 
     let fatal_snapshot = || ParseSnapshot {
@@ -771,11 +769,53 @@ pub(crate) fn imported_eval_source_type(
 ) -> SourceType {
     if file_language.is_framework_carrier() {
         framework_parse
-            .and_then(|artifact| artifact.common.script_regions.first())
-            .map(|region| oxc_source_type_from_neutral(region.source_type))
+            .and_then(|artifact| {
+                combined_framework_script_source_type(&artifact.common.script_regions)
+            })
+            .map(oxc_source_type_from_neutral)
             .unwrap_or_else(SourceType::ts)
     } else {
         plain_script_source_type(file_language)
+    }
+}
+
+/// Join the dialects of every embedded script region into the one grammar used
+/// for the carrier's combined analysis program.
+///
+/// A TypeScript grammar accepts ordinary JavaScript, so any TS region promotes
+/// the combined program to TS. JSX similarly promotes the selected grammar to
+/// its JSX-bearing form. This matters for Svelte, where module and instance
+/// scripts may legitimately use different languages; choosing the first region
+/// silently dropped later TS declarations. Single-region carriers preserve the
+/// producer's exact dialect and JS module kind.
+fn combined_framework_script_source_type(
+    regions: &[verter_language::ScriptRegion],
+) -> Option<verter_language::ScriptSourceType> {
+    use verter_language::ScriptSourceType;
+
+    let first = regions.first()?.source_type;
+    let has_typescript = regions.iter().any(|region| {
+        matches!(
+            region.source_type,
+            ScriptSourceType::Ts | ScriptSourceType::Dts
+        )
+    });
+    let has_tsx = regions
+        .iter()
+        .any(|region| matches!(region.source_type, ScriptSourceType::Tsx));
+    let jsx_kind = regions.iter().find_map(|region| match region.source_type {
+        ScriptSourceType::Jsx(kind) => Some(kind),
+        _ => None,
+    });
+
+    if has_tsx || (has_typescript && jsx_kind.is_some()) {
+        Some(ScriptSourceType::Tsx)
+    } else if has_typescript {
+        Some(ScriptSourceType::Ts)
+    } else if let Some(kind) = jsx_kind {
+        Some(ScriptSourceType::Jsx(kind))
+    } else {
+        Some(first)
     }
 }
 
@@ -2016,6 +2056,52 @@ mod tests {
         assert_eq!(
             plain_script_source_type(&verter_language::FileLanguage::vue()),
             SourceType::ts()
+        );
+    }
+
+    #[test]
+    fn combined_framework_dialect_promotes_mixed_javascript_and_typescript_regions() {
+        use verter_language::{JsModuleKind, ScriptRegion, ScriptRegionKind, ScriptSourceType};
+
+        let region = |source_type, kind| ScriptRegion {
+            span: verter_span::Span::new(0, 1),
+            source_type,
+            kind,
+        };
+        let mixed = [
+            region(
+                ScriptSourceType::Js(JsModuleKind::Module),
+                ScriptRegionKind::Module,
+            ),
+            region(ScriptSourceType::Ts, ScriptRegionKind::Instance),
+        ];
+        assert_eq!(
+            combined_framework_script_source_type(&mixed),
+            Some(ScriptSourceType::Ts),
+            "a later TypeScript instance script must promote the combined program"
+        );
+
+        let mixed_jsx = [
+            region(ScriptSourceType::Ts, ScriptRegionKind::Module),
+            region(
+                ScriptSourceType::Jsx(JsModuleKind::Module),
+                ScriptRegionKind::Instance,
+            ),
+        ];
+        assert_eq!(
+            combined_framework_script_source_type(&mixed_jsx),
+            Some(ScriptSourceType::Tsx),
+            "mixed TypeScript and JSX requires the TSX grammar"
+        );
+
+        let single_js = [region(
+            ScriptSourceType::Js(JsModuleKind::Script),
+            ScriptRegionKind::Instance,
+        )];
+        assert_eq!(
+            combined_framework_script_source_type(&single_js),
+            Some(ScriptSourceType::Js(JsModuleKind::Script)),
+            "a single region preserves its producer-owned module kind"
         );
     }
     use smallvec::SmallVec;

@@ -77,18 +77,15 @@ impl CarrierParse for SvelteParseCarrier {
 
 /// Resolve a Svelte `<script lang>` value to a neutral [`ScriptSourceType`].
 ///
-/// Svelte components are TypeScript-or-JavaScript; `lang="ts"` (or absent) is
-/// TypeScript, `lang="tsx"` is TSX, `lang="jsx"`/`lang="js"` map to their JS
-/// dialects. A `.svelte` script is module-grammar (top-level `import`/`export`
-/// allowed), so JS dialects resolve the module module-kind.
+/// Svelte components are TypeScript-or-JavaScript; only exact `lang="ts"` is
+/// TypeScript. No-lang and other script languages use JavaScript grammar. A
+/// `.svelte` script is module-grammar (top-level `import`/`export` allowed), so
+/// JS dialects resolve the module module-kind.
 fn svelte_script_source_type(script: Option<&SvelteScript>) -> ScriptSourceType {
     match script.and_then(|s| s.lang.as_deref()) {
-        Some(lang) if lang.eq_ignore_ascii_case("tsx") => ScriptSourceType::Tsx,
-        Some(lang) if lang.eq_ignore_ascii_case("jsx") => {
-            ScriptSourceType::Jsx(JsModuleKind::Module)
-        }
-        Some(lang) if lang.eq_ignore_ascii_case("js") => ScriptSourceType::Js(JsModuleKind::Module),
-        _ => ScriptSourceType::Ts,
+        Some("ts") => ScriptSourceType::Ts,
+        Some("jsx") => ScriptSourceType::Jsx(JsModuleKind::Module),
+        _ => ScriptSourceType::Js(JsModuleKind::Module),
     }
 }
 
@@ -265,9 +262,7 @@ impl SvelteCarrierCompiler {
         let ide = IdeOutput {
             code: projection.code,
             source_map: projection.source_map,
-            // A `.svelte` always projects TS `.tsx`: the projection emits
-            // TS with the `@jsxImportSource` pragma; it is never `.jsx`.
-            is_jsx: false,
+            is_jsx: projection.is_jsx,
             duration_ms,
             destructured_block: None,
         };
@@ -968,6 +963,12 @@ mod tests {
         assert_eq!(regions[1].kind, ScriptRegionKind::Instance);
         assert_eq!(regions[0].span.slice(source).trim(), "export const x = 1;");
         assert_eq!(regions[1].span.slice(source).trim(), "let a = 1;");
+        assert_eq!(
+            regions[0].source_type,
+            ScriptSourceType::Js(JsModuleKind::Module),
+            "a no-lang Svelte script is JavaScript"
+        );
+        assert_eq!(regions[1].source_type, ScriptSourceType::Ts);
     }
 
     #[test]
@@ -1009,7 +1010,7 @@ mod tests {
         let out = compiler
             .compile_ide(source, &artifact, &IdeCompileOptions::default())
             .expect("the Svelte IDE projection produces a TSX artifact");
-        // A `.svelte` always projects TS `.tsx` (never `.jsx`).
+        // A TypeScript `.svelte` projects `.tsx`.
         assert!(!out.is_jsx);
         // The pragma prelude opens the file.
         assert!(out
@@ -1021,6 +1022,41 @@ mod tests {
         assert!(!out.code.contains("<script"));
         // A source map is produced by default.
         assert!(!out.source_map.is_empty());
+    }
+
+    #[test]
+    fn compile_ide_projects_a_no_lang_component_as_valid_jsx_with_jsdoc() {
+        let compiler = SvelteCarrierCompiler::default();
+        let source = r#"<script>
+/** @type {{ label: string }} */
+let { label } = $props();
+let count = $state(0);
+</script>
+<button onclick={() => count += 1}>{label}: {count}</button>"#;
+        let artifact = compiler.parse(source, &ParseOptions::default());
+        let out = compiler
+            .compile_ide(source, &artifact, &IdeCompileOptions::default())
+            .expect("the Svelte IDE projection produces a JavaScript carrier");
+
+        assert!(out.is_jsx, "a no-lang Svelte component must publish .jsx");
+        let allocator = oxc_allocator::Allocator::default();
+        let parsed =
+            oxc_parser::Parser::new(&allocator, &out.code, oxc_span::SourceType::jsx()).parse();
+        assert!(
+            parsed.errors.is_empty(),
+            "the JavaScript carrier must be syntactically valid JSX:\n{:?}\n{}",
+            parsed.errors,
+            out.code
+        );
+        assert!(
+            out.code
+                .starts_with("/** @jsxImportSource @verter/svelte-jsx */"),
+            "the file-local Svelte JSX environment must be preserved"
+        );
+        assert!(
+            !out.source_map.is_empty(),
+            "the JavaScript carrier keeps the normal IDE source map"
+        );
     }
 
     #[test]

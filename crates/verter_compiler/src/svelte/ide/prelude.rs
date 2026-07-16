@@ -22,6 +22,8 @@
 //! clean-type-check gate spuriously. The declarations are ambient (`declare`)
 //! so they introduce no runtime value and never collide with a user import.
 
+use super::SvelteIdeDialect;
+
 /// The per-file pragma line. Opens the prelude; overrides the project-level
 /// `jsxImportSource` for this file only.
 pub const PRAGMA_LINE: &str = "/** @jsxImportSource @verter/svelte-jsx */\n";
@@ -140,6 +142,24 @@ pub fn render_prelude(namespace: SvelteJsxNamespace, legacy_mode: bool) -> Strin
         namespace,
         legacy_mode,
     })
+}
+
+/// Render the component prelude for the generated carrier dialect.
+///
+/// TypeScript carriers use ambient declarations. JavaScript carriers express
+/// the same contracts as module-local JSDoc-typed functions and values so the
+/// file is genuine JavaScript under `checkJs`, not TS syntax hidden behind a
+/// `.jsx` name.
+#[must_use]
+pub(crate) fn render_component_prelude(
+    namespace: SvelteJsxNamespace,
+    legacy_mode: bool,
+    dialect: SvelteIdeDialect,
+) -> String {
+    match dialect {
+        SvelteIdeDialect::TypeScript => render_prelude(namespace, legacy_mode),
+        SvelteIdeDialect::JavaScript => render_js_component_prelude(namespace, legacy_mode),
+    }
 }
 
 /// Render the rune prelude for the given [`RunePreludeMode`] — the SINGLE
@@ -422,6 +442,189 @@ function $inspect(...values) {
  * @returns {void}
  */
 $inspect.trace = function (name) {};
+"#;
+
+/// Render the JavaScript component prelude. The function bodies are inert IDE
+/// witnesses; all framework contracts live in JSDoc so the carrier remains
+/// valid JavaScript and TypeScript can still infer/check every generated call.
+fn render_js_component_prelude(namespace: SvelteJsxNamespace, legacy_mode: bool) -> String {
+    let legacy = if legacy_mode {
+        JS_LEGACY_MAGIC_PRELUDE
+    } else {
+        ""
+    };
+    let mut out = String::with_capacity(
+        namespace.pragma_line().len()
+            + JS_COMPONENT_HEADER.len()
+            + JS_COMPONENT_ONLY_RUNES_PROPS_BINDABLE.len()
+            + JS_MODULE_RUNES.len()
+            + JS_COMPONENT_ONLY_RUNE_HOST.len()
+            + JS_COMPONENT_PROJECTION_CHECKERS.len()
+            + legacy.len(),
+    );
+    out.push_str(namespace.pragma_line());
+    out.push_str(JS_COMPONENT_HEADER);
+    out.push_str(JS_COMPONENT_ONLY_RUNES_PROPS_BINDABLE);
+    out.push_str(JS_MODULE_RUNES);
+    out.push_str(JS_COMPONENT_ONLY_RUNE_HOST);
+    out.push_str(JS_COMPONENT_PROJECTION_CHECKERS);
+    out.push_str(legacy);
+    out
+}
+
+const JS_COMPONENT_HEADER: &str = r#"// @ts-check
+// --- Svelte 5 runes (JSDoc-typed; call sites stay verbatim) ---
+"#;
+
+const JS_COMPONENT_ONLY_RUNES_PROPS_BINDABLE: &str = r#"/**
+ * @template [T=Record<string, unknown>]
+ * @returns {T}
+ */
+function $props() {
+  return /** @type {T} */ (/** @type {unknown} */ ({}));
+}
+/** @returns {string} */
+$props.id = function () {
+  return "";
+};
+/**
+ * @template [T=never]
+ * @param {T} [fallback]
+ * @returns {T}
+ */
+function $bindable(fallback) {
+  return /** @type {T} */ (fallback);
+}
+"#;
+
+const JS_COMPONENT_ONLY_RUNE_HOST: &str = r#"/**
+ * @template {HTMLElement} [El=HTMLElement]
+ * @returns {El}
+ */
+function $host() {
+  return /** @type {El} */ (/** @type {unknown} */ (null));
+}
+"#;
+
+const JS_COMPONENT_PROJECTION_CHECKERS: &str = r#"// --- Verter projection checkers/declarators (JSDoc) ---
+/**
+ * @template {EventTarget} E
+ * @param {import("svelte/attachments").Attachment<E>} attachment
+ * @returns {void}
+ */
+function __verter_attach(attachment) {}
+/**
+ * @template {unknown[]} Params
+ * @param {(...args: Params) => unknown} render
+ * @returns {import("svelte").Snippet<Params>}
+ */
+function __verter_snippet(render) {
+  return /** @type {import("svelte").Snippet<Params>} */ (/** @type {unknown} */ (render));
+}
+/** @param {...unknown} values @returns {void} */
+function __verter_void(...values) {}
+/**
+ * @template {PromiseLike<unknown>} T
+ * @param {T} value
+ * @returns {Awaited<T>}
+ */
+function __verter_await_expr(value) {
+  return /** @type {Awaited<T>} */ (/** @type {unknown} */ (value));
+}
+/**
+ * @template {string} Tag
+ * @typedef {Tag extends keyof HTMLElementTagNameMap ? HTMLElementTagNameMap[Tag] : Tag extends keyof SVGElementTagNameMap ? SVGElementTagNameMap[Tag] : Element} __VerterHostEl
+ */
+/**
+ * @param {import("svelte/transition").TransitionConfig | ((options?: { direction: "in" | "out" }) => import("svelte/transition").TransitionConfig)} config
+ * @returns {void}
+ */
+function __verter_transition(config) {}
+/**
+ * @param {import("svelte/animate").AnimationConfig | ((options?: { direction: "in" | "out" }) => import("svelte/animate").AnimationConfig)} config
+ * @returns {void}
+ */
+function __verter_animate(config) {}
+/** @template V @param {V} local @returns {V} */
+function __verter_bind_rw(local) { return local; }
+/** @template V @returns {V} */
+function __verter_bind_read() { return /** @type {V} */ (/** @type {unknown} */ (undefined)); }
+/**
+ * @template Host
+ * @template {Host} To
+ * @param {Host} host
+ * @param {To} local
+ * @returns {void}
+ */
+function __verter_bind_this_assignable(host, local) {}
+/** @template {readonly unknown[]} L @param {L} local @returns {L} */
+function __verter_bind_group_checkbox(local) { return local; }
+/**
+ * @template L
+ * @param {L extends readonly unknown[] ? never : L} local
+ * @returns {L}
+ */
+function __verter_bind_group_radio(local) { return /** @type {L} */ (local); }
+/**
+ * @template V
+ * @param {(() => V) | null} get
+ * @param {(value: V) => void} set
+ * @returns {void}
+ */
+function __verter_bind_fn(get, set) {}
+/**
+ * @template V
+ * @param {null} get
+ * @param {(value: V) => void} set
+ * @returns {void}
+ */
+function __verter_bind_fn_read(get, set) {}
+/**
+ * @template P
+ * @param {{ new (...args: any[]): { $props: P } }} component
+ * @returns {(props: P & { children?: unknown }) => ReturnType<import("svelte").Snippet>}
+ */
+function __verter_dynamic_component(component) {
+  return /** @type {(props: P & { children?: unknown }) => ReturnType<import("svelte").Snippet>} */ (
+    function (props) { return /** @type {ReturnType<import("svelte").Snippet>} */ (/** @type {unknown} */ (null)); }
+  );
+}
+/**
+ * @template C
+ * @typedef {(C extends { new (...args: any[]): infer I } ? I : never) extends { $events: infer E } ? E : {}} __VerterEventsOf
+ */
+/**
+ * @template C
+ * @template {keyof __VerterEventsOf<C> & string} K
+ * @param {C} component
+ * @param {K} name
+ * @param {__VerterEventsOf<C>[K]} handler
+ * @returns {void}
+ */
+function __verter_event(component, name, handler) {}
+/** @template T @param {import("svelte/store").Readable<T>} store @returns {T} */
+function __verter_store_get(store) { return /** @type {T} */ (/** @type {unknown} */ (undefined)); }
+/**
+ * @template T
+ * @param {import("svelte/store").Writable<T>} store
+ * @param {T} value
+ * @returns {T}
+ */
+function __verter_store_set(store, value) { return value; }
+/**
+ * @template T
+ * @param {import("svelte/store").Writable<T>} store
+ * @returns {{ value: T }}
+ */
+function __verter_store_lvalue(store) { return /** @type {{ value: T }} */ ({ value: undefined }); }
+/** @template {number | bigint} T @param {T} current @returns {T} */
+function __verter_store_update(current) { return current; }
+"#;
+
+const JS_LEGACY_MAGIC_PRELUDE: &str = r#"// --- F12 legacy magic objects (legacy-mode only; JSDoc-typed).
+const $$props = /** @type {Record<string, any>} */ ({});
+const $$restProps = /** @type {Record<string, any>} */ ({});
+const $$slots = /** @type {Record<string, boolean>} */ ({});
 "#;
 
 /// The component projection checkers/declarators section — the

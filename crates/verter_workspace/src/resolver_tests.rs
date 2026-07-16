@@ -743,11 +743,14 @@ fn provider_paths_derive_both_virtual_files_for_svelte_carriers() {
         .expect("svelte files receive an api provider path");
     assert_eq!(api, "/workspace/src/Comp.svelte.verter.ts");
 
-    // A `.svelte` carrier always projects `.tsx` (is_jsx = false → Fixed).
     let ide = resolver
         .provider_ide_id_for_source("/workspace/src/Comp.svelte", false)
         .expect("svelte IDE files receive a provider path");
     assert_eq!(ide, "/workspace/src/Comp.svelte.tsx");
+    let js_ide = resolver
+        .provider_ide_id_for_source("/workspace/src/Comp.svelte", true)
+        .expect("JavaScript svelte IDE files receive a provider path");
+    assert_eq!(js_ide, "/workspace/src/Comp.svelte.jsx");
 
     // Both round-trip back to the `.svelte` source.
     assert_eq!(
@@ -756,6 +759,10 @@ fn provider_paths_derive_both_virtual_files_for_svelte_carriers() {
     );
     assert_eq!(
         resolver.source_id_from_provider_id(&ide).as_deref(),
+        Some("/workspace/src/Comp.svelte")
+    );
+    assert_eq!(
+        resolver.source_id_from_provider_id(&js_ide).as_deref(),
         Some("/workspace/src/Comp.svelte")
     );
 }
@@ -2857,6 +2864,16 @@ fn provider_ide_id_for_source_vue_jsx_without_ownership() {
         resolver.provider_ide_id_for_source("/foo.vue", true),
         Some("/foo.vue.jsx".to_string()),
         "Vue file with is_jsx should get .jsx suffix without ownership"
+    );
+}
+
+#[test]
+fn provider_ide_id_for_source_svelte_jsx_without_ownership() {
+    let resolver = NativeProjectResolver::new(vec![]);
+    assert_eq!(
+        resolver.provider_ide_id_for_source("/foo.svelte", true),
+        Some("/foo.svelte.jsx".to_string()),
+        "JavaScript Svelte files should get the descriptor-owned .jsx suffix"
     );
 }
 

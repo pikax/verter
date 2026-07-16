@@ -92,6 +92,16 @@ describe("relocated carrier naming CORE (browser-safe surface smoke)", () => {
     );
   });
 
+  it("strips the JavaScript Svelte IDE identity only with a backing carrier", () => {
+    const exists = (path: string) => path === "/app/Comp.svelte";
+    expect(cleanupCarrierVirtualImportPath("/app/Comp.svelte.jsx", exists)).toBe(
+      "/app/Comp.svelte",
+    );
+    expect(cleanupCarrierVirtualImportPath("/app/Missing.svelte.jsx", exists)).toBe(
+      "/app/Missing.svelte.jsx",
+    );
+  });
+
   it("containingFileAwareExists resolves a relative backing candidate WITHOUT Node builtins", () => {
     // The browser-safe internal POSIX resolver must reproduce the Node path.posix
     // behavior this wrapper shipped with: the host only knows the ABSOLUTE

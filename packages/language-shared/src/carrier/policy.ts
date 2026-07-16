@@ -83,7 +83,8 @@ const CARRIER_VIRTUAL_RULES: readonly CarrierVirtualRule[] = Object.values(VIRTU
       return [];
     }
     const rules: CarrierVirtualRule[] = [];
-    // IDE carrier (`Comp.vue.tsx` / `Comp.vue.jsx` / `Comp.svelte.tsx`) —
+    // IDE carrier (`Comp.vue.tsx` / `Comp.vue.jsx` / `Comp.svelte.tsx` /
+    // `Comp.svelte.jsx`) —
     // the self-diagnostic root; TSX or JSX per the source-language branch.
     for (const ideSuffix of ideSuffixesFor(row.ide)) {
       const language = languageForSuffix(ideSuffix);

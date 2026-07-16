@@ -52,10 +52,20 @@ impl TemplateProjector<'_, '_> {
         }
         // Handle clauses.
         self.project_if_clauses(block);
-        // Close the whole block: overwrite `{/if}` with `</>)}`.
+        // Close the whole block. A conditional chain without a final `{:else}`
+        // still needs a false arm to remain valid JSX/TSX.
+        let has_final_else = block
+            .clauses
+            .last()
+            .is_some_and(|clause| matches!(clause.kind, SvelteClauseKind::Else));
+        let close = if has_final_else {
+            "</>)}"
+        } else {
+            "</>) : null}"
+        };
         let end_tag_start = self.find_str_before(block.span.end, "{/if}");
         if let Some(s) = end_tag_start {
-            self.ct.overwrite(s, block.span.end, "</>)}");
+            self.ct.overwrite(s, block.span.end, close);
         }
     }
 
@@ -205,11 +215,14 @@ impl TemplateProjector<'_, '_> {
         // Synthetic holder: `{((__verter_await) => __verter_await.pending ? (<>P</>) : __verter_await.error ? (<>C</>) : (<>T</>))(__verter_state(PROMISE))}`
         // For a tractable, type-clean projection: resolve the promise value
         // type via `Awaited<typeof PROMISE>` and bind it.
-        self.ct.overwrite(
-            block.span.start,
-            head.start,
-            "{((__verter_p) => { type __VA = Awaited<typeof __verter_p>; ",
-        );
+        let await_header = match self.dialect {
+            super::SvelteIdeDialect::TypeScript => {
+                "{((__verter_p) => { type __VA = Awaited<typeof __verter_p>; "
+            }
+            super::SvelteIdeDialect::JavaScript => "{((__verter_p) => { ",
+        };
+        self.ct
+            .overwrite(block.span.start, head.start, await_header);
         // In the INLINE forms `{#await p then v}` / `{#await p catch e}` the block
         // has no separate `{:then}`/`{:catch}` clause — `block.children` IS the
         // then-/catch-body, and the binding lives on the block-level
@@ -238,11 +251,25 @@ impl TemplateProjector<'_, '_> {
         let inline_decl = match inline_body_binding {
             Some(sp) if !has_then_clause && then_binding == Some(sp) => {
                 let binding = self.rewrite_pattern_text_defaults(sp);
-                format!("const {binding}: __VA = (null as any); ")
+                match self.dialect {
+                    super::SvelteIdeDialect::TypeScript => {
+                        format!("const {binding}: __VA = (null as any); ")
+                    }
+                    super::SvelteIdeDialect::JavaScript => format!(
+                        "const {binding} = /** @type {{Awaited<typeof __verter_p>}} */ (/** @type {{any}} */ (null)); "
+                    ),
+                }
             }
             Some(sp) => {
                 let binding = self.rewrite_pattern_text_defaults(sp);
-                format!("const {binding}: unknown = (null as any); ")
+                match self.dialect {
+                    super::SvelteIdeDialect::TypeScript => {
+                        format!("const {binding}: unknown = (null as any); ")
+                    }
+                    super::SvelteIdeDialect::JavaScript => {
+                        format!("const {binding} = /** @type {{unknown}} */ (null); ")
+                    }
+                }
             }
             None => String::new(),
         };
@@ -295,7 +322,14 @@ impl TemplateProjector<'_, '_> {
                     self.ct.overwrite(
                         clause.tag_span.start,
                         clause.tag_span.end,
-                        &format!("</>); const {binding}: __VA = (null as any); return (<>"),
+                        &match self.dialect {
+                            super::SvelteIdeDialect::TypeScript => format!(
+                                "</>); const {binding}: __VA = (null as any); return (<>",
+                            ),
+                            super::SvelteIdeDialect::JavaScript => format!(
+                                "</>); const {binding} = /** @type {{Awaited<typeof __verter_p>}} */ (/** @type {{any}} */ (null)); return (<>",
+                            ),
+                        },
                     );
                     // The `{:then PATTERN}` binding scopes to the THEN body — push
                     // its `$`-names so a `$`-named then binding is not mis-rewritten
@@ -318,7 +352,14 @@ impl TemplateProjector<'_, '_> {
                     self.ct.overwrite(
                         clause.tag_span.start,
                         clause.tag_span.end,
-                        &format!("</>); const {binding}: unknown = (null as any); return (<>"),
+                        &match self.dialect {
+                            super::SvelteIdeDialect::TypeScript => format!(
+                                "</>); const {binding}: unknown = (null as any); return (<>",
+                            ),
+                            super::SvelteIdeDialect::JavaScript => format!(
+                                "</>); const {binding} = /** @type {{unknown}} */ (null); return (<>",
+                            ),
+                        },
                     );
                     // The `{:catch PATTERN}` binding scopes to the CATCH body —
                     // push its `$`-names.
@@ -332,8 +373,11 @@ impl TemplateProjector<'_, '_> {
             }
         }
         if let Some(s) = self.find_str_before(block.span.end, "{/await}") {
-            self.ct
-                .overwrite(s, block.span.end, "</>); })(null as any)}");
+            let close = match self.dialect {
+                super::SvelteIdeDialect::TypeScript => "</>); })(null as any)}",
+                super::SvelteIdeDialect::JavaScript => "</>); })(/** @type {any} */ (null))}",
+            };
+            self.ct.overwrite(s, block.span.end, close);
         }
     }
 
