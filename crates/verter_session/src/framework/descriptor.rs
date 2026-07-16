@@ -756,10 +756,13 @@ pub fn svelte_descriptor() -> FrameworkAdapterDescriptor {
         virtual_file_naming: Some(VirtualFileNaming {
             // A `.svelte` COMPONENT always projects a fixed `.tsx` IDE file:
             // the projection emits TS with the `@jsxImportSource`
-            // pragma — it is never JSX-conditional the way a Vue
-            // `<script lang="jsx">` carrier is, so there is no `.jsx`
-            // alternative. Its import surface is the `.verter.ts` API file.
-            ide: VirtualPathPolicy::Suffix(".tsx"),
+            // pragma. A no-lang JavaScript component is published as `.jsx`
+            // with JSDoc while a TypeScript component is published as `.tsx`.
+            // Its import surface remains the `.verter.ts` API file.
+            ide: VirtualPathPolicy::JsxConditional {
+                jsx: ".jsx",
+                non_jsx: ".tsx",
+            },
             // The public-API / import-resolution carrier carries the reserved
             // `.verter.` infix: a bare `.svelte.ts` API carrier would collide
             // with a Svelte rune module (GATE 5 — `.svelte.ts` is probed before
@@ -861,7 +864,7 @@ mod tests {
     }
 
     #[test]
-    fn svelte_descriptor_projects_a_fixed_tsx_ide_file_with_no_testing_surface() {
+    fn svelte_descriptor_projects_language_specific_ide_files_with_no_testing_surface() {
         let d = svelte_descriptor();
         assert_eq!(d.id, FrameworkAdapterId::svelte());
         assert_eq!(d.tag, FrameworkTag::Svelte);
@@ -871,16 +874,15 @@ mod tests {
             .virtual_file_naming
             .as_ref()
             .expect("the Svelte descriptor carries a virtual-file naming column");
-        // A `.svelte` COMPONENT projects a fixed `.tsx` IDE file and a
-        // `.verter.ts` import surface, and has NO testing-API surface (Vue-only).
-        assert_eq!(naming.ide, VirtualPathPolicy::Suffix(".tsx"));
-        assert_ne!(
+        // A `.svelte` COMPONENT projects `.tsx` for TypeScript source and
+        // `.jsx` for JavaScript source, plus the fixed `.verter.ts` import
+        // surface. It has NO testing-API surface (Vue-only).
+        assert_eq!(
             naming.ide,
             VirtualPathPolicy::JsxConditional {
                 jsx: ".jsx",
                 non_jsx: ".tsx",
-            },
-            "Svelte is NOT JSX-conditional"
+            }
         );
         // The public-API carrier carries the reserved `.verter.` infix: a bare
         // `.svelte.ts` would collide with a rune module (GATE 5).
@@ -899,7 +901,7 @@ mod tests {
         // component dual-file model). Its IDE and import surfaces are BOTH
         // `SelfFile` (it serves its own canonical path), and it has NO testing
         // surface. This is the discriminating contrast with the component
-        // carrier's `Suffix(".tsx")`/`Suffix(".ts")` dual-file model.
+        // carrier's conditional `.tsx`/`.jsx` IDE plus `.verter.ts` API model.
         let naming = svelte_rune_module_naming();
         assert_eq!(naming.ide, VirtualPathPolicy::SelfFile);
         assert_eq!(naming.import_surface, VirtualPathPolicy::SelfFile);

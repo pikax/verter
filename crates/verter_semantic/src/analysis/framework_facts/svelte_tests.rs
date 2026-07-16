@@ -78,6 +78,41 @@ fn captures_props_destructuring_annotation_type() {
 }
 
 #[test]
+fn captures_javascript_jsdoc_props_annotation_type() {
+    let src =
+        "/** @type {{ name: string, count?: number }} */\nlet { name, count = 0 } = $props();";
+    let c = capture(src);
+    let props = c.props.expect("JSDoc props candidate");
+    assert!(!props.from_generic_argument);
+    let payload = props
+        .props_type
+        .as_ref()
+        .expect("the JSDoc @type payload is captured");
+    assert_eq!(
+        payload.locator,
+        macro_payload_locator(0, MacroPayloadPosition::TypeAnnotation)
+    );
+    let members = props
+        .props_leaf_members
+        .expect("a depth-closed JSDoc object records leaf members");
+    assert_eq!(members.len(), 2);
+    assert_eq!(members[0].name, "name");
+    assert_eq!(members[1].name, "count");
+    assert!(members[1].optional);
+}
+
+#[test]
+fn records_snippet_candidate_from_javascript_jsdoc_props() {
+    let src = "import { Snippet } from 'svelte';\n/** @type {{ row: Snippet<[{ id: number }]> }} */\nlet { row } = $props();";
+    let c = capture(src);
+    assert_eq!(c.snippet_candidates.len(), 1);
+    let candidate = &c.snippet_candidates[0];
+    assert_eq!(candidate.member_name, "row");
+    assert_eq!(candidate.local_binding, "Snippet");
+    assert_eq!(candidate.import_source, "svelte");
+}
+
+#[test]
 fn inline_and_instantiation_payloads_are_captured_not_dropped() {
     // An inline object-literal generic argument is a REAL authored payload —
     // captured as a payload ref (position + structural hash). The former
@@ -1026,7 +1061,7 @@ fn stable_candidate_hash_discriminates_every_input() {
 
 #[test]
 fn stable_candidate_hash_golden_is_deterministic() {
-    // Deterministic golden for the VERSION 4 candidate hash: two independent
+    // Deterministic golden for the VERSION 5 candidate hash: two independent
     // constructions hash identically, and the bytes are pinned so a silently
     // dropped / reordered hash input fails loudly. An INTENTIONAL hash-shape
     // change must bump `SvelteScriptProvider::VERSION` and re-pin.
@@ -1039,7 +1074,7 @@ fn stable_candidate_hash_golden_is_deterministic() {
             0x7f, 0x9b, 0xab, 0x9d, 0x8f, 0x39, 0x29, 0xf3, 0x52, 0xe6, 0xff, 0x36, 0x57, 0x3b,
             0x1f, 0x73
         ],
-        "the VERSION 4 golden candidate hash"
+        "the VERSION 5 golden candidate hash"
     );
 }
 
@@ -1115,6 +1150,31 @@ let { name }: { name: string } = $props();\n";
                 PropsAnnotationLowering::NoPropsCall
             ),
             "ordinal 0 addresses the dispatcher call, not a $props declarator"
+        );
+    });
+}
+
+#[test]
+fn deref_accessor_replays_javascript_jsdoc_annotation() {
+    let src =
+        "/** @type {{ name: string, count?: number }} */\nlet { name, count = 0 } = $props();\n";
+    let captured = capture(src);
+    let props_ref = captured
+        .props
+        .as_ref()
+        .and_then(|props| props.props_type.as_ref())
+        .expect("the JSDoc payload is captured");
+
+    with_program(src, |program| {
+        let PropsAnnotationLowering::Annotation(lowered) =
+            lower_props_annotation_at(program, src, None, 0)
+        else {
+            panic!("the JSDoc annotation must dereference as an authored body");
+        };
+        let outcome = compute_semantic_hash(&lowered, SymbolSpace::Type, &UnresolvedLens);
+        assert_eq!(
+            outcome.hash, props_ref.payload_hash,
+            "capture and dereference must lower the same JSDoc payload"
         );
     });
 }

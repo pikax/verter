@@ -22,15 +22,25 @@
 /// `$events` / `$slots` stay permissive shells the consumer re-resolves through
 /// the precise API carrier. Template internals stay LOCAL. The `__VerterPublic*`
 /// prefix avoids collision with user bindings or the `__VerterSelf*` contract.
-pub(super) fn svelte_public_facade(props_type: Option<&str>) -> String {
+use super::super::SvelteIdeDialect;
+
+pub(super) fn svelte_public_facade(props_type: Option<&str>, dialect: SvelteIdeDialect) -> String {
     let props_ty = props_type.unwrap_or("Record<string, unknown>");
-    format!(
-        "\ntype __VerterPublicProps = {props_ty};\n\
-         interface __VerterPublicInstance {{\n  \
-         $props: __VerterPublicProps;\n  \
-         $events: Record<string, unknown>;\n  \
-         $slots: Record<string, unknown>;\n}}\n\
-         declare const __VerterPublicComponent: {{ new (...args: any[]): __VerterPublicInstance }};\n\
-         export default __VerterPublicComponent;\n",
-    )
+    match dialect {
+        SvelteIdeDialect::TypeScript => format!(
+            "\ntype __VerterPublicProps = {props_ty};\n\
+             interface __VerterPublicInstance {{\n  \
+             $props: __VerterPublicProps;\n  \
+             $events: Record<string, unknown>;\n  \
+             $slots: Record<string, unknown>;\n}}\n\
+             declare const __VerterPublicComponent: {{ new (...args: any[]): __VerterPublicInstance }};\n\
+             export default __VerterPublicComponent;\n",
+        ),
+        SvelteIdeDialect::JavaScript => format!(
+            "\n/** @typedef {{{props_ty}}} __VerterPublicProps */\n\
+             /** @typedef {{{{ $props: __VerterPublicProps, $events: Record<string, unknown>, $slots: Record<string, unknown> }}}} __VerterPublicInstance */\n\
+             const __VerterPublicComponent = /** @type {{{{ new (...args: any[]): __VerterPublicInstance }}}} */ (/** @type {{any}} */ (class {{}}));\n\
+             export default __VerterPublicComponent;\n",
+        ),
+    }
 }

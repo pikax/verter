@@ -1,6 +1,6 @@
-//! The Svelte IDE TSX projection.
+//! The Svelte IDE TypeScript/JavaScript projection.
 //!
-//! Projects a [`ParsedSvelte`] into ONE valid `.svelte.tsx` file that
+//! Projects a [`ParsedSvelte`] into one valid `.svelte.tsx` or `.svelte.jsx` file that
 //! type-checks CLEAN through the TSGO/tsserver path (the LSP parity
 //! contract). Every edit goes through one [`CodeTransform`] (the single source of
 //! truth for generated-code edits — no post-hoc string munging), so the
@@ -34,6 +34,44 @@ mod emit;
 pub mod prelude;
 mod projector;
 mod store_scan;
+
+use super::parser::ParsedSvelte;
+
+/// The script dialect of a generated Svelte component IDE carrier.
+///
+/// Svelte's component grammar treats only an exact `lang="ts"` script as
+/// TypeScript. A component with no TypeScript script is projected as real
+/// JavaScript + JSX, with generated types expressed through JSDoc. When either
+/// module or instance script is TypeScript the combined carrier must remain
+/// TSX because both script bodies share the one generated module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SvelteIdeDialect {
+    TypeScript,
+    JavaScript,
+}
+
+impl SvelteIdeDialect {
+    #[must_use]
+    pub(crate) fn for_component(parsed: &ParsedSvelte) -> Self {
+        let has_typescript = [
+            parsed.module_script.as_ref(),
+            parsed.instance_script.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|script| script.lang.as_deref() == Some("ts"));
+        if has_typescript {
+            Self::TypeScript
+        } else {
+            Self::JavaScript
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn is_javascript(self) -> bool {
+        matches!(self, Self::JavaScript)
+    }
+}
 
 #[cfg(test)]
 mod projector_tests;

@@ -617,6 +617,63 @@ fn svelte_get_public_api_renders_the_declaration_shim() {
     );
 }
 
+#[test]
+fn svelte_javascript_jsdoc_props_reach_the_declaration_import_surface() {
+    // A no-lang component is authored JavaScript. Its JSDoc types must survive
+    // the shallow Svelte facts and reach the declaration carrier consumed by a
+    // clean bare `.svelte` import; the IDE `.jsx` carrier is not a substitute
+    // for this cross-file public surface.
+    let host = host();
+    upsert_svelte(
+        &host,
+        "/JsCard.svelte",
+        r#"<script>
+/** @type {{ title: string, count?: number }} */
+let { title, count = 0 } = $props();
+</script>
+<h1>{title}: {count}</h1>
+"#,
+    );
+
+    let declaration = host
+        .get_public_api_with_mode("/JsCard.svelte", PublicApiMode::Declaration, None)
+        .expect("a JavaScript Svelte component projects a declaration import surface")
+        .code
+        .to_string();
+
+    assert!(
+        declaration.contains("title: string"),
+        "the JSDoc string prop must remain typed on the public surface:\n{declaration}"
+    );
+    assert!(
+        declaration.contains("count") && declaration.contains("number"),
+        "the JSDoc number prop must remain typed on the public surface:\n{declaration}"
+    );
+    assert!(
+        declaration.contains("export default __VerterComponent"),
+        "the JavaScript component must remain cleanly default-importable:\n{declaration}"
+    );
+
+    // Deep re-export chains are resolved through the same synthesized default
+    // symbol; they must index without requiring a source-file compatibility
+    // shim or a consumer-side jsxImportSource override.
+    upsert_ts(
+        &host,
+        "/level-one.ts",
+        "export { default as JsCard } from './JsCard.svelte';\n",
+    );
+    upsert_ts(&host, "/level-two.ts", "export * from './level-one';\n");
+    upsert_ts(
+        &host,
+        "/consumer.ts",
+        "import { JsCard } from './level-two';\ntype Props = InstanceType<typeof JsCard>['$props'];\nexport const props: Props = { title: 'ready' };\n",
+    );
+    assert!(
+        host.ensure_indexed_ready("/consumer.ts").is_some(),
+        "a JavaScript Svelte default must resolve through multiple TS re-export levels"
+    );
+}
+
 // Integration confirm for the `$props()` annotation-payload hydration route
 // (`MacroPayloadPosition::TypeAnnotation` deref → `transient_props_annotation_body`):
 // the precise `__VerterProps`-derived `$events`/`$slots` surface depends on the

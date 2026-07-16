@@ -20,11 +20,12 @@ use super::await_scan::{
     pattern_default_await_keyword_offsets, rewrite_await_exprs_on, scan_await_positions,
 };
 use super::emit::{is_css_custom_property, DiagnosticSeverity, UnsupportedKind};
-use super::prelude::{render_prelude, SvelteJsxNamespace};
+use super::prelude::{render_component_prelude, SvelteJsxNamespace};
 use super::store_scan::{
     collect_declared_dollar_names, collect_pattern_dollar_names, scan_store_subscriptions,
     text_uses_runes,
 };
+use super::SvelteIdeDialect;
 use crate::svelte::bind_contract::{lookup_bind_contract, BindContract, BindDirection};
 use crate::svelte::parser::{
     forced_runes_option, ParsedSvelte, SvelteAttribute, SvelteAttributeKind, SvelteAttributeValue,
@@ -85,10 +86,13 @@ pub struct SvelteIdeUnsupportedDiagnostic {
 /// The rendered Svelte IDE projection.
 #[derive(Debug, Clone)]
 pub struct SvelteIdeProjection {
-    /// The generated TSX.
+    /// The generated TSX or JSX.
     pub code: String,
     /// The JSON source map (empty when source maps are skipped).
     pub source_map: String,
+    /// Whether this is the JavaScript+JSX carrier (`.svelte.jsx`) rather than
+    /// the TypeScript+JSX carrier (`.svelte.tsx`).
+    pub is_jsx: bool,
     /// Typed-unsupported diagnostics for OUT-OF-SCOPE constructs.
     pub diagnostics: Vec<SvelteIdeUnsupportedDiagnostic>,
 }
@@ -104,6 +108,7 @@ pub fn project_svelte_ide(
     filename: Option<&str>,
     skip_source_map: bool,
 ) -> SvelteIdeProjection {
+    let dialect = SvelteIdeDialect::for_component(parsed);
     let allocator = Allocator::default();
     let mut ct = CodeTransform::new(source, &allocator);
     let mut diagnostics = Vec::new();
@@ -183,7 +188,7 @@ pub fn project_svelte_ide(
             !uses_runes
         }
     };
-    let prelude = render_prelude(namespace, legacy_mode);
+    let prelude = render_component_prelude(namespace, legacy_mode, dialect);
     // Prepend the prelude as the unmapped intro AND register it as the helper-import preamble so the
     // source map publishes the `x_verter_helper_preamble_end` boundary (the Vue carrier-IDE contract,
     // now matched for Svelte). The prelude STAYS the intro — the `@jsxImportSource` pragma must lead
@@ -214,6 +219,7 @@ pub fn project_svelte_ide(
         decl_moves: Vec::new(),
         needs_self_contract: false,
         self_props_type,
+        dialect,
         script_declared,
         block_declared: Vec::new(),
     };
@@ -225,7 +231,7 @@ pub fn project_svelte_ide(
     // for the shape; it REPLACES the bare `export {};` marker. Appended through
     // `CodeTransform::append` (output-only, unmapped) so it perturbs no mapped
     // span — keeping CodeTransform the single source of truth for carrier text.
-    ct.append(&svelte_public_facade(facade_props_type.as_deref()));
+    ct.append(&svelte_public_facade(facade_props_type.as_deref(), dialect));
 
     // Experimental await-EXPRESSIONS (F6) — instance/module SCRIPT positions.
     // An `await` at instance-script top level OR inside a `$derived(...)` /
@@ -270,6 +276,7 @@ pub fn project_svelte_ide(
     SvelteIdeProjection {
         code,
         source_map,
+        is_jsx: dialect.is_javascript(),
         diagnostics,
     }
 }
@@ -374,6 +381,9 @@ struct TemplateProjector<'ct, 'a> {
     /// `$props()` annotation (LOCAL — no resolver). `None` ⇒ a permissive
     /// `Record<string, unknown>` contract (untyped `$props()`).
     self_props_type: Option<String>,
+    /// Selects TS syntax or JavaScript+JSDoc for every synthetic type-bearing
+    /// fragment. Original source bytes never change dialect.
+    dialect: SvelteIdeDialect,
     /// The component SCRIPT's lexically-declared `$`-names (F11). A markup
     /// expression parses as a separate fragment, so it must consult this set to
     /// treat a script-declared `let $x` as an ORDINARY local (not a store-sub).
@@ -502,11 +512,17 @@ impl TemplateProjector<'_, '_> {
                 .self_props_type
                 .clone()
                 .unwrap_or_else(|| "Record<string, unknown>".to_string());
-            format!(
-                "\ntype __VerterSelfProps = {props_ty};\n\
-                 declare const __verter_self: abstract new (...args: never[]) => \
-                 {{ $props: __VerterSelfProps }};\n"
-            )
+            match self.dialect {
+                SvelteIdeDialect::TypeScript => format!(
+                    "\ntype __VerterSelfProps = {props_ty};\n\
+                     declare const __verter_self: abstract new (...args: never[]) => \
+                     {{ $props: __VerterSelfProps }};\n"
+                ),
+                SvelteIdeDialect::JavaScript => format!(
+                    "\n/** @typedef {{{props_ty}}} __VerterSelfProps */\n\
+                     const __verter_self = /** @type {{{{ new (...args: any[]): {{ $props: __VerterSelfProps }} }}}} */ (/** @type {{any}} */ (class {{}}));\n"
+                ),
+            }
         } else {
             String::new()
         };
@@ -1090,7 +1106,12 @@ impl TemplateProjector<'_, '_> {
         }
         let node_hint = self.host_element_hint(el);
         let fn_name = dir.local.clone();
-        let directions = "(null! as { from: DOMRect; to: DOMRect })";
+        let directions = match self.dialect {
+            SvelteIdeDialect::TypeScript => "(null! as { from: DOMRect; to: DOMRect })",
+            SvelteIdeDialect::JavaScript => {
+                "(/** @type {{ from: DOMRect, to: DOMRect }} */ (/** @type {unknown} */ (null)))"
+            }
+        };
         if let Some(SvelteAttributeValue::Expression(expr)) = dir.value {
             // F11: a store-sub in the animate params (`animate:fn={$p}`).
             self.rewrite_store_subs_in(expr);
@@ -1125,9 +1146,22 @@ impl TemplateProjector<'_, '_> {
             // bound if a future producer change admits a `"`/newline into the
             // name — never emitting a broken type literal.
             SvelteElementKind::Intrinsic if is_bare_tag_identifier(&el.name) => {
-                format!("(null! as __VerterHostEl<\"{}\">)", el.name)
+                match self.dialect {
+                    SvelteIdeDialect::TypeScript => {
+                        format!("(null! as __VerterHostEl<\"{}\">)", el.name)
+                    }
+                    SvelteIdeDialect::JavaScript => format!(
+                    "(/** @type {{__VerterHostEl<\"{}\">}} */ (/** @type {{unknown}} */ (null)))",
+                    el.name
+                ),
+                }
             }
-            _ => "(null! as Element)".to_string(),
+            _ => match self.dialect {
+                SvelteIdeDialect::TypeScript => "(null! as Element)".to_string(),
+                SvelteIdeDialect::JavaScript => {
+                    "(/** @type {Element} */ (/** @type {unknown} */ (null)))".to_string()
+                }
+            },
         }
     }
 
@@ -1346,8 +1380,20 @@ impl TemplateProjector<'_, '_> {
             SvelteTagKind::Html => {
                 // `{@html e}` → `{__verter_html_check(e)}` is overkill; a string
                 // position checks `e` — overwrite `{@html ` → `{(`, close → `)}`.
-                self.ct.overwrite(tag.span.start, tag.inner.start, "{(");
-                self.rewrite_tag_close(tag, ") as unknown as string}");
+                match self.dialect {
+                    SvelteIdeDialect::TypeScript => {
+                        self.ct.overwrite(tag.span.start, tag.inner.start, "{(");
+                        self.rewrite_tag_close(tag, ") as unknown as string}");
+                    }
+                    SvelteIdeDialect::JavaScript => {
+                        self.ct.overwrite(
+                            tag.span.start,
+                            tag.inner.start,
+                            "{(/** @type {string} */ (/** @type {unknown} */ (",
+                        );
+                        self.rewrite_tag_close(tag, ")))}");
+                    }
+                }
             }
             SvelteTagKind::Const | SvelteTagKind::LegacyConst => {
                 // `{const x = e}` / `{@const x = e}` → a `const x = e;` HOISTED

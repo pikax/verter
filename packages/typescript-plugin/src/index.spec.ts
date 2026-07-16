@@ -79,6 +79,25 @@ function vueAndSvelteManifest(): Manifest {
   };
 }
 
+function javascriptSvelteManifest(): Manifest {
+  const manifest = vueAndSvelteManifest();
+  const project = manifest.projects["d:/ws/tsconfig.json"];
+  const owned = project.owned_sources.find((entry) => entry.source_uri.endsWith("/W.svelte"));
+  if (!owned) throw new Error("fixture Svelte owner missing");
+  owned.provider_uri = "d:/ws/src/W.svelte.jsx";
+  owned.script_kind = "JSX";
+  delete project.ready_files["d:/ws/src/W.svelte.tsx"];
+  project.ready_files["d:/ws/src/W.svelte.jsx"] = {
+    content_hash: "wj1",
+    version: 3,
+    script_kind: "JSX",
+    role: "CarrierIde",
+    map_hash: "0",
+    blob_rel: "blobs/W.svelte.jsx",
+  };
+  return manifest;
+}
+
 // ── a minimal PluginCreateInfo over a real-disk passthrough ───────────────────
 
 interface FakeHostState {
@@ -454,6 +473,22 @@ describe("host-proxy matrix: resolveModuleNameLiterals (in-project → IDE carri
     const resolved = resolveOne(info, "./W.svelte", "d:/ws/src/consumer.ts");
     expect(resolved).toBe("d:/ws/src/W.svelte.tsx");
     expect(resolved).not.toContain(".verter.ts");
+  });
+
+  it("redirects a JavaScript .svelte import to the .svelte.jsx IDE carrier as JSX", () => {
+    const dir = track(writeStore(javascriptSvelteManifest(), {}));
+    const info = createInfo(dir, { diskFiles: {} });
+    init({ typescript: ts } as any).create(info);
+
+    const result = info.languageServiceHost.resolveModuleNameLiterals(
+      [{ text: "./W.svelte" }],
+      "d:/ws/src/consumer.ts",
+      undefined,
+      {},
+      undefined,
+    )[0]?.resolvedModule;
+    expect(result?.resolvedFileName).toBe("d:/ws/src/W.svelte.jsx");
+    expect(result?.extension).toBe(ts.Extension.Jsx);
   });
 
   it("leaves a plain relative .ts import to TS's own resolution", () => {

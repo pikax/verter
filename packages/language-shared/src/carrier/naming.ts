@@ -126,12 +126,12 @@ export function normalizePath(fileName: string): string {
  * The IDE-carrier companion suffix a `VirtualPathPolicy` produces — the
  * `ide` column, NOT the import surface. This is the path the Rust LSP
  * publishes a carrier's interactive content at (`Comp.vue.tsx` /
- * `Comp.svelte.tsx`) and the in-project module-resolution redirect target:
- *   - `suffix`        → its single suffix (Svelte's IDE policy → `.tsx`).
- *   - `jsxConditional`→ the `nonJsx` suffix (the TypeScript-TSX carrier the
- *     host publishes for a TS carrier — Vue's `.tsx`); the `jsx` (`.jsx`)
- *     branch is the JavaScript-carrier form and is not the published TS
- *     identity the redirect targets.
+ * `Comp.svelte.jsx`) and the in-project module-resolution redirect target:
+ *   - `suffix`        → its single suffix.
+ *   - `jsxConditional`→ the `nonJsx` suffix used as the shape-only fallback.
+ *     The manifest-aware host path selects the actual `nonJsx`/`jsx` identity
+ *     produced for the source; this helper cannot infer source language from a
+ *     path alone.
  *   - `selfFile`/`none` → no distinct companion (returns `null`).
  *
  * Derived from the generated column so adding a carrier needs no edit here.
@@ -148,27 +148,43 @@ function ideCarrierSuffix(policy: VirtualPathPolicy): string | null {
   }
 }
 
+/** Every distinct IDE-carrier suffix a policy may publish. */
+function ideCarrierSuffixes(policy: VirtualPathPolicy): readonly string[] {
+  switch (policy.kind) {
+    case "suffix":
+      return [policy.suffix];
+    case "jsxConditional":
+      return [policy.nonJsx, policy.jsx];
+    case "selfFile":
+    case "none":
+      return [];
+  }
+}
+
 /**
  * The per-carrier IDE-companion naming table: each component carrier extension
  * (`.vue`/`.svelte`) mapped to its IDE-carrier suffix (the `ide` column). Built
  * once from the generated column, in parallel to the import-surface `CARRIERS`
  * table above.
  */
-const IDE_CARRIERS: readonly { extension: string; ideSuffix: string }[] = Object.values(
-  VIRTUAL_FILE_NAMING,
-)
+const IDE_CARRIERS: readonly {
+  extension: string;
+  ideSuffix: string;
+  ideSuffixes: readonly string[];
+}[] = Object.values(VIRTUAL_FILE_NAMING)
   .filter((row) => row.carrierExtension !== null && ideCarrierSuffix(row.ide) !== null)
   .map((row) => ({
     extension: row.carrierExtension as string,
     ideSuffix: ideCarrierSuffix(row.ide) as string,
+    ideSuffixes: ideCarrierSuffixes(row.ide),
   }));
 
 /**
  * The IDE-carrier companion path for a bare carrier file (`Comp.vue` →
- * `Comp.vue.tsx`, `Comp.svelte` → `Comp.svelte.tsx`), or `null` when `fileName`
- * is not a recognised component carrier. This is the in-project module-resolution
- * redirect target THIS in-process tsserver plugin maps a bare `./Comp.vue` import
- * to (the IDE carrier). It is distinct from the `.verter.ts` API carrier (the
+ * `Comp.vue.tsx`, `Comp.svelte` → `Comp.svelte.tsx` fallback), or `null` when
+ * `fileName` is not a recognised component carrier. Manifest-aware consumers
+ * must use the owned `CarrierIde` identity because a JavaScript carrier may be
+ * published as `.jsx`. It is distinct from the `.verter.ts` API carrier (the
  * cross-package/project-ref redirect target), and from the tsgo native engine's
  * bare-import target — the `.d.<ext>.ts` declaration carrier (`Comp.d.vue.ts`),
  * which tsgo reaches via its basename-append probe (the plugin has no such hook).
@@ -368,7 +384,9 @@ const CARRIER_VIRTUAL_SUFFIX_STRIPPERS: readonly {
   // must strip back to the bare carrier too, alongside the `.verter.ts` API
   // carrier and the `.d.ts` alias.
   const ide = IDE_CARRIERS.find((row) => row.extension === c.extension);
-  if (ide && !suffixes.includes(ide.ideSuffix)) suffixes.push(ide.ideSuffix);
+  for (const ideSuffix of ide?.ideSuffixes ?? []) {
+    if (!suffixes.includes(ideSuffix)) suffixes.push(ideSuffix);
+  }
   return suffixes.map((virtualSuffix) => ({
     pattern: new RegExp(escapeRegExp(`${c.extension}${virtualSuffix}`), "g"),
     carrierExt: c.extension,

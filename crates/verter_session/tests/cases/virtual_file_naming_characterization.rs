@@ -95,6 +95,19 @@ fn svelte_column_reproduces_production_provider_derivations() {
         Some("/workspace/src/Comp.svelte.verter.ts")
     );
     assert_eq!(col_ide.as_deref(), Some("/workspace/src/Comp.svelte.tsx"));
+    assert_eq!(
+        resolver
+            .provider_ide_id_for_source(canonical, true)
+            .as_deref(),
+        Some("/workspace/src/Comp.svelte.jsx"),
+        "the Svelte JSX branch must reproduce the JavaScript carrier identity"
+    );
+    assert!(
+        naming
+            .ide_carrier_identities(canonical)
+            .contains(&"/workspace/src/Comp.svelte.jsx".to_string()),
+        "the descriptor authority must enumerate the JavaScript Svelte identity"
+    );
 }
 
 #[test]

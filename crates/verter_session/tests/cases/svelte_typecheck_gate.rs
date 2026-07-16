@@ -231,7 +231,7 @@ fn typecheck_projected_with_options(
         ""
     };
     let include = if check_js {
-        "[\"**/*.ts\", \"**/*.tsx\", \"**/*.js\"]"
+        "[\"**/*.ts\", \"**/*.tsx\", \"**/*.js\", \"**/*.jsx\"]"
     } else {
         "[\"**/*.ts\", \"**/*.tsx\"]"
     };
@@ -306,8 +306,29 @@ fn typecheck_projected_with_options(
 
 /// Project a `.svelte` source through the real IDE projector.
 fn project(source: &str) -> String {
-    let parsed = parse_svelte(source);
-    project_svelte_ide(source, &parsed, Some("Comp.svelte"), true).code
+    // The established matrix below is the TSX semantic gate. Make its dialect
+    // explicit now that no-lang production components have a distinct
+    // JavaScript+JSDoc gate.
+    let source = typescript_fixture(source);
+    let parsed = parse_svelte(&source);
+    project_svelte_ide(&source, &parsed, Some("Comp.svelte"), true).code
+}
+
+fn typescript_fixture(source: &str) -> String {
+    if source.contains("lang=\"ts\"") || source.contains("lang='ts'") {
+        return source.to_string();
+    }
+    if let Some(script_start) = source.find("<script") {
+        if let Some(relative_end) = source[script_start..].find('>') {
+            let tag_end = script_start + relative_end;
+            let mut typed = String::with_capacity(source.len() + 10);
+            typed.push_str(&source[..tag_end]);
+            typed.push_str(" lang=\"ts\"");
+            typed.push_str(&source[tag_end..]);
+            return typed;
+        }
+    }
+    format!("<script lang=\"ts\"></script>\n{source}")
 }
 
 /// The projected render body (everything AFTER the unmapped prelude) — residue
@@ -367,6 +388,187 @@ fn projected_runes_props_fixture_type_checks_clean() {
     assert!(
         ok,
         "projected runes-props TSX must type-check clean:\n{out}"
+    );
+}
+
+#[test]
+fn projected_javascript_component_with_jsdoc_props_type_checks_clean() {
+    let source = r#"<script>
+/** @type {{ label: string, count?: number }} */
+let { label, count = 0 } = $props();
+let doubled = $derived(count * 2);
+</script>
+<button onclick={() => doubled.toFixed()}>{label.toUpperCase()}: {doubled}</button>"#;
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("JsProps.svelte"), true);
+    assert!(
+        projection.is_jsx,
+        "a no-lang component must use the JS carrier"
+    );
+    let Some((ok, out)) =
+        typecheck_projected_with_options(&projection.code, "JsProps.svelte.jsx", &[], true, true)
+    else {
+        skip_note("javascript component with JSDoc props");
+        return;
+    };
+    assert!(
+        ok,
+        "the generated JavaScript+JSDoc carrier must check cleanly under checkJs:\n{out}\n{}",
+        projection.code
+    );
+}
+
+#[test]
+fn projected_javascript_component_preserves_jsdoc_type_errors() {
+    let source = r#"<script>
+/** @type {{ label: string }} */
+let { label } = $props();
+</script>
+<div>{label.toFixed()}</div>"#;
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("JsBad.svelte"), true);
+    assert!(projection.is_jsx);
+    let Some((ok, out)) =
+        typecheck_projected_with_options(&projection.code, "JsBad.svelte.jsx", &[], true, true)
+    else {
+        skip_note("javascript component JSDoc error preservation");
+        return;
+    };
+    assert!(!ok, "a real JSDoc type error must not be erased:\n{out}");
+    assert!(
+        out.contains("toFixed") && (out.contains("string") || out.contains("String")),
+        "the diagnostic must identify the invalid string member access:\n{out}"
+    );
+}
+
+#[test]
+fn projected_javascript_component_checks_template_helpers_end_to_end() {
+    let source = r#"<script>
+import { fly } from "svelte/transition";
+/** @type {HTMLInputElement} */
+let inputEl;
+/** @type {number} */
+let currentTime = 0;
+const user = Promise.resolve({ name: "Ada" });
+</script>
+{#await user then resolved}
+  <input bind:this={inputEl} transition:fly={{ duration: 100 }} />
+  <video bind:currentTime={currentTime}></video>
+  <div>{resolved.name.toUpperCase()}</div>
+{/await}"#;
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("JsHelpers.svelte"), true);
+    assert!(projection.is_jsx);
+    let Some((ok, out)) =
+        typecheck_projected_with_options(&projection.code, "JsHelpers.svelte.jsx", &[], true, true)
+    else {
+        skip_note("javascript component template helpers");
+        return;
+    };
+    assert!(
+        ok,
+        "JSDoc await/bind/transition helpers must type-check clean:\n{out}\n{}",
+        projection.code
+    );
+
+    let bad_source = r#"<script>
+/** @type {string} */
+let currentTime = "wrong";
+</script>
+<video bind:currentTime={currentTime}></video>"#;
+    let bad_parsed = parse_svelte(bad_source);
+    let bad = project_svelte_ide(bad_source, &bad_parsed, Some("JsHelpersBad.svelte"), true);
+    let Some((bad_ok, bad_out)) =
+        typecheck_projected_with_options(&bad.code, "JsHelpersBad.svelte.jsx", &[], true, true)
+    else {
+        return;
+    };
+    assert!(
+        !bad_ok,
+        "a string bound to numeric currentTime must be rejected in the JS carrier:\n{bad_out}"
+    );
+    assert!(
+        bad_out.contains("string") && bad_out.contains("number"),
+        "the bind diagnostic must preserve the incompatible types:\n{bad_out}"
+    );
+}
+
+#[test]
+fn projected_javascript_component_checks_store_reads_and_writes() {
+    let source = r#"<script>
+import { writable } from "svelte/store";
+/** @type {import("svelte/store").Writable<number>} */
+const count = writable(0);
+</script>
+<button onclick={() => $count += 1}>{$count.toFixed()}</button>"#;
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("JsStore.svelte"), true);
+    assert!(projection.is_jsx);
+    let Some((ok, out)) =
+        typecheck_projected_with_options(&projection.code, "JsStore.svelte.jsx", &[], true, true)
+    else {
+        skip_note("javascript component store helpers");
+        return;
+    };
+    assert!(
+        ok,
+        "JSDoc store reads and writes must type-check through the JS helpers:\n{out}\n{}",
+        projection.code
+    );
+
+    let bad_source = source.replace("$count.toFixed()", "$count.toUpperCase()");
+    let bad_parsed = parse_svelte(&bad_source);
+    let bad = project_svelte_ide(&bad_source, &bad_parsed, Some("JsStoreBad.svelte"), true);
+    let Some((bad_ok, bad_out)) =
+        typecheck_projected_with_options(&bad.code, "JsStoreBad.svelte.jsx", &[], true, true)
+    else {
+        return;
+    };
+    assert!(
+        !bad_ok && bad_out.contains("toUpperCase"),
+        "the JavaScript carrier must preserve the store value's numeric type:\n{bad_out}"
+    );
+}
+
+#[test]
+fn projected_javascript_self_reference_checks_jsdoc_props() {
+    let good_source = r#"<script>
+/** @type {{ title: string }} */
+let { title } = $props();
+</script>
+{#if title}<svelte:self title={title} />{/if}
+{#if title.length > 1}<span>{title}</span>{:else if title.length === 1}<span>{title}</span>{/if}"#;
+    let good_parsed = parse_svelte(good_source);
+    let good = project_svelte_ide(good_source, &good_parsed, Some("JsSelf.svelte"), true);
+    let Some((good_ok, good_out)) =
+        typecheck_projected_with_options(&good.code, "JsSelf.svelte.jsx", &[], true, true)
+    else {
+        skip_note("javascript self-reference JSDoc props");
+        return;
+    };
+    let numbered_good = good
+        .code
+        .lines()
+        .enumerate()
+        .map(|(index, line)| format!("{:>4}: {line}", index + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        good_ok,
+        "a correctly typed JavaScript self-reference must check cleanly:\n{good_out}\n{numbered_good}"
+    );
+
+    let bad_source = good_source.replace("title={title}", "title={123}");
+    let bad_parsed = parse_svelte(&bad_source);
+    let bad = project_svelte_ide(&bad_source, &bad_parsed, Some("JsSelfBad.svelte"), true);
+    let Some((bad_ok, bad_out)) =
+        typecheck_projected_with_options(&bad.code, "JsSelfBad.svelte.jsx", &[], true, true)
+    else {
+        return;
+    };
+    assert!(
+        !bad_ok && bad_out.contains("number") && bad_out.contains("string"),
+        "a numeric self prop must fail against the JSDoc string contract:\n{bad_out}"
     );
 }
 

@@ -13,8 +13,9 @@ describe("scriptKindForCarrier (descriptor-derived, TS facade injected)", () => 
   it("classifies IDE carriers as TSX (or JSX for the JS-source branch)", () => {
     expect(scriptKindForCarrier("/ws/Comp.vue.tsx", TS_FACADE)).toBe(4);
     expect(scriptKindForCarrier("/ws/Widget.svelte.tsx", TS_FACADE)).toBe(4);
-    // Vue's jsxConditional IDE policy has a `.jsx` branch for JS-source carriers.
+    // Both component adapters publish `.jsx` for JavaScript-source carriers.
     expect(scriptKindForCarrier("/ws/Comp.vue.jsx", TS_FACADE)).toBe(2);
+    expect(scriptKindForCarrier("/ws/Widget.svelte.jsx", TS_FACADE)).toBe(2);
     // Backslash (Windows) spelling normalizes.
     expect(scriptKindForCarrier("d:\\ws\\Comp.vue.tsx", TS_FACADE)).toBe(4);
   });
@@ -44,6 +45,7 @@ describe("carrierRootMembership (program-membership policy)", () => {
   it("IDE carriers are self-diagnostic ROOTS", () => {
     expect(carrierRootMembership("/ws/Comp.vue.tsx")).toBe("selfDiagnosticRoot");
     expect(carrierRootMembership("/ws/Widget.svelte.tsx")).toBe("selfDiagnosticRoot");
+    expect(carrierRootMembership("/ws/Widget.svelte.jsx")).toBe("selfDiagnosticRoot");
   });
 
   it("declaration carriers are import-driven (NOT roots)", () => {

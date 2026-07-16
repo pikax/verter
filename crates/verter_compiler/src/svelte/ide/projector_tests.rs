@@ -11,8 +11,29 @@ use crate::svelte::parser::parse_svelte;
 
 /// Project a source and return the generated TSX code.
 fn project(source: &str) -> String {
-    let parsed = parse_svelte(source);
-    project_svelte_ide(source, &parsed, Some("Comp.svelte"), false).code
+    // This pre-existing suite characterizes the TSX topology. Make that
+    // dialect explicit now that production no-lang components correctly use
+    // the separate JSX+JSDoc path.
+    let source = typescript_fixture(source);
+    let parsed = parse_svelte(&source);
+    project_svelte_ide(&source, &parsed, Some("Comp.svelte"), false).code
+}
+
+fn typescript_fixture(source: &str) -> String {
+    if source.contains("lang=\"ts\"") || source.contains("lang='ts'") {
+        return source.to_string();
+    }
+    if let Some(script_start) = source.find("<script") {
+        if let Some(relative_end) = source[script_start..].find('>') {
+            let tag_end = script_start + relative_end;
+            let mut typed = String::with_capacity(source.len() + 10);
+            typed.push_str(&source[..tag_end]);
+            typed.push_str(" lang=\"ts\"");
+            typed.push_str(&source[tag_end..]);
+            return typed;
+        }
+    }
+    format!("<script lang=\"ts\"></script>\n{source}")
 }
 
 /// The projected render body (everything AFTER the unmapped prelude) — residue
@@ -288,8 +309,8 @@ fn bind_this_on_an_intrinsic_projects_a_host_instance_assignment_check() {
     );
     assert!(
         projection.code.contains(
-            "(inputEl = (null! as __VerterHostEl<\"input\">)), \
-             __verter_bind_this_assignable<__VerterHostEl<\"input\">, typeof inputEl>()"
+            "(inputEl = (/** @type {__VerterHostEl<\"input\">} */ (/** @type {unknown} */ (null)))), \
+             __verter_bind_this_assignable((/** @type {__VerterHostEl<\"input\">} */ (/** @type {unknown} */ (null))), inputEl)"
         ),
         "host-instance invariant check present: {}",
         projection.code
@@ -538,8 +559,8 @@ fn bind_this_on_a_component_projects_an_instancetype_assignment_check() {
     );
     assert!(
         projection.code.contains(
-            "(ref = (null! as InstanceType<typeof MyComp>)), \
-             __verter_bind_this_assignable<InstanceType<typeof MyComp>, typeof ref>()"
+            "(ref = (/** @type {InstanceType<typeof MyComp>} */ (/** @type {unknown} */ (null)))), \
+             __verter_bind_this_assignable((/** @type {InstanceType<typeof MyComp>} */ (/** @type {unknown} */ (null))), ref)"
         ),
         "component instance invariant check present: {}",
         projection.code
@@ -677,7 +698,7 @@ fn transition_directive_projects_to_the_transition_checker_no_residue() {
         // routed through the `__verter_transition` result-shape checker.
         assert!(
             projection.code.contains(&format!(
-                "__verter_transition({fn_name}((null! as __VerterHostEl<\"div\">), "
+                "__verter_transition({fn_name}((/** @type {{__VerterHostEl<\"div\">}} */ (/** @type {{unknown}} */ (null))), "
             )),
             "transition function called on host element for {src}: {}",
             projection.code
@@ -698,9 +719,9 @@ fn transition_on_a_component_falls_back_to_the_element_node_hint() {
     let parsed = parse_svelte(source);
     let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
     assert!(
-        projection
-            .code
-            .contains("__verter_transition(fade((null! as Element), "),
+        projection.code.contains(
+            "__verter_transition(fade((/** @type {Element} */ (/** @type {unknown} */ (null))), "
+        ),
         "component host falls back to Element hint: {}",
         projection.code
     );
@@ -719,9 +740,9 @@ fn animate_directive_projects_to_the_animate_checker_no_residue() {
         projection.code
     );
     assert!(
-        projection
-            .code
-            .contains("__verter_animate(flip((null! as __VerterHostEl<\"div\">), (null! as { from: DOMRect; to: DOMRect }), "),
+        projection.code.contains(
+            "__verter_animate(flip((/** @type {__VerterHostEl<\"div\">} */ (/** @type {unknown} */ (null))), (/** @type {{ from: DOMRect, to: DOMRect }} */ (/** @type {unknown} */ (null))), "
+        ),
         "animate function called on host element + directions: {}",
         projection.code
     );
@@ -853,9 +874,9 @@ fn function_binding_on_an_element_projects_the_fn_checker_with_the_table_type() 
     assert!(!projection.code.contains("bind:files"), "no residue");
     // `bind:files` IS in the table → its value type pins the checker.
     assert!(
-        projection
-            .code
-            .contains("__verter_bind_fn<FileList | null>(getFiles, setFiles)"),
+        projection.code.contains(
+            "(/** @type {(get: (() => FileList | null) | null, set: (value: FileList | null) => void) => void} */ (__verter_bind_fn))(getFiles, setFiles)"
+        ),
         "element function-binding checker present with the table type: {}",
         projection.code
     );
@@ -876,7 +897,7 @@ fn function_binding_on_a_component_projects_the_instancetype_props_target() {
     assert!(!projection.code.contains("bind:size"), "no residue");
     assert!(
         projection.code.contains(
-            "__verter_bind_fn<InstanceType<typeof Child>[\"$props\"][\"size\"]>(getSize, setSize)"
+            "(/** @type {(get: (() => InstanceType<typeof Child>[\"$props\"][\"size\"]) | null, set: (value: InstanceType<typeof Child>[\"$props\"][\"size\"]) => void) => void} */ (__verter_bind_fn))(getSize, setSize)"
         ),
         "component function-binding props-target checker present: {}",
         projection.code
@@ -1279,9 +1300,12 @@ fn svelte_markup_await_projects_promise_like_helper() {
     );
     // The prelude declares the PromiseLike-constrained helper.
     assert!(
-        projection.code.contains(
-            "declare function __verter_await_expr<T extends PromiseLike<unknown>>(value: T): Awaited<T>;"
-        ),
+        projection
+            .code
+            .contains("@template {PromiseLike<unknown>} T")
+            && projection
+                .code
+                .contains("function __verter_await_expr(value)"),
         "the prelude declares the PromiseLike-constrained helper: {}",
         projection.code
     );

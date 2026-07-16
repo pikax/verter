@@ -614,7 +614,7 @@ pub(crate) async fn configure_provider_paths_for_source(
     // Re-inject the Svelte IDE-projection assets on EVERY
     // provider path-config — a subsequent owned sync sends the supplied `paths`
     // verbatim, so without re-injection it would OVERWRITE the startup-injected
-    // `@verter/svelte-jsx` + `svelte/*` rows and strand `.svelte.tsx` module
+    // `@verter/svelte-jsx` + `svelte/*` rows and strand a `.svelte.tsx`/`.jsx` module
     // resolution. The owner project root is the per-project resolution anchor.
     let owner_root = snapshot
         .resolver

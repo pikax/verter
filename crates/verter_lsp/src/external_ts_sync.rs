@@ -596,9 +596,10 @@ fn snapshot_role_of(kind: crate::provider_surface_store::ProviderSurfaceKind) ->
 /// extension, exactly as `tsc` resolves it), so it is the correct authority for
 /// `ScriptKind`: a `.tsx`/`.jsx` is JSX-bearing, a `.ts`/`.js` is not — regardless
 /// of the surface ROLE (a `Real` surface can be `.tsx`, a `Shadow` rune module can
-/// be `.svelte.js`). The carrier companion extensions (`.vue.tsx`, `.svelte.tsx`)
-/// end in `.tsx`; the `.verter.ts` API carrier ends in `.ts`. Defaults to `Ts` for
-/// an unrecognised extension (the conservative non-JSX default).
+/// be `.svelte.js`). The carrier companion extensions (`.vue.tsx`,
+/// `.svelte.tsx`, or their JavaScript `.jsx` forms) end in `.tsx` or `.jsx`;
+/// the `.verter.ts` API carrier ends in `.ts`. Defaults to `Ts` for an
+/// unrecognised extension (the conservative non-JSX default).
 #[must_use]
 fn script_kind_for_path(provider_path: &str) -> ScriptKind {
     if provider_path.ends_with(".tsx") {

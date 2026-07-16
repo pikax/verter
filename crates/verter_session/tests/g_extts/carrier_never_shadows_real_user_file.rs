@@ -1,12 +1,13 @@
 //! Guard: `carrier_never_shadows_real_user_file` (ownership / `Ambiguous` half).
 //!
 //! The carrier-companion path (`{name}.vue.tsx` / `{name}.vue.jsx` /
-//! `{name}.svelte.tsx`) is in the USER namespace, not a Verter-reserved one.
+//! `{name}.svelte.tsx` / `{name}.svelte.jsx`) is in the USER namespace, not a
+//! Verter-reserved one.
 //! When a real user file already occupies that EXACT path, Verter must NEVER
 //! overlay-shadow it: the source is downgraded to `Ambiguous` (no external-TS
 //! binding) and Verter places no overlay. Asserted for `.vue` AND `.svelte`,
 //! across EVERY companion family the descriptor authority enumerates — the IDE
-//! carrier suffixes (`.tsx`, and `.jsx` for a `JsxConditional` adapter like Vue),
+//! carrier suffixes (`.tsx` and `.jsx` for each `JsxConditional` adapter),
 //! the extension-middle DECLARATION carrier (`Foo.d.vue.ts`), the `.verter.ts`
 //! import-surface API, the testing-API, and any sidecar — never only the IDE
 //! companion.
@@ -28,8 +29,8 @@ use super::shared::{carrier_exts, resolve_with};
 const TS: &str = "d:/ws/tsconfig.json";
 
 /// The descriptor-owned IDE carrier suffixes for a carrier extension (e.g.
-/// `"vue"`), via the `VirtualFileNaming` authority. Vue → `[".tsx", ".jsx"]`,
-/// Svelte → `[".tsx"]`. Never a hardcoded suffix list.
+/// `"vue"`), via the `VirtualFileNaming` authority. Vue and Svelte both yield
+/// `[".tsx", ".jsx"]`. Never a hardcoded suffix list.
 fn ide_suffixes_for(carrier_ext: &str) -> Vec<&'static str> {
     // The descriptor's carrier_language id is the bare carrier ext
     // (`"vue"`/`"svelte"`).
@@ -71,7 +72,7 @@ fn carrier_never_shadows_real_user_file() {
         );
 
         // For EVERY descriptor-valid IDE carrier suffix (`.tsx`, and `.jsx` for a
-        // `JsxConditional` adapter like Vue): a real user file at that exact
+        // `JsxConditional` adapter): a real user file at that exact
         // carrier path ⇒ Ambiguous, no shadowing.
         let suffixes = ide_suffixes_for(ext);
         assert!(
@@ -103,12 +104,17 @@ fn carrier_never_shadows_real_user_file() {
         }
     }
 
-    // Vue's `JsxConditional` policy MUST contribute a `.jsx` companion — the
+    // Each component adapter's `JsxConditional` policy MUST contribute a `.jsx`
+    // companion — the
     // exact case the hardcoded-`.tsx` probe missed. Assert it explicitly so the
     // JSX coverage cannot silently regress to `.tsx`-only.
     assert!(
         ide_suffixes_for("vue").contains(&".jsx"),
         "Vue's JsxConditional IDE policy must yield a `.jsx` companion path"
+    );
+    assert!(
+        ide_suffixes_for("svelte").contains(&".jsx"),
+        "Svelte's JsxConditional IDE policy must yield a `.jsx` companion path"
     );
 }
 

@@ -8,8 +8,9 @@
 //! * `SveltePropsCandidate` — the `$props()` type, captured as an
 //!   [`AuthoredTypePayloadRef`] (a content-free `MacroPayload` locator plus a
 //!   parse-stable structural payload hash) from either the generic argument
-//!   (`$props<T>()`) or the destructuring annotation (`let {…}: T =
-//!   $props()`); the `$bindable()` member names; and the members
+//!   (`$props<T>()`), the destructuring annotation (`let {…}: T =
+//!   $props()`), or the JavaScript/JSDoc equivalent (`/** @type {T} */ let
+//!   {…} = $props()`); the `$bindable()` member names; and the members
 //!   annotated with a binding IMPORTED-AS-`Snippet`-CANDIDATE — recorded as
 //!   `(local_binding, raw_import_source)` pairs, NOT validated here;
 //! * the top-level export inventory (instance-script exports the synth folds
@@ -44,6 +45,7 @@ use verter_type_expr::locators::{
 use verter_type_expr::TypeExpr;
 use verter_type_expr_oxc::lower_ts_type;
 
+use crate::analysis::jsdoc::extract_jsdoc_type_at_offset;
 use crate::analysis::types::AnalyzedDefaultValue;
 use crate::facts::hashing::{compute_semantic_hash, UnresolvedLens};
 use crate::facts::registry::SymbolSpace;
@@ -254,7 +256,12 @@ impl SvelteScriptProvider {
     /// folded into the stable candidate hash. The redundant `*_scope`
     /// pairings are removed (the locator anchor carries the local-file
     /// convention). Old candidate keys intentionally miss.
-    pub const VERSION: u32 = 4;
+    ///
+    /// `5` — a JavaScript `$props()` destructuring binding's leading JSDoc
+    /// `@type {T}` now occupies the same `TypeAnnotation` authored-payload
+    /// position as the TypeScript spelling. Old candidate keys intentionally
+    /// miss so a previously untyped cached JavaScript surface cannot stay warm.
+    pub const VERSION: u32 = 5;
 }
 
 impl ScriptFactProvider for SvelteScriptProvider {
@@ -958,11 +965,26 @@ fn capture_ordinal_macro_call(
                 candidate.props_leaf_members =
                     leaf_members_from_lowered(&lower_ts_type(&annotation.type_annotation, source));
             }
-            // 3. `$bindable()` members + prop DEFAULT values from the destructuring
+            // 3. JavaScript/JSDoc binding annotation. Shallow JS analysis
+            //    already lowers `@type {T}` through this single sanctioned
+            //    text-to-typed-IR boundary; reuse it here and stamp the SAME
+            //    TypeAnnotation locator the TS spelling uses. Dereference
+            //    replays the JSDoc lowering at this exact macro ordinal.
+            else if let Some(jsdoc_type) = extract_jsdoc_type_at_offset(source, d.id.span().start)
+            {
+                candidate.props_type = Some(authored_type_payload_ref_from_lowered(
+                    &jsdoc_type,
+                    macro_index,
+                    MacroPayloadPosition::TypeAnnotation,
+                ));
+                candidate.props_leaf_members = leaf_members_from_lowered(&jsdoc_type);
+                collect_snippet_candidate_members_from_lowered(&jsdoc_type, snippet_imports, out);
+            }
+            // 4. `$bindable()` members + prop DEFAULT values from the destructuring
             //    pattern (both are syntax-only reads over the destructuring +
             //    source slice).
             collect_bindable_and_defaults(&d.id, source, &mut candidate);
-            // 4. snippet-candidate members from the props type — BOTH the
+            // 5. snippet-candidate members from the props type — BOTH the
             //    destructuring annotation (`let {…}: { row: Snippet } = $props()`)
             //    AND the generic argument (`$props<{ row: Snippet }>()`). A member
             //    typed as a `Snippet`-candidate import is recorded (validated later).
@@ -1049,7 +1071,9 @@ pub fn lower_props_annotation_at(
                         &annotation.type_annotation,
                         source,
                     )),
-                    None => PropsAnnotationLowering::Unannotated,
+                    None => extract_jsdoc_type_at_offset(source, declarator.id.span().start)
+                        .map(PropsAnnotationLowering::Annotation)
+                        .unwrap_or(PropsAnnotationLowering::Unannotated),
                 };
             }
         });
@@ -1229,6 +1253,40 @@ fn collect_snippet_candidate_members(
     }
 }
 
+/// JSDoc-lowered sibling of [`collect_snippet_candidate_members`]. The JSDoc
+/// payload is already ordinary typed IR, so snippet candidate capture remains
+/// syntax-only and uses the same imported-binding provenance pair.
+fn collect_snippet_candidate_members_from_lowered(
+    ty: &TypeExpr,
+    snippet_imports: &[(String, String)],
+    out: &mut SvelteScriptCandidates,
+) {
+    use verter_type_expr::ObjectMember;
+
+    let TypeExpr::Object(object) = ty else {
+        return;
+    };
+    for member in object.properties.iter() {
+        let ObjectMember::Property(property) = member else {
+            continue;
+        };
+        let TypeExpr::Ref { name, .. } = &property.ty else {
+            continue;
+        };
+        let Some((_, source)) = snippet_imports
+            .iter()
+            .find(|(binding, _)| binding == name.as_ref())
+        else {
+            continue;
+        };
+        out.snippet_candidates.push(SvelteSnippetImportCandidate {
+            local_binding: name.as_ref().to_string(),
+            import_source: source.clone(),
+            member_name: property.name.clone(),
+        });
+    }
+}
+
 /// The content-free anchor of a svelte macro payload: the component's
 /// `default` value symbol under the analyzer's local-file convention (the
 /// empty producing canonical = the component's own file). Mirrors the Vue
@@ -1316,7 +1374,19 @@ fn authored_type_payload_ref(
     payload: MacroPayloadPosition,
 ) -> AuthoredTypePayloadRef {
     let lowered: TypeExpr = lower_ts_type(ty, source);
-    let outcome = compute_semantic_hash(&lowered, SymbolSpace::Type, &UnresolvedLens);
+    authored_type_payload_ref_from_lowered(&lowered, macro_index, payload)
+}
+
+/// Stamp an already-lowered authored payload onto the Svelte macro-position
+/// locator. Used by JSDoc, whose tag payload is typed IR rather than a `TSType`
+/// AST node, while preserving the same structural hash and dereference path as
+/// the TypeScript spelling.
+fn authored_type_payload_ref_from_lowered(
+    lowered: &TypeExpr,
+    macro_index: u32,
+    payload: MacroPayloadPosition,
+) -> AuthoredTypePayloadRef {
+    let outcome = compute_semantic_hash(lowered, SymbolSpace::Type, &UnresolvedLens);
     AuthoredTypePayloadRef {
         locator: AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
             anchor: local_default_anchor(),
