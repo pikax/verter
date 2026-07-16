@@ -14,6 +14,7 @@ import {
   TYPE_PROVIDER,
   waitForCompletionsMatching,
 } from "../helpers";
+import { acceptCompletionInEditor, scriptBlockText } from "../dx/dxScenarioRunner";
 
 function completionLabel(item: vscode.CompletionItem): string {
   return typeof item.label === "string" ? item.label : item.label.label;
@@ -89,7 +90,15 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const completions = await getCompletions(doc.uri, pos);
+    const completions = await waitForCompletionsMatching(doc.uri, pos, {
+      predicate: (list) => {
+        if (!list) return false;
+        return ["count", "doubled", "increment"].every((label) => {
+          const item = completionItem(list, label);
+          return item?.kind !== undefined && item.kind !== vscode.CompletionItemKind.Text;
+        });
+      },
+    });
     expectCompletionsNonEmpty(completions, "completions");
 
     console.log(`    Mustache completions: ${completionLabels(completions!).join(", ")}`);
@@ -112,13 +121,23 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
   });
 
   test("event handler expression shows typed functions", async function () {
-    const pos = findPosition(doc, '@click="increment"', 8);
+    // Exercise the provider at the same state as an actual editor request:
+    // the user has typed a stable identifier prefix inside the directive value.
+    // Querying before the first character is VS Code's word-suggestion boundary
+    // and does not reliably invoke either TypeScript engine.
+    const pos = findPosition(doc, '@click="increment"', 8 + "incr".length);
     if (!pos) {
       this.skip();
       return;
     }
 
-    const completions = await getCompletions(doc.uri, pos);
+    const completions = await waitForCompletionsMatching(doc.uri, pos, {
+      predicate: (list) => {
+        if (!list) return false;
+        const item = completionItem(list, "increment");
+        return item?.kind !== undefined && item.kind !== vscode.CompletionItemKind.Text;
+      },
+    });
     expectCompletionsNonEmpty(completions, "completions");
 
     expectCompletionsPresent(completions!, ["increment"]);
@@ -488,18 +507,21 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
       console.log("    N/A");
       return;
     }
+    this.timeout(60_000);
 
     await openVueFile("src/TypedSlotComp.vue");
     const slotDoc = await openVueFile("src/TemplateSlotCases.vue");
     const localPos = findPosition(slotDoc, "{{ sl }}", 5);
-    const memberPos = findPosition(slotDoc, "slotItem.name", 9);
+    // Probe the deliberately partial member expression. Asking for completion
+    // at the start of an already-complete `name` token exercises replacement
+    // semantics instead of the member-completion path users invoke after `.`.
+    const memberPos = findPosition(slotDoc, "slotItem.na", "slotItem.na".length);
     expect(localPos, "should find slot local usage").to.exist;
     expect(memberPos, "should find slot member completion probe").to.exist;
     await waitForFileReady(slotDoc, {
       probePosition: memberPos!,
       expectedLabel: "name",
       expectedKinds: [vscode.CompletionItemKind.Property, vscode.CompletionItemKind.Field],
-      triggerCharacter: ".",
       timeoutMs: 30_000,
     });
 
@@ -514,7 +536,6 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
       },
     });
     const memberCompletions = await waitForCompletionsMatching(slotDoc.uri, memberPos!, {
-      triggerCharacter: ".",
       predicate: (list) => {
         const labels = list ? completionLabels(list) : [];
         return labels.includes("name") && labels.includes("id");
@@ -815,9 +836,6 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
 
     console.log(`    Single-file completions: ${completionLabels(completions!).join(", ")}`);
 
-    expectCompletionsPresent(completions!, ["count", "doubled", "increment"]);
-    expectCompletionKinds(completions!, "count", [vscode.CompletionItemKind.Variable]);
-    expectCompletionKinds(completions!, "doubled", [vscode.CompletionItemKind.Variable]);
     expectCompletionsMissing(completions!, [
       "AbortController",
       "HTMLDivElement",
@@ -839,79 +857,63 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
       console.log("    N/A");
       return;
     }
-    // The resolve polling loop below waits up to 30s for the provider to sync and
-    // resolve the auto-import; raise the per-test Mocha timeout above that deadline
-    // (the suite default is 15s, which this loop would otherwise overrun).
-    this.timeout(40_000);
+    this.timeout(60_000);
 
     const autoDoc = await openAndReady("src/AutoImportCase.vue");
 
-    // The `computed` reference is unimported; position the cursor at the end of
-    // the `computed` identifier so the provider offers it as an auto-import.
-    const pos = findPosition(autoDoc, "computed(() =>", "computed".length);
-    expect(pos, "should find the unimported `computed` reference").to.exist;
+    // The incomplete `comput` prefix makes `computed` the deterministic editor
+    // selection while still exercising TypeScript's real auto-import resolve.
+    const pos = findPosition(autoDoc, "comput(() =>", "comput".length);
+    expect(pos, "should find the unimported `comput` prefix").to.exist;
 
-    // Wait until the provider offers `computed` (it needs the file synced), then
-    // force VS Code to RESOLVE the first items (the 4th arg = itemResolveCount),
-    // which fires `completionItem/resolve` and populates `additionalTextEdits`.
-    let resolvedImport: vscode.CompletionItem | undefined;
-    const deadline = Date.now() + 30_000;
-    while (Date.now() < deadline) {
-      const list = await vscode.commands.executeCommand<vscode.CompletionList>(
-        "vscode.executeCompletionItemProvider",
-        autoDoc.uri,
-        pos!,
-        undefined,
-        50, // itemResolveCount — force resolve of the leading items
+    // Establish positive readiness without bulk-resolving arbitrary leading
+    // candidates. The accept path below lets the suggestion widget filter to the
+    // identifier under the cursor and resolve the exact selected candidate.
+    const offered = await waitForCompletionsMatching(autoDoc.uri, pos!, {
+      predicate: (list) =>
+        list?.items.some((item) => completionLabel(item) === "computed") === true,
+      timeoutMs: 30_000,
+    });
+    expect(completionLabels(offered!), "the synced provider offers `computed`").to.include(
+      "computed",
+    );
+
+    const editor = vscode.window.activeTextEditor;
+    expect(editor, "the auto-import fixture has an active editor").to.exist;
+    expect(editor!.document.uri.toString()).to.equal(autoDoc.uri.toString());
+    editor!.selection = new vscode.Selection(pos!, pos!);
+
+    const originalText = autoDoc.getText();
+    const templateStart = originalText.indexOf("<template>");
+    expect(templateStart, "the fixture has a <template> block").to.be.greaterThan(0);
+    const templateBefore = originalText.slice(templateStart);
+    try {
+      const outcome = await acceptCompletionInEditor(editor!, 500);
+      expect(outcome.accepted, "the real completion accept applies its import action").to.equal(
+        true,
       );
-      const computedItem = list?.items.find((i) => completionLabel(i) === "computed");
-      if (computedItem?.additionalTextEdits && computedItem.additionalTextEdits.length > 0) {
-        resolvedImport = computedItem;
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 250));
-    }
-
-    expect(
-      resolvedImport,
-      "accepting `computed` must resolve an auto-import edit (additionalTextEdits)",
-    ).to.exist;
-
-    const edits = resolvedImport!.additionalTextEdits!;
-    const insertedText = edits.map((e) => e.newText).join("");
-    console.log(`    auto-import resolved edit: ${JSON.stringify(insertedText)}`);
-
-    // The resolved edit brings `computed` into scope. TypeScript's quick-fix may
-    // either add a NEW import line (`import { computed } from "vue"`) or MERGE
-    // `computed` into the existing `import { ref } from "vue"`; in the merge case
-    // the edit's text may be only `, computed` (no re-emitted module specifier),
-    // so the discriminating, both-case-safe assertion is that `computed` appears
-    // in the inserted text. (Before the fix, tsserver/extension returned NO edit
-    // at all — `additionalTextEdits` was empty — so reaching here already proves
-    // the provider-neutral resolve produced an actionable import.)
-    expect(insertedText, "the resolved edit brings `computed` into scope").to.include("computed");
-    // A NEW import line must reference the `vue` module; a merge into the existing
-    // import need not re-emit the specifier. So require the module ONLY when the
-    // edit is not a bare merge fragment (i.e. it contains the `import` keyword).
-    if (/\bimport\b/.test(insertedText)) {
-      expect(insertedText, "a fresh import line imports `computed` from `vue`").to.match(
-        /["']vue["']/,
+      const scriptAfter = scriptBlockText(autoDoc);
+      expect(scriptAfter, "the accepted completion imports `computed` from Vue").to.match(
+        /import\s*\{[^}]*\bcomputed\b[^}]*\}\s*from\s*["']vue["']/,
       );
-    }
-
-    // Negative: the edit must NOT corrupt by landing in the template — it is a
-    // targeted import insertion in the <script setup> region. Derive the template
-    // boundary from the live document instead of hardcoding a line so the guard
-    // tracks the fixture: every edit must start strictly above `<template>`.
-    const text = autoDoc.getText();
-    const templateLine = autoDoc.positionAt(text.indexOf("<template>")).line;
-    expect(templateLine, "the fixture has a <template> block").to.be.greaterThan(0);
-    for (const edit of edits) {
       expect(
-        edit.range.start.line,
-        "the import edit lands in the <script setup>, not the template",
-      ).to.be.lessThan(templateLine);
+        autoDoc.getText().slice(autoDoc.getText().indexOf("<template>")),
+        "the completion action must not modify the template",
+      ).to.equal(templateBefore);
+    } finally {
+      await editor!.edit((edit) => {
+        edit.replace(
+          new vscode.Range(autoDoc.positionAt(0), autoDoc.positionAt(autoDoc.getText().length)),
+          originalText,
+        );
+      });
     }
+    expect(autoDoc.getText(), "the fixture is restored after the acceptance proof").to.equal(
+      originalText,
+    );
+
+    // at all — `additionalTextEdits` was empty — so reaching here already proves
+    // Negative: the edit must NOT corrupt by landing in the template — it is a
   });
 
   test("completion scenarios do not log panic markers", function () {

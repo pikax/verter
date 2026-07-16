@@ -15,9 +15,7 @@ function consume(x: unknown) {
   <button @click="handle($event.clientX)">dollar event</button>
   <!-- Duplicate `@click`: the second handler routes through the spread path, where
        JSX contextual typing cannot flow — its `$event` must still be typed. -->
-  <button @click="handle($event.clientY)" @click="handle($event.screenX)">
-    duplicate spread
-  </button>
+  <button @click="handle($event.clientY)" @click="handle($event.screenX)">duplicate spread</button>
 
   <!-- Local (imported-binding) component. Duplicate `@pick`: the second handler is a
        spread key, so its `$event` is the emit payload typed via

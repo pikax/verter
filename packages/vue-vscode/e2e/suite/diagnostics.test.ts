@@ -3,6 +3,7 @@ import * as path from "path";
 import * as vscode from "vscode";
 import {
   openReadyCached,
+  openAndReady,
   openVueFile,
   getAppVuePath,
   getCompVuePath,
@@ -14,6 +15,11 @@ import {
   TYPE_PROVIDER,
 } from "../helpers";
 import { getTimer } from "../timer";
+
+function diagnosticCode(diagnostic: vscode.Diagnostic): string {
+  const code = typeof diagnostic.code === "object" ? diagnostic.code.value : diagnostic.code;
+  return String(code ?? "");
+}
 
 suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
   suiteSetup(async function () {
@@ -66,6 +72,73 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
     getTimer().recordDiagnostics(elapsed, diags.length, sources);
 
     console.log(`    Time to diagnostics: ${elapsed}ms (${diags.length} diagnostics)`);
+  });
+
+  // A configured Vue project need not opt into a JSX runtime.
+  // Verter owns the generated TSX environment and must never surface TS7026 for
+  // a valid intrinsic template element on tsserver or any applicable tsgo route.
+  test("minimal valid Vue template has a production JSX type environment", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+    this.timeout(60_000);
+
+    const doc = await openAndReady("src/MinimalTemplate.vue");
+    const diagnostics = await waitForDiagnosticsSettled(doc.uri, {
+      timeoutMs: 30_000,
+      stableMs: 1_000,
+    });
+    const jsxEnvironmentErrors = diagnostics.filter(
+      (diagnostic) =>
+        diagnosticCode(diagnostic) === "7026" ||
+        diagnostic.message.includes("JSX element implicitly has type 'any'") ||
+        diagnostic.message.includes("JSX.IntrinsicElements"),
+    );
+
+    expect(
+      jsxEnvironmentErrors,
+      `valid Vue template must not report a missing JSX environment (${TYPE_PROVIDER}): ${JSON.stringify(
+        diagnostics.map((diagnostic) => ({
+          code: diagnostic.code,
+          source: diagnostic.source,
+          message: diagnostic.message,
+        })),
+      )}`,
+    ).to.deep.equal([]);
+  });
+
+  // Separates the static carrier/provider diagnostic contract
+  // from live edit synchronization: an unresolved script-setup name must be a
+  // real TS2304 immediately after the source and its carrier have synchronized.
+  test("static script-setup unresolved name reports TS2304", async function () {
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+    this.timeout(60_000);
+
+    const doc = await openAndReady("src/UnresolvedName.vue");
+    const diagnostics = await waitForDiagnostics(doc.uri, {
+      timeoutMs: 30_000,
+      predicate: (diagnostic) => diagnostic.message.includes("unresolvedFromVueScript"),
+    });
+    const unresolved = diagnostics.find(
+      (diagnostic) =>
+        diagnosticCode(diagnostic) === "2304" &&
+        diagnostic.message.includes("unresolvedFromVueScript"),
+    );
+
+    expect(
+      unresolved,
+      `static Vue carrier must surface TS2304 (${TYPE_PROVIDER}): ${JSON.stringify(
+        diagnostics.map((diagnostic) => ({
+          code: diagnostic.code,
+          source: diagnostic.source,
+          message: diagnostic.message,
+        })),
+      )}`,
+    ).to.exist;
   });
 
   test("diagnostics have valid ranges", async function () {
@@ -159,14 +232,16 @@ export function useLockScroll(target: MaybeRef<HTMLElement | null> = null) {
     try {
       // Wait specifically for TS2304 referencing our undeclared variable
       const diags = await waitForDiagnostics(doc.uri, {
-        source: "ts",
         timeoutMs: 15_000,
         predicate: (d) => d.message.includes("unknownVar123"),
       });
 
       // Positive: at least one TS diagnostic referencing the undeclared variable
       const ts2304 = diags.find(
-        (d) => d.message.includes("Cannot find name") && d.message.includes("unknownVar123"),
+        (d) =>
+          diagnosticCode(d) === "2304" &&
+          d.message.includes("Cannot find name") &&
+          d.message.includes("unknownVar123"),
       );
       expect(
         ts2304,
@@ -277,11 +352,12 @@ export function useLockScroll(target: MaybeRef<HTMLElement | null> = null) {
     try {
       // Wait specifically for TS2304 referencing our undeclared variable
       const initialDiags = await waitForDiagnostics(doc.uri, {
-        source: "ts",
         timeoutMs: 15_000,
         predicate: (d) => d.message.includes("unknownVar456"),
       });
-      const initialTs2304 = initialDiags.find((d) => d.message.includes("unknownVar456"));
+      const initialTs2304 = initialDiags.find(
+        (d) => diagnosticCode(d) === "2304" && d.message.includes("unknownVar456"),
+      );
       expect(initialTs2304, "TS error for unknownVar456 should appear before newline edit").to
         .exist;
 
@@ -295,11 +371,12 @@ export function useLockScroll(target: MaybeRef<HTMLElement | null> = null) {
 
       // TS diagnostics should still be present
       const afterDiags = await waitForDiagnostics(doc.uri, {
-        source: "ts",
         timeoutMs: 15_000,
         predicate: (d) => d.message.includes("unknownVar456"),
       });
-      const afterTs2304 = afterDiags.find((d) => d.message.includes("unknownVar456"));
+      const afterTs2304 = afterDiags.find(
+        (d) => diagnosticCode(d) === "2304" && d.message.includes("unknownVar456"),
+      );
       expect(
         afterTs2304,
         `TS error for unknownVar456 should survive newline insertion. Got: ${JSON.stringify(afterDiags.map((d) => ({ msg: d.message, src: d.source })))}`,

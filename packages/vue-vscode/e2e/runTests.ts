@@ -5,40 +5,89 @@ import { resolveCliArgsFromVSCodeExecutablePath, runTests } from "@vscode/test-e
 import * as os from "os";
 import {
   copyLspBinaryToTemp,
+  findWorkspaceRcTsgoBinary,
   provisionVsCodeExtension,
   readE2eEnv,
   resolveVscodeExecutablePath,
   writeVsCodeUserSettings,
 } from "./sharedLaunch";
 import { clearRunArtifacts, enforceRunSummary } from "../src/runSummaryOracle";
+import {
+  requiredFrameworkContractIds,
+  type ContractFramework,
+} from "./lib/frameworkContractManifest";
+import { requiredParitySuiteFiles } from "./lib/parityManifest";
+import type { ParityFixture } from "./lib/parityTestInventory";
 
 const EDITOR_ACCEPTANCE_FIXTURE = "editor-owned-project";
 const NATIVE_PREVIEW_EXTENSION = "TypeScriptTeam.native-preview@0.20260708.2";
+const TYPE_PROVIDER_ROUTES = ["tsserver", "tsgo", "shared-tsgo"] as const;
+const CONTRACT_FIXTURES: Readonly<Record<string, { framework: ContractFramework; only: string }>> =
+  {
+    "vue-contract": { framework: "vue", only: "frameworks/vue/contract.test" },
+    "svelte-contract": { framework: "svelte", only: "frameworks/svelte/contract.test" },
+  };
+/** Focused parity fixtures: only the parity suite tree runs. */
+const PARITY_FIXTURE_CONFIGS: Readonly<Record<ParityFixture, { only: string }>> = {
+  "vue-parity": { only: "parity/" },
+  "svelte-parity": { only: "parity/" },
+  "mixed-parity": { only: "parity/" },
+  "multi-root-parity": { only: "parity/" },
+  "ecosystem-parity": { only: "parity/" },
+};
+
+function requiredParityIds(fixture: string): readonly string[] | undefined {
+  if (!(fixture in PARITY_FIXTURE_CONFIGS)) return undefined;
+  const manifestPath = path.resolve(__dirname, "../e2e-suite-build-manifest.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
+    version?: number;
+    parity?: {
+      literalRegistrationCount?: number;
+      matrixCaseCount?: number;
+      testIdsByFixture?: Partial<Record<ParityFixture, unknown>>;
+    };
+  };
+  if (
+    manifest.version !== 2 ||
+    manifest.parity?.literalRegistrationCount !== 219 ||
+    manifest.parity.matrixCaseCount !== 73
+  ) {
+    throw new Error(
+      `E2E parity manifest has an unsupported or incomplete inventory: ${manifestPath}`,
+    );
+  }
+  const value = manifest.parity.testIdsByFixture?.[fixture as ParityFixture];
+  if (!Array.isArray(value) || value.length === 0 || !value.every((id) => typeof id === "string")) {
+    throw new Error(`E2E parity manifest has no stable test-ID inventory for ${fixture}`);
+  }
+  if (new Set(value).size !== value.length) {
+    throw new Error(`E2E parity manifest contains duplicate test IDs for ${fixture}`);
+  }
+  return value;
+}
 
 /**
  * Fixture entries: plain name uses auto type provider,
  * "name@provider" forces a specific type provider (tsserver or tsgo).
  * Every fixture runs with both providers to ensure full coverage.
  */
+const STANDARD_FIXTURES = [
+  "single-project",
+  "monorepo",
+  "tsconfig-extends",
+  "tsconfig-references",
+  "path-aliases",
+  "composite-paths",
+  "no-config",
+  "single-file",
+  "barrel-exports",
+  ...Object.keys(CONTRACT_FIXTURES),
+  ...Object.keys(PARITY_FIXTURE_CONFIGS),
+];
 const FIXTURES = [
-  "single-project@tsserver",
-  "single-project@tsgo",
-  "monorepo@tsserver",
-  "monorepo@tsgo",
-  "tsconfig-extends@tsserver",
-  "tsconfig-extends@tsgo",
-  "tsconfig-references@tsserver",
-  "tsconfig-references@tsgo",
-  "path-aliases@tsserver",
-  "path-aliases@tsgo",
-  "composite-paths@tsserver",
-  "composite-paths@tsgo",
-  "no-config@tsserver",
-  "no-config@tsgo",
-  "single-file@tsserver",
-  "single-file@tsgo",
-  "barrel-exports@tsserver",
-  "barrel-exports@tsgo",
+  ...STANDARD_FIXTURES.flatMap((fixture) =>
+    TYPE_PROVIDER_ROUTES.map((provider) => `${fixture}@${provider}`),
+  ),
   `${EDITOR_ACCEPTANCE_FIXTURE}@tsserver`,
   `${EDITOR_ACCEPTANCE_FIXTURE}@shared-tsgo`,
 ];
@@ -115,6 +164,8 @@ async function main() {
   const vscodeVersion = readE2eEnv("VSCODE_VERSION") ?? "stable";
 
   const fixtureArg = process.argv.find((a) => a.startsWith("--fixture="));
+  const onlyArg = process.argv.find((a) => a.startsWith("--only="));
+  const onlyPattern = onlyArg?.slice("--only=".length) || readE2eEnv("ONLY");
   const envFixture = readE2eEnv("FIXTURE");
   const envTypeProvider = readE2eEnv("TYPE_PROVIDER");
   const fixturesToRun = fixtureArg
@@ -128,6 +179,29 @@ async function main() {
   const vscodeExecutablePath = await resolveVscodeExecutablePath(vscodeVersion, {
     explicitExecutablePath: readE2eEnv("VSCODE_EXECUTABLE"),
   });
+  const parsedFixtures = fixturesToRun.map(parseFixtureEntry);
+  for (const { fixture, typeProvider } of parsedFixtures) {
+    if (
+      !typeProvider ||
+      !TYPE_PROVIDER_ROUTES.includes(typeProvider as (typeof TYPE_PROVIDER_ROUTES)[number])
+    ) {
+      throw new Error(
+        `E2E fixture ${fixture} must select exactly one provider route: ${TYPE_PROVIDER_ROUTES.join(", ")}`,
+      );
+    }
+  }
+  const requiresRcTsgo = parsedFixtures.some(
+    ({ typeProvider }) => typeProvider === "tsgo" || typeProvider === "shared-tsgo",
+  );
+  const rcTsgoBinaryPath = requiresRcTsgo
+    ? findWorkspaceRcTsgoBinary(extensionDevelopmentPath)
+    : undefined;
+  if (requiresRcTsgo && !rcTsgoBinaryPath) {
+    throw new Error(
+      "E2E requested tsgo but no @typescript/typescript-<platform> RC binary was found; " +
+        "install the pinned workspace dependency or set VERTER_TSGO_BIN",
+    );
+  }
 
   // Copy LSP binary to temp to prevent file locking
   const lspBinaryPath = copyLspBinaryToTemp(extensionDevelopmentPath);
@@ -156,6 +230,12 @@ async function main() {
         }
       }
     }
+    // Multi-root: each folder is its own package with node_modules.
+    if (fixture === "multi-root-parity") {
+      for (const pkg of ["pkg-a", "pkg-b"]) {
+        installFixtureDeps(path.join(fixtureDir, pkg));
+      }
+    }
 
     const logFile = path.join(os.tmpdir(), `verter-e2e-${label}.log`);
     const profile = createE2eProfile(label, index);
@@ -163,7 +243,11 @@ async function main() {
     // never false-green a current zero-exit crash that writes no fresh summary.
     clearRunArtifacts(logFile);
     try {
-      if (fixture === EDITOR_ACCEPTANCE_FIXTURE && typeProvider === "shared-tsgo") {
+      writeVsCodeUserSettings(profile.userDataDir, {
+        "verter.experimental.exposeBindingsTesting":
+          fixture === "vue-parity" || fixture === "svelte-parity",
+      });
+      if (typeProvider === "shared-tsgo") {
         const extension = readE2eEnv("NATIVE_PREVIEW_EXTENSION") ?? NATIVE_PREVIEW_EXTENSION;
         console.log(`  Provisioning ${extension} into the isolated test profile...`);
         provisionVsCodeExtension({
@@ -180,8 +264,12 @@ async function main() {
         });
       }
 
+      const workspaceLaunchPath =
+        fixture === "multi-root-parity"
+          ? path.join(fixtureDir, "multi-root-parity.code-workspace")
+          : fixtureDir;
       const launchArgs = [
-        fixtureDir,
+        workspaceLaunchPath,
         "--disable-updates",
         "--disable-workspace-trust",
         "--skip-welcome",
@@ -189,7 +277,7 @@ async function main() {
         `--extensions-dir=${profile.extensionsDir}`,
         `--user-data-dir=${profile.userDataDir}`,
       ];
-      if (!(fixture === EDITOR_ACCEPTANCE_FIXTURE && typeProvider === "shared-tsgo")) {
+      if (typeProvider !== "shared-tsgo") {
         launchArgs.push("--disable-extensions");
       }
       await runTests({
@@ -200,15 +288,25 @@ async function main() {
         extensionTestsEnv: {
           ...process.env,
           VERTER_E2E_TEST: "1",
+          VERTER_E2E_PROVIDER_ONLY_COMPLETIONS: "1",
           VERTER_E2E_LOG_FILE: logFile,
           VERTER_E2E_FIXTURE: fixture,
           VERTER_E2E_TIMING_FILE: path.join(os.tmpdir(), `verter-e2e-timing-${label}.json`),
           VERTER_LOG: "debug",
           ...(lspBinaryPath ? { VERTER_E2E_LSP_PATH: lspBinaryPath } : {}),
           ...(typeProvider ? { VERTER_E2E_TYPE_PROVIDER: typeProvider } : {}),
+          ...(rcTsgoBinaryPath && (typeProvider === "tsgo" || typeProvider === "shared-tsgo")
+            ? { VERTER_TSGO_BIN: rcTsgoBinaryPath }
+            : {}),
           ...(fixture === EDITOR_ACCEPTANCE_FIXTURE
             ? { VERTER_E2E_ONLY: "editor-owned-project.test" }
-            : {}),
+            : CONTRACT_FIXTURES[fixture]
+              ? { VERTER_E2E_ONLY: CONTRACT_FIXTURES[fixture].only }
+              : fixture in PARITY_FIXTURE_CONFIGS
+                ? { VERTER_E2E_ONLY: PARITY_FIXTURE_CONFIGS[fixture as ParityFixture].only }
+                : onlyPattern
+                  ? { VERTER_E2E_ONLY: onlyPattern }
+                  : {}),
         },
       });
       // The @vscode/test-electron process exit code is an UNRELIABLE pass/fail signal
@@ -217,7 +315,16 @@ async function main() {
       // (`suite/index.ts` → `<logFile>.runsummary`): fail on any reported test failure,
       // and on a vacuous 0-test execution or a MISSING summary. Every matrix entry is a
       // required gate; no ordinary fixture is allowed a legacy zero-execution pass.
-      await enforceRunSummary(logFile, label, {});
+      const contract = CONTRACT_FIXTURES[fixture];
+      const parityIds = requiredParityIds(fixture);
+      const requiredLoadedFiles = contract
+        ? [`frameworks/${contract.framework}/contract.test.js`]
+        : requiredParitySuiteFiles(fixture);
+      await enforceRunSummary(logFile, label, {
+        expectedFixture: fixture,
+        requiredLoadedFiles,
+        requiredTestIds: contract ? requiredFrameworkContractIds(contract.framework) : parityIds,
+      });
       console.log(`  PASSED: ${label}`);
     } catch (err) {
       console.error(`  FAILED: ${label}`, err);

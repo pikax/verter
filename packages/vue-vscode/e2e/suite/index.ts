@@ -1,6 +1,7 @@
 import * as path from "path";
 import Mocha from "mocha";
 import * as fs from "fs";
+import { createHash } from "node:crypto";
 import { getTimer } from "../timer";
 import {
   ensureFixtureWarm,
@@ -8,7 +9,9 @@ import {
   openReadyCached,
   getAppVuePath,
   TYPE_PROVIDER,
+  FIXTURE_NAME,
 } from "../helpers";
+import { suiteAllowedForFixture } from "../lib/fixtureSuiteMap";
 
 /** Recursively find the authored test sources under a directory. */
 function findTestSources(dir: string): string[] {
@@ -31,11 +34,55 @@ function discoverCompiledTests(compiledRoot: string): string[] {
     throw new Error(`E2E discovery found no authored *.test.ts files under ${sourceRoot}`);
   }
 
+  const manifestPath = path.resolve(compiledRoot, "../../e2e-suite-build-manifest.json");
+  if (!fs.existsSync(manifestPath)) {
+    throw new Error(`E2E build manifest is missing: ${manifestPath}`);
+  }
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
+    version?: number;
+    entries?: Array<{
+      source?: string;
+      sourceSha256?: string;
+      compiled?: string;
+      compiledSha256?: string;
+    }>;
+  };
+  if (manifest.version !== 2 || !Array.isArray(manifest.entries)) {
+    throw new Error(`E2E build manifest has an unsupported shape: ${manifestPath}`);
+  }
+  const packageRoot = path.resolve(compiledRoot, "../../..");
+  const bySource = new Map(manifest.entries.map((entry) => [entry.source, entry]));
+  const sourceRelatives = sources.map((source) =>
+    path.relative(packageRoot, source).replace(/\\/g, "/"),
+  );
+  const unexpected = [...bySource.keys()].filter(
+    (source): source is string => typeof source === "string" && !sourceRelatives.includes(source),
+  );
+  if (bySource.size !== sources.length || unexpected.length > 0) {
+    throw new Error(
+      `E2E build manifest/source inventory mismatch; sources=${sources.length} ` +
+        `manifest=${bySource.size} unexpected=${unexpected.join(",") || "none"}`,
+    );
+  }
+
+  const hash = (file: string): string =>
+    createHash("sha256").update(fs.readFileSync(file)).digest("hex");
   return sources.map((source) => {
     const relative = path.relative(sourceRoot, source).replace(/\.ts$/, ".js");
     const compiled = path.join(compiledRoot, relative);
     if (!fs.existsSync(compiled)) {
       throw new Error(`E2E test source was not compiled: ${source} -> ${compiled}`);
+    }
+    const sourceRelative = path.relative(packageRoot, source).replace(/\\/g, "/");
+    const compiledRelative = path.relative(packageRoot, compiled).replace(/\\/g, "/");
+    const attested = bySource.get(sourceRelative);
+    if (
+      !attested ||
+      attested.compiled !== compiledRelative ||
+      attested.sourceSha256 !== hash(source) ||
+      attested.compiledSha256 !== hash(compiled)
+    ) {
+      throw new Error(`stale or mismatched E2E build artifact: ${sourceRelative}`);
     }
     return compiled;
   });
@@ -67,9 +114,25 @@ export async function run(): Promise<void> {
 
   const testsRoot = path.resolve(__dirname);
   const onlyPattern = process.env.VERTER_E2E_ONLY || process.env.E2E_ONLY;
-  const files = discoverCompiledTests(testsRoot).filter((file) =>
-    onlyPattern ? file.includes(onlyPattern) : true,
-  );
+  const sourceRoot = path.resolve(testsRoot, "../../../e2e/suite");
+
+  const files = discoverCompiledTests(testsRoot).filter((file) => {
+    const rel = path.relative(path.join(testsRoot), file).replace(/\\/g, "/");
+    // Fixture-scoped discovery: specialty fixtures only load matching suite globs.
+    if (!suiteAllowedForFixture(FIXTURE_NAME, rel)) {
+      return false;
+    }
+    if (!onlyPattern) return true;
+    return file.replace(/\\/g, "/").includes(onlyPattern.replace(/\\/g, "/"));
+  });
+
+  if (files.length === 0) {
+    throw new Error(
+      `E2E discovery selected 0 suite files for fixture=${FIXTURE_NAME}` +
+        (onlyPattern ? ` only=${onlyPattern}` : "") +
+        ` (sourceRoot=${sourceRoot})`,
+    );
+  }
 
   for (const f of files) {
     mocha.addFile(f);
@@ -77,8 +140,6 @@ export async function run(): Promise<void> {
 
   let rootHookError: string | undefined;
 
-  // Root hooks run once before/after all test suites.
-  // Warm the fixture so individual suites skip redundant polling.
   mocha.rootHooks({
     async beforeAll(this: Mocha.Context) {
       this.timeout(60_000);
@@ -89,8 +150,6 @@ export async function run(): Promise<void> {
         }
         await openReadyCached(getAppVuePath());
       } catch (err) {
-        // Record the root-hook failure so the summary shows WHY 0 tests ran, then
-        // rethrow so mocha reports the failure rather than silently skipping suites.
         rootHookError = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
         throw err;
       }
@@ -98,32 +157,41 @@ export async function run(): Promise<void> {
   });
 
   return new Promise((resolve, reject) => {
+    const passedTestIds: string[] = [];
+    const pendingTestIds: string[] = [];
+    const failedTests: Array<{ id: string; err: string; stack?: string }> = [];
+
     const runner = mocha.run((failures: number) => {
-      // Write timing report regardless of test outcome
       getTimer().flush();
 
       const stats = runner.stats ?? { passes: 0, failures: 0, pending: 0, tests: 0 };
       const executed = (stats.passes ?? 0) + (stats.failures ?? 0) + (stats.pending ?? 0);
       writeRunSummary({
+        fixture: FIXTURE_NAME,
         onlyPattern: onlyPattern ?? null,
-        loadedFiles: files.map((f) => path.basename(f)),
+        loadedFiles: files.map((f) => path.relative(testsRoot, f).replace(/\\/g, "/")),
         passes: stats.passes ?? 0,
         failures: stats.failures ?? 0,
         pending: stats.pending ?? 0,
         executed,
+        passedTestIds,
+        pendingTestIds,
+        failedTests,
         rootHookError: rootHookError ?? null,
       });
 
-      // Reject on the runner's OWN failure count too — on some hosts the callback's
-      // `failures` arg under-counts a failed hook while `runner.stats.failures` is
-      // authoritative, so a hook-throwing gate would otherwise resolve as a pass.
       const failed = failures > 0 || (stats.failures ?? 0) > 0;
       if (failed) {
-        reject(new Error(`${Math.max(failures, stats.failures ?? 0)} tests failed`));
+        const detail =
+          failedTests.length > 0
+            ? failedTests
+                .slice(0, 5)
+                .map((f) => `${f.id}: ${f.err}`)
+                .join(" | ")
+            : "see mocha output";
+        reject(new Error(`${Math.max(failures, stats.failures ?? 0)} tests failed — ${detail}`));
         return;
       }
-      // Zero tests is always a vacuous pass: the suite failed to load, a pattern matched
-      // nothing, or the root hook aborted. Every fixture in the release matrix is required.
       if (executed === 0) {
         reject(
           new Error(
@@ -134,6 +202,15 @@ export async function run(): Promise<void> {
         return;
       }
       resolve();
+    });
+    runner.on("pass", (test) => passedTestIds.push(test.title));
+    runner.on("pending", (test) => pendingTestIds.push(test.title));
+    runner.on("fail", (test, err) => {
+      failedTests.push({
+        id: test.title,
+        err: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+      });
     });
   });
 }

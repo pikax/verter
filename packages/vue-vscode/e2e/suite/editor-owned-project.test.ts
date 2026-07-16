@@ -126,6 +126,33 @@ if (FIXTURE_NAME === FIXTURE) {
       }
     });
 
+    test("provides Vue JSX intrinsics without project jsxImportSource", async function () {
+      const tsconfig = JSON.parse(
+        fs.readFileSync(path.join(workspaceRoot(), "tsconfig.json"), "utf8"),
+      ) as { compilerOptions?: { jsxImportSource?: unknown } };
+      assert.strictEqual(
+        tsconfig.compilerOptions?.jsxImportSource,
+        undefined,
+        "The acceptance must prove the carrier-owned JSX environment, not a fixture override",
+      );
+
+      const document = await openVueFile("src/App.vue");
+      const diagnostics = await waitForDiagnosticsSettled(document.uri, {
+        timeoutMs: 20_000,
+        stableMs: 800,
+      });
+      const missingJsxEnvironment = diagnostics.filter(
+        (diagnostic) =>
+          diagnosticCode(diagnostic) === 7026 ||
+          /JSX element implicitly has type 'any'|JSX\.IntrinsicElements/.test(diagnostic.message),
+      );
+      assert.deepStrictEqual(
+        missingJsxEnvironment,
+        [],
+        `The ${TYPE_PROVIDER} editor route lacks Vue JSX intrinsics: ${formatDiagnostics(diagnostics)}`,
+      );
+    });
+
     test("maps configured-project diagnostics and exposes the real component surface", async function () {
       const ts2322 = compDiagnostics.filter((diagnostic) => diagnosticCode(diagnostic) === 2322);
       assert.strictEqual(

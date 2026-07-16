@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import { MyComp } from '@/components'
-const count = ref(0)
+import { ref } from "vue";
+import { MyComp } from "@/components";
+const count = ref(0);
 </script>
 <template>
   <div>{{ count }}</div>

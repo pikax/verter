@@ -4,6 +4,7 @@ import { join } from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  findWorkspaceRcTsgoBinary,
   provisionVsCodeExtension,
   writeVsCodeUserSettings,
   type SynchronousCommandRunner,
@@ -18,6 +19,74 @@ afterEach(() => {
 });
 
 describe("VS Code E2E extension provisioning", () => {
+  it("discovers the pinned RC tsgo package from a nested pnpm workspace", () => {
+    const root = mkdtempSync(join(tmpdir(), "verter-e2e-tsgo-"));
+    temporaryRoots.push(root);
+    const extensionPath = join(root, "packages", "vue-vscode");
+    const binary = join(
+      root,
+      "node_modules",
+      ".pnpm",
+      "@typescript+typescript-win32-x64@7.0.2",
+      "node_modules",
+      "@typescript",
+      "typescript-win32-x64",
+      "lib",
+      "tsc.exe",
+    );
+    mkdirSync(join(binary, ".."), { recursive: true });
+    writeFileSync(binary, "rc-tsgo");
+
+    expect(
+      findWorkspaceRcTsgoBinary(extensionPath, {
+        env: {},
+        platform: "win32",
+        arch: "x64",
+      }),
+    ).toBe(binary);
+  });
+
+  it("never treats the legacy native-preview package as the RC tsgo engine", () => {
+    const root = mkdtempSync(join(tmpdir(), "verter-e2e-legacy-tsgo-"));
+    temporaryRoots.push(root);
+    const extensionPath = join(root, "packages", "vue-vscode");
+    const legacy = join(
+      root,
+      "node_modules",
+      ".pnpm",
+      "@typescript+native-preview-win32-x64@7.0.0-dev.20260101.1",
+      "node_modules",
+      "@typescript",
+      "native-preview-win32-x64",
+      "lib",
+      "tsgo.exe",
+    );
+    mkdirSync(join(legacy, ".."), { recursive: true });
+    writeFileSync(legacy, "legacy-tsgo");
+
+    expect(
+      findWorkspaceRcTsgoBinary(extensionPath, {
+        env: {},
+        platform: "win32",
+        arch: "x64",
+      }),
+    ).toBeUndefined();
+  });
+
+  it("fails closed when an explicit E2E tsgo binary is configured but absent", () => {
+    const root = mkdtempSync(join(tmpdir(), "verter-e2e-explicit-tsgo-"));
+    temporaryRoots.push(root);
+    const missing = join(root, "missing", "tsc.exe");
+
+    expect(() =>
+      findWorkspaceRcTsgoBinary(root, {
+        env: { VERTER_TSGO_BIN: missing },
+        platform: "win32",
+        arch: "x64",
+      }),
+    ).toThrow(/configured VERTER_TSGO_BIN does not exist/i);
+  });
+
   it("installs into the exact isolated profile while preserving platform CLI bootstrap args", () => {
     const run = vi.fn<SynchronousCommandRunner>(() => ({
       status: 0,

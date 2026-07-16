@@ -54,15 +54,16 @@ suite(`Activation & LSP Health [${FIXTURE_NAME}]`, function () {
     ).to.be.true;
   });
 
-  test("server sends $/verter/mcpReady with valid port", function () {
+  test("standalone MCP server reports a valid bound port", function () {
     expect(isLspReady(), "LSP should reach ready state").to.be.true;
 
     const log = readTestLog();
 
-    // The extension logs this when it receives the mcpReady notification
+    // The extension logs this only after parsing the standalone child's stable
+    // readiness record; human stderr logs are not accepted as port identity.
     assertLogContains(
       "MCP HTTP server ready on port",
-      "Extension should log the MCP ready notification",
+      "Extension should log the standalone MCP readiness record",
     );
 
     // Verify port is a valid number

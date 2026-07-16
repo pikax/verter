@@ -109,6 +109,23 @@ TSGO has a known limitation: **re-exported `.vue` components** (e.g., barrel fil
 | `verter.trace.server`    | `"off"` \| `"messages"` \| `"verbose"`                      | `"off"`  | Traces the communication between VS Code and the Verter language server. Useful for debugging LSP issues. |
 | `verter.server.logLevel` | `"error"` \| `"warn"` \| `"info"` \| `"debug"` \| `"trace"` | `"info"` | Log level for the Verter language server process. Changing this setting restarts the server.              |
 
+## Experimental
+
+| Setting                                        | Type      | Default | Description                                                                                                                                                                                             |
+| ---------------------------------------------- | --------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `verter.experimental.conditionalRootNarrowing` | `boolean` | `false` | Generic narrowing for conditional root elements controlled by props (Vue). See [Experimental Features](/guide/experimental).                                                                            |
+| `verter.experimental.exposeBindingsTesting`    | `boolean` | `false` | In **test files**, resolve **Vue** `.vue` imports to the VTU-style testing API (`*.vue.__verter_test.ts`) so `<script setup>` bindings are visible. **Svelte** has no testing virtual file — see below. |
+| `verter.experimental.strictSlots`              | `boolean` | `false` | Enforce strict type checking for slot children against `defineSlots()`.                                                                                                                                 |
+
+### `exposeBindingsTesting` (Vue + Svelte)
+
+Vue and Svelte are both first-class. This setting is **not Vue-only noise for Svelte users**:
+
+- **Vue:** test importers (`*.spec.ts`, `*.test.ts`, `__tests__/`, …) use `Foo.vue.__verter_test.ts` (setup bindings visible; `defineExpose` does not narrow). Non-test importers stay on the public API.
+- **Svelte:** there is **no** `Foo.svelte.__verter_test.ts`. App and test importers share the same public component type. Enabling the flag does not invent a second Svelte instance shape.
+
+Full detail: [Experimental Features → Expose Bindings Testing](/guide/experimental#expose-bindings-testing-spects--test-importers).
+
 ## Emmet Configuration
 
 The extension automatically configures Emmet to include Vue in its language list:

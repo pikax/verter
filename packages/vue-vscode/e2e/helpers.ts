@@ -5,6 +5,9 @@ import * as os from "os";
 import * as assert from "assert";
 import { readE2eEnv } from "../src/e2eEnv";
 import { computeStartupSegments } from "../src/startupOptimizations";
+import { attestE2eTypeProviderLog, type E2eTypeProviderRoute } from "../src/e2eProviderAttestation";
+import { parseArmedControlDir, verifySharedArmedHandshake } from "../src/sharedTsgoLaunch";
+import { isVirtualCarrierPath } from "./lib/virtualCarrier";
 
 // ── Environment ────────────────────────────────────────────────
 
@@ -84,8 +87,10 @@ export async function waitForExtensionReady(timeoutMs = 45_000): Promise<void> {
     await sleep(200);
   }
 
-  // If we timed out, check if the extension at least activated
-  assert.ok(ext.isActive, `Extension should have activated within ${timeoutMs}ms timeout`);
+  assert.fail(
+    `waitForExtensionReady: extension activated=${ext.isActive} but the LSP did not publish ` +
+      `"Verter ready" within ${timeoutMs}ms; an activated shell is not semantic readiness`,
+  );
 }
 
 /**
@@ -178,13 +183,15 @@ export async function waitForFileReady(
   // Auto-detect from mustache expressions if not provided
   if (!probePosition || !expectedLabel) {
     const text = doc.getText();
-    const mustacheMatch = text.match(/\{\{\s*(\w+)\s*\}\}/);
-    if (mustacheMatch) {
-      const idx = text.indexOf(mustacheMatch[0]);
+    const expressionMatch =
+      text.match(/\{\{\s*([$_\p{ID_Start}][$_\p{ID_Continue}]*)\s*\}\}/u) ??
+      text.match(/(?<!\{)\{\s*([$_\p{ID_Start}][$_\p{ID_Continue}]*)\s*\}(?!\})/u);
+    if (expressionMatch) {
+      const idx = text.indexOf(expressionMatch[0]);
       // Position inside the identifier (after "{{ ")
-      const identStart = idx + mustacheMatch[0].indexOf(mustacheMatch[1]);
+      const identStart = idx + expressionMatch[0].indexOf(expressionMatch[1]);
       probePosition = probePosition || doc.positionAt(identStart);
-      expectedLabel = expectedLabel || mustacheMatch[1];
+      expectedLabel = expectedLabel || expressionMatch[1];
     }
   }
 
@@ -208,8 +215,9 @@ export async function waitForFileReady(
         }
         await sleep(intervalMs);
       }
-      console.log(`    waitForFileReady: timed out (hover probe, ${timeoutMs}ms)`);
-      return;
+      throw new Error(
+        `waitForFileReady: hover readiness for ${doc.uri.toString()} timed out after ${timeoutMs}ms`,
+      );
     }
     // No probe target found — just return
     console.log("    waitForFileReady: no probe target found, skipping");
@@ -238,9 +246,9 @@ export async function waitForFileReady(
     await sleep(intervalMs);
   }
 
-  console.log(
-    `    waitForFileReady: timed out waiting for "${expectedLabel}" ` +
-      `to get typed completions (${timeoutMs}ms)`,
+  throw new Error(
+    `waitForFileReady: timed out waiting for "${expectedLabel}" in ${doc.uri.toString()} ` +
+      `to get a typed completion (${timeoutMs}ms)`,
   );
 }
 
@@ -327,6 +335,17 @@ export function getAppVuePath(): string {
     case "no-config":
     case "single-file":
       return "App.vue";
+    case "svelte-contract":
+    case "svelte-parity":
+      return "src/App.svelte";
+    case "vue-parity":
+    case "vue-contract":
+    case "mixed-parity":
+    case "ecosystem-parity":
+      return "src/App.vue";
+    case "multi-root-parity":
+      // Launch opens multi-root-parity.code-workspace; workspaceFolders[0] is pkg-a.
+      return "src/App.vue";
     default:
       return "src/App.vue";
   }
@@ -730,6 +749,15 @@ export async function waitForTypeProviderSync(timeoutMs = 30_000): Promise<void>
     for (const m of syncMatches) {
       const gen = parseInt(m[1], 10);
       if (gen >= currentGen) {
+        if (TYPE_PROVIDER) {
+          if (!isE2eTypeProviderRoute(TYPE_PROVIDER)) {
+            assert.fail(`Unsupported E2E type-provider route: ${TYPE_PROVIDER}`);
+          }
+          attestE2eTypeProviderLog(log, TYPE_PROVIDER);
+          if (TYPE_PROVIDER === "shared-tsgo") {
+            assertSharedTsgoHandshake(log);
+          }
+        }
         return;
       }
     }
@@ -740,6 +768,24 @@ export async function waitForTypeProviderSync(timeoutMs = 30_000): Promise<void>
     `waitForTypeProviderSync: timed out waiting for TypeProviderSyncComplete ` +
       `(gen >= ${currentGen}, ${timeoutMs}ms)`,
   );
+}
+
+function isE2eTypeProviderRoute(value: string): value is E2eTypeProviderRoute {
+  return value === "tsserver" || value === "tsgo" || value === "shared-tsgo";
+}
+
+function assertSharedTsgoHandshake(log: string): void {
+  const controlDir = parseArmedControlDir(log);
+  assert.ok(controlDir, "Shared-tsgo E2E did not publish an armed control directory");
+  assert.ok(
+    fs.existsSync(controlDir),
+    `Shared-tsgo control directory does not exist: ${controlDir}`,
+  );
+  const verdict = verifySharedArmedHandshake({
+    logText: log,
+    controlDirEntries: fs.readdirSync(controlDir),
+  });
+  assert.ok(verdict.ok, verdict.reason);
 }
 
 // ── Log file helpers ───────────────────────────────────────────
@@ -966,12 +1012,24 @@ export async function getDefinitions(
   uri: vscode.Uri,
   pos: vscode.Position,
 ): Promise<vscode.Location[]> {
-  const locations = await vscode.commands.executeCommand<vscode.Location[]>(
-    "vscode.executeDefinitionProvider",
-    uri,
-    pos,
+  const definitions = await vscode.commands.executeCommand<
+    Array<vscode.Location | vscode.LocationLink>
+  >("vscode.executeDefinitionProvider", uri, pos);
+  const locations = (definitions ?? []).map((definition) =>
+    "targetUri" in definition
+      ? new vscode.Location(
+          definition.targetUri,
+          definition.targetSelectionRange ?? definition.targetRange,
+        )
+      : definition,
   );
-  return locations || [];
+  const leaked = locations.filter((location) => isVirtualCarrierPath(location.uri.fsPath));
+  assert.deepEqual(
+    leaked.map((location) => location.uri.fsPath),
+    [],
+    "definitions must never expose carrier virtual files",
+  );
+  return locations;
 }
 
 /**
@@ -998,7 +1056,7 @@ export async function getRenameEdits(
 ): Promise<vscode.WorkspaceEdit | undefined> {
   try {
     return await vscode.commands.executeCommand<vscode.WorkspaceEdit>(
-      "vscode.executeRenameProvider",
+      "vscode.executeDocumentRenameProvider",
       uri,
       position,
       newName,

@@ -6,12 +6,25 @@ import { openReadyCached, getAppVuePath, FIXTURE_NAME, TYPE_PROVIDER } from "../
 
 /** Execute go-to-definition at a position and return locations. */
 async function getDefinitions(uri: vscode.Uri, pos: vscode.Position): Promise<vscode.Location[]> {
-  const locations = await vscode.commands.executeCommand<vscode.Location[]>(
-    "vscode.executeDefinitionProvider",
-    uri,
-    pos,
+  const definitions = await vscode.commands.executeCommand<
+    Array<vscode.Location | vscode.LocationLink>
+  >("vscode.executeDefinitionProvider", uri, pos);
+  const locations = (definitions ?? []).map((definition) =>
+    "targetUri" in definition
+      ? new vscode.Location(
+          definition.targetUri,
+          definition.targetSelectionRange ?? definition.targetRange,
+        )
+      : definition,
   );
-  return locations || [];
+  const leaked = locations.filter((location) =>
+    /\.(?:vue|svelte)\.(?:tsx|jsx|verter\.ts|d\.ts|__verter_test\.ts)$/i.test(location.uri.fsPath),
+  );
+  expect(
+    leaked.map((location) => location.uri.fsPath),
+    "definitions must never expose carrier virtual files",
+  ).to.deep.equal([]);
+  return locations;
 }
 
 /** Find position of `needle` in document text, offset by `charOffset` into the match. */
