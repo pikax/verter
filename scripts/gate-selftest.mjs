@@ -1599,8 +1599,8 @@ async function main() {
   //      artifact but currently omits its hashed PDB. The allocation-site audit deliberately verifies
   //      named caller attribution, so the canonical archived surface must restore that sidecar from the
   //      runner-owned build tree before nextest launches the test. This drives the real helper with an
-  //      injected filesystem: the required verter_napi PDB is copied to the matching extracted path;
-  //      a missing source PDB is a loud setup error; non-Windows runs perform no copy.
+  //      injected filesystem: the required verter_napi PDB replaces an already-present stale extracted
+  //      sidecar; a missing source PDB is a loud setup error; non-Windows runs perform no copy.
   // --------------------------------------------------------------------------------------------------
   process.stderr.write("\n(xi-b) WINDOWS archive debug-sidecar completeness\n");
   {
@@ -1611,7 +1611,9 @@ async function main() {
     const source = "C:\\gate\\runner\\debug\\deps\\verter_napi-deadbeef.pdb";
     const destination = "C:\\gate\\extract\\target\\debug\\deps\\verter_napi-deadbeef.pdb";
     const copied = [];
-    const present = new Set([source]);
+    // `--extract-overwrite` does not remove files omitted by the new archive. Model a destination PDB left
+    // behind by an earlier gate run: it must never suppress copying the current matching build sidecar.
+    const present = new Set([source, destination]);
     const result = ensureRequiredWindowsDebugSidecars({
       allSuites: [suite],
       runnerTarget: "C:\\gate\\runner",
@@ -1628,7 +1630,8 @@ async function main() {
       runnerTarget: "C:\\gate\\runner",
       extractDir: "C:\\gate\\extract",
       windows: true,
-      existsFn: () => false,
+      // A stale extracted destination must not mask a missing current source.
+      existsFn: (path) => path === destination,
       copyFileFn: () => {
         throw new Error("copy must not run without the source PDB");
       },
@@ -1660,8 +1663,8 @@ async function main() {
       );
     } else {
       pass(
-        "(xi-b) WINDOWS archive debug sidecar: required verter_napi PDB is copied beside the extracted " +
-          "test binary, missing source fails setup, and non-Windows execution is a no-op",
+        "(xi-b) WINDOWS archive debug sidecar: required verter_napi PDB replaces a stale extracted " +
+          "sidecar, missing source fails setup, and non-Windows execution is a no-op",
       );
     }
   }

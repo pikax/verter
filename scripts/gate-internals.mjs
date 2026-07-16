@@ -116,7 +116,6 @@ export function ensureRequiredWindowsDebugSidecars({
     const toPdb = (path) => `${path.slice(0, -4)}.pdb`;
     const sourcePdb = toPdb(pathApi.join(pathApi.resolve(runnerTarget), relativeBinary));
     const destinationPdb = toPdb(resolvedBinary);
-    if (existsFn(destinationPdb)) continue;
     if (!existsFn(sourcePdb)) {
       return {
         error: `required Windows debug sidecar is missing for '${binaryId}': ${sourcePdb}`,
@@ -125,6 +124,9 @@ export function ensureRequiredWindowsDebugSidecars({
     }
 
     try {
+      // `--extract-overwrite` replaces members present in the new archive but does not remove
+      // sidecars the archive omits. Therefore destination existence proves nothing about freshness:
+      // always overwrite it from the PDB produced alongside this run's exact test executable.
       copyFileFn(sourcePdb, destinationPdb);
     } catch (error) {
       return {
