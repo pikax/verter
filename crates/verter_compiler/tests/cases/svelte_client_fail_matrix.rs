@@ -528,15 +528,11 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<script>let c = $state(0);</script>\n<button onclick={async () => { await c; }}>x</button>\n",
         code: "svelte-runtime-unsupported-experimental-async",
     },
-    // ── text (static-interpolation / async / root-text) ─────────────────────
+    // ── text (async / root-text) ────────────────────────────────────────────
     FailRow {
-        name: "text_static_interp",
-        source: "<script>let c = $state(0); const k = 1;</script>\n<button onclick={() => c++}>{k}</button>\n",
-        code: "svelte-runtime-unsupported-static-interpolation",
-    },
-    FailRow {
-        // An `await` interpolation is a non-identifier expression — the
-        // `build_template_chunk` breadth, refused before the async-rewrite gate.
+        // A top-level `await` root is outside the accepted text-chunk root
+        // vocabulary. Nested `await` inside an accepted call root retains the
+        // more precise experimental-async diagnostic in the runtime unit suite.
         name: "text_await",
         source: "<script>let c = $state(0);</script>\n<button onclick={() => c++}>{await Promise.resolve(c)}</button>\n",
         code: "svelte-runtime-unsupported-complex-interpolation",
@@ -1170,49 +1166,9 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<script>let c = $state(0);</script>\n{@const x = 1}\n<button onclick={() => c++}>{c}</button>\n",
         code: "svelte-runtime-unsupported-block",
     },
-    FailRow {
-        // A MEMBER read inside reactive text WITHIN a block body (`{item.x}`): block-body
-        // content is scoped to the BARE-signal reactive-text surface, so a member read is
-        // the interpolation-breadth surface (owned by the reactive-text/interpolation
-        // completion work) and fails closed — it is NOT emitted, matching the topology
-        // corpus comment that excludes `{item.label}` block-body member reads.
-        name: "block_body_member_interpolation",
-        source: "<script>let { items } = $props();</script>\n{#each items as item}<p>{item.x}</p>{/each}\n",
-        code: "svelte-runtime-unsupported-complex-interpolation",
-    },
     // (`component` removed — a component reference is the 5f-a surface and now emits a
     // direct `Foo($$anchor, {})` call.)
     // ── Complex interpolations are fail-closed (complex-interpolation surface) ─
-    FailRow {
-        name: "interp_logical",
-        source: "<script>let count = $state(0);</script>\n<button onclick={() => count++}>{count || 0} x{count}</button>\n",
-        code: "svelte-runtime-unsupported-complex-interpolation",
-    },
-    FailRow {
-        name: "interp_binary",
-        source: "<script>let count = $state(0);</script>\n<button onclick={() => count++}>{count + 1}</button>\n",
-        code: "svelte-runtime-unsupported-complex-interpolation",
-    },
-    FailRow {
-        name: "interp_optional_call",
-        source: "<script>let count = $state(0); let f = $state(null);</script>\n<button onclick={() => count++}>{f?.(count)}</button>\n",
-        code: "svelte-runtime-unsupported-complex-interpolation",
-    },
-    FailRow {
-        name: "interp_call",
-        source: "<script>let count = $state(0); let f = $state(null);</script>\n<button onclick={() => count++}>{f(count)}</button>\n",
-        code: "svelte-runtime-unsupported-complex-interpolation",
-    },
-    FailRow {
-        name: "interp_member",
-        source: "<script>let count = $state(0); let obj = $state(null);</script>\n<button onclick={() => count++}>{obj?.x}</button>\n",
-        code: "svelte-runtime-unsupported-complex-interpolation",
-    },
-    FailRow {
-        name: "interp_conditional",
-        source: "<script>let count = $state(0);</script>\n<button onclick={() => count++}>{count ? count : 0}</button>\n",
-        code: "svelte-runtime-unsupported-complex-interpolation",
-    },
     FailRow {
         name: "derived_simple",
         source: "<script>let c = $state(0); let d = $derived(c + 1);</script>\n<button onclick={() => c++}>{d}</button>\n",
@@ -1572,12 +1528,11 @@ const FAIL_MATRIX: &[FailRow] = &[
     },
     FailRow {
         // A WELL-FORMED `$host()` in an INTERPOLATION (`<p>{$host()}</p>`) inside
-        // the admitting context — the interpolation position does not lower the
-        // host read today; it fails closed at the interpolation classifier
-        // (never a raw `$host` in emitted output).
+        // the admitting context. The interpolation carrier accepts calls, then
+        // the unsupported rune retains its own diagnostic identity.
         name: "host_call_interpolation_inside_custom_element",
         source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n<p>{$host()}</p>\n<button onclick={() => c++}>{c}</button>\n",
-        code: "svelte-runtime-unsupported-complex-interpolation",
+        code: "svelte-runtime-unsupported-advanced-rune",
     },
     // ── `$host` DEGENERATE-UNBOUND residue (well-formed, admitted, un-bound) ──
     // Official `svelte@5.56.3` rewrites every ADMITTED `$host()` to
@@ -1840,7 +1795,6 @@ fn fail_matrix_row_codes_are_known_unsupported_diagnostics() {
         "svelte-runtime-unsupported-advanced-rune",
         "svelte-runtime-unsupported-host-custom-element",
         "svelte-runtime-unsupported-experimental-async",
-        "svelte-runtime-unsupported-static-interpolation",
         "svelte-runtime-unsupported-destructuring-write",
         "svelte-runtime-unsupported-root-text-region",
         "svelte-runtime-unsupported-complex-interpolation",
@@ -2602,31 +2556,25 @@ fn generated_rune_declaration_kinds_land_on_boundary() {
 
 #[test]
 fn generated_interpolation_expression_kinds_land_on_boundary() {
-    // The finite grammar of an interpolation `{expr}` EXPRESSION kind. ONLY a bare
-    // identifier resolving to a reactive `$state` signal read or a no-default prop
-    // read is supported; EVERY non-identifier expression shape (a binary / logical /
-    // conditional / call / optional-call / member / sequence / unary / `new` /
-    // template / parenthesized / TS-wrapped) needs the official `build_template_chunk`
-    // evaluator and fails closed. A bare identifier resolving to a non-reactive
-    // binding is the static-fold deferral.
+    // The finite grammar pins the retained-AST interpolation boundary. Root
+    // families implemented by the shared text-chunk planner are supported;
+    // unary and sequence roots remain explicitly fail-closed.
     let head = "<script>let c = $state(0); let f = $state(null); let obj = $state(0);</script>\n";
     let variants: &[(&str, &str, Expected)] = &[
-        // ── supported: bare reactive identifier read ─────────────────────────────
         ("signal_ident", "{c}", Expected::Supported),
-        // ── demoted: complex expression shapes (build_template_chunk) ─────────
-        ("binary", "{c + 1}", Expected::FailClosed),
-        ("logical", "{c || 0}", Expected::FailClosed),
-        ("conditional", "{c ? c : 0}", Expected::FailClosed),
-        ("call", "{f(c)}", Expected::FailClosed),
-        ("optional_call", "{f?.(c)}", Expected::FailClosed),
-        ("member", "{obj.x}", Expected::FailClosed),
-        ("optional_member", "{obj?.x}", Expected::FailClosed),
+        ("binary", "{c + 1}", Expected::Supported),
+        ("logical", "{c || 0}", Expected::Supported),
+        ("conditional", "{c ? c : 0}", Expected::Supported),
+        ("call", "{f(c)}", Expected::Supported),
+        ("optional_call", "{f?.(c)}", Expected::Supported),
+        ("member", "{obj.x}", Expected::Supported),
+        ("optional_member", "{obj?.x}", Expected::Supported),
         ("unary", "{-c}", Expected::FailClosed),
         ("sequence", "{(c, c)}", Expected::FailClosed),
-        ("new_expr", "{new Date()}", Expected::FailClosed),
-        ("template", "{`v${c}`}", Expected::FailClosed),
-        ("parenthesized", "{(c)}", Expected::FailClosed),
-        ("literal", "{1}", Expected::FailClosed),
+        ("new_expr", "{new Date()}", Expected::Supported),
+        ("template", "{`v${c}`}", Expected::Supported),
+        ("parenthesized", "{(c)}", Expected::Supported),
+        ("literal", "{1}", Expected::Supported),
     ];
     for (label, interp, expected) in variants {
         // The interpolation under test is the button text; the onclick keeps the
@@ -2998,8 +2946,8 @@ fn fail_matrix_covers_every_documented_sub_shape() {
     // (the legacy `$.mutable_source` promotion is legacy-mode-only).
     assert_eq!(
         FAIL_MATRIX.len(),
-        216,
-        "the fail matrix pins 216 fail-closed rows — one documented \
+        208,
+        "the fail matrix pins 208 fail-closed rows — one documented \
          unsupported-feature sub-shape per row, EXCEPT the D-43 custom-element-host / \
          native-slotting rows, which are REPRESENTATIVE smoke probes for that \
          root-scoped over-refusal class (protected by the generic host-gate rows plus \
@@ -3018,9 +2966,7 @@ fn fail_matrix_covers_every_documented_sub_shape() {
          rather than the roots-only hoist that silently DROPPED a non-region-root \
          declaration tag, plus a `{{@const}}` at the COMPONENT ROOT \
          (`const_tag_at_component_root`) which the official also rejects (the component root \
-         is not a `{{@const}}` valid parent) — +4 rows. A MEMBER read inside reactive text \
-         within a block body (`block_body_member_interpolation`, `{{item.x}}`) fails closed \
-         as the interpolation-breadth surface — +1 row. The regular-element event surface is \
+         is not a `{{@const}}` valid parent) — +4 rows. The regular-element event surface is \
          now SUPPORTED, so \
          its three former rows moved to the positive `events/*` corpus + smoke, replaced \
          by the two still-fail-closed rows `event_invalid_modifier_combo` and \

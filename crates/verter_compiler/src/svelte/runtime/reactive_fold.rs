@@ -82,18 +82,96 @@ pub(super) fn mixed_chunk_fold(
         return ChunkFold::Live { ledger: None };
     };
     let instance_program = instance_source.and_then(|src| reparse_module(&alloc, src));
-    let inits = instance_program
-        .as_ref()
-        .map(collect_top_level_inits)
-        .unwrap_or_default();
-    let ctx = ChunkEvalCtx {
+    mixed_chunk_fold_parsed(
+        &stmt.expression,
+        scope,
         bindings,
         scopes,
-        scope,
-        inits: &inits,
-    };
-    let mut visited = rustc_hash::FxHashSet::default();
-    ctx.evaluate(&stmt.expression, &mut visited).classify()
+        instance_program.as_ref(),
+    )
+}
+
+/// Retained-AST form of [`mixed_chunk_fold`]. Template interpolation planning
+/// uses this entry point so the evaluator shares the canonical lowering parse.
+#[must_use]
+pub(super) fn mixed_chunk_fold_parsed<'ast>(
+    expression: &Expression<'ast>,
+    scope: ScopeId,
+    bindings: &BindingTable,
+    scopes: &ScopeGraph,
+    instance_program: Option<&'ast Program<'ast>>,
+) -> ChunkFold {
+    PreparedChunkEvaluator::new(bindings, scopes, instance_program).fold(expression, scope)
+}
+
+/// Immutable, per-client-plan constant-evaluation context. The top-level
+/// initializer index is built once and reused by every interpolation's fold and
+/// definedness decisions.
+pub(super) struct PreparedChunkEvaluator<'analysis, 'ast> {
+    bindings: &'analysis BindingTable,
+    scopes: &'analysis ScopeGraph,
+    inits: rustc_hash::FxHashMap<&'ast str, &'ast Expression<'ast>>,
+}
+
+impl<'analysis, 'ast> PreparedChunkEvaluator<'analysis, 'ast> {
+    #[must_use]
+    pub(super) fn new(
+        bindings: &'analysis BindingTable,
+        scopes: &'analysis ScopeGraph,
+        instance_program: Option<&'ast Program<'ast>>,
+    ) -> Self {
+        Self {
+            bindings,
+            scopes,
+            inits: instance_program
+                .map(collect_top_level_inits)
+                .unwrap_or_default(),
+        }
+    }
+
+    #[must_use]
+    pub(super) fn fold(&self, expression: &Expression<'ast>, scope: ScopeId) -> ChunkFold {
+        let ctx = ChunkEvalCtx {
+            bindings: self.bindings,
+            scopes: self.scopes,
+            scope,
+            inits: &self.inits,
+        };
+        let mut visited = rustc_hash::FxHashSet::default();
+        ctx.evaluate(expression, &mut visited).classify()
+    }
+
+    #[must_use]
+    pub(super) fn nullish_wrap(
+        &self,
+        expression: &Expression<'ast>,
+        scope: ScopeId,
+        is_memoized: bool,
+    ) -> NullishCoalesce {
+        if is_memoized {
+            return NullishCoalesce::Bare;
+        }
+        let ctx = ChunkEvalCtx {
+            bindings: self.bindings,
+            scopes: self.scopes,
+            scope,
+            inits: &self.inits,
+        };
+        let mut visited = rustc_hash::FxHashSet::default();
+        if ctx.evaluate(expression, &mut visited).is_defined() {
+            return NullishCoalesce::None;
+        }
+        if is_logical_andor(unwrap_parens(expression)) {
+            NullishCoalesce::Parenthesized
+        } else {
+            NullishCoalesce::Bare
+        }
+    }
+
+    #[cfg(test)]
+    fn top_level_init_count(&self) -> usize {
+        self.inits.len()
+    }
 }
 
 /// How a LIVE (un-folded) mixed-template expression part is coerced to a string in the
@@ -235,11 +313,11 @@ fn collect_top_level_inits<'a>(
 
 /// The evaluation context — the binding/scope resolver (for the foldability gate) plus the
 /// top-level initializer map (for the identifier-recursion value).
-struct ChunkEvalCtx<'a> {
-    bindings: &'a BindingTable,
-    scopes: &'a ScopeGraph,
+struct ChunkEvalCtx<'analysis, 'ast> {
+    bindings: &'analysis BindingTable,
+    scopes: &'analysis ScopeGraph,
     scope: ScopeId,
-    inits: &'a rustc_hash::FxHashMap<&'a str, &'a Expression<'a>>,
+    inits: &'analysis rustc_hash::FxHashMap<&'ast str, &'ast Expression<'ast>>,
 }
 
 /// A faithful port of the value-set in official's `Evaluation` (`phases/scope.js`): a chunk
@@ -434,7 +512,7 @@ impl Eval {
     }
 }
 
-impl ChunkEvalCtx<'_> {
+impl ChunkEvalCtx<'_, '_> {
     /// Evaluate a chunk expression to its value set — a faithful port of official's
     /// `Evaluation` constructor switch (`phases/scope.js`). `visited` guards identifier
     /// recursion cycles (official's `current_evaluations` map).
@@ -614,10 +692,14 @@ impl ChunkEvalCtx<'_> {
     /// by recursing into its initializer; `undefined` is the global; everything else is
     /// UNKNOWN (a reactive signal, a prop, an unresolved global).
     fn evaluate_identifier(&self, name: &str, visited: &mut rustc_hash::FxHashSet<String>) -> Eval {
-        // A demoted `$state` lowers to `PlainLocal`; a signal / prop / proxy / derived is
-        // reactive and never statically known.
-        if self.bindings.resolve_kind(self.scopes, self.scope, name)
-            == Some(BindingRuntimeKind::PlainLocal)
+        // A plain `let` is explicitly registered as `PlainLocal`. Top-level
+        // `const`/`var` declarations intentionally have no runtime binding row,
+        // but their canonical script initializer is still authoritative and
+        // official evaluates it when it is unchanged. Reactive/import/prop rows
+        // never enter this initializer fold.
+        let kind = self.bindings.resolve_kind(self.scopes, self.scope, name);
+        if kind == Some(BindingRuntimeKind::PlainLocal)
+            || (kind.is_none() && self.inits.contains_key(name))
         {
             // Cycle guard: official's `current_evaluations` returns the in-flight evaluation
             // (which is empty / unknown) when an expression re-enters itself.
@@ -1330,7 +1412,10 @@ fn static_member_keypath(expr: &Expression<'_>) -> Option<String> {
 
 /// The global keypath of a CALL callee (`String` / `Math.floor`) NOT shadowed by a binding,
 /// for the pure-global-call fold. Returns `(keypath, ())`.
-fn global_call_keypath(callee: &Expression<'_>, ctx: &ChunkEvalCtx<'_>) -> Option<(String, ())> {
+fn global_call_keypath(
+    callee: &Expression<'_>,
+    ctx: &ChunkEvalCtx<'_, '_>,
+) -> Option<(String, ())> {
     let keypath = static_member_keypath(callee)?;
     let root = keypath.split('.').next()?;
     if ctx

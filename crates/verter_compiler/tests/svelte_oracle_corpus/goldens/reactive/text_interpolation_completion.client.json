@@ -1,0 +1,116 @@
+{
+  "slug": "reactive/text_interpolation_completion.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "text_interpolation_completion",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "from_html",
+    "state",
+    "proxy",
+    "first_child",
+    "child",
+    "reset",
+    "sibling",
+    "child",
+    "reset",
+    "sibling",
+    "sibling",
+    "each",
+    "get",
+    "index",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "append",
+    "sibling",
+    "template_effect",
+    "set_text",
+    "get",
+    "set_text",
+    "get",
+    "delegated",
+    "set",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "delegate",
+    "delegated",
+    "each",
+    "first_child",
+    "from_html",
+    "get",
+    "index",
+    "proxy",
+    "reset",
+    "set",
+    "set_text",
+    "sibling",
+    "state",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 2,
+    "state": 1,
+    "proxy": 1,
+    "first_child": 1,
+    "child": 3,
+    "reset": 3,
+    "sibling": 4,
+    "each": 1,
+    "get": 4,
+    "index": 1,
+    "template_effect": 2,
+    "set_text": 3,
+    "append": 2,
+    "delegated": 1,
+    "set": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p> </p>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<p> </p> <p> </p> <div></div> <!> <button>change</button>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p> </p>`); var root_1 = $.from_html(`<p> </p> <p> </p> <div></div> <!> <button>change</button>`, 1); export default function text_interpolation_completion($$anchor) {let value = $.state($.proxy({label: 'x'})); const constant = 5; function label(input) {return input.label;} var fragment = root_1(); var p = $.first_child(fragment); var text = $.child(p, true); $.reset(p); var p_1 = $.sibling(p, 2); var text_1 = $.child(p_1, true); $.reset(p_1); var div = $.sibling(p_1, 2); div.textContent = 'static 5'; var node = $.sibling(div, 2); $.each(node, 17, () => [$.get(value)], $.index, ($$anchor, item) => {var p_2 = root(); var text_2 = $.child(p_2); $.reset(p_2); $.template_effect(() => $.set_text(text_2, `item ${$.get(item).label ?? ''}`)); $.append($$anchor, p_2);}); var button = $.sibling(node, 2); $.template_effect(($0) => {$.set_text(text, $.get(value).label); $.set_text(text_1, $0);}, [() => label($.get(value))]); $.delegated('click', button, () => $.set(value, {label: 'y'}, true)); $.append($$anchor, fragment);} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

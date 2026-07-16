@@ -545,6 +545,24 @@ pub(super) fn synthesize_region(
     scope: &TemplateScope,
     css: Option<&CssScopeFacts>,
 ) -> TemplateFactory {
+    synthesize_region_with_client_nodes(ir, scope, css, None)
+}
+
+pub(super) fn synthesize_region_for_client(
+    ir: &SvelteRuntimeIr,
+    scope: &TemplateScope,
+    css: Option<&CssScopeFacts>,
+    client_nodes: &[super::client_plan_types::ClientNode],
+) -> TemplateFactory {
+    synthesize_region_with_client_nodes(ir, scope, css, Some(client_nodes))
+}
+
+fn synthesize_region_with_client_nodes(
+    ir: &SvelteRuntimeIr,
+    scope: &TemplateScope,
+    css: Option<&CssScopeFacts>,
+    client_nodes: Option<&[super::client_plan_types::ClientNode]>,
+) -> TemplateFactory {
     // The region's roots are at the fragment level (no parent element, never inside a
     // `<pre>`), html-namespaced, with whitespace/comment preservation following the
     // resolved compile options — the ONE shared `region_ctx` derivation.
@@ -618,7 +636,7 @@ pub(super) fn synthesize_region(
         }
     }
     let mut html = String::new();
-    super::template_serialize::serialize_clean_items(ir, &items, ctx, css, &mut html);
+    super::template_serialize::serialize_clean_items(ir, &items, ctx, css, client_nodes, &mut html);
     let fragments = ir.root_options.fragments;
     // The trailing flag is the official `from_*` bitmask: TEMPLATE_FRAGMENT (1) for a
     // MULTI-ROOT template (2+ cleaned DOM positions), OR'd with TEMPLATE_USE_IMPORT_NODE
@@ -638,7 +656,11 @@ pub(super) fn synthesize_region(
     // built from the SAME cleaned-item sequence + scope facts, so the two never disagree.
     let tree = if fragments == SvelteFragments::Tree {
         Some(super::template_serialize::objectify_region(
-            ir, &items, ctx, css,
+            ir,
+            &items,
+            ctx,
+            css,
+            client_nodes,
         ))
     } else {
         None
@@ -1216,6 +1238,22 @@ pub fn plan_static_templates(
     ir: &SvelteRuntimeIr,
     css: Option<&CssScopeFacts>,
 ) -> StaticTemplatePlan {
+    plan_static_templates_impl(ir, css, None)
+}
+
+pub(super) fn plan_static_templates_for_client(
+    ir: &SvelteRuntimeIr,
+    css: Option<&CssScopeFacts>,
+    client_nodes: &[super::client_plan_types::ClientNode],
+) -> StaticTemplatePlan {
+    plan_static_templates_impl(ir, css, Some(client_nodes))
+}
+
+fn plan_static_templates_impl(
+    ir: &SvelteRuntimeIr,
+    css: Option<&CssScopeFacts>,
+    client_nodes: Option<&[super::client_plan_types::ClientNode]>,
+) -> StaticTemplatePlan {
     let mut plan = StaticTemplatePlan::default();
     let mut scopes = Vec::new();
     collect_template_scopes(ir, ir.root, &mut scopes);
@@ -1239,7 +1277,12 @@ pub fn plan_static_templates(
         if scope_id != ir.root && region_empty {
             continue;
         }
-        plan.templates.push(synthesize_region(ir, scope, css));
+        plan.templates.push(synthesize_region_with_client_nodes(
+            ir,
+            scope,
+            css,
+            client_nodes,
+        ));
     }
     // Walk EVERY region for its dynamic slots + client paths (the nested-block
     // bodies are not reachable from the root region's element-child recursion — a

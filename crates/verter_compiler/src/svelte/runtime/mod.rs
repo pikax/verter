@@ -140,7 +140,7 @@ use verter_span::Span;
 
 use attr_lowering::lower_attributes;
 use expr::{
-    collect_expr_references, parse_debug_identifier_spans, parse_pattern_names, AnalyzedExpr,
+    collect_expr_references_in, parse_debug_identifier_spans, parse_pattern_names, AnalyzedExpr,
     BindingInfo, BindingRuntimeKind, BindingTable, ExprArena, ScopeGraph, ScopeId, ScriptAnalysis,
 };
 use html::StaticTemplatePlan;
@@ -299,6 +299,8 @@ use naming::derive_component_name;
 /// state.
 pub(super) struct LoweringCtx<'a> {
     pub(super) source: &'a str,
+    /// Parser arena shared by scripts and every canonical template expression.
+    alloc: &'a Allocator,
     nodes: Vec<IrNode>,
     ops: Vec<RuntimeOp>,
     pub(super) template_scopes: Vec<TemplateScope>,
@@ -379,15 +381,16 @@ impl<'a> LoweringCtx<'a> {
         id
     }
 
-    /// Intern a template expression: reparse its references and record its scope.
+    /// Intern a template expression: parse it once, retain the typed AST, and
+    /// record its facts and scope.
     /// A fragment that does not parse cleanly records a parse diagnostic so the
     /// failure is surfaced rather than silently dropped to no references.
     pub(super) fn push_expr(&mut self, span: Span, scope: ScopeId) -> ExprId {
         let text = span_text(self.source, span);
-        match collect_expr_references(text) {
-            Ok(facts) => self
-                .expressions
-                .push(AnalyzedExpr::interned(text, span, scope, facts)),
+        match collect_expr_references_in(self.alloc, text) {
+            Ok((facts, program)) => self.expressions.push(AnalyzedExpr::interned_with_program(
+                text, span, scope, facts, program,
+            )),
             Err(()) => {
                 self.errors.push(
                     "svelte-runtime-expr-parse",
@@ -719,6 +722,7 @@ pub fn lower_parsed_svelte_to_ir<'a>(
     // --- Template IR lowering ---
     let mut ctx = LoweringCtx {
         source,
+        alloc,
         nodes: Vec::new(),
         ops: Vec::new(),
         template_scopes: Vec::new(),

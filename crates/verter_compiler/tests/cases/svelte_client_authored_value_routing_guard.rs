@@ -1958,7 +1958,7 @@ const AUTHORED_POSITION_SURFACE_BINDINGS: &[(&str, &str, &str, &str, usize)] = &
     ("client_plan.rs", "collect_group_dynamic_values", "attr_value_for", "AttributeValue", 1),
     ("client_plan.rs", "project_scope_op", "prepare_template_value", "AnimationParams", 1),
     ("client_plan.rs", "project_scope_op", "prepare_template_value", "AttachPayload", 1),
-    ("client_plan.rs", "project_scope_op", "prepare_template_value", "ReactiveText", 1),
+    ("client_plan.rs", "build_interpolation_plans", "prepare_template_value", "ReactiveText", 1),
     ("client_plan.rs", "project_scope_op", "prepare_template_value", "TransitionParams", 1),
     ("client_plan.rs", "project_scope_op", "prepare_template_value", "UseActionArg", 1),
     ("client_plan_attr_value.rs", "attr_value_for", "mixed_attr_value", "forwarded(surface)", 1),

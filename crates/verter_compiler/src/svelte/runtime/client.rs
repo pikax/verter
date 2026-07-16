@@ -757,17 +757,38 @@ impl<'a> ClientEmitter<'a> {
             self.emit_node_inline_inits(out, only);
             let child_items = clean_nodes(self.ir(), &el.children, child_ctx);
             let child_init_nodes = self.non_rendering_init_nodes(&el.children);
-            self.emit_walk_over_items(
-                out,
-                &child_items,
-                &child_init_nodes,
-                WalkBase::Element(region_var),
-                child_ctx,
-            );
-            // `$.reset(region_var)` after the clone-root element's children, when
-            // any child was named (matches official's innermost-first reset order).
-            if any_item_needs_name(self.ir(), &child_items) {
-                out.push_str(&format!("\t$.reset({region_var});\n"));
+            if let [only] = child_items.as_slice() {
+                if let Some(cooked) = self.static_text_run(only) {
+                    self.emit_non_rendering_inits(out, &child_init_nodes);
+                    if !cooked.is_empty() {
+                        out.push_str(&format!(
+                            "\t{region_var}.textContent = {};\n",
+                            js_single_quoted(&cooked)
+                        ));
+                    }
+                } else {
+                    self.emit_walk_over_items(
+                        out,
+                        &child_items,
+                        &child_init_nodes,
+                        WalkBase::Element(region_var),
+                        child_ctx,
+                    );
+                    if any_item_needs_name(self.ir(), &child_items) {
+                        out.push_str(&format!("\t$.reset({region_var});\n"));
+                    }
+                }
+            } else {
+                self.emit_walk_over_items(
+                    out,
+                    &child_items,
+                    &child_init_nodes,
+                    WalkBase::Element(region_var),
+                    child_ctx,
+                );
+                if any_item_needs_name(self.ir(), &child_items) {
+                    out.push_str(&format!("\t$.reset({region_var});\n"));
+                }
             }
             // The element's inline RENDER ops (`$.bind_this` / `$.action` / `$.attach`
             // / the action-host effect-wrapped events, in attribute source order) emit
@@ -883,9 +904,20 @@ impl<'a> ClientEmitter<'a> {
             // Record the var for the interpolations / element it names.
             match item {
                 CleanItem::TextRun { interps, .. } => {
-                    // The text node is shared by all interps in the run.
-                    for &interp in interps {
-                        self.interp_var.insert(interp, var.clone());
+                    if let Some(cooked) = self.static_text_run(item) {
+                        if !cooked.is_empty() {
+                            out.push_str(&format!(
+                                "\t{var}.nodeValue = {};\n",
+                                js_single_quoted(&cooked)
+                            ));
+                        }
+                    } else {
+                        // The text node is shared by all live interps in the run.
+                        for &interp in interps {
+                            if matches!(self.client_node(interp), ClientNode::ReactiveText { .. }) {
+                                self.interp_var.insert(interp, var.clone());
+                            }
+                        }
                     }
                 }
                 CleanItem::Node(node) => {
@@ -955,15 +987,38 @@ impl<'a> ClientEmitter<'a> {
                             let child_ctx = ctx.for_children_of(tag);
                             let child_items = clean_nodes(self.ir(), &el.children, child_ctx);
                             let child_init_nodes = self.non_rendering_init_nodes(&el.children);
-                            self.emit_walk_over_items(
-                                out,
-                                &child_items,
-                                &child_init_nodes,
-                                WalkBase::Element(&var),
-                                child_ctx,
-                            );
-                            if any_item_needs_name(self.ir(), &child_items) {
-                                out.push_str(&format!("\t$.reset({var});\n"));
+                            if let [only] = child_items.as_slice() {
+                                if let Some(cooked) = self.static_text_run(only) {
+                                    self.emit_non_rendering_inits(out, &child_init_nodes);
+                                    if !cooked.is_empty() {
+                                        out.push_str(&format!(
+                                            "\t{var}.textContent = {};\n",
+                                            js_single_quoted(&cooked)
+                                        ));
+                                    }
+                                } else {
+                                    self.emit_walk_over_items(
+                                        out,
+                                        &child_items,
+                                        &child_init_nodes,
+                                        WalkBase::Element(&var),
+                                        child_ctx,
+                                    );
+                                    if any_item_needs_name(self.ir(), &child_items) {
+                                        out.push_str(&format!("\t$.reset({var});\n"));
+                                    }
+                                }
+                            } else {
+                                self.emit_walk_over_items(
+                                    out,
+                                    &child_items,
+                                    &child_init_nodes,
+                                    WalkBase::Element(&var),
+                                    child_ctx,
+                                );
+                                if any_item_needs_name(self.ir(), &child_items) {
+                                    out.push_str(&format!("\t$.reset({var});\n"));
+                                }
                             }
                             // `bind:this` + the init-domain lifecycle ops (`$.action`
                             // / `$.attach`) + the action-host effect-wrapped events
@@ -1052,6 +1107,35 @@ impl<'a> ClientEmitter<'a> {
             .get(&target)
             .cloned()
             .unwrap_or_else(|| "node".to_string())
+    }
+
+    /// Return the cooked value of an all-static interpolation text run. Source
+    /// literal parts are decoded because `textContent`/`nodeValue` consume DOM
+    /// text rather than HTML source. A run containing any live interpolation is
+    /// not a static initialization.
+    fn static_text_run(&self, item: &CleanItem) -> Option<String> {
+        let CleanItem::TextRun { interps, .. } = item else {
+            return None;
+        };
+        let first = *interps.first()?;
+        if interps
+            .iter()
+            .any(|node| !matches!(self.client_node(*node), ClientNode::StaticText { .. }))
+        {
+            return None;
+        }
+        let run = self.owning_text_run(first);
+        if run.iter().any(|part| matches!(part, RunPart::Interp(_))) {
+            return None;
+        }
+        Some(
+            run.into_iter()
+                .map(|part| match part {
+                    RunPart::Literal(text) => text,
+                    RunPart::Interp(_) => unreachable!(),
+                })
+                .collect(),
+        )
     }
 
     /// Emit the `$.set_text(...)` call body for the reactive-text node `target`.
@@ -1158,8 +1242,26 @@ impl<'a> ClientEmitter<'a> {
                 RunPart::Interp(interp_node) => {
                     let value = self.memoized_interp(*interp_node, memoizer);
                     tmpl.push_unmapped("${");
-                    tmpl.push_mapped(&value);
-                    tmpl.push_unmapped(" ?? ''}");
+                    match self.client_node(*interp_node) {
+                        ClientNode::ReactiveText {
+                            coalesce: super::reactive_fold::NullishCoalesce::None,
+                            ..
+                        } => tmpl.push_mapped(&value),
+                        ClientNode::ReactiveText {
+                            coalesce: super::reactive_fold::NullishCoalesce::Parenthesized,
+                            ..
+                        } => {
+                            tmpl.push_unmapped("(");
+                            tmpl.push_mapped(&value);
+                            tmpl.push_unmapped(") ?? ''");
+                        }
+                        ClientNode::ReactiveText { .. } => {
+                            tmpl.push_mapped(&value);
+                            tmpl.push_unmapped(" ?? ''");
+                        }
+                        _ => unreachable!("only live interpolation parts reach memoization"),
+                    }
+                    tmpl.push_unmapped("}");
                 }
             }
         }
@@ -1198,7 +1300,11 @@ impl<'a> ClientEmitter<'a> {
                 .into_iter()
                 .map(|p| match p {
                     RunTextPart::Literal(text) => RunPart::Literal(decode_text_entities(&text)),
-                    RunTextPart::Interp(node) => RunPart::Interp(node),
+                    RunTextPart::Interp(node) => match self.client_node(node) {
+                        ClientNode::StaticText { cooked, .. } => RunPart::Literal(cooked.clone()),
+                        ClientNode::ReactiveText { .. } => RunPart::Interp(node),
+                        _ => unreachable!("text-run interpolation must project to a text node"),
+                    },
                 })
                 .collect();
         }

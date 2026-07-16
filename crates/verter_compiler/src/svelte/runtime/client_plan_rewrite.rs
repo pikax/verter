@@ -48,8 +48,12 @@ impl<'a> SupportedClientIr<'a> {
         _scope: ScopeId,
     ) -> Result<String, UnsupportedSvelteRuntimeSurface> {
         let analyzed = self.ir.analysis.expressions.get(expr_id);
-        expr_rewrite::rewrite_expression_full(
+        let program = analyzed.parsed_program.as_ref().ok_or_else(|| {
+            UnsupportedSvelteRuntimeSurface::expression_fact_recovery("rewrite-ast")
+        })?;
+        expr_rewrite::rewrite_expression_full_parsed(
             analyzed.source,
+            program,
             analyzed.scope,
             expression_context(self),
         )

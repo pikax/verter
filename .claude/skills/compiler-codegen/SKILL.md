@@ -190,6 +190,10 @@ Default is parity with official's observable-correct behavior. A deviation is a 
 
 Guards: `svelte_structural_conformance_discriminates_cosmetic_from_behavioral_diffs`, `no_compiled_output_cosmetic_reprinter_path`.
 
+### Svelte client text interpolation
+
+Template text expressions are classified from the canonical retained OXC AST. Supported roots are identifier, member/optional-member, call/optional-call, binary, logical, conditional, template, `new`, and primitive literals. Rewriting, call memoization, binding impurity, D-14 constant evaluation, and nullish-coalescing analysis must consume that retained carrier rather than reparsing or scanning source text. Exact static runs use `textContent` (sole element child) or `nodeValue` (reached sibling text node) without an effect; mixed static/live chunks share one text update, and call-bearing values use the official deps-array `$.template_effect` topology. Each/await aliases retain their signal-root rewrite. Unsupported nested constructs preserve their precise typed refusal.
+
 ## Svelte Compile-Options Resolver
 
 `resolve_svelte_compile_options(source, parsed, opts) -> Result<ResolvedSvelteCompileOptions, UnsupportedSvelteRuntimeSurface>` (`svelte/runtime/compile_options.rs`) is the SINGLE fold point for Svelte compile options. It runs ONCE per compile request from the single guarded call site at the top of `compile_client` (`svelte/runtime/client_compile.rs`) — every downstream consumer reads the resolved struct, never the raw `SvelteRuntimeOptions`.

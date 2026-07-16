@@ -259,6 +259,7 @@ pub(super) fn after_update_ranks(
             Some(
                 ClientNode::Text { .. }
                 | ClientNode::Comment { .. }
+                | ClientNode::StaticText { .. }
                 | ClientNode::ReactiveText { .. }
                 | ClientNode::RawHtml { .. }
                 | ClientNode::OptionsMarker { .. }

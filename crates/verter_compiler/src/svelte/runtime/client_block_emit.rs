@@ -18,7 +18,7 @@ use super::client_plan_block_types::{
     ClientAwait, ClientBlock, ClientDeclKeyword, ClientDeclaration, ClientEach, ClientIfBranch,
 };
 use super::client_plan_types::ClientNode;
-use super::html::{synthesize_region, TemplateFactory};
+use super::html::{synthesize_region_for_client, TemplateFactory};
 use super::ir::{BlockIr, IrNode, NodeId, SvelteRuntimeIr, TemplateScope, TemplateScopeId};
 use super::whitespace::{clean_nodes, CleanItem};
 
@@ -32,10 +32,11 @@ impl<'a> ClientEmitter<'a> {
     pub(super) fn plan_region_factories(&mut self, out: &mut super::output::SvelteRuntimeOutput) {
         let (regions, each_scopes) = self.post_order_regions();
         for scope_id in regions {
-            let factory = synthesize_region(
+            let factory = synthesize_region_for_client(
                 self.ir(),
                 self.ir().template_scope(scope_id),
                 self.plan.build.css_scope.as_ref(),
+                &self.plan.nodes,
             );
             let region_frame = match &factory {
                 // ONLY a `$.from_html(...)` clone factory is module-hoisted + factory-called.

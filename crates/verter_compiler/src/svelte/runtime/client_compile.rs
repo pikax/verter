@@ -19,9 +19,8 @@ use super::official_reject;
 use super::official_rule::OfficialRejection;
 use super::parse_refusal::parse_domain_gate;
 use super::{
-    lower_parsed_svelte_to_ir, plan_client_topology, plan_static_templates,
-    resolve_svelte_compile_options, RuntimeLoweringErrors, SvelteRuntimeOptions,
-    UnsupportedSvelteRuntimeSurface,
+    lower_parsed_svelte_to_ir, plan_client_topology, resolve_svelte_compile_options,
+    RuntimeLoweringErrors, SvelteRuntimeOptions, UnsupportedSvelteRuntimeSurface,
 };
 
 /// The exact invariant that prevented a generated client source map from being
@@ -240,7 +239,8 @@ pub fn compile_client<'a>(
     // artifact (the carrier publishes it); INJECTED css (options
     // `css="injected"` / custom element) inlines into the module as the hoisted
     // `$$css` + `$.append_styles` prelude and produces NO external artifact.
-    let html_plan = plan_static_templates(&ir, scope_facts.as_ref());
+    let html_plan =
+        super::html::plan_static_templates_for_client(&ir, scope_facts.as_ref(), &plan.nodes);
     let topology = plan_client_topology(&ir, &html_plan, scope_facts.as_ref());
     let (external_css, injected_css) = match &style_plan {
         Some(style) => {

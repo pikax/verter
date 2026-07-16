@@ -239,10 +239,9 @@ fn bind_root_writability_admits_only_assignment_valid_kinds() {
 #[test]
 fn is_writable_bind_root_admits_only_assignment_valid_kinds() {
     // The writable predicate admits EXACTLY the assignment-valid kinds (a `$state`
-    // signal, a reassignable proxy, a plain local) and EXCLUDES the read-oriented signal
-    // kinds the read classifier (`is_signal_binding`) admits — `Derived` / `EachSignal` /
-    // `AwaitSignal` / `LegacyConstDerived`. A signal being READABLE does not make it a
-    // valid bind WRITE target.
+    // signal, a reassignable proxy, a plain local) and EXCLUDES read-only
+    // `Derived` / `EachSignal` / `AwaitSignal` / `LegacyConstDerived` roots.
+    // A value being readable does not make it a valid bind write target.
     assert!(is_writable_bind_root(BindingRuntimeKind::StateSignal {
         raw: false
     }));
@@ -259,9 +258,7 @@ fn is_writable_bind_root_admits_only_assignment_valid_kinds() {
     assert!(!is_writable_bind_root(
         BindingRuntimeKind::LegacyConstDerived
     ));
-    // Read-only signal kinds the read classifier admits are NOT writable — the explicit
-    // split this predicate enforces.
-    assert!(is_signal_binding(BindingRuntimeKind::Derived));
+    // A derived value is readable by expressions but not a writable bind root.
     assert!(!is_writable_bind_root(BindingRuntimeKind::Derived));
     // IMPORT kinds are NON-writable roots by design (non-reassignable ES import
     // bindings; official `constant_binding` / `constant_assignment` rejects) —
