@@ -22,7 +22,8 @@ use super::child_prop_rename::ChildPropUsageClass;
 use super::server_utils::{
     attr_name_match_rank, event_name_match_rank, extract_word_at_offset,
     goto_response_from_locations, is_default_export_component_carrier, listener_prop_candidates,
-    location_from_span, push_unique_location, resolve_import_path, to_pascal_case,
+    location_from_span, push_unique_location, resolve_import_path, select_best_ranked_candidate,
+    to_pascal_case,
 };
 use super::{ResolvedComponentDocument, VerterLanguageServer};
 
@@ -536,24 +537,16 @@ impl VerterLanguageServer {
             } else if let Some(child_template) = resolved.child.analysis.template.as_ref() {
                 // Fallback: template-level prop definitions (navigation convenience).
                 let requested = resolved.usage.parent_prop_name.as_str();
-                let mut best: Option<(u8, verter_span::Span)> = None;
-                for prop_def in &child_template.prop_definitions {
-                    if let Some(rank) = attr_name_match_rank(requested, &prop_def.name) {
-                        let better = match best {
-                            None => true,
-                            Some((best_rank, best_span)) => {
-                                rank < best_rank
-                                    || (rank == best_rank
-                                        && (prop_def.span.start, prop_def.span.end)
-                                            < (best_span.start, best_span.end))
-                            }
-                        };
-                        if better {
-                            best = Some((rank, prop_def.span));
-                        }
-                    }
-                }
-                if let Some((_, span)) = best {
+                let best = select_best_ranked_candidate(
+                    child_template
+                        .prop_definitions
+                        .iter()
+                        .filter_map(|prop_def| {
+                            attr_name_match_rank(requested, &prop_def.name)
+                                .map(|rank| (rank, prop_def.span, ()))
+                        }),
+                );
+                if let Some((_, span, ())) = best {
                     if let Some(loc) =
                         location_from_span(&resolved.child.uri, &resolved.child.line_index, span)
                     {
@@ -971,29 +964,19 @@ impl VerterLanguageServer {
         slot_name: &str,
     ) -> Option<GotoDefinitionResponse> {
         // Check defineSlots macro first (exact rank preferred over case-fold).
-        let mut best: Option<(u8, verter_span::Span)> = None;
-        for mac in child.analysis.macros.iter() {
-            if mac.kind != verter_semantic::analysis::AnalyzedMacroKind::DefineSlots {
-                continue;
-            }
-            for slot_field in &mac.slot_fields {
-                if let Some(rank) = attr_name_match_rank(slot_name, &slot_field.name) {
-                    let better = match best {
-                        None => true,
-                        Some((best_rank, best_span)) => {
-                            rank < best_rank
-                                || (rank == best_rank
-                                    && (slot_field.span.start, slot_field.span.end)
-                                        < (best_span.start, best_span.end))
-                        }
-                    };
-                    if better {
-                        best = Some((rank, slot_field.span));
-                    }
-                }
-            }
-        }
-        if let Some((_, span)) = best {
+        let best = select_best_ranked_candidate(
+            child
+                .analysis
+                .macros
+                .iter()
+                .filter(|mac| mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
+                .flat_map(|mac| mac.slot_fields.iter())
+                .filter_map(|slot_field| {
+                    attr_name_match_rank(slot_name, &slot_field.name)
+                        .map(|rank| (rank, slot_field.span, ()))
+                }),
+        );
+        if let Some((_, span, ())) = best {
             if let Some(loc) = location_from_span(&child.uri, &child.line_index, span) {
                 return Some(GotoDefinitionResponse::Scalar(loc));
             }
@@ -1001,24 +984,14 @@ impl VerterLanguageServer {
 
         // Fallback: template-level DefinedSlot
         if let Some(child_template) = child.analysis.template.as_ref() {
-            let mut best: Option<(u8, verter_span::Span)> = None;
-            for defined_slot in &child_template.defined_slots {
-                if let Some(rank) = attr_name_match_rank(slot_name, &defined_slot.name) {
-                    let better = match best {
-                        None => true,
-                        Some((best_rank, best_span)) => {
-                            rank < best_rank
-                                || (rank == best_rank
-                                    && (defined_slot.span.start, defined_slot.span.end)
-                                        < (best_span.start, best_span.end))
-                        }
-                    };
-                    if better {
-                        best = Some((rank, defined_slot.span));
-                    }
-                }
-            }
-            if let Some((_, span)) = best {
+            let best =
+                select_best_ranked_candidate(child_template.defined_slots.iter().filter_map(
+                    |defined_slot| {
+                        attr_name_match_rank(slot_name, &defined_slot.name)
+                            .map(|rank| (rank, defined_slot.span, ()))
+                    },
+                ));
+            if let Some((_, span, ())) = best {
                 if let Some(loc) = location_from_span(&child.uri, &child.line_index, span) {
                     return Some(GotoDefinitionResponse::Scalar(loc));
                 }
@@ -1038,29 +1011,19 @@ impl VerterLanguageServer {
     ) -> Option<GotoDefinitionResponse> {
         // Check defineSlots macro — slot name uses kebab/camel equivalence;
         // the binding identifier itself is an exact TS identifier match.
-        let mut best_slot: Option<(u8, &verter_semantic::analysis::AnalyzedSlotField)> = None;
-        for mac in child.analysis.macros.iter() {
-            if mac.kind != verter_semantic::analysis::AnalyzedMacroKind::DefineSlots {
-                continue;
-            }
-            for slot_field in &mac.slot_fields {
-                if let Some(rank) = attr_name_match_rank(slot_name, &slot_field.name) {
-                    let better = match best_slot {
-                        None => true,
-                        Some((best_rank, best_field)) => {
-                            rank < best_rank
-                                || (rank == best_rank
-                                    && (slot_field.span.start, slot_field.span.end)
-                                        < (best_field.span.start, best_field.span.end))
-                        }
-                    };
-                    if better {
-                        best_slot = Some((rank, slot_field));
-                    }
-                }
-            }
-        }
-        if let Some((_, slot_field)) = best_slot {
+        let best_slot = select_best_ranked_candidate(
+            child
+                .analysis
+                .macros
+                .iter()
+                .filter(|mac| mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
+                .flat_map(|mac| mac.slot_fields.iter())
+                .filter_map(|slot_field| {
+                    attr_name_match_rank(slot_name, &slot_field.name)
+                        .map(|rank| (rank, slot_field.span, slot_field))
+                }),
+        );
+        if let Some((_, _, slot_field)) = best_slot {
             if let Some(binding) = slot_field.bindings.iter().find(|b| b.name == binding_name) {
                 if binding.span.start != 0 || binding.span.end != 0 {
                     if let Some(loc) =

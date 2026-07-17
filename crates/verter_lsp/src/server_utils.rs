@@ -966,6 +966,32 @@ pub(super) fn attr_name_match_rank(requested: &str, candidate: &str) -> Option<u
     (normalized_event_name(requested) == normalized_event_name(candidate)).then_some(1)
 }
 
+/// Select the best-matching candidate by `(rank, span)`: lowest rank wins and
+/// equal ranks fall to the earliest span. Shared by every attr-name
+/// best-candidate loop (prop fields, template prop definitions, slot fields,
+/// defined slots, slot bindings, rename declarations) so the rank/span
+/// tie-break cannot drift between call sites. The candidate `value` rides
+/// along so a caller can keep a borrowed field instead of re-looking it up.
+pub(super) fn select_best_ranked_candidate<T>(
+    candidates: impl IntoIterator<Item = (u8, verter_span::Span, T)>,
+) -> Option<(u8, verter_span::Span, T)> {
+    let mut best: Option<(u8, verter_span::Span, T)> = None;
+    for (rank, span, value) in candidates {
+        let better = match &best {
+            None => true,
+            Some((best_rank, best_span, _)) => {
+                rank < *best_rank
+                    || (rank == *best_rank
+                        && (span.start, span.end) < (best_span.start, best_span.end))
+            }
+        };
+        if better {
+            best = Some((rank, span, value));
+        }
+    }
+    best
+}
+
 pub(super) fn normalized_event_name(name: &str) -> String {
     let mut parts = name.splitn(2, ':');
     let head = parts.next().unwrap_or_default();
@@ -1077,6 +1103,28 @@ mod attr_name_match_tests {
     fn attr_name_unrelated_misses() {
         assert_eq!(attr_name_match_rank("title", "count"), None);
         assert_eq!(attr_name_match_rank("my-prop", "myFlag"), None);
+    }
+
+    #[test]
+    fn select_best_ranked_candidate_prefers_lowest_rank_then_earliest_span() {
+        let span = |start: u32, end: u32| verter_span::Span { start, end };
+        // Exact (rank 0) beats kebab/camel (rank 1) regardless of order.
+        let best = select_best_ranked_candidate([
+            (1u8, span(4, 8), "case-fold"),
+            (0u8, span(20, 24), "exact"),
+        ]);
+        assert_eq!(best, Some((0u8, span(20, 24), "exact")));
+        // Equal rank: the earlier span wins, even when seen second.
+        let best = select_best_ranked_candidate([
+            (1u8, span(20, 24), "later"),
+            (1u8, span(4, 8), "earlier"),
+        ]);
+        assert_eq!(best, Some((1u8, span(4, 8), "earlier")));
+        // Empty candidate set fails closed.
+        assert_eq!(
+            select_best_ranked_candidate(Vec::<(u8, verter_span::Span, ())>::new()),
+            None
+        );
     }
 }
 
