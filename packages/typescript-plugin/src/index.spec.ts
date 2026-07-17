@@ -807,6 +807,38 @@ describe("getExternalFiles = ready carrier source + companion identities", () =>
     ]);
   });
 
+  it("collapses case-variant spellings of one identity on a case-insensitive host", () => {
+    // A store whose owned sources spell ONE carrier source with two different
+    // casings (e.g. drive-letter case from different producers). On a
+    // case-insensitive host both raw strings name the SAME document identity;
+    // advertising both would hand TS6 two external-file roots for one
+    // identity — the double-identity hazard this function exists to avoid.
+    const manifest = vueAndSvelteManifest();
+    manifest.projects["d:/ws/tsconfig.json"].owned_sources.push({
+      source_uri: "D:/ws/src/A.vue",
+      provider_uri: "d:/ws/src/A.vue.tsx",
+      role: "CarrierIde",
+      script_kind: "TSX",
+    });
+    const dir = track(writeStore(manifest, { "blobs/A.vue.tsx": "x" }));
+    const info = createInfo(dir, { diskFiles: {} });
+    const plugin = init({ typescript: ts } as any);
+    plugin.create(info);
+
+    // `canonical()` keys on ts.sys.useCaseSensitiveFileNames — force the
+    // case-insensitive host semantics the dedupe must respect.
+    const sys = ts.sys as { useCaseSensitiveFileNames?: boolean };
+    const original = sys.useCaseSensitiveFileNames;
+    sys.useCaseSensitiveFileNames = false;
+    try {
+      const files = plugin.getExternalFiles!(info.project, 0 as any);
+      const aIdentities = files.filter((file) => file.toLowerCase() === "d:/ws/src/a.vue");
+      expect(aIdentities).toEqual(["d:/ws/src/A.vue"]);
+    } finally {
+      sys.useCaseSensitiveFileNames = original;
+    }
+  });
+
   // @ai-generated - Plugin externals become Program files after the first graph
   // build; that must not make the next getExternalFiles call retract them.
   it("keeps non-root carrier externals stable across repeated project graph reads", () => {
