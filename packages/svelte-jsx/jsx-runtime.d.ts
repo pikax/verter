@@ -5,13 +5,14 @@
 // namespace EXPORTED from this module — overriding the project-level
 // `jsxImportSource: "vue"` for that file only.
 //
-// The namespace is Svelte-true: intrinsic elements and their attributes are
-// typed by `svelte/elements`' `SvelteHTMLElements` (lowercase event
+// The namespace is Svelte-true: intrinsic elements and authored attributes
+// derive from `svelte/elements`' `SvelteHTMLElements` (lowercase event
 // attributes — `onclick`, `onchange`, `onintrostart` — NOT Vue's/React's
 // camelCase table), an element evaluates to `ReturnType<Snippet>`, and
 // native component tags are admitted through Svelte 5's callable `Component`
 // contract and `LibraryManagedAttributes`; `$props` is retained only for the
-// private class-shaped foreign-component adapter.
+// private class-shaped foreign-component adapter. The sole adapter-specific
+// intrinsic member is the implicit JSX child channel documented below.
 //
 // Types-only: there is no runtime jsx factory here — the projection is never
 // executed, only type-checked. This file is the SINGLE hand-written content
@@ -50,9 +51,15 @@ export namespace JSX {
     $props: {};
   }
 
-  // Intrinsic (lowercase) elements and their attributes are Svelte-true —
-  // sourced from `svelte/elements`, never Vue's intrinsic table.
+  // Intrinsic (lowercase) elements and their authored attributes come from
+  // `svelte/elements`, never Vue's intrinsic table. `children` is the sole
+  // projection adapter: a Svelte template body is ordinary markup, whereas
+  // `DOMAttributes.children` models an explicitly forwarded Snippet prop.
+  // Keeping the official Snippet type here would contextually mis-type
+  // `<p>{text}</p>` as `string -> Snippet` in the native TypeScript engine.
   type IntrinsicElements = {
-    [Name in keyof SvelteHTMLElements]: SvelteHTMLElements[Name];
+    [Name in keyof SvelteHTMLElements]: Omit<SvelteHTMLElements[Name], "children"> & {
+      children?: unknown;
+    };
   };
 }

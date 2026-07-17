@@ -1,7 +1,7 @@
 {
   "name": "@verter/svelte-jsx",
   "version": "0.0.1-beta.1",
-  "description": "Verter-owned, module-scoped JSX namespace for Svelte IDE projections, with native Svelte 5 Component adaptation, exact svelte/elements intrinsics, and dedicated SVG and MathML entrypoints. Types-only, no runtime JS.",
+  "description": "Verter-owned, module-scoped JSX namespace for Svelte IDE projections, with native Svelte 5 Component adaptation, official-derived element attributes, a child-only projection adapter, and dedicated SVG and MathML entrypoints. Types-only, no runtime JS.",
   "keywords": [
     "jsx",
     "svelte",

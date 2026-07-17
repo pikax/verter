@@ -25,9 +25,10 @@ interface DOMEvent<T extends EventTarget> {
 }
 
 interface SvelteBaseAttributes<T extends EventTarget> {
-  // Children: text, expressions, nested elements/snippets — permissive in the
-  // vendored stub (the real `svelte/elements` types this precisely).
-  children?: unknown;
+  // The official Svelte 5 DOMAttributes contract uses a Snippet for the
+  // implicit children prop. The Verter JSX adapter deliberately owns any
+  // projection-only relaxation, so this oracle must not weaken it here.
+  children?: import("svelte").Snippet;
   class?: ClassValue;
   id?: string;
   // Svelte-5 lowercase event attributes (the primary event path).
@@ -46,7 +47,7 @@ interface SvelteBaseAttributes<T extends EventTarget> {
 // The official package exposes this shared event base separately. The
 // production MathML fallback extends it so event.currentTarget remains typed.
 export interface DOMAttributes<T extends EventTarget> {
-  children?: unknown;
+  children?: import("svelte").Snippet;
   onclick?: (event: DOMEvent<T> & MouseEvent) => void;
   onchange?: (event: DOMEvent<T> & Event) => void;
   oninput?: (event: DOMEvent<T> & Event) => void;
@@ -91,7 +92,7 @@ interface HTMLImgAttributes<T extends EventTarget> extends SvelteBaseAttributes<
 // (`value`/`checked`/`type`) — so an HTML-only attribute on an svg element
 // FAILS, proving the svg table replaced the HTML table.
 export interface SVGAttributes<T extends EventTarget> {
-  children?: unknown;
+  children?: import("svelte").Snippet;
   class?: ClassValue;
   id?: string;
   // Shared SVG presentation globals.

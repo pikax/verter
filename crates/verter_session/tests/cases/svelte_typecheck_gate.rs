@@ -655,6 +655,45 @@ fn intrinsic_elements_use_official_tag_specific_contracts() {
     }
 }
 
+/// @ai-generated - Reproduces the real-editor Svelte interpolation contract against TS>=7.
+///
+/// Mutation recipe: remove the child-isolation projection for intrinsic elements, run this
+/// test with `VERTER_REQUIRE_TYPECHECKER=1`, and require TS2322 (`string` versus `Snippet`).
+/// Restore the projection, verify the worktree diff, then rerun this test and the existing
+/// `intrinsic_elements_use_official_tag_specific_contracts` control green.
+#[test]
+fn typed_intrinsic_interpolation_is_not_contextually_checked_as_a_snippet() {
+    let projected = project(
+        r#"<script lang="ts">
+let svelteTsTitle: string = $state("Svelte TypeScript");
+</script>
+<p>{svelteTsTitle}</p>"#,
+    );
+    let intrinsic_contract = r#"import type { JSX as SvelteJSX } from '@verter/svelte-jsx/jsx-runtime';
+type IsAny<T> = 0 extends (1 & T) ? true : false;
+type IsUnknown<T> = IsAny<T> extends true
+  ? false
+  : unknown extends T
+    ? [keyof T] extends [never] ? true : false
+    : false;
+const pChildrenAreUnknown: IsUnknown<SvelteJSX.IntrinsicElements['p']['children']> = true;
+void pChildrenAreUnknown;
+"#;
+    let Some((ok, out)) = typecheck_projected(
+        &projected,
+        "TypedIntrinsicInterpolation.svelte.tsx",
+        &[("intrinsic-contract.ts", intrinsic_contract)],
+        true,
+    ) else {
+        skip_note("typed intrinsic interpolation");
+        return;
+    };
+    assert!(
+        ok,
+        "an ordinary Svelte interpolation must remain a value expression, not a Snippet child:\n{out}\n{projected}"
+    );
+}
+
 #[test]
 fn svelte_jsx_namespace_remains_file_scoped() {
     let projected = project("<div>scoped</div>");

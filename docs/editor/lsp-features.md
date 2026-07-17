@@ -174,14 +174,19 @@ remains concrete without exposing generated `__Verter*` types or
 `.svelte.jsx`/`.svelte.tsx` implementation names. Authored component generics
 remain callable generics rather than being collapsed to `any`.
 
-Template checking uses a private, file-scoped adapter. HTML intrinsics come
-directly from `SvelteHTMLElements[tag]` in the workspace's installed
-`svelte/elements`, including tag-specific attributes and typed event
-`currentTarget`. The SVG namespace selects the official SVG-keyed subset of
-that table. Svelte 5 does not publish MathML element attributes, so Verter owns
-the closed MathML attribute table while reusing Svelte's official
-`DOMAttributes<MathMLElement>` event base. None of these declarations merge a
-global JSX namespace or alter the public `.svelte` module type.
+Template checking uses a private, file-scoped adapter. HTML intrinsics derive
+every authored attribute from `SvelteHTMLElements[tag]` in the workspace's
+installed `svelte/elements`, including tag-specific attributes and typed event
+`currentTarget`. The adapter changes only the implicit JSX `children` channel
+to `unknown`: an authored Svelte element body is ordinary markup, while
+Svelte's `DOMAttributes.children` describes an explicitly forwarded `Snippet`
+prop. This prevents a value interpolation such as `<p>{title}</p>` from being
+misdiagnosed as `string` versus `Snippet` without weakening any authored DOM
+attribute. The SVG namespace applies the same child-only adaptation to the
+official SVG-keyed subset. Svelte 5 does not publish MathML element attributes,
+so Verter owns the closed MathML attribute table while reusing Svelte's
+official `DOMAttributes<MathMLElement>` event base. None of these declarations
+merge a global JSX namespace or alter the public `.svelte` module type.
 
 ::: warning TSGO Limitation
 TSGO has a known limitation: re-exported `.vue` components (e.g., barrel files) may lose their typing. This is why `auto` mode defaults to tsserver when a workspace TypeScript installation is found.
