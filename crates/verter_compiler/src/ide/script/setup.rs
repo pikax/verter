@@ -881,10 +881,14 @@ pub(super) fn process_tsx_script_setup<'alloc>(
             // shadows the authored binding in the block scope); without the
             // name-level mapping, the response remap fails closed and every
             // markup definition/reference/rename drops on the editor surface.
-            let mut destruct_segments: Vec<(u32, Option<(u32, u32)>, &'alloc str)> = Vec::new();
+            // One ordered CT segment: (insertion offset, optional (source
+            // start, source offset-delta), text) — the tuple shape
+            // `batch_prepend_left_with_source_map` consumes.
+            type DestructSegment<'a> = (u32, Option<(u32, u32)>, &'a str);
+            let mut destruct_segments: Vec<DestructSegment<'alloc>> = Vec::new();
             let anchor = tag_close.end;
             destruct_segments.push((anchor, None, "{ /* verter-destructured-start */"));
-            let push_group = |segments: &mut Vec<(u32, Option<(u32, u32)>, &'alloc str)>,
+            let push_group = |segments: &mut Vec<DestructSegment<'alloc>>,
                               keyword: &str,
                               names: &[&str],
                               ct: &mut CodeTransform<'alloc>| {
