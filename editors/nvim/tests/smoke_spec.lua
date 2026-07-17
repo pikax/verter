@@ -6,6 +6,14 @@
 
 local init = require("verter")
 
+local diagnostic_publications = dofile(
+  vim.fs.joinpath(
+    vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h"),
+    "support",
+    "diagnostic_publications.lua"
+  )
+)
+
 local function tests_dir()
   return vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h")
 end
@@ -115,6 +123,8 @@ describe("verter real Neovim client contract", function()
     local old_ready = vim.lsp.handlers["$/verter/ready"]
     local old_sync = vim.lsp.handlers["$/verter/typeProviderSyncComplete"]
     local old_provider_started = vim.lsp.handlers["$/verter/typeProviderStarted"]
+    local old_publish_diagnostics = vim.lsp.handlers["textDocument/publishDiagnostics"]
+    local published_diagnostics = diagnostic_publications.new()
     vim.lsp.handlers["$/verter/ready"] = function(_, params)
       if params and params.gen ~= nil then ready_generations[params.gen] = true end
     end
@@ -124,6 +134,9 @@ describe("verter real Neovim client contract", function()
     vim.lsp.handlers["$/verter/typeProviderStarted"] = function(_, params)
       if params and params.kind ~= nil then started_providers[params.kind] = true end
     end
+    vim.lsp.handlers["textDocument/publishDiagnostics"] = published_diagnostics:wrap(
+      old_publish_diagnostics
+    )
 
     local ok, failure = pcall(function()
       init.setup({ cmd_path = bin, check_binary = true, log_level = "error" })
@@ -175,6 +188,13 @@ describe("verter real Neovim client contract", function()
         local bufnr = opened_case.bufnr
         local case = opened_case.case
         local uri = vim.uri_from_bufnr(bufnr)
+        local diagnostics_ready = vim.wait(30000, function()
+          return published_diagnostics:has(uri)
+        end, 50)
+        assert.is_true(
+          diagnostics_ready,
+          case.file .. " must publish diagnostics before the clean-diagnostic assertion"
+        )
         local position = position_of(bufnr, case.token, case.occurrence)
         local hover = request(client, bufnr, "textDocument/hover", {
           textDocument = { uri = uri },
@@ -240,6 +260,7 @@ describe("verter real Neovim client contract", function()
     vim.lsp.handlers["$/verter/ready"] = old_ready
     vim.lsp.handlers["$/verter/typeProviderSyncComplete"] = old_sync
     vim.lsp.handlers["$/verter/typeProviderStarted"] = old_provider_started
+    vim.lsp.handlers["textDocument/publishDiagnostics"] = old_publish_diagnostics
     stop_clients()
     if not ok then error(failure) end
   end)

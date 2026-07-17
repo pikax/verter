@@ -104,8 +104,8 @@ Notes:
 - **`binary.path` wins over PATH discovery.** Set it for a dev build or a pinned
   binary. Leave it unset and set `settings.serverSource = "path"` to use a
   `verter-lsp` on your `PATH`.
-- **`lint.preset`** accepts `essential | recommended | all | performance | a11y |
-strict`; an unknown value clamps to `recommended`.
+- **`lint.preset`** accepts `essential`, `recommended`, `all`, `performance`,
+  `a11y`, or `strict`; an unknown value clamps to `recommended`.
 - The type provider is always `tsgo` (the SDK-free native provider); the extension
   never requests `tsserver`.
 

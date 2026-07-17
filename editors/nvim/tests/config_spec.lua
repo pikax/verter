@@ -180,6 +180,27 @@ describe("verter.config.build_cmd", function()
     assert.is_not_nil(captured.spawn.env, "spawn params must carry an env table")
     assert.are.equal("debug", captured.spawn.env.VERTER_LOG)
   end)
+
+  it("preserves an explicit VERTER_TSGO_BIN override in the function-form spawn", function()
+    local captured = nil
+    local orig_start = vim.lsp.rpc.start
+    local orig_tsgo = vim.env.VERTER_TSGO_BIN
+    vim.env.VERTER_TSGO_BIN = "/toolchain/typescript/lib/tsc"
+    vim.lsp.rpc.start = function(_cmd_args, _dispatchers, spawn)
+      captured = spawn
+      return { is_closing = function() return false end, terminate = function() end }
+    end
+
+    local ok, err = pcall(function()
+      config.build_cmd(merged())({}, { root_dir = "/home/u/project" })
+    end)
+    vim.lsp.rpc.start = orig_start
+    vim.env.VERTER_TSGO_BIN = orig_tsgo
+    if not ok then error(err) end
+
+    assert.is_not_nil(captured)
+    assert.are.equal("/toolchain/typescript/lib/tsc", captured.env.VERTER_TSGO_BIN)
+  end)
 end)
 
 describe("verter.config.build_init_options", function()

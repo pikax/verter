@@ -9,6 +9,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { LspClient } from "../../packages/lsp-test-client/dist/index.js";
+import { assertWorkspaceRootTransport } from "./plan-contract.mjs";
 
 function option(name) {
   const prefix = `--${name}=`;
@@ -115,11 +116,7 @@ assert.equal(
   1,
   "shipping plan must select exactly one tsgo provider",
 );
-assert.equal(
-  path.resolve(plan.args.at(-1)),
-  root,
-  "shipping plan must keep the workspace root last",
-);
+assertWorkspaceRootTransport(plan, root);
 assert.deepEqual(
   plan.languages,
   ["vue", "svelte"],
