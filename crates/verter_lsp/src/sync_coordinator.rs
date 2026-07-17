@@ -185,16 +185,17 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
     };
     deps.documents.host().ensure_loaded(canonical_id);
 
-    // A self-file rune module (`.svelte.ts` / `.svelte.js`) is NOT a carrier —
-    // it serves its OWN-path provider buffer (`<rune prelude> + <rewritten
-    // module bytes>`), has no IDE TSX, and its provider state lives in the
-    // Shadow slot keyed at its own canonical path. Route it through the SHARED
-    // self-file shadow-sync path (the SAME one the editor ingress uses) so the
-    // debounced tick (a) uses the generalized projection for diagnostics and (b)
-    // never clobbers the Shadow state via the carrier-miss
-    // `preserve_open_unresolved_carrier`, which would overwrite it with an
-    // IDE-path state and break did_close cleanup.
-    if let Some(file_language) = crate::server::adapter_module_language_for(canonical_id) {
+    // A self-file document (a `.svelte.ts` / `.svelte.js` rune module OR a
+    // plain TS-family script) is NOT a carrier — it serves its OWN-path
+    // provider buffer (`<rune prelude> + <rewritten module bytes>` for a rune
+    // module, the source verbatim for a plain script), has no IDE TSX, and its
+    // provider state lives in the Shadow slot keyed at its own canonical path.
+    // Route it through the SHARED self-file shadow-sync path (the SAME one the
+    // editor ingress uses) so the debounced tick (a) uses the generalized
+    // projection for diagnostics and (b) never clobbers the Shadow state via
+    // the carrier-miss `preserve_open_unresolved_carrier`, which would
+    // overwrite it with an IDE-path state and break did_close cleanup.
+    if let Some(file_language) = crate::server::self_file_language_for(canonical_id) {
         if let Some(uri) = deps.documents.canonical_id_to_uri(canonical_id) {
             crate::server::sync_self_file_shadow_state(
                 &deps.documents,
@@ -775,15 +776,15 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
         });
     }
 
-    // A self-file rune module (`.svelte.ts` / `.svelte.js`) has NO IDE TSX —
-    // its provider buffer is served from its OWN canonical path (`<rune prelude>
-    // + <rewritten module bytes>`). Route its debounced diagnostics through the
-    // generalized self-file projection (the document's rewrite-aware mapper +
-    // own-path provider buffer), so type diagnostics land at the correctly
-    // offset source position — NOT through the carrier IDE-source-map path
-    // below (which requires an `ide_path` the rune module never has).
+    // A self-file document (rune module or plain TS-family script) has NO IDE
+    // TSX — its provider buffer is served from its OWN canonical path. Route
+    // its debounced diagnostics through the generalized self-file projection
+    // (the document's rewrite-aware mapper + own-path provider buffer), so
+    // type diagnostics land at the correctly offset source position — NOT
+    // through the carrier IDE-source-map path below (which requires an
+    // `ide_path` a self-file document never has).
     if let Some(tp) = &deps.type_provider {
-        if crate::server::adapter_module_language_for(canonical_id).is_some() {
+        if crate::server::self_file_language_for(canonical_id).is_some() {
             let diagnostics =
                 rune_module_diagnostics(deps, tp.as_ref(), canonical_id, verter_diags).await;
             return deps

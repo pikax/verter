@@ -102,9 +102,13 @@ impl DocumentRegistry {
         *self.encoding.write() = encoding;
     }
 
-    /// Build the self-file provider projection for a rune module (`.svelte.ts`
-    /// / `.svelte.js`): the prelude line count (from the shared rune prelude)
-    /// plus the import-specifier rewrite segments.
+    /// Build the self-file provider projection for an own-path provider
+    /// document: a Svelte rune module (`.svelte.ts` / `.svelte.js`) gets the
+    /// rune-prelude line count plus the import-specifier rewrite segments; a
+    /// plain TS-family script gets a zero-prelude mapper over the same
+    /// rewrite segments (its provider buffer is the source verbatim).
+    /// `None` for framework carriers and for unknown extensions (a `.md` /
+    /// extensionless document is never served to the TypeScript provider).
     ///
     /// `replacements` are the `(byte_start, byte_end, replacement)` import-
     /// specifier rewrites computed against `source` (the resolver-backed
@@ -113,12 +117,16 @@ impl DocumentRegistry {
     /// shift for every position; the rewrite column shifts refine import lines
     /// once the resolver lands.
     fn build_self_file_projection(
-        file_language: &FileLanguage,
+        canonical_id: &str,
         source: &str,
         replacements: &[(usize, usize, String)],
         line_index: &LineIndex,
     ) -> Option<DocumentProviderProjection> {
-        let built = verter_session::framework::rune_module_provider_content(file_language, source)?;
+        // Path-gated: the registry extension table is the authority, so an
+        // unknown extension (which the host classifier's catch-all would
+        // report as a TS script) builds NO projection.
+        let file_language = crate::server::self_file_language_for(canonical_id)?;
+        let built = verter_session::framework::self_file_provider_content(&file_language, source)?;
         let mapper =
             SelfFileProviderMapper::new(built.prelude_line_count, replacements, line_index);
         Some(DocumentProviderProjection::SelfFile { mapper })
@@ -207,17 +215,18 @@ impl DocumentRegistry {
         // (e.g., because scan_workspace already loaded the same content), we still
         // need the mapper for hover/definition/diagnostics.
         //  - CARRIER (`.vue` / `.svelte`): the IDE TSX source-map projection.
-        //  - SELF-FILE rune module (`.svelte.ts` / `.svelte.js`): the line-only
+        //  - SELF-FILE (rune module OR plain TS-family script): the line-only
         //    rewrite-aware projection (prelude-offset-only at did_open; the
         //    server refines it with resolver-backed rewrite segments once
-        //    ownership is ready).
+        //    ownership is ready). Plain scripts carry a zero-line prelude —
+        //    their provider buffer is the source verbatim.
         let projection = if is_carrier {
             self.host
                 .get_ide(&canonical_id, &self.tsx_profile.read())
                 .and_then(|tsx| PositionMapper::from_json(&tsx.source_map?).ok())
                 .map(DocumentProviderProjection::carrier_ide)
         } else {
-            Self::build_self_file_projection(&file_language, &source, &[], &line_index)
+            Self::build_self_file_projection(&canonical_id, &source, &[], &line_index)
         };
 
         let state = DocumentState {
@@ -269,7 +278,6 @@ impl DocumentRegistry {
         // Carrier-general: every framework carrier (Vue OR Svelte) re-compiles
         // its IDE TSX on change.
         let is_carrier = file_language.is_framework_carrier();
-        let file_language_for_projection = file_language.clone();
 
         let upsert_start = std::time::Instant::now();
         let result = self.host.upsert(UpsertRequest {
@@ -332,15 +340,11 @@ impl DocumentRegistry {
                 _ => prior_projection(),
             }
         } else {
-            // Self-file rune module (or plain script → `None`). The prelude
-            // offset is content-independent; rebuild it whole-line (rewrite
-            // segments get refined by the server once the resolver is ready).
-            Self::build_self_file_projection(
-                &file_language_for_projection,
-                &source,
-                &[],
-                &new_line_index,
-            )
+            // Self-file (rune module or plain TS-family script; unknown
+            // extension → `None`). The prelude offset is content-independent;
+            // rebuild it whole-line (rewrite segments get refined by the
+            // server once the resolver is ready).
+            Self::build_self_file_projection(&canonical_id, &source, &[], &new_line_index)
         };
 
         if let Some(mut entry) = self.documents.get_mut(&uri_str) {
@@ -583,20 +587,15 @@ impl DocumentRegistry {
         Some(resp)
     }
 
-    /// Refine an OPEN rune module's self-file projection with resolver-backed
+    /// Refine an OPEN self-file document's projection with resolver-backed
     /// import-specifier rewrite segments.
     ///
     /// At did_open / did_change the projection carries the prelude offset with
     /// NO rewrite segments (the resolver may not be ready). Once the server has
     /// a published resolver it computes the rewrite replacements and calls this
     /// to refine the rewrite-aware column mapping. A no-op when the document is
-    /// not a `SelfFile` projection (e.g. a carrier or plain script).
-    pub fn refresh_self_file_rewrites(
-        &self,
-        uri: &Uri,
-        file_language: &FileLanguage,
-        replacements: &[(usize, usize, String)],
-    ) {
+    /// not a `SelfFile` projection (e.g. a carrier or an unknown extension).
+    pub fn refresh_self_file_rewrites(&self, uri: &Uri, replacements: &[(usize, usize, String)]) {
         let Some(mut entry) = self.documents.get_mut(uri.as_str()) else {
             return;
         };
@@ -606,10 +605,11 @@ impl DocumentRegistry {
         ) {
             return;
         }
+        let canonical_id = entry.canonical_id.clone();
         let source = entry.source.clone();
         let line_index = entry.line_index.clone();
         if let Some(projection) =
-            Self::build_self_file_projection(file_language, &source, replacements, &line_index)
+            Self::build_self_file_projection(&canonical_id, &source, replacements, &line_index)
         {
             entry.projection = Some(projection);
         }
@@ -1425,6 +1425,84 @@ mod tests {
                 .tsx_to_carrier(TsPosition::new(0, 0))
                 .is_none(),
             "a provider position in the prelude region must drop, not surface a fake source line"
+        );
+    }
+
+    /// A plain TS-family script is NOT a carrier either: did_open must build a
+    /// SELF-FILE projection whose zero-prelude mapper is the identity (its
+    /// provider buffer is the source bytes verbatim). Without the projection,
+    /// every provider-backed feature (hover/definition/completion/diagnostics)
+    /// fails closed for plain scripts.
+    #[test]
+    fn did_open_plain_script_builds_self_file_projection_with_identity_mapping() {
+        use provider_projection::DocumentProviderProjection;
+        use verter_span::{LspPosition, TsPosition};
+
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(Arc::clone(&host));
+
+        let uri: Uri = "file:///x/plain-control.ts".parse().expect("uri");
+        let _ = registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "typescript".to_string(),
+            version: 1,
+            text: "export const plainControlNumber = 1;\nplainControlNumber.toFixed(0);\n"
+                .to_string(),
+        });
+
+        let projection = registry
+            .get_projection(&uri)
+            .expect("a plain .ts script must build a self-file provider projection");
+        let mapper = match &projection {
+            DocumentProviderProjection::SelfFile { mapper } => mapper.clone(),
+            DocumentProviderProjection::CarrierIde { .. } => {
+                panic!("a plain .ts script is NOT a carrier — must be a SelfFile projection")
+            }
+        };
+        assert_eq!(
+            mapper.prelude_line_count(),
+            0,
+            "a plain script's provider buffer is verbatim — no prelude offset"
+        );
+
+        // Identity mapping in both directions (zero prelude, no rewrites).
+        let prov = registry
+            .get_position_mapper(&uri)
+            .expect("unified mapper")
+            .carrier_to_tsx(LspPosition::new(1, 3))
+            .expect("source maps to provider");
+        assert_eq!(prov.pos, TsPosition::new(1, 3));
+        let back = registry
+            .get_position_mapper(&uri)
+            .expect("unified mapper")
+            .tsx_to_carrier(TsPosition::new(1, 3))
+            .expect("provider maps back");
+        assert_eq!(back.pos, LspPosition::new(1, 3));
+    }
+
+    /// An unknown extension (no registered language row) must NOT build a
+    /// provider projection: never serve a non-script document to the
+    /// TypeScript provider.
+    #[test]
+    fn did_open_unknown_extension_builds_no_projection() {
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(Arc::clone(&host));
+
+        let uri: Uri = "file:///x/notes.md".parse().expect("uri");
+        let _ = registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "markdown".to_string(),
+            version: 1,
+            text: "# notes\n".to_string(),
+        });
+
+        assert!(
+            registry.get_projection(&uri).is_none(),
+            "an unknown-extension document must not get a provider projection"
         );
     }
 

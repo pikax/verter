@@ -38,7 +38,8 @@ pub use registry::{
     TagDisposition,
 };
 pub use rune_module::{
-    rune_module_provider_content, svelte_rune_module_source_type, RuneModuleProviderContent,
+    rune_module_provider_content, self_file_provider_content, serves_self_file_provider_buffer,
+    svelte_rune_module_source_type, RuneModuleProviderContent,
 };
 
 /// The interned framework-adapter id, re-exported from `verter_language` so

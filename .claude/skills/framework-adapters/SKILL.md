@@ -461,23 +461,29 @@ navigation / component-resolution, workspace symbols, component import / drop,
 watcher carrier routing, provider-path reverse-mapping, position mapping, or
 barrel / provider sync — exactly the categories that must be carrier-generic.
 
-### Rune-module own-buffer LSP path (`.svelte.ts` / `.svelte.js`)
+### Self-file own-buffer LSP path (rune modules + plain TS-family scripts)
 
 A standalone rune module is a NON-component carrier — NOT in `carrier_extensions()`,
 covered instead by the dedicated descriptor-derived adapter-module watch glob
 (`all_adapter_module_extensions()` → `**/*.{svelte.ts,svelte.js}`). Its provider
 buffer is its OWN canonical path serving `<rune prelude> + <rewritten module
-bytes>`. The LSP own-buffer path:
+bytes>`. A plain TS-family script (`.ts` / `.tsx` / `.js` / `.jsx` / `.d.ts` …)
+uses the SAME own-buffer path with a zero-line prelude — its provider buffer is
+the source bytes verbatim. The shared classification is
+`self_file_language_for(path)` (registry-gated: `None` for carriers and unknown
+extensions); the shared content builder is
+`verter_session::framework::self_file_provider_content`. The LSP own-buffer path:
 
 - `DocumentState.projection: Option<DocumentProviderProjection>` (a clean
   cutover from `position_mapper`) carries either `CarrierIde { mapper:
   PositionMapper }` or `SelfFile { mapper: SelfFileProviderMapper }`. The
   `provider_path` is DERIVED (carrier IDE path / canonical id), never stored.
 - `SelfFileProviderMapper` (in `documents/provider_projection.rs`) is line-only
-  + rewrite-aware: source→provider shifts the line by `prelude_line_count` and
-  the column by the per-line import-specifier rewrite delta (DROP inside a
-  rewritten specifier); provider→source DROPS the prelude region (never clamps)
-  and undoes the rewrite delta. The rewrite segments come from the SAME
+  + rewrite-aware: source→provider shifts the line by `prelude_line_count` (0
+  for a plain script — the identity) and the column by the per-line
+  import-specifier rewrite delta (DROP inside a rewritten specifier);
+  provider→source DROPS the prelude region (never clamps) and undoes the
+  rewrite delta. The rewrite segments come from the SAME
   `compute_specifier_replacements` the background non-carrier sync uses.
 - `ProviderPositionMapper` (the `SourceMap`/`SelfFile` enum) exposes the three
   ops the `tsgo::merge` helpers use (`tsx_to_carrier` / `carrier_to_tsx` /
@@ -485,15 +491,16 @@ bytes>`. The LSP own-buffer path:
 - `provider_projection_context` is the ONE generalized query context serving
   BOTH projections (no parallel rune path); `type_provider_context` /
   `ide_context` route through it.
-- `did_open` syncs the rune module's self-file Shadow provider state (keyed at
-  the canonical path) so it is queryable BEFORE resolver ownership (does NOT
-  depend on `non_carrier_sync_state_for_source`); `did_close` closes + removes
-  it via an explicit non-carrier branch (the carrier did_close gate never fires
-  for a non-carrier). The `did_change_watched_files` batch classifies a closed
+- `did_open` syncs the self-file Shadow provider state (keyed at the canonical
+  path) so it is queryable BEFORE resolver ownership (does NOT depend on
+  `non_carrier_sync_state_for_source`); `did_close` closes + removes it via an
+  explicit non-carrier branch (the carrier did_close gate never fires for a
+  non-carrier). The `did_change_watched_files` batch classifies a closed
   rune-module edit through an EXPLICIT adapter-module branch and resyncs it via
-  the non-carrier resync impl.
-- Follow-up (out of S2c scope): rename + code-actions for the rune-module own
-  buffer (they need workspace-edit mapping through the same mapper first).
+  the non-carrier resync impl; plain scripts fall through to the generic TS/JS
+  arm there.
+- Follow-up (still open): rename + code-actions for self-file buffers (they
+  need workspace-edit mapping through the same mapper first).
 
 ## Bindings (NAPI / WASM / MCP / TS)
 

@@ -543,13 +543,14 @@ pub(super) async fn handle_did_open(
         server.ensure_current_file_synced(uri).await;
     }
 
-    // A self-file rune module (`.svelte.ts` / `.svelte.js`) is NOT a carrier —
-    // it serves its OWN-path provider buffer. Sync it as UNRESOLVED open-
-    // document shadow state so its own buffer is queryable before resolver
-    // ownership is ready (a no-op for any non-rune document).
+    // A self-file document (a `.svelte.ts` / `.svelte.js` rune module OR a
+    // plain TS-family script) is NOT a carrier — it serves its OWN-path
+    // provider buffer. Sync it as UNRESOLVED open-document shadow state so
+    // its own buffer is queryable before resolver ownership is ready (a no-op
+    // for any carrier or unknown-extension document).
     if current_canonical_id
         .as_deref()
-        .and_then(adapter_module_language_for)
+        .and_then(self_file_language_for)
         .is_some()
     {
         server.sync_self_file_shadow_unresolved(uri).await;
@@ -730,14 +731,15 @@ pub(super) async fn handle_did_change(
                 }
             }
 
-            // A self-file rune module (`.svelte.ts` / `.svelte.js`) is NOT a
-            // carrier — the eager TSX path above never fires for it, and the
-            // coordinator's diagnostics route through carrier IDE state. Re-sync
-            // its OWN-path provider buffer here so an editor edit refreshes the
-            // provider content AND refines the rewrite-aware projection (keeping
-            // `provider_projection_context`'s content and mapper consistent — no
-            // stale own-buffer content, no lost rewrite columns).
-            if adapter_module_language_for(&canonical_id).is_some() {
+            // A self-file document (rune module or plain TS-family script) is
+            // NOT a carrier — the eager TSX path above never fires for it, and
+            // the coordinator's diagnostics route through carrier IDE state.
+            // Re-sync its OWN-path provider buffer here so an editor edit
+            // refreshes the provider content AND refines the rewrite-aware
+            // projection (keeping `provider_projection_context`'s content and
+            // mapper consistent — no stale own-buffer content, no lost rewrite
+            // columns).
+            if self_file_language_for(&canonical_id).is_some() {
                 server.sync_self_file_shadow_unresolved(&uri).await;
             }
         }
@@ -757,13 +759,13 @@ pub(super) async fn handle_did_close(
     let uri = &params.text_document.uri;
     tracing::info!("did_close: {}", uri.as_str());
 
-    // A self-file rune module (`.svelte.ts` / `.svelte.js`) has NO IDE TSX —
-    // the carrier-oriented branch below (gated on `get_ide(...).is_some()`)
+    // A self-file document (rune module or plain TS-family script) has NO IDE
+    // TSX — the carrier-oriented branch below (gated on `get_ide(...).is_some()`)
     // never fires for it. Close + remove its OWN-path Shadow provider state
     // explicitly so the open-document buffer does not linger in the provider.
     if server.documents.get_virtual_source_uri(uri).is_none() && server.project_sync.is_some() {
         if let Some(canonical_id) = server.documents.get_canonical_id(uri) {
-            if adapter_module_language_for(&canonical_id).is_some() {
+            if self_file_language_for(&canonical_id).is_some() {
                 server.clear_provider_sync_state(&canonical_id).await;
             }
         }

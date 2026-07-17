@@ -26,6 +26,10 @@ use verter_language::{FileLanguage, ScriptSourceType};
 /// The provider content for a Svelte rune module, plus the prelude line count
 /// the position mapper applies to map the provider content back to the real
 /// module source.
+///
+/// Also serves plain TS-family scripts through
+/// [`self_file_provider_content`]: their provider content is the source bytes
+/// verbatim with a zero-line prelude.
 #[derive(Debug, Clone)]
 pub struct RuneModuleProviderContent {
     /// `<module rune prelude> + <module bytes>` — the content fed to the
@@ -35,6 +39,58 @@ pub struct RuneModuleProviderContent {
     /// module-source line is shifted down by exactly this many lines in
     /// [`Self::content`]; columns are unchanged.
     pub prelude_line_count: u32,
+}
+
+/// The provider content for a SELF-FILE document — a document whose TypeProvider
+/// buffer is served from its OWN canonical path rather than from a generated
+/// companion:
+///
+/// - a Svelte standalone rune module (`.svelte.ts` / `.svelte.js`) gets
+///   `<module rune prelude> + <bytes>` (see [`rune_module_provider_content`]);
+/// - a plain TS-family script (`.ts` / `.tsx` / `.js` / `.jsx` / `.d.ts` …)
+///   gets its bytes verbatim — no prelude, no per-file scoping;
+/// - anything else (a framework carrier, an unknown extension) returns `None`:
+///   carriers project a generated IDE companion instead.
+///
+/// This is the single builder both the interactive open-document sync and the
+/// projection construction use, so a document's provider buffer and its
+/// position mapper never disagree about the prelude offset.
+#[must_use]
+pub fn self_file_provider_content(
+    language: &FileLanguage,
+    source: &str,
+) -> Option<RuneModuleProviderContent> {
+    if let Some(built) = rune_module_provider_content(language, source) {
+        return Some(built);
+    }
+    if matches!(
+        language,
+        FileLanguage::Script {
+            flavor: verter_language::ScriptFlavor::Plain,
+            ..
+        }
+    ) {
+        return Some(RuneModuleProviderContent {
+            content: source.to_string(),
+            prelude_line_count: 0,
+        });
+    }
+    None
+}
+
+/// Whether `language` serves an own-path (self-file) TypeProvider buffer —
+/// a Svelte rune module or a plain TS-family script. `false` for framework
+/// carriers (they project a generated IDE companion) and unknown extensions.
+#[must_use]
+pub fn serves_self_file_provider_buffer(language: &FileLanguage) -> bool {
+    svelte_rune_module_source_type(language).is_some()
+        || matches!(
+            language,
+            FileLanguage::Script {
+                flavor: verter_language::ScriptFlavor::Plain,
+                ..
+            }
+        )
 }
 
 /// Build the rune-module provider content for `module_bytes` when `language` is
@@ -124,6 +180,42 @@ mod tests {
         assert!(rune_module_provider_content(&FileLanguage::script_ts(), "x").is_none());
         assert!(rune_module_provider_content(&FileLanguage::svelte(), "x").is_none());
         assert!(svelte_rune_module_source_type(&FileLanguage::script_ts()).is_none());
+    }
+
+    #[test]
+    fn self_file_content_serves_plain_scripts_verbatim_without_prelude() {
+        for language in [
+            FileLanguage::script_ts(),
+            FileLanguage::script(verter_language::ScriptSourceType::Tsx),
+            FileLanguage::script(verter_language::ScriptSourceType::js()),
+            FileLanguage::script(verter_language::ScriptSourceType::jsx()),
+            FileLanguage::script(verter_language::ScriptSourceType::Dts),
+        ] {
+            let source = "export const plainControlNumber = 1;\n";
+            let built = self_file_provider_content(&language, source)
+                .expect("a plain TS-family script has self-file provider content");
+            assert_eq!(built.content, source, "plain script bytes are verbatim");
+            assert_eq!(built.prelude_line_count, 0);
+            assert!(serves_self_file_provider_buffer(&language));
+        }
+    }
+
+    #[test]
+    fn self_file_content_delegates_rune_modules_and_rejects_carriers() {
+        let rune = FileLanguage::adapter_module(
+            ScriptSourceType::Ts,
+            FrameworkAdapterId::svelte(),
+            LanguageId::new(verter_language::SVELTE_RUNE_MODULE_LANGUAGE_ID),
+        );
+        let built = self_file_provider_content(&rune, "export const s = $state(0);\n")
+            .expect("a rune module has self-file provider content");
+        assert!(built.prelude_line_count > 0);
+        assert!(serves_self_file_provider_buffer(&rune));
+
+        for carrier in [FileLanguage::vue(), FileLanguage::svelte()] {
+            assert!(self_file_provider_content(&carrier, "x").is_none());
+            assert!(!serves_self_file_provider_buffer(&carrier));
+        }
     }
 
     #[test]

@@ -141,8 +141,8 @@ pub use self::protocol_types::*;
 mod server_utils;
 use self::server_utils::*;
 pub(crate) use self::server_utils::{
-    adapter_module_language_for, carrier_language_for, compute_verter_diagnostics_for_with_views,
-    is_default_export_component_carrier, prepare_non_carrier_provider_sync,
+    carrier_language_for, compute_verter_diagnostics_for_with_views,
+    is_default_export_component_carrier, prepare_non_carrier_provider_sync, self_file_language_for,
     sync_self_file_shadow_state,
 };
 
