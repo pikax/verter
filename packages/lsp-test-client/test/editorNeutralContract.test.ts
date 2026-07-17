@@ -43,6 +43,11 @@ function fakeDriver(diagnostics: readonly LspDiagnostic[]): EditorNeutralContrac
   };
 }
 
+function fixtureSource(document: string): string {
+  const fixtureRoot = fileURLToPath(new URL("../fixtures/editor-neutral/", import.meta.url));
+  return readFileSync(resolve(fixtureRoot, document), "utf8");
+}
+
 describe("editor-neutral LSP contract inventory", () => {
   it("is a non-vacuous, exact 73-case cross-framework inventory", () => {
     const inventory = createEditorNeutralContractInventory();
@@ -98,6 +103,19 @@ describe("editor-neutral LSP contract inventory", () => {
     expect(
       standard.filter((testCase) => /^plain-[jt]sx-pointer-event\./.test(testCase.id)),
     ).toHaveLength(4);
+    for (const testCase of standard.filter((candidate) =>
+      candidate.feature.includes("definition"),
+    )) {
+      expect(testCase.expectedDefinitionDocument, `${testCase.id} target document`).toBeTruthy();
+      expect(
+        Number(testCase.expectedDefinitionAnchor !== undefined) +
+          Number(testCase.expectedDefinitionRange !== undefined),
+        `${testCase.id} must own exactly one exact declaration range`,
+      ).toBe(1);
+    }
+    for (const testCase of standard.filter((candidate) => candidate.feature === "rename")) {
+      expect(testCase.expectedRenameAnchors, `${testCase.id} exact rename anchors`).toHaveLength(2);
+    }
     for (const framework of ["vue", "svelte"] as const) {
       for (const language of ["js", "ts"] as const) {
         const prefix = `${framework}-${language}-dom-event.`;
@@ -162,9 +180,29 @@ describe("editor-neutral anchor resolution", () => {
   it("resolves every committed inventory anchor unambiguously", () => {
     const fixtureRoot = fileURLToPath(new URL("../fixtures/editor-neutral/", import.meta.url));
     for (const testCase of createEditorNeutralContractInventory()) {
-      if (!testCase.anchor || !testCase.document) continue;
-      const source = readFileSync(resolve(fixtureRoot, testCase.document), "utf8");
-      expect(() => resolveContractAnchor(source, testCase.anchor!), testCase.id).not.toThrow();
+      if (testCase.anchor && testCase.document) {
+        const source = readFileSync(resolve(fixtureRoot, testCase.document), "utf8");
+        expect(() => resolveContractAnchor(source, testCase.anchor!), testCase.id).not.toThrow();
+      }
+      if (testCase.expectedDefinitionAnchor && testCase.expectedDefinitionDocument) {
+        const source = readFileSync(
+          resolve(fixtureRoot, testCase.expectedDefinitionDocument),
+          "utf8",
+        );
+        expect(
+          () => resolveContractAnchor(source, testCase.expectedDefinitionAnchor!),
+          `${testCase.id} definition`,
+        ).not.toThrow();
+      }
+      if (testCase.expectedRenameAnchors) {
+        const source = readFileSync(resolve(fixtureRoot, testCase.document), "utf8");
+        for (const anchor of testCase.expectedRenameAnchors) {
+          expect(
+            () => resolveContractAnchor(source, anchor),
+            `${testCase.id} rename`,
+          ).not.toThrow();
+        }
+      }
     }
   });
 });
@@ -209,5 +247,155 @@ describe("editor-neutral fail-closed validation", () => {
     await expect(
       executeEditorNeutralContractCase(topologyCase!, driver, new Map()),
     ).rejects.toThrow(/managed fallback/i);
+  });
+
+  it("rejects a definition that reaches the right document at the wrong declaration range", async () => {
+    const testCase = createEditorNeutralContractInventory().find(
+      (candidate) => candidate.id === "plain-typescript.definition",
+    );
+    expect(testCase).toBeDefined();
+    const source = fixtureSource(testCase!.document);
+    const driver = fakeDriver([]);
+    driver.definition = async () => ({
+      uri: "file:///workspace/src/plain-control.ts",
+      range: {
+        start: { line: 1, character: 34 },
+        end: { line: 1, character: 52 },
+      },
+    });
+
+    await expect(
+      executeEditorNeutralContractCase(testCase!, driver, new Map([[testCase!.document, source]])),
+    ).rejects.toThrow(/declaration range/i);
+  });
+
+  it("requires the same exact local declaration on first and repeated requests", async () => {
+    const testCase = createEditorNeutralContractInventory().find(
+      (candidate) => candidate.id === "vue-ts.markup.definition",
+    );
+    expect(testCase).toBeDefined();
+    const source = fixtureSource(testCase!.document);
+    const driver = fakeDriver([]);
+    let requests = 0;
+    driver.definition = async () => {
+      requests += 1;
+      return {
+        uri: "file:///workspace/src/vue/TypeScriptCase.vue",
+        range: {
+          start: { line: 6, character: 6 },
+          end: { line: 6, character: 16 },
+        },
+      };
+    };
+
+    const evidence = await executeEditorNeutralContractCase(
+      testCase!,
+      driver,
+      new Map([[testCase!.document, source]]),
+    );
+    expect(requests).toBe(2);
+    expect(evidence?.localDefinitionDurationsMs).toEqual([expect.any(Number), expect.any(Number)]);
+  });
+
+  it("still exercises and records the repeated definition when the first target is wrong", async () => {
+    const testCase = createEditorNeutralContractInventory().find(
+      (candidate) => candidate.id === "vue-ts.markup.definition",
+    );
+    expect(testCase).toBeDefined();
+    const source = fixtureSource(testCase!.document);
+    const driver = fakeDriver([]);
+    let requests = 0;
+    driver.definition = async () => {
+      requests += 1;
+      return {
+        uri: "file:///workspace/src/vue/TypeScriptCase.vue",
+        range:
+          requests === 1
+            ? {
+                start: { line: 0, character: 0 },
+                end: { line: 0, character: 0 },
+              }
+            : {
+                start: { line: 6, character: 6 },
+                end: { line: 6, character: 16 },
+              },
+      };
+    };
+
+    await expect(
+      executeEditorNeutralContractCase(testCase!, driver, new Map([[testCase!.document, source]])),
+    ).rejects.toMatchObject({
+      message: expect.stringMatching(/first.*wrong declaration range/i),
+      evidence: {
+        localDefinitionDurationsMs: [expect.any(Number), expect.any(Number)],
+      },
+    });
+    expect(requests).toBe(2);
+  });
+
+  it("rejects rename edits whose replacement is not the requested new name", async () => {
+    const testCase = createEditorNeutralContractInventory().find(
+      (candidate) => candidate.id === "vue-ts.markup.rename",
+    );
+    expect(testCase).toBeDefined();
+    const source = fixtureSource(testCase!.document);
+    const driver = fakeDriver([]);
+    driver.rename = async () => ({
+      changes: {
+        "file:///workspace/src/vue/TypeScriptCase.vue": [
+          {
+            newText: "wrong_name",
+            range: {
+              start: { line: 6, character: 6 },
+              end: { line: 6, character: 16 },
+            },
+          },
+          {
+            newText: "wrong_name",
+            range: {
+              start: { line: 10, character: 28 },
+              end: { line: 10, character: 38 },
+            },
+          },
+        ],
+      },
+    });
+
+    await expect(
+      executeEditorNeutralContractCase(testCase!, driver, new Map([[testCase!.document, source]])),
+    ).rejects.toThrow(/newText/i);
+  });
+
+  it("rejects rename edits that do not replace the original source token", async () => {
+    const testCase = createEditorNeutralContractInventory().find(
+      (candidate) => candidate.id === "vue-ts.markup.rename",
+    );
+    expect(testCase).toBeDefined();
+    const source = fixtureSource(testCase!.document);
+    const driver = fakeDriver([]);
+    driver.rename = async () => ({
+      changes: {
+        "file:///workspace/src/vue/TypeScriptCase.vue": [
+          {
+            newText: testCase!.renameTo!,
+            range: {
+              start: { line: 6, character: 0 },
+              end: { line: 6, character: 5 },
+            },
+          },
+          {
+            newText: testCase!.renameTo!,
+            range: {
+              start: { line: 10, character: 28 },
+              end: { line: 10, character: 38 },
+            },
+          },
+        ],
+      },
+    });
+
+    await expect(
+      executeEditorNeutralContractCase(testCase!, driver, new Map([[testCase!.document, source]])),
+    ).rejects.toThrow(/original token/i);
   });
 });

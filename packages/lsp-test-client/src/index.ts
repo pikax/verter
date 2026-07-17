@@ -31,10 +31,13 @@ export {
 } from "./positionEncoding.js";
 export {
   createEditorNeutralContractInventory,
+  EditorNeutralContractFailure,
   executeEditorNeutralContractCase,
   resolveContractAnchor,
+  resolveContractAnchorRange,
   type ContractAnchor,
   type EditorNeutralContractCase,
+  type EditorNeutralContractEvidence,
   type EditorNeutralContractDriver,
   type EditorNeutralContractFeature,
   type EditorNeutralContractSurface,

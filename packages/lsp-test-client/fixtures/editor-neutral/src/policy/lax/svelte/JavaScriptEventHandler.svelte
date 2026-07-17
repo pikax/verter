@@ -4,7 +4,6 @@
   /** @param {PointerEvent} e */
   function myClick(e) {
     e.pointerId;
-    // @ts-expect-error authored PointerEvent has no such member; lax policy suppresses diagnostics
     lastPointerId = e.__verterMissingPointerMember;
   }
 </script>
