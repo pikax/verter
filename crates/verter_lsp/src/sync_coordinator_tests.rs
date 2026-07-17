@@ -483,7 +483,7 @@ async fn rune_module_debounced_diagnostics_map_through_self_file_projection() {
         canonical_id: Some(canonical_id.to_string()),
         input_id: canonical_id.to_string(),
         source: Arc::<str>::from(source),
-        file_language: crate::server::adapter_module_language_for(canonical_id)
+        file_language: crate::server::self_file_language_for(canonical_id)
             .expect("the path classifies as a rune module"),
         aliases: Vec::new(),
     });
@@ -498,7 +498,7 @@ async fn rune_module_debounced_diagnostics_map_through_self_file_projection() {
         text: source.to_string(),
     });
 
-    let file_language = crate::server::adapter_module_language_for(canonical_id).unwrap();
+    let file_language = crate::server::self_file_language_for(canonical_id).unwrap();
     let provider = Arc::new(MockTypeProvider::new());
 
     let provider_sync_states = Arc::new(DashMap::new());
@@ -1194,7 +1194,7 @@ async fn rune_diagnostics_drop_provider_results_when_shadow_surface_regenerates_
         canonical_id: Some(canonical_id.to_string()),
         input_id: canonical_id.to_string(),
         source: Arc::<str>::from(source),
-        file_language: crate::server::adapter_module_language_for(canonical_id)
+        file_language: crate::server::self_file_language_for(canonical_id)
             .expect("the path classifies as a rune module"),
         aliases: Vec::new(),
     });
@@ -1208,7 +1208,7 @@ async fn rune_diagnostics_drop_provider_results_when_shadow_surface_regenerates_
         version: 1,
         text: source.to_string(),
     });
-    let file_language = crate::server::adapter_module_language_for(canonical_id).unwrap();
+    let file_language = crate::server::self_file_language_for(canonical_id).unwrap();
 
     let provider = Arc::new(MockTypeProvider::new());
     let provider_sync_states = Arc::new(DashMap::new());

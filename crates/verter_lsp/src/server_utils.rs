@@ -67,6 +67,25 @@ pub(crate) fn adapter_module_language_for(path: &str) -> Option<verter_session::
     verter_session::framework::svelte_rune_module_source_type(&language).map(|_| language)
 }
 
+/// Registry-backed SELF-FILE classification for a canonical ID (or URI
+/// string): `Some(language)` when the path serves an OWN-path provider
+/// buffer — a Svelte rune module (`<rune prelude> + <bytes>`) OR a plain
+/// TS-family script (bytes verbatim, zero-line prelude). `None` for
+/// framework carriers (they project a generated IDE companion) and for
+/// unknown extensions (no registered language row — never serve a
+/// `.md`/`.css`/extensionless document to the TypeScript provider).
+pub(crate) fn self_file_language_for(path: &str) -> Option<verter_session::FileLanguage> {
+    let classification = verter_session::LanguageRegistry::global().classify_static(path);
+    if matches!(
+        classification,
+        verter_session::StaticClassification::Unknown
+    ) {
+        return None;
+    }
+    let language = classification.static_resolution();
+    verter_session::framework::serves_self_file_provider_buffer(&language).then_some(language)
+}
+
 /// Whether `path` is a framework CARRIER whose default export IS the
 /// component value (`.vue`, `.svelte`, …). Every framework carrier shares
 /// default-export component semantics: a default import of the carrier binds
@@ -499,22 +518,25 @@ pub(crate) fn apply_specifier_replacements(
     rewritten
 }
 
-/// Sync an OPEN rune module's self-file provider buffer (`<rune prelude> +
-/// <rewritten module bytes>`) to the type provider as UNRESOLVED open-document
-/// state, keyed at the module's OWN canonical path (the Shadow provider path).
+/// Sync an OPEN self-file document's provider buffer to the type provider as
+/// UNRESOLVED open-document state, keyed at the document's OWN canonical path
+/// (the Shadow provider path).
 ///
-/// This is the SHARED self-file shadow-sync primitive, called from BOTH the
-/// server's `did_open`/`did_change` handler and the debounced [`SyncCoordinator`]
-/// tick — so a debounced sync routes a rune module through the SAME self-file
-/// projection path the editor ingress uses (NOT the carrier-miss
-/// `preserve_open_unresolved_carrier`, which would clobber the Shadow state with
-/// an IDE-path state and break did_close cleanup).
+/// A self-file document is a Svelte rune module (`<rune prelude> + <rewritten
+/// module bytes>`) or a plain TS-family script (its bytes verbatim — the
+/// provider buffer IS the document source). This is the SHARED self-file
+/// shadow-sync primitive, called from BOTH the server's `did_open`/`did_change`
+/// handler and the debounced [`SyncCoordinator`] tick — so a debounced sync
+/// routes a self-file document through the SAME projection path the editor
+/// ingress uses (NOT the carrier-miss `preserve_open_unresolved_carrier`,
+/// which would clobber the Shadow state with an IDE-path state and break
+/// did_close cleanup).
 ///
 /// Returns `true` when the self-file buffer was synced and the Shadow state
-/// committed; `false` when the path is not a rune module, the document is gone,
-/// or the provider sync failed. It refreshes the document's rewrite-aware
-/// projection from the same replacements it applies, so own-buffer position
-/// mapping stays exact.
+/// committed; `false` when the path is not a self-file document, the document
+/// is gone, or the provider sync failed. It refreshes the document's
+/// rewrite-aware projection from the same replacements it applies, so
+/// own-buffer position mapping stays exact.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn sync_self_file_shadow_state(
     documents: &DocumentRegistry,
@@ -557,11 +579,11 @@ pub(crate) async fn sync_self_file_shadow_state(
     } else {
         Vec::new()
     };
-    documents.refresh_self_file_rewrites(uri, file_language, &replacements);
+    documents.refresh_self_file_rewrites(uri, &replacements);
 
     let rewritten = apply_specifier_replacements(&source, &replacements);
     let Some(built) =
-        verter_session::framework::rune_module_provider_content(file_language, &rewritten)
+        verter_session::framework::self_file_provider_content(file_language, &rewritten)
     else {
         return false;
     };

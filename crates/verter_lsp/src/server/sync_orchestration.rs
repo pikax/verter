@@ -1831,14 +1831,16 @@ impl VerterLanguageServer {
         })
     }
 
-    /// Sync an OPEN rune module's self-file provider buffer to the provider as
-    /// UNRESOLVED open-document state, keyed at the module's OWN canonical path
-    /// (the Shadow provider path), so it is QUERYABLE before resolver ownership
-    /// is ready.
+    /// Sync an OPEN self-file document's provider buffer to the provider as
+    /// UNRESOLVED open-document state, keyed at the document's OWN canonical
+    /// path (the Shadow provider path), so it is QUERYABLE before resolver
+    /// ownership is ready.
     ///
-    /// Mirrors [`Self::sync_carrier_ide_unresolved`] but for a SELF-FILE rune
-    /// module: the provider buffer is `<rune prelude> + <rewritten module
-    /// bytes>`, the provider path is the canonical id itself (not a derived
+    /// Mirrors [`Self::sync_carrier_ide_unresolved`] but for a SELF-FILE
+    /// document (a Svelte rune module OR a plain TS-family script): the
+    /// provider buffer is the own-path content (`<rune prelude> + <rewritten
+    /// module bytes>` for a rune module, the source verbatim for a plain
+    /// script), the provider path is the canonical id itself (not a derived
     /// `.tsx` path), and it does NOT depend on
     /// `non_carrier_sync_state_for_source` (which requires resolver ownership).
     /// It refreshes the document's rewrite-aware projection from the same
@@ -1847,8 +1849,7 @@ impl VerterLanguageServer {
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
             return false;
         };
-        let Some(file_language) = super::server_utils::adapter_module_language_for(&canonical_id)
-        else {
+        let Some(file_language) = super::server_utils::self_file_language_for(&canonical_id) else {
             return false;
         };
         let Some(sync) = &self.project_sync else {

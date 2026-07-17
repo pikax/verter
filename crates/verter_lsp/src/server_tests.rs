@@ -4475,12 +4475,12 @@ async fn barrel_export_navigates_to_terminal_vue_component() {
         .find(|loc| loc.uri == overlay_uri)
         .expect("definition should point to Overlay.vue");
 
-    // Should navigate to the component file — `default` export resolves
-    // to the first script binding (line 1: `const visible = ref(false)`)
+    // Should navigate to the component file — the `default` export of a
+    // carrier anchors at the file start (no authored source token).
     assert_eq!(
-        target.range.start.line,
-        line_for_snippet(overlay_source, "const visible"),
-        "barrel export should navigate to the terminal Vue component"
+        target.range,
+        Range::default(),
+        "barrel export should navigate to the terminal Vue component file start"
     );
 
     // Negative: should NOT stay in barrel file
@@ -4523,11 +4523,11 @@ async fn barrel_multi_level_navigates_to_terminal() {
         .find(|loc| loc.uri == button_uri)
         .expect("definition should point to Button.vue");
 
-    // `default` export resolves to first binding (line 1: `defineProps<...>()`)
+    // The `default` export of a carrier anchors at the file start.
     assert_eq!(
-        target.range.start.line,
-        line_for_snippet(button_source, "defineProps"),
-        "multi-level barrel should navigate to terminal Vue component"
+        target.range,
+        Range::default(),
+        "multi-level barrel should navigate to terminal Vue component file start"
     );
 
     // Negative: should NOT stay in any barrel file
@@ -4569,9 +4569,9 @@ async fn barrel_import_binding_in_vue_script_navigates_to_terminal() {
         .expect("definition should point to Overlay.vue");
 
     assert_eq!(
-        target.range.start.line,
-        line_for_snippet(overlay_source, "const visible"),
-        "Vue script import binding should resolve through barrel to the terminal component"
+        target.range,
+        Range::default(),
+        "Vue script import binding should resolve through barrel to the terminal component file start"
     );
     assert!(
         !locations
@@ -4633,9 +4633,9 @@ async fn barrel_import_binding_in_vue_script_skips_type_provider_barrel_result()
         .expect("definition should point to Overlay.vue");
 
     assert_eq!(
-            target.range.start.line,
-            line_for_snippet(overlay_source, "const visible"),
-            "Vue script import binding should resolve through barrel to the terminal component even when the type provider returns the barrel"
+            target.range,
+            Range::default(),
+            "Vue script import binding should resolve through barrel to the terminal component file start even when the type provider returns the barrel"
         );
     assert!(
         !locations
@@ -4684,11 +4684,11 @@ async fn barrel_aliased_local_side_navigates_to_source() {
         .find(|loc| loc.uri == popup_uri)
         .expect("definition should point to Popup.vue");
 
-    // `default` export resolves to first binding (line 1: `const shown = ref(true)`)
+    // The `default` export of a carrier anchors at the file start.
     assert_eq!(
-        target.range.start.line,
-        line_for_snippet(popup_source, "const shown"),
-        "local side of aliased barrel export should navigate to terminal"
+        target.range,
+        Range::default(),
+        "local side of aliased barrel export should navigate to terminal file start"
     );
 
     drain_handle.abort();
@@ -4744,11 +4744,12 @@ async fn resolve_barrel_locations_follows_reexport_to_terminal() {
         .find(|loc| loc.uri == comp_uri)
         .expect("should resolve barrel to Counter.vue");
 
-    // Should navigate to first binding in Counter.vue
+    // Should navigate to the Counter.vue file start (the carrier default
+    // export has no authored source token).
     assert_eq!(
-        target.range.start.line,
-        line_for_snippet(comp_source, "const count"),
-        "type provider barrel location should resolve to terminal"
+        target.range,
+        Range::default(),
+        "type provider barrel location should resolve to terminal file start"
     );
 
     // Negative: should NOT stay in barrel
