@@ -76,7 +76,7 @@ the shipped `wasm32-wasip2` build:
   with a default**, including `language_server_command`. ([docs.rs Extension trait](https://docs.rs/zed_extension_api/latest/zed_extension_api/trait.Extension.html))
 - `language_server_command(&mut self, &LanguageServerId, &Worktree) -> Result<Command>`.
 - `language_server_initialization_options(&mut self, &LanguageServerId, &Worktree) ->
-  Result<Option<serde_json::Value>>` — the LSP `initialize` `initializationOptions`
+Result<Option<serde_json::Value>>` — the LSP `initialize` `initializationOptions`
   (one-time).
 - `Command { command: String, args: Vec<String>, env: Vec<(String, String)> }` — the launch
   spec.
@@ -89,7 +89,7 @@ the shipped `wasm32-wasip2` build:
   `zed::github_release_by_tag_name`, `zed::download_file`, `zed::make_file_executable`,
   `zed::set_language_server_installation_status`.
 - User settings access: `LspSettings::for_worktree(server_name, worktree) ->
-  Result<LspSettings>` with `.binary: Option<CommandSettings { path, arguments, env }>`,
+Result<LspSettings>` with `.binary: Option<CommandSettings { path, arguments, env }>`,
   `.settings: Option<Value>`, `.initialization_options: Option<Value>`. The extension reads
   the user's `lsp.verter.binary.path` override, `binary.arguments`/`binary.env`, and the
   `lsp.verter.settings` blob through this.
@@ -194,7 +194,7 @@ crate's `build_server_args` **clamps** any non-`{tsgo, off}` value (including th
 satisfy (it never passes `--tsdk`). `tsgo` is self-contained: `try_spawn_tsgo` discovers the
 native provider via `find_tsgo_binary_canonical(workspace_root)` (env → workspace
 `node_modules` → PATH → npm/npx cache). The extension ships no TypeScript SDK; the user
-installs `@typescript/native-preview` per-project. `--plugin-path` and the `--mcp-*` flags
+installs TypeScript 7 (`typescript@7`, which supplies the native platform binary) per-project. `--plugin-path` and the `--mcp-*` flags
 are omitted.
 
 The **workspace root** positional is forwarded explicitly (a WASM extension's cwd is not the
@@ -219,14 +219,14 @@ The VS Code client passes a rich `initializationOptions`; the server reads only 
 `build_initialization_options`, which projects the user's `lsp.verter.settings` blob onto
 **exactly** the server-read parity set and fills defaults:
 
-| Init option (server reads) | Default |
-|---|---|
-| `lint: { enabled, preset }` | `{ enabled: false, preset: "recommended" }` |
-| `inlayHints: { enabled }` | `{ enabled: true }` |
-| `viteConfig: { enabled, trustedFiles }` | `{ enabled: true, trustedFiles: [] }` |
-| `experimental: { conditionalRootNarrowing, strictSlots }` | `{ false, false }` |
-| `hover: { provenance }` | `{ provenance: false }` |
-| `statistics: { enabled }` | `{ enabled: false }` |
+| Init option (server reads)                                | Default                                     |
+| --------------------------------------------------------- | ------------------------------------------- |
+| `lint: { enabled, preset }`                               | `{ enabled: false, preset: "recommended" }` |
+| `inlayHints: { enabled }`                                 | `{ enabled: true }`                         |
+| `viteConfig: { enabled, trustedFiles }`                   | `{ enabled: true, trustedFiles: [] }`       |
+| `experimental: { conditionalRootNarrowing, strictSlots }` | `{ false, false }`                          |
+| `hover: { provenance }`                                   | `{ provenance: false }`                     |
+| `statistics: { enabled }`                                 | `{ enabled: false }`                        |
 
 The builder constructs the output POSITIVELY — it only ever inserts the parity keys — so
 editor/UI-only settings (`configuration`, `decorations`, `mcp`, `analysis`, `trace`) cannot
@@ -320,6 +320,7 @@ Vue and Svelte are NOT built into Zed — they come from the official `zed-exten
 language definition, and contributes only the language server.
 
 Why language-server-only:
+
 1. A language-defining extension needs a grammar; a server-only extension does not. Zero
    grammar maintenance.
 2. The official `vue`/`svelte` extensions already own `"Vue.js"`/`"Svelte"` with correct
@@ -354,8 +355,8 @@ table.
 {
   "languages": {
     "Vue.js": { "language_servers": ["verter", "!vue-language-server", "..."] },
-    "Svelte": { "language_servers": ["verter", "!svelte-language-server", "..."] }
-  }
+    "Svelte": { "language_servers": ["verter", "!svelte-language-server", "..."] },
+  },
 }
 ```
 
@@ -368,10 +369,11 @@ Discovery precedence is owned by the shared `verter-editor-client` crate's `reso
 (the same precedence the Lapce volt uses), driven by host-gathered inputs:
 
 **Precedence (highest first):**
+
 1. **User `lsp.verter.binary.path` override** → launch it (covers dev `target/{debug,release}`
-   + power users). `binary.arguments` / `binary.env` are also forwarded.
+   - power users). `binary.arguments` / `binary.env` are also forwarded.
 2. **PATH discovery — opt-in only.** When the user sets `lsp.verter.settings.serverSource =
-   "path"`, the extension asks `worktree.which("verter-lsp")` for the binary on `PATH`. That
+"path"`, the extension asks `worktree.which("verter-lsp")` for the binary on `PATH`. That
    host call resolves the ABSOLUTE path itself — handling `.exe`/`PATHEXT` on Windows — and
    returns the resolved absolute path (or `None`). The extension injects that real hit into
    `plan_launch` as `path_found` and the resolved source uses it VERBATIM as the launch
@@ -379,7 +381,7 @@ Discovery precedence is owned by the shared `verter-editor-client` crate's `reso
    opt-in is NOT launched — it yields the distinct `PathFoundButNotOptedIn` reason, so a stale
    PATH binary can't silently break client/server version coupling.
 3. **Loud fail.** No override, and an opt-in with no `worktree.which` hit (`path_found =
-   None`), → `language_server_command` returns an actionable error (set `lsp.verter.binary.path`,
+None`), → `language_server_command` returns an actionable error (set `lsp.verter.binary.path`,
    or install `verter-lsp` and opt in) — the distinct `NothingResolved` reason, never a
    silent mis-launch and never a guessed binary name.
 
@@ -393,7 +395,8 @@ CRITICAL portability rule.
 state requires Verter to publish per-platform `verter-lsp` GitHub-release assets + a release
 pipeline (none exist yet). The shared `discovery` module documents the forward-compat seam
 (an additive `ServerSource`/`DiscoveryInputs` extension), so adding the managed pinned-download
-+ checksum-verification source is additive, not a rewrite (§8).
+
+- checksum-verification source is additive, not a rewrite (§8).
 
 ### 4.4 Settings schema (Zed `settings.json`)
 
@@ -406,21 +409,22 @@ reads (all under the single `verter` id):
   "lsp": {
     "verter": {
       "binary": { "path": "…", "arguments": ["…"], "env": { "…": "…" } }, // discovery override + extras
-      "settings": {                          // forwarded as initializationOptions (§3.3)
-        "serverSource": "path",              // PATH-discovery opt-in (only if binary.path unset)
+      "settings": {
+        // forwarded as initializationOptions (§3.3)
+        "serverSource": "path", // PATH-discovery opt-in (only if binary.path unset)
         "lint": { "enabled": false, "preset": "recommended" },
         "inlayHints": { "enabled": true },
         "viteConfig": { "enabled": true, "trustedFiles": [] },
         "experimental": { "conditionalRootNarrowing": false, "strictSlots": false },
         "hover": { "provenance": false },
-        "statistics": { "enabled": false }
-      }
-    }
+        "statistics": { "enabled": false },
+      },
+    },
   },
   "languages": {
-    "Vue.js":  { "language_servers": ["verter", "!vue-language-server", "..."] },
-    "Svelte":  { "language_servers": ["verter", "!svelte-language-server", "..."] }
-  }
+    "Vue.js": { "language_servers": ["verter", "!vue-language-server", "..."] },
+    "Svelte": { "language_servers": ["verter", "!svelte-language-server", "..."] },
+  },
 }
 ```
 
@@ -487,6 +491,7 @@ canonical `cargo nextest run --workspace` gate (the shared crate is a workspace 
 
 The Zed crate's own host-target tests (`cargo test --manifest-path extensions/zed/Cargo.toml`)
 cover the wiring:
+
 - **Launch contract:** a fake root + override settings → the EXACT plan (`command_path` ==
   the override; `args == ["--type-provider=tsgo", "<root>"]`).
 - **`tsgo` emitted, `tgo`/`tsserver`/`auto`/`bogus`/`""` clamped, the literal `tgo` NEVER in
@@ -517,9 +522,15 @@ cover the wiring:
 compiles the `cfg(wasi)` glue against the real `zed_extension_api` 0.7.0 API and catches a
 wasip1/wasip2 mismatch or an API drift.
 
+**Production-plan semantic smoke:** the Linux CI lane builds the real extension and
+`verter-lsp`, calls the extension's production `plan_launch`, and drives the exact command,
+argv, and initialization options through the shared stdio client. Valid Vue/Svelte hover
+must be concrete, an authored mutation must publish its exact TS2322, restoration must return
+to zero diagnostics, and startup/shutdown must complete. Missing inputs fail closed.
+
 **Server-side LSP behavior** is already covered by the real-LSP gatekeeper suite in
 `crates/verter_lsp/tests/` (drives the server in-process over stdio, independent of any
-editor). The Zed extension only *launches* that server, so **no server change is needed**.
+editor). The Zed extension only _launches_ that server, so **no server change is needed**.
 
 **Manual (irreducible):** full Zed **UI** E2E — installing the dev extension in a real Zed
 build and exercising hover/completion/rename in a `.vue`/`.svelte` file; confirming Zed
@@ -532,8 +543,10 @@ checklist in the README, not an automated gate (mirrors the Lapce/neovim posture
 `.github/workflows/zed.yml` runs a 3-OS matrix (ubuntu/macos/windows, `shell: bash`,
 `dtolnay/rust-toolchain@stable` with `targets: wasm32-wasip2` + clippy/rustfmt): the
 `wasm32-wasip2` release build, the host-target unit tests, `cargo clippy --target
-wasm32-wasip2 -- -D warnings`, and `cargo fmt --check`. Triggers on `extensions/zed/**` + the
-workflow file. Real-Zed UI smoke is out of scope for v0 (like the lapce/neovim jobs).
+wasm32-wasip2 -- -D warnings`, and `cargo fmt --check`. The Linux lane additionally runs the
+production-plan semantic smoke. Real-Zed UI loading remains manual because Zed has no
+headless extension-host harness; the neutral-client lane is documented as a shipping-plan
+contract, not as GUI automation.
 
 The `pnpm build:zed` script (`rustup target add wasm32-wasip2` + the wasip2 release build + a
 `shx` copy of the `.wasm` into `extensions/zed/bin/`) is NOT in the default `pnpm build`
@@ -542,6 +555,7 @@ chain.
 ## 8. Scope, dependencies, and roadmap
 
 **Scope (as built):**
+
 - **`extensions/zed/`** — a standalone crate **outside the root Cargo workspace** (§4.1).
   Touches **no existing crate**.
 - **`crates/verter-editor-client`** — consumed unchanged as the shared launch contract; the
@@ -552,12 +566,14 @@ chain.
   is unaffected by `extensions/zed/` (out of workspace).
 
 **Decisions (as built):**
+
 - **Grammar/language → language-server-only, no grammar.** Verter attaches to the official
   `"Vue.js"`/`"Svelte"` languages, an opt-in alternative to Volar/svelte-language-server.
 - **Manifest → ONE server id `verter` with plural `languages`** (proven by `zed-extensions/tsgo`).
 - **Discovery → override > opt-in PATH > loud fail** (v0). Managed download is roadmap.
 
 **Roadmap (follow-ups — not v0):**
+
 1. **Managed pinned-download + checksum verification (requires published per-platform release
    assets).** Wire the managed-download source into the shared crate's `discovery` once
    per-platform `verter-lsp` release assets exist; a CI matrix builds

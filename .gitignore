@@ -17,6 +17,7 @@ TODOs.md
 dts-build/packages
 *.tsbuildinfo
 package-lock.json
+!editors/nvim/tests/fixtures/real-client/package-lock.json
 
 # Generated type fixtures
 **/__generated__/

@@ -132,32 +132,34 @@ VS Code activates on `onLanguage:vue`, `onLanguage:svelte` (plus the TS/JS varia
 
 The `verter-lsp` CLI (`crates/verter_lsp/src/main.rs`, hand-rolled `CliArgs::parse`, not clap) accepts: `--type-provider={auto|tsgo|tsserver|extension|off}`, `--tsdk=<path>`, `--plugin-path=<path>`, `--mcp-port=<n>` (parsed but **ignored** — LSP no longer embeds MCP), `--mcp-lint-preset=<preset>` (ignored), and a **positional workspace root**.
 
-**Decisive simplification for Lapce: use `--type-provider=tsgo`.** In `main.rs`, `--tsdk` is consumed **only** by the tsserver path (`find_tsserver(args.tsdk…)`). `try_spawn_tsgo` ignores `--tsdk` entirely and discovers the tsgo binary via `find_tsgo_binary_canonical(workspace_root)` (order: `VERTER_TSGO_BIN` env → workspace `node_modules` → PATH → npm/npx cache). So the tsgo provider is **self-contained** — the volt does **not** need to ship a TypeScript SDK (which it has no `node_modules` to provide anyway). The user installs the tsgo binary (`@typescript/native-preview`) per-project in `node_modules` (the normal case for a TS/Vue/Svelte project), exactly as the VS Code path expects.
+**Decisive simplification for Lapce: use `--type-provider=tsgo`.** In `main.rs`, `--tsdk` is consumed **only** by the tsserver path (`find_tsserver(args.tsdk…)`). `try_spawn_tsgo` ignores `--tsdk` entirely and discovers the native TypeScript 7 binary via `find_tsgo_binary_canonical(workspace_root)` (order: `VERTER_TSGO_BIN` env → workspace `node_modules` → PATH → npm/npx cache). The volt does **not** need to ship a TypeScript SDK. The user installs `typescript@7` per-project, which installs the matching `@typescript/typescript-<platform>-<arch>` binary.
 
 `--plugin-path` (tsserver-only) and the `--mcp-*` flags are **omitted** for the Lapce volt.
 
 The **workspace root** positional arg: it is optional (the server falls back to `std::env::current_dir()`), but a WASI plugin's cwd is the volt directory, not the workspace. So the volt **must** pass the workspace root positionally, derived from the LSP `initialize` request's `root_uri` (`params.root_uri.to_file_path()` → push the plain path string; `CliArgs` treats any non-`--` arg as the root).
 
 Resulting `server_args` for the default (tsgo) case:
+
 ```
 ["--type-provider=tsgo", "<workspace-root-path>"]
 ```
+
 (plus any user-supplied extra args via `initializationOptions.lsp.serverArgs`).
 
 ### 3.3 Initialization options — parity mapping
 
 VS Code passes a rich `initializationOptions` object (extension.ts ~484-520). The server reads only a subset (`crates/verter_lsp/src/server/lifecycle.rs` ~106-194; `crates/verter_lsp/src/config.rs`). The Lapce volt mirrors the **server-relevant** subset and drops VS-Code-UI-only fields.
 
-| Init option | VS Code source | Lapce mapping |
-|---|---|---|
-| `lint: { enabled, preset }` | `verter.lint.*` | `[config."lint.enabled"]`, `[config."lint.preset"]` |
-| `inlayHints: { enabled }` | `verter.inlayHints.enabled` | `[config."inlayHints.enabled"]` |
-| `viteConfig: { enabled, trustedFiles }` | `verter.viteConfig.*` | `[config."viteConfig.enabled"]`, `[config."viteConfig.trustedFiles"]` |
-| `experimental: { conditionalRootNarrowing, strictSlots }` | `verter.experimental.*` | `[config."experimental.*"]` |
-| `hover: { provenance }` | `verter.hover.provenance` | `[config."hover.provenance"]` |
-| `statistics: { … }` | `verter.statistics.*` | optional; drop in v0 |
-| `frameworks: ["vue","svelte"]` | descriptor manifest | hardcode `["vue","svelte"]` |
-| `configuration: { vue, typescript, css, … }` | VS Code per-language config | **drop** — these are VS-Code language-service settings (emmet/css/html) the Verter server reads opportunistically; Lapce has its own. v0 omits; can add a minimal `{ typescript: {…} }` later if a feature needs it. |
+| Init option                                               | VS Code source              | Lapce mapping                                                                                                                                                                                                        |
+| --------------------------------------------------------- | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lint: { enabled, preset }`                               | `verter.lint.*`             | `[config."lint.enabled"]`, `[config."lint.preset"]`                                                                                                                                                                  |
+| `inlayHints: { enabled }`                                 | `verter.inlayHints.enabled` | `[config."inlayHints.enabled"]`                                                                                                                                                                                      |
+| `viteConfig: { enabled, trustedFiles }`                   | `verter.viteConfig.*`       | `[config."viteConfig.enabled"]`, `[config."viteConfig.trustedFiles"]`                                                                                                                                                |
+| `experimental: { conditionalRootNarrowing, strictSlots }` | `verter.experimental.*`     | `[config."experimental.*"]`                                                                                                                                                                                          |
+| `hover: { provenance }`                                   | `verter.hover.provenance`   | `[config."hover.provenance"]`                                                                                                                                                                                        |
+| `statistics: { … }`                                       | `verter.statistics.*`       | optional; drop in v0                                                                                                                                                                                                 |
+| `frameworks: ["vue","svelte"]`                            | descriptor manifest         | hardcode `["vue","svelte"]`                                                                                                                                                                                          |
+| `configuration: { vue, typescript, css, … }`              | VS Code per-language config | **drop** — these are VS-Code language-service settings (emmet/css/html) the Verter server reads opportunistically; Lapce has its own. v0 omits; can add a minimal `{ typescript: {…} }` later if a feature needs it. |
 
 VS-Code-only surfaces **excluded** entirely: `decorations.*` (editor UI decorations), `analysis.enabled` / the `$/verter/*` custom requests (panels), `mcp.*`, `trace.server`, the `@verter/typescript-plugin` wiring (tsserver-in-tsserver integration — N/A to Lapce). These power VS Code UI and are not part of the standard LSP feature set Lapce consumes.
 
@@ -204,6 +206,7 @@ The decision surface in `lib.rs` (`plan_launch`, `handle_initialize`, the `LspLa
 An unprimed codex architect consult (full output: `.feedback/_lapce_binfork.out`) evaluated PATH-only (A), download-on-activation (B), bundled-all-platform (C), and hybrids (D) against cross-platform correctness, first-run friction, client/server version coupling, maintenance, security, and the WASI sandbox. **Verdict: Strategy D, a managed pinned download as the default, with an explicit override above it and a loud failure below it — PATH is opt-in only, never a silent fallback.**
 
 **Precedence (highest first):**
+
 1. **`lsp.serverPath` override** (explicit user/dev config; also covers the dev `target/{debug,release}` and E2E cases) → launch `urn:<that path>`.
 2. **Verified pinned managed binary already present** in the volt dir at `servers/<serverVersion>/<target>/verter-lsp[.exe]` (hash-verified) → launch its `file://`.
 3. **Download the pinned release asset** for the current OS/arch from `releases/download/v<serverVersion>/verter-lsp-v<serverVersion>-<target>.{tar.gz|zip}`, **verify SHA-256** (embedded in the volt's `manifest.rs`), extract the single expected binary (reject zip-slip/tar-traversal), atomically rename into place under `servers/<serverVersion>/<target>/`, `chmod +x` on Unix → launch its `file://`.
@@ -212,6 +215,7 @@ An unprimed codex architect consult (full output: `.feedback/_lapce_binfork.out`
 PATH (`urn:`) is reachable only when the user explicitly opts in (e.g. `lsp.serverSource = "path"`), to avoid a stale/unrelated PATH binary shadowing the managed, version-matched one.
 
 Supporting rules from the architect:
+
 - **Pin to the volt's exact server version, not `latest`** — Verter has client/server protocol/init-options coupling; `latest` would silently pair an old client with a new server. (The official `lapce-rust` volt uses `latest`; Verter deliberately does not.)
 - **Compatibility handshake:** the volt passes `initializationOptions.verterClient = { name: "lapce-volt", version, protocolVersion, expectedServerVersion }`; `verter-lsp` validates at `initialize`, returns `serverInfo`, and rejects/warns on mismatch. Use a **protocol epoch/range**, not raw package semver, so a patched server stays valid when the protocol is unchanged. (This is a small **server-side addition** — see scope, §8.)
 - **Cross-platform (the CRITICAL portability rule):** ship a **portable Linux artifact (static/musl)** for x64 + arm64 — the WASI plugin gets OS/arch but **no glibc/musl signal**, so libc guessing is a real hole. Use a **total platform matrix**: map only known `(os, arch)` tuples; **unknown ⇒ fail loudly, never guess**. Asset/cache names use safe target triples (`verter-lsp-v0.1.0-x86_64-apple-darwin.tar.gz`, `…-x86_64-pc-windows-msvc.zip`, `…-x86_64-unknown-linux-musl.tar.gz`, `…-aarch64-*`) — all NTFS-safe (no `:` etc.).
@@ -230,6 +234,7 @@ Supporting rules from the architect:
 This section is the original decomposition plan. **Landed today (v0 interim):** the crate skeleton, manifest, LSP registration, build wiring, the launch-contract logic (housed in the shared `crates/verter-editor-client` crate rather than per-volt `init.rs`/`discovery.rs`/`manifest.rs` files), the host-target unit/manifest/lockfile tests, and the `wasm32-wasip1` build-smoke — i.e. the unit of work described below minus the managed-download machinery. **Documented roadmap (not yet landed):** the managed pinned download + SHA-256 verification + atomic install, the `verterClient` compatibility handshake (and its small server-side counterpart), and the release/publish CI. Each landed change carries discriminating tests (a test must FAIL pre-change and PASS post-change; no stubs/always-true asserts, per the project Stub-Prevention rule).
 
 ### Block L1 — Crate skeleton, manifest, LSP registration, build integration (LANDED)
+
 - The crate `extensions/lapce/` (standalone, empty `[workspace]`; `crate-type = ["cdylib", "rlib"]`, wasi-cfg `lapce-plugin` dep) ships with a committed `Cargo.lock` pinned to `lsp-types 0.94.1` and the `volt.toml` manifest. The as-built is a **single `src/lib.rs`** (there is no `main.rs`): its `mod wasi_volt` — gated `#[cfg(target_os = "wasi")]` — holds `register_plugin!` + the `LapcePlugin::handle_request` that dispatches `Initialize::METHOD` to the pure `handle_initialize`. There is no `init::start`.
 - The launch-contract logic lives in the shared `crates/verter-editor-client` crate — `pub fn build_server_args(root: Option<&str>, settings: &Value) -> Vec<String>` and `pub fn build_initialization_options(settings: &Value) -> Value` (signatures take `Option<&str>`, not `Option<&Path>`). The volt's `lib.rs` only carries the thin surface that consumes them: `plan_launch` / `handle_initialize` / `document_selector` and the `LspLauncher` test seam.
 - Build wiring: a `pnpm` script `build:lapce` (`rustup target add wasm32-wasip1` guard + `cargo build --manifest-path extensions/lapce/Cargo.toml --target wasm32-wasip1 --release` + copy `.wasm` to `bin/`). `bin/*.wasm` is in the volt's `.gitignore`.
@@ -241,9 +246,11 @@ This section is the original decomposition plan. **Landed today (v0 interim):** 
   - A **build-smoke** (CI job, §6): `cargo build --target wasm32-wasip1 --release` succeeds and emits a non-empty `.wasm` (this is the test that would have caught the `lsp-types` float; it FAILS without the committed lock).
 
 ### Block L2 — Binary discovery / acquisition — ROADMAP (NOT landed)
+
 **As-built (v0):** the volt has **no** `discovery.rs` / `manifest.rs` and ships **no** managed download. Server discovery is delegated to the shared `crates/verter-editor-client` crate (`resolve_server` over `DiscoveryInputs`), and the v0 precedence is **`lsp.serverPath` override → opted-in PATH (`lsp.serverSource = "path"`) → loud failure** — no download, no PATH fallback unless the user opts in. The override/PATH/fail decision and its host-target tests live on the volt's launch surface (`plan_launch`) and the shared crate.
 
 **Roadmap (the managed pinned download — not yet landed):** the items below describe the Strategy-D managed-download machinery, which is future work and ships with its own `discovery.rs` / `manifest.rs` + release assets. None of it is part of the landed v0.
+
 - A `resolve_server(os, arch, cfg, volt_dir, manifest, fs, http) -> Result<ServerLaunch>` extension where `fs`/`http` are trait seams so tests inject a fake filesystem + fake HTTP. `ServerLaunch = { uri: Url, /* urn or file */ }`.
 - An embedded `{ (os,arch) -> { asset_url, sha256 } }` table (the known matrix; values are placeholders until release assets exist — gated behind the v0 decision, §8).
 - SHA-256 verify, atomic install, zip-slip/tar-traversal rejection, versioned-immutable cache path `servers/<ver>/<target>/`.
@@ -257,9 +264,11 @@ This section is the original decomposition plan. **Landed today (v0 interim):** 
   - Target-triple/asset-name builder → asserts names are NTFS-safe (no `:` `<` `>` etc.) for every matrix entry (discriminates the cross-platform rule).
 
 ### Block L3 — Init-options & capabilities parity + compatibility handshake
+
 **As-built (v0):** the full `initializationOptions` parity mapping (§3.3) is landed in the shared `crates/verter-editor-client` crate (`build_initialization_options`), exercised by the volt's host-target tests. The `verterClient` compatibility handshake and its server-side counterpart are **NOT** part of v0 — the volt makes **zero** server-side changes (no `crates/verter_lsp` edit). The handshake items below are roadmap.
 
 **Roadmap (the compatibility handshake — not yet landed):**
+
 - Extend the parity mapping with `verterClient` handshake fields (`protocolVersion`, `expectedServerVersion`).
 - **Server-side counterpart (a small, separate future change in `crates/verter_lsp`):** read `initializationOptions.verterClient`, validate protocol epoch/range, populate `serverInfo`, log/warn on mismatch. (When landed it touches `verter_lsp`, **not** `verter_session`.)
 - **Discriminating tests (roadmap):**
@@ -267,9 +276,11 @@ This section is the original decomposition plan. **Landed today (v0 interim):** 
   - Server-side (a new `crates/verter_lsp/tests/` integration test driving `initialize`): a request with a **compatible** `verterClient` → normal init + `serverInfo` present; a request with an **incompatible** `protocolVersion` → the defined mismatch behavior (warn/reject) fires. Discriminates the handshake (pre-change: no handshake → both behave identically; post-change: they differ). These join the existing real-LSP gatekeeper suite in `crates/verter_lsp/tests/`.
 
 ### Block L4 — Tests, CI, docs
+
 **As-built (v0):** the `lapce` CI workflow (§6) — a **3-OS matrix** (ubuntu/macos/windows, `shell: bash`) running the `wasm32-wasip1` build-smoke, the host-target `cargo test`, and `cargo clippy --target wasm32-wasip1 -- -D warnings` + `cargo fmt --check` on all three. The committed-`Cargo.lock` `lsp-types < 0.95` guard test (FAILS if the lock drifts to a `Url`→`Uri` version — guards the §2.3 gotcha permanently) and the manifest tests are part of that host suite.
 
 **Roadmap (not in v0):**
+
 - A release-pipeline job (gated on the §8 decision) that builds per-platform `verter-lsp` assets + checksums and a `volts publish` step (needs a registry-token secret).
 - `README.md` for the volt + a docs page (`docs/` guide) on installing the Verter Lapce plugin (incl. the tsgo / `node_modules` prerequisite and the binary-source config).
 
@@ -285,32 +296,38 @@ This section is the original decomposition plan. **Landed today (v0 interim):** 
 The project mandates automated tests for LSP/extension changes (no manual-only verification). Realistic split:
 
 **Automated (the bulk):**
+
 - **Pure-logic unit tests** (host target, no WASI runtime) — as-built, all in `extensions/lapce/src/lib.rs`: the launch tuple (`handle_initialize` → exact `(uri, args, selector, options)`, plus the fail-loud-on-`None`-root and the §5 negative assertions), the type-provider clamp, and the discovery precedence (override > opted-in PATH > loud fail) over the shared `verter-editor-client` crate. These fully cover the v0 decision logic. (ROADMAP: the fake-fs/fake-http tests for the managed download — hash verify, fail-loud, zip-slip, NTFS-safe names, platform-matrix totality — ship with the `discovery.rs` / `manifest.rs` managed-download work, not v0.)
 - **Manifest tests:** parse `volt.toml`, assert activation languages, `wasm` path, config keys.
 - **Build-smoke:** the `wasm32-wasip1` crate compiles to a non-empty `.wasm` (CI). This is a genuine discriminating gate — it fails without the committed `lsp-types` lock pin.
+- **Production-plan semantic smoke:** the Linux CI lane builds the real volt and `verter-lsp`, calls the volt's production `plan_launch` to export its exact command/argv/options/selector, and drives that plan through the shared stdio client. Valid Vue/Svelte hover must be concrete, an authored type mutation must publish its exact TS2322, restoration must return to zero diagnostics, and startup/shutdown must complete. Missing binaries/providers fail closed.
 - **Lockfile-pin guard:** assert `Cargo.lock` pins `lsp-types < 0.95` (guards §2.3 permanently).
 - **Server-side handshake** (L3 — ROADMAP, not in v0): when the handshake lands, new `crates/verter_lsp/tests/` integration tests would drive `initialize` with compatible/incompatible `verterClient`, reusing the repo's existing real-LSP gatekeeper harness (`crates/verter_lsp/tests/*.rs`, which drives the server in-process; tsgo/tsserver-dependent assertions skip vacuously without `node_modules`, per the established pattern). v0 ships no such tests because it makes no server-side change.
 
-**Headless LSP-handshake (feasible, medium effort):** because the volt only *launches* a native server, the **server's** LSP behavior over stdio is already fully testable via `crates/verter_lsp/tests/` (independent of any editor). A Lapce-specific headless test would mean driving the WASI plugin's `handle_request(Initialize)` and asserting the `start_lsp` call shape — but `PLUGIN_RPC` talks to the Lapce host over WASI stdio, so this needs either (a) a thin abstraction over `PLUGIN_RPC.start_lsp` injected in tests (so the host-target unit test asserts the exact `(uri, args, selector, options)` the plugin would send — **recommended**, low cost, and it directly tests the launch contract), or (b) a full WASI host harness (high effort, low marginal value over (a)). **Plan: do (a)** — wrap `start_lsp` behind a trait, assert the launch tuple in unit tests. This makes the "what does the volt tell Lapce to spawn" contract a discriminating automated test.
+**Headless host boundary:** Lapce exposes no documented headless GUI/volt host. The committed production-plan exporter exercises the same `plan_launch` implementation as the WASI glue and the neutral client proves that exact output launches a healthy semantic server. It does not claim to automate Lapce UI loading.
 
 **Manual (irreducible):** full Lapce **UI** E2E — installing the volt in a real Lapce build and exercising hover/completion/rename in a `.vue`/`.svelte` file, and confirming Lapce's own client advertises `completionItem.resolveSupport` so auto-import edits apply (§3.4 known risk). Lapce has no documented headless-editor test harness comparable to VS Code's `@vscode/test-electron` (`packages/vue-vscode/.vscode-test.mjs` + the `e2e/` Mocha suite), so editor-level UI E2E is a manual smoke checklist in the volt README, not an automated gate. The automated layers above (especially the launch-contract test and the server's own `crates/verter_lsp/tests/`) cover the volt's actual logic; the manual step only validates Lapce-host integration, which is outside Verter's control.
 
 ## 8. Scope, dependencies, and decisions for the CTO/user
 
 **Scope landed (v0):**
+
 - A **new, non-overlapping** crate (`extensions/lapce/`), **excluded from the root Cargo workspace** (§4.1). Touches **no existing crate** — and makes **no server-side change at all** (zero `crates/verter_lsp` edits). The volt is a pure client of the built `verter-lsp` binary and the shared `crates/verter-editor-client` launch contract.
 - The `build:lapce` `package.json` script, the 3-OS `lapce` CI workflow (§6), and the volt's **own committed `Cargo.lock`** (the `lsp-types 0.94.1` pin).
 
 **Scope deferred (ROADMAP, not in v0):**
+
 - The `verterClient` compatibility handshake **and** its server-side counterpart (Block L3): a future change where `verter-lsp` reads + validates the handshake at `initialize` and populates `serverInfo`. When landed it would touch `crates/verter_lsp` (the LSP server), **not** `verter_session`, and be additive + exercised by the existing LSP test suite. It is explicitly **not** part of v0.
 - The managed pinned download + SHA-256 + atomic install (Block L2) and the release/publish pipeline (below).
 
 **Decisions outstanding for the roadmap (escalate to CTO/user before the next stage):**
+
 1. **Release-engineering commitment (the big one).** Strategy D (the architect's recommended default) requires Verter to **publish per-platform `verter-lsp` binaries as GitHub Release assets** (incl. static/musl Linux x64+arm64) with checksums, plus a CI release pipeline and an embedded version/hash manifest in the volt. Verter has **no published `verter-lsp` binaries today.** v0 took the **interim** path (`lsp.serverPath` override > PATH opt-in > loud fail, loud setup docs); the open decision is **when** to build the full release pipeline and graduate to Strategy D. Graduation is additive: the shared `crates/verter-editor-client` discovery already exposes a `managed_present` seam (always `None` in v0), so adding the managed download does not require rewriting the v0 precedence.
 2. **Publishing to the Lapce registry** (`plugins.lapce.dev`) requires a **registry token secret** and a `volts publish` CI step — confirm we want to publish (vs. distribute the `.wasm` via GitHub Releases for manual install).
 3. **Supply-chain policy:** auto-download-and-execute of a native binary (Strategy D step 3) is a security/policy surface. The architect's mitigation is pinned URLs + SHA-256 + explicit override + clear docs; confirm this is acceptable, or require an explicit user opt-in to the managed-download mode.
 
 **Toolchain prerequisites (documented build deps, not blockers):**
+
 - `rustup target add wasm32-wasip1` (only `wasm32-unknown-unknown` is installed locally today; `wasm32-wasip1` is available to add — validated in §9).
 - `cargo install volts` for publishing.
 - These are recorded as build prerequisites in the volt README and the `build:lapce` script guards the target.
@@ -318,6 +335,7 @@ The project mandates automated tests for LSP/extension changes (no manual-only v
 ## 9. Build prerequisites & toolchain
 
 Building the volt requires:
+
 - The `wasm32-wasip1` Rust target (`rustup target add wasm32-wasip1`; the `build:lapce` script adds it idempotently). The volt is a `cdylib` whose `lapce-plugin` glue compiles only under `cfg(target_os = "wasi")`, so the wasm build is the surface that exercises that glue.
 - The committed `Cargo.lock`, which pins `lsp-types = 0.94.1` (the highest non-yanked pre-0.95 release) so `psp-types`' unpinned `lsp-types = "0"` does not float past the `Url`→`Uri` rename (§2.3). The lockfile-pin guard test enforces `< 0.95` permanently.
 - `cargo install volts` for publishing to the Lapce plugin registry (§2.4).

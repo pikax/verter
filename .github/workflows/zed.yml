@@ -9,9 +9,11 @@ name: zed
 # target yields a `__wasi_init_tp` load error in Zed), and the host-target tests
 # exercise the pure launch surface plus the manifest and lockfile guards.
 #
-# A real-Zed UI smoke is out of scope for v0: Zed has no headless-editor harness
-# comparable to @vscode/test-electron, so the real-server end-to-end check is
-# deferred, mirroring how the lapce and neovim jobs defer their real-server smoke.
+# Zed has no headless GUI harness comparable to @vscode/test-electron. The Linux
+# lane therefore builds the real extension, exports its production launch plan,
+# and drives that exact plan against a real verter-lsp over stdio. This covers
+# extension-owned discovery/argv/options plus Vue/Svelte behavior without
+# pretending that a neutral client is a Zed UI automation layer.
 
 on:
   push:
@@ -19,11 +21,17 @@ on:
     paths:
       - "extensions/zed/**"
       - "crates/verter-editor-client/**"
+      - "scripts/editor-contracts/**"
+      - "editors/nvim/tests/fixtures/real-client/**"
+      - "packages/lsp-test-client/**"
       - ".github/workflows/zed.yml"
   pull_request:
     paths:
       - "extensions/zed/**"
       - "crates/verter-editor-client/**"
+      - "scripts/editor-contracts/**"
+      - "editors/nvim/tests/fixtures/real-client/**"
+      - "packages/lsp-test-client/**"
       - ".github/workflows/zed.yml"
 
 jobs:
@@ -64,3 +72,40 @@ jobs:
         shell: bash
         working-directory: extensions/zed
         run: cargo fmt --check
+
+      - name: Install pnpm for the shipping-plan smoke
+        if: runner.os == 'Linux'
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node.js for the shipping-plan smoke
+        if: runner.os == 'Linux'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install JavaScript test dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          npm ci --ignore-scripts --prefix editors/nvim/tests/fixtures/real-client
+
+      - name: Build the real server and neutral client
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cargo build -p verter_lsp --release
+          pnpm --filter @verter/lsp-test-client build
+
+      - name: Drive the exact Zed launch plan over stdio
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="${GITHUB_WORKSPACE}/editors/nvim/tests/fixtures/real-client"
+          bin="${GITHUB_WORKSPACE}/target/release/verter-lsp"
+          plan="${RUNNER_TEMP}/zed-launch-plan.json"
+          cargo run --quiet --manifest-path extensions/zed/Cargo.toml --example contract_plan -- "$root" "$bin" > "$plan"
+          node scripts/editor-contracts/run-plan-smoke.mjs --plan="$plan" --root="$root"

@@ -15,11 +15,12 @@ Requires **Neovim ≥ 0.11** (for `vim.lsp.config` / `vim.lsp.enable`).
 
 - `verter-lsp` on your `PATH` (or pass an absolute `cmd_path`). There is **no
   managed download** — install it via your package manager / `cargo build -p
-  verter_lsp --release`. A mason.nvim registry entry is a planned follow-up
+verter_lsp --release`. A mason.nvim registry entry is a planned follow-up
   (see the [Roadmap in the Neovim support design](../../docs/arch/neovim-support-design.md#91-roadmap-out-of-v0-scope)).
-- For full type features, the project should have **`@typescript/native-preview`
-  (tsgo)** installed (the normal case for a typed Vue/Svelte project). The default
-  type provider is `tsgo`, which discovers its own binary
+- For full type features, the project should have **TypeScript 7 (`typescript@7`)**
+  installed (the normal case for a typed Vue/Svelte project). The default type
+  provider is `tsgo`, which discovers the native
+  `@typescript/typescript-<platform>-<arch>` binary installed by that package
   (`VERTER_TSGO_BIN` → project `node_modules` → `PATH` → npm/npx cache).
 
 ## Quick start
@@ -148,7 +149,7 @@ trees. The cheap replacement is a `BufWritePost` autocmd for `*.js` / `*.ts`
 that notifies the server with `$/onFileChanged { uri, type = "update" }`, whose
 handler **re-reads the file from the workspace VFS** — exactly the external-edit
 freshness signal a save needs. (The related `$/onDidChangeTsOrJsFile` method is
-for *in-editor* TS/JS edits and carries a `changes` array of deltas, which a save
+for _in-editor_ TS/JS edits and carries a `changes` array of deltas, which a save
 does not have, so the save autocmd does not use it.)
 
 Set `watch_files = true` to enable dynamic watchers (and skip the autocmd) if
@@ -176,24 +177,38 @@ support is a server-side enhancement tracked separately.
 
 ## Running the tests
 
-The suite is pure-Lua (no running server) and runs under
-[plenary.nvim](https://github.com/nvim-lua/plenary.nvim)'s busted harness in
-headless Neovim. plenary must be on the runtimepath — either install it under
-the standard packpath or point `$PLENARY_PATH` at a checkout.
+The config and attach specs are pure Lua. The fail-closed smoke additionally
+launches a real `verter-lsp` and requires the pinned fixture dependencies. All
+specs run under [plenary.nvim](https://github.com/nvim-lua/plenary.nvim)'s busted
+harness in headless Neovim. Plenary must be on the runtimepath — either install
+it under the standard packpath or point `$PLENARY_PATH` at a checkout.
 
 From the repo root:
 
 ```bash
+npm ci --ignore-scripts --prefix editors/nvim/tests/fixtures/real-client
+cargo build -p verter_lsp
+VERTER_TSGO_BIN=$(node --input-type=module -e \
+  "import getExePath from './editors/nvim/tests/fixtures/real-client/node_modules/typescript/lib/getExePath.js'; console.log(getExePath())")
+
 PLENARY_PATH=/path/to/plenary.nvim \
+VERTER_LSP_BIN="$PWD/target/debug/verter-lsp" \
+VERTER_TSGO_BIN="$VERTER_TSGO_BIN" \
   nvim --headless --noplugin \
+    -u editors/nvim/tests/minimal_init.lua \
     -c "PlenaryBustedDirectory editors/nvim/tests/ {minimal_init='editors/nvim/tests/minimal_init.lua'}" \
     -c "qa!"
 ```
 
 - `config_spec.lua` and `on_attach_spec.lua` are the always-on gate (no binary
   required).
-- `smoke_spec.lua` drives a real `verter-lsp` and **skips vacuously** when the
-  binary is not executable; set `$VERTER_LSP_BIN` to a built binary to run it.
+- `smoke_spec.lua` is fail-closed: `$VERTER_LSP_BIN`, `$VERTER_TSGO_BIN`, and the
+  pinned fixture dependencies are required. It loads the shipped
+  `require("verter").setup`, opens Vue and Svelte in both TypeScript and
+  JavaScript modes, and hard-asserts the fixture root, one UTF-8 client, matched
+  readiness/sync, no TS7026, concrete hover, authored definition, exact
+  completion, markup rename, and clean shutdown.
 
-CI runs the same command across a Neovim version × OS matrix
-(`.github/workflows/neovim.yml`).
+CI explicitly provisions every prerequisite and runs the same contract across a
+Neovim version × OS matrix. The workflow also rejects output that does not prove
+at least one assertion-bearing test ran.

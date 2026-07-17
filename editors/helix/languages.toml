@@ -14,10 +14,11 @@
 #   - `verter-lsp` on your $PATH (or set `command` to an absolute path). There is
 #     no managed download — install it via your package manager or
 #     `cargo build -p verter_lsp --release`.
-#   - `@typescript/native-preview` (tsgo) installed in the project for full type
-#     features. The default type provider is `tsgo`, which self-discovers its
-#     binary (VERTER_TSGO_BIN env -> project node_modules -> PATH -> npm/npx
-#     cache). NOTE: the provider value is `tsgo`, NOT `tgo` — `tgo` is
+#   - TypeScript 7 (`typescript@7`) installed in the project for full type
+#     features. The default `tsgo` provider self-discovers the native
+#     `@typescript/typescript-<platform>-<arch>` binary installed by that package
+#     (VERTER_TSGO_BIN env -> project node_modules -> PATH -> npm/npx cache).
+#     NOTE: the provider value is `tsgo`, NOT `tgo` — `tgo` is
 #     unrecognized and silently falls back to `auto`.
 
 [language-server.verter]

@@ -26,13 +26,13 @@ Performance is a non-negotiable design driver: where Neovim offers multiple inte
 
 Three candidate mechanisms, ranked by request-time indirection:
 
-| Mechanism | Request-time path | Verdict |
-|---|---|---|
-| **(a) Built-in `vim.lsp.config` + `vim.lsp.enable`** (0.11+) | Neovim's in-process **C/Lua native LSP client** ⇄ stdio ⇄ native `verter-lsp`. Lua touched once at attach. | **CHOSEN — fastest, most direct.** |
-| (b) `nvim-lspconfig` `lsp/verter.lua` | **Identical** request-time path — `lsp/*.lua` is just a config-table source that feeds the **same** built-in client. | Equivalent at runtime; a distribution helper only (§5). |
-| (c) RPC-bridge / wrapper plugin | Adds an extra Lua/process hop in front of every request. | **Rejected — strictly slower indirection, no benefit.** |
+| Mechanism                                                    | Request-time path                                                                                                    | Verdict                                                 |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| **(a) Built-in `vim.lsp.config` + `vim.lsp.enable`** (0.11+) | Neovim's in-process **C/Lua native LSP client** ⇄ stdio ⇄ native `verter-lsp`. Lua touched once at attach.           | **CHOSEN — fastest, most direct.**                      |
+| (b) `nvim-lspconfig` `lsp/verter.lua`                        | **Identical** request-time path — `lsp/*.lua` is just a config-table source that feeds the **same** built-in client. | Equivalent at runtime; a distribution helper only (§5). |
+| (c) RPC-bridge / wrapper plugin                              | Adds an extra Lua/process hop in front of every request.                                                             | **Rejected — strictly slower indirection, no benefit.** |
 
-Architect verdict (verbatim sense): *"(a) and (b) have no meaningful per-request overhead difference … `nvim-lspconfig/lsp/verter.lua` is just a config-table source … Reject RPC bridges/wrapper plugins."* nvim-lspconfig's modern `lsp/*.lua` files **are** consumed by the built-in `vim.lsp.config` ([nvim-lspconfig migration #3494](https://github.com/neovim/nvim-lspconfig/issues/3494)); choosing (a) directly and offering (b) as a distribution helper costs nothing at request time.
+Architect verdict (verbatim sense): _"(a) and (b) have no meaningful per-request overhead difference … `nvim-lspconfig/lsp/verter.lua` is just a config-table source … Reject RPC bridges/wrapper plugins."_ nvim-lspconfig's modern `lsp/*.lua` files **are** consumed by the built-in `vim.lsp.config` ([nvim-lspconfig migration #3494](https://github.com/neovim/nvim-lspconfig/issues/3494)); choosing (a) directly and offering (b) as a distribution helper costs nothing at request time.
 
 **The fastest path is therefore: Neovim's built-in native LSP client talking stdio to `verter-lsp`, with a one-time-at-attach Lua config.** There is no faster mechanism available in Neovim — the native client is the transport; nothing sits between it and the server.
 
@@ -59,23 +59,23 @@ Our config merges whichever the user provides into the verter config's `capabili
 
 ### 2.4 File watching — `didChangeWatchedFiles` OFF by default, opt-in (perf)
 
-`verter-lsp` **dynamically registers** `workspace/didChangeWatchedFiles` at runtime (carrier glob `**/*.{vue,svelte}`, plus `**/*.{ts,tsx,js,jsx,…}`, `**/tsconfig*.json`, `**/vite.config.*`, `**/package.json`, `**/.verterrc.json`) — see `lifecycle.rs` `handle_initialized`, whose comment explicitly names *"non-VS Code clients (Neovim, etc.)"* as the intended beneficiary. Whether Neovim honors that registration depends on the **client** advertising `workspace.didChangeWatchedFiles.dynamicRegistration`.
+`verter-lsp` **dynamically registers** `workspace/didChangeWatchedFiles` at runtime (carrier glob `**/*.{vue,svelte}`, plus `**/*.{ts,tsx,js,jsx,…}`, `**/tsconfig*.json`, `**/vite.config.*`, `**/package.json`, `**/.verterrc.json`) — see `lifecycle.rs` `handle_initialized`, whose comment explicitly names _"non-VS Code clients (Neovim, etc.)"_ as the intended beneficiary. Whether Neovim honors that registration depends on the **client** advertising `workspace.didChangeWatchedFiles.dynamicRegistration`.
 
 **Fact:** the built-in client sets `dynamicRegistration = (sysname == 'Darwin' or 'Windows_NT')` — **TRUE on macOS/Windows, FALSE on Linux** by default ([protocol.lua @ release-0.11](https://github.com/neovim/neovim/blob/release-0.11/runtime/lua/vim/lsp/protocol.lua)). Neovim's built-in watcher recursively watches the registered globs; on large trees (node_modules) this is a documented CPU sink ([neovim/neovim#23291](https://github.com/neovim/neovim/issues/23291)), and Neovim's watcher has no built-in node_modules ignore.
 
-**Architect verdict:** *"Default do not advertise `workspace.didChangeWatchedFiles.dynamicRegistration`. Make it explicit user opt-in."* Rationale: it is an **optional client capability, not a semantic requirement**; broad recursive watching causes unacceptable hot-state CPU; the server stays correct for open-buffer edits regardless.
+**Architect verdict:** _"Default do not advertise `workspace.didChangeWatchedFiles.dynamicRegistration`. Make it explicit user opt-in."_ Rationale: it is an **optional client capability, not a semantic requirement**; broad recursive watching causes unacceptable hot-state CPU; the server stays correct for open-buffer edits regardless.
 
 **Design:** our config **forces `capabilities.workspace.didChangeWatchedFiles.dynamicRegistration = false` by default** (overriding the macOS/Windows default to a single cross-platform behavior), with a `watch_files = true` opt-in for users who prioritize external-edit freshness. This is paired with §2.5 (the save-notify autocmd) and the §8 documented freshness caveat.
 
 ### 2.5 Cheap external-freshness signal — `BufWritePost` save-notify autocmd
 
-Because watchers are off by default (§2.4), we replicate the pattern nvim-lspconfig's own Svelte definition uses: an `on_attach` `BufWritePost` autocmd for `*.js` / `*.ts` that notifies the server. The save fires `$/onFileChanged { uri, type = "update" }` (registered in `crates/verter_lsp/src/main.rs`); its handler maps `"update"` to `WorkspaceChange::FileChanged { source = None }`, which **re-reads the file from the workspace VFS** — exactly the external-edit freshness semantic a save (which carries no in-editor edit deltas) needs. The sibling `$/onFileChanged` `"create"`/`"delete"` types cover external add/remove. This is **client-side event plumbing, not semantic work** — a single `client:notify` on save, restoring a low-cost cross-file freshness signal without broad watchers. Architect: *"Replicate the small `BufWritePost` notification … only if dynamic file watching is disabled by default … client-side event plumbing, not semantic computation."* When `watch_files = true` it is redundant but harmless (server-side dedup).
+Because watchers are off by default (§2.4), we replicate the pattern nvim-lspconfig's own Svelte definition uses: an `on_attach` `BufWritePost` autocmd for `*.js` / `*.ts` that notifies the server. The save fires `$/onFileChanged { uri, type = "update" }` (registered in `crates/verter_lsp/src/main.rs`); its handler maps `"update"` to `WorkspaceChange::FileChanged { source = None }`, which **re-reads the file from the workspace VFS** — exactly the external-edit freshness semantic a save (which carries no in-editor edit deltas) needs. The sibling `$/onFileChanged` `"create"`/`"delete"` types cover external add/remove. This is **client-side event plumbing, not semantic work** — a single `client:notify` on save, restoring a low-cost cross-file freshness signal without broad watchers. Architect: _"Replicate the small `BufWritePost` notification … only if dynamic file watching is disabled by default … client-side event plumbing, not semantic computation."_ When `watch_files = true` it is redundant but harmless (server-side dedup).
 
 > **Why not `$/onDidChangeTsOrJsFile`?** That custom method is the **in-editor delta** channel (the analog of VS Code's `onDidChangeTextDocument`): its params are `{ uri, changes }` where `changes` is a **required, non-defaulted** array of text edits, and the handler applies the last edit's `text` directly. A `BufWritePost` save has no such delta payload, so a `{ uri }`-only notify would fail server-side deserialization and be dropped. `$/onFileChanged`'s VFS re-read is the correct save/external-edit signal; `$/onDidChangeTsOrJsFile` is reserved for live in-buffer TS/JS edits and is not used by the save autocmd.
 
 ### 2.6 Semantic tokens — on by default, easy opt-out (full-document caveat)
 
-`verter-lsp` advertises `semantic_tokens_provider` with `full = Bool(true)` and **no `range`, no `delta`** (`crates/verter_lsp/src/capabilities.rs`) — i.e. **full-document** token computation, not incremental. Neovim auto-starts semantic-token highlighting on attach when the server advertises the provider. Architect: leave semantic tokens *"on by default only if the server's semantic-token path is incremental, bounded, and projection-aware … else expose an opt-out."* Since verter's path is full-document (each refresh recomputes the whole projected TS surface), the design keeps them **on by default** (they are valuable for Vue/Svelte) but exposes a one-line opt-out (`semantic_tokens = false` → clears `server_capabilities.semanticTokensProvider` in `on_attach`), and flags the full-only cost as a known follow-up (range/delta support is a server-side enhancement, out of scope here).
+`verter-lsp` advertises `semantic_tokens_provider` with `full = Bool(true)` and **no `range`, no `delta`** (`crates/verter_lsp/src/capabilities.rs`) — i.e. **full-document** token computation, not incremental. Neovim auto-starts semantic-token highlighting on attach when the server advertises the provider. Architect: leave semantic tokens _"on by default only if the server's semantic-token path is incremental, bounded, and projection-aware … else expose an opt-out."_ Since verter's path is full-document (each refresh recomputes the whole projected TS surface), the design keeps them **on by default** (they are valuable for Vue/Svelte) but exposes a one-line opt-out (`semantic_tokens = false` → clears `server_capabilities.semanticTokensProvider` in `on_attach`), and flags the full-only cost as a known follow-up (range/delta support is a server-side enhancement, out of scope here).
 
 ### 2.7 Startup latency & client-per-root
 
@@ -83,15 +83,15 @@ Because watchers are off by default (§2.4), we replicate the pattern nvim-lspco
 
 ### 2.8 Performance defaults summary
 
-| Knob | Default | Why |
-|---|---|---|
-| Integration mechanism | Built-in `vim.lsp.config` native client | Most direct; no proxy hop (§2.1). |
-| Position encoding | UTF-8 (auto-negotiated) | Zero-conversion both ends (§2.2). |
-| Completion engine | blink.cmp recommended (optional) | Rust matcher, ~0.5–4 ms; auto-import works without it (§2.3). |
-| `didChangeWatchedFiles` dynamicRegistration | **false** (opt-in `watch_files`) | Avoid node_modules recursive-watch CPU spikes (§2.4). |
-| `BufWritePost` save-notify | on (when watchers off) | Cheap external-freshness signal (§2.5). |
-| Semantic tokens | on, easy opt-out | Valuable but full-document; opt-out for perf (§2.6). |
-| Attach | Lazy, FileType-triggered, one client/root | No per-file spawn (§2.7). |
+| Knob                                        | Default                                   | Why                                                           |
+| ------------------------------------------- | ----------------------------------------- | ------------------------------------------------------------- |
+| Integration mechanism                       | Built-in `vim.lsp.config` native client   | Most direct; no proxy hop (§2.1).                             |
+| Position encoding                           | UTF-8 (auto-negotiated)                   | Zero-conversion both ends (§2.2).                             |
+| Completion engine                           | blink.cmp recommended (optional)          | Rust matcher, ~0.5–4 ms; auto-import works without it (§2.3). |
+| `didChangeWatchedFiles` dynamicRegistration | **false** (opt-in `watch_files`)          | Avoid node_modules recursive-watch CPU spikes (§2.4).         |
+| `BufWritePost` save-notify                  | on (when watchers off)                    | Cheap external-freshness signal (§2.5).                       |
+| Semantic tokens                             | on, easy opt-out                          | Valuable but full-document; opt-out for perf (§2.6).          |
+| Attach                                      | Lazy, FileType-triggered, one client/root | No per-file spawn (§2.7).                                     |
 
 ## 3. The Neovim LSP-config model (researched, with citations)
 
@@ -111,7 +111,7 @@ Load-bearing field semantics (verbatim quotes, `lsp.txt` @ release-0.11):
 - **`cmd_cwd`** — `"(string, default: cwd) Directory to launch the cmd process. Not related to root_dir."`
 - **`workspace_required`** — `"(boolean, default: false) Server requires a workspace (no 'single file' support)."`
 - **`offset_encoding`** — `"('utf-8'|'utf-16'|'utf-32') … Can be modified in on_init."`
-- **`vim.lsp.enable()`** — *"Auto-starts LSP when a buffer is opened, based on the |lsp-config| `filetypes`, `root_markers`, and `root_dir` fields."*
+- **`vim.lsp.enable()`** — _"Auto-starts LSP when a buffer is opened, based on the |lsp-config| `filetypes`, `root_markers`, and `root_dir` fields."_
 - A config named **`'*'`** provides defaults merged into all clients (increasing-priority merge: `'*'` → `lsp/<name>.lua` → explicit `vim.lsp.config('<name>', …)`).
 - **There is NO `on_new_config` field** in `vim.lsp.config` — that is a legacy nvim-lspconfig framework concept and must not be used here.
 
@@ -136,7 +136,7 @@ Separation of concerns (load-bearing): filetype **detection** (`.vue` → `vue`)
 
 `verter-lsp` takes the workspace root as a **positional** CLI argument (`crates/verter_lsp/src/main.rs`, hand-rolled `CliArgs::parse`: any non-`--` arg is the root), falling back to `std::env::current_dir()` if absent. The VS Code client always passes it explicitly (`buildServerOptions` pushes `rootPath` last).
 
-**Architect verdict:** pass the **resolved root positionally via a root-aware `cmd` function** — *"Do not rely solely on cwd fallback if the server's CLI already accepts an explicit workspace root … `before_init` is too late/indirect for process argv construction."* The `cmd` function receives the **resolved `config`** (with `root_dir` populated by `vim.lsp.enable`'s root resolution), so it can append `config.root_dir`:
+**Architect verdict:** pass the **resolved root positionally via a root-aware `cmd` function** — _"Do not rely solely on cwd fallback if the server's CLI already accepts an explicit workspace root … `before_init` is too late/indirect for process argv construction."_ The `cmd` function receives the **resolved `config`** (with `root_dir` populated by `vim.lsp.enable`'s root resolution), so it can append `config.root_dir`:
 
 ```lua
 cmd = function(dispatchers, config)
@@ -154,7 +154,7 @@ This **fails closed**: if `root_dir` is unresolved the server still launches and
 
 Studied in `packages/vue-vscode/src/extension.ts` (`buildServerOptions`, `clientOptions.initializationOptions`), `crates/verter_lsp/src/main.rs`, `crates/verter_lsp/src/server/lifecycle.rs`, `crates/verter_lsp/src/config.rs`.
 
-**Server launch (VS Code → Neovim):** VS Code launches `verter-lsp --type-provider=<tp> --tsdk=<tsdk> --plugin-path=<node_modules> [--mcp-port=0 --mcp-lint-preset=<p>] <rootPath>` with `env.VERTER_LOG`. **Decisive simplification (shared with the Lapce design): use `--type-provider=tsgo` and omit `--tsdk` / `--plugin-path`.** In `main.rs`, `--tsdk` and `--plugin-path` are consumed **only** by the tsserver path; `try_spawn_tsgo` ignores them and discovers the tsgo binary itself (`find_tsgo_binary_canonical`: `VERTER_TSGO_BIN` env → workspace `node_modules` → PATH → npm/npx cache). So the tsgo provider is self-contained — the user installs `@typescript/native-preview` per-project (the normal case for a Vue/Svelte project), exactly as the VS Code tsgo path expects. The `--mcp-*` flags are parsed-but-ignored by the server (MCP shipped separately) and are **omitted**. Resulting default `cmd`: `verter-lsp --type-provider=tsgo <root>` (plus user-overridable extra args).
+**Server launch (VS Code → Neovim):** VS Code launches `verter-lsp --type-provider=<tp> --tsdk=<tsdk> --plugin-path=<node_modules> [--mcp-port=0 --mcp-lint-preset=<p>] <rootPath>` with `env.VERTER_LOG`. **Decisive simplification (shared with the Lapce design): use `--type-provider=tsgo` and omit `--tsdk` / `--plugin-path`.** In `main.rs`, `--tsdk` and `--plugin-path` are consumed **only** by the tsserver path; `try_spawn_tsgo` ignores them and discovers the native TypeScript 7 binary itself (`find_tsgo_binary_canonical`: `VERTER_TSGO_BIN` env → workspace `node_modules` → PATH → npm/npx cache). The user installs `typescript@7` per-project, which installs the matching `@typescript/typescript-<platform>-<arch>` binary. The `--mcp-*` flags are parsed-but-ignored by the server (MCP shipped separately) and are **omitted**. Resulting default `cmd`: `verter-lsp --type-provider=tsgo <root>` (plus user-overridable extra args).
 
 **Type-provider surface — a deliberate native-client superset.** The default stays `tsgo`, but the Neovim client validates `type_provider` against the full server-accepted set `{ auto, tsgo, tsserver, off }` (`VALID_TYPE_PROVIDERS` in `init.lua`), rejecting anything else fail-closed. This is an **intentional advanced capability**, not a divergence from the SDK-less wasm clients (Lapce/Zed), which clamp to `{ tsgo, off }`. The wasm volts cannot supply a TypeScript SDK, so they refuse `tsserver`/`auto`; Neovim is a full editor where the user can put a TypeScript SDK on PATH and `tsserver` self-discovers its own install, so exposing `tsserver`/`auto` as opt-in overrides is correct here. Users who do nothing get the self-contained `tsgo` provider; the broader surface is purely an advanced override.
 
@@ -162,16 +162,16 @@ Studied in `packages/vue-vscode/src/extension.ts` (`buildServerOptions`, `client
 
 VS Code passes a rich `initializationOptions`; the server reads only a subset (`lifecycle.rs` `handle_initialize`; `config.rs`). The Neovim config mirrors the **server-relevant** subset and drops VS-Code-UI-only fields.
 
-| Init option | Server reads it? (where) | Neovim mapping |
-|---|---|---|
-| `lint: { enabled, preset }` | yes (`init_lint_options`; `config::merge_init_options`) | `init_options.lint` from module opts |
-| `inlayHints: { enabled }` | yes (`inlay_hints_enabled`) | `init_options.inlayHints` |
-| `viteConfig: { enabled, trustedFiles }` | yes (`vite_config_options`) | `init_options.viteConfig` |
-| `experimental: { conditionalRootNarrowing, strictSlots }` | yes (`config::parse_experimental_init_options`) | `init_options.experimental` |
-| `hover: { provenance }` | yes (`config::parse_hover_init_options`) | `init_options.hover` |
-| `statistics: { enabled }` | yes (`statistics.set_enabled`) | `init_options.statistics`, default OFF |
-| `frameworks: ["vue","svelte"]` | **no — server ignores it** | **dropped** (dead protocol surface) |
-| `configuration: { vue, typescript, css, emmet, … }` | opportunistic VS-Code language-service settings | **drop** — these are VS Code's emmet/css/html/ts language-service settings; Neovim has its own. v0 omits. |
+| Init option                                               | Server reads it? (where)                                | Neovim mapping                                                                                            |
+| --------------------------------------------------------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `lint: { enabled, preset }`                               | yes (`init_lint_options`; `config::merge_init_options`) | `init_options.lint` from module opts                                                                      |
+| `inlayHints: { enabled }`                                 | yes (`inlay_hints_enabled`)                             | `init_options.inlayHints`                                                                                 |
+| `viteConfig: { enabled, trustedFiles }`                   | yes (`vite_config_options`)                             | `init_options.viteConfig`                                                                                 |
+| `experimental: { conditionalRootNarrowing, strictSlots }` | yes (`config::parse_experimental_init_options`)         | `init_options.experimental`                                                                               |
+| `hover: { provenance }`                                   | yes (`config::parse_hover_init_options`)                | `init_options.hover`                                                                                      |
+| `statistics: { enabled }`                                 | yes (`statistics.set_enabled`)                          | `init_options.statistics`, default OFF                                                                    |
+| `frameworks: ["vue","svelte"]`                            | **no — server ignores it**                              | **dropped** (dead protocol surface)                                                                       |
+| `configuration: { vue, typescript, css, emmet, … }`       | opportunistic VS-Code language-service settings         | **drop** — these are VS Code's emmet/css/html/ts language-service settings; Neovim has its own. v0 omits. |
 
 The Neovim client now emits **exactly** the canonical six server-read init-option keys — `lint`, `inlayHints`, `viteConfig`, `experimental`, `hover`, `statistics` — the same parity set every Verter editor client ships (`verter_editor_client::build_initialization_options`, the SSoT). `statistics` is emitted (default OFF, honoring a user opt-in); the previously-emitted `frameworks` key is **dropped** because the server ignores it. This builder is bound to the shared SSoT by a Rust drift-guard (`crates/verter-editor-client/tests/nvim_config_contract.rs`): it extracts `build_init_options`' top-level keys and asserts set equality against `build_initialization_options(&{})`, so a missing key (e.g. dropping `statistics`) or an extra key (e.g. re-adding `frameworks`) fails the gate. Neovim was the only editor client not written in Rust, hence the only one able to silently re-diverge; the drift-guard closes that gap.
 
@@ -271,32 +271,33 @@ The README provides three copy-paste recipes:
 2. **lazy.nvim plugin spec** pointing at the repo's `editors/nvim/` (or a published mirror), calling `require('verter').setup{}` in `config`.
 3. **nvim-lspconfig** users: a one-liner noting that the in-repo module supersedes it today, and that an upstream `lsp/verter.lua` is a planned follow-up (§5/§8).
 
-Plus the **completion-engine note**: recommend blink.cmp for speed and show passing `capabilities = require('blink.cmp').get_lsp_capabilities()` (or `cmp_nvim_lsp.default_capabilities()`) into `setup{ capabilities = … }`; note that auto-import works without either (§2.3). Plus the **prerequisite note**: `verter-lsp` on PATH (or `cmd_path`), and `@typescript/native-preview` (tsgo) in the project for full type features (§3.5).
+Plus the **completion-engine note**: recommend blink.cmp for speed and show passing `capabilities = require('blink.cmp').get_lsp_capabilities()` (or `cmp_nvim_lsp.default_capabilities()`) into `setup{ capabilities = … }`; note that auto-import works without either (§2.3). Plus the **prerequisite note**: `verter-lsp` on PATH (or `cmd_path`), and TypeScript 7 (`typescript@7`) in the project for full type features (§3.5).
 
 ## 5. Distribution & binary discovery — architect-approved (Neovim-idiomatic)
 
-**Architect verdict:** *in-repo Lua module + docs now; upstream lspconfig and mason later; PATH/absolute binary discovery only.* This **deliberately differs** from the Lapce design's "Strategy D" managed-download, because Neovim's conventions differ.
+**Architect verdict:** _in-repo Lua module + docs now; upstream lspconfig and mason later; PATH/absolute binary discovery only._ This **deliberately differs** from the Lapce design's "Strategy D" managed-download, because Neovim's conventions differ.
 
 ### 5.1 Distribution mix (land order)
 
-1. **In-repo Lua module `editors/nvim/` + README** (now). Worth shipping because the config owns non-trivial options (root argv, type-provider flag, capability shaping + watcher override, save-notify autocmd, init-option parity). Architect: *"If it were only `cmd = { 'verter-lsp' }`, docs-only would be enough"* — verter's config is more than that, so the module earns its place.
+1. **In-repo Lua module `editors/nvim/` + README** (now). Worth shipping because the config owns non-trivial options (root argv, type-provider flag, capability shaping + watcher override, save-notify autocmd, init-option parity). Architect: _"If it were only `cmd = { 'verter-lsp' }`, docs-only would be enough"_ — verter's config is more than that, so the module earns its place.
 2. **Docs-only minimal snippet** (now) for users who don't want the module (recipe 1 above).
 3. **Upstream `lsp/verter.lua` to `neovim/nvim-lspconfig`** (follow-up) — once the server has stable public install instructions. Widest reach; couples to their cadence; pursued **without changing the chosen runtime path** (§2.1).
 4. **mason.nvim registry entry** (follow-up) — once per-platform `verter-lsp` release assets exist, for auto-install.
 
 ### 5.2 Binary discovery — PATH / absolute path only; NO Lua downloader
 
-Architect verdict (verbatim sense): *"Do not reuse Lapce Strategy D in Lua. That is architecturally wrong for Neovim. Managed server installation belongs to mason.nvim or user package managers, not a thin LSP config plugin … no downloader, no cache directory, no SHA management in Neovim module."*
+Architect verdict (verbatim sense): _"Do not reuse Lapce Strategy D in Lua. That is architecturally wrong for Neovim. Managed server installation belongs to mason.nvim or user package managers, not a thin LSP config plugin … no downloader, no cache directory, no SHA management in Neovim module."_
 
 **Policy:** `cmd` names `verter-lsp` on **PATH** (or `opts.cmd_path` as an absolute path). If the binary is missing, **fail loudly** with actionable guidance (`vim.notify(..., ERROR)`: install `verter-lsp` / set `cmd_path` / use mason once available). This is the Neovim convention: the editor/plugin does **not** download language-server binaries; that is mason.nvim's job (its own registry) or the user's package manager (cargo install / Homebrew / Scoop / Winget). Re-implementing Lapce's pinned-download + SHA-verify + cache in Lua would **duplicate mason** and violate the convention.
 
-**Contrast with Lapce:** Lapce's volt has a plugin distribution/activation model with a download primitive (`Http::get`) and a `[config]` schema, and *no per-platform volt artifacts* — so a managed in-volt download (Strategy D) is the right fit there. Neovim has mason as the dedicated installer, so delegation is correct here. The two designs reach **different** binary-discovery conclusions for **principled, editor-specific** reasons — not an inconsistency.
+**Contrast with Lapce:** Lapce's volt has a plugin distribution/activation model with a download primitive (`Http::get`) and a `[config]` schema, and _no per-platform volt artifacts_ — so a managed in-volt download (Strategy D) is the right fit there. Neovim has mason as the dedicated installer, so delegation is correct here. The two designs reach **different** binary-discovery conclusions for **principled, editor-specific** reasons — not an inconsistency.
 
 ## 6. Decomposition into implementation blocks
 
 Each block lands with discriminating tests (must FAIL pre-change, PASS post-change; no stubs/always-true asserts, per the project Stub-Prevention rule). All blocks are in `editors/nvim/` + docs; **no existing crate is touched** (§8).
 
 ### Block N1 — Lua module: pure config builders + setup
+
 - `lua/verter/config.lua`: `build_cmd(opts)` (root-aware `cmd` function/list per §3.4), `build_init_options(opts)` (parity map §3.6), `build_capabilities(opts)` (merge user caps + force watcher dynamicRegistration §2.4), `on_attach(opts)` (save-notify §2.5 + semantic-tokens opt-out §2.6).
 - `lua/verter/init.lua`: `M.setup(opts)` (filetype fallback §3.3 + `vim.lsp.config` + `vim.lsp.enable`).
 - **Discriminating tests** (plenary, no server; §7):
@@ -308,6 +309,7 @@ Each block lands with discriminating tests (must FAIL pre-change, PASS post-chan
   - `setup{}` then `vim.lsp.config('verter')` getter returns a table whose `filetypes` contains both `vue` and `svelte` and whose `cmd` is present (config registered).
 
 ### Block N2 — `on_attach` behaviors + capability merge
+
 - Finalize the save-notify `BufWritePost` autocmd and the semantic-tokens opt-out.
 - **Discriminating tests** (plenary, no server):
   - With `watch_files=false`, `on_attach(fake_client, bufnr)` registers a `BufWritePost` autocmd for `*.js,*.ts` (assert the augroup/autocmd exists); with `watch_files=true` it does **not** (discriminates §2.5 gating).
@@ -315,40 +317,44 @@ Each block lands with discriminating tests (must FAIL pre-change, PASS post-chan
   - `build_capabilities` merges a user-provided blink.cmp-shaped caps table without dropping `completionItem.resolveSupport` (assert it survives the merge).
 
 ### Block N3 — Headless real-server smoke + CI + docs
-- `tests/smoke_spec.lua`: a headless test that `vim.lsp.enable('verter')`, opens a fixture `.vue`, `vim.wait`s for `#vim.lsp.get_clients({ name='verter' }) > 0`, and asserts the client attached (and, when a type provider is available, that a diagnostic/hover arrives). **Gated**: skips vacuously (like the Rust `crates/verter_lsp/tests/` tsgo/tsserver e2e) when `verter-lsp` or `node_modules`/tsgo is absent, so CI without those is green.
-- CI workflow (`.github/workflows`): a `neovim` job using `rhysd/action-setup-vim@v1` to matrix Neovim `0.11` / `0.12` / `nightly` on Linux + macOS; runs `nvim --headless -c 'PlenaryBustedDirectory editors/nvim/tests/ {minimal_init="editors/nvim/tests/minimal_init.lua"}' -c 'qa!'`. The pure-Lua unit specs (N1/N2) are the always-on gate; the smoke spec runs where the binary is built.
+
+- `tests/smoke_spec.lua` is a fail-closed headless real-client contract. It requires an executable `$VERTER_LSP_BIN` plus the pinned TypeScript/Vue/Svelte fixture, loads the shipped `require("verter").setup`, opens Vue and Svelte in both JS and TS modes, and asserts one shared UTF-8 client, matched ready/sync generation, zero TS7026, concrete hover, authored definition, exact completion, markup rename, and clean shutdown. Missing prerequisites fail; there is no skip/N/A path.
+- `.github/workflows/neovim.yml` provisions the real server, fixture, and a commit-pinned plenary checkout, then runs the contract across Neovim `0.11.0` / `0.12.3` / nightly on Linux, macOS, and Windows. The workflow rejects failure tokens, nonzero process status, and output that proves no assertion-bearing test ran.
 - README (§4.3) + a `docs/` guide page on installing Verter for Neovim (prerequisites, the modern + lspconfig recipes, completion-engine note, the §8 freshness caveat + `watch_files` opt-in).
-- **Discriminating test:** a lint/structure test asserting `README` recipes reference `--type-provider=tsgo` and **not** `--tsdk` (guards the §3.5 simplification), runnable in the same plenary suite via file read.
 
 ## 7. Test strategy (mandatory-rule compliant)
 
 The project mandates automated tests for LSP/editor-integration changes (no manual-only verification). The work splits cleanly:
 
 **Automated — the bulk (pure-Lua, no server; highest value):** `config.lua` builders and `setup()` behaviors, run under **plenary.nvim** busted (`PlenaryBustedDirectory`, the de-facto Neovim plugin test standard) in headless Neovim with a `minimal_init.lua` that prepends the module + plenary to `rtp`. These cover **all** of the module's decision logic: `cmd` args (+ negative `--tsdk`/`--plugin-path` absence), init-option parity (+ negative VS-Code-only-key absence), capability/watcher override, filetype registration (`vim.filetype.match`), the save-notify and semantic-tokens gating, and reading back the registered config via the `vim.lsp.config('verter')` getter. They need **no `verter-lsp` binary** and run in milliseconds. CI invocation:
+
 ```bash
 nvim --headless -c 'PlenaryBustedDirectory editors/nvim/tests/ {minimal_init="editors/nvim/tests/minimal_init.lua"}' -c 'qa!'
 ```
+
 Citations: [plenary.nvim TESTS_README](https://github.com/nvim-lua/plenary.nvim/blob/master/TESTS_README.md); [rhysd/action-setup-vim](https://github.com/rhysd/action-setup-vim).
 
-**Automated — headless real-server smoke (feasible, gated):** `nvim --headless`/`nvim -l` can drive a real attach: open a `.vue`, `vim.wait(ms, predicate)` for `vim.lsp.get_clients({ name='verter' })`, assert attach + (provider-permitting) a diagnostic/hover, exit nonzero via `vim.cmd('cq N')` on failure. This is **gated** to skip vacuously without the binary/tsgo (matching the established Rust e2e skip pattern). Citations: [Neovim `lsp.txt` — `vim.lsp.enable`/`get_clients`/`vim.wait`](https://github.com/neovim/neovim/blob/release-0.11/runtime/doc/lsp.txt); [testing Neovim LSP plugins](https://zignar.net/2022/10/26/testing-neovim-lsp-plugins/).
+**Automated — headless real-server contract (fail-closed):** the provisioned suite launches the shipped Lua config inside a real Neovim process and exercises the semantic assertions listed in Block N3 for real Vue/Svelte JS+TS files. Readiness uses LSP notifications and `vim.wait` predicates rather than sleeps. The test requires the binary and tsgo fixture and cannot skip. Citations: [Neovim `lsp.txt` — `vim.lsp.enable`/`get_clients`/`vim.wait`](https://github.com/neovim/neovim/blob/release-0.11/runtime/doc/lsp.txt); [testing Neovim LSP plugins](https://zignar.net/2022/10/26/testing-neovim-lsp-plugins/).
 
-**Already covered by the server's own suite:** because the Neovim config only *launches* the server, `verter-lsp`'s LSP behavior over stdio is **already** fully tested by the repo's existing real-LSP gatekeeper suite at `crates/verter_lsp/tests/` (in-process server, editor-independent; tsgo/tsserver assertions skip vacuously without `node_modules`). The Neovim layer adds **no semantic surface** to re-test — only the launch/config contract, which the pure-Lua specs cover.
+**Server-side complement:** `crates/verter_lsp/tests/` retains the broad editor-neutral protocol suite. The Neovim contract deliberately duplicates a compact critical slice through the real client because client capability negotiation, setup/attach, and authored position mapping are integration surfaces that in-process server tests do not prove.
 
-**Manual (irreducible):** an interactive Neovim UI smoke (open a `.vue`/`.svelte` in a real Neovim, exercise hover/completion/rename/diagnostics, confirm auto-import edits apply) is a README checklist, not an automated gate — the automated layers above cover the module's actual logic and the server's behavior.
+**Manual (irreducible):** interactive rendering and user-input ergonomics remain manual; semantic attach, hover, completion, definition, rename, diagnostics, and shutdown are automated through the real headless client.
 
 ## 8. Scope, dependencies, and decisions for the CTO/user
 
 **Scope (confirmed):**
+
 - A **new, non-overlapping** Lua-only artifact (`editors/nvim/`) + docs. **No existing crate touched.**
-- **No server-side change.** Architect: *"No server-side change is implied by this design."* `verter-lsp` already supports everything the Neovim client needs — stdio LSP, UTF-8 negotiation, completion-resolve advertisement, dynamic watcher registration, and the `$/onFileChanged` custom method (the VFS-re-read save/external-edit signal; the `$/onDidChangeTsOrJsFile` in-editor-delta method also exists but is not used by the Neovim save autocmd). (This contrasts with the Lapce design, which proposed a small `verterClient` handshake addition; the Neovim path needs none.) So this block does **not** trip the "confirm before editing verter_session" rule, and does not touch `verter_session` or any shared substrate.
+- **No server-side change.** Architect: _"No server-side change is implied by this design."_ `verter-lsp` already supports everything the Neovim client needs — stdio LSP, UTF-8 negotiation, completion-resolve advertisement, dynamic watcher registration, and the `$/onFileChanged` custom method (the VFS-re-read save/external-edit signal; the `$/onDidChangeTsOrJsFile` in-editor-delta method also exists but is not used by the Neovim save autocmd). (This contrasts with the Lapce design, which proposed a small `verterClient` handshake addition; the Neovim path needs none.) So this block does **not** trip the "confirm before editing verter_session" rule, and does not touch `verter_session` or any shared substrate.
 - A new CI job (Neovim matrix) + the pure-Lua test suite.
 
 **Decisions for the CTO/user (not derivable from the plan):**
+
 1. **Where does the in-repo module live and how is it published?** `editors/nvim/` in-repo is clear; the open question is whether to also publish it as a standalone installable (a separate `verter.nvim` repo / mirror) so lazy.nvim users can `{ 'verter/verter.nvim' }` without the monorepo. Recommend: in-repo now; mirror/standalone as a follow-up alongside the upstream-lspconfig PR.
 2. **Upstream lspconfig PR + mason registry** (§5.1 items 3–4) — confirm we want to pursue these follow-ups, and note both depend on the same release-engineering work the Lapce design's §8 flags (published per-platform `verter-lsp` assets). Until then, PATH/`cmd_path` discovery is the supported path.
 3. **`watch_files` default** — the design defaults `didChangeWatchedFiles` OFF (perf; §2.4) with the save-notify autocmd as the cheap freshness signal (§2.5). The flagged residual risk (architect): **external edits made outside Neovim may leave cross-file type state stale until another trigger** (a buffer edit, a `*.js`/`*.ts` save, or `:e`). Confirm OFF-by-default + documented opt-in is the right product call (vs ON, accepting node_modules-watch CPU). Recommend OFF-by-default per the architect.
 
-**Toolchain prerequisites (documented, not blockers):** Neovim ≥ 0.11 (for `vim.lsp.config`/`enable`); `verter-lsp` on PATH or `cmd_path`; `@typescript/native-preview` (tsgo) in the project for full type features; plenary.nvim for the test suite (CI-vendored).
+**Toolchain prerequisites (documented, not blockers):** Neovim ≥ 0.11 (for `vim.lsp.config`/`enable`); `verter-lsp` on PATH or `cmd_path`; TypeScript 7 (`typescript@7`) in the project for full type features; plenary.nvim for the test suite (CI-vendored).
 
 ## 9. Open decisions / risks (summary)
 
@@ -362,11 +368,11 @@ Citations: [plenary.nvim TESTS_README](https://github.com/nvim-lua/plenary.nvim/
 
 Enhancements intentionally **not** implemented in the config-only v0. Each item states its concrete external blocker. None is a defect in the shipped Lua config layer — they are gated on release engineering (published per-platform `verter-lsp` assets) or are server-side changes outside the Lua config layer.
 
-- **Upstream `lsp/verter.lua` in `neovim/nvim-lspconfig`.** Widest reach for Neovim users; the runtime path is unchanged (`lsp/*.lua` is just a config-table source for the same built-in client, §2.1). *Blocker:* stable public `verter-lsp` install instructions + published release assets.
-- **mason.nvim registry entry** (`:MasonInstall verter-lsp`). mason owns the download/SHA logic; the Lua module deliberately does not (§5.2). *Blocker:* published per-platform release assets + checksums. Managed provisioning itself is tracked as the scheduled managed-binary-provisioning work.
-- **Standalone `verter.nvim` mirror repo.** A separate installable mirror of `editors/nvim/` so lazy.nvim users can `{ "verter-dev/verter.nvim" }` without the monorepo. *Blocker:* release engineering / a published mirror; no runtime-path change.
-- **`watch_files` stays OFF by default** (documented opt-in, [README → File watching](https://github.com/pikax/verter/blob/main/editors/nvim/README.md#file-watching-watch_files-default-off)). The save-notify autocmd (§2.5) is the cheap cross-file freshness signal in its place. *Blocker:* revisit only if a `node_modules`-ignoring watcher path lands (server/client-side).
-- **Incremental semantic tokens (range/delta).** `verter-lsp` advertises full-document tokens only (§2.6); range/delta would let the Neovim default stay on with lower cost. *Blocker:* a future `verter_lsp` protocol change (server-side, shared with the Helix design).
+- **Upstream `lsp/verter.lua` in `neovim/nvim-lspconfig`.** Widest reach for Neovim users; the runtime path is unchanged (`lsp/*.lua` is just a config-table source for the same built-in client, §2.1). _Blocker:_ stable public `verter-lsp` install instructions + published release assets.
+- **mason.nvim registry entry** (`:MasonInstall verter-lsp`). mason owns the download/SHA logic; the Lua module deliberately does not (§5.2). _Blocker:_ published per-platform release assets + checksums. Managed provisioning itself is tracked as the scheduled managed-binary-provisioning work.
+- **Standalone `verter.nvim` mirror repo.** A separate installable mirror of `editors/nvim/` so lazy.nvim users can `{ "verter-dev/verter.nvim" }` without the monorepo. _Blocker:_ release engineering / a published mirror; no runtime-path change.
+- **`watch_files` stays OFF by default** (documented opt-in, [README → File watching](https://github.com/pikax/verter/blob/main/editors/nvim/README.md#file-watching-watch_files-default-off)). The save-notify autocmd (§2.5) is the cheap cross-file freshness signal in its place. _Blocker:_ revisit only if a `node_modules`-ignoring watcher path lands (server/client-side).
+- **Incremental semantic tokens (range/delta).** `verter-lsp` advertises full-document tokens only (§2.6); range/delta would let the Neovim default stay on with lower cost. _Blocker:_ a future `verter_lsp` protocol change (server-side, shared with the Helix design).
 
 ## 10. Citations
 

@@ -9,8 +9,9 @@ name: helix
 # `verter_editor_client::build_server_args(None, {})`. It is a host-target test
 # crate, so no wasm target is needed.
 #
-# A real-Helix `hx --health` UI smoke is out of scope for v0, mirroring how the
-# zed / neovim / lapce jobs defer their real-server smoke.
+# The Linux lane additionally installs pinned Helix 25.07.1, validates the
+# published archive checksum, proves `hx --health` selects only Verter for Vue
+# and Svelte, and drives the parsed shipping plan through the neutral LSP client.
 
 on:
   push:
@@ -18,11 +19,17 @@ on:
     paths:
       - "editors/helix/**"
       - "crates/verter-editor-client/**"
+      - "scripts/editor-contracts/**"
+      - "editors/nvim/tests/fixtures/real-client/**"
+      - "packages/lsp-test-client/**"
       - ".github/workflows/helix.yml"
   pull_request:
     paths:
       - "editors/helix/**"
       - "crates/verter-editor-client/**"
+      - "scripts/editor-contracts/**"
+      - "editors/nvim/tests/fixtures/real-client/**"
+      - "packages/lsp-test-client/**"
       - ".github/workflows/helix.yml"
 
 jobs:
@@ -48,7 +55,7 @@ jobs:
 
       - name: Run the Helix config-contract test
         shell: bash
-        run: cargo test -p verter-editor-client --test helix_config_contract
+        run: cargo test -p verter-editor-client --test main cases::helix_config_contract
 
       - name: Run the whole verter-editor-client suite
         shell: bash
@@ -61,3 +68,81 @@ jobs:
       - name: Rustfmt check
         shell: bash
         run: cargo fmt -p verter-editor-client --check
+
+  real-client:
+    name: helix 25.07.1 real-client contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install pinned Helix with checksum verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/helix-25.07.1-x86_64-linux.tar.xz"
+          curl --fail --location --retry 3 \
+            --output "$archive" \
+            https://github.com/helix-editor/helix/releases/download/25.07.1/helix-25.07.1-x86_64-linux.tar.xz
+          echo "3f08e63ecd388fff657ad39722f88bb03dcf326f1f2da2700d99e1dc40ab2e8b  $archive" | sha256sum --check --strict
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+          echo "${RUNNER_TEMP}/helix-25.07.1-x86_64-linux" >> "$GITHUB_PATH"
+          echo "HELIX_RUNTIME=${RUNNER_TEMP}/helix-25.07.1-x86_64-linux/runtime" >> "$GITHUB_ENV"
+
+      - name: Provision the shipped Helix configuration and server
+        shell: bash
+        run: |
+          set -euo pipefail
+          config="${RUNNER_TEMP}/helix-config/helix"
+          mkdir -p "$config" "${RUNNER_TEMP}/verter-bin"
+          cp editors/helix/languages.toml "$config/languages.toml"
+          cargo build -p verter_lsp --release
+          cp target/release/verter-lsp "${RUNNER_TEMP}/verter-bin/verter-lsp"
+          chmod +x "${RUNNER_TEMP}/verter-bin/verter-lsp"
+          echo "XDG_CONFIG_HOME=${RUNNER_TEMP}/helix-config" >> "$GITHUB_ENV"
+          echo "${RUNNER_TEMP}/verter-bin" >> "$GITHUB_PATH"
+
+      - name: Prove Vue and Svelte select only the executable Verter server
+        shell: bash
+        run: |
+          set -euo pipefail
+          hx --version | grep -F "helix 25.07.1"
+          for language in vue svelte; do
+            output=$(NO_COLOR=1 hx --health "$language" 2>&1)
+            printf '%s\n' "$output"
+            printf '%s\n' "$output" | grep -F "verter-lsp"
+            if printf '%s\n' "$output" | grep -Eiq 'vue-language-server|svelteserver|svelte-language-server'; then
+              echo "::error::$language has a second framework language server configured"
+              exit 1
+            fi
+          done
+
+      - name: Install neutral-client fixture dependencies
+        shell: bash
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          npm ci --ignore-scripts --prefix editors/nvim/tests/fixtures/real-client
+          pnpm --filter @verter/lsp-test-client build
+
+      - name: Drive the parsed Helix shipping plan over stdio
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="${GITHUB_WORKSPACE}/editors/nvim/tests/fixtures/real-client"
+          bin="${RUNNER_TEMP}/verter-bin/verter-lsp"
+          plan="${RUNNER_TEMP}/helix-launch-plan.json"
+          cargo run --quiet -p verter-editor-client --example helix_plan -- "$root" "$bin" > "$plan"
+          node scripts/editor-contracts/run-plan-smoke.mjs --plan="$plan" --root="$root"

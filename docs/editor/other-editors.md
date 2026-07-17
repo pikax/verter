@@ -14,12 +14,12 @@ shared LSP path.
 
 ## The four editors
 
-| Editor   | What it is                                  | Per-editor guide |
-| -------- | ------------------------------------------- | ---------------- |
-| **Lapce**  | A compiled WASM volt (plugin) that launches `verter-lsp`. | [`extensions/lapce/README.md`](https://github.com/pikax/verter/blob/main/extensions/lapce/README.md) |
-| **Zed**    | A compiled WASM extension that launches `verter-lsp`.     | [`extensions/zed/README.md`](https://github.com/pikax/verter/blob/main/extensions/zed/README.md) |
-| **Helix**  | A pure `languages.toml` config (built-in native LSP client). | [`editors/helix/README.md`](https://github.com/pikax/verter/blob/main/editors/helix/README.md) |
-| **Neovim** | A pure Lua config (built-in LSP client).                  | [`editors/nvim/README.md`](https://github.com/pikax/verter/blob/main/editors/nvim/README.md) |
+| Editor     | What it is                                                   | Per-editor guide                                                                                     |
+| ---------- | ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| **Lapce**  | A compiled WASM volt (plugin) that launches `verter-lsp`.    | [`extensions/lapce/README.md`](https://github.com/pikax/verter/blob/main/extensions/lapce/README.md) |
+| **Zed**    | A compiled WASM extension that launches `verter-lsp`.        | [`extensions/zed/README.md`](https://github.com/pikax/verter/blob/main/extensions/zed/README.md)     |
+| **Helix**  | A pure `languages.toml` config (built-in native LSP client). | [`editors/helix/README.md`](https://github.com/pikax/verter/blob/main/editors/helix/README.md)       |
+| **Neovim** | A pure Lua config (built-in LSP client).                     | [`editors/nvim/README.md`](https://github.com/pikax/verter/blob/main/editors/nvim/README.md)         |
 
 For each editor, its README covers the **prerequisites**, the **install** steps,
 and the **config override** (how to point it at `verter-lsp`):
@@ -60,10 +60,10 @@ This produces the server binary at:
 (The `.exe` suffix is Windows-only.) Use the absolute path to that binary when you
 configure your editor below, or place it on your `PATH`.
 
-For full type features, install the `tsgo` type provider
-(`@typescript/native-preview`) as a dev dependency in the project you open —
-Verter launches with `--type-provider=tsgo` and discovers it from the project's
-`node_modules`.
+For full type features, install TypeScript 7 (`typescript@7`) as a dev dependency
+in the project you open. Verter launches with `--type-provider=tsgo` and
+discovers the native `@typescript/typescript-<platform>-<arch>` binary installed
+by that package from the project's `node_modules`.
 
 ## Point the editor at `verter-lsp`
 
@@ -91,24 +91,21 @@ intended behavior, not a bug. The loud message looks like:
 
 The remedy is exactly the two options above.
 
-## Automated test coverage (honest infeasibility note)
+## Automated test coverage
 
-**Lapce and Zed have no headless extension-test harness**, so a real GUI launch
-cannot be exercised in CI. The **authoritative automated check of the shared
-launch path** — that `verter-lsp` actually launches over stdio and completes an
-LSP `initialize` handshake returning real capabilities — is the Rust
-stdio-launch smoke at
-[`crates/verter_lsp/tests/stdio_launch_smoke.rs`](https://github.com/pikax/verter/blob/main/crates/verter_lsp/tests/stdio_launch_smoke.rs).
-Both clients' launch contracts are additionally pinned by host-target unit tests
-(the launch-contract tests in each extension's `src/lib.rs`, built in their own
-CI), and the contract logic itself lives in one shared crate
-(`verter-editor-client`) so the clients cannot diverge.
+All four integrations have non-vacuous automated contracts:
 
-The two config-only clients are guarded differently:
-
-- **Helix** — a hermetic Rust config-contract test parses the shipped
-  `editors/helix/languages.toml` and asserts it against the shared launch contract
-  (no Helix binary required).
-- **Neovim** — a headless plenary suite runs the Lua config builders and a **real
-  `verter-lsp` attach smoke** (the CI job builds the binary and exports
-  `$VERTER_LSP_BIN`), across a Neovim-version × OS matrix.
+- **Lapce and Zed:** their CI jobs build the real WASM artifacts, export the
+  exact production launch plans, and drive those plans through the shared stdio
+  LSP client. Real Vue and Svelte diagnostics plus concrete typed hover are
+  required. This validates everything short of GUI-host loading; neither editor
+  currently provides a headless GUI extension harness.
+- **Helix:** the parsed TOML contract runs on every OS. A separate Linux lane
+  installs checksum-verified Helix 25.07.1, proves both `hx --health` routes use
+  only Verter, then drives the parsed shipping plan through the same real-server
+  Vue/Svelte semantic smoke.
+- **Neovim:** the shipped Lua setup runs inside a real headless Neovim client on
+  the supported-version × OS matrix. It covers Vue/Svelte, JS/TS, readiness,
+  UTF-8 negotiation, diagnostics, hover, authored definition, completion,
+  template rename, and clean shutdown. Missing prerequisites and zero executed
+  tests are hard failures.

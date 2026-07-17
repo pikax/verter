@@ -1,6 +1,6 @@
 # Verter Helix Support — Design & Implementation Plan
 
-> Status: **LANDED — config-only v0.** Helix support ships at [`editors/helix/`](https://github.com/pikax/verter/tree/main/editors/helix) as a `languages.toml` snippet + README, guarded by the hermetic Rust contract test `crates/verter-editor-client/tests/helix_config_contract.rs`. Scope: a discoverable `verter-lsp` binary (NO managed download), ZERO server-side change. Anything beyond v0 (a `hx --health` CI smoke, upstreaming) is roadmap — see [§9.1 Roadmap (out of v0 scope)](#91-roadmap-out-of-v0-scope).
+> Status: **LANDED.** Helix support ships at [`editors/helix/`](https://github.com/pikax/verter/tree/main/editors/helix) as a `languages.toml` snippet + README. It is guarded by the hermetic parsed-config contract, a checksum-pinned real `hx --health` gate for Vue and Svelte, and a neutral-client semantic smoke driven from the parsed shipping plan. Scope remains a discoverable `verter-lsp` binary (NO managed download) and ZERO server-side change.
 > Sibling designs: [`docs/arch/neovim-support-design.md`](./neovim-support-design.md) and [`docs/arch/lapce-extension-design.md`](./lapce-extension-design.md) (same server, different editors). The server-launch contract (type provider, init-options parity) is shared; the **distribution model differs per editor**. **Correction over the sibling docs:** the verter-lsp type-provider value is **`tsgo`**, not `tgo` (the sibling docs contain the `tgo` typo — see §3.3). `tgo` is not a recognized value and silently falls through to `auto`.
 
 ## 1. Context
@@ -25,10 +25,10 @@ Performance is a non-negotiable design driver. Helix offers exactly **one** LSP 
 
 Helix has **no plugin-based LSP path** (the in-development Steel/Scheme plugin system is for editor commands, not for hosting language servers; routing LSP through a plugin would be strictly slower and is explicitly out of scope). LSP is configured declaratively in `languages.toml` and serviced by Helix's built-in client:
 
-| Mechanism | Request-time path | Verdict |
-|---|---|---|
+| Mechanism                                                         | Request-time path                                                                                         | Verdict                                                   |
+| ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
 | **`languages.toml` `[language-server.verter]` + built-in client** | Helix's in-process **Rust native LSP client** ⇄ stdio ⇄ native `verter-lsp`. TOML parsed once at startup. | **CHOSEN — the only path, and the most direct possible.** |
-| Steel/Scheme plugin shim | Adds a plugin hop in front of the client. | **Rejected — slower, and not how Helix hosts LSPs.** |
+| Steel/Scheme plugin shim                                          | Adds a plugin hop in front of the client.                                                                 | **Rejected — slower, and not how Helix hosts LSPs.**      |
 
 **The fastest path is therefore: Helix's built-in native LSP client talking stdio to `verter-lsp`, configured once via `languages.toml`.** Native client ↔ native server, no proxy, no per-request indirection. There is nothing between the client and the server.
 
@@ -51,13 +51,13 @@ Two independent, mutually-reinforcing facts make root handling correct with **ze
 
 ### 2.5 Performance defaults summary
 
-| Knob | Default | Why |
-|---|---|---|
-| Integration mechanism | Built-in native LSP client via `languages.toml` | Only path; most direct; no proxy (§2.1). |
-| Position encoding | UTF-8 (auto-negotiated) | Zero-conversion, both ends Rust (§2.2). |
-| Process model | One server per workspace root, lazy attach | No per-file spawn (§2.3). |
-| Workspace root | From `initialize.workspaceFolders` (+ Helix cwd=root) | No argv injection needed; correct by construction (§2.4). |
-| Type provider | `tsgo` (self-discovering) | Native preview TS, self-contained (§3.3). |
+| Knob                  | Default                                               | Why                                                       |
+| --------------------- | ----------------------------------------------------- | --------------------------------------------------------- |
+| Integration mechanism | Built-in native LSP client via `languages.toml`       | Only path; most direct; no proxy (§2.1).                  |
+| Position encoding     | UTF-8 (auto-negotiated)                               | Zero-conversion, both ends Rust (§2.2).                   |
+| Process model         | One server per workspace root, lazy attach            | No per-file spawn (§2.3).                                 |
+| Workspace root        | From `initialize.workspaceFolders` (+ Helix cwd=root) | No argv injection needed; correct by construction (§2.4). |
+| Type provider         | `tsgo` (self-discovering)                             | Native preview TS, self-contained (§3.3).                 |
 
 ## 3. The Helix `languages.toml` model (researched, with citations)
 
@@ -67,13 +67,13 @@ All facts verified against the Helix documentation, the helix repo's default `la
 
 From [docs.helix-editor.com/languages.html](https://docs.helix-editor.com/languages.html):
 
-| Field | Meaning |
-|---|---|
-| `command` | "The name or path of the language server binary to execute. Binaries must be in `$PATH`" (or an absolute path). |
-| `args` | "A list of arguments to pass to the language server binary." |
-| `config` | "Language server initialization options" — **maps directly to the LSP `initializationOptions`** sent at `initialize`. |
-| `environment` | "Any environment variables that will be used when starting the language server" (e.g. `{ VERTER_LOG = "info" }`). |
-| `timeout` | "The maximum time a request to the language server may take, in seconds. Defaults to `20`." |
+| Field                    | Meaning                                                                                                                            |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `command`                | "The name or path of the language server binary to execute. Binaries must be in `$PATH`" (or an absolute path).                    |
+| `args`                   | "A list of arguments to pass to the language server binary."                                                                       |
+| `config`                 | "Language server initialization options" — **maps directly to the LSP `initializationOptions`** sent at `initialize`.              |
+| `environment`            | "Any environment variables that will be used when starting the language server" (e.g. `{ VERTER_LOG = "info" }`).                  |
+| `timeout`                | "The maximum time a request to the language server may take, in seconds. Defaults to `20`."                                        |
 | `required-root-patterns` | "A list of `glob` patterns to look for in the working directory. The language server is started if at least one of them is found." |
 
 ### 3.2 `[[language]]` fields & language-server assignment
@@ -146,7 +146,7 @@ Studied in `packages/vue-vscode/src/extension.ts` (`buildServerOptions` ~L1051-1
 **Server launch (VS Code → Helix):** VS Code launches `verter-lsp --type-provider=<tp> --tsdk=<tsdk> --plugin-path=<node_modules> [--mcp-port=0 --mcp-lint-preset=<p>] <rootPath>` with `env.VERTER_LOG`. **Decisive simplifications for Helix:**
 
 - **Use `--type-provider=tsgo`** (NOT `tgo`). `--type-provider` accepts `auto|tsgo|tsserver|off` only (`crates/verter_lsp/src/main.rs` `CliArgs::parse`). `tgo` is unrecognized and falls through to `auto`. The `tgo` spelling in the Neovim/Lapce docs is a typo this design corrects.
-- **Omit `--tsdk` / `--plugin-path`.** They are consumed only by the tsserver path; `try_spawn_tsgo` ignores them and self-discovers the tsgo binary (`VERTER_TSGO_BIN` env → workspace `node_modules` → PATH → npm/npx cache). The user installs `@typescript/native-preview` per-project (the normal case for a Vue/Svelte project).
+- **Omit `--tsdk` / `--plugin-path`.** They are consumed only by the tsserver path; `try_spawn_tsgo` ignores them and self-discovers the native TypeScript 7 binary (`VERTER_TSGO_BIN` env → workspace `node_modules` → PATH → npm/npx cache). The user installs `typescript@7` per-project, which installs the matching `@typescript/typescript-<platform>-<arch>` binary.
 - **Omit the positional root** (§2.4) — Helix has no argv-injection mechanism, and the server reads the root from `workspaceFolders`.
 - **Omit `--mcp-*`** (parsed-but-ignored; MCP ships separately).
 
@@ -156,17 +156,17 @@ Resulting default: `command = "verter-lsp"`, `args = ["--type-provider=tsgo"]`.
 
 VS Code passes a rich `initializationOptions`; the server reads only a subset (`crates/verter_lsp/src/config.rs`; `lifecycle.rs` `handle_initialize`). The Helix `config` table mirrors **exactly the server-read subset** and drops VS-Code-UI-only fields.
 
-| Init option | Server reads it? (where) | Helix `config` mapping |
-|---|---|---|
-| `lint: { enabled, preset }` | yes (`config::merge_init_options`) | `config.lint` |
-| `inlayHints: { enabled }` | yes (`handle_initialize`, `inlay_hints_enabled`) | `config.inlayHints` |
-| `viteConfig: { enabled, trustedFiles }` | yes (`handle_initialize`, `vite_config_options`) | `config.viteConfig` |
-| `experimental: { conditionalRootNarrowing, strictSlots }` | yes (`config::parse_experimental_init_options`) | `config.experimental` |
-| `hover: { provenance }` | yes (`config::parse_hover_init_options`) | `config.hover` |
-| `statistics: { enabled }` | yes (`statistics.set_enabled`) | `config.statistics` — shipped explicitly OFF (opt-in telemetry); part of the server-read parity set, not omitted |
-| `frameworks: ["vue","svelte"]` | informational only | omit (the carrier language is implied by which `[[language]]` attaches verter) |
-| `configuration: { vue, typescript, css, … }` | **not parsed** by the server | **drop** — VS Code language-service settings; Helix has its own. |
-| `decorations.*`, `mcp.*`, `$/verter/*` | VS-Code-only surfaces | **drop** — a plain LSP client never sends these; standard features flow unchanged. |
+| Init option                                               | Server reads it? (where)                         | Helix `config` mapping                                                                                           |
+| --------------------------------------------------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `lint: { enabled, preset }`                               | yes (`config::merge_init_options`)               | `config.lint`                                                                                                    |
+| `inlayHints: { enabled }`                                 | yes (`handle_initialize`, `inlay_hints_enabled`) | `config.inlayHints`                                                                                              |
+| `viteConfig: { enabled, trustedFiles }`                   | yes (`handle_initialize`, `vite_config_options`) | `config.viteConfig`                                                                                              |
+| `experimental: { conditionalRootNarrowing, strictSlots }` | yes (`config::parse_experimental_init_options`)  | `config.experimental`                                                                                            |
+| `hover: { provenance }`                                   | yes (`config::parse_hover_init_options`)         | `config.hover`                                                                                                   |
+| `statistics: { enabled }`                                 | yes (`statistics.set_enabled`)                   | `config.statistics` — shipped explicitly OFF (opt-in telemetry); part of the server-read parity set, not omitted |
+| `frameworks: ["vue","svelte"]`                            | informational only                               | omit (the carrier language is implied by which `[[language]]` attaches verter)                                   |
+| `configuration: { vue, typescript, css, … }`              | **not parsed** by the server                     | **drop** — VS Code language-service settings; Helix has its own.                                                 |
+| `decorations.*`, `mcp.*`, `$/verter/*`                    | VS-Code-only surfaces                            | **drop** — a plain LSP client never sends these; standard features flow unchanged.                               |
 
 The shipped `config` is the COMPLETE server-read init parity set — the same six-key set the shared `verter_editor_client::build_initialization_options` emits: `lint`, `inlayHints`, `viteConfig`, `experimental`, `hover`, and `statistics` (off by default). The contract test asserts the parsed `config` equals `build_initialization_options(&json!({}))`, so the snippet cannot drift from the SSoT parity set. Genuinely-not-read keys (`configuration`/`decorations`/`mcp`/`frameworks`) are absent.
 
@@ -195,8 +195,8 @@ The config-validation test (§7) lives at **`crates/verter-editor-client/tests/h
 ```toml
 # Verter — Vue & Svelte language support for Helix.
 # Merge this into ~/.config/helix/languages.toml (or a project-local .helix/languages.toml).
-# Requires: `verter-lsp` on $PATH, and @typescript/native-preview (tsgo) installed
-# in the project for full type features.
+# Requires: `verter-lsp` on $PATH, and TypeScript 7 (`typescript@7`) installed in
+# the project for full type features.
 
 [language-server.verter]
 command = "verter-lsp"
@@ -230,7 +230,7 @@ language-servers = ["verter"]
 
 The README provides:
 
-1. **Install:** put `verter-lsp` on `$PATH` (cargo install / release binary / absolute `command` path); install `@typescript/native-preview` in the project for full type features; merge the snippet into `~/.config/helix/languages.toml` (global) **or** a project-local `.helix/languages.toml` — **the project-local variant is the same minimal overlay**, not a different/full config.
+1. **Install:** put `verter-lsp` on `$PATH` (cargo install / release binary / absolute `command` path); install `typescript@7` in the project for full type features; merge the snippet into `~/.config/helix/languages.toml` (global) **or** a project-local `.helix/languages.toml` — **the project-local variant is the same minimal overlay**, not a different/full config.
 2. **Verify:** run `hx --health vue` and `hx --health svelte` — the "Configured language server" line must show **`verter-lsp`** (in green) with its resolved binary path. (Note the historical `hx --health` limitation for multi-server languages, §3.2/§7 — with the replace design there is only one server, so the check is unambiguous.)
 3. **The `--type-provider=tsgo` rationale** and the explicit **do-not-use-`tgo`** note.
 4. **`config` parity table** — the exact server-read init options (§3.6), so users can tune `lint`/`inlayHints`/`viteConfig`/`experimental`/`hover`/`statistics` (`statistics` server-read, shipped OFF by default). (Stress: only these six keys are read; anything else is ignored.)
@@ -253,6 +253,7 @@ The README provides:
 All blocks are in `editors/helix/` + one test file under `crates/verter-editor-client/tests/` (plus a one-line `[dev-dependencies]` add); **no existing crate's behavior is touched** (§8). Each block lands with discriminating tests (must FAIL pre-change, PASS post-change; no stubs/always-true asserts, per the project Stub-Prevention rule).
 
 ### Block H1 — the `languages.toml` snippet + config-validation test
+
 - Author `editors/helix/languages.toml` (§4.2).
 - Add `crates/verter-editor-client/tests/helix_config_contract.rs`: parse `editors/helix/languages.toml` with a TOML parser and assert the shipped contract, with the anchor assertion `args == build_server_args(None, &json!({}))`.
 - **Discriminating tests** (hermetic, no editor, no server):
@@ -266,43 +267,48 @@ All blocks are in `editors/helix/` + one test file under `crates/verter-editor-c
   - A negative assertion that the default snippet does **not** set `required-root-patterns` (guards the architect decision that gating is opt-in, not a shipped default).
 
 ### Block H2 — README + follow-ups
+
 - `editors/helix/README.md` (§4.3: Helix install, the tsgo note, the `config` parity table, the `hx --health` verification, advanced usage). Beyond-v0 follow-ups are tracked in [§9.1 Roadmap (out of v0 scope)](#91-roadmap-out-of-v0-scope).
 - A separate `docs/` guide page is a roadmap item, not part of v0 — the README is the canonical install doc.
 
-### Block H3 (optional) — `hx --health` CI smoke
-- A gated CI job that installs a pinned Helix, drops `editors/helix/languages.toml` into the Helix config dir, builds `verter-lsp`, puts it on PATH, and runs `hx --health vue` + `hx --health svelte`, asserting the output contains `verter-lsp` and a green/✓ status. **Gated** to skip when Helix or the binary is unavailable (matching how the zed / neovim / lapce jobs defer their real-server smoke). Tracked in [§9.1 Roadmap (out of v0 scope)](#91-roadmap-out-of-v0-scope).
-- This is **lower-value** than H1 (the TOML-parse test already guards the shipped contract; `hx --health` only re-confirms Helix accepts it), so H3 is optional / a follow-up.
+### Block H3 — real Helix and shipping-plan contracts
+
+- CI installs checksum-verified Helix 25.07.1 and explicitly provisions a built `verter-lsp`; missing tools fail the job rather than skip it.
+- `hx --health vue` and `hx --health svelte` must both select `verter-lsp` and must not report the built-in Vue or Svelte servers.
+- The parsed command, arguments, and initialization options then drive a real Vue/Svelte diagnostics-and-hover smoke through the shared stdio LSP client.
 
 ## 7. Test strategy (mandatory-rule compliant)
 
 The project mandates automated tests for LSP/editor-integration changes (no manual-only verification). The work splits cleanly:
 
-**Automated — the primary gate (TOML-parse contract test; hermetic, editor-independent):** `crates/verter-editor-client/tests/helix_config_contract.rs` parses the shipped `editors/helix/languages.toml` and asserts every field of the contract — its **anchor** assertion ties `args` to the shared launch contract (`args == build_server_args(None, &json!({}))`), plus `command == "verter-lsp"`, the `--type-provider=tsgo` arg + negative `tgo`/`--tsdk`/`--plugin-path`/positional absence, the exact `config` parity keys + negative VS-Code-only-key absence, `language-servers` = `verter` + negative built-in-server absence, the no-`required-root-patterns` default, and the minimal-override shape. It needs **no Helix binary and no `verter-lsp` process**, runs via `cargo test -p verter-editor-client --test helix_config_contract` (and inside the canonical workspace gate), and is fully discriminating (it fails against a snippet with the `tgo` typo, a missing parity key, a coexist mistake, or a dropped carrier language).
+**Automated — the primary gate (TOML-parse contract test; hermetic, editor-independent):** `crates/verter-editor-client/tests/cases/helix_config_contract.rs` parses the shipped `editors/helix/languages.toml` and asserts every field of the contract — its **anchor** assertion ties `args` to the shared launch contract (`args == build_server_args(None, &json!({}))`), plus `command == "verter-lsp"`, the `--type-provider=tsgo` arg + negative `tgo`/`--tsdk`/`--plugin-path`/positional absence, the exact `config` parity keys + negative VS-Code-only-key absence, `language-servers` = `verter` + negative built-in-server absence, the no-`required-root-patterns` default, and the minimal-override shape. It needs **no Helix binary and no `verter-lsp` process**, runs via `cargo test -p verter-editor-client --test main cases::helix_config_contract` (and inside the canonical workspace gate), and is fully discriminating (it fails against a snippet with the `tgo` typo, a missing parity key, a coexist mistake, or a dropped carrier language).
 
-**Automated — headless `hx --health` smoke (feasible, gated, optional):** `hx --health <lang>` is Helix's scriptable inspection: it prints, for a language, the configured language-server executable name (green when found) + binary path, the grammar/highlight status, etc., to stdout. A CI job can therefore drop the snippet into the Helix config dir and assert `hx --health vue`/`svelte` shows `verter-lsp` (Block H3). **Caveat:** historically `hx --health <lang>` displayed only the **first** server for a multi-server language ([helix#8156](https://github.com/helix-editor/helix/issues/8156), later improved by [#7315](https://github.com/helix-editor/helix/pull/7315)); with the **replace** design (`language-servers = ["verter"]`) there is exactly one server, so the check is unambiguous regardless of Helix version. This is gated (skips without Helix / the binary), so CI without them stays green. It is a **confirmation** smoke, not the primary gate.
+**Automated — real `hx --health` and semantic smoke:** `hx --health <lang>` confirms that pinned Helix accepts the shipped overlay and resolves the executable. Because the replace design has exactly one server, the result is unambiguous. The subsequent neutral-client run exercises the exact parsed plan and requires real Vue/Svelte diagnostics and concrete typed hover, so health output alone is never treated as semantic proof.
 
-**Already covered by the server's own suite:** because the Helix config only *launches* the server, `verter-lsp`'s LSP behavior over stdio is **already** fully tested by `crates/verter_lsp/tests/` (in-process server, editor-independent; tsgo/tsserver assertions skip vacuously without `node_modules`). The Helix layer adds **no semantic surface** to re-test — only the launch/config contract, which the TOML-parse test covers.
+**Server-side complement:** `crates/verter_lsp/tests/` retains the broad editor-neutral protocol suite. The Helix gate deliberately repeats a compact critical slice through the exact parsed shipping plan because real executable resolution, client initialization, and plan drift are integration surfaces the in-process server suite does not prove.
 
 **Manual (irreducible):** an interactive Helix UI smoke (open a `.vue`/`.svelte`, exercise hover/completion/rename/diagnostics, confirm auto-import edits apply) is a README checklist, not an automated gate.
 
 ## 8. Scope, dependencies, and decisions for the CTO/user
 
 **Scope (confirmed):**
+
 - A **new, non-overlapping** config-only artifact (`editors/helix/`) + docs + one hermetic test under `crates/verter-editor-client/tests/` (plus a one-line `toml` `[dev-dependencies]` add). **No existing crate's behavior touched.**
 - **No server-side change.** `verter-lsp` already supports everything Helix needs — stdio LSP, UTF-8 negotiation (§2.2), `workspaceFolders`-driven root (§2.4), completion-resolve advertisement (§3.7), dynamic watcher registration. (This contrasts with the Lapce design's proposed `verterClient` handshake; the Helix path needs none.) So this block does **not** trip the "confirm before editing verter_session" rule and does not touch `verter_session` or any shared substrate.
-- The config-validation test joins the existing canonical Rust gate; the optional `hx --health` smoke is a new gated CI job.
+- The config-validation test joins the canonical Rust gate; the real-client lane is an explicit editor-integration gate.
 
 **Decisions for the CTO/user (not derivable from the plan):**
+
 1. **`lint.enabled` default** — mirrors the VS Code default (`false`). Confirm parity (vs defaulting lint ON for Helix users). Recommend parity (`false`).
-2. **Optional `hx --health` CI job (Block H3)** — confirm whether to add the gated Helix-matrix CI smoke now or defer (the TOML-parse test is the real gate). Recommend defer-or-optional.
+2. **Real-client coverage** — resolved: pinned `hx --health` plus a semantic shipping-plan smoke are required in CI.
 
 (The `required-root-patterns` default-ON question from an earlier draft is **resolved**: the architect verdict is always-attach by default, with `required-root-patterns` as a documented opt-in knob — §4.2/§4.3. Not a CTO decision.)
 
-**Toolchain prerequisites (documented, not blockers):** Helix (any version with the standard `languages.toml` model — vue/svelte built-ins exist; per-field merge confirmed); `verter-lsp` on `$PATH` or an absolute `command`; `@typescript/native-preview` (tsgo) in the project for full type features.
+**Toolchain prerequisites (documented, not blockers):** Helix (any version with the standard `languages.toml` model — vue/svelte built-ins exist; per-field merge confirmed); `verter-lsp` on `$PATH` or an absolute `command`; TypeScript 7 (`typescript@7`, which installs the native platform binary used by tsgo) in the project for full type features.
 
 ## 9. Open decisions / risks (summary)
 
-- **`hx --health` CI smoke** optional/deferred — TOML-parse test is the primary gate. [CTO]
+- **`hx --health` and semantic shipping-plan smoke** implemented and fail-closed. [resolved]
 - **`lint.enabled` default** `false` (VS Code parity, recommended). [CTO]
 - **`required-root-patterns`** is an opt-in README knob, NOT a default (architect-ratified) — always-attach is the default. [resolved]
 - **Formatter interplay** — if a user already configured another server/formatter for vue/svelte, replacing the server list is correct for default LSP behavior, but they may need `only-features`/`except-features` filtering; documented in the README. [noted]
@@ -313,10 +319,9 @@ The project mandates automated tests for LSP/editor-integration changes (no manu
 
 Enhancements intentionally **not** implemented in the config-only v0. Each item states its concrete external blocker. None is a defect in the shipped contract — they are gated on release engineering (published per-platform `verter-lsp` assets) or are server-side changes outside the `languages.toml` config layer.
 
-- **No managed binary download.** Helix convention (like Neovim's, unlike Lapce's volt) is that the editor does not fetch language-server binaries; the user installs `verter-lsp` themselves and points `command` at it (PATH name or absolute path). *Blocker:* revisit only if Helix gains a managed-binary mechanism. Managed provisioning itself is tracked as the scheduled managed-binary-provisioning work, not owned here.
-- **No upstream `[language-server.verter]` default in Helix's built-in `languages.toml`.** Helix's built-in defaults point vue/svelte at Volar/svelteserver, and adding a third-party server to upstream defaults is not their model — the in-repo snippet is the supported channel. *Blocker:* not pursued (upstream policy), not an asset/release gate.
-- **Gated `hx --health` UI smoke.** A CI job that installs a pinned Helix, drops `editors/helix/languages.toml` into the config dir, puts a built `verter-lsp` on PATH, and asserts `hx --health vue` / `hx --health svelte` show `verter-lsp`. Lower value than the hermetic TOML-parse contract test (which already guards the shipped contract). *Blocker:* needs a pinned Helix available in CI; deferred, mirroring how the zed / neovim / lapce jobs defer their real-server smoke.
-- **Incremental semantic tokens (range/delta).** `verter-lsp` currently advertises full-document tokens only; range/delta is a server-side enhancement shared with the Neovim design. *Blocker:* a future `verter_lsp` protocol change (server-side), not a Helix knob.
+- **No managed binary download.** Helix convention (like Neovim's, unlike Lapce's volt) is that the editor does not fetch language-server binaries; the user installs `verter-lsp` themselves and points `command` at it (PATH name or absolute path). _Blocker:_ revisit only if Helix gains a managed-binary mechanism. Managed provisioning itself is tracked as the scheduled managed-binary-provisioning work, not owned here.
+- **No upstream `[language-server.verter]` default in Helix's built-in `languages.toml`.** Helix's built-in defaults point vue/svelte at Volar/svelteserver, and adding a third-party server to upstream defaults is not their model — the in-repo snippet is the supported channel. _Blocker:_ not pursued (upstream policy), not an asset/release gate.
+- **Incremental semantic tokens (range/delta).** `verter-lsp` currently advertises full-document tokens only; range/delta is a server-side enhancement shared with the Neovim design. _Blocker:_ a future `verter_lsp` protocol change (server-side), not a Helix knob.
 
 ## 10. Citations
 
