@@ -863,14 +863,6 @@ pub(super) fn process_tsx_script_setup<'alloc>(
                 .map(|(name, _)| *name)
                 .collect();
 
-            let format_destruct_entries = |names: &[&str]| -> String {
-                names
-                    .iter()
-                    .map(|name| format!("\n    {}", name))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            };
-
             // Collect binding metadata from binding_source_info
             let mut destruct_bindings: Vec<DestructuredBindingInfo> = Vec::new();
             for name in const_names.iter().chain(let_names.iter()) {
@@ -882,25 +874,48 @@ pub(super) fn process_tsx_script_setup<'alloc>(
                 }
             }
 
-            let mut destruct_block = String::from("{ /* verter-destructured-start */");
-            if !const_names.is_empty() {
-                destruct_block.push_str(&format!(
-                    "const {{ {} }} = {P}unwrapped;",
-                    format_destruct_entries(&const_names),
-                    P = PREFIX,
+            // Emit the destructure block as ORDERED CT segments at the </script>
+            // boundary: the scaffold text unmapped, every destructured binding
+            // NAME source-mapped to its authored identifier span. The provider
+            // resolves a template-usage definition to the destructured alias (it
+            // shadows the authored binding in the block scope); without the
+            // name-level mapping, the response remap fails closed and every
+            // markup definition/reference/rename drops on the editor surface.
+            let mut destruct_segments: Vec<(u32, Option<(u32, u32)>, &'alloc str)> = Vec::new();
+            let anchor = tag_close.end;
+            destruct_segments.push((anchor, None, "{ /* verter-destructured-start */"));
+            let push_group = |segments: &mut Vec<(u32, Option<(u32, u32)>, &'alloc str)>,
+                              keyword: &str,
+                              names: &[&str],
+                              ct: &mut CodeTransform<'alloc>| {
+                if names.is_empty() {
+                    return;
+                }
+                segments.push((anchor, None, ct.alloc_str(&format!("{keyword} {{ "))));
+                for (index, name) in names.iter().enumerate() {
+                    let separator = if index == 0 { "\n    " } else { ",\n    " };
+                    let source_start = binding_source_info.get(name).map(|info| info.sfc_start);
+                    let content = ct.alloc_str(&format!("{separator}{name}"));
+                    segments.push((
+                        anchor,
+                        source_start.map(|start| (start, separator.len() as u32)),
+                        content,
+                    ));
+                }
+                segments.push((
+                    anchor,
+                    None,
+                    ct.alloc_str(&format!(" }} = {PREFIX}unwrapped;")),
                 ));
-            }
+            };
+            push_group(&mut destruct_segments, "const", &const_names, ct);
             if !let_names.is_empty() {
                 if !const_names.is_empty() {
-                    destruct_block.push(' ');
+                    destruct_segments.push((anchor, None, " "));
                 }
-                destruct_block.push_str(&format!(
-                    "let {{ {} }} = {P}unwrapped;",
-                    format_destruct_entries(&let_names),
-                    P = PREFIX,
-                ));
+                push_group(&mut destruct_segments, "let", &let_names, ct);
             }
-            destruct_block.push_str(" /* verter-destructured-end */\n");
+            destruct_segments.push((anchor, None, " /* verter-destructured-end */\n"));
 
             // Keep `___VERTER___unwrapped` itself live when NOTHING is
             // destructured from it: if EVERY setup binding is proven-unused (and
@@ -910,7 +925,11 @@ pub(super) fn process_tsx_script_setup<'alloc>(
             // reads the temp, so the guard is unnecessary (and omitted to keep
             // the common-case output unchanged).
             if const_names.is_empty() && let_names.is_empty() {
-                destruct_block.push_str(&format!("void {P}unwrapped;\n", P = PREFIX));
+                destruct_segments.push((
+                    anchor,
+                    None,
+                    ct.alloc_str(&format!("void {PREFIX}unwrapped;\n")),
+                ));
             }
 
             // Emit void(name) for bindings referenced in script body or style
@@ -921,19 +940,36 @@ pub(super) fn process_tsx_script_setup<'alloc>(
             // unwrapped-entry liveness decision — one shared usage inventory.
             // Only LIVE bindings have a destructured copy; a script/style-used
             // binding is always live (used somewhere ⇒ not omitted), so iterating
-            // `live_bindings` never voids a name that was dropped.
+            // `live_bindings` never voids a name that was dropped. These
+            // keep-alive references stay UNMAPPED (they are scaffold liveness,
+            // not user references).
             let mut block_copy_used = false;
             for (name, _) in &live_bindings {
                 if script_refs.contains(name) || style_v_bind_set.contains(name) {
-                    destruct_block.push_str(&format!("void({});", name));
+                    destruct_segments.push((anchor, None, ct.alloc_str(&format!("void({name});"))));
                     block_copy_used = true;
                 }
             }
             if block_copy_used {
-                destruct_block.push('\n');
+                destruct_segments.push((anchor, None, "\n"));
             }
 
-            wrapper_end.push_str(&destruct_block);
+            // No template: close the block scope and the binding function right
+            // after the destructure block (the template path defers these to the
+            // template-end tail).
+            if template_end.is_none() {
+                destruct_segments.push((anchor, None, "\n} // close block scope\n"));
+                destruct_segments.push((
+                    anchor,
+                    None,
+                    "\nreturn {};\n} // close templateBindingFN\n",
+                ));
+            }
+
+            // The ordered batch preserves insertion order at the shared anchor
+            // (the merged plain/mapped channel would reorder plains before
+            // mapped at equal positions).
+            ct.batch_prepend_left_with_source_map(&destruct_segments);
 
             // Store metadata (block_start/block_end computed later from final TSX)
             if !destruct_bindings.is_empty() {
@@ -1056,9 +1092,9 @@ pub(super) fn process_tsx_script_setup<'alloc>(
             tail.push_str("\nreturn {};\n} // close templateBindingFN\n");
             deferred_return_close = Some(tail);
         } else {
-            // No template: emit block scope + close immediately.
-            wrapper_end.push_str("\n} // close block scope\n");
-            wrapper_end.push_str("\nreturn {};\n} // close templateBindingFN\n");
+            // No template: the block-scope close and the function close are
+            // already appended to the destructure segments above; emit the
+            // script-side wrapper (temp const) at </script>.
             out.overwrite(tag_close.start, tag_close.end, &wrapper_end);
         }
     }
