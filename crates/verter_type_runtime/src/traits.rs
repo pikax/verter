@@ -175,17 +175,20 @@ pub trait TypeProvider: Send + Sync {
         Box::pin(async { Ok(()) })
     }
 
-    /// Evict a carrier companion's stale resolution from the engine's caches
-    /// AFTER the carrier-publish store warms its content.
+    /// Evict a carrier companion's stale resolution and warm ScriptInfo from the
+    /// engine's caches AFTER the carrier-publish store advances its content.
     ///
     /// A synchronous-host engine (tsserver, via the plugin) caches negative
     /// resolution results — including a `fileExists(companion) == false` probed
     /// while the companion's content was not yet on disk. Once the store warms the
     /// companion, the engine must be told the file changed so it re-resolves;
     /// otherwise a cold-probed import stays pinned to a sticky `TS2307`. The
-    /// default is a no-op (an engine whose membership is not store-backed needs no
-    /// eviction); `TsserverTypeProvider` overrides it to fire an `updateOpen`
-    /// file-changed notification for the companion path.
+    /// A previously loaded external companion also has no disk watcher to replace
+    /// its warm ScriptInfo after the content-addressed blob changes. The default is
+    /// a no-op (an engine whose membership is not store-backed needs no eviction);
+    /// `TsserverTypeProvider` overrides it to advance the Verter plugin's
+    /// `carrierStoreRefreshToken` for targeted ScriptInfo reload and then fire an
+    /// `updateOpen` file-changed notification for the companion path.
     fn notify_carrier_changed(&self, _companion_path: &str) -> ProviderFuture<'_, ()> {
         Box::pin(async { Ok(()) })
     }

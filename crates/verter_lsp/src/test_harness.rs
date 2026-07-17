@@ -5,9 +5,10 @@
 //! methods for completions, hover, go-to-definition), and the `real_provider_test!` macro
 //! that generates both tsserver and TSGO test variants from a single test body.
 //!
-//! **Fully virtual filesystem**: No temp dirs or file writes. The E2E fixtures provide
-//! the project scaffold (tsconfig.json, node_modules/vue) already on disk. Test file
-//! content is fed entirely through in-memory APIs (`host.upsert()` + `did_open()`).
+//! Fixture source is read from the repository and document content is fed through
+//! in-memory APIs (`host.upsert()` + `did_open()`). Tests that need package contracts
+//! materialize deterministic declarations under gitignored fixture `node_modules`, and
+//! every real-provider session owns an isolated temporary carrier store.
 
 use std::sync::Arc;
 
@@ -18,6 +19,23 @@ use verter_session::{HostConfig, VerterHost};
 use crate::server::VerterLanguageServer;
 use crate::type_provider::traits::TypeProvider;
 use crate::LspConfig;
+
+/// Keep real external-provider sessions below the host-saturation point. A tsgo
+/// session owns both `--lsp` and `--api` processes, while a tsserver session owns a
+/// Node process. Letting Rust's default test-thread count spawn every session at
+/// once starves provider startup and turns production's bounded interactive sync
+/// into nondeterministic timeouts. Two sessions still exercise cross-engine
+/// concurrency without making unrelated tests compete for dozens of processes.
+const MAX_CONCURRENT_REAL_PROVIDER_SESSIONS: usize = 2;
+
+fn real_provider_session_gate() -> &'static Arc<tokio::sync::Semaphore> {
+    static GATE: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    GATE.get_or_init(|| {
+        Arc::new(tokio::sync::Semaphore::new(
+            MAX_CONCURRENT_REAL_PROVIDER_SESSIONS,
+        ))
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Provider kind
@@ -203,6 +221,10 @@ impl TestSessionBuilder {
     pub(crate) async fn build(self) -> Option<RealProviderTestSession> {
         let fixture_name = self.fixture.as_deref().unwrap_or("single-project");
         let workspace_id = fixture_workspace_root(fixture_name);
+        let provider_process_permit = Arc::clone(real_provider_session_gate())
+            .acquire_owned()
+            .await
+            .expect("the real-provider session gate is never closed");
 
         // Per-session carrier-store isolation. The production store dir is keyed
         // `(host_version, workspace_root)`, so two sessions over the SAME fixture
@@ -489,6 +511,7 @@ impl TestSessionBuilder {
             kind: self.kind,
             carrier_store_dir: session_carrier_store_dir,
             _drain_handle: drain_handle,
+            _provider_process_permit: provider_process_permit,
         };
 
         // Open queued fixture files
@@ -522,6 +545,9 @@ pub(crate) struct RealProviderTestSession {
     /// and the LSP-side publish backend resolve exactly this dir.
     carrier_store_dir: std::path::PathBuf,
     _drain_handle: tokio::task::JoinHandle<()>,
+    /// Held for the entire external-provider lifetime so the Rust test runner cannot
+    /// replace a completed session with another process until shutdown has finished.
+    _provider_process_permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl RealProviderTestSession {
@@ -1247,6 +1273,21 @@ export declare function defineComponent<P = {}>(options: P): {
 export {};
 "#;
 
+/// The official `vue/jsx-runtime` export shape consumed by the managed-tsgo
+/// owner-bound JSX adapter. Keep this deliberately narrow: the fixture renders
+/// only a `div`, so an open string index would make unknown intrinsic elements
+/// silently type-check and weaken the carrier-navigation contract.
+const VUE_JSX_RUNTIME_STUB_DTS: &str = r#"import type { HTMLAttributes } from "../index";
+export namespace JSX {
+  interface Element {}
+  interface ElementClass { $props: {} }
+  interface ElementAttributesProperty { $props: {} }
+  interface ElementChildrenAttribute {}
+  interface IntrinsicElements { div: HTMLAttributes }
+  interface IntrinsicAttributes {}
+}
+"#;
+
 /// Make the `external-ts-dx` fixture self-sufficient for the §2.9 plain-`.ts`-
 /// imports-`.vue`/`.svelte` enhanced-DX contract: provide a flat dependency-free
 /// `vue` type stub and materialise `@verter/types` from the bundled standalone
@@ -1265,40 +1306,55 @@ export {};
 ///
 /// Returns the fixture workspace root.
 pub(crate) fn materialize_external_ts_dx_deps() -> std::path::PathBuf {
-    let root = std::path::PathBuf::from(fixture_workspace_root("external-ts-dx"));
-    let node_modules = root.join("node_modules");
-    let _ = std::fs::create_dir_all(&node_modules);
+    static MATERIALIZED: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    MATERIALIZED
+        .get_or_init(|| {
+            let root = std::path::PathBuf::from(fixture_workspace_root("external-ts-dx"));
+            let node_modules = root.join("node_modules");
+            std::fs::create_dir_all(&node_modules)
+                .expect("create external-ts-dx node_modules");
 
-    // A FLAT, self-contained `vue` type stub providing exactly the surface the
-    // generated component IDE/API carriers consume (`defineComponent`,
-    // `PublicProps`, `HTMLAttributes`). Hand-written + dependency-free so the
-    // `$props` surface resolves to the REAL declared member type (e.g.
-    // `verterDxHeadline: string`) deterministically — without dragging in vue's
-    // transitive `@vue/*` + `csstype` closure (whose pnpm-store symlink layout is
-    // not junction-resolvable). This is a TYPE stub only; the §2.9 contract is
-    // about the carrier-resolved prop surface flowing into the `.ts`, not vue's
-    // runtime.
-    let vue_dir = node_modules.join("vue");
-    let _ = std::fs::create_dir_all(&vue_dir);
-    let _ = std::fs::write(vue_dir.join("index.d.ts"), VUE_TYPE_STUB_DTS);
-    let _ = std::fs::write(
-        vue_dir.join("package.json"),
-        r#"{"name":"vue","version":"3.0.0-stub","types":"index.d.ts"}"#,
-    );
+            // A FLAT, self-contained `vue` type stub providing exactly the surface the
+            // generated component IDE/API carriers consume (`defineComponent`,
+            // `PublicProps`, `HTMLAttributes`) plus the official `./jsx-runtime` export
+            // the managed-tsgo owner adapter validates. Hand-written + dependency-free
+            // keeps the declared prop surface deterministic without dragging in Vue's
+            // transitive `@vue/*` + `csstype` closure.
+            let vue_dir = node_modules.join("vue");
+            let vue_jsx_runtime_dir = vue_dir.join("jsx-runtime");
+            std::fs::create_dir_all(&vue_jsx_runtime_dir)
+                .expect("create external-ts-dx vue/jsx-runtime");
+            std::fs::write(vue_dir.join("index.d.ts"), VUE_TYPE_STUB_DTS)
+                .expect("write external-ts-dx vue types");
+            std::fs::write(
+                vue_jsx_runtime_dir.join("index.d.ts"),
+                VUE_JSX_RUNTIME_STUB_DTS,
+            )
+            .expect("write external-ts-dx vue/jsx-runtime types");
+            std::fs::write(
+                vue_dir.join("package.json"),
+                r#"{"name":"vue","version":"3.0.0-stub","types":"index.d.ts","exports":{".":{"types":"./index.d.ts"},"./jsx-runtime":{"types":"./jsx-runtime/index.d.ts"}}}"#,
+            )
+            .expect("write external-ts-dx vue manifest");
 
-    // `@verter/types` from the bundled standalone declaration.
-    let types_dir = node_modules.join("@verter").join("types");
-    let _ = std::fs::create_dir_all(&types_dir);
-    let _ = std::fs::write(
-        types_dir.join("index.d.ts"),
-        verter_session::VERTER_TYPES_STANDALONE_DTS,
-    );
-    let _ = std::fs::write(
-        types_dir.join("package.json"),
-        r#"{"name":"@verter/types","types":"index.d.ts"}"#,
-    );
+            // `@verter/types` from the bundled standalone declaration.
+            let types_dir = node_modules.join("@verter").join("types");
+            std::fs::create_dir_all(&types_dir)
+                .expect("create external-ts-dx @verter/types");
+            std::fs::write(
+                types_dir.join("index.d.ts"),
+                verter_session::VERTER_TYPES_STANDALONE_DTS,
+            )
+            .expect("write external-ts-dx @verter/types declarations");
+            std::fs::write(
+                types_dir.join("package.json"),
+                r#"{"name":"@verter/types","types":"index.d.ts"}"#,
+            )
+            .expect("write external-ts-dx @verter/types manifest");
 
-    root
+            root
+        })
+        .clone()
 }
 
 /// Infer a language ID from a file extension.

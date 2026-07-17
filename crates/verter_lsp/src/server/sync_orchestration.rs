@@ -1584,6 +1584,16 @@ impl VerterLanguageServer {
     }
 
     pub(super) fn current_file_needs_inline_type_provider_sync(&self, uri: &Uri) -> bool {
+        // This foreground repair owns carrier IDE projections. Plain scripts have
+        // no source→provider projection, while rune self-files use the separate
+        // own-buffer sync path.
+        let Some(projection) = self.documents.get_projection(uri) else {
+            return false;
+        };
+        if projection.is_self_file() {
+            return false;
+        }
+
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
             return false;
         };
@@ -1613,7 +1623,17 @@ impl VerterLanguageServer {
             return false;
         };
 
-        state.ide_path.as_deref() != Some(ide_path.as_str())
+        if state.ide_path.as_deref() != Some(ide_path.as_str()) {
+            return true;
+        }
+
+        // Path liveness alone does not prove content freshness. A host update can
+        // advance the open document independently of didChange's eager sync. In
+        // that case the immutable request-surface capture correctly fails closed;
+        // classify the miss as repairable so the next interactive request recompiles
+        // and syncs before querying instead of silently falling back to stale or
+        // Verter-only data.
+        self.capture_provider_request_surface(uri).is_none()
     }
 
     /// Returns true if the user is actively typing (last change was within the cooldown window).

@@ -130,6 +130,8 @@ The LSP delegates TypeScript type checking to an external **TypeProvider** proce
 
 **tsserver kind mapping**: `parse_tsserver_completion()` in `tsserver/ipc.rs` maps tsserver's `ScriptElementKind` strings to LSP `CompletionItemKind`. MUST match VS Code's `MyCompletionItem.convertKind()` exactly. Test coverage: `test_parse_tsserver_completion_kinds_match_vscode`. Sync with VS Code source when updating TypeScript dependencies.
 
+**Store-backed carrier refresh**: publishing new carrier bytes must invalidate both tsserver cache classes. `TsserverTypeProvider::notify_carrier_changed` advances the plugin's monotonic `carrierStoreRefreshToken`, which makes the plugin compare manifest identities and reload only changed virtual ScriptInfos, then sends the existing content-preserving `updateOpen` touch for cold negative module-resolution entries. The plugin performs its configured-project reload on the next Node event-loop turn to avoid re-entrant graph mutation inside `configurePlugin`; an interactive hover that had to repair a stale current-file surface uses one ordered quickinfo response as the synchronization probe and returns only the subsequent refreshed result. Warm hovers remain single-query. Never replace this with an untyped fallback or a global reload on every edit.
+
 **Key modules** (`crates/verter_lsp/src/`):
 
 - `tsgo/` -- TSGO integration (LSP client, resilient wrapper, project sync)
