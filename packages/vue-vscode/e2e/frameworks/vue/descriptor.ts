@@ -32,10 +32,30 @@ export const vueContract: FrameworkContractDescriptor = {
   directParentTag: { file: "src/DirectParent.vue", token: "DirectChild", occurrence: 1 },
   directChildFile: "src/components/DirectChild.vue",
   directConsumerUse: { file: "src/direct-consumer.ts", token: "DirectChild", occurrence: 1 },
+  directConsumerPropUse: {
+    file: "src/direct-consumer.ts",
+    token: "contractProp",
+    occurrence: 0,
+  },
+  directChildPropDeclaration: {
+    file: "src/components/DirectChild.vue",
+    token: "contractProp",
+    occurrence: 0,
+  },
   directComponentHoverNeedles: ["DirectChild", "contractProp", "string"],
   barrelParentTag: { file: "src/BarrelParent.vue", token: "BarrelChild", occurrence: 1 },
   barrelChildFile: "src/components/BarrelChild.vue",
   barrelConsumerUse: { file: "src/barrel-consumer.ts", token: "BarrelChild", occurrence: 1 },
+  barrelConsumerPropUse: {
+    file: "src/barrel-consumer.ts",
+    token: "barrelProp",
+    occurrence: 0,
+  },
+  barrelChildPropDeclaration: {
+    file: "src/components/BarrelChild.vue",
+    token: "barrelProp",
+    occurrence: 0,
+  },
   publicTypeConsumer: "src/barrel-consumer.ts",
   barrelComponentHoverNeedles: ["BarrelChild", "barrelProp", "string"],
 };

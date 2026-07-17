@@ -32,10 +32,30 @@ export const svelteContract: FrameworkContractDescriptor = {
   directParentTag: { file: "src/DirectParent.svelte", token: "DirectChild", occurrence: 1 },
   directChildFile: "src/components/DirectChild.svelte",
   directConsumerUse: { file: "src/direct-consumer.ts", token: "DirectChild", occurrence: 1 },
+  directConsumerPropUse: {
+    file: "src/direct-consumer.ts",
+    token: "contractProp",
+    occurrence: 0,
+  },
+  directChildPropDeclaration: {
+    file: "src/components/DirectChild.svelte",
+    token: "contractProp",
+    occurrence: 1,
+  },
   directComponentHoverNeedles: ["DirectChild", "contractProp", "string"],
   barrelParentTag: { file: "src/BarrelParent.svelte", token: "BarrelChild", occurrence: 1 },
   barrelChildFile: "src/components/BarrelChild.svelte",
   barrelConsumerUse: { file: "src/barrel-consumer.ts", token: "BarrelChild", occurrence: 1 },
+  barrelConsumerPropUse: {
+    file: "src/barrel-consumer.ts",
+    token: "barrelProp",
+    occurrence: 0,
+  },
+  barrelChildPropDeclaration: {
+    file: "src/components/BarrelChild.svelte",
+    token: "barrelProp",
+    occurrence: 1,
+  },
   publicTypeConsumer: "src/barrel-consumer.ts",
   barrelComponentHoverNeedles: ["BarrelChild", "barrelProp", "string"],
 };
