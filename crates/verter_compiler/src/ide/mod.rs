@@ -376,29 +376,32 @@ pub(crate) fn event_to_jsx_name(event_name: &str) -> String {
 /// Build the event-handler PARAMETER TUPLE type for a template event binding.
 ///
 /// Derives the parameter-tuple shape from the element's event surface:
-/// - Native element: `Parameters<NonNullable<import('vue').IntrinsicElementAttributes["tag"]["onEvent"]>>`
+/// - Native element: `[GlobalEventHandlersEventMap["event"]]` (with the safe
+///   base-`Event` fallback used by [`native_dom_event_payload_type`])
 /// - Component: `Parameters<NonNullable<Required<InstanceType<typeof Binding>["$props"]>["onEvent"]>>`
 ///
 /// Used by the script-handler inference path (`event_inference`), which annotates a
 /// function declaration's params as `...[e]: <this type>`, and — for the COMPONENT
 /// case only — by the template `$event` spread path (`template::von`, indexed
-/// `<this type>[0]`). The native spread `$event` instead uses the ambient
-/// [`native_dom_event_payload_type`], because the `import('vue')` indexed formula
-/// here resolves only under a full `tsserver`, not the native preview (`tsgo`).
+/// `<this type>[0]`). The native spread `$event` uses the same ambient DOM
+/// payload formula directly.
 ///
 /// `event_prop` is the JSX prop name produced by [`event_to_jsx_name`] (`onClick`).
+/// `native_event_name` is the authored Vue event local (`click`) and is required
+/// only for a native element; component events derive from `event_prop`.
 /// Returns `None` for a component whose binding could not be resolved, or for a tag
 /// kind that has no typed event surface.
 pub(crate) fn event_handler_params_type(
-    tag_name: &str,
     tag_type: crate::ast::types::TagType,
     component_binding: Option<&str>,
     event_prop: &str,
+    native_event_name: Option<&str>,
 ) -> Option<String> {
     use crate::ast::types::TagType;
     match tag_type {
         TagType::Element => Some(format!(
-            "Parameters<NonNullable<import('vue').IntrinsicElementAttributes[\"{tag_name}\"][\"{event_prop}\"]>>"
+            "[{}]",
+            native_dom_event_payload_type(native_event_name?)
         )),
         TagType::Component => Some(format!(
             "Parameters<NonNullable<Required<InstanceType<typeof {}>[\"$props\"]>[\"{event_prop}\"]>>",

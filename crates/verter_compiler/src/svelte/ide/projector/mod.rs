@@ -29,9 +29,9 @@ use super::store_scan::{
 use super::SvelteIdeDialect;
 use crate::svelte::bind_contract::{lookup_bind_contract, BindContract, BindDirection};
 use crate::svelte::parser::{
-    ParsedSvelte, SvelteAttribute, SvelteAttributeKind, SvelteAttributeValue, SvelteBlock,
-    SvelteBlockKind, SvelteClauseKind, SvelteDirectiveKind, SvelteElement, SvelteElementKind,
-    SvelteNode, SvelteScript, SvelteSpecialKind, SvelteTag, SvelteTagKind,
+    ParsedSvelte, ScriptBodyGrammar, SvelteAttribute, SvelteAttributeKind, SvelteAttributeValue,
+    SvelteBlock, SvelteBlockKind, SvelteClauseKind, SvelteDirectiveKind, SvelteElement,
+    SvelteElementKind, SvelteNode, SvelteScript, SvelteSpecialKind, SvelteTag, SvelteTagKind,
 };
 use store::rewrite_store_sub;
 
@@ -60,12 +60,19 @@ mod ident;
 /// file size.
 mod facade;
 
+/// Framework-owned TypeScript inference for named DOM handlers in a Svelte 5
+/// runes instance script.
+mod event_inference;
+mod template_mode;
+
+use event_inference::apply_event_handler_param_inference;
 use facade::svelte_public_facade;
 use ident::{
     is_bare_tag_identifier, is_type_query_safe_lvalue, is_valid_binding_identifier,
     is_valid_component_reference, skip_string_literal,
 };
 use special::{detect_jsx_namespace, extract_props_annotation};
+use template_mode::template_uses_host_rune;
 
 /// A typed diagnostic the projector emitted for a flagged matrix construct (the
 /// construct was still checked, never dropped). Re-exported with its severity:
@@ -149,6 +156,48 @@ pub fn project_svelte_ide(
         }
     }
 
+    // A Svelte `lang="ts"` body is authored as TypeScript, while the combined
+    // IDE carrier is necessarily TSX. Rewrite TypeScript's angle-bracket
+    // assertions before moving either script body so valid `<T>value` syntax
+    // remains valid and mapped in the carrier.
+    for script in [
+        parsed.module_script.as_ref(),
+        parsed.instance_script.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if script.lang.as_deref() == Some("ts") {
+            if let Some(content) = script.content {
+                crate::ide::script::rewrite_ts_type_assertions(
+                    &source[content.start as usize..content.end as usize],
+                    content.start,
+                    &mut ct,
+                );
+            }
+        }
+    }
+
+    // Classify template-only `$host` through the single scope-aware template
+    // authority. The no-`$host` path performs no template traversal. A free
+    // template `$host` can only promote an otherwise-legacy script candidate;
+    // an explicit `runes={false}` remains authoritative.
+    let script_classifies_legacy = component_is_legacy(source, parsed, false);
+    let template_host_rune = script_classifies_legacy
+        && parsed.forced_runes != Some(false)
+        && template_uses_host_rune(&parsed.template, source, &script_declared);
+    let legacy_mode = script_classifies_legacy && !template_host_rune;
+
+    // A named DOM handler declared in a TypeScript RUNES instance script is in
+    // framework-managed component scope. Apply its official `svelte/elements`
+    // parameter tuple before any script body can be moved; CodeTransform moves
+    // carry prior edits, while edits made after a move cannot target the moved
+    // chunk by its former source position. JavaScript remains authored-JSDoc
+    // only, and legacy/module scripts are deliberately outside this inference.
+    if matches!(dialect, SvelteIdeDialect::TypeScript) && !legacy_mode {
+        apply_event_handler_param_inference(source, parsed, &mut ct);
+    }
+
     // 1) Strip the `<script>` tags. A script BEFORE the first markup byte keeps
     //    its body in place (top-level, mapped). A script that falls AT/AFTER the
     //    first markup byte (interleaved or trailing) would land INSIDE the render
@@ -167,9 +216,8 @@ pub fn project_svelte_ide(
         remove_span(&mut ct, style_full_span(style));
     }
 
-    // 2) Capture the namespace axis now. The prelude remains the module intro,
-    // but its runes/legacy axis is finalized after the template expression walk
-    // has produced the structural free-`$host` fact.
+    // 2) Capture the namespace axis now. Mode was finalized above so every
+    // consumer (event inference and the prelude) observes the same fact.
     let namespace = detect_jsx_namespace(source, &parsed.template);
 
     // 3) The render scope function wrapping the template. With trailing/
@@ -198,13 +246,10 @@ pub fn project_svelte_ide(
         dialect,
         script_declared,
         block_declared: Vec::new(),
-        template_uses_host_rune: false,
     };
     projector.project_template(&parsed.template, region);
-    let template_uses_host_rune = projector.template_uses_host_rune;
     drop(projector);
 
-    let legacy_mode = component_is_legacy(source, parsed, template_uses_host_rune);
     let prelude = render_component_prelude(namespace, legacy_mode, dialect);
     // Register the prelude as the unmapped intro after mode finalization.
     // CodeTransform still emits it before every authored/moved chunk and
@@ -293,7 +338,11 @@ fn component_is_legacy(source: &str, parsed: &ParsedSvelte, template_uses_host_r
     let eval = String::from_utf8(eval)
         .expect("blanking non-script UTF-8 bytes with ASCII spaces preserves UTF-8");
     let allocator = Allocator::default();
-    let program = Parser::new(&allocator, &eval, SourceType::tsx()).parse();
+    let source_type = match parsed.script_body_probes.first().map(|probe| probe.grammar) {
+        Some(ScriptBodyGrammar::Ts) => SourceType::ts(),
+        Some(ScriptBodyGrammar::Js) | None => SourceType::mjs(),
+    };
+    let program = Parser::new(&allocator, &eval, source_type).parse();
     let module_region = parsed
         .module_content()
         .map(|region| (region.start, region.end));
@@ -420,10 +469,6 @@ struct TemplateProjector<'ct, 'a> {
     /// so a `$`-named block binding is treated as an ORDINARY local (NOT a
     /// store-sub) inside its block, and never leaks to a sibling.
     block_declared: Vec<Vec<String>>,
-    /// Whether a structurally parsed template expression referenced the free
-    /// Svelte `$host` rune. Produced while that expression is already being
-    /// scanned for store rewrites; never inferred from source text.
-    template_uses_host_rune: bool,
 }
 
 /// A snippet declarator to hoist to the top of its scope function.

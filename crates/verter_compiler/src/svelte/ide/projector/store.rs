@@ -45,7 +45,6 @@ impl TemplateProjector<'_, '_> {
         let body = &source[span.start as usize..span.end as usize];
         let declared = self.declared_dollar_names();
         let scan = scan_store_subscriptions_and_host_with(body, &declared);
-        self.template_uses_host_rune |= scan.uses_host_rune;
         for sub in scan.subs {
             rewrite_store_sub(self.ct, span.start, &sub);
         }
@@ -76,7 +75,6 @@ impl TemplateProjector<'_, '_> {
         declared: &[String],
     ) -> String {
         let scan = scan_pattern_default_store_subs_and_host(pattern_text, declared);
-        self.template_uses_host_rune |= scan.uses_host_rune;
         let subs = scan.subs;
         let has_await = pattern_text.contains("await");
         if subs.is_empty() && !has_await {
@@ -136,7 +134,6 @@ impl TemplateProjector<'_, '_> {
     pub(super) fn rewrite_store_subs_in_text(&mut self, text: &str) -> String {
         let declared = self.declared_dollar_names();
         let scan = scan_store_subscriptions_and_host_with(text, &declared);
-        self.template_uses_host_rune |= scan.uses_host_rune;
         rewrite_store_subs_text_with_scan(text, scan.subs)
     }
 }

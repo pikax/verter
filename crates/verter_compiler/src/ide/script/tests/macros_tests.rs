@@ -4,6 +4,9 @@ use super::*;
 
 use oxc_ast::ast::{BindingIdentifier, IdentifierReference};
 use oxc_ast_visit::{walk, Visit};
+use oxc_span::GetSpan;
+
+use crate::code_transform::SourceMapOptions;
 
 struct IdentifierBindingFacts<'name> {
     name: &'name str,
@@ -839,20 +842,89 @@ let a = <1 | 2>1
 
 #[test]
 fn script_setup_ts_type_assertion_nested() {
-    let (code, _) = gen_tsx_script(
-        r#"<script setup lang="ts">
-let b = <string><number>x
-</script>"#,
+    struct AsExpressionFacts {
+        type_names_postorder: Vec<String>,
+        spans_postorder: Vec<(u32, u32)>,
+        carrier: String,
+    }
+
+    impl<'a> Visit<'a> for AsExpressionFacts {
+        fn visit_expression(&mut self, expression: &oxc_ast::ast::Expression<'a>) {
+            walk::walk_expression(self, expression);
+            if let oxc_ast::ast::Expression::TSAsExpression(assertion) = expression {
+                let span = assertion.type_annotation.span();
+                self.type_names_postorder
+                    .push(self.carrier[span.start as usize..span.end as usize].to_string());
+                self.spans_postorder
+                    .push((assertion.span.start, assertion.span.end));
+            }
+        }
+    }
+
+    let source = "let b = <Outer><Inner>x";
+    let alloc = Allocator::new();
+    let mut transform = CodeTransform::new(source, &alloc);
+    rewrite_ts_type_assertions(source, 0, &mut transform);
+    let carrier = transform.build_string();
+    let parse_alloc = oxc_allocator::Allocator::new();
+    let parsed =
+        oxc_parser::Parser::new(&parse_alloc, &carrier, oxc_span::SourceType::tsx()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "nested assertion rewrite must be valid TSX: {:?}\n{carrier}",
+        parsed.errors
     );
+    let mut facts = AsExpressionFacts {
+        type_names_postorder: Vec::new(),
+        spans_postorder: Vec::new(),
+        carrier: carrier.clone(),
+    };
+    facts.visit_program(&parsed.program);
     // Nested: <string><number>x → ((<number>x as string) → ((x as number) as string)
+    assert_eq!(facts.type_names_postorder, ["Inner", "Outer"]);
+    let [inner, outer] = facts.spans_postorder.as_slice() else {
+        panic!("the carrier must contain exactly two `as` assertions: {carrier}");
+    };
     assert!(
-        code.contains("as number") && code.contains("as string"),
-        "nested assertions should both be rewritten: {code}"
+        outer.0 <= inner.0 && outer.1 >= inner.1,
+        "the outer assertion must structurally contain the complete inner assertion: {carrier}"
     );
-    assert!(
-        !code.contains("<string>") && !code.contains("<number>"),
-        "angle bracket syntax must not remain: {code}"
-    );
+}
+
+#[test]
+fn script_setup_ts_type_assertion_preserves_type_and_value_source_identity() {
+    let source =
+        "type Box = { value: string }; const value = { value: 'ok' }; const boxed = <Box>value;";
+    let alloc = Allocator::new();
+    let mut transform = CodeTransform::new(source, &alloc);
+    rewrite_ts_type_assertions(source, 0, &mut transform);
+    let carrier = transform.build_string();
+    let map = transform.generate_map(SourceMapOptions::new().with_source("Component.vue"));
+
+    let authored_type = source.rfind("<Box>").expect("authored assertion type") + 1;
+    let generated_type = carrier.rfind("Box").expect("relocated assertion type");
+    let authored_value = source.rfind("value;").expect("authored asserted value");
+    let generated_value = carrier.rfind("value as").expect("rewritten asserted value");
+
+    for (label, generated, authored) in [
+        ("type reference", generated_type, authored_type),
+        ("value reference", generated_value, authored_value),
+    ] {
+        let token = map
+            .get_tokens()
+            .filter(|token| token.get_dst_line() == 0 && token.get_dst_col() <= generated as u32)
+            .max_by_key(|token| token.get_dst_col())
+            .unwrap_or_else(|| panic!("a source-map token must cover the {label}: {carrier}"));
+        assert!(
+            token.get_source_id().is_some(),
+            "the rewritten {label} must remain source-owned: {carrier}"
+        );
+        assert_eq!(
+            token.get_src_col() + generated as u32 - token.get_dst_col(),
+            authored as u32,
+            "the rewritten {label} must map byte-accurately to its authored span: {carrier}"
+        );
+    }
 }
 
 // ── Bug 4: defineProps type parameter output structure ──

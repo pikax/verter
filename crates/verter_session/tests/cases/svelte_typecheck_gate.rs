@@ -694,6 +694,235 @@ void pChildrenAreUnknown;
     );
 }
 
+/// A named handler in a Svelte 5 runes component is framework-owned instance
+/// scope. Its unannotated parameter must therefore receive the installed
+/// `svelte/elements` event type, not `any`. The deliberately-invalid member is
+/// the behavioral discriminator: `any` would accept it, while the official
+/// `MouseEventHandler` contract reports TS2339.
+#[test]
+fn runes_typescript_named_dom_handler_uses_the_official_event_parameter() {
+    let projected = project(
+        r#"<svelte:options runes={true} />
+<script lang="ts">
+type IsAny<T> = 0 extends (1 & T) ? true : false;
+function handleClick(event) {
+  const eventIsNotAny: IsAny<typeof event> = false;
+  const eventIsMouse: MouseEvent = event;
+  void eventIsNotAny;
+  void eventIsMouse;
+  // @ts-expect-error a concrete MouseEvent has no such member; `any` leaves this unused
+  event.notARealEventMember;
+}
+</script>
+<button onclick={handleClick}>click</button>"#,
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "RunesNamedEvent.svelte.tsx", &[], true)
+    else {
+        skip_note("runes TypeScript named DOM handler inference");
+        return;
+    };
+    assert!(
+        ok,
+        "the concrete event must consume @ts-expect-error and the anti-any witnesses must pass:\n{out}\n{projected}"
+    );
+}
+
+#[test]
+fn runes_typescript_angle_assertion_does_not_disable_named_handler_inference() {
+    let projected = project(
+        r#"<script lang="ts">
+type Box = { value: string };
+type IsAny<T> = 0 extends (1 & T) ? true : false;
+let count = $state(0);
+function handleClick(event) {
+  const boxed = <Box>{ value: "kept as TypeScript, never parsed as TSX" };
+  const eventIsNotAny: IsAny<typeof event> = false;
+  const eventIsMouse: MouseEvent = event;
+  void boxed;
+  void eventIsNotAny;
+  void eventIsMouse;
+  // @ts-expect-error a concrete MouseEvent has no such member; `any` leaves this unused
+  event.notARealEventMember;
+}
+</script>
+<button onclick={handleClick}>click {count}</button>"#,
+    );
+    let Some((ok, out)) =
+        typecheck_projected(&projected, "AngleAssertionEvent.svelte.tsx", &[], true)
+    else {
+        skip_note("runes TypeScript angle-assertion event inference");
+        return;
+    };
+    assert!(
+        ok,
+        "an implicit runes component with a valid TypeScript angle assertion must retain concrete handler inference:\n{out}\n{projected}"
+    );
+}
+
+#[test]
+fn one_runes_handler_used_by_distinct_events_receives_the_safe_event_union() {
+    let projected = project(
+        r#"<svelte:options runes={true} />
+<script lang="ts">
+type IsAny<T> = 0 extends (1 & T) ? true : false;
+type ButtonMouseEvent = Parameters<NonNullable<import("svelte/elements").SvelteHTMLElements["button"]["onclick"]>>[0];
+type ButtonKeyboardEvent = Parameters<NonNullable<import("svelte/elements").SvelteHTMLElements["button"]["onkeydown"]>>[0];
+function handleEvent(event) {
+  const eventIsNotAny: IsAny<typeof event> = false;
+  const acceptsMouse: ButtonMouseEvent extends typeof event ? true : false = true;
+  const acceptsKeyboard: ButtonKeyboardEvent extends typeof event ? true : false = true;
+  const rejectsBaseEvent: Event extends typeof event ? true : false = false;
+  void eventIsNotAny;
+  void acceptsMouse;
+  void acceptsKeyboard;
+  void rejectsBaseEvent;
+  // @ts-expect-error neither concrete event arm has this fabricated member
+  event.notARealEventMember;
+}
+</script>
+<button onclick={handleEvent} onkeydown={handleEvent}>both</button>"#,
+    );
+    let Some((ok, out)) =
+        typecheck_projected(&projected, "MultiEventHandler.svelte.tsx", &[], true)
+    else {
+        skip_note("runes multi-event handler union");
+        return;
+    };
+    assert!(
+        ok,
+        "a shared handler must receive every distinct official event arm without widening to Event/any:\n{out}\n{projected}"
+    );
+}
+
+#[test]
+fn template_host_runes_and_trailing_script_keep_named_handler_inference() {
+    let projected = project(
+        r#"<button onclick={handleClick}>{$host().tagName}</button>
+<script lang="ts">
+function handleClick(event) {
+  // @ts-expect-error a concrete MouseEvent has no such member; `any` leaves this unused
+  event.notARealEventMember;
+}
+</script>"#,
+    );
+    let Some((ok, out)) = typecheck_projected(
+        &projected,
+        "TemplateHostTrailingEvent.svelte.tsx",
+        &[],
+        true,
+    ) else {
+        skip_note("template-host runes trailing-script event inference");
+        return;
+    };
+    assert!(
+        ok,
+        "template-only runes mode must type the handler before the edited script is moved:\n{out}\n{projected}"
+    );
+}
+
+#[test]
+fn keyed_each_host_binding_does_not_select_runes_handler_inference() {
+    let projected = project(
+        r#"<script lang="ts">
+const hosts = [{ id: 1 }];
+// @ts-expect-error a block-local `$host` is not the rune, so this remains legacy
+function handleClick(event) {
+  event.notARealEventMember;
+}
+</script>
+{#each hosts as $host ($host.id)}
+  <button onclick={handleClick}>{$host.id}</button>
+{/each}"#,
+    );
+    let Some((ok, out)) =
+        typecheck_projected(&projected, "ShadowedHostEvent.svelte.tsx", &[], true)
+    else {
+        skip_note("shadowed template-host handler boundary");
+        return;
+    };
+    assert!(
+        ok,
+        "a keyed each binding named `$host` must not turn legacy handler inference on:\n{out}\n{projected}"
+    );
+}
+
+#[test]
+fn inline_await_host_binding_does_not_select_runes_handler_inference() {
+    let projected = project(
+        r#"<script lang="ts">
+const pending = Promise.resolve({ id: 1 });
+// @ts-expect-error an inline await binding named `$host` is not the rune
+function handleClick(event) {
+  event.notARealEventMember;
+}
+</script>
+{#await pending then $host}
+  <button onclick={handleClick}>{$host.id}</button>
+{/await}"#,
+    );
+    let Some((ok, out)) =
+        typecheck_projected(&projected, "InlineAwaitHostEvent.svelte.tsx", &[], true)
+    else {
+        skip_note("inline-await `$host` handler boundary");
+        return;
+    };
+    assert!(
+        ok,
+        "an inline await binding must shadow `$host` throughout its body and keep the component legacy:\n{out}\n{projected}"
+    );
+}
+
+#[test]
+fn legacy_typescript_named_handler_is_not_template_inferred() {
+    let projected = project(
+        r#"<script lang="ts">
+// @ts-expect-error legacy named handlers are not contextually inferred from markup
+function handleClick(event) {
+  event.notARealEventMember;
+}
+</script>
+<button onclick={handleClick}>click</button>"#,
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "LegacyNamedEvent.svelte.tsx", &[], true)
+    else {
+        skip_note("legacy TypeScript named DOM handler boundary");
+        return;
+    };
+    assert!(
+        ok,
+        "the expected implicit-any must be consumed; accidental runes inference would leave it unused:\n{out}\n{projected}"
+    );
+}
+
+#[test]
+fn runes_javascript_named_handler_remains_authored_jsdoc_only() {
+    let source = r#"<svelte:options runes={true} />
+<script>
+// @ts-expect-error JavaScript event parameters remain authored-JSDoc-only
+function handleClick(event) {
+  event.notARealEventMember;
+}
+</script>
+<button onclick={handleClick}>click</button>"#;
+    let parsed = parse_svelte(source);
+    let projected = project_svelte_ide(source, &parsed, Some("RunesJsEvent.svelte"), false);
+    let Some((ok, out)) = typecheck_projected_with_options(
+        &projected.code,
+        "RunesJsEvent.svelte.jsx",
+        &[],
+        true,
+        true,
+    ) else {
+        skip_note("runes JavaScript named DOM handler boundary");
+        return;
+    };
+    assert!(
+        ok,
+        "the expected JS implicit-any must be consumed; synthetic inference would leave it unused:\n{out}\n{}",
+        projected.code
+    );
+}
+
 #[test]
 fn svelte_jsx_namespace_remains_file_scoped() {
     let projected = project("<div>scoped</div>");
