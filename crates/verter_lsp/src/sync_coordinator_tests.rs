@@ -718,6 +718,194 @@ async fn sync_file_routes_open_rune_module_through_self_file_shadow_not_carrier(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn sync_file_routes_open_plain_script_through_self_file_shadow_not_carrier() {
+    // The plain-script half of the shadow-vs-dependency interleave (mirrors
+    // `sync_file_routes_open_rune_module_through_self_file_shadow_not_carrier`):
+    // an OPEN plain `.ts` is a SELF-FILE buffer — the debounced coordinator must
+    // re-sync its own-path Shadow buffer and must NEVER fall through to the
+    // carrier-miss `preserve_open_unresolved_carrier`, which would clobber the
+    // Shadow state with an IDE-path state (breaking did_close cleanup), nor to
+    // the non-open dependency branch, which would clear an OPEN document's
+    // provider state from under it.
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let canonical_id = "/workspace/src/util.ts";
+    let uri: Uri = "file:///workspace/src/util.ts".parse().expect("test uri");
+    // did_open registers the URI→canonical mapping (file reads as OPEN) and
+    // builds the self-file projection (identity mapping for a plain script).
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const utilValue: number = 1;\n".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    // Ready snapshot whose only project lives at `/other` — it does NOT own
+    // the open `/workspace` plain script, so owner resolution returns None.
+    let vfs_workspace = Arc::new(crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/other",
+        Some("/other/tsconfig.json"),
+    ));
+    // Pre-seed the plain script's self-file Shadow state at its OWN path.
+    let provider_sync_states = Arc::new(DashMap::new());
+    provider_sync_states.insert(
+        canonical_id.to_string(),
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+            shadow_path: Some(canonical_id.to_string()),
+            shadow_background_loaded: true,
+            ..Default::default()
+        },
+    );
+
+    let deps = SyncCoordinatorDeps {
+        documents,
+        project_sync: ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject),
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: None,
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::clone(&provider_sync_states),
+        vfs_workspace,
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    };
+
+    sync_file(&deps, canonical_id, uri.as_str()).await;
+
+    let state = provider_sync_states
+        .get(canonical_id)
+        .map(|entry| entry.clone())
+        .expect("the open plain script must keep its self-file provider state across the tick");
+    // Discriminator: the Shadow path must SURVIVE as the script's OWN
+    // canonical id. The carrier-miss path would clobber it (shadow_path →
+    // None, ide_path → a `.tsx` path); the non-open dependency branch would
+    // have REMOVED the state entirely.
+    assert_eq!(
+        state.shadow_path.as_deref(),
+        Some(canonical_id),
+        "the coordinator tick must preserve the plain script's Shadow path, got {:?}",
+        state.shadow_path
+    );
+    assert!(
+        state.ide_path.is_none(),
+        "a plain script has no IDE path — the carrier-miss path must not have committed one, got {:?}",
+        state.ide_path
+    );
+    assert!(
+        state.is_unresolved(),
+        "the owner-None tick keeps the plain script Unresolved, got {:?}",
+        state.owner_binding
+    );
+    // The coordinator must have re-synced the Shadow buffer at the script's
+    // OWN canonical path (a refresh `UpdateFile` since it was already loaded);
+    // it must NEVER open/sync a derived `.tsx` carrier path for it.
+    let calls = provider.file_sync_calls();
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::UpdateFile { path, .. } | MockCall::LoadFile { path, .. }
+            if path == canonical_id
+        )),
+        "the coordinator must re-sync the plain script's OWN-path Shadow buffer, calls={calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. }
+                | MockCall::UpdateFile { path, .. }
+                | MockCall::LoadFile { path, .. }
+            if path != canonical_id
+        )),
+        "the coordinator must NOT sync any derived carrier path for a plain script, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_file_clears_non_open_plain_script_dependency_state_once_ready() {
+    // The dependency half of the shadow-vs-dependency interleave: a plain
+    // `.ts` that is NOT open in the editor reaches the provider only as a
+    // background dependency buffer. Once resolver ownership is ready the
+    // provider reads the file from disk, so the debounced coordinator must
+    // RETIRE the redundant buffer — closing the own-path Shadow provider file
+    // and removing the sync state (the rune-module branch documents the same
+    // "genuinely non-open … removed once ready" discipline).
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let canonical_id = "/workspace/src/util.ts";
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical_id.to_string()),
+        input_id: canonical_id.to_string(),
+        source: Arc::<str>::from("export const utilValue: number = 1;\n"),
+        file_language: crate::server::self_file_language_for(canonical_id)
+            .expect("the path classifies as a plain script"),
+        aliases: Vec::new(),
+    });
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    // No did_open: the plain script is a NON-open (background dependency) file.
+
+    let provider = Arc::new(MockTypeProvider::new());
+    // Ready snapshot that OWNS `/workspace` (a configured project).
+    let vfs_workspace = Arc::new(crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+    ));
+    // Pre-seed the dependency shadow state a background sync would have
+    // committed while ownership was unresolved.
+    let provider_sync_states = Arc::new(DashMap::new());
+    provider_sync_states.insert(
+        canonical_id.to_string(),
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+            shadow_path: Some(canonical_id.to_string()),
+            shadow_background_loaded: true,
+            ..Default::default()
+        },
+    );
+
+    let deps = SyncCoordinatorDeps {
+        documents,
+        project_sync: ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject),
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: None,
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::clone(&provider_sync_states),
+        vfs_workspace,
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    };
+
+    sync_file(&deps, canonical_id, "file:///workspace/src/util.ts").await;
+
+    // Discriminator: the non-open dependency state is RETIRED once ready …
+    assert!(
+        provider_sync_states.get(canonical_id).is_none(),
+        "a non-open plain script's dependency state must be removed once ownership is ready"
+    );
+    // … and the redundant provider buffer is CLOSED at the script's OWN path
+    // (never a derived carrier path).
+    let calls = provider.file_sync_calls();
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == canonical_id
+        )),
+        "the coordinator must close the non-open plain script's own-path buffer, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn sync_file_retains_stale_paths_when_owner_change_sync_fails() {
     // AUDIT (sync_coordinator, invariant b): on an owner change the
     // coordinator must sync the NEW paths first and close stale paths only

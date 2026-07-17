@@ -13164,6 +13164,382 @@ async fn rune_module_self_file_state_closed_on_did_close() {
     drain.abort();
 }
 
+/// Close-while-depended-upon: a plain `.ts` that an OPEN carrier imports is
+/// closed in the editor. did_close retires the script's own self-file provider
+/// state (the new every-plain-script close branch), but the dependent
+/// carrier's provider surface must be UNTOUCHED — the provider still resolves
+/// the closed script from disk, so the carrier's features keep answering.
+/// DISCRIMINATING: a close that tears the carrier's sync state / provider
+/// buffer (or closes nothing for the script) fails one of the assertions
+/// below.
+#[tokio::test(flavor = "multi_thread")]
+async fn plain_script_close_while_depended_upon_keeps_carrier_features_answering() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+
+    // An OPEN carrier that imports the plain script.
+    let app_uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        "<script setup lang=\"ts\">\nimport { utilValue } from './util'\nconst doubled = utilValue * 2\n</script>\n<template><div>{{ doubled }}</div></template>\n",
+    );
+    // The OPEN plain script the carrier depends on, with its self-file
+    // own-buffer provider state committed (the production did_open drive).
+    let util_uri: Uri = "file:///workspace/src/util.ts".parse().unwrap();
+    let util_canonical = "/workspace/src/util.ts";
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: util_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const utilValue: number = 1;\n".to_string(),
+    });
+    assert!(
+        server.sync_self_file_shadow_unresolved(&util_uri).await,
+        "the open plain script syncs its self-file Shadow provider state"
+    );
+    assert_eq!(
+        server
+            .provider_sync_state_for_source(util_canonical)
+            .and_then(|state| state.shadow_path)
+            .as_deref(),
+        Some(util_canonical),
+        "precondition: the plain script has own-path Shadow state"
+    );
+
+    // Seed the carrier's query surface + a provider hover answer for it.
+    let position = find_document_position(server, &app_uri, "{{ doubled", 3);
+    set_type_hover_at_vue_position(server, &provider, &app_uri, position, "doubled: number");
+    let carrier_canonical = "/workspace/src/App.vue";
+    let carrier_ide_path = server
+        .provider_sync_state_for_source(carrier_canonical)
+        .and_then(|state| state.ide_path)
+        .expect("precondition: the carrier has a committed IDE path");
+
+    // Close the depended-upon plain script.
+    super::lifecycle::handle_did_close(
+        server,
+        DidCloseTextDocumentParams {
+            text_document: TextDocumentIdentifier {
+                uri: util_uri.clone(),
+            },
+        },
+    )
+    .await;
+
+    // The closed script's own provider state is retired (closed + removed) …
+    assert!(
+        server
+            .provider_sync_state_for_source(util_canonical)
+            .is_none(),
+        "did_close must retire the closed plain script's self-file provider state"
+    );
+    let calls = provider.calls();
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == util_canonical
+        )),
+        "did_close must close the plain script's own-path provider buffer, calls={calls:?}"
+    );
+    // … while the dependent carrier's provider surface is UNTOUCHED …
+    let carrier_state = server
+        .provider_sync_state_for_source(carrier_canonical)
+        .expect("closing a dependency must NOT remove the open carrier's provider state");
+    assert_eq!(
+        carrier_state.ide_path.as_deref(),
+        Some(carrier_ide_path.as_str()),
+        "the carrier's IDE path must survive its dependency's close"
+    );
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == &carrier_ide_path
+        )),
+        "closing a dependency must NOT close the carrier's provider buffer, calls={calls:?}"
+    );
+    // … and the carrier's features keep answering.
+    let hover = super::nav_features::handle_hover(server, hover_params(&app_uri, position))
+        .await
+        .expect("hover request succeeds");
+    assert!(
+        hover_text(hover).contains("doubled: number"),
+        "the dependent carrier's hover must keep answering after its plain-script \
+         dependency closed"
+    );
+
+    drain.abort();
+}
+
+/// Symptom-level provider-route coverage for a plain `.ts`: hover, definition,
+/// and diagnostics must ANSWER on every provider route.
+///
+/// - TSGO / managed tsserver (local provider): the features are served through
+///   the self-file projection — the provider is queried at the script's OWN
+///   canonical path (verbatim bytes, identity mapping), never a derived
+///   companion path.
+/// - Editor-owned tsserver: the editor's own TypeScript server natively owns a
+///   plain `.ts` (it IS a TypeScript file), so the LSP must DEFER cleanly —
+///   `None` answers, no error, no competing partial response — and publish no
+///   diagnostics of its own.
+#[tokio::test(flavor = "multi_thread")]
+async fn plain_script_features_answer_on_every_provider_route() {
+    use crate::type_provider::protocol::TypeDiagnosticSeverity;
+
+    for kind in [
+        crate::TypeProviderKind::Tsgo,
+        crate::TypeProviderKind::Tsserver,
+    ] {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        let host_for_server = Arc::clone(&host);
+        let type_provider_for_server = Arc::clone(&type_provider);
+        let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+            VerterLanguageServer::new(
+                client,
+                LspConfig {
+                    host: Arc::clone(&host_for_server),
+                    type_provider: Some(Arc::clone(&type_provider_for_server)),
+                    project_sync_mode: crate::ProjectSyncMode::FullProject,
+                    type_provider_kind: kind,
+                    suggest_tsgo: false,
+                    mcp_port: None,
+                    type_provider_reason: None,
+                    suppress_imported_carrier_prewarm: false,
+                },
+            )
+        });
+        let drain = tokio::spawn(async move {
+            let mut socket = socket;
+            while socket.next().await.is_some() {}
+        });
+        let server = service.inner();
+
+        let canonical_id = "/workspace/src/util.ts";
+        let source = "export const utilValue: number = 1;\nexport const doubled = utilValue * 2;\n";
+        let uri: Uri = "file:///workspace/src/util.ts".parse().unwrap();
+        let _ = server.documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "typescript".to_string(),
+            version: 1,
+            text: source.to_string(),
+        });
+        // The production did_open drives the self-file shadow sync; this test
+        // opens through the registry directly, so drive it here.
+        assert!(
+            server.sync_self_file_shadow_unresolved(&uri).await,
+            "{kind}: the plain script's self-file shadow sync succeeds"
+        );
+        let ctx = server
+            .type_provider_context(&uri)
+            .expect("{kind}: the plain script is queryable through the self-file projection");
+        assert_eq!(
+            ctx.tsx_path, canonical_id,
+            "{kind}: the provider path is the script's OWN canonical id"
+        );
+        assert_eq!(
+            ctx.tsx_content.as_ref(),
+            source,
+            "{kind}: the plain script's provider buffer is the source verbatim"
+        );
+
+        // ── hover ──
+        let position = find_document_position(server, &uri, "utilValue * 2", 2);
+        let provider_offset = merge::carrier_position_to_tsx_offset_validated(
+            &position,
+            &ctx.carrier_line_index,
+            &ctx.mapper,
+            &ctx.tsx_line_index,
+        )
+        .expect("{kind}: the source position maps into the provider buffer");
+        provider.set_hover(
+            &ctx.tsx_path,
+            provider_offset,
+            Some(HoverInfo {
+                contents: "const utilValue: number".to_string(),
+                range_start: None,
+                range_end: None,
+            }),
+        );
+        let hover = super::nav_features::handle_hover(server, hover_params(&uri, position))
+            .await
+            .expect("{kind}: hover request succeeds");
+        assert!(
+            hover_text(hover).contains("const utilValue: number"),
+            "{kind}: hover must answer for a plain script"
+        );
+
+        // ── definition ──
+        let decl_start = source.find("utilValue").expect("declaration token") as u32;
+        provider.set_definitions(
+            &ctx.tsx_path,
+            provider_offset,
+            vec![TypeLocation {
+                path: ctx.tsx_path.clone(),
+                start: decl_start,
+                end: decl_start + "utilValue".len() as u32,
+            }],
+        );
+        let definition = super::nav_features_navigation::handle_goto_definition(
+            server,
+            goto_definition_params(&uri, position),
+        )
+        .await
+        .expect("{kind}: definition request succeeds")
+        .expect("{kind}: definition must answer for a plain script");
+        let locations = definition_locations(definition);
+        let target = locations
+            .iter()
+            .find(|location| location.uri == uri)
+            .expect("{kind}: the definition must target the plain script itself");
+        assert_eq!(
+            target.range.start.line, 0,
+            "{kind}: the definition must land on the declaration line"
+        );
+
+        // ── diagnostics ──
+        let diag_start = source.find("doubled").expect("diagnostic token") as u32;
+        provider.set_diagnostics(
+            &ctx.tsx_path,
+            vec![TypeDiagnostic {
+                message: "Type 'string' is not assignable to type 'number'.".to_string(),
+                severity: TypeDiagnosticSeverity::Error,
+                start: diag_start,
+                end: diag_start + "doubled".len() as u32,
+                code: Some("2322".to_string()),
+                tags: Vec::new(),
+                related_information: Vec::new(),
+            }],
+        );
+        let diagnostics = server.compute_full_diagnostics(&uri).await;
+        let type_diag = diagnostics
+            .iter()
+            .find(|diag| diag.message.contains("not assignable"))
+            .expect("{kind}: diagnostics must answer for a plain script");
+        assert_eq!(
+            type_diag.range.start.line, 1,
+            "{kind}: the type diagnostic must land on the declaration line (identity mapping)"
+        );
+
+        // Every feature queried the provider at the script's OWN canonical
+        // path — never a derived companion.
+        let calls = provider.calls();
+        for expected in ["hover", "definition", "diagnostics"] {
+            let matched = match expected {
+                "hover" => calls.iter().any(|call| {
+                    matches!(
+                        call,
+                        MockCall::GetHover { path, .. } if path == canonical_id
+                    )
+                }),
+                "definition" => calls.iter().any(|call| {
+                    matches!(
+                        call,
+                        MockCall::GetDefinition { path, .. } if path == canonical_id
+                    )
+                }),
+                _ => calls.iter().any(|call| {
+                    matches!(
+                        call,
+                        MockCall::GetDiagnostics { path } if path == canonical_id
+                    )
+                }),
+            };
+            assert!(
+                matched,
+                "{kind}: {expected} must query the provider at the script's OWN path, calls={calls:?}"
+            );
+        }
+
+        drain.abort();
+    }
+
+    // ── Editor-owned tsserver: the editor natively owns plain-TS features, so
+    // the LSP defers cleanly on every feature (never an error, never a
+    // competing partial answer, no diagnostics of its own). ──
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: None,
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::EditorTsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_reason: Some("attested editor project".into()),
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+
+    let uri: Uri = "file:///workspace/src/util.ts".parse().unwrap();
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const utilValue: number = 1;\nexport const doubled = utilValue * 2;\n"
+            .to_string(),
+    });
+    let position = find_document_position(server, &uri, "utilValue * 2", 2);
+
+    let hover = super::nav_features::handle_hover(server, hover_params(&uri, position))
+        .await
+        .expect("editor route: hover request succeeds");
+    assert!(
+        hover.is_none(),
+        "editor route: the LSP defers plain-script hover to the editor's own tsserver, got {hover:?}"
+    );
+    let definition = super::nav_features_navigation::handle_goto_definition(
+        server,
+        goto_definition_params(&uri, position),
+    )
+    .await
+    .expect("editor route: definition request succeeds");
+    assert!(
+        definition.is_none(),
+        "editor route: the LSP defers plain-script definition to the editor's own tsserver, got {definition:?}"
+    );
+    let diagnostics = server.compute_full_diagnostics(&uri).await;
+    assert!(
+        diagnostics.is_empty(),
+        "editor route: the LSP publishes no diagnostics of its own for a plain script \
+         (the editor's tsserver owns them), got {diagnostics:?}"
+    );
+
+    drain.abort();
+}
+
 /// R1b close-lifecycle: deleting a carrier source CLOSES its companions in the
 /// provider (retracting the open diagnostics buffer + carrier→project route). The
 /// companion close is the buffer-side half of carrier retraction (the store-side
