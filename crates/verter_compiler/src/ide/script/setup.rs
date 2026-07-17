@@ -899,6 +899,22 @@ pub(super) fn process_tsx_script_setup<'alloc>(
                 for (index, name) in names.iter().enumerate() {
                     let separator = if index == 0 { "\n    " } else { ",\n    " };
                     let source_start = binding_source_info.get(name).map(|info| info.sfc_start);
+                    if let Some(start) = source_start {
+                        // A token-level authored boundary at the declaration
+                        // identifier: the strict forward map (source → generated)
+                        // takes the LARGEST srcCol ≤ query on the declaration
+                        // line, so without this boundary every position past the
+                        // identifier (the initializer, later statements on the
+                        // line) GLBs onto the destructured-alias token, whose
+                        // generated extent rejects the delta — hover/definition/
+                        // completion anywhere on the declaration line fails
+                        // closed. The declaration's own boundary accepts the
+                        // whole line's delta and wins (earliest generated
+                        // position), keeping the retained script's route. An
+                        // invalid offset degrades to the line-level mapping
+                        // only — never a wrong position.
+                        let _ = ct.try_add_sourcemap_location(start);
+                    }
                     let content = ct.alloc_str(&format!("{separator}{name}"));
                     segments.push((
                         anchor,
