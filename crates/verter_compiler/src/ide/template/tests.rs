@@ -107,6 +107,204 @@ fn gen_tsx_template(source: &str) -> String {
     full[tpl_start..full.len() - suffix_len].to_string()
 }
 
+#[derive(Debug, Default)]
+struct JsxElementBodyFacts {
+    element_count: usize,
+    non_empty_elements: Vec<String>,
+    explicit_children_attributes: usize,
+    definitely_invalid_attributes: usize,
+    template_only_references: usize,
+    hello_string_literals: usize,
+    panel_open_name_offsets: Vec<u32>,
+    panel_close_name_offsets: Vec<u32>,
+}
+
+/// Parse generated TSX and inspect the JSX AST rather than matching rendered
+/// source text. Vue template bodies are slots, not React-style `children`
+/// attributes, so the IDE carrier must leave every concrete JSX element empty
+/// while retaining the body expressions in surrounding JSX fragments.
+fn jsx_element_body_facts(code: &str) -> JsxElementBodyFacts {
+    use oxc_ast::ast::{
+        IdentifierReference, JSXAttributeItem, JSXAttributeName, JSXElement, JSXElementName,
+        StringLiteral,
+    };
+    use oxc_ast_visit::{walk, Visit};
+
+    struct Scanner {
+        facts: JsxElementBodyFacts,
+    }
+
+    impl<'a> Visit<'a> for Scanner {
+        fn visit_jsx_element(&mut self, element: &JSXElement<'a>) {
+            self.facts.element_count += 1;
+            if !element.children.is_empty() {
+                let name = match &element.opening_element.name {
+                    JSXElementName::Identifier(name) => name.name.to_string(),
+                    JSXElementName::IdentifierReference(name) => name.name.to_string(),
+                    JSXElementName::NamespacedName(_) => "<namespaced>".to_string(),
+                    JSXElementName::MemberExpression(_) => "<member>".to_string(),
+                    JSXElementName::ThisExpression(_) => "this".to_string(),
+                };
+                self.facts.non_empty_elements.push(name);
+            }
+            if matches!(
+                &element.opening_element.name,
+                JSXElementName::IdentifierReference(name) if name.name == "Panel"
+            ) {
+                let JSXElementName::IdentifierReference(name) = &element.opening_element.name
+                else {
+                    unreachable!();
+                };
+                self.facts.panel_open_name_offsets.push(name.span.start);
+                if let Some(closing) = &element.closing_element {
+                    let JSXElementName::IdentifierReference(name) = &closing.name else {
+                        panic!("Panel closing tag must remain an identifier reference");
+                    };
+                    self.facts.panel_close_name_offsets.push(name.span.start);
+                }
+            }
+
+            self.facts.explicit_children_attributes += element
+                .opening_element
+                .attributes
+                .iter()
+                .filter(|attribute| {
+                    matches!(
+                        attribute,
+                        JSXAttributeItem::Attribute(attribute)
+                            if matches!(
+                                &attribute.name,
+                                JSXAttributeName::Identifier(name) if name.name == "children"
+                            )
+                    )
+                })
+                .count();
+            self.facts.definitely_invalid_attributes += element
+                .opening_element
+                .attributes
+                .iter()
+                .filter(|attribute| {
+                    matches!(
+                        attribute,
+                        JSXAttributeItem::Attribute(attribute)
+                            if matches!(
+                                &attribute.name,
+                                JSXAttributeName::Identifier(name)
+                                    if name.name == "definitelyInvalid"
+                            )
+                    )
+                })
+                .count();
+
+            walk::walk_jsx_element(self, element);
+        }
+
+        fn visit_identifier_reference(&mut self, reference: &IdentifierReference<'a>) {
+            if reference.name == "templateOnly" {
+                self.facts.template_only_references += 1;
+            }
+        }
+
+        fn visit_string_literal(&mut self, literal: &StringLiteral<'a>) {
+            if literal.value == "hello" {
+                self.facts.hello_string_literals += 1;
+            }
+        }
+    }
+
+    let alloc = Allocator::default();
+    let parsed = oxc_parser::Parser::new(&alloc, code, oxc_span::SourceType::tsx()).parse();
+    assert!(
+        !parsed.panicked && parsed.errors.is_empty(),
+        "generated template must be valid TSX: {:?}\n{code}",
+        parsed.errors
+    );
+
+    let mut scanner = Scanner {
+        facts: JsxElementBodyFacts::default(),
+    };
+    scanner.visit_program(&parsed.program);
+    scanner.facts
+}
+
+#[test]
+fn vue_slot_bodies_are_fragment_siblings_not_jsx_element_children() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><Panel children="explicit" definitelyInvalid="bad"><div class="card">{{ templateOnly }}</div></Panel></template>"#,
+        &[
+            ("Panel", BindingType::SetupConst),
+            ("templateOnly", BindingType::SetupConst),
+        ],
+    );
+    let facts = jsx_element_body_facts(&result);
+
+    assert_eq!(
+        facts.element_count, 2,
+        "Panel and div must remain typed JSX elements"
+    );
+    assert!(
+        facts.non_empty_elements.is_empty(),
+        "Vue slot bodies must not become React JSX children: {facts:?}\n{result}"
+    );
+    assert_eq!(
+        facts.explicit_children_attributes, 1,
+        "an authored children prop must remain on the typed element"
+    );
+    assert_eq!(
+        facts.definitely_invalid_attributes, 1,
+        "an invalid authored prop must remain on the typed element for the TypeScript diagnostic"
+    );
+    assert_eq!(
+        facts.template_only_references, 1,
+        "detaching slot content must preserve the authored template reference"
+    );
+}
+
+#[test]
+fn isolated_empty_pair_preserves_both_component_tag_mappings() {
+    let source = r#"<template><Panel><span>{{ templateOnly }}</span></Panel></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(
+        source,
+        &[
+            ("Panel", BindingType::SetupConst),
+            ("templateOnly", BindingType::SetupConst),
+        ],
+    );
+    let facts = jsx_element_body_facts(&output);
+    assert!(
+        facts.non_empty_elements.is_empty(),
+        "mapped empty-pair carrier must also isolate JSX children: {facts:?}\n{output}"
+    );
+
+    assert_eq!(
+        facts.panel_open_name_offsets.len(),
+        1,
+        "the typed empty pair must retain one opening Panel tag: {facts:?}\n{output}"
+    );
+    assert_eq!(
+        facts.panel_close_name_offsets.len(),
+        1,
+        "the typed empty pair must retain one closing Panel tag: {facts:?}\n{output}"
+    );
+
+    let source_open = source.find("Panel").unwrap() as u32;
+    let source_close = source.rfind("Panel").unwrap() as u32;
+    assert!(
+        tokens.iter().any(|&(line, generated, original)| line == 0
+            && generated == facts.panel_open_name_offsets[0]
+            && original == source_open),
+        "opening Panel must map to the authored opening name; tokens={tokens:?}\n{output}"
+    );
+    assert!(
+        tokens
+            .iter()
+                .any(|&(line, generated, original)| line == 0
+                && generated == facts.panel_close_name_offsets[0]
+                && original == source_close),
+        "generated empty-pair closing Panel must map to the authored closing name; tokens={tokens:?}\n{output}"
+    );
+}
+
 fn gen_tsx_template_with_bindings(source: &str, bindings: &[(&str, BindingType)]) -> String {
     gen_tsx_template_with_components(source, bindings, &[])
 }
@@ -203,7 +401,16 @@ fn basic_div() {
 #[test]
 fn text_content() {
     let result = gen_tsx_template("<template><div>hello</div></template>");
-    assert!(result.contains("<div>{\"hello\"}</div>"), "got: {}", result);
+    let facts = jsx_element_body_facts(&result);
+    assert_eq!(facts.element_count, 1);
+    assert!(
+        facts.non_empty_elements.is_empty(),
+        "got: {facts:?}\n{result}"
+    );
+    assert_eq!(
+        facts.hello_string_literals, 1,
+        "the detached template text must remain a JSX string expression: {facts:?}\n{result}"
+    );
 }
 
 #[test]
@@ -336,10 +543,14 @@ fn multiline_text_escapes_newlines_in_string_literal() {
 #[test]
 fn nested_elements() {
     let result = gen_tsx_template("<template><div><span></span></div></template>");
+    let facts = jsx_element_body_facts(&result);
+    assert_eq!(
+        facts.element_count, 2,
+        "div and span must both remain typed"
+    );
     assert!(
-        result.contains("<div><span></span></div>"),
-        "got: {}",
-        result
+        facts.non_empty_elements.is_empty(),
+        "nested Vue elements must become fragment siblings, not JSX element children: {facts:?}\n{result}"
     );
 }
 
@@ -8675,7 +8886,7 @@ fn dynamic_component_is_setup_ref_keeps_value_unmapped() {
     let resolver = BindingResolver::new(binding_map, true);
 
     let mut out = CodeGenOutput::new(&alloc);
-    let handled = rewrite_component_is(
+    let rewrite = rewrite_component_is(
         el,
         oxc_el,
         source,
@@ -8684,7 +8895,9 @@ fn dynamic_component_is_setup_ref_keeps_value_unmapped() {
         &[],
         EmitContext::JsxChildren,
     );
-    assert!(handled, "dynamic :is must be handled");
+    let rewrite = rewrite.expect("dynamic :is must be handled");
+    assert_eq!(rewrite.tag_name, "___VERTER___component_render");
+    assert!(rewrite.needs_iife_close);
 
     let mut ct = CodeTransform::new(source, &alloc);
     out.apply_to(&mut ct);

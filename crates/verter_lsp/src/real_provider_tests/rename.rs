@@ -783,16 +783,37 @@ fn edit_touches(
     uri: &tower_lsp_server::ls_types::Uri,
 ) -> bool {
     if let Some(changes) = &ws_edit.changes {
-        if changes.contains_key(uri) {
+        if changes
+            .keys()
+            .any(|edited_uri| uris_identify_same_file(edited_uri, uri))
+        {
             return true;
         }
     }
     if let Some(tower_lsp_server::ls_types::DocumentChanges::Edits(doc_edits)) =
         &ws_edit.document_changes
     {
-        return doc_edits.iter().any(|e| &e.text_document.uri == uri);
+        return doc_edits
+            .iter()
+            .any(|e| uris_identify_same_file(&e.text_document.uri, uri));
     }
     false
+}
+
+/// Compare file URIs using the same filesystem-identity policy as production.
+///
+/// TypeScript canonicalizes filenames according to the host filesystem (for
+/// example `App.vue` can be returned as `app.vue` on Windows). A direct URI-key
+/// comparison therefore rejects a valid edit for the same file on
+/// case-insensitive filesystems while still being required on Linux, where the
+/// differently-cased paths may identify distinct files.
+fn uris_identify_same_file(
+    left: &tower_lsp_server::ls_types::Uri,
+    right: &tower_lsp_server::ls_types::Uri,
+) -> bool {
+    let left_path = crate::documents::uri_to_canonical_id(left);
+    let right_path = crate::documents::uri_to_canonical_id(right);
+    verter_span::path::fs_paths_equal(&left_path, &right_path)
 }
 
 /// Read the on-disk content for a fixture URI (works for a CLOSED file).
@@ -814,15 +835,17 @@ fn apply_edits(
 
     let mut edits: Vec<tower_lsp_server::ls_types::TextEdit> = Vec::new();
     if let Some(changes) = &ws_edit.changes {
-        if let Some(file_edits) = changes.get(uri) {
-            edits.extend(file_edits.iter().cloned());
+        for (edited_uri, file_edits) in changes {
+            if uris_identify_same_file(edited_uri, uri) {
+                edits.extend(file_edits.iter().cloned());
+            }
         }
     }
     if let Some(tower_lsp_server::ls_types::DocumentChanges::Edits(doc_edits)) =
         &ws_edit.document_changes
     {
         for de in doc_edits {
-            if &de.text_document.uri == uri {
+            if uris_identify_same_file(&de.text_document.uri, uri) {
                 for e in &de.edits {
                     if let tower_lsp_server::ls_types::OneOf::Left(te) = e {
                         edits.push(te.clone());

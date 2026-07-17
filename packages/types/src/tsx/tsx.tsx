@@ -8,6 +8,9 @@ type VNode<T> = import("vue").VNode & {
 // Module augmentation for jsxImportSource: "vue"
 declare module "vue/jsx-runtime" {
   namespace JSX {
+    /** Prevent fallback to a foreign global (for example React) children rule. */
+    export interface ElementChildrenAttribute {}
+
     export interface IntrinsicClassAttributes<T> {
       // // Vue TSX style, in verter only the argument is needed.
       // // leaving this here just in case we want to compile to TSX for other usages

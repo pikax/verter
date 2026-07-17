@@ -35,7 +35,7 @@ export const PARITY_LITERAL_TEST_COUNTS = {
   "svelte/matrix.test.ts": 0,
   "svelte/public-surface.test.ts": 2,
   "svelte/runes-control.test.ts": 7,
-  "vue/daily.test.ts": 10,
+  "vue/daily.test.ts": 12,
   "vue/fallthrough.test.ts": 8,
   "vue/features.test.ts": 7,
   "vue/intellisense.test.ts": 4,

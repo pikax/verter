@@ -26,6 +26,14 @@ use crate::type_provider::protocol::{
     TypeDocumentHighlightKind, TypeLocation,
 };
 
+/// Rename edits are returned under the shared filesystem identity, not the raw provider spelling.
+/// On case-insensitive hosts, test lookups must therefore fold synthetic path case as production
+/// does before constructing the expected URI.
+fn rename_identity_uri(path: &str) -> Uri {
+    let identity = verter_span::InjectedPathKey::new(path);
+    path_to_uri(identity.as_str()).expect("fixture path produces a file URI")
+}
+
 // ── Position mapping tests ─────────────────────────────────────
 
 fn make_mapper_and_indexes() -> (ProviderPositionMapper, LineIndex, LineIndex) {
@@ -4889,12 +4897,11 @@ fn merge_references_vue_dts_is_dropped_not_zeroed() {
     );
 }
 
-/// FIX 3 (merge boundary): a REAL on-disk `{carrier}.ts` (here `Child.vue.ts` alongside an existing
-/// `Child.vue`) whose `is_carrier_api_path` SUFFIX predicate matches, but for which the
-/// identity-gated `external_api_resolver` DECLINES (it is NOT the synced virtual API surface), is
-/// edited IN PLACE as a normal file — its rename edit lands in `Child.vue.ts` at the REAL symbol
-/// span, and NOTHING is mapped into `Child.vue`. This discriminates the suffix-only classification
-/// that would have mapped the real file's offsets into the `.vue` and corrupted it.
+/// A REAL on-disk bare `{carrier}.ts` sidecar (here `Child.vue.ts` alongside an existing
+/// `Child.vue`) is not the reserved `{carrier}.verter.ts` API surface. It is edited IN PLACE as a
+/// normal file: its rename edit lands in `Child.vue.ts` at the REAL symbol span and NOTHING is
+/// mapped into `Child.vue`. The injected API resolver panics if consulted, discriminating any
+/// regression that reclassifies a bare sidecar by suffix shape alone.
 #[test]
 fn merge_rename_real_on_disk_carrier_ts_edits_in_place_never_maps_into_vue() {
     let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
@@ -4907,11 +4914,13 @@ fn merge_rename_real_on_disk_carrier_ts_edits_in_place_never_maps_into_vue() {
     let real_content: Arc<str> = Arc::from(real_ts);
     let read_source = move |p: &str| (p == reader_path.as_str()).then(|| real_content.clone());
 
-    // `Child.vue` exists → `is_carrier_api_path("/src/Child.vue.ts")` is true (suffix+exists).
+    // `Child.vue` exists, but a bare `.vue.ts` is not the reserved virtual API surface.
     let carrier_source_exists = |p: &str| p == "/src/Child.vue";
 
-    // The identity-gated API resolver DECLINES this path: it is not the synced virtual surface.
-    let api_resolver = |_p: &str| ApiSurfaceResolution::NotVirtual;
+    // A suffix-only regression would consult this resolver and fail the test immediately.
+    let api_resolver = |p: &str| -> ApiSurfaceResolution {
+        panic!("a bare carrier sidecar must not consult the API resolver: {p}")
+    };
 
     let type_locations = vec![RenameLocation {
         path: real_path.clone(),
@@ -4938,14 +4947,14 @@ fn merge_rename_real_on_disk_carrier_ts_edits_in_place_never_maps_into_vue() {
     let changes = edit.changes.expect("changes map");
 
     // NOTHING is mapped into `Child.vue` — the corruption the suffix-only classifier would cause.
-    let vue_uri = path_to_uri("/src/Child.vue").unwrap();
+    let vue_uri = rename_identity_uri("/src/Child.vue");
     assert!(
         !changes.contains_key(&vue_uri),
         "a real on-disk Child.vue.ts must NEVER produce an edit in Child.vue: {changes:?}"
     );
 
     // The edit lands in the REAL `Child.vue.ts` at the real symbol line (1), never line 0.
-    let real_uri = path_to_uri(&real_path).unwrap();
+    let real_uri = rename_identity_uri(&real_path);
     let edits = changes
         .get(&real_uri)
         .unwrap_or_else(|| panic!("rename must edit the real {real_path} in place"));
@@ -4963,14 +4972,15 @@ fn merge_rename_real_on_disk_carrier_ts_edits_in_place_never_maps_into_vue() {
     assert_ne!(edits[0].range, Range::default());
 }
 
-/// A cross-file `{carrier}.ts` PUBLIC-API rename target (the common case: tsserver renames an
-/// imported component's `defineProps` prop and reports the edit against `Child.vue.ts`, where the
-/// prop type is lifted into the `$props` / `new(props?)` declaration) maps its API-surface byte
+/// A cross-file `{carrier}.verter.ts` PUBLIC-API rename target (the common case: tsserver renames
+/// an imported component's `defineProps` prop and reports the edit against
+/// `Child.vue.verter.ts`, where the prop type is lifted into the `$props` / `new(props?)`
+/// declaration) maps its API-surface byte
 /// offsets back to the `.vue` source through the API surface's CodeTransform sourcemap (the
 /// `external_api_resolver`) and is INCLUDED at the resolved carrier range.
 ///
 /// This is THE root-cause regression for the dropped cross-file `.vue` prop rename: without the
-/// API branch, `Child.vue.ts` fell through to the external branch, where `normalize_carrier_path`
+/// API branch, `Child.vue.verter.ts` fell through to the external branch, where `normalize_carrier_path`
 /// rewrote it to `Child.vue` (≠ original) → the edit was dropped → the rename touched only the
 /// queried file. The mapped prop sits on carrier line 1, so a faithful resolve lands on line 1 —
 /// discriminating against both the drop (no edit) and a line-0 collapse.
@@ -5082,7 +5092,7 @@ fn merge_rename_carrier_api_target_maps_via_api_sourcemap_and_is_included() {
 
     let edit = result.expect("carrier API rename edit must be produced, not dropped");
     let changes = edit.changes.expect("changes map");
-    let uri = path_to_uri("/src/Child.vue").unwrap();
+    let uri = rename_identity_uri("/src/Child.vue");
     let edits = changes
         .get(&uri)
         .unwrap_or_else(|| panic!("rename must map the API target to the .vue carrier source"));
@@ -5209,7 +5219,7 @@ fn merge_rename_carrier_api_target_utf8_session_nonascii_prefix_maps_correct_ran
 
     let edit = result.expect("carrier API rename edit must be produced under a UTF-8 session");
     let changes = edit.changes.expect("changes map");
-    let uri = path_to_uri("/src/Child.vue").unwrap();
+    let uri = rename_identity_uri("/src/Child.vue");
     let edits = changes
         .get(&uri)
         .unwrap_or_else(|| panic!("rename must map the API target to the .vue carrier source"));
@@ -5390,10 +5400,10 @@ fn merge_rename_superseded_virtual_surface_with_real_backing_file_fails_closed()
 fn merge_rename_not_virtual_path_with_real_backing_file_edits_in_place() {
     let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
 
-    // A REAL hand-written sidecar `Child.vue.ts`; the renamed symbol sits on line 1.
+    // A real same-named file at the reserved virtual-API path; the symbol sits on line 1.
     let real_ts = "// hand-written sidecar\nexport const childHelper = 1\n";
     let off = real_ts.find("childHelper").unwrap() as u32;
-    let real_path = "/src/Child.vue.ts".to_string();
+    let real_path = "/src/Child.vue.verter.ts".to_string();
     let reader_path = real_path.clone();
     let real_content: Arc<str> = Arc::from(real_ts);
     let read_source = move |p: &str| (p == reader_path.as_str()).then(|| real_content.clone());
@@ -5428,21 +5438,21 @@ fn merge_rename_not_virtual_path_with_real_backing_file_edits_in_place() {
     let changes = edit.changes.expect("changes map");
 
     // NOTHING is mapped into `Child.vue`.
-    let vue_uri = path_to_uri("/src/Child.vue").unwrap();
+    let vue_uri = rename_identity_uri("/src/Child.vue");
     assert!(
         !changes.contains_key(&vue_uri),
-        "a NotVirtual real Child.vue.ts must NEVER produce an edit in Child.vue: {changes:?}"
+        "a NotVirtual real Child.vue.verter.ts must NEVER produce an edit in Child.vue: {changes:?}"
     );
 
-    // The edit lands in the REAL `Child.vue.ts` at the real symbol line (1), never line 0.
-    let real_uri = path_to_uri(&real_path).unwrap();
+    // The edit lands in the REAL `Child.vue.verter.ts` at line 1, never line 0.
+    let real_uri = rename_identity_uri(&real_path);
     let edits = changes
         .get(&real_uri)
         .unwrap_or_else(|| panic!("rename must edit the real {real_path} in place"));
     assert_eq!(
         edits.len(),
         1,
-        "exactly one in-place edit in the real .vue.ts"
+        "exactly one in-place edit in the real .vue.verter.ts"
     );
     assert_eq!(
         edits[0].range.start.line, 1,
@@ -5542,7 +5552,7 @@ fn merge_rename_store_unknown_path_with_real_backing_edits_in_place_end_to_end()
 
     let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
 
-    let vpath = "/src/Child.vue.ts".to_string();
+    let vpath = "/src/Child.vue.verter.ts".to_string();
     let real_ts = "// hand-written sidecar\nexport const foo = 1\n";
     let off = real_ts.find("foo").unwrap() as u32;
     let real_content: Arc<str> = Arc::from(real_ts);
@@ -5582,12 +5592,12 @@ fn merge_rename_store_unknown_path_with_real_backing_edits_in_place_end_to_end()
 
     let edit = result.expect("an unknown-path real-file rename edit must be produced in place");
     let changes = edit.changes.expect("changes map");
-    let vue_uri = path_to_uri("/src/Child.vue").unwrap();
+    let vue_uri = rename_identity_uri("/src/Child.vue");
     assert!(
         !changes.contains_key(&vue_uri),
-        "an unknown real Child.vue.ts must NEVER edit Child.vue: {changes:?}"
+        "an unknown real Child.vue.verter.ts must NEVER edit Child.vue: {changes:?}"
     );
-    let real_uri = path_to_uri(&vpath).unwrap();
+    let real_uri = rename_identity_uri(&vpath);
     let edits = changes
         .get(&real_uri)
         .unwrap_or_else(|| panic!("rename must edit the real {vpath} in place"));

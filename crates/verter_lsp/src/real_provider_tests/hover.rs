@@ -232,11 +232,14 @@ real_provider_test!(
         let js_uri = session.open_fixture_file("src/JsTemplateCases.vue").await;
         let type_res_uri = session.open_fixture_file("src/TypeResolutionCases.vue").await;
 
-        // Wait for warmup on App.vue
-        if !session.wait_until_ready(&app_uri, "action.disabled", 7, "disabled").await {
-            eprintln!("skipping: provider not warmed up");
-            return;
-        }
+        // The contract is non-vacuous: a materialized provider must warm the
+        // project before any secondary-file hover is accepted.
+        assert!(
+            session
+                .wait_until_ready(&app_uri, "action.disabled", 7, "disabled")
+                .await,
+            "the provider must warm the fixture project before hover assertions"
+        );
 
         // --- MyComp.vue: slot outlet <slot name="header" ---
         let pos = session.find_position(&mycomp_uri, r#"<slot name="header""#, 1);
@@ -278,6 +281,12 @@ real_provider_test!(
 
         // --- JsTemplateCases.vue: {{ count }} ---
         session.ensure_synced(&js_uri).await;
+        assert!(
+            session
+                .wait_until_ready(&js_uri, "{{ count }}", 3, "count")
+                .await,
+            "the JavaScript carrier must enter the provider program before its typed hover is asserted"
+        );
         let pos = session.find_position(&js_uri, "{{ count }}", 3);
         let hover = session.hover_text(&js_uri, pos).await;
         assert!(hover.is_some(), "hover on JS SFC count should return a result");
@@ -287,6 +296,12 @@ real_provider_test!(
 
         // --- TypeResolutionCases.vue: {{ mixed }} ---
         session.ensure_synced(&type_res_uri).await;
+        assert!(
+            session
+                .wait_until_ready(&type_res_uri, "{{ mixed }}", 3, "mixed")
+                .await,
+            "the type-resolution carrier must enter the provider program before its union hover is asserted"
+        );
         let pos = session.find_position(&type_res_uri, "{{ mixed }}", 3);
         let hover = session.hover_text(&type_res_uri, pos).await;
         assert!(hover.is_some(), "hover on mixed should return a result");

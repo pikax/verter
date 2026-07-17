@@ -119,6 +119,7 @@ struct CachedPathConfig {
 /// the carrier's content authority).
 #[derive(Debug, Clone)]
 struct CachedCarrier {
+    source_path: String,
     content: String,
     project_file_name: String,
 }
@@ -161,6 +162,7 @@ enum DesiredMutation {
         removed: Vec<serde_json::Value>,
     },
     RegisterCarrier {
+        source_path: String,
         companion_path: String,
         content: String,
         project_file_name: String,
@@ -381,6 +383,7 @@ impl DesiredState {
                 self.cache_workspace_folders(added, removed)
             }
             DesiredMutation::RegisterCarrier {
+                source_path,
                 companion_path,
                 content,
                 project_file_name,
@@ -388,6 +391,7 @@ impl DesiredState {
                 self.carrier_registrations.insert(
                     companion_path.clone(),
                     CachedCarrier {
+                        source_path: source_path.clone(),
                         content: content.clone(),
                         project_file_name: project_file_name.clone(),
                     },
@@ -494,6 +498,7 @@ impl DesiredState {
         for (companion_path, carrier) in &self.carrier_registrations {
             if let Err(err) = provider
                 .register_carrier_member(
+                    &carrier.source_path,
                     companion_path,
                     &carrier.content,
                     &carrier.project_file_name,
@@ -562,12 +567,13 @@ async fn forward<P: TypeProvider>(
         },
         // Carrier registration has no priority lanes; the lane is irrelevant.
         DesiredMutation::RegisterCarrier {
+            source_path,
             companion_path,
             content,
             project_file_name,
         } => {
             provider
-                .register_carrier_member(companion_path, content, project_file_name)
+                .register_carrier_member(source_path, companion_path, content, project_file_name)
                 .await
         }
     }
@@ -759,16 +765,19 @@ where
 
     fn register_carrier_member(
         &self,
+        source_path: &str,
         companion_path: &str,
         content: &str,
         project_file_name: &str,
     ) -> ProviderFuture<'_, ()> {
+        let source_path = source_path.to_string();
         let companion_path = companion_path.to_string();
         let content = content.to_string();
         let project_file_name = project_file_name.to_string();
         Box::pin(async move {
             self.submit_mutation(
                 DesiredMutation::RegisterCarrier {
+                    source_path,
                     companion_path,
                     content,
                     project_file_name,

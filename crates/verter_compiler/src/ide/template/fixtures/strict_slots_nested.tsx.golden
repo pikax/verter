@@ -1,3 +1,4 @@
+/** @jsxImportSource vue */
 import Card from './Card.vue'
 import Panel from './Panel.vue'
 import Row from './Row.vue'
@@ -17,15 +18,15 @@ void ___VERTER___directiveAccessor;
 
 {
 <>
-  <Card>
+  <><Card></Card>
     <>{"header"}{(() => { const { title } = ___VERTER___extractArgumentsFromRenderSlot(___VERTER___instantiateComponent(Card, {}), "header"); return (<>
-      <Row>{ title }</Row>
+      <><Row></Row>{ title }</>
     </>); })()}</>
     <>{"default"}
       <Panel />
       {"leading text"}
     </>
-  </Card>
+  </>
 </>
 ___VERTER___strictRenderSlot({} as NonNullable<ReturnType<typeof ___VERTER___Comp186>['$slots']['default']>, []);
 ___VERTER___strictRenderSlot({} as NonNullable<ReturnType<typeof ___VERTER___Comp138>['$slots']['header']>, []);

@@ -145,11 +145,10 @@ impl ProjectSync {
     ///
     /// Managed/editor-owned tsgo cannot add compiler options to a configured
     /// project through `workspace/didChangeConfiguration`; native tsgo treats
-    /// that payload as user preferences. Svelte's compiler-owned automatic JSX
-    /// runtime is therefore adapted to an owner-bound classic JSX namespace in
-    /// the provider buffer. Vue and every non-tsgo topology remain byte-for-byte
-    /// unchanged. Callers that record a provider surface use this method first so
-    /// the recorded bytes are the exact bytes delivered to the engine.
+    /// that payload as user preferences. Compiler-owned automatic JSX runtimes
+    /// are therefore adapted to owner-bound classic JSX namespaces in the
+    /// provider buffer. Callers that record a provider surface use this method
+    /// first so the recorded bytes are the exact bytes delivered to the engine.
     pub(crate) fn prepare_tsx_content<'a>(
         &self,
         tsx_path: &str,
@@ -158,7 +157,17 @@ impl ProjectSync {
         if !matches!(self.kind, TypeProviderKind::Tsgo) {
             return Ok(Cow::Borrowed(tsx_content));
         }
-        crate::svelte_assets::prepare_managed_tsgo_svelte_carrier(tsx_path, tsx_content)
+        if let Some(prepared) =
+            crate::svelte_assets::prepare_managed_tsgo_svelte_carrier(tsx_path, tsx_content)
+                .map_err(|error| {
+                    TypeProviderError::new(format!(
+                        "failed to prepare Svelte JSX provider assets for {tsx_path}: {error}"
+                    ))
+                })?
+        {
+            return Ok(Cow::Owned(prepared.content));
+        }
+        crate::vue_assets::prepare_managed_tsgo_vue_carrier(tsx_path, tsx_content)
             .map(|prepared| {
                 prepared.map_or(Cow::Borrowed(tsx_content), |prepared| {
                     Cow::Owned(prepared.content)
@@ -166,7 +175,7 @@ impl ProjectSync {
             })
             .map_err(|error| {
                 TypeProviderError::new(format!(
-                    "failed to prepare Svelte JSX provider assets for {tsx_path}: {error}"
+                    "failed to prepare Vue JSX provider assets for {tsx_path}: {error}"
                 ))
             })
     }
@@ -256,12 +265,13 @@ impl ProjectSync {
     /// default).
     pub async fn register_carrier_member(
         &self,
+        source_path: &str,
         companion_path: &str,
         content: &str,
         project_file_name: &str,
     ) -> Result<(), TypeProviderError> {
         self.provider
-            .register_carrier_member(companion_path, content, project_file_name)
+            .register_carrier_member(source_path, companion_path, content, project_file_name)
             .await
     }
 

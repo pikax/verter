@@ -196,8 +196,9 @@ pub trait TypeProvider: Send + Sync {
     /// buffer (the `@verter/typescript-plugin`'s `getScriptSnapshot` remains the
     /// SOLE content authority; this never sends the bytes to the engine).
     ///
-    /// `companion_path` is the carrier companion path (`{name}.vue.tsx` /
-    /// `{name}.vue.verter.ts`); `content` is the exact bytes the publish store
+    /// `source_path` is the configured-project carrier identity (`{name}.vue` /
+    /// `{name}.svelte`); `companion_path` is its generated companion path
+    /// (`{name}.vue.tsx` / `{name}.vue.verter.ts`); `content` is the exact bytes the publish store
     /// holds for it (used ONLY for the provider's local position conversion —
     /// `byte_offset_to_tsserver_pos` / `parse_tsserver_location` — never forwarded
     /// to the engine); `project_file_name` is the owning project's tsconfig path
@@ -211,6 +212,7 @@ pub trait TypeProvider: Send + Sync {
     /// overrides it to hydrate its `contents` cache and its carrier→project map.
     fn register_carrier_member(
         &self,
+        _source_path: &str,
         _companion_path: &str,
         _content: &str,
         _project_file_name: &str,

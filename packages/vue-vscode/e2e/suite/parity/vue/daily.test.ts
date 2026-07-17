@@ -1,7 +1,8 @@
 /**
  * Vue daily IDE surface: script ↔ markup bindings, child props, basic diagnostics.
  */
-import { FIXTURE_NAME } from "../../../helpers";
+import { strict as assert } from "node:assert";
+import { FIXTURE_NAME, waitForFileReady } from "../../../helpers";
 import * as vscode from "vscode";
 import {
   assertCleanErrors,
@@ -11,9 +12,10 @@ import {
   assertHoverNeedles,
   assertReferenceCountAtLeast,
   ensureParityReady,
+  failParityGap,
   openRelative,
   pollUntil,
-  failParityGap,
+  settledDiagnostics,
   type TokenAnchor,
 } from "../../../lib/parityHarness";
 
@@ -36,6 +38,18 @@ suite(`Vue daily surface [${FIXTURE_NAME}]`, function () {
     onlyVueParity(this);
     await assertCleanErrors("src/DailyBinding.vue");
     await assertCleanErrors("src/JsDaily.vue");
+  });
+
+  test("vue.diagnostics.jsx-environment-isolated-from-react-children", async function () {
+    onlyVueParity(this);
+    for (const file of [
+      "src/diagnostics/JsxEnvironmentTs.vue",
+      "src/diagnostics/JsxEnvironmentJs.vue",
+    ]) {
+      const doc = await openRelative(file);
+      await waitForFileReady(doc);
+      await assertCleanErrors(file);
+    }
   });
 
   test("vue.definition.markup-to-script", async function () {
@@ -191,6 +205,54 @@ suite(`Vue daily surface [${FIXTURE_NAME}]`, function () {
         "ISSUE-vue-markup-unresolved",
         `Markup-region unresolved identifier did not surface a mapped diagnostic: ${String(err)}`,
         "architecture",
+      );
+    }
+  });
+
+  test("vue.diagnostics.unused-script-template-css-binding", async function () {
+    onlyVueParity(this);
+    const file = "src/diagnostics/UnusedBindings.vue";
+    const doc = await openRelative(file);
+    const diagnostics = await settledDiagnostics(file);
+    const errors = diagnostics.filter(
+      (diagnostic) => diagnostic.severity === vscode.DiagnosticSeverity.Error,
+    );
+    assert.deepEqual(
+      errors.map(
+        (diagnostic) =>
+          `${diagnostic.source ?? "unknown"}:${String(diagnostic.code)}:${diagnostic.message}`,
+      ),
+      [],
+      `${file} must remain error-clean`,
+    );
+
+    const unused = diagnostics.filter((diagnostic) => {
+      const code =
+        typeof diagnostic.code === "object" && diagnostic.code && "value" in diagnostic.code
+          ? String(diagnostic.code.value)
+          : String(diagnostic.code ?? "");
+      return code === "6133";
+    });
+    assert.equal(
+      unused.length,
+      1,
+      `expected exactly one genuinely unused binding; got ${unused.map((diagnostic) => `${String(diagnostic.code)}:${diagnostic.message}`).join(" | ")}`,
+    );
+    const unusedText = doc.getText(unused[0].range);
+    assert.equal(
+      unusedText,
+      "trulyUnused",
+      `the unused diagnostic must map to the authored script binding, got ${JSON.stringify(unusedText)}`,
+    );
+    assert.ok(
+      unused[0].tags?.includes(vscode.DiagnosticTag.Unnecessary),
+      "the unused binding diagnostic must carry the Unnecessary tag for editor fading",
+    );
+
+    for (const liveBinding of ["templateOnly", "cssOnly"]) {
+      assert.ok(
+        !unused.some((diagnostic) => doc.getText(diagnostic.range).includes(liveBinding)),
+        `${liveBinding} is live through ${liveBinding === "templateOnly" ? "template projection" : "CSS v-bind()"} and must not be reported unused`,
       );
     }
   });

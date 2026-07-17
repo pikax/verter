@@ -109,6 +109,7 @@ mod inner {
             companion_path: String,
         },
         RegisterCarrierMember {
+            source_path: String,
             companion_path: String,
             content: String,
             project_file_name: String,
@@ -729,6 +730,7 @@ mod inner {
 
         fn register_carrier_member(
             &self,
+            source_path: &str,
             companion_path: &str,
             content: &str,
             project_file_name: &str,
@@ -739,6 +741,7 @@ mod inner {
             let block = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::RegisterCarrierMember {
+                    source_path: source_path.to_string(),
                     companion_path: companion_path.to_string(),
                     content: content.to_string(),
                     project_file_name: project_file_name.to_string(),

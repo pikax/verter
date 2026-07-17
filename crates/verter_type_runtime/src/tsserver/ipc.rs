@@ -774,6 +774,14 @@ pub struct TsserverTypeProvider {
     /// configured project (where `getExternalFiles` admitted it) instead of a fresh
     /// inferred/default project that would return empty/wrong results.
     carrier_projects: Arc<parking_lot::RwLock<HashMap<String, String>>>,
+    /// Published companion path -> configured Program source identity.
+    ///
+    /// Non-editor plugin projects admit generated carrier content under the
+    /// authored source path. Diagnostic protocol requests must therefore name
+    /// that source while positions continue to decode against the companion bytes
+    /// cached locally. This map is routing metadata only: the source is never
+    /// opened by this provider, so the plugin remains the sole content authority.
+    carrier_sources: Arc<parking_lot::RwLock<HashMap<String, String>>>,
     /// Per-file content generation: a globally-unique, monotonically-increasing
     /// stamp written in lockstep with every `contents` write (open / load /
     /// update / carrier register) and dropped on close. A resync captures each
@@ -1030,6 +1038,7 @@ impl TsserverTypeProvider {
             workspace_root: ws_root,
             project_roots: Arc::new(parking_lot::RwLock::new(Vec::new())),
             carrier_projects: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            carrier_sources: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             content_generations: Arc::new(ContentGenerations::default()),
         })
     }
@@ -1315,6 +1324,7 @@ impl TypeProvider for TsserverTypeProvider {
         let content_generations = Arc::clone(&self.content_generations);
         let opened_files = Arc::clone(&self.opened_files);
         let carrier_projects = Arc::clone(&self.carrier_projects);
+        let carrier_sources = Arc::clone(&self.carrier_sources);
         Box::pin(async move {
             crate::type_runtime_trace_scope_async!(
                 "tsserver_close_file",
@@ -1328,6 +1338,7 @@ impl TypeProvider for TsserverTypeProvider {
                     // companion left). A no-op for a real `.ts`/`.tsx` file (never in
                     // the carrier map).
                     carrier_projects.write().remove(&file);
+                    carrier_sources.write().remove(&file);
                     transport
                         .command_no_response("close", serde_json::json!({ "file": file }))
                         .await?;
@@ -1370,16 +1381,19 @@ impl TypeProvider for TsserverTypeProvider {
 
     fn register_carrier_member(
         &self,
+        source_path: &str,
         companion_path: &str,
         content: &str,
         project_file_name: &str,
     ) -> ProviderFuture<'_, ()> {
+        let source = Self::normalize_path(source_path);
         let file = Self::normalize_path(companion_path);
         let content: Arc<str> = Arc::from(content);
         let project_file_name = Self::normalize_path(project_file_name);
         let contents_cache = Arc::clone(&self.contents);
         let content_generations = Arc::clone(&self.content_generations);
         let carrier_projects = Arc::clone(&self.carrier_projects);
+        let carrier_sources = Arc::clone(&self.carrier_sources);
         let opened_files = Arc::clone(&self.opened_files);
         let transport = Arc::clone(&self.transport);
         let script_kind_name = if file.ends_with(".jsx") {
@@ -1391,6 +1405,7 @@ impl TypeProvider for TsserverTypeProvider {
         } else {
             "TS"
         };
+        let is_ide_companion = file.ends_with(".tsx") || file.ends_with(".jsx");
         // `projectRootPath` for the project-load `open` is the tsconfig's directory.
         let project_root = project_file_name
             .rsplit_once('/')
@@ -1447,6 +1462,11 @@ impl TypeProvider for TsserverTypeProvider {
                 &project_root,
             )
             .await?;
+            // Record diagnostic routing only after companion membership signaling
+            // succeeds. This never opens the source or sends source content.
+            if is_ide_companion {
+                carrier_sources.write().insert(file.clone(), source);
+            }
             // No per-open project verification: the carrier reaching this point is
             // ALREADY a confirmed configured-project member. The fail-closed gate
             // against an inferred / ownerless / ambiguous carrier lives UPSTREAM at
@@ -1815,6 +1835,12 @@ impl TypeProvider for TsserverTypeProvider {
         // `getExternalFiles` admitted it, not a fresh inferred project that returns
         // empty). `None` for a non-carrier file (its default project is correct).
         let project_file_name = self.project_file_name_for(&file);
+        let diagnostic_file = self
+            .carrier_sources
+            .read()
+            .get(&file)
+            .cloned()
+            .unwrap_or_else(|| file.clone());
         Box::pin(async move {
             let content = {
                 let cache = contents_cache.lock().await;
@@ -1848,7 +1874,7 @@ impl TypeProvider for TsserverTypeProvider {
                     .request(
                         "semanticDiagnosticsSync",
                         inject_project_file_name(
-                            serde_json::json!({ "file": file }),
+                            serde_json::json!({ "file": diagnostic_file }),
                             &project_file_name,
                         ),
                     )
@@ -1877,7 +1903,7 @@ impl TypeProvider for TsserverTypeProvider {
                         .request(
                             "syntacticDiagnosticsSync",
                             inject_project_file_name(
-                                serde_json::json!({ "file": file }),
+                                serde_json::json!({ "file": diagnostic_file }),
                                 &project_file_name,
                             ),
                         )
@@ -1896,7 +1922,7 @@ impl TypeProvider for TsserverTypeProvider {
                         .request(
                             "suggestionDiagnosticsSync",
                             inject_project_file_name(
-                                serde_json::json!({ "file": file }),
+                                serde_json::json!({ "file": diagnostic_file }),
                                 &project_file_name,
                             ),
                         )

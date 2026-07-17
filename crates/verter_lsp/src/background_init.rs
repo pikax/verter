@@ -119,6 +119,28 @@ fn build_published_workspace(
     }
 }
 
+/// Admit provider-type materialization into the live initialization generation.
+///
+/// The filesystem writes themselves are immutable/idempotent, but their failure
+/// result changes the shared compiler profile. Keeping the generation test and
+/// that mutation in one function makes it impossible for a superseded init to
+/// flip `embed_ambient_types` before the caller returns without reconfiguring
+/// the provider.
+fn admit_materialized_provider_types(
+    init_generation: &std::sync::atomic::AtomicU64,
+    my_gen: u64,
+    tsx_profile: &parking_lot::RwLock<verter_session::CompileProfile>,
+    materialize_types: MaterializeVerterTypesResult,
+) -> bool {
+    if init_generation.load(std::sync::atomic::Ordering::Acquire) != my_gen {
+        return false;
+    }
+    if materialize_types.any_failed {
+        tsx_profile.write().embed_ambient_types = true;
+    }
+    true
+}
+
 /// Run all blocking initialization work in the background.
 ///
 /// This function is spawned from `initialized()` and performs:
@@ -232,6 +254,33 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         return Ok(());
     }
 
+    // Materialize compiler-owned provider declarations BEFORE the provider is
+    // configured/reopened. An existing generated stub may change across a
+    // Verter upgrade; reopening first lets tsserver/tsgo cache the old module,
+    // while the generated-stub watcher is intentionally ignored to prevent a
+    // self-write loop. Publishing the immutable asset first gives the one
+    // provider resync below the final bytes on fresh installs and upgrades.
+    let roots_for_types = roots.clone();
+    let materialize_types =
+        tokio::task::spawn_blocking(move || materialize_verter_types(&roots_for_types))
+            .await
+            .unwrap_or(MaterializeVerterTypesResult {
+                any_failed: true,
+                wrote_any: false,
+            });
+
+    // The blocking materialization may overlap a newer workspace-folder
+    // initialization. Revalidate before mutating the shared TSX profile or
+    // reconfiguring the provider: immutable stub writes for the old roots are
+    // harmless, but stale roots/options must never become live authority.
+    if !admit_materialized_provider_types(&init_generation, my_gen, &tsx_profile, materialize_types)
+    {
+        tracing::info!(
+            "init gen={my_gen} superseded during provider-type materialization, discarding"
+        );
+        return Ok(());
+    }
+
     // 3. Type provider: workspace folder sync + path config (async, non-blocking)
     if let Some(tp) = &type_provider {
         let added: Vec<serde_json::Value> = roots
@@ -321,19 +370,6 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         if let Some(tp) = &type_provider {
             let _ = tp.resync_open_files().await;
         }
-    }
-
-    // 5. Materialize @verter/types (spawn_blocking — blocking FS)
-    let roots_for_types = roots.clone();
-    let materialize_types =
-        tokio::task::spawn_blocking(move || materialize_verter_types(&roots_for_types))
-            .await
-            .unwrap_or(MaterializeVerterTypesResult {
-                any_failed: true,
-                wrote_any: false,
-            });
-    if materialize_types.any_failed {
-        tsx_profile.write().embed_ambient_types = true;
     }
 
     // 6. Generation check → spawn workspace scanner
@@ -639,6 +675,50 @@ pub(super) fn materialize_verter_types(roots: &[String]) -> MaterializeVerterTyp
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn superseded_type_materialization_cannot_mutate_the_live_compile_profile() {
+        let generation = std::sync::atomic::AtomicU64::new(2);
+        let profile = parking_lot::RwLock::new(verter_session::CompileProfile::default());
+
+        let admitted = admit_materialized_provider_types(
+            &generation,
+            1,
+            &profile,
+            MaterializeVerterTypesResult {
+                any_failed: true,
+                wrote_any: false,
+            },
+        );
+
+        assert!(!admitted, "a superseded initialization must fail admission");
+        assert!(
+            !profile.read().embed_ambient_types,
+            "a stale materialization failure must not change the live compiler profile"
+        );
+    }
+
+    #[test]
+    fn current_type_materialization_failure_enables_the_safe_embedded_fallback() {
+        let generation = std::sync::atomic::AtomicU64::new(3);
+        let profile = parking_lot::RwLock::new(verter_session::CompileProfile::default());
+
+        let admitted = admit_materialized_provider_types(
+            &generation,
+            3,
+            &profile,
+            MaterializeVerterTypesResult {
+                any_failed: true,
+                wrote_any: false,
+            },
+        );
+
+        assert!(admitted, "the current initialization must be admitted");
+        assert!(
+            profile.read().embed_ambient_types,
+            "the current materialization failure must retain the safe embedded fallback"
+        );
+    }
 
     #[test]
     fn build_published_workspace_materializes_exact_snapshot_with_views() {

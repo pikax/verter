@@ -21,6 +21,8 @@ TypeScript utility types and Vue helpers for the [Verter](https://github.com/pik
 - Model-to-emit and model-to-prop type inference (`ModelToEmits`, `ModelToProps`)
 - Directive modifier type checking (`vOnModifiers`, `vModelModifiers`, `vBindModifiers`)
 - TSX augmentations for `v-slot`, `v-directive`, and `onVue:*` lifecycle attributes
+- Vue JSX namespace isolation so ambient React types cannot reinterpret slot
+  content as a `children` prop
 - Multiple export paths for different consumption contexts
 - Benchmark harness for TypeScript checker performance regression testing
 

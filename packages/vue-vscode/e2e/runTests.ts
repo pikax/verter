@@ -49,7 +49,7 @@ function requiredParityIds(fixture: string): readonly string[] | undefined {
   };
   if (
     manifest.version !== 2 ||
-    manifest.parity?.literalRegistrationCount !== 219 ||
+    manifest.parity?.literalRegistrationCount !== 221 ||
     manifest.parity.matrixCaseCount !== 73
   ) {
     throw new Error(

@@ -1033,14 +1033,16 @@ fn workspace_edit_satisfies_child_prop_rename(
         let Some(changes) = merged.changes.as_ref() else {
             return false;
         };
-        let Some(edits) = changes.get(uri) else {
-            return false;
-        };
+        let expected_path = crate::documents::uri_to_canonical_id(uri);
         // FULL-RANGE equality (start AND end) — a right-anchor wrong-span edit must
         // NOT pass (the start-only check this replaced was too weak).
-        edits
-            .iter()
-            .any(|e| e.range == expected && e.new_text == new_name)
+        changes.iter().any(|(edited_uri, edits)| {
+            let edited_path = crate::documents::uri_to_canonical_id(edited_uri);
+            verter_span::path::fs_paths_equal(&edited_path, &expected_path)
+                && edits
+                    .iter()
+                    .any(|e| e.range == expected && e.new_text == new_name)
+        })
     };
 
     has_edit_at(expected_decl_uri, expected_decl_range)

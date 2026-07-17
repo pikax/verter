@@ -48,9 +48,9 @@ const parity = buildParityTestInventory({
   suiteRoot: join(sourceRoot, "parity"),
   matrixCasesFile: join(packageRoot, "e2e", "lib", "matrixCases.ts"),
 });
-if (parity.literalRegistrationCount !== 219 || parity.matrixCaseCount !== 73) {
+if (parity.literalRegistrationCount !== 221 || parity.matrixCaseCount !== 73) {
   throw new Error(
-    `accepted parity inventory mismatch: expected 219 literal registrations + 73 matrix cases, got ${parity.literalRegistrationCount} + ${parity.matrixCaseCount}`,
+    `accepted parity inventory mismatch: expected 221 literal registrations + 73 matrix cases, got ${parity.literalRegistrationCount} + ${parity.matrixCaseCount}`,
   );
 }
 writeFileSync(output, `${JSON.stringify({ version: 2, entries, parity }, null, 2)}\n`, "utf8");

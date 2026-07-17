@@ -334,6 +334,7 @@ async fn register_carrier_member_forwards_and_replays_after_restart() {
     // with tsserver because the publish path called the wrapper, not the inner).
     provider
         .register_carrier_member(
+            "/project/src/App.vue",
             "/project/src/App.vue.tsx",
             "export default {} as any;\n",
             "/project/tsconfig.json",
@@ -345,10 +346,12 @@ async fn register_carrier_member_forwards_and_replays_after_restart() {
         initial_clone.calls().iter().any(|call| matches!(
             call,
             MockCall::RegisterCarrierMember {
+                source_path,
                 companion_path,
                 project_file_name,
                 ..
             } if companion_path == "/project/src/App.vue.tsx"
+                && source_path == "/project/src/App.vue"
                 && project_file_name == "/project/tsconfig.json"
         )),
         "register_carrier_member must forward to the live inner provider, calls={:?}",
@@ -372,10 +375,12 @@ async fn register_carrier_member_forwards_and_replays_after_restart() {
         calls.iter().any(|call| matches!(
             call,
             MockCall::RegisterCarrierMember {
+                source_path,
                 companion_path,
                 content,
                 project_file_name,
             } if companion_path == "/project/src/App.vue.tsx"
+                && source_path == "/project/src/App.vue"
                 && content == "export default {} as any;\n"
                 && project_file_name == "/project/tsconfig.json"
         )),
@@ -418,6 +423,7 @@ async fn registration_racing_respawn_replay_reaches_fresh_inner() {
     // replay snapshot.
     provider
         .register_carrier_member(
+            "/project/src/A.vue",
             carrier_a,
             "export default {} as any; // A\n",
             "/project/tsconfig.json",
@@ -451,6 +457,7 @@ async fn registration_racing_respawn_replay_reaches_fresh_inner() {
     let task_b = tokio::spawn(async move {
         provider_for_b
             .register_carrier_member(
+                "/project/src/B.vue",
                 carrier_b,
                 "export default {} as any; // B\n",
                 "/project/tsconfig.json",

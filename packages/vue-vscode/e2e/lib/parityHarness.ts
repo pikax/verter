@@ -14,6 +14,7 @@ import {
   FIXTURE_NAME,
   ensureTypeProviderSynced,
   sleep,
+  waitForDiagnostics,
   waitForDiagnosticsSettled,
 } from "../helpers";
 import { VIRTUAL_CARRIER_PATTERN } from "./virtualCarrier";
@@ -309,16 +310,25 @@ export async function assertReferenceCountAtLeast(
   return refs;
 }
 
-export async function errorDiagnostics(relative: string): Promise<vscode.Diagnostic[]> {
+export async function settledDiagnostics(relative: string): Promise<vscode.Diagnostic[]> {
   const doc = await openRelative(relative);
-  const diags = await waitForDiagnosticsSettled(doc.uri, { timeoutMs: 12_000, stableMs: 600 });
-  return diags.filter((diagnostic) => diagnostic.severity === vscode.DiagnosticSeverity.Error);
+  return waitForDiagnosticsSettled(doc.uri, { timeoutMs: 12_000, stableMs: 600 });
+}
+
+export async function errorDiagnostics(relative: string): Promise<vscode.Diagnostic[]> {
+  const diagnostics = await settledDiagnostics(relative);
+  return diagnostics.filter(
+    (diagnostic) => diagnostic.severity === vscode.DiagnosticSeverity.Error,
+  );
 }
 
 export async function assertCleanErrors(relative: string): Promise<void> {
   const errors = await errorDiagnostics(relative);
   assert.deepEqual(
-    errors.map((diagnostic) => `${String(diagnostic.code)}:${diagnostic.message}`),
+    errors.map(
+      (diagnostic) =>
+        `${diagnostic.source ?? "unknown"}:${String(diagnostic.code)}:${diagnostic.message}`,
+    ),
     [],
     `${relative} must be error-clean`,
   );
@@ -328,10 +338,23 @@ export async function assertHasErrorMatching(
   relative: string,
   matcher: RegExp | string,
 ): Promise<vscode.Diagnostic[]> {
-  const errors = await errorDiagnostics(relative);
-  const hit = errors.filter((diagnostic) => {
+  const doc = await openRelative(relative);
+  const matches = (diagnostic: vscode.Diagnostic) => {
+    if (diagnostic.severity !== vscode.DiagnosticSeverity.Error) return false;
     const hay = `${String(diagnostic.code)}:${diagnostic.message}`;
-    return typeof matcher === "string" ? hay.includes(matcher) : matcher.test(hay);
+    if (typeof matcher === "string") return hay.includes(matcher);
+    matcher.lastIndex = 0;
+    return matcher.test(hay);
+  };
+  const diagnostics = await waitForDiagnostics(doc.uri, {
+    timeoutMs: 12_000,
+    predicate: matches,
+  });
+  const errors = diagnostics.filter(
+    (diagnostic) => diagnostic.severity === vscode.DiagnosticSeverity.Error,
+  );
+  const hit = errors.filter((diagnostic) => {
+    return matches(diagnostic);
   });
   assert.ok(
     hit.length > 0,
