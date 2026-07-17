@@ -562,7 +562,7 @@ async fn rune_module_debounced_diagnostics_map_through_self_file_projection() {
         }],
     );
 
-    let merged = rune_module_diagnostics(&deps, provider.as_ref(), canonical_id, Vec::new()).await;
+    let merged = self_file_diagnostics(&deps, provider.as_ref(), canonical_id, Vec::new()).await;
 
     // The type provider must have been queried at the module's OWN canonical
     // path (the Shadow buffer), never a derived `.tsx`.
@@ -1285,7 +1285,7 @@ async fn rune_diagnostics_drop_provider_results_when_shadow_surface_regenerates_
         }),
     );
 
-    let merged = rune_module_diagnostics(&deps, provider.as_ref(), canonical_id, Vec::new()).await;
+    let merged = self_file_diagnostics(&deps, provider.as_ref(), canonical_id, Vec::new()).await;
     assert!(
         !merged
             .iter()

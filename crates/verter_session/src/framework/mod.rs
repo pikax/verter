@@ -18,8 +18,8 @@ pub mod descriptor;
 pub mod language_classifier;
 pub mod project_capabilities;
 pub mod registry;
-pub mod rune_module;
 pub mod script_facts;
+pub mod self_file;
 pub mod surface_store;
 pub mod svelte_jsx_assets;
 pub mod synth;
@@ -37,9 +37,9 @@ pub use registry::{
     CarrierLeg, FrameworkAdapterRegistry, FrameworkRegistration, SurfaceRegistration,
     TagDisposition,
 };
-pub use rune_module::{
+pub use self_file::{
     rune_module_provider_content, self_file_provider_content, serves_self_file_provider_buffer,
-    svelte_rune_module_source_type, RuneModuleProviderContent,
+    svelte_rune_module_source_type, SelfFileProviderContent,
 };
 
 /// The interned framework-adapter id, re-exported from `verter_language` so

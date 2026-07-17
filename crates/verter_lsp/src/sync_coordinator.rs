@@ -619,10 +619,11 @@ async fn close_stale_paths(
     }
 }
 
-/// Merge a rune module's debounced diagnostics through the generalized
-/// SELF-FILE projection: query the type provider at the module's OWN canonical
-/// path (the Shadow provider buffer `<rune prelude> + <rewritten module
-/// bytes>`), then map each type diagnostic back to the user-source position
+/// Merge a self-file document's debounced diagnostics through the generalized
+/// SELF-FILE projection: query the type provider at the document's OWN
+/// canonical path (the Shadow provider buffer — `<rune prelude> + <rewritten
+/// module bytes>` for a rune module, the source verbatim for a plain script),
+/// then map each type diagnostic back to the user-source position
 /// through the rewrite-aware self-file mapper (prelude offset + per-line
 /// rewrite delta).
 ///
@@ -635,7 +636,7 @@ async fn close_stale_paths(
 /// DROPPED and the Verter-only set publishes (fail closed). Falls back to the
 /// verter diagnostics alone when no capturable Shadow surface exists or the
 /// provider errors.
-async fn rune_module_diagnostics(
+async fn self_file_diagnostics(
     deps: &SyncCoordinatorDeps,
     tp: &dyn TypeProvider,
     canonical_id: &str,
@@ -672,7 +673,7 @@ async fn rune_module_diagnostics(
                 &snapshot,
             ) {
                 tracing::debug!(
-                    "sync_coordinator: dropping rune-module provider diagnostics for \
+                    "sync_coordinator: dropping self-file provider diagnostics for \
                      {canonical_id} — captured surface no longer valid"
                 );
                 return verter_diags;
@@ -702,7 +703,7 @@ async fn rune_module_diagnostics(
         }
         Err(error) => {
             tracing::warn!(
-                "sync_coordinator: type provider error for rune module {canonical_id}: {error}"
+                "sync_coordinator: type provider error for self-file document {canonical_id}: {error}"
             );
             verter_diags
         }
@@ -786,7 +787,7 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
     if let Some(tp) = &deps.type_provider {
         if crate::server::self_file_language_for(canonical_id).is_some() {
             let diagnostics =
-                rune_module_diagnostics(deps, tp.as_ref(), canonical_id, verter_diags).await;
+                self_file_diagnostics(deps, tp.as_ref(), canonical_id, verter_diags).await;
             return deps
                 .client
                 .publish_diagnostics(uri, diagnostics, None)
