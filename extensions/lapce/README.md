@@ -209,8 +209,8 @@ script, and **diagnostics** for type errors in both `<script>` and `<template>`.
   points at an existing, executable `verter-lsp` (use the `.exe` on Windows), or
   that `verter-lsp` is on `PATH` and `lsp.serverSource = "path"` is set.
 - **Type information is missing or wrong.** Ensure `typescript@7` (tsgo) is
-  installed in the opened workspace's `node_modules`, or set `typeProvider =
-"off"` if you want Verter without TypeScript type checking.
+  installed in the opened workspace's `node_modules`, or set
+  `typeProvider = "off"` if you want Verter without TypeScript type checking.
 
 ## Testing this volt
 

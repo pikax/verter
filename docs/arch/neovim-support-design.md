@@ -1,6 +1,6 @@
 # Verter Neovim Support — Design & Implementation Plan
 
-> Status: **DESIGN — UNCOMMITTED draft for CTO review.** Research + design block. No production code landed.
+> Status: **AS BUILT.** The Neovim 0.11+ integration ships under `editors/nvim/` and is guarded by pure-Lua configuration tests plus a fail-closed real headless-Neovim contract across the supported version and OS matrix.
 > Date: 2026-06-22. Author: research+design block manager.
 > Sibling design: [`docs/arch/lapce-extension-design.md`](./lapce-extension-design.md) (same server, different editor). The server-launch contract (`--type-provider=tsgo`, no `--tsdk`, positional root, init-options parity) is shared; the **distribution and binary-discovery strategy differs deliberately** (see §5, §8) because Neovim's conventions differ from Lapce's plugin model.
 

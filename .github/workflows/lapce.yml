@@ -20,18 +20,22 @@ on:
     branches: [main]
     paths:
       - "extensions/lapce/**"
-      - "crates/verter-editor-client/**"
+      - "crates/**"
       - "scripts/editor-contracts/**"
       - "editors/nvim/tests/fixtures/real-client/**"
       - "packages/lsp-test-client/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/lapce.yml"
   pull_request:
     paths:
       - "extensions/lapce/**"
-      - "crates/verter-editor-client/**"
+      - "crates/**"
       - "scripts/editor-contracts/**"
       - "editors/nvim/tests/fixtures/real-client/**"
       - "packages/lsp-test-client/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/lapce.yml"
 
 jobs:
@@ -104,6 +108,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          node --test scripts/editor-contracts/plan-contract.test.mjs
           root="${GITHUB_WORKSPACE}/editors/nvim/tests/fixtures/real-client"
           bin="${GITHUB_WORKSPACE}/target/release/verter-lsp"
           plan="${RUNNER_TEMP}/lapce-launch-plan.json"

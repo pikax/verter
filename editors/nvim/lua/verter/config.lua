@@ -82,10 +82,18 @@ end
 function M.build_cmd(opts)
   return function(dispatchers, config)
     local args = M.build_cmd_args(opts, config and config.root_dir or nil)
+    local env = { VERTER_LOG = opts.log_level }
+    -- Preserve the server's documented explicit TypeScript-engine override.
+    -- Function-form commands own their spawn parameters, and forwarding this
+    -- value explicitly keeps CI pins and non-standard user installations from
+    -- falling through to a different workspace/cache engine.
+    if type(vim.env.VERTER_TSGO_BIN) == "string" and vim.env.VERTER_TSGO_BIN ~= "" then
+      env.VERTER_TSGO_BIN = vim.env.VERTER_TSGO_BIN
+    end
     return vim.lsp.rpc.start(args, dispatchers, {
       cwd = config and config.cmd_cwd or nil,
       -- Forward the log level the function-form `cmd` would otherwise drop.
-      env = { VERTER_LOG = opts.log_level },
+      env = env,
     })
   end
 end

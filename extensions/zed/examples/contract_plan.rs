@@ -23,6 +23,7 @@ fn main() {
             "editor": "zed",
             "command": plan.command_path,
             "args": plan.args,
+            "workspaceRootTransport": "argv",
             "initializationOptions": verter_editor_client::build_initialization_options(&settings),
             "languages": ["vue", "svelte"],
         })

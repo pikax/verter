@@ -4,13 +4,13 @@
 Verter is pre-release software. APIs may change between releases — see the [API Stability](/api-stability) document.
 :::
 
-Beyond the [VS Code extension](/editor/vscode), Verter ships thin LSP clients for
+Beyond the [VS Code extension](/editor/vscode), Verter ships integrations for
 four more editors. Each one runs the **same** native `verter-lsp` server over
-stdio — the client just tells the editor how to launch it and adds **zero**
-per-message latency. All four give you the same type-aware IDE features for Vue
-and Svelte (diagnostics, hover, completion, go-to-definition, find-references,
-rename, code actions, semantic tokens, inlay hints, signature help) over the
-shared LSP path.
+stdio; the integration tells the editor how to launch it and adds no proxy to
+the per-message path. The server exposes its standard Vue/Svelte LSP features to
+all four clients, but the feature a user sees still depends on that editor's LSP
+capabilities. Current automated evidence is intentionally narrower than a claim
+of full UI parity: the exact tested boundaries are listed below.
 
 ## The four editors
 
@@ -93,19 +93,28 @@ The remedy is exactly the two options above.
 
 ## Automated test coverage
 
-All four integrations have non-vacuous automated contracts:
+All four integrations have non-vacuous automated contracts, with deliberately
+different evidence boundaries:
 
 - **Lapce and Zed:** their CI jobs build the real WASM artifacts, export the
   exact production launch plans, and drive those plans through the shared stdio
   LSP client. Real Vue and Svelte diagnostics plus concrete typed hover are
-  required. This validates everything short of GUI-host loading; neither editor
-  currently provides a headless GUI extension harness.
+  required. This validates artifact build, production launch policy, and that
+  compact semantic slice; it does not prove untested features or GUI-host
+  behavior because neither editor currently provides a headless GUI extension
+  harness.
 - **Helix:** the parsed TOML contract runs on every OS. A separate Linux lane
   installs checksum-verified Helix 25.07.1, proves both `hx --health` routes use
   only Verter, then drives the parsed shipping plan through the same real-server
-  Vue/Svelte semantic smoke.
+  Vue/Svelte diagnostic-and-hover smoke. The semantic requests use the shared
+  stdio driver, not Helix UI automation.
 - **Neovim:** the shipped Lua setup runs inside a real headless Neovim client on
   the supported-version × OS matrix. It covers Vue/Svelte, JS/TS, readiness,
   UTF-8 negotiation, diagnostics, hover, authored definition, completion,
   template rename, and clean shutdown. Missing prerequisites and zero executed
   tests are hard failures.
+
+These gates are regression evidence, not a statement that every server feature
+has been exercised in every editor. The editor-neutral LSP suite owns broad
+protocol behavior; the contracts above prove the integration-specific launch
+and a compact critical slice through each available real-client boundary.

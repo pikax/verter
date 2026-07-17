@@ -18,18 +18,22 @@ on:
     branches: [main]
     paths:
       - "editors/helix/**"
-      - "crates/verter-editor-client/**"
+      - "crates/**"
       - "scripts/editor-contracts/**"
       - "editors/nvim/tests/fixtures/real-client/**"
       - "packages/lsp-test-client/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/helix.yml"
   pull_request:
     paths:
       - "editors/helix/**"
-      - "crates/verter-editor-client/**"
+      - "crates/**"
       - "scripts/editor-contracts/**"
       - "editors/nvim/tests/fixtures/real-client/**"
       - "packages/lsp-test-client/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/helix.yml"
 
 jobs:
@@ -60,6 +64,10 @@ jobs:
       - name: Run the whole verter-editor-client suite
         shell: bash
         run: cargo test -p verter-editor-client
+
+      - name: Test the exported rootless Helix shipping plan
+        shell: bash
+        run: cargo test -p verter-editor-client --example helix_plan
 
       - name: Clippy
         shell: bash
@@ -141,8 +149,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          node --test scripts/editor-contracts/plan-contract.test.mjs
           root="${GITHUB_WORKSPACE}/editors/nvim/tests/fixtures/real-client"
           bin="${RUNNER_TEMP}/verter-bin/verter-lsp"
           plan="${RUNNER_TEMP}/helix-launch-plan.json"
-          cargo run --quiet -p verter-editor-client --example helix_plan -- "$root" "$bin" > "$plan"
+          cargo run --quiet -p verter-editor-client --example helix_plan -- "$bin" > "$plan"
           node scripts/editor-contracts/run-plan-smoke.mjs --plan="$plan" --root="$root"

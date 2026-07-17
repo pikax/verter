@@ -16,12 +16,19 @@ on:
     branches: [main]
     paths:
       - "editors/nvim/**"
-      - "crates/verter-editor-client/**"
+      # The real-client lane builds and exercises verter-lsp. Use the complete
+      # workspace-crate umbrella so a new/transitive server dependency cannot
+      # silently bypass this contract.
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/neovim.yml"
   pull_request:
     paths:
       - "editors/nvim/**"
-      - "crates/verter-editor-client/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/neovim.yml"
 
 jobs:

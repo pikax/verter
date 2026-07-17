@@ -28,6 +28,7 @@ fn main() {
             "editor": "lapce",
             "command": binary,
             "args": plan.args,
+            "workspaceRootTransport": "argv",
             "initializationOptions": plan.options,
             "languages": plan.selector.into_iter().map(|entry| entry.language).collect::<Vec<_>>(),
         })
