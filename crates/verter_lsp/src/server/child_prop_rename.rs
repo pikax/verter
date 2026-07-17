@@ -18,7 +18,7 @@ use crate::documents::line_index::LineIndex;
 use crate::documents::uri_to_canonical_id;
 use crate::type_provider::merge;
 
-use super::server_utils::{location_from_span, to_pascal_case};
+use super::server_utils::{attr_name_match_rank, location_from_span, to_pascal_case};
 use super::{ResolvedComponentDocument, TypeProviderContext, VerterLanguageServer};
 
 /// ALL mapped [`Location`]s of a [`GotoDefinitionResponse`] — the full candidate
@@ -296,12 +296,27 @@ impl VerterLanguageServer {
         &self,
         resolved: &ResolvedChildPropUsage,
     ) -> Option<verter_span::Span> {
-        resolved.child.analysis.macros.iter().find_map(|mac| {
-            mac.prop_fields
-                .iter()
-                .find(|field| field.name == resolved.usage.parent_prop_name)
-                .map(|field| field.span)
-        })
+        let requested = resolved.usage.parent_prop_name.as_str();
+        let mut best: Option<(u8, verter_span::Span)> = None;
+        for mac in resolved.child.analysis.macros.iter() {
+            for field in &mac.prop_fields {
+                if let Some(rank) = attr_name_match_rank(requested, &field.name) {
+                    let better = match best {
+                        None => true,
+                        Some((best_rank, best_span)) => {
+                            rank < best_rank
+                                || (rank == best_rank
+                                    && (field.span.start, field.span.end)
+                                        < (best_span.start, best_span.end))
+                        }
+                    };
+                    if better {
+                        best = Some((rank, field.span));
+                    }
+                }
+            }
+        }
+        best.map(|(_, span)| span)
     }
 
     /// Classify a rename position with respect to the cross-file `<Child prop=…>`
