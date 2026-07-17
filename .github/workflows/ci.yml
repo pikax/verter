@@ -23,6 +23,7 @@ jobs:
       playground: ${{ steps.filter.outputs.playground }}
       vscode: ${{ steps.filter.outputs.vscode }}
       dx: ${{ steps.filter.outputs.dx }}
+      editor_lsp: ${{ steps.filter.outputs.editor_lsp }}
       svelte_oracle: ${{ steps.filter.outputs.svelte_oracle }}
       svelte_conformance: ${{ steps.filter.outputs.svelte_conformance }}
       svelte_client_smokes: ${{ steps.filter.outputs.svelte_client_smokes }}
@@ -137,6 +138,34 @@ jobs:
               - 'packages/dx-harness/**'
               - 'packages/lsp-test-client/**'
               - 'scripts/dx/**'
+              - '.github/workflows/ci.yml'
+            # Dependency closure for the editor-neutral raw-LSP contract. This is
+            # intentionally broader than either the VS Code or DX-only filters:
+            # the contract drives the real compiler/LSP, provider plugin, relay,
+            # and shared typed test substrate without an editor process.
+            editor_lsp:
+              - 'crates/verter_compiler/**'
+              - 'crates/verter_parser/**'
+              - 'crates/verter_session/**'
+              - 'crates/verter_workspace/**'
+              - 'crates/verter_semantic/**'
+              - 'crates/verter_diagnostics/**'
+              - 'crates/verter_actions/**'
+              - 'crates/verter_lsp/**'
+              - 'crates/verter_relay_shim/**'
+              - 'crates/verter_span/**'
+              - 'crates/verter_tsgo_api/**'
+              - 'crates/verter_type_runtime/**'
+              - 'packages/dx-harness/**'
+              - 'packages/lsp-test-client/**'
+              - 'packages/language-shared/**'
+              - 'packages/typescript-plugin/**'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'tsconfig*.json'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
               - '.github/workflows/ci.yml'
             svelte_oracle:
               - 'scripts/gen-svelte-goldens.mjs'
@@ -603,9 +632,9 @@ jobs:
         run: pnpm --filter @verter/wasm test
 
   build-vscode-e2e:
-    name: Build VS Code E2E
+    name: Build editor integration E2E
     needs: detect-changes
-    if: needs.detect-changes.outputs.vscode == 'true'
+    if: needs.detect-changes.outputs.vscode == 'true' || needs.detect-changes.outputs.editor_lsp == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -647,6 +676,46 @@ jobs:
             packages/vue-vscode/dist/
             packages/vue-vscode/out-test/
           retention-days: 1
+
+  editor-neutral-lsp:
+    name: Editor-neutral LSP contract
+    needs: [detect-changes, build-vscode-e2e]
+    if: needs.detect-changes.outputs.editor_lsp == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Download editor integration binaries
+        uses: actions/download-artifact@v7
+        with:
+          name: vscode-e2e-native
+          path: target/debug
+      - name: Make editor integration binaries executable
+        run: chmod +x target/debug/verter-lsp target/debug/verter-relay-shim
+      - name: Download provider integration builds
+        uses: actions/download-artifact@v7
+        with:
+          name: vscode-e2e-build
+          path: packages
+      - name: Build editor-neutral contract packages
+        run: pnpm --filter "@verter/dx-harness..." build
+      - name: Run tsserver, tsgo, and real shared-tsgo contract
+        env:
+          VERTER_EDITOR_NEUTRAL_RECEIPT: ${{ runner.temp }}/verter-editor-neutral-lsp.json
+        run: pnpm --filter @verter/dx-harness test:editor-neutral-lsp
+      - name: Upload editor-neutral contract receipt
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: editor-neutral-lsp-receipt
+          path: ${{ runner.temp }}/verter-editor-neutral-lsp.json
+          if-no-files-found: error
+          retention-days: 7
 
   vscode-e2e:
     name: VS Code E2E (${{ matrix.fixture }} / ${{ matrix.type_provider }})
