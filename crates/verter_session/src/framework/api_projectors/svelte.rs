@@ -205,6 +205,30 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             });
         let component_props_text =
             render_native_component_props(&component_props_text, dispatcher_text.as_deref());
+        // Prop NAME-token map anchors apply ONLY when the props fragment that
+        // ships IS the resolved render byte-for-byte — the captured authored
+        // display takes rendering precedence and may differ in formatting, in
+        // which case anchors recorded against the resolved render would index
+        // the wrong bytes. The legacy dispatcher wrapper re-renders the
+        // fragment one byte in (`({props}) & …`). Any other shape ships NO
+        // prop mappings — unmapped is honest (the consumer remaps fail
+        // closed).
+        let (prop_name_mappings, props_fragment_base): (&[PropNameMapping], usize) =
+            match resolved_props.as_ref() {
+                Some(resolved)
+                    if !resolved.name_mappings.is_empty()
+                        && component_props_text == resolved.text =>
+                {
+                    (&resolved.name_mappings, 0)
+                }
+                Some(resolved)
+                    if !resolved.name_mappings.is_empty()
+                        && component_props_text.starts_with(&format!("({})", resolved.text)) =>
+                {
+                    (&resolved.name_mappings, 1)
+                }
+                _ => (&[], 0),
+            };
         let bindings_text = render_native_bindings(script_facts.as_deref());
 
         // 3. Build an authored-name public value. `Component<Props, Exports,
@@ -229,16 +253,33 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
                 "import(\"svelte\").Component<{component_props_text}, {exports_text}, {bindings_text}>"
             );
             out.line(&format!("declare const {component_name}: {{"));
-            out.line(&format!(
-                "  <{generics}>(...args: Parameters<{native}>): ReturnType<{native}>;"
-            ));
+            // The props fragment appears TWICE in the call signature
+            // (`Parameters<…>` and `ReturnType<…>`); both occurrences map to
+            // the same authored prop members.
+            let signature =
+                format!("  <{generics}>(...args: Parameters<{native}>): ReturnType<{native}>;");
+            let props_in_native = "import(\"svelte\").Component<".len() + props_fragment_base;
+            let first_native = format!("  <{generics}>(...args: Parameters<").len();
+            let second_native = first_native + native.len() + "): ReturnType<".len();
+            out.line_mapped(
+                &signature,
+                &[
+                    first_native + props_in_native,
+                    second_native + props_in_native,
+                ],
+                prop_name_mappings,
+            );
             out.line(&format!("  z_$$bindings?: {bindings_text};"));
             out.line("};");
         } else {
             out.line(&format!(
                 "declare const {component_name}: import(\"svelte\").Component<"
             ));
-            out.line(&format!("  {component_props_text},"));
+            out.line_mapped(
+                &format!("  {component_props_text},"),
+                &[2 + props_fragment_base],
+                prop_name_mappings,
+            );
             out.line(&format!("  {exports_text},"));
             out.line(&format!("  {bindings_text}"));
             out.line(">;");
@@ -265,10 +306,18 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             out.line(&format!("export declare const {name}: unknown;"));
         }
 
+        let (code, name_mappings) = out.finish();
+        let source_map = build_api_source_map(
+            &code,
+            &indexed.raw_source,
+            resolved_canonical,
+            &name_mappings,
+        );
+
         Some(ComponentApiProjection {
             response: TscResponse {
-                code: Arc::from(out.finish().as_str()),
-                source_map: None,
+                code: Arc::from(code.as_str()),
+                source_map,
             },
             contract: resolved_props.map(|props| ComponentPublicContract { props: props.props }),
         })
@@ -278,6 +327,26 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
 struct ResolvedPublicProps {
     text: String,
     props: Vec<ComponentPublicProp>,
+    /// Prop NAME-token map anchors: each rendered prop name's byte offset
+    /// within [`Self::text`] paired with its authored SFC-absolute byte offset
+    /// (the `$props()` annotation member / local interface member name). Only
+    /// props with a typed LOCAL origin contribute an anchor; the anchors are
+    /// valid ONLY while [`Self::text`] ships byte-identical in the carrier.
+    name_mappings: Vec<PropNameMapping>,
+}
+
+/// One prop NAME-token source-map anchor: the rendered name token's byte
+/// offset within the resolved props fragment plus the prop's authored
+/// SFC-absolute byte offset, with the name both sides must byte-match before
+/// the mapping is admitted (fail closed on any drift).
+#[derive(Debug, Clone)]
+struct PropNameMapping {
+    /// Byte offset of the rendered name token within the props fragment.
+    offset_in_fragment: usize,
+    /// Authored SFC-absolute byte offset of the prop-name token.
+    source_start: u32,
+    /// The prop name both the generated and authored tokens must spell.
+    name: String,
 }
 
 struct ResolvedPublicExports {
@@ -424,23 +493,60 @@ fn resolve_public_props_text(
             }
         })
         .collect::<Vec<_>>();
-    let fields = contract_props
+    // The authored NAME-token span per prop, from the surface's typed
+    // member-declaration origins: a prop DECLARED in the owner file (a `Local`
+    // hop — the `$props()` annotation member, or a local interface member)
+    // carries its SFC-absolute member-declaration span, which STARTS at the
+    // member name token. A prop declared in an imported module (an `Import`
+    // hop) maps to ANOTHER file — out of scope for this single-source carrier
+    // map, so it contributes NO anchor (honest unmapped, never a cross-file
+    // guess). The final assembly byte-verifies each anchor against the raw
+    // source before admitting it (fail closed on any drift).
+    let local_name_starts: std::collections::HashMap<&str, u32> = props
+        .prop_origins
         .iter()
-        .map(|field| {
+        .filter(|entry| {
+            entry.origin.declaration.canonical_source == owner
+                && matches!(
+                    entry.origin.chain.as_slice(),
+                    [crate::typeinfo::framework_surface::results::OriginHop::Local]
+                )
+        })
+        .map(|entry| {
+            (
+                entry.prop_name.as_str(),
+                entry.origin.declaration.span.start,
+            )
+        })
+        .collect();
+    let mut name_mappings: Vec<PropNameMapping> = Vec::new();
+    let mut text = String::new();
+    if contract_props.is_empty() {
+        text.push_str("{}");
+    } else {
+        text.push_str("{ ");
+        for (index, field) in contract_props.iter().enumerate() {
+            if index > 0 {
+                text.push_str("; ");
+            }
+            if let Some(&source_start) = local_name_starts.get(field.name.as_str()) {
+                name_mappings.push(PropNameMapping {
+                    offset_in_fragment: text.len(),
+                    source_start,
+                    name: field.name.clone(),
+                });
+            }
             let name = render_property_name(&field.name);
             let optional = if field.optional { "?" } else { "" };
             let ty = field.type_annotation.as_deref().unwrap_or("unknown");
-            format!("{name}{optional}: {ty}")
-        })
-        .collect::<Vec<_>>();
-    let text = if fields.is_empty() {
-        "{}".to_string()
-    } else {
-        format!("{{ {} }}", fields.join("; "))
-    };
+            text.push_str(&format!("{name}{optional}: {ty}"));
+        }
+        text.push_str(" }");
+    }
     Some(ResolvedPublicProps {
         text,
         props: contract_props,
+        name_mappings,
     })
 }
 
@@ -654,25 +760,116 @@ fn render_native_bindings(
         .join(" | ")
 }
 
+/// A prop-name anchor rebased to finished-code byte offsets, admitted into
+/// the source map only after BOTH endpoints byte-verify against the prop name.
+#[derive(Debug, Clone)]
+struct RebasedNameMapping {
+    /// Byte offset of the rendered name token in the finished code.
+    generated_offset: usize,
+    /// Authored SFC-absolute byte offset of the prop-name token.
+    source_start: u32,
+    /// The prop name both the generated and authored tokens must spell.
+    name: String,
+}
+
+/// Build the carrier's V3 source-map JSON — the same oxc_sourcemap JSON the
+/// Vue tsc projector writes (`verter_compiler::tsc::script`) and the carrier
+/// store/plugin consume uniformly: one source (the authored component, its
+/// exact bytes embedded), one token per admitted prop name.
+///
+/// An anchor is admitted ONLY when BOTH endpoints byte-match the prop name —
+/// the generated token at the recorded offset in `code` AND the authored
+/// token at the recorded SFC-absolute offset in `source`. Any drift (a
+/// shifted render, a stale span, a non-identifier key rendered quoted) drops
+/// the anchor rather than publishing a mis-map. No admitted anchors ⇒ `None`
+/// (the projection then behaves exactly as before this map existed).
+fn build_api_source_map(
+    code: &str,
+    source: &str,
+    canonical: &str,
+    mappings: &[RebasedNameMapping],
+) -> Option<Arc<str>> {
+    let admitted: Vec<verter_compiler::tsc::script::GeneratedMapping> = mappings
+        .iter()
+        .filter(|mapping| {
+            code.get(mapping.generated_offset..mapping.generated_offset + mapping.name.len())
+                == Some(mapping.name.as_str())
+                && source.get(
+                    mapping.source_start as usize
+                        ..mapping.source_start as usize + mapping.name.len(),
+                ) == Some(mapping.name.as_str())
+        })
+        .map(|mapping| verter_compiler::tsc::script::GeneratedMapping {
+            generated_offset: mapping.generated_offset,
+            source_span: verter_span::Span::new(
+                mapping.source_start,
+                mapping.source_start + mapping.name.len() as u32,
+            ),
+        })
+        .collect();
+    if admitted.is_empty() {
+        return None;
+    }
+    Some(Arc::from(
+        verter_compiler::tsc::script::build_tsc_source_map(
+            code,
+            source,
+            Some(canonical),
+            &admitted,
+        ),
+    ))
+}
+
 /// A minimal line-oriented shim builder. The api-projector renders into it with
 /// CodeTransform-style inserts (append-only line writes) — there is no
-/// post-hoc string rewrite of already-built content.
+/// post-hoc string rewrite of already-built content. Lines carrying a mapped
+/// fragment record their prop-name anchors as the line is appended, so the
+/// generated offsets are construction-exact (never a re-scan of the built
+/// text).
 #[derive(Default)]
 struct ShimBuilder {
     lines: Vec<String>,
+    /// Running byte offset of the NEXT line's start in the finished code
+    /// (each pushed line contributes its length plus the joining `\n`).
+    offset: usize,
+    /// Prop-name anchors, rebased to finished-code byte offsets.
+    mappings: Vec<RebasedNameMapping>,
 }
 
 impl ShimBuilder {
     fn line(&mut self, text: &str) {
+        self.offset += text.len() + 1;
         self.lines.push(text.to_string());
     }
     fn blank(&mut self) {
-        self.lines.push(String::new());
+        self.line("");
     }
-    fn finish(self) -> String {
+    /// Push one line carrying a mapped props fragment at EACH of
+    /// `fragment_bases_in_line` (the generics call-signature renders the props
+    /// object twice — `Parameters<…>` and `ReturnType<…>` — and both
+    /// occurrences map to the same authored member), rebasing the fragment's
+    /// prop-name anchors to finished-code byte offsets.
+    fn line_mapped(
+        &mut self,
+        text: &str,
+        fragment_bases_in_line: &[usize],
+        mappings: &[PropNameMapping],
+    ) {
+        let line_base = self.offset;
+        for &fragment_base in fragment_bases_in_line {
+            self.mappings
+                .extend(mappings.iter().map(|mapping| RebasedNameMapping {
+                    generated_offset: line_base + fragment_base + mapping.offset_in_fragment,
+                    source_start: mapping.source_start,
+                    name: mapping.name.clone(),
+                }));
+        }
+        self.line(text);
+    }
+    fn finish(self) -> (String, Vec<RebasedNameMapping>) {
         let mut s = self.lines.join("\n");
         s.push('\n');
-        s
+        (s, self.mappings)
     }
 }
 
