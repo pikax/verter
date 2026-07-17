@@ -51,6 +51,7 @@
     "integration-test": "node scripts/integration-test/run.mjs",
     "integration-test:discover": "node scripts/integration-test/run.mjs --discover-local --discover-only",
     "integration-test:local": "node scripts/integration-test/run.mjs --discover-local --local-only",
+    "compare:vize-fixtures": "node scripts/vize-fixture-compare/run.mjs",
     "docs:dev": "pnpm --filter docs dev",
     "docs:build": "pnpm --filter docs build",
     "docs:preview": "pnpm --filter docs preview",
@@ -61,7 +62,8 @@
     "profile:hotpath:full:alloc": "VERTER_PROFILE_FULL=1 cargo run -p verter_bench --example profile_ast --release --features=hotpath-alloc",
     "prepare": "husky",
     "proto:gen": "buf generate && oxfmt packages/proto/src/gen",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "compare:vue-behavior": "node scripts/vue-behavior-compare/run.mjs"
   },
   "dependencies": {
     "@vue/compiler-core": "^3.5.34",
