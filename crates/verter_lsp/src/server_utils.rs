@@ -952,6 +952,13 @@ pub(super) fn goto_response_from_locations(locations: Vec<Location>) -> GotoDefi
 }
 
 pub(super) fn event_name_match_rank(requested: &str, candidate: &str) -> Option<u8> {
+    attr_name_match_rank(requested, candidate)
+}
+
+/// Rank an authored template attribute / directive arg name against a declaration
+/// name. Exact match wins; otherwise kebab ↔ camel equivalence (Vue's HTML-case
+/// contract) ranks as a secondary hit. Used for props, events, and slots.
+pub(super) fn attr_name_match_rank(requested: &str, candidate: &str) -> Option<u8> {
     if requested == candidate {
         return Some(0);
     }
@@ -1046,6 +1053,31 @@ pub(super) fn hyphenate_event_segment(value: &str) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod attr_name_match_tests {
+    use super::*;
+
+    #[test]
+    fn attr_name_exact_rank_zero() {
+        assert_eq!(attr_name_match_rank("myProp", "myProp"), Some(0));
+        assert_eq!(attr_name_match_rank("my-prop", "my-prop"), Some(0));
+    }
+
+    #[test]
+    fn attr_name_kebab_camel_rank_one() {
+        assert_eq!(attr_name_match_rank("my-prop", "myProp"), Some(1));
+        assert_eq!(attr_name_match_rank("myProp", "my-prop"), Some(1));
+        assert_eq!(attr_name_match_rank("my-event", "myEvent"), Some(1));
+        assert_eq!(attr_name_match_rank("my-slot", "mySlot"), Some(1));
+    }
+
+    #[test]
+    fn attr_name_unrelated_misses() {
+        assert_eq!(attr_name_match_rank("title", "count"), None);
+        assert_eq!(attr_name_match_rank("my-prop", "myFlag"), None);
+    }
 }
 
 pub(super) fn push_unique_location(
