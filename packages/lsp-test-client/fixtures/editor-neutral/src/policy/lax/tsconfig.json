@@ -9,5 +9,5 @@
     "strict": false,
     "target": "ES2022"
   },
-  "include": ["vue/**/*.vue", "svelte/**/*.svelte"]
+  "include": ["plain-pointer-control.jsx", "vue/**/*.vue", "svelte/**/*.svelte"]
 }

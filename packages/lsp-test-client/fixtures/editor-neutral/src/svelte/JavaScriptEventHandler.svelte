@@ -1,7 +1,11 @@
 <script>
+  let lastPointerId = $state(0);
+
+  // @ts-expect-error unannotated JavaScript named handlers intentionally require authored JSDoc
   function myClick(e) {
-    return e.pointerId;
+    lastPointerId = e.pointerId;
   }
 </script>
 
-<button onclick={myClick}>Click</button>
+<button onpointerdown={myClick}>Click</button>
+<output>{lastPointerId}</output>

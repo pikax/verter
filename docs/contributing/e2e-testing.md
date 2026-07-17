@@ -28,25 +28,34 @@ plugin, and then executes one immutable Vue/Svelte, JavaScript/TypeScript fixtur
 
 The inventory is typed and fail-closed:
 
-- 69 standard-LSP cases cover diagnostics (including the absence of TS7026), hover, definition,
+- 71 standard-LSP cases cover diagnostics (including the absence of TS7026), hover, definition,
   completion, rename across script and markup, direct SFC imports, two-hop barrel imports, and a
   plain-TypeScript navigation control that distinguishes SFC projection defects from provider-route
   defects. A dedicated Svelte 5 case requires `let title: string = $state("x")` to remain clean when
-  interpolated as `<p>{title}</p>` on every provider route. Unannotated JavaScript and TypeScript Vue
-  and Svelte handlers referenced by DOM click bindings must infer `PointerEvent`: a valid `pointerId`
-  access is clean, hover cannot degrade to `any` or generic `Event`, and a nonexistent member must
-  produce exactly TS2339. `.jsx` and `.tsx` `HTMLElement.onclick` controls record provider behavior
-  without JSDoc, parameter annotations, or JSX-runtime shims. Both controls are compiled directly by
-  TypeScript 7 or newer, and their versions plus exact TS2339 diagnostics are recorded as authority
-  evidence separately from the standard-LSP executions. Nested authored-config rows separate strict
-  checking from lax JavaScript policy: `checkJs: false`/`strict: false` keeps the invalid member
-  diagnostic-free while hover, completion, and definition remain concretely `PointerEvent`-aware.
+  interpolated as `<p>{title}</p>` on every provider route. Unannotated TypeScript Vue `<script setup>`
+  handlers and Svelte 5 runes-mode instance handlers referenced by DOM `pointerdown` bindings must infer
+  `PointerEvent`: a valid `pointerId` access is clean, hover cannot degrade to `any` or generic
+  `Event`, and an authored `@ts-expect-error` on a nonexistent member must consume TS2339 (degrading
+  to `any` instead produces TS2578). Automatic named-handler inference is not applied to JavaScript:
+  strict unannotated JavaScript rows consume the intended TS7006 at the declaration, while typed
+  JavaScript rows carry authored `@param {PointerEvent}` JSDoc and require PointerEvent language
+  features plus a consumed invalid-member error. Strict Svelte legacy-mode controls likewise consume
+  TS7006 at the declaration; accidental back-propagated inference makes that expectation unused and
+  fails with TS2578. `.jsx` and `.tsx`
+  `HTMLElement.onpointerdown` controls record native TypeScript behavior without generated JSDoc, parameter
+  annotations, or JSX-runtime shims. Both controls are compiled directly by TypeScript 7 or newer,
+  and their versions plus exact TS2339 diagnostics are recorded as authority evidence separately from
+  the standard-LSP executions. Nested authored-config rows separate strict checking from lax
+  JavaScript policy: their authored JSDoc keeps hover, completion, and definition concretely
+  `PointerEvent`-aware, while `checkJs: false`/`strict: false` keeps the invalid member diagnostic-free.
   The strict and lax rows are run together so a generated or hidden override of `allowJs`, `checkJs`,
-  `strict`, or `noImplicitAny` cannot satisfy both policies.
+  `strict`, or `noImplicitAny` cannot satisfy both policies. TypeScript 7 also compiles the nested lax
+  project directly and records its zero-diagnostic result in the receipt, independently of Verter's
+  provider routing.
 - One Verter custom-protocol case attests the selected provider route separately from standard LSP.
 - One provider-topology case applies only to `shared-tsgo`; it requires a live editor-owned relay
   and forbids activation of a managed fallback provider.
-- The three routes produce exactly 211 required executions. A missing route, startup failure, empty
+- The three routes produce exactly 217 required executions. A missing route, startup failure, empty
   response, skipped/N/A case, or incomplete execution count fails the run.
 
 The fixture intentionally has no configured `jsxImportSource`. Public Svelte hovers must expose the

@@ -379,9 +379,9 @@ const DOM_EVENT_HANDLERS: readonly DomEventContractSpec[] = [
     document: "src/vue/JavaScriptEventHandler.vue",
     errorDocument: "src/vue/JavaScriptEventHandlerInvalid.vue",
     hoverAnchor: {
-      text: "return e.pointerId;",
+      text: "e.pointerId;",
       occurrence: 0,
-      token: "e",
+      token: "e.pointerId",
     },
   },
   {
@@ -391,9 +391,9 @@ const DOM_EVENT_HANDLERS: readonly DomEventContractSpec[] = [
     document: "src/svelte/JavaScriptEventHandler.svelte",
     errorDocument: "src/svelte/JavaScriptEventHandlerInvalid.svelte",
     hoverAnchor: {
-      text: "return e.pointerId;",
+      text: "e.pointerId;",
       occurrence: 0,
-      token: "e",
+      token: "e.pointerId",
     },
   },
   {
@@ -405,7 +405,7 @@ const DOM_EVENT_HANDLERS: readonly DomEventContractSpec[] = [
     hoverAnchor: {
       text: "return e.pointerId;",
       occurrence: 0,
-      token: "e",
+      token: "e.pointerId",
     },
   },
   {
@@ -415,9 +415,9 @@ const DOM_EVENT_HANDLERS: readonly DomEventContractSpec[] = [
     document: "src/svelte/TypeScriptEventHandler.svelte",
     errorDocument: "src/svelte/TypeScriptEventHandlerInvalid.svelte",
     hoverAnchor: {
-      text: "return e.pointerId;",
+      text: "lastPointerId = e.pointerId;",
       occurrence: 0,
-      token: "e",
+      token: "e.pointerId",
     },
   },
 ];
@@ -430,7 +430,7 @@ const LAX_DOM_EVENT_HANDLERS: readonly LaxDomEventContractSpec[] = [
     eventAnchor: {
       text: "e.pointerId;",
       occurrence: 0,
-      token: "e",
+      token: "e.pointerId",
     },
     completionAnchor: {
       text: "e.pointerId;",
@@ -446,7 +446,7 @@ const LAX_DOM_EVENT_HANDLERS: readonly LaxDomEventContractSpec[] = [
     eventAnchor: {
       text: "e.pointerId;",
       occurrence: 0,
-      token: "e",
+      token: "e.pointerId",
     },
     completionAnchor: {
       text: "e.pointerId;",
@@ -558,30 +558,55 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
       providers: ALL_PROVIDERS,
       surface: "standard-lsp" as const,
     };
-    cases.push(
-      {
-        ...base,
-        id: `${handler.id}.diagnostics.clean`,
-        feature: "diagnostics-clean",
-        document: handler.document,
-      },
-      {
-        ...base,
-        id: `${handler.id}.hover`,
-        feature: "hover",
-        document: handler.document,
-        anchor: handler.hoverAnchor,
-        requiredHoverFragments: ["PointerEvent"],
-        forbiddenHoverPatterns: [/\bany\b/i, /\bunknown\b/i],
-      },
-      {
-        ...base,
-        id: `${handler.id}.diagnostics.invalid-member`,
-        feature: "diagnostics-error",
-        document: handler.errorDocument,
-        expectedDiagnosticCode: 2339,
-      },
-    );
+    if (handler.language === "js") {
+      cases.push(
+        {
+          ...base,
+          id: `${handler.id}.diagnostics.non-inference-boundary`,
+          feature: "diagnostics-clean",
+          document: handler.document,
+        },
+        {
+          ...base,
+          id: `${handler.id}.jsdoc.hover`,
+          feature: "hover",
+          document: handler.errorDocument,
+          anchor: handler.hoverAnchor,
+          requiredHoverFragments: ["PointerEvent"],
+          forbiddenHoverPatterns: [/\bany\b/i, /\bunknown\b/i],
+        },
+        {
+          ...base,
+          id: `${handler.id}.jsdoc.diagnostics.invalid-member-consumed`,
+          feature: "diagnostics-clean",
+          document: handler.errorDocument,
+        },
+      );
+    } else {
+      cases.push(
+        {
+          ...base,
+          id: `${handler.id}.diagnostics.clean`,
+          feature: "diagnostics-clean",
+          document: handler.document,
+        },
+        {
+          ...base,
+          id: `${handler.id}.hover`,
+          feature: "hover",
+          document: handler.document,
+          anchor: handler.hoverAnchor,
+          requiredHoverFragments: ["PointerEvent"],
+          forbiddenHoverPatterns: [/\bany\b/i, /\bunknown\b/i],
+        },
+        {
+          ...base,
+          id: `${handler.id}.diagnostics.invalid-member-consumed`,
+          feature: "diagnostics-clean",
+          document: handler.errorDocument,
+        },
+      );
+    }
   }
 
   for (const handler of LAX_DOM_EVENT_HANDLERS) {
@@ -628,6 +653,27 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
 
   cases.push(
     {
+      id: "svelte-classic-js-dom-event.diagnostics.non-inference-boundary",
+      surface: "standard-lsp",
+      feature: "diagnostics-clean",
+      framework: "svelte",
+      language: "js",
+      document: "src/svelte/ClassicJavaScriptEventHandler.svelte",
+      providers: ALL_PROVIDERS,
+    },
+    {
+      id: "svelte-classic-ts-dom-event.diagnostics.non-inference-boundary",
+      surface: "standard-lsp",
+      feature: "diagnostics-clean",
+      framework: "svelte",
+      language: "ts",
+      document: "src/svelte/ClassicTypeScriptEventHandler.svelte",
+      providers: ALL_PROVIDERS,
+    },
+  );
+
+  cases.push(
+    {
       id: "svelte-ts-state-string.diagnostics.clean",
       surface: "standard-lsp",
       feature: "diagnostics-clean",
@@ -644,7 +690,7 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
       anchor: {
         text: "e.pointerId;",
         occurrence: 0,
-        token: "e",
+        token: "e.pointerId",
       },
       requiredHoverFragments: ["PointerEvent"],
       forbiddenHoverPatterns: [/\bany\b/i, /\bunknown\b/i],
@@ -666,7 +712,7 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
       anchor: {
         text: "e.pointerId;",
         occurrence: 0,
-        token: "e",
+        token: "e.pointerId",
       },
       requiredHoverFragments: ["PointerEvent"],
       forbiddenHoverPatterns: [/\bany\b/i, /\bunknown\b/i, /\bEvent\b/],
@@ -772,6 +818,11 @@ export function resolveContractAnchor(
   if (tokenStart < 0) {
     throw new Error(
       `contract anchor token ${JSON.stringify(anchor.token)} is absent from ${JSON.stringify(anchor.text)}`,
+    );
+  }
+  if (anchor.text.indexOf(anchor.token, tokenStart + anchor.token.length) >= 0) {
+    throw new Error(
+      `contract anchor token ${JSON.stringify(anchor.token)} is ambiguous in ${JSON.stringify(anchor.text)}`,
     );
   }
   const sourceOffset = contextStart + tokenStart + (anchor.offset ?? 0);

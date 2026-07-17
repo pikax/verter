@@ -1,7 +1,10 @@
 <script lang="ts">
+  let lastPointerId = $state(0);
+
   function myClick(e) {
-    return e.pointerId;
+    lastPointerId = e.pointerId;
   }
 </script>
 
-<button onclick={myClick}>Click</button>
+<button onpointerdown={myClick}>Click</button>
+<output>{lastPointerId}</output>

@@ -4,4 +4,4 @@ function myClick(e) {
 }
 </script>
 
-<template><button @click="myClick">Click</button></template>
+<template><button @pointerdown="myClick">Click</button></template>
