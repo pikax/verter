@@ -197,6 +197,8 @@ function createInfo(
     projectService: {
       logger,
       getScriptInfo: (fileName: string) => scriptInfos.get(normalize(fileName).toLowerCase()),
+      getScriptInfoForNormalizedPath: (fileName: string) =>
+        scriptInfos.get(normalize(fileName).toLowerCase()),
       getOrCreateScriptInfoForNormalizedPath: (fileName: string) => {
         const normalized = normalize(fileName);
         if (!serverHost.fileExists(normalized)) return undefined;
@@ -387,6 +389,71 @@ describe("host-proxy matrix: getScriptSnapshot", () => {
     const snap = info.languageServiceHost.getScriptSnapshot("d:/ws/src/A.vue.tsx");
     expect(snap).toBeDefined();
     expect(snap.getText(0, snap.getLength())).toBe("export const A = 1; // vue");
+  });
+
+  it("serves one source-map-stable owner-bound Vue JSX authority to every host read", () => {
+    const owner = track(mkdtempSync(join(tmpdir(), "verter-plugin-vue-jsx-owner-")));
+    const normalize = (fileName: string) => fileName.replace(/\\/g, "/");
+    const project = normalize(join(owner, "tsconfig.json"));
+    const source = normalize(join(owner, "src", "A.vue"));
+    const provider = `${source}.tsx`;
+    const vue = join(owner, "node_modules", "vue");
+    mkdirSync(join(vue, "jsx-runtime"), { recursive: true });
+    writeFileSync(
+      join(vue, "package.json"),
+      JSON.stringify({
+        name: "vue",
+        version: "3.5.40",
+        exports: { "./jsx-runtime": { types: "./jsx-runtime/index.d.ts" } },
+      }),
+      "utf8",
+    );
+    writeFileSync(
+      join(vue, "jsx-runtime", "index.d.ts"),
+      "export namespace JSX { interface Element {} interface ElementClass { $props: {} } interface ElementAttributesProperty { $props: {} } interface IntrinsicElements { div: { class?: string } } interface IntrinsicAttributes {} }\n",
+      "utf8",
+    );
+    const tail = 'const view = <div class="card">ok</div>;\n';
+    const compilerBytes = `/** @jsxImportSource vue */\n${tail}`;
+    const manifest: Manifest = {
+      epoch: 1,
+      host_version: "test",
+      projects: {
+        [project]: {
+          owned_sources: [
+            {
+              source_uri: source,
+              provider_uri: provider,
+              role: "CarrierIde",
+              script_kind: "TSX",
+            },
+          ],
+          ready_files: {
+            [provider]: {
+              content_hash: "vue-jsx",
+              version: 1,
+              script_kind: "TSX",
+              role: "CarrierIde",
+              map_hash: "map",
+              blob_rel: "blobs/A.vue.tsx",
+            },
+          },
+        },
+      },
+    };
+    const dir = track(writeStore(manifest, { "blobs/A.vue.tsx": compilerBytes }));
+    const info = createInfo(dir, { diskFiles: {} }, project);
+    init({ typescript: ts } as any).create(info);
+
+    const snapshot = info.languageServiceHost.getScriptSnapshot(provider);
+    const snapshotText = snapshot.getText(0, snapshot.getLength());
+    const serverText = info.serverHost.readFile(provider);
+
+    expect(snapshotText).toBe(serverText);
+    expect(snapshotText).toMatch(/^\/\*\* @jsxRuntime classic \*\//u);
+    expect(snapshotText).not.toContain("@jsxImportSource vue");
+    expect(snapshotText.split("\n").slice(1).join("\n")).toBe(tail);
+    expect(snapshotText.split("\n")).toHaveLength(compilerBytes.split("\n").length);
   });
 
   it("serves the ready Svelte companion blob", () => {
@@ -722,11 +789,37 @@ describe("getExternalFiles = ready framework source identities only", () => {
       }),
     );
     const info = createInfo(dir, { diskFiles: {} });
-    info.project.getFileNames = () => ["D:\\ws\\src\\A.vue"];
+    info.project.getRootFiles = () => ["D:\\ws\\src\\A.vue"];
     const plugin = init({ typescript: ts } as any);
     plugin.create(info);
 
     expect(plugin.getExternalFiles!(info.project, 0 as any)).toEqual(["d:/ws/src/W.svelte"]);
+  });
+
+  // @ai-generated - Plugin externals become Program files after the first graph
+  // build; that must not make the next getExternalFiles call retract them.
+  it("keeps non-root carrier externals stable across repeated project graph reads", () => {
+    const dir = track(
+      writeStore(vueAndSvelteManifest(), {
+        "blobs/A.vue.tsx": "export const A = 1;",
+        "blobs/W.svelte.tsx": "export const W = 1;",
+      }),
+    );
+    const info = createInfo(dir, { diskFiles: {} });
+    let graphRoots: string[] = [];
+    info.project.getRootFiles = () => graphRoots;
+    const plugin = init({ typescript: ts } as any);
+    plugin.create(info);
+
+    const first = plugin.getExternalFiles!(info.project, 0 as any).sort();
+    graphRoots = [...first];
+    const second = plugin.getExternalFiles!(info.project, 0 as any).sort();
+    graphRoots = [...second];
+    const third = plugin.getExternalFiles!(info.project, 0 as any).sort();
+
+    expect(first).toEqual(["d:/ws/src/A.vue", "d:/ws/src/W.svelte"]);
+    expect(second).toEqual(first);
+    expect(third).toEqual(first);
   });
 
   it("advertises only distinct companion roots when the editor owns source membership", () => {
@@ -1404,6 +1497,175 @@ function mappableBlobs(): Record<string, string> {
 }
 
 describe("editor-owned source diagnostic routing", () => {
+  // @ai-generated - The protocol serializer can format a non-editor carrier's
+  // semantic response under its configured companion request identity, while a
+  // direct suggestion command cannot. Bind the two language-service passes here
+  // and retain one diagnostic object for an overlap rather than double-publishing.
+  it("merges non-editor carrier suggestions into the semantic response without duplication", () => {
+    const dir = track(writeStore(mappableManifest(), mappableBlobs()));
+    const sourcePath = "d:/ws/src/A.vue";
+    const generatedSourceFile = ts.createSourceFile(
+      sourcePath,
+      mappableBlobs()["blobs/A.vue.tsx"],
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    const semantic: ts.Diagnostic = {
+      file: generatedSourceFile,
+      start: 0,
+      length: 5,
+      category: ts.DiagnosticCategory.Error,
+      code: 2322,
+      messageText: "Type 'number' is not assignable to type 'string'.",
+    };
+    const suggestion: ts.DiagnosticWithLocation = {
+      file: generatedSourceFile,
+      start: 6,
+      length: 3,
+      category: ts.DiagnosticCategory.Suggestion,
+      code: 6133,
+      reportsUnnecessary: true,
+      messageText: "'foo' is declared but its value is never read.",
+    };
+    let suggestionQueries = 0;
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: "const foo = 1;\n" } });
+    info.languageService.__lsImpl = {
+      getSemanticDiagnostics: () => [semantic],
+      getSuggestionDiagnostics: () => {
+        suggestionQueries += 1;
+        return [suggestion, semantic as ts.DiagnosticWithLocation];
+      },
+    };
+
+    init({ typescript: ts } as any).create(info);
+    const diagnostics = info.languageService.getSemanticDiagnostics(sourcePath);
+
+    expect(suggestionQueries).toBe(1);
+    expect(diagnostics).toEqual([semantic, suggestion]);
+    expect(diagnostics[1]).toMatchObject({
+      category: ts.DiagnosticCategory.Suggestion,
+      code: 6133,
+      reportsUnnecessary: true,
+      start: 6,
+      length: 3,
+    });
+  });
+
+  // @ai-generated - Svelte uses the same framework-neutral carrier-source
+  // diagnostic contract; the router must not rely on a Vue-only extension test.
+  it("merges non-editor Svelte suggestions into the semantic response", () => {
+    const dir = track(writeStore(mappableManifest(), mappableBlobs()));
+    const sourcePath = "d:/ws/src/W.svelte";
+    const generatedSourceFile = ts.createSourceFile(
+      sourcePath,
+      mappableBlobs()["blobs/W.svelte.tsx"],
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    const suggestion: ts.DiagnosticWithLocation = {
+      file: generatedSourceFile,
+      start: 6,
+      length: 3,
+      category: ts.DiagnosticCategory.Suggestion,
+      code: 6133,
+      reportsUnnecessary: true,
+      messageText: "'bar' is declared but its value is never read.",
+    };
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: "const bar = 1;\n" } });
+    info.languageService.__lsImpl = {
+      getSemanticDiagnostics: () => [],
+      getSuggestionDiagnostics: () => [suggestion],
+    };
+
+    init({ typescript: ts } as any).create(info);
+
+    expect(info.languageService.getSemanticDiagnostics(sourcePath)).toEqual([suggestion]);
+  });
+
+  // @ai-generated - Ordinary TypeScript remains a direct LanguageService
+  // passthrough; carrier-specific suggestion folding must not broaden globally.
+  it("does not supplement a non-carrier semantic diagnostic response", () => {
+    const dir = track(writeStore(mappableManifest(), mappableBlobs()));
+    const fileName = "d:/ws/src/plain.ts";
+    const sourceFile = ts.createSourceFile(
+      fileName,
+      "const value: string = 1;\n",
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const semantic: ts.DiagnosticWithLocation = {
+      file: sourceFile,
+      start: 6,
+      length: 5,
+      category: ts.DiagnosticCategory.Error,
+      code: 2322,
+      messageText: "Type 'number' is not assignable to type 'string'.",
+    };
+    let suggestionQueries = 0;
+    const info = createInfo(dir, { diskFiles: { [fileName]: sourceFile.text } });
+    info.languageService.__lsImpl = {
+      getSemanticDiagnostics: () => [semantic],
+      getSuggestionDiagnostics: () => {
+        suggestionQueries += 1;
+        return [];
+      },
+    };
+
+    init({ typescript: ts } as any).create(info);
+
+    expect(info.languageService.getSemanticDiagnostics(fileName)).toEqual([semantic]);
+    expect(suggestionQueries).toBe(0);
+  });
+
+  // @ai-generated - Proves the non-editor tsserver backend diagnoses the configured
+  // carrier source identity whose snapshot is the plugin-served generated program.
+  it("passes non-editor carrier-source diagnostics through to the configured Program identity", () => {
+    const dir = track(writeStore(mappableManifest(), mappableBlobs()));
+    const sourcePath = "d:/ws/src/A.vue";
+    const sourceText = "const foo = 1;\n";
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
+    const generatedSourceFile = ts.createSourceFile(
+      sourcePath,
+      mappableBlobs()["blobs/A.vue.tsx"],
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    let requestedFile: string | undefined;
+    info.languageService.__lsImpl = {
+      getSuggestionDiagnostics: (fileName: string) => {
+        requestedFile = fileName;
+        return [
+          {
+            file: generatedSourceFile,
+            start: 6,
+            length: 3,
+            category: ts.DiagnosticCategory.Suggestion,
+            code: 6133,
+            reportsUnnecessary: true,
+            messageText: "'foo' is declared but its value is never read.",
+          },
+        ];
+      },
+    };
+
+    init({ typescript: ts } as any).create(info);
+    const diagnostics = info.languageService.getSuggestionDiagnostics(sourcePath);
+
+    expect(requestedFile).toBe(sourcePath);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({
+      file: generatedSourceFile,
+      start: 6,
+      length: 3,
+      code: 6133,
+      reportsUnnecessary: true,
+    });
+  });
+
   it("queries the ready companion and maps its diagnostic onto the source file", () => {
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
     const sourcePath = "d:/ws/src/A.vue";

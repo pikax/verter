@@ -128,3 +128,9 @@ export declare function checkRequiredSlots<T>(
   slots: T,
   provided: { [K in keyof T as undefined extends T[K] ? never : K]: true },
 ): void;
+
+declare module "vue/jsx-runtime" {
+  namespace JSX {
+    interface ElementChildrenAttribute {}
+  }
+}

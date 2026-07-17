@@ -1,6 +1,9 @@
 /**
  * Svelte daily IDE surface: script ↔ markup, child props, basic diagnostics.
  */
+import { strict as assert } from "node:assert";
+import * as vscode from "vscode";
+
 import { FIXTURE_NAME } from "../../../helpers";
 import {
   assertCleanErrors,
@@ -11,6 +14,8 @@ import {
   assertReferenceCountAtLeast,
   ensureParityReady,
   failParityGap,
+  openRelative,
+  settledDiagnostics,
   type TokenAnchor,
 } from "../../../lib/parityHarness";
 
@@ -30,6 +35,54 @@ suite(`Svelte daily surface [${FIXTURE_NAME}]`, function () {
     onlySvelteParity(this);
     await assertCleanErrors("src/DailyBinding.svelte");
     await assertCleanErrors("src/JsDaily.svelte");
+
+    // @ai-generated - Proves public unused diagnostics discriminate authored
+    // script-only bindings from bindings consumed by Svelte markup projection.
+    const relative = "src/diagnostics/UnusedBindings.svelte";
+    const doc = await openRelative(relative);
+    const diagnostics = await settledDiagnostics(relative);
+    const errors = diagnostics.filter(
+      (diagnostic) => diagnostic.severity === vscode.DiagnosticSeverity.Error,
+    );
+    assert.deepEqual(
+      errors.map(
+        (diagnostic) =>
+          `${diagnostic.source ?? "unknown"}:${String(diagnostic.code)}:${diagnostic.message}`,
+      ),
+      [],
+      `${relative} must remain error-clean while carrying its expected unused hint`,
+    );
+
+    const unused = diagnostics.filter((diagnostic) => {
+      const code =
+        typeof diagnostic.code === "object" && diagnostic.code && "value" in diagnostic.code
+          ? String(diagnostic.code.value)
+          : String(diagnostic.code ?? "");
+      return code === "6133";
+    });
+    assert.equal(
+      unused.length,
+      1,
+      `expected exactly one genuinely unused binding; got ${unused
+        .map((diagnostic) => `${String(diagnostic.code)}:${diagnostic.message}`)
+        .join(" | ")}`,
+    );
+    assert.equal(
+      doc.getText(unused[0].range),
+      "trulyUnused",
+      "the unused diagnostic must map exactly to the authored script identifier",
+    );
+    assert.ok(
+      unused[0].tags?.includes(vscode.DiagnosticTag.Unnecessary),
+      "the unused diagnostic must retain TypeScript's Unnecessary tag",
+    );
+
+    for (const liveBinding of ["templateOnly", "styleDirectiveOnly"]) {
+      assert.ok(
+        unused.every((diagnostic) => doc.getText(diagnostic.range) !== liveBinding),
+        `${liveBinding} is live through Svelte markup projection and must not be reported unused`,
+      );
+    }
   });
 
   test("svelte.definition.markup-to-script", async function () {

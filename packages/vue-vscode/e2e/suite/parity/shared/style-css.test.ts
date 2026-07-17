@@ -3,6 +3,7 @@
  */
 import { FIXTURE_NAME } from "../../../helpers";
 import {
+  assertCleanErrors,
   assertDefinitionTargetsToken,
   assertHoverNeedles,
   assertReferenceCountAtLeast,
@@ -36,6 +37,10 @@ suite(`Style/CSS [${FIXTURE_NAME}]`, function () {
     if (!fw) throw new Error("TEST_DEFECT: parity suite loaded for an inapplicable fixture");
     const file = fw === "vue" ? "src/features/ScopedStyle.vue" : "src/features/ScopedStyle.svelte";
     try {
+      // A valid class-bearing component must remain semantically clean while
+      // style navigation is active. This catches a provider selecting React's
+      // `className` JSX surface while the navigation assertion itself passes.
+      await assertCleanErrors(file);
       // From style `.card-title` selector toward template class usage.
       const locations = await definitionsAt({ file, token: "card-title", occurrence: 1 });
       const sameFile = locations.some((l) =>
@@ -179,6 +184,7 @@ suite(`Style/CSS [${FIXTURE_NAME}]`, function () {
       if (!text.includes(":global") && fw === "vue" && !text.includes("scoped")) {
         throw new Error("TEST_DEFECT: Vue GlobalStyle needs scoped + :global");
       }
+      await assertCleanErrors(file);
       await assertHoverNeedles({ file, token: "local-only", occurrence: 0 }, ["local-only"]);
     } catch (err) {
       failParityGap(

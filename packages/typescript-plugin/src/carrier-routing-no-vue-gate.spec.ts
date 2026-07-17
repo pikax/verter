@@ -39,7 +39,13 @@ const SRC_ROOT = join(__dirname);
  * virtual-suffix regexes) and the byte-pinned naming-column mirror live in
  * `@verter/language-shared`, outside this package's scan root.
  */
-const ALLOWLISTED_FILES = new Set<string>(["helpers/verterTypesStub.ts"]);
+const ALLOWLISTED_FILES = new Set<string>([
+  "helpers/verterTypesStub.ts",
+  // Framework-intrinsic owner validation and official runtime resolution, not
+  // carrier routing. Behavioral tests prove it only rewrites the compiler's
+  // Vue JSX prelude and leaves every other framework carrier untouched.
+  "helpers/vueJsxAuthority.ts",
+]);
 
 /** Whether a `src`-relative POSIX path is excluded from the scan. */
 function isExcludedFile(relPosix: string): boolean {

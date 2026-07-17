@@ -1243,12 +1243,17 @@ impl TypeProvider for TsgoCompositeProvider {
 
     fn register_carrier_member(
         &self,
+        source_path: &str,
         companion_path: &str,
         content: &str,
         project_file_name: &str,
     ) -> ProviderFuture<'_, ()> {
-        self.managed
-            .register_carrier_member(companion_path, content, project_file_name)
+        self.managed.register_carrier_member(
+            source_path,
+            companion_path,
+            content,
+            project_file_name,
+        )
     }
 
     fn resync_open_files(&self) -> ProviderFuture<'_, ()> {

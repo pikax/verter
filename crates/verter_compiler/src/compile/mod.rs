@@ -1204,6 +1204,12 @@ fn compile_inner(
         // One CT → one source map → template diagnostics map correctly.
         let tsx_alloc = Allocator::new();
         let mut tsx_ct = CodeTransform::new(input, &tsx_alloc);
+        // The per-file official Vue JSX authority must lead every TSX/JSX
+        // carrier, including carriers whose first authored script declaration
+        // maps to generated line/column zero. Put it in CodeTransform's
+        // unmapped intro so source-map generation shifts authored mappings
+        // structurally instead of a provider mutating mapped bytes later.
+        tsx_ct.prepend(ide::VUE_JSX_PRAGMA);
 
         // Compute template end position (byte offset after </template> close tag)
         let template_end: Option<u32> = template_ast_opt.map(|tpl| {

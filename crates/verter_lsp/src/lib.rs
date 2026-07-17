@@ -27,6 +27,7 @@ pub mod tsgo;
 pub mod tsserver;
 pub mod type_provider;
 pub mod utils;
+pub mod vue_assets;
 pub mod workspace_scanner;
 pub mod workspace_state;
 

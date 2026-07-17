@@ -89,16 +89,13 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
       timeoutMs: 30_000,
       stableMs: 1_000,
     });
-    const jsxEnvironmentErrors = diagnostics.filter(
-      (diagnostic) =>
-        diagnosticCode(diagnostic) === "7026" ||
-        diagnostic.message.includes("JSX element implicitly has type 'any'") ||
-        diagnostic.message.includes("JSX.IntrinsicElements"),
+    const errors = diagnostics.filter(
+      (diagnostic) => diagnostic.severity === vscode.DiagnosticSeverity.Error,
     );
 
     expect(
-      jsxEnvironmentErrors,
-      `valid Vue template must not report a missing JSX environment (${TYPE_PROVIDER}): ${JSON.stringify(
+      errors,
+      `valid Vue template must be error-clean under the production JSX environment (${TYPE_PROVIDER}): ${JSON.stringify(
         diagnostics.map((diagnostic) => ({
           code: diagnostic.code,
           source: diagnostic.source,

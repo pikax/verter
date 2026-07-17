@@ -37,6 +37,15 @@ pub mod script;
 pub mod script_recover;
 pub mod template;
 
+/// Per-file JSX type authority for every generated Vue IDE carrier.
+///
+/// The carrier may be opened by an inferred/editor-owned TypeScript project
+/// whose ambient JSX namespace belongs to another framework. Keeping this
+/// pragma in the compiler-owned unmapped intro makes Vue's official
+/// `vue/jsx-runtime` authoritative without mutating the user's tsconfig and
+/// gives managed providers a stable one-line specialization boundary.
+pub const VUE_JSX_PRAGMA: &str = "/** @jsxImportSource vue */\n";
+
 /// The reserved public-API carrier virtual-file suffix (`.verter.ts`).
 ///
 /// A component's PUBLIC type lives in the REDIRECT-reached public-API carrier

@@ -7,7 +7,7 @@
     "jsx": "preserve",
     "skipLibCheck": true,
     "noEmit": true,
-    "types": ["vue/jsx"],
+    "types": ["react"],
     "paths": {
       "@/*": ["./src/*"]
     },

@@ -18,9 +18,253 @@
 //! the binary IS present the assertions are fail-closed (no vacuous skip past a
 //! materialized provider).
 
+use tower_lsp_server::ls_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, NumberOrString};
 use verter_type_runtime::protocol::TypeDiagnosticSeverity;
 
 use crate::test_harness::{real_provider_test, RealProviderTestSession};
+
+fn lsp_diagnostic_code(diagnostic: &Diagnostic) -> Option<String> {
+    diagnostic.code.as_ref().map(|code| match code {
+        NumberOrString::Number(value) => value.to_string(),
+        NumberOrString::String(value) => value.clone(),
+    })
+}
+
+fn assert_framework_file_has_no_error_diagnostics(label: &str, diagnostics: &[Diagnostic]) {
+    let errors = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Some(DiagnosticSeverity::ERROR))
+        .map(|diagnostic| {
+            format!(
+                "{}:{}",
+                lsp_diagnostic_code(diagnostic).unwrap_or_default(),
+                diagnostic.message
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        errors.is_empty(),
+        "valid {label} must be error-clean through the public merged diagnostic path; got {errors:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Vue's carrier-owned JSX environment must win over inferred ambient React.
+// ---------------------------------------------------------------------------
+
+real_provider_test!(
+    diagnostics_vue_class_uses_official_jsx_without_tsconfig_override,
+    fixture = "vue-parity",
+    async fn run(session) {
+        // The fixture intentionally has `jsx: preserve` and NO
+        // `jsxImportSource`. The generated provider carrier must select Vue's
+        // official JSX runtime per file; changing this valid `class` to React's
+        // `className` would hide the exact production regression this pins.
+        let ts_uri = session
+            .open_fixture_file("src/diagnostics/JsxEnvironmentTs.vue")
+            .await;
+        let js_uri = session
+            .open_fixture_file("src/diagnostics/JsxEnvironmentJs.vue")
+            .await;
+
+        assert!(
+            session
+                .wait_until_ready(&ts_uri, "{{ doubled }}", 4, "doubled")
+                .await,
+            "the TypeScript Vue carrier must materialize a typed template program before an empty diagnostic set can be accepted"
+        );
+        assert!(
+            session
+                .wait_until_ready(&js_uri, "{{ doubled }}", 4, "doubled")
+                .await,
+            "the JavaScript Vue carrier must materialize a typed template program before an empty diagnostic set can be accepted"
+        );
+
+        let ts_diagnostics = session.merged_diagnostics(&ts_uri).await;
+        let js_diagnostics = session.merged_diagnostics(&js_uri).await;
+        assert_framework_file_has_no_error_diagnostics("TypeScript Vue SFC", &ts_diagnostics);
+        assert_framework_file_has_no_error_diagnostics("JavaScript Vue SFC", &js_diagnostics);
+    }
+);
+
+// ---------------------------------------------------------------------------
+// Slot-content isolation must retain component prop checking.
+// ---------------------------------------------------------------------------
+
+real_provider_test!(
+    diagnostics_vue_invalid_component_prop_remains_type_checked,
+    fixture = "vue-parity",
+    async fn run(session) {
+        // Materialize the imported child carrier first. The real provider test
+        // bypasses the workspace scanner, so an unopened framework dependency
+        // is intentionally not fabricated by the harness.
+        let child_uri = session
+            .open_fixture_file("src/diagnostics/BadPropChild.vue")
+            .await;
+        session.ensure_synced(&child_uri).await;
+        let uri = session
+            .open_fixture_file("src/diagnostics/BadPropParent.vue")
+            .await;
+
+        // This positive control prevents the clean JSX-environment assertion
+        // above from passing through a suppressed or disconnected diagnostic
+        // channel. The child component requires `count: number`, while the
+        // parent deliberately supplies a string.
+        let diagnostics = session.merged_diagnostics(&uri).await;
+        let assignability = diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.severity == Some(DiagnosticSeverity::ERROR)
+                    && lsp_diagnostic_code(diagnostic).as_deref() == Some("2322")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            assignability.len(),
+            1,
+            "the deliberately invalid component prop must produce exactly one mapped assignability error; got {diagnostics:?}"
+        );
+
+        let prop_start = session.find_position(&uri, ":count", 0);
+        let prop_end = session.find_position(
+            &uri,
+            ":count=\"'not-a-number'\"",
+            ":count=\"'not-a-number'\"".len(),
+        );
+        assert!(
+            assignability[0].range.start < prop_end
+                && assignability[0].range.end > prop_start,
+            "the component prop error must map onto the authored `:count` binding; got {:?}",
+            assignability[0].range
+        );
+    }
+);
+
+// ---------------------------------------------------------------------------
+// Authored-script unused diagnostics must survive the carrier source map.
+// ---------------------------------------------------------------------------
+
+real_provider_test!(
+    diagnostics_vue_unused_script_binding_excludes_template_and_css_uses,
+    fixture = "vue-parity",
+    async fn run(session) {
+        let uri = session
+            .open_fixture_file("src/diagnostics/UnusedBindings.vue")
+            .await;
+
+        assert!(
+            session
+                .wait_until_ready(&uri, "templateOnly\"", 4, "templateOnly")
+                .await,
+            "the Vue carrier must materialize its typed template program before diagnostics are asserted"
+        );
+
+        session.ensure_synced(&uri).await;
+        let provider_path = session
+            .provider_sync_state(&uri)
+            .and_then(|state| state.ide_path)
+            .expect("a ready Vue carrier must have a committed IDE provider path");
+        let provider_diagnostics = diagnostics_until_nonempty(session, &provider_path).await;
+        let diagnostics = session.merged_diagnostics(&uri).await;
+        assert_framework_file_has_no_error_diagnostics(
+            "Vue SFC with script-, template-, and CSS-owned bindings",
+            &diagnostics,
+        );
+
+        let unused = diagnostics
+            .iter()
+            .filter(|diagnostic| lsp_diagnostic_code(diagnostic).as_deref() == Some("6133"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            unused.len(),
+            1,
+            "exactly the authored script-only binding must be reported unused; public={diagnostics:?}; provider={provider_diagnostics:?}"
+        );
+
+        let expected_start = session.find_position(&uri, "trulyUnused", 0);
+        let expected_end = session.find_position(&uri, "trulyUnused", "trulyUnused".len());
+        assert_eq!(
+            unused[0].range.start, expected_start,
+            "the unused diagnostic must start at the authored identifier"
+        );
+        assert_eq!(
+            unused[0].range.end, expected_end,
+            "the unused diagnostic must end at the authored identifier"
+        );
+        assert!(
+            unused[0]
+                .tags
+                .as_ref()
+                .is_some_and(|tags| tags.contains(&DiagnosticTag::UNNECESSARY)),
+            "the unused diagnostic must retain TypeScript's Unnecessary tag; got {:?}",
+            unused[0].tags
+        );
+
+        for live_binding in ["templateOnly", "cssOnly"] {
+            let live_start = session.find_position(&uri, live_binding, 0);
+            assert!(
+                unused.iter().all(|diagnostic| {
+                    diagnostic.range.end <= live_start || diagnostic.range.start > live_start
+                }),
+                "`{live_binding}` is live through the carrier projection and must not be reported unused; got {diagnostics:?}"
+            );
+        }
+    }
+);
+
+real_provider_test!(
+    diagnostics_svelte_unused_script_binding_excludes_markup_and_style_directive_uses,
+    fixture = "svelte-parity",
+    async fn run(session) {
+        let uri = session
+            .open_fixture_file("src/diagnostics/UnusedBindings.svelte")
+            .await;
+        session.ensure_synced(&uri).await;
+
+        let provider_path = session
+            .provider_sync_state(&uri)
+            .and_then(|state| state.ide_path)
+            .expect("a synced Svelte carrier must have a committed IDE provider path");
+        let provider_diagnostics = diagnostics_until_nonempty(session, &provider_path).await;
+        let diagnostics = session.merged_diagnostics(&uri).await;
+        assert_framework_file_has_no_error_diagnostics(
+            "Svelte SFC with script-, markup-, and style-directive-owned bindings",
+            &diagnostics,
+        );
+
+        let unused = diagnostics
+            .iter()
+            .filter(|diagnostic| lsp_diagnostic_code(diagnostic).as_deref() == Some("6133"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            unused.len(),
+            1,
+            "exactly the authored Svelte script-only binding must be reported unused; public={diagnostics:?}; provider={provider_diagnostics:?}"
+        );
+
+        let expected_start = session.find_position(&uri, "trulyUnused", 0);
+        let expected_end = session.find_position(&uri, "trulyUnused", "trulyUnused".len());
+        assert_eq!(unused[0].range.start, expected_start);
+        assert_eq!(unused[0].range.end, expected_end);
+        assert!(
+            unused[0]
+                .tags
+                .as_ref()
+                .is_some_and(|tags| tags.contains(&DiagnosticTag::UNNECESSARY)),
+            "the Svelte unused diagnostic must retain TypeScript's Unnecessary tag; got {:?}",
+            unused[0].tags
+        );
+
+        for live_binding in ["templateOnly", "styleDirectiveOnly"] {
+            let live_start = session.find_position(&uri, live_binding, 0);
+            assert!(
+                unused.iter().all(|diagnostic| {
+                    diagnostic.range.end <= live_start || diagnostic.range.start > live_start
+                }),
+                "`{live_binding}` is live through the Svelte markup projection and must not be reported unused; got {diagnostics:?}"
+            );
+        }
+    }
+);
 
 /// Pull diagnostics for an open provider file, retrying briefly while the
 /// inferred project warms up (a cold tsserver/TSGO project can return an empty

@@ -27,19 +27,19 @@ pub mod von;
 use oxc_allocator::Allocator;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use verter_span::SourceByteOffset;
+use verter_span::{SourceByteOffset, SourceByteRange};
 
 use crate::ast::types::{
     AstNodeKind, CommentNode, ConditionalChain, ElementNode, ElementNodeConditionKind,
     InterpolationNode, TagType, TextNode,
 };
 use crate::ide::condition::{self, ConditionScope};
-use crate::ide::template::emit::emit_synthesized_shorthand_value;
+use crate::ide::template::emit::{emit_op, emit_synthesized_shorthand_value, EmitOp, EmitText};
 use crate::template::code_gen::binding::{BindingResolver, BindingType};
 use crate::template::code_gen::expression::{
     build_prefixed_expr_segments, resolve_simple_expr_segments,
 };
-use crate::template::code_gen::types::CodeGenOutput;
+use crate::template::code_gen::types::{CodeGenOutput, MappedGeneratedText};
 use crate::template::oxc::types::{
     ComponentSlotSummary, OxcNodeData, OxcParsedAst, OxcParsedElement, SlotChildFact, SlotChildKind,
 };
@@ -365,6 +365,11 @@ fn walk_element<'a, 'alloc>(
     // Handle the element tag itself
     let tag_name = &ctx.source[(el.tag_open.start + 1) as usize..el.tag_open.name_end as usize];
 
+    // Track the actual JSX tag name. Dynamic/static `<component :is>` rewrites
+    // both authored tag names, so the empty typed pair emitted for Vue slot
+    // isolation must close the rewritten name rather than literal `component`.
+    let mut emitted_tag_name = tag_name;
+
     // Track whether dynamic <component :is> needs IIFE closing after element
     let mut needs_component_is_iife_close = false;
 
@@ -373,8 +378,8 @@ fn walk_element<'a, 'alloc>(
         TagType::Component => {
             // Handle `<component is="...">` / `<component :is="...">`.
             // Dynamic `:is` wraps the element in an IIFE — needs closing after element end.
-            if tag_name == "component"
-                && rewrite_component_is(
+            if tag_name == "component" {
+                if let Some(rewrite) = rewrite_component_is(
                     el,
                     oxc_el,
                     ctx.source,
@@ -382,9 +387,10 @@ fn walk_element<'a, 'alloc>(
                     ctx.resolver,
                     &ctx.ts_directives_for_component_is,
                     emit_ctx,
-                )
-            {
-                needs_component_is_iife_close = true;
+                ) {
+                    emitted_tag_name = rewrite.tag_name;
+                    needs_component_is_iife_close = rewrite.needs_iife_close;
+                }
             }
         }
         TagType::Template => {
@@ -610,6 +616,14 @@ fn walk_element<'a, 'alloc>(
         }
     }
 
+    // Vue element bodies are slot/template content, not a React-style
+    // `children` prop. Keep an empty, fully typed JSX pair for tag/prop checking
+    // and navigation, then place the authored body beside it in a fragment. This
+    // prevents an ambient React `ElementChildrenAttribute` from injecting a
+    // synthetic `children` attribute into Vue's JSX contract under
+    // `jsx: preserve` while retaining every authored child expression.
+    let has_isolated_slot_body = isolate_vue_slot_body(el, emitted_tag_name, ctx.out);
+
     // ── v-slot scoped parameter IIFE wrapping ────────────────────────
     // When v-slot has parameters (e.g., `v-slot="{ slotItem }"`), wrap children
     // in an IIFE that types the slot params via extractArgumentsFromRenderSlot.
@@ -622,7 +636,15 @@ fn walk_element<'a, 'alloc>(
     let slot_iife_info = build_slot_iife_info(id, el, ctx.source, ctx.ast);
     if let Some(ref slot_info) = slot_iife_info {
         // Emit slot IIFE opening: {((params) => (<>
-        ctx.out.prepend_alloc(el.tag_open.end, &slot_info.open_text);
+        if has_isolated_slot_body {
+            // The generated mapped `</Tag>` sits at the same anchor. Keep both
+            // emissions in the ordered prepend channel so the empty pair closes
+            // before the slot IIFE begins.
+            ctx.out
+                .prepend_ordered_unmapped(el.tag_open.end - 1, &slot_info.open_text);
+        } else {
+            ctx.out.prepend_alloc(el.tag_open.end, &slot_info.open_text);
+        }
     }
 
     // Walk children — children inherit the condition scopes from this element
@@ -658,6 +680,20 @@ fn walk_element<'a, 'alloc>(
             .map(|tc| tc.start)
             .unwrap_or(el.tag_open.end);
         ctx.out.prepend_alloc(close_pos, &slot_info.close_text);
+    }
+
+    if has_isolated_slot_body {
+        let tag_close = el
+            .tag_close
+            .as_ref()
+            .expect("isolated Vue slot bodies always have an authored closing tag");
+        emit_op(
+            ctx.out,
+            &EmitOp::InsertUnmapped {
+                at: SourceByteOffset(tag_close.start),
+                text: EmitText::Static("</>"),
+            },
+        );
     }
 
     // Fix closing tag case mismatch: Vue is case-insensitive for closing tags
@@ -709,6 +745,102 @@ fn walk_element<'a, 'alloc>(
             chain_mode == ChainMode::LiftedBranch,
         );
     }
+}
+
+/// Isolate an authored Vue element body from JSX's framework-specific
+/// `ElementChildrenAttribute` contract.
+///
+/// A paired element with body content becomes one JSX fragment whose first
+/// child is an empty typed pair and whose remaining children are the original
+/// Vue body:
+///
+/// ```text
+/// <Panel prop="x">body</Panel>
+/// <><Panel prop="x"></Panel>body</>
+/// ```
+///
+/// The opening name remains original source. The generated empty-pair closing
+/// name is mapped to the authored closing-name span so hover/definition/rename
+/// continue to work from either tag. All fragment punctuation is unmapped.
+fn isolate_vue_slot_body(
+    el: &ElementNode,
+    emitted_tag_name: &str,
+    out: &mut CodeGenOutput<'_>,
+) -> bool {
+    if matches!(el.tag_type, TagType::Template | TagType::SlotOutlet)
+        || el
+            .content
+            .as_ref()
+            .is_none_or(|content| content.children.is_empty())
+    {
+        return false;
+    }
+
+    let Some(tag_close) = &el.tag_close else {
+        // An incomplete/unclosed element already carries a parser diagnostic.
+        // Do not invent a closing-source anchor that does not exist.
+        return false;
+    };
+
+    // Delete the authored `<` and put `<><` immediately before the preserved
+    // opening name. Anchoring at `start + 1` keeps existing v-if/v-for/dynamic
+    // component wrappers (inserted at `start`) outside the new fragment.
+    emit_op(
+        out,
+        &EmitOp::OverwriteSyntheticBoundary {
+            source: SourceByteRange::new(
+                SourceByteOffset(el.tag_open.start),
+                SourceByteOffset(el.tag_open.start + 1),
+            ),
+            text: EmitText::Static(""),
+            anchor: None,
+        },
+    );
+    emit_op(
+        out,
+        &EmitOp::InsertUnmapped {
+            at: SourceByteOffset(el.tag_open.start + 1),
+            text: EmitText::Static("<><"),
+        },
+    );
+
+    // Replace the authored opening `>` with `></Tag>`, closing the typed element
+    // immediately. Anchoring before the original `>` avoids the boundary shared
+    // with a following text/interpolation overwrite. Only the generated tag name
+    // is mapped; JSX punctuation is synthetic. Use the actual emitted name for
+    // `<component :is>` rewrites while mapping it to the authored close.
+    let close_name_start = tag_close.start + 2;
+    emit_op(
+        out,
+        &EmitOp::OverwriteSyntheticBoundary {
+            source: SourceByteRange::new(
+                SourceByteOffset(el.tag_open.end - 1),
+                SourceByteOffset(el.tag_open.end),
+            ),
+            text: EmitText::Static(""),
+            anchor: None,
+        },
+    );
+    let mut empty_pair_close = MappedGeneratedText::synthetic("></");
+    empty_pair_close.push(emitted_tag_name, Some(close_name_start));
+    empty_pair_close.push(">", None);
+    out.prepend_mapped_generated_text(el.tag_open.end - 1, &empty_pair_close);
+
+    // Delete the original close. `walk_element` emits the synthetic fragment
+    // close at `tag_close.start` only after children and any slot-IIFE close have
+    // been recorded, preserving their nesting order.
+    emit_op(
+        out,
+        &EmitOp::OverwriteSyntheticBoundary {
+            source: SourceByteRange::new(
+                SourceByteOffset(tag_close.start),
+                SourceByteOffset(tag_close.end),
+            ),
+            text: EmitText::Static(""),
+            anchor: None,
+        },
+    );
+    true
 }
 
 /// Info for generating a v-slot scoped parameter IIFE wrapper.
@@ -1502,8 +1634,18 @@ fn collect_sibling_negations<'alloc>(
     negations
 }
 
+/// Result of rewriting Vue's polymorphic `<component :is>` tag.
+///
+/// `tag_name` is the name present in generated JSX. The slot-body isolation
+/// pair must close this exact name while mapping it to the authored closing tag.
+struct ComponentIsRewrite<'a> {
+    tag_name: &'a str,
+    needs_iife_close: bool,
+}
+
 /// Rewrite `<component :is="expr">` to use `extractRenderComponent`.
-/// Returns `true` if the dynamic `:is` pattern was used (requires IIFE close after element).
+/// Returns the emitted JSX tag identity when a static or dynamic `is` rewrite
+/// occurred; dynamic rewrites also require an IIFE close after the element.
 ///
 /// `ts_directives`: TS directive comment texts (e.g., `"@ts-expect-error"`) to inject
 /// inside the IIFE before `return`, so they suppress errors on the resolved component.
@@ -1515,7 +1657,7 @@ fn rewrite_component_is<'alloc>(
     resolver: &BindingResolver<'alloc>,
     ts_directives: &[String],
     emit_ctx: EmitContext,
-) -> bool {
+) -> Option<ComponentIsRewrite<'alloc>> {
     let static_is_prop = el.props.iter().find(|prop| {
         if prop.is_directive {
             return false;
@@ -1526,15 +1668,15 @@ fn rewrite_component_is<'alloc>(
     // 1) Static `is="div"`
     if let Some(is_prop) = static_is_prop {
         let (Some(value_start), Some(value_end)) = (is_prop.value_start, is_prop.value_end) else {
-            return false;
+            return None;
         };
         if value_end <= value_start {
-            return false;
+            return None;
         }
 
         let target_tag = source[value_start as usize..value_end as usize].trim();
         if target_tag.is_empty() {
-            return false;
+            return None;
         }
 
         rewrite_component_tag_name(el, target_tag, out);
@@ -1542,7 +1684,10 @@ fn rewrite_component_is<'alloc>(
         // Remove `is="..."`
         let is_prop_end = props::get_prop_end(is_prop);
         out.overwrite(is_prop.start, is_prop_end, "");
-        return false;
+        return Some(ComponentIsRewrite {
+            tag_name: target_tag,
+            needs_iife_close: false,
+        });
     }
 
     // 2) Dynamic `:is="expr"` / `v-bind:is="expr"`
@@ -1559,21 +1704,19 @@ fn rewrite_component_is<'alloc>(
         source[arg_start as usize..arg_end as usize].trim() == "is"
     });
 
-    let Some((bind_is_index, bind_is_prop)) = bind_is_result else {
-        return false;
-    };
+    let (bind_is_index, bind_is_prop) = bind_is_result?;
 
     let (Some(value_start), Some(value_end)) = (bind_is_prop.value_start, bind_is_prop.value_end)
     else {
-        return false;
+        return None;
     };
     if value_end <= value_start {
-        return false;
+        return None;
     }
 
     let value_expr = source[value_start as usize..value_end as usize].trim();
     if value_expr.is_empty() {
-        return false;
+        return None;
     }
 
     // All dynamic :is expressions use the extractRenderComponent wrapper. The
@@ -1633,7 +1776,10 @@ fn rewrite_component_is<'alloc>(
     // Remove `:is="..."`
     let prop_end = props::get_prop_end(bind_is_prop);
     out.overwrite(bind_is_prop.start, prop_end, "");
-    true
+    Some(ComponentIsRewrite {
+        tag_name: temp_name,
+        needs_iife_close: true,
+    })
 }
 
 fn rewrite_component_tag_name(el: &ElementNode, target_tag: &str, out: &mut CodeGenOutput<'_>) {

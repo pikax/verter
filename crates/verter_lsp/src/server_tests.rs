@@ -2981,6 +2981,10 @@ async fn editor_tsserver_live_publish_refreshes_durable_carrier_content() {
 /// owner. Verter still owns bare template-scope completions, but returning that
 /// same outer scope for `obj.|` makes VS Code merge unrelated bindings into the
 /// plugin's precise property list.
+/// Broken-script recovery is TypeScript-provider-owned: compiler partial
+/// recovery keeps the carrier queryable, while Verter's native analysis never
+/// claims semantic authority over a partial script AST. Dedicated provider
+/// recovery tests cover both identifiers and functions.
 #[tokio::test(flavor = "multi_thread")]
 async fn editor_tsserver_completion_yields_member_access_but_keeps_bare_scope() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
@@ -3058,36 +3062,6 @@ async fn editor_tsserver_completion_yields_member_access_but_keeps_bare_scope() 
         "editor-owned script completion must yield to the TypeScript plugin, got {:?}",
         completion_labels(script)
     );
-
-    let recovery_source = "<script setup lang=\"ts\">\nconst count = 1\nfunction safeAction() { return count }\nconst broken =\n</script>\n<template><div>{{ cou }} {{ safeA }}</div></template>\n";
-    let recovery_uri = open_test_vue(server, "/workspace/src/Recovery.vue", recovery_source);
-    let recovery_index = server
-        .documents
-        .get(&recovery_uri)
-        .expect("open recovery document")
-        .line_index
-        .clone();
-    for (probe, prefix, expected) in [
-        ("{{ cou }}", "{{ cou", "count"),
-        ("{{ safeA }}", "{{ safeA", "safeAction"),
-    ] {
-        let offset = recovery_source.find(probe).expect("recovery probe") + prefix.len();
-        let position = recovery_index
-            .offset_to_position(offset as u32)
-            .expect("recovery source position");
-        let labels = completion_labels(
-            super::nav_features::handle_completion(
-                server,
-                completion_params(&recovery_uri, position, None),
-            )
-            .await
-            .expect("recovery completion succeeds"),
-        );
-        assert!(
-            labels.iter().any(|label| label == expected),
-            "a trailing broken declaration must retain earlier `{expected}` in template scope, got {labels:?}"
-        );
-    }
 }
 
 /// Provider-parity extension E2E must attribute every completion item to the
@@ -6793,10 +6767,7 @@ const summary = computed(() => `${person.value.name}: ${person.value.age}`)
 "#;
 
     let uri = open_test_vue(server, "/workspace/src/TypeResolutionCases.vue", source);
-    let position = Position {
-        line: 23,
-        character: 21,
-    };
+    let position = find_document_position(server, &uri, "nested.deep.va", "nested.deep.va".len());
 
     set_type_completions_at_vue_position(
         server,
@@ -8995,16 +8966,15 @@ defineProps<{ msg: string }>()
     );
 }
 
-/// open_dts is STORE-COORDINATED transport: a SUCCESSFUL provider dts open and the
-/// `record_carrier_api_snapshot` -> `ProviderSurfaceStore` record are COUPLED, and
-/// the store is the authority for the recorded surface. On a FAILED provider open
-/// the record is SKIPPED, so the store never tracks a surface the provider rejected
-/// (fail-closed coupling).
+/// Managed tsgo publishes carrier companions for the editor TypeScript consumer
+/// before opening its own direct buffers. The store publication and the direct
+/// tsgo admission are intentionally independent: a failed `open_dts` may leave a
+/// valid editor-consumer store surface, but it must never mark that API path live
+/// in tsgo provider state and must remain queued for retry.
 ///
-/// DISCRIMINATING: the positive half fails if the store record is decoupled from the
-/// provider verb (the surface would be untracked after a successful open); the
-/// negative half fails if a record were emitted regardless of the provider result
-/// (the surface would appear despite the failed open).
+/// DISCRIMINATING: the positive half proves a successful direct open is admitted;
+/// the negative half proves a failed direct open is attempted but not admitted,
+/// while preserving the separately-published editor membership.
 #[tokio::test(flavor = "multi_thread")]
 async fn open_dts_success_records_store_surface_and_failure_does_not() {
     let child_source = r#"<script setup lang="ts">
@@ -9041,9 +9011,20 @@ defineProps<{ msg: string }>()
             )),
             "tsgo must open/update the carrier-API companion at {api_path}; calls={calls:?}"
         );
+        let state = server
+            .provider_sync_state_for_source(child_id)
+            .expect("a successful direct sync must commit provider state");
+        assert_eq!(
+            state.api_path.as_deref(),
+            Some(api_path.as_str()),
+            "the successfully-opened API companion must be the committed live path"
+        );
+        assert!(
+            state.api_background_loaded,
+            "the successfully-opened API companion must be marked live"
+        );
 
-        // AND the store recorded the surface — the provider verb and the store record
-        // are COUPLED; the store is the authority.
+        // The shared store also records the independently-published editor surface.
         let snapshot = server
             .test_documents()
             .provider_surfaces()
@@ -9059,11 +9040,11 @@ defineProps<{ msg: string }>()
         );
     }
 
-    // ── Negative: a FAILED open_dts records NOTHING (fail-closed coupling). ──
+    // ── Negative: a FAILED direct open is not admitted into tsgo state. ──
     {
         let provider = Arc::new(MockTypeProvider::new());
         // Pre-fail the carrier-API companion open: open_dts -> provider.open_file
-        // returns Err for this path, so the record is skipped.
+        // returns Err for this path, so direct tsgo admission is skipped.
         let api_path = format!("{child_id}.verter.ts");
         provider.set_fail_sync_path(&api_path);
         let type_provider: Arc<dyn TypeProvider> = provider.clone();
@@ -9084,16 +9065,29 @@ defineProps<{ msg: string }>()
             )),
             "the failed open was still attempted at {api_path}; calls={calls:?}"
         );
-        // ...but it FAILED, so the store records NOTHING for it — the surface is
-        // untracked (fail-closed coupling: no record without a successful verb).
+        // The editor-owned TypeScript service has its own durable store
+        // publication, so that surface legitimately remains available even
+        // though managed tsgo rejected its independent direct open.
+        let editor_surface = server
+            .test_documents()
+            .provider_surfaces()
+            .current_snapshot(&api_path)
+            .expect("editor membership publication is independent of the direct tsgo open");
+        assert_eq!(
+            editor_surface.kind,
+            crate::provider_surface_store::ProviderSurfaceKind::CarrierApi
+        );
+
+        let state = server
+            .provider_sync_state_for_source(child_id)
+            .expect("the sibling IDE success may commit a partial provider state");
         assert!(
-            server
-                .test_documents()
-                .provider_surfaces()
-                .current_snapshot(&api_path)
-                .is_none(),
-            "a FAILED open_dts must NOT record a carrier-API surface in the store \
-             (the record is coupled to a SUCCESSFUL provider verb)"
+            state.api_path.is_none() && !state.api_background_loaded,
+            "a FAILED direct open must not admit the API companion into tsgo state"
+        );
+        assert!(
+            server.pending_snapshot_provider_sync.contains(child_id),
+            "a FAILED direct API open must stay queued for retry"
         );
     }
 }
@@ -17393,20 +17387,24 @@ async fn resync_background_owner_loss_retracts_ledger_membership() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_compiled_owner_resolved_publishes_ledger_via_reconciler() {
     use crate::external_ts::CanonicalSource;
+    static FIXTURE_ID: AtomicUsize = AtomicUsize::new(0);
+
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
     let service = make_hover_test_service(type_provider);
     let server = service.inner();
-    let tsconfig = "/workspace/tsconfig.json";
-    let canonical_id = "/workspace/src/App.vue";
-    install_test_resolver_for_root(server, "/workspace", Some(tsconfig));
-    open_test_vue(server, canonical_id, MEMBERSHIP_TEST_VUE);
+    let fixture_id = FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
+    let workspace_root = format!("/verter_membership_publish_{fixture_id}");
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+    let canonical_id = format!("{workspace_root}/src/App.vue");
+    install_test_resolver_for_root(server, &workspace_root, Some(&tsconfig));
+    open_test_vue(server, &canonical_id, MEMBERSHIP_TEST_VUE);
 
     assert!(
         !server
             .membership_ledger()
             .expect("ledger")
-            .is_advertised(&CanonicalSource::from(canonical_id)),
+            .is_advertised(&CanonicalSource::from(canonical_id.as_str())),
         "precondition: not advertised before the resync publish"
     );
 
@@ -17415,22 +17413,22 @@ async fn sync_compiled_owner_resolved_publishes_ledger_via_reconciler() {
     // (which compiles internally), so the ledger advertises regardless of the
     // passed IDE output.
     server
-        .sync_compiled_carrier_to_provider(canonical_id, None)
+        .sync_compiled_carrier_to_provider(&canonical_id, None)
         .await;
 
     assert!(
         server
             .membership_ledger()
             .expect("ledger")
-            .is_advertised(&CanonicalSource::from(canonical_id)),
+            .is_advertised(&CanonicalSource::from(canonical_id.as_str())),
         "an owner-resolved tsserver carrier MUST be advertised in the ledger via the \
          reconciler (not the no-op ProjectSync verbs)"
     );
     // The ledger-backed advertised set for the project includes the carrier's
     // companion provider paths.
-    let advertised = server.external_ts_advertised_for_project(tsconfig);
+    let advertised = server.external_ts_advertised_for_project(&tsconfig);
     assert!(
-        advertised.iter().any(|p| p.starts_with(canonical_id)),
+        advertised.iter().any(|p| p.starts_with(&canonical_id)),
         "the project's ledger-backed getExternalFiles set must include the carrier's \
          companions, got {advertised:?}"
     );
@@ -18909,8 +18907,10 @@ async fn successful_direct_ide_sync_records_carrier_ide_surface() {
     );
 }
 
-/// A FAILED direct IDE sync must record NOTHING: the provider never received
-/// the content, so no surface generation may pretend it did (fail closed).
+/// A FAILED direct IDE sync must not admit a queryable managed-tsgo surface.
+/// The editor TypeScript consumer may already have a valid independently-
+/// published store generation, but managed tsgo cannot commit or query through
+/// it until its own direct buffer open succeeds.
 #[tokio::test(flavor = "multi_thread")]
 async fn failed_direct_ide_sync_records_no_carrier_ide_surface() {
     let provider = Arc::new(MockTypeProvider::new());
@@ -18927,13 +18927,35 @@ async fn failed_direct_ide_sync_records_no_carrier_ide_surface() {
 
     server.sync_ide_to_provider(&uri).await;
 
+    let editor_surface = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&target_ide_path)
+        .expect("the independent editor-membership publish remains valid");
+    assert_eq!(
+        editor_surface.kind,
+        crate::provider_surface_store::ProviderSurfaceKind::CarrierIde
+    );
+    assert!(
+        provider.file_sync_calls().iter().any(|call| matches!(
+            call,
+            MockCall::UpdateFile { path, .. } if path == &target_ide_path
+        )),
+        "the managed-tsgo direct IDE sync must have been attempted"
+    );
     assert!(
         server
-            .documents
-            .provider_surfaces()
-            .current_snapshot(&target_ide_path)
+            .provider_sync_state_for_source("/workspace/src/App.vue")
             .is_none(),
-        "a failed IDE sync must not record a provider surface"
+        "a failed direct IDE sync must not commit provider state"
+    );
+    assert!(
+        server.active_ide_path_for_uri(&uri).is_none(),
+        "a failed direct IDE sync must not expose a live IDE path"
+    );
+    assert!(
+        server.capture_provider_request_surface(&uri).is_none(),
+        "a failed direct IDE sync must not expose the editor-only surface to managed-tsgo queries"
     );
 }
 
@@ -19697,15 +19719,23 @@ async fn make_foreign_mapping_fixture() -> (
     Uri,
     Position,
     String,
+    String,
 ) {
+    static FIXTURE_ID: AtomicUsize = AtomicUsize::new(0);
+
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
     let service = make_hover_test_service_tsgo(type_provider);
     let server = service.inner();
-    install_test_resolver(server);
+    let fixture_id = FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
+    let workspace_root = format!("/verter_foreign_mapping_{fixture_id}");
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+    install_test_resolver_for_root(server, &workspace_root, Some(&tsconfig));
 
-    let parent_uri = open_test_vue(server, "/workspace/src/App.vue", REQUEST_SURFACE_APP);
-    let child_uri = open_test_vue(server, "/workspace/src/Child.vue", REQUEST_SURFACE_APP);
+    let parent_canonical = format!("{workspace_root}/src/App.vue");
+    let child_canonical = format!("{workspace_root}/src/Child.vue");
+    let parent_uri = open_test_vue(server, &parent_canonical, REQUEST_SURFACE_APP);
+    let child_uri = open_test_vue(server, &child_canonical, REQUEST_SURFACE_APP);
     server.sync_ide_to_provider(&parent_uri).await;
     server.sync_ide_to_provider(&child_uri).await;
 
@@ -19747,7 +19777,14 @@ async fn make_foreign_mapping_fixture() -> (
             end: child_target + 3,
         }],
     );
-    (service, provider, parent_uri, position, child_ide_path)
+    (
+        service,
+        provider,
+        parent_uri,
+        position,
+        child_ide_path,
+        child_canonical,
+    )
 }
 
 /// STABLE foreign surface: a provider definition landing in a FOREIGN carrier's
@@ -19755,7 +19792,7 @@ async fn make_foreign_mapping_fixture() -> (
 /// request start — guards against the pinned-set resolver over-dropping.
 #[tokio::test(flavor = "multi_thread")]
 async fn definition_maps_foreign_carrier_location_through_pinned_surface() {
-    let (service, _provider, parent_uri, position, _child_ide_path) =
+    let (service, _provider, parent_uri, position, _child_ide_path, _child_canonical) =
         make_foreign_mapping_fixture().await;
     let server = service.inner();
 
@@ -19792,7 +19829,7 @@ async fn definition_maps_foreign_carrier_location_through_pinned_surface() {
 /// land on wrong `.vue` positions (torn, not stale).
 #[tokio::test(flavor = "multi_thread")]
 async fn definition_drops_foreign_carrier_location_when_foreign_surface_advances_mid_request() {
-    let (service, provider, parent_uri, position, child_ide_path) =
+    let (service, provider, parent_uri, position, child_ide_path, child_canonical) =
         make_foreign_mapping_fixture().await;
     let server = service.inner();
 
@@ -19820,7 +19857,7 @@ async fn definition_drops_foreign_carrier_location_when_foreign_surface_advances
                 crate::provider_surface_store::RecordSurface::carrier_legacy(
                     crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
                     raced_child_path,
-                    "/workspace/src/Child.vue".to_string(),
+                    child_canonical,
                     Arc::from(raced_content.as_str()),
                     raced_mapper,
                     Arc::from(REQUEST_SURFACE_APP),

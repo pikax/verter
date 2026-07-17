@@ -100,7 +100,7 @@ export const SVELTE_MATRIX_CASES = [] as const;
 `;
 
 describe("parity inventory", () => {
-  it("owns exactly 219 literal tests across the complete 38-file parity suite", () => {
+  it("owns exactly 221 literal tests across the complete 38-file parity suite", () => {
     const discovered = testSources(suiteRoot)
       .map((file) => relative(suiteRoot, file).replace(/\\/g, "/"))
       .sort();
@@ -115,7 +115,7 @@ describe("parity inventory", () => {
       );
       total += count;
     }
-    expect(total).toBe(219);
+    expect(total).toBe(221);
   });
 
   it("attests all 73 unique matrix IDs and every authored anchor", () => {
@@ -138,14 +138,14 @@ describe("parity inventory", () => {
       suiteRoot,
       matrixCasesFile: resolve(libRoot, "matrixCases.ts"),
     });
-    expect(inventory.literalRegistrationCount).toBe(219);
+    expect(inventory.literalRegistrationCount).toBe(221);
     expect(inventory.matrixCaseCount).toBe(73);
     expect(
       Object.fromEntries(
         Object.entries(inventory.testIdsByFixture).map(([fixture, ids]) => [fixture, ids.length]),
       ),
     ).toEqual({
-      "vue-parity": 204,
+      "vue-parity": 206,
       "svelte-parity": 181,
       "mixed-parity": 7,
       "multi-root-parity": 6,

@@ -6497,6 +6497,69 @@ fn compile_tsx_with_force_js(source: &str, force_js: bool) -> VerterCompileResul
 }
 
 #[test]
+fn vue_ide_carrier_declares_its_official_jsx_authority_without_moving_first_script_mapping() {
+    let source = concat!(
+        "<script setup lang=\"ts\">\n",
+        "interface Props { label: string }\n",
+        "const props = defineProps<Props>()\n",
+        "</script>\n",
+        "<template><div class=\"card\">{{ props.label }}</div></template>\n",
+    );
+    let result = compile_tsx(source);
+    let tsx = result.tsx.expect("Vue IDE carrier");
+
+    assert!(
+        tsx.code.starts_with("/** @jsxImportSource vue */\n"),
+        "the official Vue JSX authority must be compiler-owned per file:\n{}",
+        tsx.code
+    );
+
+    let map = oxc_sourcemap::SourceMap::from_json_string(&tsx.source_map)
+        .expect("valid Vue IDE source map");
+    assert!(
+        map.get_tokens()
+            .filter(|token| token.get_source_id().is_some())
+            .all(|token| token.get_dst_line() > 0),
+        "the generated JSX-authority line must be wholly unmapped"
+    );
+    let interface_mapping = map
+        .get_tokens()
+        .find(|token| {
+            token.get_source_id().is_some() && token.get_src_line() == 1 && token.get_src_col() == 0
+        })
+        .expect("first script declaration has a source mapping");
+    assert_eq!(interface_mapping.get_dst_line(), 1);
+    assert_eq!(interface_mapping.get_dst_col(), 0);
+    assert!(
+        tsx.code
+            .lines()
+            .nth(1)
+            .is_some_and(|line| line.starts_with("interface Props")),
+        "the first authored script declaration must retain generated column zero:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn vue_js_ide_carrier_declares_the_same_official_jsx_authority() {
+    let source = concat!(
+        "<script setup>\n",
+        "/** @type {string} */\n",
+        "const label = 'ok'\n",
+        "</script>\n",
+        "<template><div class=\"card\">{{ label }}</div></template>\n",
+    );
+    let result = compile_tsx_with_force_js(source, true);
+    let tsx = result.tsx.expect("Vue JS IDE carrier");
+    assert!(tsx.is_jsx, "a JavaScript Vue carrier must remain JSX");
+    assert!(
+        tsx.code.starts_with("/** @jsxImportSource vue */\n"),
+        "JS+JSDoc and TS carriers must select the same official Vue JSX surface:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
 fn tsx_basic_sfc() {
     let result = compile_tsx(
         r#"<script setup>
@@ -8959,8 +9022,8 @@ fn tsx_v_for_on_template_tag_uses_fragment_children() {
         tsx.code
     );
     assert!(
-        tsx.code.contains("<li>{ item.msg }</li>")
-            || tsx.code.contains("<li>{ _ctx.item.msg }</li>"),
+        tsx.code.contains("<><li></li>{ item.msg }</>")
+            || tsx.code.contains("<><li></li>{ _ctx.item.msg }</>"),
         "template v-for branch should render li child content, got:\n{}",
         tsx.code
     );
@@ -13940,11 +14003,22 @@ fn norm_eol(s: &str) -> String {
     s.replace("\r\n", "\n")
 }
 
+/// Source-map JSON is a single logical record. Git/checkouts may add one final
+/// line terminator to the fixture file, while the compiler API intentionally
+/// returns the JSON record without it. Remove exactly one fixture terminator;
+/// embedded/trailing blank lines still fail the byte comparison.
+fn norm_map_golden_eol(s: &str) -> String {
+    let mut normalized = norm_eol(s);
+    if normalized.ends_with('\n') {
+        normalized.pop();
+    }
+    normalized
+}
+
 /// Assert the compiled TSX's `code` AND `source_map` both equal their committed
-/// goldens (byte-for-byte after EOL normalization). Sharing one per-component
-/// slot summary between the two collectors is a pure compute change, so it must
-/// leave BOTH the emitted code and its source map identical to the output the
-/// two independent scans produced.
+/// goldens (byte-for-byte after EOL normalization). These fixtures pin the
+/// current public IDE-carrier contract, including Vue slot-body isolation and
+/// the mapped empty-pair closing tags used for navigation.
 fn assert_tsx_code_and_map_match(tsx: &VerterTsxBlock, code_golden: &str, map_golden: &str) {
     assert_eq!(
         norm_eol(&tsx.code),
@@ -13957,17 +14031,16 @@ fn assert_tsx_code_and_map_match(tsx: &VerterTsxBlock, code_golden: &str, map_go
     );
     assert_eq!(
         norm_eol(&tsx.source_map),
-        norm_eol(map_golden),
+        norm_map_golden_eol(map_golden),
         "emitted TSX source map must be byte-identical to its golden"
     );
 }
 
 #[test]
 fn strict_slots_nested_output_is_byte_identical() {
-    // Nested components with named (#header, scoped) + default slots. Routing
-    // both strict-slot and required-slot collection through the one shared
-    // per-component slot summary must leave the emitted TSX — code AND source
-    // map — byte-identical.
+    // Nested components with named (#header, scoped) + default slots. The code
+    // and map golden jointly pin strict-slot helpers plus the isolated typed
+    // element pairs used by the IDE projection.
     let result = compile_tsx_strict_slots(SLOT_SFC_NESTED);
     let tsx = result.tsx.as_ref().expect("tsx output");
     assert_tsx_code_and_map_match(
@@ -13991,7 +14064,7 @@ fn strict_slots_nested_output_is_byte_identical() {
 fn strict_slots_deep_output_is_byte_identical() {
     // A deeply nested slot (component inside section inside div, with a named
     // slot wrapping a further-nested component) proves the per-component summary
-    // reaches arbitrarily deep components without changing output bytes.
+    // and isolated typed pairs reach arbitrarily deep components.
     let result = compile_tsx_strict_slots(SLOT_SFC_DEEP);
     let tsx = result.tsx.as_ref().expect("tsx output");
     assert_tsx_code_and_map_match(
@@ -14010,7 +14083,8 @@ fn strict_slots_deep_output_is_byte_identical() {
 #[test]
 fn strict_slots_no_slot_subtree_is_byte_identical_and_emits_no_checks() {
     // A component-free subtree provides no slots: no summary is built and no
-    // slot check is emitted. Output (code AND source map) stays byte-identical.
+    // slot check is emitted. The golden still pins its isolated DOM pairs and
+    // exact source map.
     let result = compile_tsx_strict_slots(SLOT_SFC_NO_SLOT);
     let tsx = result.tsx.as_ref().expect("tsx output");
     assert_tsx_code_and_map_match(
@@ -14760,7 +14834,8 @@ return (_openBlock(), _createElementBlock("p", { title: $setup.msg }, _toDisplay
 // in as the explicit `" \n"` segment so no source line carries (invisible,
 // strip-prone) trailing whitespace while the golden still pins the exact bytes.
 const TS_OVERLAY_GOLDEN_TSX: &str = concat!(
-    r#"import type { Prettify as ___VERTER___Prettify, ExtractComponentProps as ___VERTER___ExtractComponentProps, ExtractLeafElement as ___VERTER___ExtractLeafElement } from "@verter/types";
+    r#"/** @jsxImportSource vue */
+import type { Prettify as ___VERTER___Prettify, ExtractComponentProps as ___VERTER___ExtractComponentProps, ExtractLeafElement as ___VERTER___ExtractLeafElement } from "@verter/types";
 import { shallowUnwrapRef as ___VERTER___shallowUnwrapRef, enhanceElementWithProps as ___VERTER___enhanceElementWithProps, extractRenderComponent as ___VERTER___extractRenderComponent, instantiateComponent as ___VERTER___instantiateComponent, extractArgumentsFromRenderSlot as ___VERTER___extractArgumentsFromRenderSlot, runCustomDirective as ___VERTER___runCustomDirective, retrieveSetupDirectives as ___VERTER___retrieveSetupDirectives, strictRenderSlot as ___VERTER___strictRenderSlot, checkRequiredSlots as ___VERTER___checkRequiredSlots } from "@verter/types";
 ;export function ___VERTER___TemplateBindingFN() {
 
@@ -14779,7 +14854,7 @@ const ___VERTER___unwrapped = ___VERTER___shallowUnwrapRef({
     " \n",
     r#"    msg } = ___VERTER___unwrapped; /* verter-destructured-end */
 <>
-  <p title={msg}>{ msg }</p>
+  <><p title={msg}></p>{ msg }</>
 </>
 } // close block scope
 
@@ -14859,7 +14934,7 @@ fn template_expression_overlay_pins_absolute_output_bytes() {
 
     // Guard the goldens themselves against accidental triviality.
     assert!(TS_OVERLAY_GOLDEN_RUNTIME.contains("_createElementBlock(\"p\""));
-    assert!(TS_OVERLAY_GOLDEN_TSX.contains("<p title={msg}>{ msg }</p>"));
+    assert!(TS_OVERLAY_GOLDEN_TSX.contains("<><p title={msg}></p>{ msg }</>"));
 
     // The IDE carrier exports the component's PUBLIC FACADE — a clean
     // `export default` re-exported from the API carrier (`.verter.ts`). A bare

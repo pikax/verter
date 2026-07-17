@@ -1487,11 +1487,14 @@ const props = defineProps<Props>()
         let tsx = result.tsx.as_ref().unwrap();
         let sm = oxc_sourcemap::OwnedSourceMap::from_json_string(&tsx.source_map).unwrap();
 
-        // The interface should be hoisted to top of TSX and MAPPED
+        // The compiler-owned JSX authority occupies the one unmapped intro
+        // line; the authored interface remains the first mapped declaration at
+        // exact column zero on the following line.
         assert!(
-            tsx.code.starts_with("interface Props {"),
-            "interface should be hoisted to top, got:\n{}",
-            &tsx.code[..tsx.code.find('\n').unwrap_or(80)]
+            tsx.code
+                .starts_with("/** @jsxImportSource vue */\ninterface Props {"),
+            "interface should follow the unmapped Vue JSX intro, got:\n{}",
+            &tsx.code[..tsx.code.find("\nimport type").unwrap_or(80)]
         );
         assert_token_is_mapped(&sm, &tsx.code, "interface Props {");
     }

@@ -40,6 +40,7 @@ struct DesiredFile {
 
 #[derive(Debug, Clone)]
 struct RegisteredCarrier {
+    source_path: String,
     content: String,
     project_file_name: String,
 }
@@ -141,7 +142,12 @@ impl LazyManagedTypeProvider {
 
         for (path, carrier) in desired.carriers {
             provider
-                .register_carrier_member(&path, &carrier.content, &carrier.project_file_name)
+                .register_carrier_member(
+                    &carrier.source_path,
+                    &path,
+                    &carrier.content,
+                    &carrier.project_file_name,
+                )
                 .await?;
         }
 
@@ -612,10 +618,12 @@ impl TypeProvider for LazyManagedTypeProvider {
 
     fn register_carrier_member(
         &self,
+        source_path: &str,
         companion_path: &str,
         content: &str,
         project_file_name: &str,
     ) -> ProviderFuture<'_, ()> {
+        let source_path = source_path.to_string();
         let companion_path = companion_path.to_string();
         let content = content.to_string();
         let project_file_name = project_file_name.to_string();
@@ -624,6 +632,7 @@ impl TypeProvider for LazyManagedTypeProvider {
             self.desired.lock().unwrap().carriers.insert(
                 companion_path.clone(),
                 RegisteredCarrier {
+                    source_path: source_path.clone(),
                     content: content.clone(),
                     project_file_name: project_file_name.clone(),
                 },
@@ -632,7 +641,12 @@ impl TypeProvider for LazyManagedTypeProvider {
                 return Ok(());
             };
             provider
-                .register_carrier_member(&companion_path, &content, &project_file_name)
+                .register_carrier_member(
+                    &source_path,
+                    &companion_path,
+                    &content,
+                    &project_file_name,
+                )
                 .await
         })
     }

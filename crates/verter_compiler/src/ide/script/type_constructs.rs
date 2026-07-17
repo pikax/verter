@@ -134,6 +134,12 @@ declare module "@verter/types" {
   export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, children: ReturnType<T> extends infer R ? R extends readonly [any, ...any[]] ? R : R extends Array<infer E> ? U extends Array<infer UE> ? [UE] extends [never] ? U : E extends string | number | boolean | symbol | bigint | null | undefined ? E extends UE ? U : never : UE extends E ? IsExactlyEqual<UE, E> extends true ? U : never : never : never : never : ReturnType<T>): any;
   export declare function checkRequiredSlots<T>(slots: T, provided: { [K in keyof T as undefined extends T[K] ? never : K]: true }): void;
 }
+
+declare module "vue/jsx-runtime" {
+  namespace JSX {
+    interface ElementChildrenAttribute {}
+  }
+}
 "#;
 
 /// Standalone `@verter/types` type declarations as a `.d.ts` file.
@@ -172,6 +178,12 @@ export type IsExactlyEqual<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() 
 export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, child: ReturnType<T> extends infer R ? R extends Array<any> ? never : R extends string ? [R] : R extends U ? [U] : R : ReturnType<T>): any;
 export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, children: ReturnType<T> extends infer R ? R extends readonly [any, ...any[]] ? R : R extends Array<infer E> ? U extends Array<infer UE> ? [UE] extends [never] ? U : E extends string | number | boolean | symbol | bigint | null | undefined ? E extends UE ? U : never : UE extends E ? IsExactlyEqual<UE, E> extends true ? U : never : never : never : never : ReturnType<T>): any;
 export declare function checkRequiredSlots<T>(slots: T, provided: { [K in keyof T as undefined extends T[K] ? never : K]: true }): void;
+
+declare module "vue/jsx-runtime" {
+  namespace JSX {
+    interface ElementChildrenAttribute {}
+  }
+}
 "#;
 
 /// Collect Vue built-in component names used in the template AST.

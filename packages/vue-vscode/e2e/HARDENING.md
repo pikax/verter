@@ -5,7 +5,7 @@ editor-owned tsgo. Compiling the harness alone does not satisfy the release gate
 
 ## Enforced inventory
 
-- 38 parity suite files containing 219 literal tests.
+- 38 parity suite files containing 221 literal tests.
 - 73 declarative matrix cases: 38 Vue and 35 Svelte.
 - The 22-case framework contract remains a separate focused surface; it is not a
   substitute for the parity inventory.

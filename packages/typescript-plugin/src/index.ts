@@ -9,6 +9,7 @@ import {
   editorOwnsCarrierSourceFeatures,
   e2eProviderOnlyCompletions,
   isCarrierCompanionPath,
+  isCarrierSourcePath,
   isModuleLevelDefinition,
   isRelativeVue,
   isRelativeVueTs,
@@ -39,6 +40,7 @@ import {
 } from "./helpers/barrelNavigation";
 import { VERTER_TYPES_STUB } from "./helpers/verterTypesStub";
 import { writeEditorTsserverAttestation } from "./helpers/editorAttestation";
+import { prepareVueJsxCarrier } from "./helpers/vueJsxAuthority";
 
 // tsserver may invoke the plugin module factory separately for different projects.
 // Attestation is process-scoped, so every factory must publish the same union rather
@@ -339,7 +341,27 @@ function isPureImportInsertion(ts: typeof tsModule, text: string): boolean {
   );
 }
 
+/** Stable identity for diagnostics produced by more than one LS pass. */
+function diagnosticIdentity(
+  diagnostic: tsModule.Diagnostic,
+  flattenMessage: (
+    messageText: string | tsModule.DiagnosticMessageChain,
+    newLine: string,
+  ) => string,
+): string {
+  return JSON.stringify([
+    diagnostic.file === undefined ? undefined : normalizePath(diagnostic.file.fileName),
+    diagnostic.start,
+    diagnostic.length,
+    diagnostic.category,
+    diagnostic.code,
+    flattenMessage(diagnostic.messageText, "\n"),
+  ]);
+}
+
 const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
+  const priorNonEditorExternalsByProject = new WeakMap<tsModule.server.Project, Set<string>>();
+
   // The resolved store dir per configured project, recorded by `create` (which
   // has the plugin config) so `getExternalFiles` (which does NOT receive the
   // config) can reuse the same store. Keyed by the project name (tsconfig path).
@@ -367,6 +389,9 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     let providerOnlyCompletions = e2eProviderOnlyCompletions(effectiveConfig);
     let carrierStoreRefreshToken = effectiveConfig[CARRIER_STORE_REFRESH_TOKEN_CONFIG_KEY];
     const projectKey = info.project.getProjectName();
+    if (!priorNonEditorExternalsByProject.has(info.project)) {
+      priorNonEditorExternalsByProject.set(info.project, new Set());
+    }
     processBoundProjects.add(projectKey);
     processCurrentConfig = effectiveConfig;
     writeEditorTsserverAttestation(processCurrentConfig, processBoundProjects);
@@ -381,6 +406,10 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       projectKey,
       info.serverHost.useCaseSensitiveFileNames,
     );
+    const vueJsxContentCache = new Map<
+      string,
+      { readonly original: string; readonly prepared: string }
+    >();
     // Assigned after the host hooks have captured their original implementations.
     // The configuration updater closes over this mutable context so every response
     // provider sees the same project-scoped reader as the live host hooks.
@@ -430,6 +459,9 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
             ? `[Verter] carrier store reconfigured: ${storeDir}`
             : "[Verter] carrier store removed; carrier serving disabled",
         );
+      }
+      if (publicationAdvanced || storeChanged) {
+        vueJsxContentCache.clear();
       }
       const nextReadyVersions = store.readyFileVersions();
       for (const [providerPath, version] of nextReadyVersions) {
@@ -559,6 +591,24 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       useCaseSensitiveFileNames: info.serverHost.useCaseSensitiveFileNames,
     };
 
+    const specializeEditorTsserverCarrier = (
+      providerPath: string,
+      content: string | undefined,
+    ): string | undefined => {
+      if (content === undefined) return undefined;
+      const owned = store.ownedSourceFor(providerPath);
+      if (owned?.role !== "CarrierIde" || !sameStorePath(store, owned.provider_uri, providerPath)) {
+        return content;
+      }
+      const cacheKey = store.canonicalPath(providerPath);
+      const cached = vueJsxContentCache.get(cacheKey);
+      if (cached?.original === content) return cached.prepared;
+
+      const prepared = prepareVueJsxCarrier(providerPath, content)?.content ?? content;
+      vueJsxContentCache.set(cacheKey, { original: content, prepared });
+      return prepared;
+    };
+
     // ── carrier-store reads (the SOLE carrier-content authority) ───────────
 
     /**
@@ -583,16 +633,22 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         const sourceReady = store.readyFileForSource(fileName);
         if (sourceReady) {
           const companion = store.companionForSource(fileName) ?? fileName;
-          return store.readBlobSync(sourceReady.blob_rel, companion);
+          return specializeEditorTsserverCarrier(
+            companion,
+            store.readBlobSync(sourceReady.blob_rel, companion),
+          );
         }
         const sourceCompanion = store.companionForSource(fileName);
         if (sourceCompanion && store.ownedSourceFor(sourceCompanion)) {
           const result = coldResolveCompanion(store, sourceCompanion);
           if (result.kind === "ready") {
-            return store.readBlobSync(result.readyFile.blob_rel, sourceCompanion);
+            return specializeEditorTsserverCarrier(
+              sourceCompanion,
+              store.readBlobSync(result.readyFile.blob_rel, sourceCompanion),
+            );
           }
           if (result.kind === "lastGood") {
-            return result.content;
+            return specializeEditorTsserverCarrier(sourceCompanion, result.content);
           }
         }
       }
@@ -600,15 +656,21 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       // A direct companion provider path (`Comp.vue.tsx`) → serve it directly.
       const ready = store.readyFile(fileName);
       if (ready) {
-        return store.readBlobSync(ready.blob_rel, fileName);
+        return specializeEditorTsserverCarrier(
+          fileName,
+          store.readBlobSync(ready.blob_rel, fileName),
+        );
       }
       if (store.ownedSourceFor(fileName)) {
         const result = coldResolveCompanion(store, fileName);
         if (result.kind === "ready") {
-          return store.readBlobSync(result.readyFile.blob_rel, fileName);
+          return specializeEditorTsserverCarrier(
+            fileName,
+            store.readBlobSync(result.readyFile.blob_rel, fileName),
+          );
         }
         if (result.kind === "lastGood") {
-          return result.content;
+          return specializeEditorTsserverCarrier(fileName, result.content);
         }
       }
       return undefined;
@@ -1415,10 +1477,50 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       fileName: string,
       method: "getSyntacticDiagnostics" | "getSemanticDiagnostics" | "getSuggestionDiagnostics",
       query: (target: string) => readonly T[],
+      nonEditorSupplement?: (target: string) => readonly T[],
     ): T[] {
       if (editorYieldsCarrierSourceFeatures(fileName)) return [];
-      if (!isVue(fileName)) {
+      if (!isCarrierSourcePath(fileName)) {
         return [...query(fileName)];
+      }
+      // On the out-of-process verter_lsp backend the configured Program owns
+      // the carrier SOURCE identity (`Comp.vue` / `Comp.svelte`), while the host serves the IDE
+      // companion bytes for that SourceFile. Query that identity directly and
+      // leave the generated coordinates untouched for Rust's authoritative
+      // source-map merge. The editor-owned topology below is different: VS Code
+      // keeps the raw SFC ScriptInfo, so its request must route to the distinct
+      // companion and map the response back here.
+      if (!editorOwnsMembership) {
+        const primary = [...query(fileName)];
+        const companion = store.companionForSource(fileName);
+        if (
+          nonEditorSupplement === undefined ||
+          companion === undefined ||
+          store.readyFile(companion) === undefined
+        ) {
+          return primary;
+        }
+
+        // tsserver can serialize semantic diagnostics for the configured
+        // Program's carrier-source identity, but its separate suggestion command
+        // requires a client-owned ScriptInfo that this internal backend must not
+        // manufacture. Fold the LanguageService suggestion pass into the semantic
+        // result while we are already inside the owning configured Program. Rust
+        // still issues all three protocol passes and performs the public union;
+        // the standalone suggestion request may fail without losing TS6133.
+        const out = [...primary];
+        const seen = new Set(
+          primary.map((diagnostic) =>
+            diagnosticIdentity(diagnostic, ts.flattenDiagnosticMessageText),
+          ),
+        );
+        for (const diagnostic of nonEditorSupplement(fileName)) {
+          const key = diagnosticIdentity(diagnostic, ts.flattenDiagnosticMessageText);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          out.push(diagnostic);
+        }
+        return out;
       }
       const targetRuntime = editorOwnerForSource(fileName);
       if (targetRuntime === undefined) {
@@ -1501,15 +1603,21 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     }
 
     const _getSyntacticDiagnostics = languageService.getSyntacticDiagnostics.bind(languageService);
+    const _getSemanticDiagnostics = languageService.getSemanticDiagnostics.bind(languageService);
+    const _getSuggestionDiagnostics =
+      languageService.getSuggestionDiagnostics.bind(languageService);
+
     languageService.getSyntacticDiagnostics = (fileName) =>
       editorSourceDiagnostics(fileName, "getSyntacticDiagnostics", _getSyntacticDiagnostics);
 
-    const _getSemanticDiagnostics = languageService.getSemanticDiagnostics.bind(languageService);
     languageService.getSemanticDiagnostics = (fileName) =>
-      editorSourceDiagnostics(fileName, "getSemanticDiagnostics", _getSemanticDiagnostics);
+      editorSourceDiagnostics(
+        fileName,
+        "getSemanticDiagnostics",
+        _getSemanticDiagnostics,
+        _getSuggestionDiagnostics,
+      );
 
-    const _getSuggestionDiagnostics =
-      languageService.getSuggestionDiagnostics.bind(languageService);
     languageService.getSuggestionDiagnostics = (fileName) =>
       editorSourceDiagnostics(
         fileName,
@@ -2796,10 +2904,19 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       const normalized = normalizePath(fileName);
       return ts.sys.useCaseSensitiveFileNames ? normalized : normalized.toLowerCase();
     };
-    const projectFiles = new Set(
-      [...project.getRootFiles(), ...project.getFileNames()].map(canonical),
+    // TypeScript includes plugin externals in `getRootFiles()` after the first
+    // graph build. Subtract exactly the prior external set to recover the true
+    // configured-root baseline; filtering the live roots directly would make an
+    // external retract itself on the next call and oscillate the graph.
+    const priorExternals = priorNonEditorExternalsByProject.get(project) ?? new Set<string>();
+    const configuredRoots = new Set(
+      project
+        .getRootFiles()
+        .map(canonical)
+        .filter((root) => !priorExternals.has(root)),
     );
-    const out = store.readyIdeSources().filter((source) => !projectFiles.has(canonical(source)));
+    const out = store.readyIdeSources().filter((source) => !configuredRoots.has(canonical(source)));
+    priorNonEditorExternalsByProject.set(project, new Set(out.map(canonical)));
     project.projectService.logger.info(
       `[Verter] getExternalFiles(${projectKey}): ${out.length} ready carrier source(s)`,
     );

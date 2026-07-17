@@ -133,10 +133,20 @@ Provider selection is configured via the `--type-provider` CLI arg or `verter.ty
 
 Verter publishes an IDE carrier in the component's authored script language.
 Vue and Svelte components containing TypeScript use a `.tsx` carrier. A
-no-lang JavaScript Svelte component uses a `.jsx` carrier with `// @ts-check`
-and generated JSDoc declarations, so template expressions, runes, stores,
-bindings, transitions, and await blocks remain type-checked without requiring a
-project-wide `jsxImportSource` setting.
+no-lang JavaScript component uses a `.jsx` carrier with generated JSDoc
+declarations.
+
+Every Vue carrier selects Vue's official `vue/jsx-runtime` per file. The
+carrier therefore does not depend on a project-wide `jsxImportSource` setting,
+and an unrelated ambient JSX package such as React cannot change `class` into
+`className` or make Vue slot content a React-style `children` prop. Verter's
+generated `@verter/types` declaration is published before the TypeScript
+provider is reopened, so upgrades cannot leave tsserver or tsgo using stale JSX
+support bytes. TypeScript and JS+JSDoc Vue carriers share this contract.
+
+Svelte's `.jsx` carrier keeps template expressions, runes, stores, bindings,
+transitions, and await blocks type-checked without requiring a project-wide
+`jsxImportSource` setting.
 
 JSDoc on a JavaScript `$props()` binding is also retained by Svelte's public
 declaration carrier. A bare `.svelte` import, including one reached through

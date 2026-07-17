@@ -1,3 +1,4 @@
+/** @jsxImportSource vue */
 import Outer from './Outer.vue'
 import Inner from './Inner.vue'
 import Leaf from './Leaf.vue'
@@ -17,17 +18,17 @@ void ___VERTER___directiveAccessor;
 
 {
 <>
-  <div>
-    <section>
-      <Outer>
+  <><div></div>
+    <><section></section>
+      <><Outer></Outer>
         <>{"body"}
-          <Inner>
+          <><Inner></Inner>
             <Leaf />
-          </Inner>
+          </>
         </>
-      </Outer>
-    </section>
-  </div>
+      </>
+    </>
+  </>
 </>
 ___VERTER___strictRenderSlot({} as NonNullable<ReturnType<typeof ___VERTER___Comp211>['$slots']['default']>, []);
 ___VERTER___strictRenderSlot({} as NonNullable<ReturnType<typeof ___VERTER___Comp168>['$slots']['body']>, []);LeafInner

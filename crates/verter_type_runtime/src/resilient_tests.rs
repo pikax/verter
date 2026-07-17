@@ -54,6 +54,7 @@ enum MockCall {
         removed: Vec<serde_json::Value>,
     },
     RegisterCarrierMember {
+        source_path: String,
         companion_path: String,
         content: String,
         project_file_name: String,
@@ -157,11 +158,13 @@ impl TypeProvider for MockProvider {
 
     fn register_carrier_member(
         &self,
+        source_path: &str,
         companion_path: &str,
         content: &str,
         project_file_name: &str,
     ) -> ProviderFuture<'_, ()> {
         self.record(MockCall::RegisterCarrierMember {
+            source_path: source_path.to_string(),
             companion_path: companion_path.to_string(),
             content: content.to_string(),
             project_file_name: project_file_name.to_string(),
@@ -535,6 +538,7 @@ async fn carrier_registration_racing_respawn_reaches_fresh_inner() {
     let carrier = "/project/src/Racing.vue.tsx";
     provider
         .register_carrier_member(
+            "/project/src/Racing.vue",
             carrier,
             "export default {} as any;\n",
             "/project/tsconfig.json",
@@ -548,8 +552,9 @@ async fn carrier_registration_racing_respawn_reaches_fresh_inner() {
     assert!(
         replayed.iter().any(|c| matches!(
             c,
-            MockCall::RegisterCarrierMember { companion_path, content, project_file_name }
+            MockCall::RegisterCarrierMember { source_path, companion_path, content, project_file_name }
                 if companion_path == carrier
+                    && source_path == "/project/src/Racing.vue"
                     && content == "export default {} as any;\n"
                     && project_file_name == "/project/tsconfig.json"
         )),
@@ -571,6 +576,7 @@ async fn carrier_registration_survives_respawn_contentlessly() {
     let carrier = "/project/src/App.vue.tsx";
     provider
         .register_carrier_member(
+            "/project/src/App.vue",
             carrier,
             "export default {} as any;\n",
             "/project/tsconfig.json",
@@ -586,8 +592,9 @@ async fn carrier_registration_survives_respawn_contentlessly() {
     assert!(
         replayed.iter().any(|c| matches!(
             c,
-            MockCall::RegisterCarrierMember { companion_path, content, project_file_name }
+            MockCall::RegisterCarrierMember { source_path, companion_path, content, project_file_name }
                 if companion_path == carrier
+                    && source_path == "/project/src/App.vue"
                     && content == "export default {} as any;\n"
                     && project_file_name == "/project/tsconfig.json"
         )),
@@ -608,6 +615,7 @@ async fn retracted_carrier_is_absent_from_restart_replay() {
     let kept = "/project/src/Kept.vue.tsx";
     provider
         .register_carrier_member(
+            "/project/src/Gone.vue",
             carrier,
             "export default {} as any;\n",
             "/project/tsconfig.json",
@@ -616,6 +624,7 @@ async fn retracted_carrier_is_absent_from_restart_replay() {
         .unwrap();
     provider
         .register_carrier_member(
+            "/project/src/Kept.vue",
             kept,
             "export default {} as any;\n",
             "/project/tsconfig.json",
@@ -749,6 +758,7 @@ async fn register_carrier_forwards_to_the_live_provider() {
 
     provider
         .register_carrier_member(
+            "/project/src/App.vue",
             "/project/src/App.vue.tsx",
             "export default {} as any;\n",
             "/project/tsconfig.json",

@@ -141,15 +141,13 @@ if (FIXTURE_NAME === FIXTURE) {
         timeoutMs: 20_000,
         stableMs: 800,
       });
-      const missingJsxEnvironment = diagnostics.filter(
-        (diagnostic) =>
-          diagnosticCode(diagnostic) === 7026 ||
-          /JSX element implicitly has type 'any'|JSX\.IntrinsicElements/.test(diagnostic.message),
+      const errors = diagnostics.filter(
+        (diagnostic) => diagnostic.severity === vscode.DiagnosticSeverity.Error,
       );
       assert.deepStrictEqual(
-        missingJsxEnvironment,
+        errors,
         [],
-        `The ${TYPE_PROVIDER} editor route lacks Vue JSX intrinsics: ${formatDiagnostics(diagnostics)}`,
+        `The ${TYPE_PROVIDER} editor route must keep the minimal valid Vue file error-clean, including against React-style className/component leakage: ${formatDiagnostics(diagnostics)}`,
       );
     });
 

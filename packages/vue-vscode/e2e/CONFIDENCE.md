@@ -7,7 +7,7 @@ release works.
 Green evidence includes:
 
 - all 73 Vue/Svelte matrix cases;
-- the broader 219-test parity and hardening inventory;
+- the broader 221-test parity and hardening inventory;
 - exact loaded-suite and build-content attestation;
 - framework contract suites as an additional focused gate;
 - no hidden product-gap skips; and

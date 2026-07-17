@@ -1,85 +1,131 @@
-/**
- * @ai-generated - Tests for the @verter/types virtual stub content.
- * Verifies the stub contains all symbols that Rust TSX codegen may import.
- */
-import { describe, it, expect } from "vitest";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import ts from "typescript";
+import { afterEach, describe, expect, it } from "vitest";
 import { VERTER_TYPES_STUB } from "./verterTypesStub";
 
+const roots: string[] = [];
+
+const VUE_STUB = `
+export type ShallowUnwrapRef<T> = T;
+export interface ComponentObjectPropsOptions {}
+export type EmitsOptions = Record<string, unknown>;
+export type ComponentTypeEmits = Record<string, unknown>;
+export interface PropType<T> {}
+export interface ComponentOptionsMixin {}
+export interface ComputedOptions {}
+export interface MethodOptions {}
+export interface ComponentOptionsBase<A, B, C, D, E, F, G, H> {}
+export const Comment: unique symbol;
+export const Fragment: unique symbol;
+export interface HTMLAttributes { class?: string }
+export interface NativeElements { div: HTMLAttributes; [name: string]: unknown }
+export interface Directive<T = any, V = any, M extends string = string, A = any> {}
+export interface GlobalDirectives {}
+declare global { namespace JSX { interface Element {} } }
+`;
+
+const GENERATED_IMPORT_CONTRACT = `
+import type {
+  Prettify,
+  ExtractComponentProps,
+  ExtractLeafElement,
+  ExtractRenderComponent,
+} from "@verter/types";
+import {
+  shallowUnwrapRef,
+  enhanceElementWithProps,
+  extractRenderComponent,
+  instantiateComponent,
+  extractArgumentsFromRenderSlot,
+  runCustomDirective,
+  retrieveSetupDirectives,
+  strictRenderSlot,
+  checkRequiredSlots,
+} from "@verter/types";
+
+declare const Component: new () => { $props: { label: string }; $el: HTMLDivElement };
+type Props = Prettify<ExtractComponentProps<typeof Component>>;
+const valid: Props = { label: "ok" };
+// @ts-expect-error the virtual stub must preserve the component's public prop type
+const invalid: Props = { label: 1 };
+declare const leaf: ExtractLeafElement<typeof Component>;
+const element: HTMLDivElement = leaf;
+declare const rendered: ExtractRenderComponent<"div">;
+void valid;
+void invalid;
+void element;
+void rendered;
+void shallowUnwrapRef;
+void enhanceElementWithProps;
+void extractRenderComponent;
+void instantiateComponent;
+void extractArgumentsFromRenderSlot;
+void runCustomDirective;
+void retrieveSetupDirectives;
+void strictRenderSlot;
+void checkRequiredSlots;
+`;
+
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+function typecheckVirtualPackage(stub: string): readonly ts.Diagnostic[] {
+  const root = path.join(
+    tmpdir(),
+    `verter-types-stub-contract-${process.pid}-${roots.length}-${Date.now()}`,
+  );
+  roots.push(root);
+  const vue = path.join(root, "node_modules", "vue");
+  const verterTypes = path.join(root, "node_modules", "@verter", "types");
+  mkdirSync(vue, { recursive: true });
+  mkdirSync(verterTypes, { recursive: true });
+  writeFileSync(path.join(vue, "index.d.ts"), VUE_STUB);
+  writeFileSync(path.join(vue, "package.json"), '{"name":"vue","types":"index.d.ts"}');
+  writeFileSync(path.join(verterTypes, "index.d.ts"), stub);
+  writeFileSync(
+    path.join(verterTypes, "package.json"),
+    '{"name":"@verter/types","types":"index.d.ts"}',
+  );
+  const consumer = path.join(root, "contract.ts");
+  writeFileSync(consumer, GENERATED_IMPORT_CONTRACT);
+
+  const program = ts.createProgram([consumer], {
+    lib: ["lib.es2022.d.ts", "lib.dom.d.ts"],
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    noEmit: true,
+    skipLibCheck: false,
+    strict: true,
+    target: ts.ScriptTarget.ES2022,
+  });
+  return ts.getPreEmitDiagnostics(program);
+}
+
 describe("VERTER_TYPES_STUB", () => {
-  it("is a non-empty string", () => {
-    expect(VERTER_TYPES_STUB).toBeTruthy();
-    expect(typeof VERTER_TYPES_STUB).toBe("string");
+  it("type-checks the complete generated IDE import contract with precise component props", () => {
+    const diagnostics = typecheckVirtualPackage(VERTER_TYPES_STUB);
+    expect(
+      diagnostics.map(
+        (diagnostic) =>
+          `TS${diagnostic.code}: ${ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")}`,
+      ),
+    ).toEqual([]);
   });
 
-  it("imports only from vue (no circular @verter/types dependency)", () => {
-    expect(VERTER_TYPES_STUB).toContain('from "vue"');
-    expect(VERTER_TYPES_STUB).not.toContain('from "@verter/types"');
-  });
-
-  describe("always-imported core types (tsx/script.rs:2338-2343)", () => {
-    it("exports Prettify type", () => {
-      expect(VERTER_TYPES_STUB).toContain("export type Prettify<");
-    });
-
-    it("exports PublicInstanceFromMacro type", () => {
-      expect(VERTER_TYPES_STUB).toContain("export type PublicInstanceFromMacro<");
-    });
-
-    it("exports ExtractComponentProps type", () => {
-      expect(VERTER_TYPES_STUB).toContain("export type ExtractComponentProps<");
-    });
-
-    it("exports OmitConstructorSignature type", () => {
-      expect(VERTER_TYPES_STUB).toContain("export type OmitConstructorSignature<");
-    });
-  });
-
-  describe("always-imported runtime functions (tsx/script.rs:2356-2358)", () => {
-    it("exports shallowUnwrapRef function", () => {
-      expect(VERTER_TYPES_STUB).toContain("export declare function shallowUnwrapRef<");
-    });
-
-    it("exports enhanceElementWithProps function", () => {
-      expect(VERTER_TYPES_STUB).toContain("export declare function enhanceElementWithProps<");
-    });
-
-    it("exports createMacroReturn function", () => {
-      expect(VERTER_TYPES_STUB).toContain("export declare function createMacroReturn<");
-    });
-  });
-
-  describe("conditional Box helpers (tsx/script.rs:2346, via box_standard_macro)", () => {
-    it("exports defineProps_Box", () => {
-      expect(VERTER_TYPES_STUB).toContain("export declare function defineProps_Box");
-    });
-
-    it("exports defineEmits_Box", () => {
-      expect(VERTER_TYPES_STUB).toContain("export declare function defineEmits_Box");
-    });
-
-    it("exports defineSlots_Box", () => {
-      expect(VERTER_TYPES_STUB).toContain("export declare function defineSlots_Box");
-    });
-
-    it("exports defineExpose_Box", () => {
-      expect(VERTER_TYPES_STUB).toContain("export declare function defineExpose_Box");
-    });
-
-    it("exports defineOptions_Box", () => {
-      expect(VERTER_TYPES_STUB).toContain("export declare function defineOptions_Box");
-    });
-
-    it("exports defineModel_Box", () => {
-      expect(VERTER_TYPES_STUB).toContain("export declare function defineModel_Box");
-    });
-
-    it("exports withDefaults_Box", () => {
-      expect(VERTER_TYPES_STUB).toContain("export declare function withDefaults_Box");
-    });
-  });
-
-  it("does not contain import() expressions (self-contained)", () => {
-    // The stub should use direct imports, not dynamic import() type references
-    expect(VERTER_TYPES_STUB).not.toMatch(/import\(/);
+  it("keeps the managed-tsgo fallback on the same typed import contract", () => {
+    const rustStub = readFileSync(
+      path.resolve(__dirname, "../../../../crates/verter_lsp/src/verter_types_stub.d.ts"),
+      "utf8",
+    );
+    const diagnostics = typecheckVirtualPackage(rustStub);
+    expect(
+      diagnostics.map(
+        (diagnostic) =>
+          `TS${diagnostic.code}: ${ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")}`,
+      ),
+    ).toEqual([]);
   });
 });

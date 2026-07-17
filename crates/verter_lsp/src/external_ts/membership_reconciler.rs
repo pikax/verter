@@ -834,6 +834,7 @@ impl MembershipReconciler {
             for companion in &companions {
                 provider
                     .register_carrier_member(
+                        source.as_str(),
                         &companion.provider_uri,
                         &companion.content,
                         project.as_str(),
