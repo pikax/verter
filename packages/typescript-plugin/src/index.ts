@@ -2932,7 +2932,19 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     const companions = store
       .readyIdeCompanions()
       .filter((companion) => !configuredRoots.has(canonical(companion)));
-    const out = [...new Set([...sources, ...companions])];
+    // Dedupe on the canonical key, not the raw string: on a case-insensitive
+    // host the store can surface case-variant spellings of one identity (e.g.
+    // drive-letter case), and raw-string dedupe would advertise both — the
+    // double-identity hazard above.
+    const seen = new Set<string>();
+    const out = [...sources, ...companions].filter((file) => {
+      const key = canonical(file);
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
     priorNonEditorExternalsByProject.set(project, new Set(out.map(canonical)));
     project.projectService.logger.info(
       `[Verter] getExternalFiles(${projectKey}): ${sources.length} ready carrier source(s), ${companions.length} companion(s)`,
