@@ -7,9 +7,9 @@
 // namespace EXPORTED from this module (its `/svg/jsx-runtime` subpath) —
 // overriding the project-level `jsxImportSource` for that file only.
 //
-// The namespace is SVG-ONLY: `IntrinsicElements` is the official SVG-keyed
-// subset of `svelte/elements`' `SvelteHTMLElements`. It REPLACES the HTML
-// table — an
+// The namespace is SVG-ONLY: `IntrinsicElements` derives from the official
+// SVG-keyed subset of `svelte/elements`' `SvelteHTMLElements`, adapting only
+// the implicit JSX child channel documented below. It REPLACES the HTML table — an
 // HTML-only attribute on an svg element FAILS, proving the svg table is in
 // effect (there is no catch-all intrinsic index). `Element` /
 // component adaptation is namespace-invariant.
@@ -23,7 +23,7 @@ import type { SvelteHTMLElements } from "svelte/elements";
 
 // Svelte 5 publishes its SVG tag contracts as the SVG-keyed portion of
 // `SvelteHTMLElements`. Keep the namespace closed while inheriting every
-// attribute, event, and `currentTarget` detail from the official package.
+// authored attribute, event, and `currentTarget` detail from the official package.
 type SvelteSVGElementNames =
   | "svg"
   | "a"
@@ -109,7 +109,12 @@ export namespace JSX {
   }
 
   // The official SVG-keyed intrinsic subset. This REPLACES the HTML table.
+  // Only the implicit JSX child channel is adapted: Svelte markup children
+  // are values/elements, not the explicit forwarded Snippet prop represented
+  // by `DOMAttributes.children`.
   type IntrinsicElements = {
-    [Name in SvelteSVGElementNames]: SvelteHTMLElements[Name];
+    [Name in SvelteSVGElementNames]: Omit<SvelteHTMLElements[Name], "children"> & {
+      children?: unknown;
+    };
   };
 }

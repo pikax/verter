@@ -21,7 +21,8 @@
 
 /// The embedded `@verter/svelte-jsx/jsx-runtime.d.ts` shim — the `JSX`
 /// namespace authority (`Element`/`ElementType`/
-/// `IntrinsicElements extends SvelteHTMLElements`).
+/// `IntrinsicElements` derives authored attributes from `SvelteHTMLElements`
+/// and adapts only the implicit JSX child channel).
 pub const SVELTE_JSX_RUNTIME_DTS: &str = include_str!("svelte_jsx_assets/jsx-runtime.d.ts");
 
 /// The embedded `@verter/svelte-jsx/jsx-dev-runtime.d.ts` shim — the
@@ -87,8 +88,9 @@ mod tests {
         // The namespace is Svelte-true (SvelteHTMLElements), brands snippets,
         // and privately adapts native Svelte Component props — never Vue's table.
         assert!(SVELTE_JSX_RUNTIME_DTS.contains("export namespace JSX"));
-        assert!(SVELTE_JSX_RUNTIME_DTS
-            .contains("[Name in keyof SvelteHTMLElements]: SvelteHTMLElements[Name]"));
+        assert!(SVELTE_JSX_RUNTIME_DTS.contains(
+            "[Name in keyof SvelteHTMLElements]: Omit<SvelteHTMLElements[Name], \"children\">"
+        ));
         assert!(SVELTE_JSX_RUNTIME_DTS.contains("LibraryManagedAttributes"));
         assert!(SVELTE_JSX_RUNTIME_DTS.contains("import(\"svelte\").Component"));
         assert!(SVELTE_JSX_RUNTIME_DTS.contains("ReturnType<Snippet>"));
@@ -105,12 +107,14 @@ mod tests {
     fn embedded_svg_runtime_declares_an_svg_only_namespace() {
         // F10: the svg entrypoint is the official SVG-keyed subset of
         // `SvelteHTMLElements`. Each concrete tag retains the installed Svelte
-        // package's exact props instead of inheriting a generic event base.
+        // package's authored props instead of inheriting a generic event base;
+        // only the implicit JSX child channel is projection-adapted.
         assert!(SVELTE_JSX_SVG_RUNTIME_DTS.contains("export namespace JSX"));
         assert!(SVELTE_JSX_SVG_RUNTIME_DTS
             .contains("import type { SvelteHTMLElements } from \"svelte/elements\""));
-        assert!(SVELTE_JSX_SVG_RUNTIME_DTS
-            .contains("[Name in SvelteSVGElementNames]: SvelteHTMLElements[Name]"));
+        assert!(SVELTE_JSX_SVG_RUNTIME_DTS.contains(
+            "[Name in SvelteSVGElementNames]: Omit<SvelteHTMLElements[Name], \"children\">"
+        ));
         assert!(SVELTE_JSX_SVG_RUNTIME_DTS.contains("ReturnType<Snippet>"));
         assert!(SVELTE_JSX_SVG_DEV_RUNTIME_DTS.contains("export { JSX } from \"./jsx-runtime\""));
     }
