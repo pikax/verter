@@ -435,6 +435,62 @@ fn block_tree_vif_element_uses_block() {
     );
 }
 
+/// Inline multi-statement arrow handlers must not be double-wrapped.
+/// `@keydown="(event) => { if (x); }"` → `onKeydown: (event) => {…}`
+/// NOT `onKeydown: $event => {(event) => {…}}` (no-op at runtime).
+#[test]
+fn inline_arrow_event_handler_not_double_wrapped() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <div @keydown="(event) => {
+    if (event.key === 'Home') {
+      goHome(event);
+    }
+  }"></div>
+</template>
+<script setup>
+function goHome(e) {}
+</script>"#,
+    );
+    assert!(
+        !code.contains("$event => {(event)") && !code.contains("$event => { (event)"),
+        "must not double-wrap arrow handler, got:\n{code}"
+    );
+    assert!(
+        code.contains("onKeydown:") && (code.contains("(event)") || code.contains("event =>")),
+        "handler must remain an arrow taking event, got:\n{code}"
+    );
+    assert!(
+        code.contains("goHome") || code.contains("$setup.goHome"),
+        "handler body must call goHome, got:\n{code}"
+    );
+}
+
+/// reka-ui VisuallyHiddenInput: `v-for="parsed in …" v-else` on one element.
+/// Loop alias must be introduced via `_renderList` callback — without that,
+/// props like `parsed.name` are free identifiers → ReferenceError.
+#[test]
+fn v_for_on_v_else_emits_render_list_with_alias_in_scope() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <div v-if="cond" key="x">one</div>
+  <div v-for="parsed in items" v-else :key="parsed.name">{{ parsed.value }}</div>
+</template>
+<script setup>
+const cond = false
+const items = [{ name: 'a', value: 1 }]
+</script>"#,
+    );
+    assert!(
+        code.contains("_renderList"),
+        "v-for on v-else must emit _renderList, got:\n{code}"
+    );
+    assert!(
+        code.contains("(parsed") || code.contains("parsed)"),
+        "loop alias `parsed` must appear as _renderList callback param, got:\n{code}"
+    );
+}
+
 #[test]
 fn block_tree_vif_component_uses_block() {
     let code = gen_vdom_template(
@@ -547,7 +603,7 @@ fn normalize_props_vbind_spread_on_component() {
 
 #[test]
 fn normalize_props_vbind_spread_with_regular_props_uses_merge_only() {
-    // v-bind="attrs" + class="foo" → _mergeProps({...}, attrs) — NO normalizeProps
+    // class first, then v-bind → _mergeProps({class}, attrs) so attrs can override
     let code = gen_vdom_template(
         "<template><div class=\"foo\" v-bind=\"attrs\">hi</div></template>\n<script setup>\nconst attrs = {}\n</script>",
     );
@@ -562,6 +618,51 @@ fn normalize_props_vbind_spread_with_regular_props_uses_merge_only() {
     assert!(
         !code.contains("_guardReactiveProps("),
         "v-bind spread + regular props should NOT use _guardReactiveProps, got:\n{code}"
+    );
+    // class before attrs in source → regular props object first, then spread
+    let merge = code.find("_mergeProps(").expect("mergeProps");
+    let class_pos = code[merge..]
+        .find("class:")
+        .or_else(|| code[merge..].find("\"class\""));
+    let attrs_pos = code[merge..].find("attrs");
+    if let (Some(c), Some(a)) = (class_pos, attrs_pos) {
+        assert!(
+            c < a,
+            "class then v-bind should emit props object before spread, got:\n{code}"
+        );
+    }
+}
+
+/// v-bind first then explicit :name must let :name win (later mergeProps arg).
+/// reka-ui VisuallyHiddenInput: `v-bind="{...props}" :name="parsed.name"`.
+#[test]
+fn merge_props_vbind_then_explicit_keeps_explicit_last() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <input v-bind="props" :name="computedName" :value="computedValue" />
+</template>
+<script setup>
+const props = { name: 'base' }
+const computedName = 'override'
+const computedValue = 1
+</script>"#,
+    );
+    assert!(
+        code.contains("_mergeProps("),
+        "expected _mergeProps, got:\n{code}"
+    );
+    let merge = code.find("_mergeProps(").expect("mergeProps");
+    let rest = &code[merge..];
+    // Spread `props` (or $setup.props) must appear before the explicit name/value object
+    // so later keys win in Vue's mergeProps.
+    let spread_pos = rest.find("props").expect("props spread");
+    let name_pos = rest
+        .find("name:")
+        .or_else(|| rest.find("\"name\""))
+        .expect("explicit name");
+    assert!(
+        spread_pos < name_pos,
+        "v-bind then :name must emit spread before explicit object, got:\n{code}"
     );
 }
 
@@ -783,6 +884,66 @@ fn cache_wraps_multiple_static_elements() {
     );
 }
 
+/// `<slot v-bind="slotProps" />` must pass the object as the third arg of
+/// `_renderSlot` (AlertDialogRoot / DialogRoot reka-ui pattern).
+#[test]
+fn slot_outlet_v_bind_spread_passes_props() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <Comp v-slot="slotProps">
+    <slot v-bind="slotProps" />
+  </Comp>
+</template>
+<script setup>
+const x = 1
+</script>"#,
+    );
+    assert!(
+        code.contains("_renderSlot(_ctx.$slots, \"default\",")
+            || code.contains("_renderSlot(_ctx.$slots, \"default\", $setup.slotProps")
+            || code.contains("slotProps"),
+        "slot v-bind spread must appear in renderSlot args, got:\n{code}"
+    );
+    // Must not be bare `_renderSlot(_ctx.$slots, "default")` with no third arg
+    // inside the withCtx that receives slotProps.
+    assert!(
+        code.contains("_withCtx((slotProps)") && code.contains("slotProps"),
+        "scoped slot param must flow into renderSlot, got:\n{code}"
+    );
+    // The renderSlot call inside withCtx must receive the spread.
+    let with_ctx = code
+        .find("_withCtx((slotProps)")
+        .expect("withCtx with slotProps");
+    let tail = &code[with_ctx..];
+    assert!(
+        tail.contains("_renderSlot(_ctx.$slots, \"default\", slotProps)")
+            || tail.contains("_renderSlot(_ctx.$slots, \"default\", $setup.slotProps)"),
+        "renderSlot must take slotProps as 3rd arg, got tail:\n{tail}"
+    );
+}
+
+/// Component with children + v-show must wrap createBlock in _withDirectives.
+/// Regression: AvatarImage uses `<Primitive v-show="..."><slot/></Primitive>` —
+/// the slots path used to drop v-show entirely (display:none never applied).
+#[test]
+fn component_with_children_v_show_uses_with_directives() {
+    let code = gen_vdom_template(
+        "<template><Comp v-show=\"visible\"><span>x</span></Comp></template>\n<script setup>\nimport Comp from './Comp.vue'\nconst visible = true\n</script>",
+    );
+    assert!(
+        code.contains("_withDirectives"),
+        "component+children+v-show should use _withDirectives, got:\n{code}"
+    );
+    assert!(
+        code.contains("_vShow"),
+        "component+children+v-show should use _vShow helper, got:\n{code}"
+    );
+    assert!(
+        code.contains("createBlock") || code.contains("_createBlock"),
+        "should still emit createBlock, got:\n{code}"
+    );
+}
+
 // ==================== withDirectives (v-show + custom directives) ====================
 
 #[test]
@@ -947,6 +1108,237 @@ fn dynamic_slots_flag_vif() {
     assert!(
         code.contains("1024"),
         "Slot with v-if should emit DYNAMIC_SLOTS (1024), got:\n{code}"
+    );
+}
+
+/// Components inside `v-for` must mark default slots as DYNAMIC (`_: 2`) and
+/// set the DYNAMIC_SLOTS patch flag. STABLE (`_: 1`) freezes slot content so
+/// `{{ item.value }}` never updates when the iterated item changes (reka-ui
+/// TimeField / DateField segment text regression).
+#[test]
+fn component_inside_vfor_default_slot_is_dynamic() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <MyComp
+    v-for="item in items"
+    :key="item.part"
+    :part="item.part"
+  >{{ item.value }}</MyComp>
+</template>
+<script setup>
+import MyComp from './MyComp.vue'
+const items = [{ part: 'minute', value: '30' }]
+</script>"#,
+    );
+    assert!(
+        code.contains("_: 2"),
+        "v-for component default slot must be DYNAMIC (_: 2), got:\n{code}"
+    );
+    assert!(
+        !code.contains("_: 1 /* STABLE */") && !code.contains(", _: 1}"),
+        "v-for component default slot must NOT be STABLE, got:\n{code}"
+    );
+    assert!(
+        code.contains("DYNAMIC_SLOTS") || code.contains("1024"),
+        "v-for component must emit DYNAMIC_SLOTS patch flag, got:\n{code}"
+    );
+    // Component patch flag is PROPS|DYNAMIC_SLOTS (1032), never TEXT|PROPS (9).
+    // TEXT (1) on `_createTextVNode(..., 1 /* TEXT */)` is correct and unrelated.
+    assert!(
+        code.contains("1032") || code.contains("PROPS, DYNAMIC_SLOTS"),
+        "v-for component patch flag should be PROPS|DYNAMIC_SLOTS (1032), got:\n{code}"
+    );
+    assert!(
+        !code.contains("9 /* TEXT, PROPS */") && !code.contains("TEXT, PROPS, DYNAMIC"),
+        "component patch flag must not include TEXT, got:\n{code}"
+    );
+}
+
+#[test]
+fn component_nested_in_vfor_parent_default_slot_is_dynamic() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <div v-for="item in items" :key="item.id">
+    <MyComp>{{ item.value }}</MyComp>
+  </div>
+</template>
+<script setup>
+import MyComp from './MyComp.vue'
+const items = [{ id: 1, value: 'x' }]
+</script>"#,
+    );
+    assert!(
+        code.contains("_: 2"),
+        "component nested in v-for must use DYNAMIC slots, got:\n{code}"
+    );
+    assert!(
+        code.contains("1024") || code.contains("DYNAMIC_SLOTS"),
+        "component nested in v-for must emit DYNAMIC_SLOTS, got:\n{code}"
+    );
+}
+
+#[test]
+fn component_outside_vfor_default_slot_stays_stable() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <MyComp>{{ msg }}</MyComp>
+</template>
+<script setup>
+import MyComp from './MyComp.vue'
+const msg = 'hi'
+</script>"#,
+    );
+    assert!(
+        code.contains("_: 1"),
+        "component outside v-for keeps STABLE slots, got:\n{code}"
+    );
+    assert!(
+        !code.contains("1024") && !code.contains("DYNAMIC_SLOTS"),
+        "component outside v-for must not emit DYNAMIC_SLOTS, got:\n{code}"
+    );
+}
+
+// ==================== Keyboard event key filters (_withKeys) ====================
+
+/// `@keydown.backspace` must use `_withKeys(..., ["backspace"])`, never
+/// `_withModifiers`. Unknown runtime modifiers are no-ops so the handler would
+/// fire for every key and `preventDefault` typing (reka-ui PinInput).
+#[test]
+fn keydown_backspace_uses_with_keys_not_with_modifiers() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <input @keydown.backspace="onBack" @keydown.delete="onDel" />
+</template>
+<script setup>
+function onBack() {}
+function onDel() {}
+</script>"#,
+    );
+    assert!(
+        code.contains(r#"_withKeys("#) && code.contains(r#""backspace""#),
+        "keydown.backspace must use _withKeys, got:\n{code}"
+    );
+    assert!(
+        code.contains(r#""delete""#),
+        "keydown.delete must use _withKeys, got:\n{code}"
+    );
+    // The backspace/delete filters must not be runtime modifiers.
+    assert!(
+        !code.contains(r#"_withModifiers($setup.onBack"#)
+            && !code.contains(r#"_withModifiers(onBack"#)
+            && !code.contains(r#"_withModifiers($setup.onDel"#),
+        "keydown.backspace/delete must NOT use _withModifiers, got:\n{code}"
+    );
+}
+
+#[test]
+fn keydown_chained_arrow_home_end_all_with_keys() {
+    // Official Vue: _withKeys(handler, ["left","right","up","down","home","end"])
+    let code = gen_vdom_template(
+        r#"<template>
+  <input @keydown.left.right.up.down.home.end="onNav" />
+</template>
+<script setup>
+function onNav() {}
+</script>"#,
+    );
+    assert!(
+        code.contains("_withKeys("),
+        "keyboard key filters must use _withKeys, got:\n{code}"
+    );
+    for key in ["left", "right", "up", "down", "home", "end"] {
+        assert!(
+            code.contains(&format!("\"{key}\"")),
+            "expected key filter {key:?} in _withKeys, got:\n{code}"
+        );
+    }
+    // home/end must not be routed to withModifiers (Vue treats them as keys).
+    assert!(
+        !code.contains("_withModifiers("),
+        "keydown.left.right.up.down.home.end must not use _withModifiers, got:\n{code}"
+    );
+}
+
+#[test]
+fn click_stop_prevent_still_uses_with_modifiers() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <button @click.stop.prevent="onClick">x</button>
+</template>
+<script setup>
+function onClick() {}
+</script>"#,
+    );
+    assert!(
+        code.contains("_withModifiers("),
+        "click.stop.prevent must use _withModifiers, got:\n{code}"
+    );
+    assert!(
+        code.contains("\"stop\"") && code.contains("\"prevent\""),
+        "expected stop/prevent modifiers, got:\n{code}"
+    );
+}
+
+/// Props objects with dynamic `:key` must not be hoisted to module scope —
+/// `const _hoisted = { key: item.name }` evaluates `item` outside v-for
+/// (reka-ui CheckboxGroup `item is not defined`).
+#[test]
+fn dynamic_key_props_object_not_hoisted() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <div v-for="item in items" :key="item.name" class="static-cls">
+    {{ item.name }}
+  </div>
+</template>
+<script setup>
+const items = [{ name: 'a' }]
+</script>"#,
+    );
+    assert!(
+        !code.contains("key: item.name")
+            || !code
+                .lines()
+                .any(|l| l.contains("const _hoisted") && l.contains("item.name")),
+        "must not hoist props object containing v-for key expression, got:\n{code}"
+    );
+    // key expression must appear inside the render function, not only in hoists
+    assert!(
+        code.contains("key:") || code.contains("key "),
+        "key must still be emitted on the element, got:\n{code}"
+    );
+}
+
+/// Vnode `key` must never appear in the dynamicProps array. Official Vue only
+/// puts it on the VNode; listing `"key"` in dynamicProps breaks keyed fragment
+/// reuse (reka-ui Calendar cells remount → keyboard focus lost).
+#[test]
+fn vnode_key_not_in_dynamic_props_array() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <MyComp
+    v-for="item in items"
+    :key="item.id"
+    :date="item.date"
+    :data-testid="item.id"
+  />
+</template>
+<script setup>
+import MyComp from './MyComp.vue'
+const items = [{ id: 'a', date: 1 }]
+</script>"#,
+    );
+    // key must still be on the createBlock props object
+    assert!(
+        code.contains("key:") || code.contains("key "),
+        "vnode key property must still be emitted, got:\n{code}"
+    );
+    // dynamicProps hoisted array must not include "key"
+    assert!(
+        !code.contains(r#"["key""#)
+            && !code.contains(r#"["key","#)
+            && !code.contains(r#", "key""#)
+            && !code.contains(r#","key""#),
+        "dynamicProps must not include \"key\", got:\n{code}"
     );
 }
 
@@ -1612,4 +2004,75 @@ fn condition_prefix_compound_props_map_each_identifier() {
     assert_unmapped_region(&tokens, 16, 24);
     // `) ? ` wrapper stays unmapped.
     assert_unmapped_region(&tokens, 27, 31);
+}
+
+#[test]
+fn vbind_spread_alone_emits_full_props_patch_flag() {
+    // Official Vue emits `16 /* FULL_PROPS */` for bare v-bind spreads so attrs
+    // (class/style) re-diff every update. Missing the flag freezes initial class.
+    let code = gen_vdom_template(
+        "<template><div v-bind=\"attrs\">hi</div></template>\n<script setup>\nconst attrs = {}\n</script>",
+    );
+    assert!(
+        code.contains("16") && (code.contains("FULL_PROPS") || code.contains(", 16")),
+        "v-bind spread alone must emit FULL_PROPS patch flag, got:\n{code}"
+    );
+}
+
+#[test]
+fn vbind_spread_on_component_with_slot_emits_full_props_patch_flag() {
+    // Label.vue pattern: component + v-bind expr + default slot
+    let code = gen_vdom_template(
+        r#"<template>
+  <MyComp v-bind="normalizeAttrs(label.attrs([$attrs, { as }]))">
+    <slot />
+  </MyComp>
+</template>
+<script setup>
+import MyComp from './MyComp.vue'
+const as = 'label'
+const label = { attrs: (x) => x }
+const normalizeAttrs = (x) => x
+</script>"#,
+    );
+    assert!(
+        code.contains("_normalizeProps(_guardReactiveProps(") || code.contains("normalizeProps"),
+        "should use normalizeProps for single spread, got:\n{code}"
+    );
+    assert!(
+        code.contains("FULL_PROPS") || code.contains(", 16"),
+        "component v-bind + slot must emit FULL_PROPS so $attrs.class updates, got:\n{code}"
+    );
+}
+
+#[test]
+fn vbind_spread_on_component_self_closing_emits_full_props() {
+    let code = gen_vdom_template(
+        r#"<template><MyComp v-bind="attrs" /></template>
+<script setup>
+import MyComp from './MyComp.vue'
+const attrs = {}
+</script>"#,
+    );
+    eprintln!("SELF_CLOSING:\n{code}");
+    assert!(
+        code.contains("FULL_PROPS") || code.contains(", 16"),
+        "self-closing component v-bind must emit FULL_PROPS, got:\n{code}"
+    );
+}
+
+#[test]
+fn vbind_spread_on_component_with_static_child_emits_full_props() {
+    let code = gen_vdom_template(
+        r#"<template><MyComp v-bind="attrs">hi</MyComp></template>
+<script setup>
+import MyComp from './MyComp.vue'
+const attrs = {}
+</script>"#,
+    );
+    eprintln!("STATIC_CHILD:\n{code}");
+    assert!(
+        code.contains("FULL_PROPS") || code.contains(", 16"),
+        "component v-bind + static child must emit FULL_PROPS, got:\n{code}"
+    );
 }

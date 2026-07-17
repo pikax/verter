@@ -23,6 +23,7 @@ use verter_parser::utils::oxc::script::type_surface::{
     ResolvedNamedCallSignature, ResolvedProp, RuntimeType,
 };
 use verter_semantic::analysis::AnalyzedMacroKind;
+use verter_type_expr::TypeExpr;
 
 use super::{raise_member_value, TypeinfoVueSurfaceOutputCap, UnresolvedSurfaceArm};
 use crate::meta_resolve::callable_view::CallableNodeView;
@@ -79,9 +80,13 @@ pub(crate) fn imported_emits_resolved_elements(
 ) -> Option<ResolvedElements> {
     let dispatch = ctx.dispatch();
 
-    // By-name representability gate (node-domain): the macro type arg must be
-    // the bare `type_name` reference, with NO type arguments.
-    bare_named_ref_type_arg(ctx, owner_canonical, macro_index, type_name)?;
+    // Representability gate (node-domain): the macro type arg must be a bare
+    // named reference with NO type arguments. The name may be a LOCAL ALIAS
+    // of `type_name` (e.g. `type A = RootEmits; defineEmits<A>()` with dep
+    // RootEmits) — the shared macro-surface authority expands aliases, so
+    // we must NOT require the type arg's spelling to equal `type_name`.
+    bare_named_type_arg(ctx, owner_canonical, macro_index)?;
+    let _ = type_name; // map key / tracking only (used by caller)
 
     // Resolve the macro surface through the shared macro-surface authority.
     let indexed = ctx
@@ -170,19 +175,75 @@ pub(crate) fn imported_emits_resolved_elements(
             }
             continue;
         }
-        // Inline tuple member value → the named-tuple shorthand emit. The
-        // tuple-ness decision is NODE-domain; the display is the member's
-        // already-rendered value text (`[id: number]`).
-        if matches!(
+        // Named-tuple shorthand emit (`escapeKeydown: [event: KeyboardEvent]`).
+        // Accept:
+        // - a direct `Tuple` node on the member value,
+        // - a Navigate-expanded terminal Tuple (indexed access / alias chains
+        //   like `DismissableLayerEmits['escapeKeydown']` used by
+        //   oku-primitives / reka-ui under `Omit<SharedEmits, …>`), OR
+        // - a raised TypeExpr::Tuple after materialize.
+        // The display is the already-rendered member value text.
+        let raw_is_tuple = matches!(
             node_data_for(dispatch.ctx, member.value).as_deref(),
             Some(SemanticNodeData::Tuple { .. })
-        ) {
-            if let Some(tuple_text) = type_text {
+        );
+        let navigated = dispatch.resolve_hot_handle_with_context(
+            crate::semantic_query::HotTypeRef::new(member.value),
+            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+        );
+        let navigated_data = node_data_for(dispatch.ctx, navigated);
+        let navigated_is_tuple = matches!(
+            navigated_data.as_deref(),
+            Some(SemanticNodeData::Tuple { .. })
+        );
+        // Indexed-access property values (`LayerEmits['escapeKeydown']`) are
+        // the oku-primitives / reka-ui named-tuple emit pattern. They must
+        // count as emit signatures even when Navigate has not yet collapsed
+        // them to a concrete `Tuple` node (payload may degrade to unknown).
+        let is_indexed_access =
+            matches!(
+                node_data_for(dispatch.ctx, member.value).as_deref(),
+                Some(SemanticNodeData::IndexedAccess { .. })
+            ) || matches!(
+                navigated_data.as_deref(),
+                Some(SemanticNodeData::IndexedAccess { .. })
+            ) || matches!(raised.as_ref(), Some(TypeExpr::IndexedAccess { .. }));
+        let raised_is_tuple = matches!(raised.as_ref(), Some(TypeExpr::Tuple { .. }));
+        if raw_is_tuple || navigated_is_tuple || raised_is_tuple {
+            let tuple_text = type_text.clone().or_else(|| {
+                let cap = TypeinfoVueSurfaceOutputCap::new(&dispatch);
+                cap.materialize_output_type_expr(navigated)
+                    .map(|r| r.into_type_expr(&cap))
+                    .and_then(|expr| render_type_expr_display(&expr))
+            });
+            if let Some(tuple_text) = tuple_text {
                 call_signatures.push(named_signature_row(
                     member.name.as_ref(),
                     ResolvedCallPayloadForm::Tuple { tuple_text },
                 ));
+            } else {
+                call_signatures.push(named_signature_row(
+                    member.name.as_ref(),
+                    ResolvedCallPayloadForm::Call {
+                        params_text: "...args: unknown[]".to_string(),
+                    },
+                ));
             }
+        } else if is_indexed_access {
+            // Named-tuple emit via indexed access: keep the event name, payload
+            // degrades when the hop is not yet a concrete tuple.
+            let signature = match type_text.as_deref() {
+                Some(tt) if tt.trim_start().starts_with('[') => ResolvedCallPayloadForm::Tuple {
+                    tuple_text: tt.to_string(),
+                },
+                Some(tt) => ResolvedCallPayloadForm::Call {
+                    params_text: format!("payload: {tt}"),
+                },
+                None => ResolvedCallPayloadForm::Call {
+                    params_text: "...args: unknown[]".to_string(),
+                },
+            };
+            call_signatures.push(named_signature_row(member.name.as_ref(), signature));
         }
     }
 
@@ -208,6 +269,30 @@ fn bare_named_ref_type_arg(
     macro_index: usize,
     type_name: &str,
 ) -> Option<crate::semantic_query::HotTypeRef> {
+    let type_arg = bare_named_type_arg(ctx, owner_canonical, macro_index)?;
+    let dispatch = ctx.dispatch();
+    let matches_name = node_data_for(dispatch.ctx, type_arg.node())
+        .as_deref()
+        .is_some_and(|data| {
+            if let Some((name, _scope)) = data.bare_ref_head() {
+                return name.as_ref() == type_name;
+            }
+            if let SemanticNodeData::DeclRef { identity } = data {
+                return identity.decl_name.as_ref() == type_name;
+            }
+            false
+        });
+    matches_name.then_some(type_arg)
+}
+
+/// Like [`bare_named_ref_type_arg`] but accepts ANY bare named type argument
+/// (including local aliases of an imported type). Used for defineEmits when
+/// the macro dep is the imported name but the type arg is a local alias.
+fn bare_named_type_arg(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    owner_canonical: &str,
+    macro_index: usize,
+) -> Option<crate::semantic_query::HotTypeRef> {
     let dispatch = ctx.dispatch();
     let type_arg = crate::structural_carrier_producer::macro_type_arg_hot_ref(
         ctx,
@@ -217,13 +302,10 @@ fn bare_named_ref_type_arg(
     let is_bare_named_ref = node_data_for(dispatch.ctx, type_arg.node())
         .as_deref()
         .is_some_and(|data| {
-            if let Some((name, _scope)) = data.bare_ref_head() {
-                return name.as_ref() == type_name && data.carrier_type_args().is_empty();
+            if let Some((_name, _scope)) = data.bare_ref_head() {
+                return data.carrier_type_args().is_empty();
             }
-            if let SemanticNodeData::DeclRef { identity } = data {
-                return identity.decl_name.as_ref() == type_name;
-            }
-            false
+            matches!(data, SemanticNodeData::DeclRef { .. })
         });
     is_bare_named_ref.then_some(type_arg)
 }

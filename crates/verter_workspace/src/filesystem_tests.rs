@@ -904,3 +904,92 @@ fn delete_dir_all_records_subtree_content_transition() {
         "a canonical outside the deleted subtree is untouched",
     );
 }
+
+/// Scalar monorepo layout: package-level `paths: { "@/*": ["./src/*"] }` on
+/// `packages/icons/tsconfig.json`. An importer under that package must resolve
+/// `@/types` → `packages/icons/src/types.ts` via ProjectGraph discovery.
+///
+/// Regression: an exclude-only root tsconfig used to synthesize monorepo-wide
+/// `include` that package leafs inherited, so the wrong package owned the file
+/// and `@/*` mapped to the wrong `src/*`.
+#[test]
+fn monorepo_package_tsconfig_paths_resolve_at_types() {
+    // crates/verter_workspace → repo root → sibling vize checkout
+    let scalar = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("../vize/tests/_fixtures/_git/scalar");
+    let scalar = match scalar.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("skip: scalar fixture not checked out beside the repo");
+            return;
+        }
+    };
+    let scalar_str = scalar.to_string_lossy().replace('\\', "/");
+    let importer = format!("{scalar_str}/packages/icons/src/components/ScalarIconPersonSimple.vue");
+    let expected = format!("{scalar_str}/packages/icons/src/types.ts");
+    assert!(
+        std::path::Path::new(&expected).is_file(),
+        "precondition: {expected} must exist"
+    );
+
+    let ws = FilesystemWorkspace::new(FilesystemOptions {
+        roots: vec![scalar_str.clone()],
+        ..Default::default()
+    });
+    let graph = ProjectGraph::from_workspace_roots(
+        &ws,
+        std::slice::from_ref(&scalar_str),
+        &crate::vite_config::ViteConfigOptions::default(),
+    );
+    ws.set_project_graph(graph.graph);
+
+    // Sibling package that only extends the root for `paths` must not own icons.
+    let ch_ts = format!("{scalar_str}/packages/code-highlight/tsconfig.json");
+    let ch_mem = crate::snapshot_builder::configured_membership_from_raw(
+        &format!("{scalar_str}/packages/code-highlight"),
+        &crate::config::load_project_membership(&ws, &ch_ts),
+        &Default::default(),
+    );
+    assert!(
+        !ch_mem.contains(&crate::CanonicalPath::new(&importer)),
+        "code-highlight must not claim icons sources after leaf-local default include"
+    );
+
+    let result = ws.resolve_import(
+        &importer,
+        "@/types",
+        ResolutionContext {
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::TypeImport,
+        },
+    );
+    let resolved = result.expect("@/types must resolve under package tsconfig paths");
+    let got = resolved.source_id.replace('\\', "/");
+    assert_eq!(
+        got, expected,
+        "package-level @/* paths must map @/types to icons/src/types.ts"
+    );
+}
+
+#[test]
+fn package_tsconfig_membership_does_not_claim_sibling_package_files() {
+    use crate::resolver::{IdeProjectCompilerOptions, ProjectMembership};
+    use crate::snapshot_builder::configured_membership_from_raw;
+    use crate::CanonicalPath;
+
+    let root = "/repo/packages/code-highlight";
+    // MatchAll (no files/include) → defaults under THIS root only
+    let mem = configured_membership_from_raw(
+        root,
+        &ProjectMembership::MatchAll,
+        &IdeProjectCompilerOptions::default(),
+    );
+    let sibling = CanonicalPath::new("/repo/packages/icons/src/Icon.vue");
+    let own = CanonicalPath::new("/repo/packages/code-highlight/src/x.ts");
+    assert!(mem.contains(&own), "own package file must be a member");
+    assert!(
+        !mem.contains(&sibling),
+        "sibling package file must NOT be claimed by code-highlight membership"
+    );
+}

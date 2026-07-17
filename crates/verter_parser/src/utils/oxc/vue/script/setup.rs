@@ -1034,44 +1034,58 @@ fn extract_object_arg<'a>(
     ctx: &ScriptParseContext<'a>,
 ) -> MacroObjectArg<'a> {
     let mut properties = Vec::new();
+    // Object spreads (`...Defaults`) — reka-ui PopperContent pattern:
+    // `withDefaults(defineProps<T>(), { ...PopperContentPropsDefaultValue })`.
+    // Store the identifier name so script codegen can expand from the
+    // companion/setup binding's object literal.
+    let mut spread_identifiers: Vec<String> = Vec::new();
 
     for prop in &obj.properties {
-        if let ObjectPropertyKind::ObjectProperty(p) = prop {
-            if let Some((name, name_span)) = extract_property_key(&p.key, ctx) {
-                let value_span = if p.shorthand {
-                    None
-                } else {
-                    Some(Span::from(p.value.span()))
-                };
+        match prop {
+            ObjectPropertyKind::ObjectProperty(p) => {
+                if let Some((name, name_span)) = extract_property_key(&p.key, ctx) {
+                    let value_span = if p.shorthand {
+                        None
+                    } else {
+                        Some(Span::from(p.value.span()))
+                    };
 
-                let (required, has_default, runtime_types, prop_type_annotation) = if p.shorthand {
-                    (false, false, vec![], None)
-                } else {
-                    match &p.value {
-                        Expression::Identifier(_) | Expression::ArrayExpression(_) => {
-                            let types = extract_runtime_types_from_expr(&p.value);
-                            (false, false, types, None)
+                    let (required, has_default, runtime_types, prop_type_annotation) = if p
+                        .shorthand
+                    {
+                        (false, false, vec![], None)
+                    } else {
+                        match &p.value {
+                            Expression::Identifier(_) | Expression::ArrayExpression(_) => {
+                                let types = extract_runtime_types_from_expr(&p.value);
+                                (false, false, types, None)
+                            }
+                            Expression::TSAsExpression(_) => {
+                                let types = extract_runtime_types_from_expr(&p.value);
+                                let annotation = extract_prop_type_annotation(&p.value);
+                                (false, false, types, annotation)
+                            }
+                            Expression::ObjectExpression(obj) => extract_prop_object_metadata(obj),
+                            _ => (false, false, vec![], None),
                         }
-                        Expression::TSAsExpression(_) => {
-                            let types = extract_runtime_types_from_expr(&p.value);
-                            let annotation = extract_prop_type_annotation(&p.value);
-                            (false, false, types, annotation)
-                        }
-                        Expression::ObjectExpression(obj) => extract_prop_object_metadata(obj),
-                        _ => (false, false, vec![], None),
-                    }
-                };
+                    };
 
-                properties.push(MacroProperty {
-                    name,
-                    name_span,
-                    value_span,
-                    is_method: p.method,
-                    required,
-                    has_default,
-                    runtime_types,
-                    prop_type_annotation,
-                });
+                    properties.push(MacroProperty {
+                        name,
+                        name_span,
+                        value_span,
+                        is_method: p.method,
+                        required,
+                        has_default,
+                        runtime_types,
+                        prop_type_annotation,
+                    });
+                }
+            }
+            ObjectPropertyKind::SpreadProperty(spread) => {
+                if let Expression::Identifier(id) = &spread.argument {
+                    spread_identifiers.push(id.name.to_string());
+                }
             }
         }
     }
@@ -1079,6 +1093,7 @@ fn extract_object_arg<'a>(
     MacroObjectArg {
         span: Span::from(obj.span),
         properties,
+        spread_identifiers,
     }
 }
 

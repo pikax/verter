@@ -229,11 +229,100 @@ function findTypesInExports(exports: Record<string, unknown>, pkgDir: string): s
   return null;
 }
 
-async function hydrateRelativeDependencyClosure(
+/**
+ * Resolve a type-import specifier to an absolute filesystem path.
+ *
+ * Order:
+ * 1. Bundler `resolveId` (path aliases like `@/…`, package subpaths)
+ * 2. Relative filesystem probing (`.d.ts` / `.ts` / `.vue` / index)
+ *
+ * Returns null when the specifier cannot be resolved to a local file.
+ */
+async function resolveTypeImportPath(
+  source: string,
+  importer: string,
+  fa: FileAccess,
+  resolveId?: ResolveHook,
+): Promise<string | null> {
+  if (resolveId) {
+    const result = resolvedIdFromHookResult(await resolveId(source, importer, { skipSelf: true }));
+    if (result) {
+      // Prefer companion .d.ts next to a JS runtime entry (pre-built packages).
+      const jsExtMatch = result.match(/\.(js|mjs|cjs)$/);
+      if (jsExtMatch) {
+        const base = result.slice(0, -jsExtMatch[0].length);
+        for (const ext of [".d.ts", ".d.mts", ".d.cts"]) {
+          const candidate = base + ext;
+          if (fa.fileExists(normalizePath(candidate))) {
+            return normalizePath(candidate);
+          }
+        }
+      }
+      return normalizePath(result);
+    }
+  }
+
+  if (!isRelativeImport(source)) return null;
+
+  const absBase = resolve(dirname(importer), source);
+  const candidates = [
+    absBase + ".d.ts",
+    absBase + ".ts",
+    absBase + ".tsx",
+    absBase + ".vue",
+    absBase + "/index.d.ts",
+    absBase + "/index.ts",
+    absBase + "/index.vue",
+    absBase,
+  ];
+  for (const candidate of candidates) {
+    const normalized = normalizePath(candidate);
+    if (fa.fileExists(normalized)) return normalized;
+  }
+  return null;
+}
+
+/**
+ * Upsert a resolved type dependency and return whether it should be enqueued
+ * for further import-graph traversal.
+ */
+function upsertResolvedTypeFile(host: VerterHost, fa: FileAccess, resolvedPath: string): boolean {
+  const normalized = normalizePath(resolvedPath);
+  try {
+    const src = fa.readFile(normalized);
+    if (src === null) return false;
+    if (normalized.endsWith(".vue")) {
+      // SFC so script analysis extracts exported types / heritage imports.
+      host.upsert({ inputId: normalized, source: src });
+      return true;
+    }
+    host.upsert({
+      inputId: normalized,
+      source: src,
+      fileKind: "non_sfc",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Walk the type-import graph starting at `entryFile`.
+ *
+ * Handles both relative imports and bundler-resolved aliases (`@/…`) so that
+ * intermediate `.vue` type deps (reka-ui / radix-vue pattern) load nested
+ * heritage types such as `PrimitiveProps` from `@/Primitive`.
+ *
+ * Bare npm packages that only resolve via package.json `types` are handled
+ * by the entry-level bare-specifier phase of `hydrateMacroTypeDeps`, not here.
+ */
+async function hydrateDependencyClosure(
   host: VerterHost,
   entryFile: string,
   fa: FileAccess,
   visited: Set<string>,
+  resolveId?: ResolveHook,
 ): Promise<void> {
   const normalizedEntry = normalizePath(entryFile);
   if (visited.has(normalizedEntry)) return;
@@ -255,79 +344,46 @@ async function hydrateRelativeDependencyClosure(
 
     const depResolutions: HostDependencyResolution[] = [];
 
-    // Export signatures are more precise than moduleReferences: they know exactly
-    // which names are re-exported and from where.
+    // Imports + reexports + macro type deps all contribute to type resolution.
     const importSources = (depAnalysis.imports ?? []).map((imp) => imp.source);
     const reexportSources = (depAnalysis.exportSignatures ?? [])
       .filter((sig) => sig.reexportSource)
       .map((sig) => sig.reexportSource!);
-    const allSources = [...new Set([...importSources, ...reexportSources])];
+    const macroSources = (depAnalysis.macroTypeDeps ?? []).map((dep) => dep.importSource);
+    const allSources = [...new Set([...importSources, ...reexportSources, ...macroSources])];
 
     for (const source of allSources) {
-      if (!isRelativeImport(source)) continue;
+      const resolved = await resolveTypeImportPath(source, currentFile, fa, resolveId);
+      if (!resolved) continue;
 
-      const absBase = resolve(dirname(currentFile), source);
-      const candidates = [
-        absBase + ".d.ts",
-        absBase + ".ts",
-        absBase + "/index.d.ts",
-        absBase + "/index.ts",
-        absBase,
-      ];
-
-      for (const candidate of candidates) {
-        const normalized = normalizePath(candidate);
-        if (visited.has(normalized)) {
-          depResolutions.push({
-            specifier: source,
-            resolvedCanonicalId: normalized,
-          });
-          break;
-        }
-        if (!fa.fileExists(normalized)) continue;
-
-        // .vue files at the end of a barrel chain need their types available
-        // for cross-file resolution. Upsert as SFC (not non_sfc) so script
-        // analysis extracts exported types. The SFC's own transform will
-        // re-upsert with the full source later, which is a no-op if unchanged.
-        // Do NOT traverse further (SFC internal imports are handled separately).
-        if (normalized.endsWith(".vue")) {
-          visited.add(normalized);
-          try {
-            const vueSrc = fa.readFile(normalized);
-            if (vueSrc !== null) {
-              host.upsert({ inputId: normalized, source: vueSrc });
-            }
-          } catch {
-            // If read fails, just record the resolution without upserting
-          }
-          depResolutions.push({
-            specifier: source,
-            resolvedCanonicalId: normalized,
-          });
-          break;
-        }
-
-        visited.add(normalized);
-        try {
-          const depSource = fa.readFile(normalized);
-          if (depSource !== null) {
-            host.upsert({
-              inputId: normalized,
-              source: depSource,
-              fileKind: "non_sfc",
-            });
-            depResolutions.push({
-              specifier: source,
-              resolvedCanonicalId: normalized,
-            });
-            queue.push(normalized);
-          }
-          break;
-        } catch {
-          continue;
-        }
+      const normalized = normalizePath(resolved);
+      if (visited.has(normalized)) {
+        depResolutions.push({
+          specifier: source,
+          resolvedCanonicalId: normalized,
+        });
+        continue;
       }
+
+      if (!fa.fileExists(normalized)) continue;
+
+      if (!upsertResolvedTypeFile(host, fa, normalized)) {
+        // Record resolution even if upsert failed so the host has a route.
+        depResolutions.push({
+          specifier: source,
+          resolvedCanonicalId: normalized,
+        });
+        continue;
+      }
+
+      visited.add(normalized);
+      depResolutions.push({
+        specifier: source,
+        resolvedCanonicalId: normalized,
+      });
+      // Traverse further: intermediate .vue files may import heritage via @/
+      // and .ts/.d.ts files may re-export or import more type modules.
+      queue.push(normalized);
     }
 
     if (depResolutions.length > 0) {
@@ -343,6 +399,10 @@ async function hydrateRelativeDependencyClosure(
  * checks if the SFC has macro type deps that reference bare package specifiers.
  * For each, it resolves the package's declaration entry and upserts it into
  * the host so the macro type resolution can succeed.
+ *
+ * Intermediate `.vue` type deps (and their nested `@/` / relative type imports)
+ * are walked via `hydrateDependencyClosure` so heritage types like
+ * `PrimitiveProps` from `@/Primitive` load before runtime props emission.
  */
 export async function hydrateMacroTypeDeps(
   host: VerterHost,
@@ -361,22 +421,33 @@ export async function hydrateMacroTypeDeps(
     return;
   }
 
-  if (!analysis.macroTypeDeps?.length) return;
-
   // Create file access from workspace or fall back to disk
   const fa: FileAccess = ws ? fileAccessFromWorkspace(ws) : fileAccessFromDisk();
 
-  const hydratedRelativeVisited = new Set<string>();
+  const hydratedVisited = new Set<string>();
 
-  // Collect unique specifiers from macro type deps.
-  const specifiers = [...new Set(analysis.macroTypeDeps.map((dep) => dep.importSource))];
+  // Specifiers to hydrate:
+  // 1. macroTypeDeps import sources (direct `defineProps<ImportedType>()`)
+  // 2. ALL file imports — covers the radix pattern where a LOCAL interface
+  //    extends an imported type (`export interface SeparatorProps extends
+  //    BaseSeparatorProps`) and defineProps uses the local name. Without
+  //    hydrating those imports, heritage (PrimitiveProps via nested `@/`)
+  //    never loads and runtime props miss fallthrough/heritage keys.
+  const macroSources = (analysis.macroTypeDeps ?? []).map((dep) => dep.importSource);
+  const importSources = (analysis.imports ?? []).map((imp) => imp.source);
+  const reexportSources = (analysis.exportSignatures ?? [])
+    .filter((sig) => sig.reexportSource)
+    .map((sig) => sig.reexportSource!);
+  const specifiers = [...new Set([...macroSources, ...importSources, ...reexportSources])];
+  if (specifiers.length === 0) return;
 
   const resolutions: HostDependencyResolution[] = [];
 
   // Phase 1: Handle specifiers that resolve to .vue files.
   // resolveUpsertDependencies records .vue resolutions but does NOT upsert the
   // source — the assumption is the bundler will process the .vue file later.
-  // But macro type resolution needs the source NOW. Upsert .vue deps eagerly.
+  // But macro type resolution needs the source NOW. Upsert .vue deps eagerly
+  // and walk their nested type-import graph (including path aliases).
   const remaining: string[] = [];
   for (const specifier of specifiers) {
     let resolvedPath: string | null = null;
@@ -414,13 +485,28 @@ export async function hydrateMacroTypeDeps(
           // Read failed — skip
         }
         resolutions.push({ specifier, resolvedCanonicalId: normalized });
+        // Nested heritage: intermediate SFC may import types via @/ aliases.
+        await hydrateDependencyClosure(host, normalized, fa, hydratedVisited, resolveId);
         continue;
       }
       // Non-.vue resolved file (.ts, .d.ts, etc.) — only handle relative specifiers.
       // Bare specifiers (npm packages) should go to the bare-package step
       // below, which properly finds the .d.ts declaration entry via
       // package.json, not the .js runtime entry.
-      if (isRelativeImport(specifier)) {
+      // Exception: path aliases (`@/…`) that resolve to project-local .ts files
+      // are also hydrated here (same as relative), since they are not packages.
+      const isProjectLocal =
+        isRelativeImport(specifier) ||
+        (resolvedPath !== null &&
+          !normalized.includes("/node_modules/") &&
+          (normalized.endsWith(".ts") ||
+            normalized.endsWith(".tsx") ||
+            normalized.endsWith(".d.ts") ||
+            normalized.endsWith(".d.mts") ||
+            normalized.endsWith(".d.cts") ||
+            normalized.endsWith(".mts") ||
+            normalized.endsWith(".cts")));
+      if (isProjectLocal) {
         // If the resolved file is a JS runtime file (.js, .mjs, .cjs), check for a
         // companion .d.ts/.d.mts/.d.cts file that has the actual type declarations.
         // This happens in pre-built workspace packages (dist/) where types.mjs has
@@ -449,12 +535,7 @@ export async function hydrateMacroTypeDeps(
           // Read failed — skip
         }
         resolutions.push({ specifier, resolvedCanonicalId: effectiveNormalized });
-        await hydrateRelativeDependencyClosure(
-          host,
-          effectiveNormalized,
-          fa,
-          hydratedRelativeVisited,
-        );
+        await hydrateDependencyClosure(host, effectiveNormalized, fa, hydratedVisited, resolveId);
         continue;
       }
     }
@@ -483,7 +564,7 @@ export async function hydrateMacroTypeDeps(
             // skip
           }
           resolutions.push({ specifier, resolvedCanonicalId: normalized });
-          await hydrateRelativeDependencyClosure(host, normalized, fa, hydratedRelativeVisited);
+          await hydrateDependencyClosure(host, normalized, fa, hydratedVisited, resolveId);
           found = true;
           break;
         }
@@ -529,6 +610,17 @@ export async function hydrateMacroTypeDeps(
       // runtime entry itself if it's a .ts/.d.ts file (local project files).
       entryPath = findPackageDeclarationEntry(fa, runtimeEntry);
       if (!entryPath && (runtimeEntry.endsWith(".ts") || runtimeEntry.endsWith(".d.ts"))) {
+        entryPath = runtimeEntry;
+      }
+      // Path-alias / project-local resolution that landed here as "bare":
+      // e.g. `@/components/base` resolved by the bundler to a workspace .ts file.
+      // Prefer that over package.json walk when the path is outside node_modules.
+      if (
+        !entryPath &&
+        runtimeEntry &&
+        !normalizePath(runtimeEntry).includes("/node_modules/") &&
+        fa.fileExists(normalizePath(runtimeEntry))
+      ) {
         entryPath = runtimeEntry;
       }
     }
@@ -582,15 +674,20 @@ export async function hydrateMacroTypeDeps(
 
     // Upsert the entry file
     const normalizedEntryPath = normalizePath(entryPath);
+    const isVueEntry = normalizedEntryPath.endsWith(".vue");
 
     try {
       const source = fa.readFile(normalizedEntryPath);
       if (source !== null) {
-        host.upsert({
-          inputId: normalizedEntryPath,
-          source,
-          fileKind: "non_sfc",
-        });
+        if (isVueEntry) {
+          host.upsert({ inputId: normalizedEntryPath, source });
+        } else {
+          host.upsert({
+            inputId: normalizedEntryPath,
+            source,
+            fileKind: "non_sfc",
+          });
+        }
         resolutions.push({
           specifier,
           resolvedCanonicalId: normalizedEntryPath,
@@ -602,7 +699,7 @@ export async function hydrateMacroTypeDeps(
       continue;
     }
 
-    await hydrateRelativeDependencyClosure(host, normalizedEntryPath, fa, hydratedRelativeVisited);
+    await hydrateDependencyClosure(host, normalizedEntryPath, fa, hydratedVisited, resolveId);
   }
 
   // Update the entry file's import dependencies to include the hydrated resolutions

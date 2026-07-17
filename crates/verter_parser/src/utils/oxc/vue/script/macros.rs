@@ -35,6 +35,9 @@ pub struct MacroObjectArg<'a> {
     pub span: Span,
     /// Property spans (name spans only)
     pub properties: Vec<MacroProperty<'a>>,
+    /// Identifier names from object spreads (`...Foo`). Used by withDefaults
+    /// to expand `...PopperContentPropsDefaultValue`-style default tables.
+    pub spread_identifiers: Vec<String>,
 }
 
 /// A property in a macro object argument.

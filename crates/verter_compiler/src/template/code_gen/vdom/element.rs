@@ -178,17 +178,10 @@ fn emit_merged_event_handler_value(
             let arg_name = &source[as_ as usize..ae as usize];
             for modifier in &prop.modifiers {
                 let m = &source[modifier.start as usize..modifier.end as usize];
-                match m {
-                    "capture" | "once" | "passive" => {} // already in key name
-                    "enter" | "tab" | "delete" | "esc" | "space" | "up" | "down" | "left"
-                    | "right" => {
-                        if (m == "left" || m == "right") && !arg_name.starts_with("key") {
-                            runtime_mods.push(m);
-                        } else {
-                            key_mods.push(m);
-                        }
-                    }
-                    _ => runtime_mods.push(m),
+                match classify_event_modifier(m, arg_name) {
+                    EventModifierKind::Option => {} // already in key name
+                    EventModifierKind::Runtime => runtime_mods.push(m),
+                    EventModifierKind::Key => key_mods.push(m),
                 }
             }
         }
@@ -202,18 +195,23 @@ fn emit_merged_event_handler_value(
         let value = &source[vs as usize..ve as usize];
         if is_on && value.trim().is_empty() {
             buf.push_str("() => {}");
-        } else if is_on && (value.contains(';') || contains_assignment_operator(value)) {
+        } else if is_on {
             let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
             let resolved = resolve_expr(value, vs, oxc_exp, resolver, force_js);
-            buf.push_str("$event => {");
-            buf.push_str(&resolved);
-            buf.push('}');
-        } else if is_on && !is_member_expression(value) {
-            let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
-            let resolved = resolve_expr(value, vs, oxc_exp, resolver, force_js);
-            buf.push_str("$event => (");
-            buf.push_str(&resolved);
-            buf.push(')');
+            if is_function_expression_value(value, oxc_exp) {
+                // Already a function — emit as-is (no double-wrap no-op).
+                buf.push_str(&resolved);
+            } else if value.contains(';') || contains_assignment_operator(value) {
+                buf.push_str("$event => {");
+                buf.push_str(&resolved);
+                buf.push('}');
+            } else if !is_member_expression(value) {
+                buf.push_str("$event => (");
+                buf.push_str(&resolved);
+                buf.push(')');
+            } else {
+                buf.push_str(&resolved);
+            }
         } else {
             let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
             let resolved = resolve_expr(value, vs, oxc_exp, resolver, force_js);
@@ -262,6 +260,134 @@ fn emit_merged_event_handler_value(
     }
 
     (uses_wm, uses_wk)
+}
+
+/// Classification of a Vue event-handler modifier (mirrors `@vue/compiler-dom`).
+enum EventModifierKind {
+    /// `capture` / `once` / `passive` — folded into the prop key name.
+    Option,
+    /// Event/system guards → `_withModifiers` (`stop`, `prevent`, `ctrl`, …).
+    Runtime,
+    /// Keyboard key filter → `_withKeys` (`enter`, `backspace`, `home`, …).
+    Key,
+}
+
+/// Classify one `@event.mod` token the way Vue's compiler does.
+///
+/// On keyboard events (`keydown` / `keyup` / `keypress`), any modifier that is
+/// not an event option or a known non-key guard is a **key** filter — including
+/// aliases like `backspace`, `home`, `end`, and arbitrary key names. Putting
+/// those in `_withModifiers` is wrong: unknown runtime guards are no-ops, so
+/// the handler runs for every key (and may `preventDefault` everything).
+fn classify_event_modifier(mod_name: &str, event_arg: &str) -> EventModifierKind {
+    match mod_name {
+        "capture" | "once" | "passive" => EventModifierKind::Option,
+        // Event propagation + system modifiers + exact + middle mouse button.
+        "stop" | "prevent" | "self" | "ctrl" | "shift" | "alt" | "meta" | "exact" | "middle" => {
+            EventModifierKind::Runtime
+        }
+        // `left` / `right` are mouse-button modifiers on pointer events and key
+        // aliases on keyboard events (ArrowLeft / ArrowRight).
+        "left" | "right" => {
+            if is_keyboard_event_arg(event_arg) {
+                EventModifierKind::Key
+            } else {
+                EventModifierKind::Runtime
+            }
+        }
+        // Everything else on a keyboard event is a key filter (enter, tab,
+        // delete, backspace, esc, space, up, down, home, end, page-up, …).
+        // On non-keyboard events, treat unknown mods as runtime (Vue does the
+        // same via isNonKeyModifier / maybeKeyModifier split).
+        _ => {
+            if is_keyboard_event_arg(event_arg) {
+                EventModifierKind::Key
+            } else {
+                EventModifierKind::Runtime
+            }
+        }
+    }
+}
+
+#[inline]
+fn is_keyboard_event_arg(arg_name: &str) -> bool {
+    // Strip optional Vue event prefixes; arg is usually `keydown` / `keyup` /
+    // `keypress` (or `Keydown` after camelize — we see the raw template arg).
+    let lower = arg_name.as_bytes();
+    lower.eq_ignore_ascii_case(b"keydown")
+        || lower.eq_ignore_ascii_case(b"keyup")
+        || lower.eq_ignore_ascii_case(b"keypress")
+        || arg_name.starts_with("key")
+}
+
+/// True when `value` is already a function expression (arrow or `function`)
+/// that can be used as an event handler as-is.
+///
+/// Multi-statement arrows like `(event: KeyboardEvent) => { if (...); }` contain
+/// `;` and must NOT be re-wrapped as `$event => { (event) => {…} }` — that creates
+/// a block whose body is an unused expression statement (no-op at runtime). This
+/// is the reka-ui SliderImpl / DateField inline-handler pattern.
+fn is_function_expression_value(value: &str, oxc_exp: Option<&OxcParsedExpression<'_>>) -> bool {
+    if let Some(oxc) = oxc_exp {
+        if let Some(expr) = oxc.expression.as_ref() {
+            use oxc_ast::ast::Expression;
+            if matches!(
+                expr,
+                Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+            ) {
+                return true;
+            }
+        }
+    }
+    // Fallback without OXC: trim and look for arrow / function keyword.
+    let t = value.trim_start();
+    if t.starts_with("function") || t.starts_with("async function") {
+        return true;
+    }
+    let t = if let Some(rest) = t.strip_prefix("async") {
+        rest.trim_start()
+    } else {
+        t
+    };
+    // Scan for top-level `=>` (paren/brace depth aware).
+    let bytes = t.as_bytes();
+    let mut depth: i32 = 0;
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        match bytes[i] {
+            b'(' | b'{' | b'[' => depth += 1,
+            b')' | b'}' | b']' => depth -= 1,
+            b'=' if depth == 0 && bytes[i + 1] == b'>' => return true,
+            b'"' | b'\'' | b'`' => {
+                // Skip string / template literal
+                let q = bytes[i];
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == q {
+                        break;
+                    }
+                    // template ${}
+                    if q == b'`' && bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{'
+                    {
+                        depth += 1;
+                        i += 2;
+                        continue;
+                    }
+                    if q == b'`' && bytes[i] == b'}' && depth > 0 {
+                        depth -= 1;
+                    }
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Check if a string contains an assignment operator (`=`, `+=`, `-=`, etc.)
@@ -393,6 +519,12 @@ pub struct PropsResult {
     pub uses_normalize_props: bool,
     pub uses_guard_reactive_props: bool,
     pub uses_to_handlers: bool,
+    /// True when a vnode `key` / `:key` is present. The key is not listed in
+    /// `dynamic_props` (vnode special), but the props object still embeds the
+    /// key expression and must not be hoisted to module scope — hoisting
+    /// `{ key: item.name }` evaluates `item` outside the v-for (reka-ui
+    /// CheckboxGroup `item is not defined`).
+    pub has_vnode_key: bool,
     /// v-model on a native element (input/textarea/select) that needs
     /// `_withDirectives()` wrapping after the element VNode is created.
     pub native_vmodel: Option<NativeVModel>,
@@ -755,6 +887,10 @@ pub(crate) fn build_props_object_into(
     let mut spreads: Vec<(String, bool)> = Vec::with_capacity(2);
     let mut has_regular_props = false;
     let mut has_dynamic_key = false;
+    // True when a vnode `key` / `:key` is present. Blocks props-object
+    // hoisting so loop-scoped keys like `item.name` are not evaluated at
+    // module scope.
+    let mut has_vnode_key = false;
     let mut uses_normalize_class = false;
     let mut uses_normalize_style = false;
     let mut uses_with_modifiers = false;
@@ -791,6 +927,12 @@ pub(crate) fn build_props_object_into(
                 if prop.is_dynamic == Some(true) {
                     has_dynamic_key = true;
                 }
+                // `:key="expr"` / `v-bind:key="expr"`
+                if let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) {
+                    if &source[as_ as usize..ae as usize] == "key" {
+                        has_vnode_key = true;
+                    }
+                }
             }
             // v-model on components or native elements expands to props
             if directive_name == "v-model" {
@@ -802,6 +944,9 @@ pub(crate) fn build_props_object_into(
         } else {
             // Skip static class/style when it will be merged with dynamic `:class`/`:style`
             let name = &source[prop.start as usize..prop.name_end as usize];
+            if name == "key" {
+                has_vnode_key = true;
+            }
             if (name == "class" && merge_class.is_some())
                 || (name == "style" && merge_style.is_some())
             {
@@ -817,10 +962,89 @@ pub(crate) fn build_props_object_into(
         has_regular_props = true;
     }
 
-    // If we have spreads and regular props, use _mergeProps
+    // If we have spreads and regular props, use _mergeProps.
+    // Vue mergeProps is left-to-right (later wins). Attribute source order must
+    // be preserved: `v-bind="obj" :name="x"` → `_mergeProps(obj, { name: x })`
+    // so the explicit `:name` overrides `obj.name` (reka-ui VisuallyHiddenInput
+    // emits `name="slider[0]"` from the v-for alias, not bare `props.name`).
     let use_merge = !spreads.is_empty() && has_regular_props;
+    // Heuristic source order: if the first spread prop appears before the first
+    // regular prop in the element, emit spreads first; otherwise regular first.
+    let first_spread_start = element
+        .props
+        .iter()
+        .find(|p| {
+            if !p.is_directive {
+                return false;
+            }
+            let dname = &source[p.start as usize..p.name_end as usize];
+            (dname == "v-bind" || dname == "v-on" || dname == ":" || dname == "@")
+                && p.arg_start.is_none()
+                && p.value_start.is_some()
+        })
+        .map(|p| p.start);
+    // First non-key regular prop (key is often hoisted first and should not
+    // force regulars-before-spreads — VisuallyHidden: `:key` then `v-bind`
+    // then `:name` must still treat spreads as before the overriding `:name`).
+    let first_regular_start = element
+        .props
+        .iter()
+        .find(|p| {
+            if p.is_directive {
+                let dname = &source[p.start as usize..p.name_end as usize];
+                // Skip spreads
+                if (dname == "v-bind" || dname == "v-on" || dname == ":" || dname == "@")
+                    && p.arg_start.is_none()
+                    && p.value_start.is_some()
+                {
+                    return false;
+                }
+                // Skip :key / v-bind:key — special vnode key, not merge override
+                if let (Some(as_), Some(ae)) = (p.arg_start, p.arg_end) {
+                    let arg = &source[as_ as usize..ae as usize];
+                    if arg == "key" {
+                        return false;
+                    }
+                }
+            } else {
+                let name = &source[p.start as usize..p.name_end as usize];
+                if name == "key" {
+                    return false;
+                }
+            }
+            true
+        })
+        .map(|p| p.start);
+    let spreads_first = match (first_spread_start, first_regular_start) {
+        (Some(s), Some(r)) => s < r,
+        (Some(_), None) => true,
+        _ => false,
+    };
+
     if use_merge {
         buf.push_str("_mergeProps(");
+        if spreads_first {
+            // Emit spreads first as leading mergeProps args.
+            for (i, spread) in spreads.iter().enumerate() {
+                if i > 0 {
+                    buf.push_str(", ");
+                }
+                let (expr, is_von) = spread;
+                if *is_von {
+                    buf.push_str("_toHandlers(");
+                    buf.push_str(expr);
+                    if !element.tag_type.is_component() {
+                        buf.push_str(", true");
+                    }
+                    buf.push(')');
+                } else {
+                    buf.push_str(expr);
+                }
+            }
+            if has_regular_props {
+                buf.push_str(", ");
+            }
+        }
     }
 
     // Dynamic key names (:[expr]) need _normalizeProps wrapping when not using _mergeProps
@@ -1026,35 +1250,27 @@ pub(crate) fn build_props_object_into(
                         props::format_event_handler_key_into(buf, arg_name);
 
                         // Classify modifiers into option (key suffix), runtime, and key categories
+                        // matching @vue/compiler-dom: keyboard-event unknown mods are
+                        // key filters (`_withKeys`), not runtime guards. Misrouting
+                        // `@keydown.backspace` into `_withModifiers` makes the handler
+                        // fire for every key (reka-ui PinInput typing regression).
                         let mut runtime_modifiers: Vec<&str> = Vec::new();
                         let mut key_modifiers: Vec<&str> = Vec::new();
                         for modifier in &prop.modifiers {
                             let mod_name = &source[modifier.start as usize..modifier.end as usize];
-                            match mod_name {
-                                // Option modifiers: appended to key name
-                                "capture" | "once" | "passive" => {
+                            match classify_event_modifier(mod_name, arg_name) {
+                                EventModifierKind::Option => {
                                     // Capitalize and append to key name (e.g., onClick → onClickCapture)
                                     let first_char =
                                         mod_name.as_bytes()[0].to_ascii_uppercase() as char;
                                     buf.push(first_char);
                                     buf.push_str(&mod_name[1..]);
                                 }
-                                // Key modifiers: wrapped with _withKeys
-                                "enter" | "tab" | "delete" | "esc" | "space" | "up" | "down"
-                                | "left" | "right" => {
-                                    // "left" and "right" are key modifiers on keyboard events,
-                                    // but runtime modifiers on mouse events.
-                                    if (mod_name == "left" || mod_name == "right")
-                                        && !arg_name.starts_with("key")
-                                    {
-                                        runtime_modifiers.push(mod_name);
-                                    } else {
-                                        key_modifiers.push(mod_name);
-                                    }
-                                }
-                                // Runtime modifiers: wrapped with _withModifiers
-                                _ => {
+                                EventModifierKind::Runtime => {
                                     runtime_modifiers.push(mod_name);
+                                }
+                                EventModifierKind::Key => {
+                                    key_modifiers.push(mod_name);
                                 }
                             }
                         }
@@ -1104,9 +1320,25 @@ pub(crate) fn build_props_object_into(
                         // appear in dynamic_props (which triggers PATCH_PROPS).
                         // Components need them in dynamic_props for
                         // shouldUpdateComponent checking.
+                        //
+                        // `key` is a vnode special prop (reconciliation only) —
+                        // never list it in dynamicProps. Official Vue omits it;
+                        // including `"key"` breaks keyed fragment reuse so
+                        // calendar cells remount on every placeholder change
+                        // and keyboard focus is lost (reka-ui Calendar).
+                        //
+                        // `ref` is also a vnode special prop (not a DOM attr).
+                        // Listing it in dynamicProps makes the patcher treat it
+                        // as a HTML attribute, so function refs serialize as
+                        // `ref="(el) => …"` in the DOM (reka-ui PopperArrow).
                         let is_class_or_style =
                             is_bind && (arg_name == "class" || arg_name == "style");
-                        if !is_class_or_style || element.tag_type.is_component() {
+                        let is_vnode_key = arg_name == "key";
+                        let is_vnode_ref = arg_name == "ref";
+                        if (!is_class_or_style || element.tag_type.is_component())
+                            && !is_vnode_key
+                            && !is_vnode_ref
+                        {
                             // Skip adding to dynamic_props when the expression is:
                             // - A pure literal (no bindings at all, e.g., :value="200")
                             // - All const props (proven constant across call sites)
@@ -1371,17 +1603,27 @@ pub(crate) fn build_props_object_into(
                     if prop_is_event && value.trim().is_empty() {
                         // Empty string event handler (e.g., @click.stop="")
                         buf.push_str("() => {}");
-                    } else if prop_is_event
-                        && (value.contains(';') || contains_assignment_operator(value))
-                    {
-                        // Multi-statement handlers (`;`) or assignment expressions
-                        // (`dialog = true`) need wrapping to be valid in an
-                        // object literal. Vue's official compiler does the same.
+                    } else if prop_is_event {
                         let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
                         let resolved = resolve_expr(value, vs, oxc_exp, resolver, force_js);
-                        buf.push_str("$event => {");
-                        buf.push_str(&resolved);
-                        buf.push('}');
+                        if is_function_expression_value(value, oxc_exp) {
+                            // Inline arrow/function is already the handler.
+                            // Do not wrap — `$event => { (e) => {…} }` is a no-op.
+                            buf.push_str(&resolved);
+                        } else if value.contains(';') || contains_assignment_operator(value) {
+                            // Multi-statement handlers (`;`) or assignment
+                            // expressions (`dialog = true`) need wrapping.
+                            buf.push_str("$event => {");
+                            buf.push_str(&resolved);
+                            buf.push('}');
+                        } else if !is_member_expression(value) {
+                            // Inline call: @click="onClick(tab)"
+                            buf.push_str("$event => (");
+                            buf.push_str(&resolved);
+                            buf.push(')');
+                        } else {
+                            buf.push_str(&resolved);
+                        }
                     } else {
                         let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
                         let resolved = resolve_expr(value, vs, oxc_exp, resolver, force_js);
@@ -1413,12 +1655,6 @@ pub(crate) fn build_props_object_into(
                             }
                             buf.push(')');
                             uses_normalize_style = true;
-                        } else if prop_is_event && !is_member_expression(value) {
-                            // Inline event handler: @click="onClick(tab)"
-                            // needs wrapping so it fires on click, not during render.
-                            buf.push_str("$event => (");
-                            buf.push_str(&resolved);
-                            buf.push(')');
                         } else {
                             buf.push_str(&resolved);
                         }
@@ -1578,13 +1814,23 @@ pub(crate) fn build_props_object_into(
     };
 
     if use_merge {
-        // Spreads mixed with regular props → _mergeProps({...}, spread1, spread2)
-        // No normalizeProps/guardReactiveProps needed — _mergeProps handles normalization
-        for spread in &spreads {
-            buf.push_str(", ");
-            format_spread(buf, spread);
-            if spread.1 {
-                uses_to_handlers = true;
+        // Spreads mixed with regular props. When spreads come first in source
+        // order they were already emitted above; only append them when regular
+        // props came first (classic `_mergeProps({…}, spread)`).
+        if !spreads_first {
+            for spread in &spreads {
+                buf.push_str(", ");
+                format_spread(buf, spread);
+                if spread.1 {
+                    uses_to_handlers = true;
+                }
+            }
+        } else {
+            // Track _toHandlers import for leading spreads already emitted.
+            for spread in &spreads {
+                if spread.1 {
+                    uses_to_handlers = true;
+                }
             }
         }
         buf.push(')');
@@ -1626,6 +1872,7 @@ pub(crate) fn build_props_object_into(
         uses_normalize_props,
         uses_guard_reactive_props,
         uses_to_handlers,
+        has_vnode_key,
         native_vmodel,
         directive_entries,
     }
@@ -1667,8 +1914,9 @@ pub(super) fn format_dynamic_props_ref(
 /// Emit the `_withDirectives()` closing part: `, [[dir, val, arg, mods], ...])`.
 ///
 /// Handles both native v-model entries and directive entries (v-show, custom directives).
-/// Called from both self-closing and regular close tag paths.
-fn emit_with_directives_close<'alloc>(
+/// Called from both self-closing and regular close tag paths, and from the
+/// component-with-slots path in `slots.rs` (which previously dropped v-show).
+pub(crate) fn emit_with_directives_close<'alloc>(
     buf: &mut String,
     native_vmodel: &Option<NativeVModel>,
     directive_entries: &[DirectiveEntry],
@@ -1923,6 +2171,7 @@ pub fn process_element_leave<'alloc>(
             && !has_cached_patchflag
             && !element.tag_type.is_component()
             && props_result.dynamic_props.is_empty()
+            && !props_result.has_vnode_key
             && !props_result.uses_merge
             && !props_result.uses_normalize_class
             && !props_result.uses_normalize_style
@@ -1986,15 +2235,15 @@ pub fn process_element_leave<'alloc>(
     // shouldUpdateComponent can check listed dynamic props.
     // For plain elements, compute_patch_flags already handles PATCH_PROPS
     // based on PropFlags::HasDynamicBinding / HasEventListener.
-    if element.tag_type.is_component() {
-        // For components, literal bind suppression may have emptied dynamic_props
-        // after compute_patch_flags set PATCH_PROPS. Clear it when no dynamic props remain.
-        if dynamic_props.is_empty() {
-            patch_flag &= !helpers::PATCH_PROPS;
-        } else {
-            patch_flag |= helpers::PATCH_PROPS;
-        }
-    } else if !dynamic_props.is_empty() {
+    // `:ref` / `:key` are excluded from `dynamic_props` (vnode specials). If
+    // they were the only dynamic bindings, clear PATCH_PROPS so we don't pass
+    // a null/empty dynamicProps array that crashes Vue's patcher
+    // (`Cannot read properties of null (reading 'length')`).
+    if dynamic_props.is_empty() {
+        patch_flag &= !helpers::PATCH_PROPS;
+    } else if element.tag_type.is_component() {
+        patch_flag |= helpers::PATCH_PROPS;
+    } else {
         patch_flag |= helpers::PATCH_PROPS;
     }
 

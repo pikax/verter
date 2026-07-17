@@ -28,10 +28,10 @@ use super::{
     extract_string_literal_keys_with_ctx, get_property_key_name, get_property_key_span,
     get_type_reference_name, has_immediate_vue_ignore_comment, infer_runtime_type,
     instantiate_type_params_ctx, resolve_mapped_type_with_ctx, resolve_type_elements_with_ctx_ref,
-    resolve_type_literal_members, span_text, ClassResolutionPlan, DiagnosticLocation,
-    InterfaceResolutionPlan, NamedTypeHeritageEdge, NamedTypeResolutionPlan, ResolutionDepthGuard,
-    ResolutionDiagnostic, ResolutionDiagnosticKind, ResolvedElements, ResolvedMemberVisibility,
-    ResolvedProp, RuntimeType, TypeResolutionContext,
+    resolve_type_literal_members, resolve_type_literal_members_with_ctx, span_text,
+    ClassResolutionPlan, DiagnosticLocation, InterfaceResolutionPlan, NamedTypeHeritageEdge,
+    NamedTypeResolutionPlan, ResolutionDepthGuard, ResolutionDiagnostic, ResolutionDiagnosticKind,
+    ResolvedElements, ResolvedMemberVisibility, ResolvedProp, RuntimeType, TypeResolutionContext,
 };
 
 pub(super) fn inferred_root_runtime_type_for_companion(
@@ -170,13 +170,31 @@ pub(super) fn resolve_named_local_type_with_ctx_ref<'ctx, 'a: 'ctx>(
         }
         // Type alias body is structurally part of the caller's
         // expression — propagate the caller's `from_root_body`.
-        let resolved = Arc::new(resolve_type_elements_with_ctx_ref(
-            aliased_type,
-            base_offset,
-            &child,
-            from_root_body,
-        ));
-        return Some(resolved);
+        let mut resolved =
+            resolve_type_elements_with_ctx_ref(aliased_type, base_offset, &child, from_root_body);
+        // `type A = ImportedEmits` where ImportedEmits lives only in
+        // companion_types (host external map): body resolution can still
+        // land empty if the name lookup missed. Copy the companion surface
+        // for simple non-generic aliases (AlertDialogEmits = DialogRootEmits).
+        if resolved.props.is_empty()
+            && resolved.call_signatures.is_empty()
+            && !resolved.has_call_signature
+        {
+            if let TSType::TSTypeReference(type_ref) = aliased_type {
+                if type_ref.type_arguments.is_none() {
+                    let ref_name = get_type_reference_name(&type_ref.type_name);
+                    if let Some(companion) = child.companion_types.get(ref_name.as_str()) {
+                        if !companion.props.is_empty()
+                            || !companion.call_signatures.is_empty()
+                            || companion.has_call_signature
+                        {
+                            resolved = companion.clone();
+                        }
+                    }
+                }
+            }
+        }
+        return Some(Arc::new(resolved));
     }
 
     if let Some((members, _extends, heritage, type_params)) = ctx.find_interface(type_name_bytes) {
@@ -334,7 +352,14 @@ pub(super) fn build_interface_resolution_plan<'ctx, 'a: 'ctx>(
     // Heritage edges always descend with `from_root_body = false`
     // inside `apply_named_type_heritage_edge_with_ctx_ref` and
     // `try_resolve_heritage_utility_type`.
-    resolve_type_literal_members(members, base_offset, &mut own, ctx.source, from_root_body);
+    resolve_type_literal_members_with_ctx(
+        members,
+        base_offset,
+        &mut own,
+        ctx.source,
+        from_root_body,
+        Some(ctx),
+    );
 
     let heritage = heritage
         .iter()
@@ -603,7 +628,14 @@ pub(super) fn resolve_interface_with_extends_ctx<'ctx, 'a: 'ctx>(
     recursion_guard: &mut Vec<String>,
 ) {
     // Resolve own members
-    resolve_type_literal_members(members, base_offset, result, ctx.source, from_root_body);
+    resolve_type_literal_members_with_ctx(
+        members,
+        base_offset,
+        result,
+        ctx.source,
+        from_root_body,
+        Some(&*ctx),
+    );
 
     // Resolve extends — try heritage AST first for utility type support,
     // then fall back to string-based lookup (matches _ctx_ref variant).
@@ -727,7 +759,14 @@ pub(super) fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
         );
     }
     // Resolve own members — propagate caller flag.
-    resolve_type_literal_members(members, base_offset, result, ctx.source, from_root_body);
+    resolve_type_literal_members_with_ctx(
+        members,
+        base_offset,
+        result,
+        ctx.source,
+        from_root_body,
+        Some(ctx),
+    );
 
     // Resolve extends — try heritage AST first for utility type support,
     // then fall back to string-based lookup.
@@ -1243,12 +1282,13 @@ pub(super) fn resolve_type_elements_inner_with_ctx_guarded<'ctx, 'a: 'ctx>(
     match node {
         // { prop: Type } — own-body literal, propagate caller flag.
         TSType::TSTypeLiteral(lit) => {
-            resolve_type_literal_members(
+            resolve_type_literal_members_with_ctx(
                 &lit.members,
                 base_offset,
                 result,
                 ctx.source,
                 from_root_body,
+                Some(&*ctx),
             );
         }
 
@@ -1317,6 +1357,8 @@ pub(super) fn resolve_type_elements_inner_with_ctx_guarded<'ctx, 'a: 'ctx>(
                     type_params,
                     type_ref.type_arguments.as_deref(),
                 );
+                let before_props = result.props.len();
+                let before_calls = result.call_signatures.len();
                 resolve_type_elements_inner_with_ctx(
                     aliased_type,
                     base_offset,
@@ -1324,6 +1366,27 @@ pub(super) fn resolve_type_elements_inner_with_ctx_guarded<'ctx, 'a: 'ctx>(
                     &mut child,
                     from_root_body,
                 );
+                // Empty simple alias → copy companion surface of the target
+                // (AlertDialogEmits = DialogRootEmits via host external map).
+                if result.props.len() == before_props
+                    && result.call_signatures.len() == before_calls
+                    && !result.has_call_signature
+                {
+                    if let TSType::TSTypeReference(inner_ref) = aliased_type {
+                        if inner_ref.type_arguments.is_none() {
+                            let ref_name = get_type_reference_name(&inner_ref.type_name);
+                            if let Some(companion) = child.companion_types.get(ref_name.as_str()) {
+                                result.props.extend(companion.props.iter().cloned());
+                                result
+                                    .call_signatures
+                                    .extend(companion.call_signatures.iter().cloned());
+                                if companion.has_call_signature {
+                                    result.has_call_signature = true;
+                                }
+                            }
+                        }
+                    }
+                }
                 ctx.diagnostics.append(&mut child.diagnostics);
                 return;
             }
@@ -1562,12 +1625,13 @@ pub(super) fn resolve_type_elements_inner_with_ctx_ref_guarded<'ctx, 'a: 'ctx>(
     match node {
         // { prop: Type } — own-body literal, propagate caller flag.
         TSType::TSTypeLiteral(lit) => {
-            resolve_type_literal_members(
+            resolve_type_literal_members_with_ctx(
                 &lit.members,
                 base_offset,
                 result,
                 ctx.source,
                 from_root_body,
+                Some(ctx),
             );
         }
 

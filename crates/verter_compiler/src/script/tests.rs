@@ -1484,6 +1484,100 @@ fn make_external_types(
 }
 
 #[test]
+/// `withDefaults(defineProps<T>(), { as: 'td' })` must declare `as` even when
+/// `T` only partially expands (heritage props missing). Otherwise `_ctx.as`
+/// is undefined and table cells render as `div` (reka-ui Calendar).
+#[test]
+fn with_defaults_emits_keys_missing_from_partial_type_surface() {
+    let alloc = Allocator::default();
+    // Simulate partial type resolution: only `date` on the interface, but
+    // withDefaults still supplies `as: 'td'`.
+    let content = r#"
+interface CellProps {
+  date: string
+}
+const props = withDefaults(defineProps<CellProps>(), { as: 'td' })
+"#;
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
+
+    let _result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Test",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(
+        output.contains("date:"),
+        "resolved type prop `date` must be present. output:\n{output}"
+    );
+    assert!(
+        output.contains("as:") && output.contains("'td'"),
+        "withDefaults key `as: 'td'` must be a runtime prop even if absent from type surface. output:\n{output}"
+    );
+}
+
+/// Local interface members whose type is an indexed access (`Foo['bar']`)
+/// must still appear in the runtime props object (type may degrade to
+/// `null`). Dropping them breaks `toRefs(props).missingProp.value` at
+/// setup (reka-ui MenuContentImpl trapFocus / disableOutsidePointerEvents).
+#[test]
+fn local_indexed_access_props_still_emitted_in_runtime_props() {
+    let alloc = Allocator::default();
+    let content = r#"
+interface Cap { foo: boolean }
+interface PrivateProps {
+  disableOutsidePointerEvents?: Cap['foo']
+  disableOutsideScroll?: boolean
+  trapFocus?: Cap['foo']
+}
+interface ImplProps extends PrivateProps {
+  loop?: boolean
+}
+const props = withDefaults(defineProps<ImplProps>(), {})
+const { trapFocus, disableOutsidePointerEvents, loop } = toRefs(props)
+"#;
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
+
+    let result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Test",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    for name in [
+        "disableOutsidePointerEvents",
+        "disableOutsideScroll",
+        "trapFocus",
+        "loop",
+    ] {
+        assert!(
+            result.bindings.contains_key(name) || output.contains(&format!("{name}:")),
+            "runtime props must include {name:?}. bindings={:?}\noutput:\n{output}",
+            result.bindings.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            output.contains(&format!("{name}:")),
+            "runtime props object must declare {name:?}. output:\n{output}"
+        );
+    }
+}
+
 fn external_type_defineprops_generates_runtime_props() {
     let alloc = Allocator::default();
     let external_types = make_external_types(
@@ -2226,5 +2320,52 @@ fn define_props_array_dynamic_element_names_nothing() {
         !result.bindings.contains_key("dynamicName"),
         "a dynamic identifier element must not be treated as a prop name. bindings: {:?}",
         result.bindings.keys().collect::<Vec<_>>()
+    );
+}
+
+/// External property-form emits (`{ 'update:open': [boolean] }`) must produce
+/// a runtime `emits: [...]` array. AlertDialogRoot re-exports DialogRootEmits
+/// and useEmitAsProps reads `vm.type.emits` — empty array → silent open toggle.
+#[test]
+fn external_type_defineemits_property_form_generates_emits_array() {
+    let alloc = Allocator::default();
+    let external_types = make_external_types(
+        "DialogRootEmits",
+        "export type DialogRootEmits = { 'update:open': [value: boolean] }",
+    );
+    // Sanity: external resolution itself yields call signatures
+    let resolved = external_types.get("DialogRootEmits").unwrap();
+    assert!(
+        !resolved.call_signatures.is_empty(),
+        "resolve_external_type must classify property-form emits as call_signatures, got props={:?} calls={:?}",
+        resolved.props.iter().map(|p| p.key_name.as_deref()).collect::<Vec<_>>(),
+        resolved.call_signatures.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+    );
+
+    let content = r#"
+import type { DialogRootEmits } from './dialog'
+type AlertDialogEmits = DialogRootEmits
+const emit = defineEmits<AlertDialogEmits>()
+"#;
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
+
+    let _result = gen_script_with_external(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Test",
+            ..Default::default()
+        },
+        Some(&external_types),
+    );
+
+    let output = ct.build_string();
+    assert!(
+        output.contains("emits:") && output.contains("update:open"),
+        "defineEmits of external property-form emits must emit runtime emits array, got:\n{output}"
     );
 }
