@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { attestE2eTypeProviderLog } from "./e2eProviderAttestation";
+import {
+  assertSharedTsgoServedWithoutFallback,
+  attestE2eTypeProviderLog,
+} from "./e2eProviderAttestation";
 
 describe("E2E type-provider attestation", () => {
   it("rejects the former vacuous managed-tsgo run before feature assertions", () => {
@@ -52,5 +55,27 @@ describe("E2E type-provider attestation", () => {
       publicKind: "tsserver",
       route: "tsserver",
     });
+  });
+
+  it("requires an actual shared feature result and rejects every managed fallback signal", () => {
+    expect(() =>
+      assertSharedTsgoServedWithoutFallback(
+        "[shared-tsgo] armed: shim=x realTsgo=y controlDir=z\n" +
+          "Type provider status: tsgo (attested editor-owned Native Preview Program)",
+      ),
+    ).toThrow(/no carrier feature was served/i);
+
+    expect(() =>
+      assertSharedTsgoServedWithoutFallback(
+        "editor-owned tsgo served carrier feature; managed fallback remained cold\n" +
+          "editor-owned tsgo diagnostics did not engage; activating managed fallback",
+      ),
+    ).toThrow(/managed fallback was activated/i);
+
+    expect(() =>
+      assertSharedTsgoServedWithoutFallback(
+        "editor-owned tsgo served carrier diagnostics; managed fallback remained cold",
+      ),
+    ).not.toThrow();
   });
 });

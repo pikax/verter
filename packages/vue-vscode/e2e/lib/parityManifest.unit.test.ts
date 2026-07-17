@@ -7,8 +7,7 @@ import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 import { SVELTE_MATRIX_CASES, VUE_MATRIX_CASES, type MatrixCase } from "./matrixCases";
-import { PARITY_LITERAL_TEST_COUNTS, requiredParitySuiteFiles } from "./parityManifest";
-import { buildParityTestInventory } from "./parityTestInventory";
+import { buildParityTestInventory, selectParityTestInventory } from "./parityTestInventory";
 
 const libRoot = dirname(fileURLToPath(import.meta.url));
 const suiteRoot = resolve(libRoot, "../suite/parity");
@@ -100,28 +99,34 @@ export const SVELTE_MATRIX_CASES = [] as const;
 `;
 
 describe("parity inventory", () => {
-  it("owns exactly 223 literal tests across the complete 38-file parity suite", () => {
+  it("derives every parity suite and literal registration from the authored tree", () => {
     const discovered = testSources(suiteRoot)
       .map((file) => relative(suiteRoot, file).replace(/\\/g, "/"))
       .sort();
-    const accepted = Object.keys(PARITY_LITERAL_TEST_COUNTS).sort();
-    expect(discovered).toEqual(accepted);
+    const inventory = buildParityTestInventory({
+      suiteRoot,
+      matrixCasesFile: resolve(libRoot, "matrixCases.ts"),
+    });
+    const ownedSuiteFiles = new Set(
+      Object.values(inventory.suiteFilesByFixture)
+        .flat()
+        .map((file) => file.replace(/^parity\//, "").replace(/\.js$/, ".ts")),
+    );
+    expect([...ownedSuiteFiles].sort()).toEqual(discovered);
 
-    let total = 0;
-    for (const file of accepted) {
-      const count = literalTestRegistrations(join(suiteRoot, file));
-      expect(count, file).toBe(
-        PARITY_LITERAL_TEST_COUNTS[file as keyof typeof PARITY_LITERAL_TEST_COUNTS],
-      );
-      total += count;
-    }
-    expect(total).toBe(223);
+    const derivedLiteralCount = discovered.reduce(
+      (total, file) => total + literalTestRegistrations(join(suiteRoot, file)),
+      0,
+    );
+    expect(inventory.literalRegistrationCount).toBe(derivedLiteralCount);
+    expect(discovered).toHaveLength(40);
+    expect(derivedLiteralCount).toBe(239);
   });
 
   it("attests all 73 unique matrix IDs and every authored anchor", () => {
     const matrix = [...VUE_MATRIX_CASES, ...SVELTE_MATRIX_CASES];
     expect(matrix).toHaveLength(73);
-    expect(new Set(matrix.map((entry) => entry.id)).size).toBe(73);
+    expect(new Set(matrix.map((entry) => entry.id)).size).toBe(matrix.length);
     for (const entry of VUE_MATRIX_CASES) assertMatrixFixture("vue-parity", entry);
     for (const entry of SVELTE_MATRIX_CASES) assertMatrixFixture("svelte-parity", entry);
 
@@ -138,19 +143,9 @@ describe("parity inventory", () => {
       suiteRoot,
       matrixCasesFile: resolve(libRoot, "matrixCases.ts"),
     });
-    expect(inventory.literalRegistrationCount).toBe(223);
+    expect(inventory.literalRegistrationCount).toBe(239);
     expect(inventory.matrixCaseCount).toBe(73);
-    expect(
-      Object.fromEntries(
-        Object.entries(inventory.testIdsByFixture).map(([fixture, ids]) => [fixture, ids.length]),
-      ),
-    ).toEqual({
-      "vue-parity": 206,
-      "svelte-parity": 183,
-      "mixed-parity": 7,
-      "multi-root-parity": 6,
-      "ecosystem-parity": 9,
-    });
+    expect(inventory.matrixCaseCount).toBe(VUE_MATRIX_CASES.length + SVELTE_MATRIX_CASES.length);
     for (const ids of Object.values(inventory.testIdsByFixture)) {
       expect(ids.length).toBeGreaterThan(0);
       expect(new Set(ids).size).toBe(ids.length);
@@ -193,15 +188,56 @@ describe("parity inventory", () => {
     );
   });
 
-  it("declares the exact loaded suite files for every parity fixture", () => {
-    expect(requiredParitySuiteFiles("vue-parity")).toHaveLength(29);
-    expect(requiredParitySuiteFiles("svelte-parity")).toHaveLength(28);
-    expect(requiredParitySuiteFiles("mixed-parity")).toEqual(["parity/mixed/workspace.test.js"]);
-    expect(requiredParitySuiteFiles("multi-root-parity")).toEqual([
+  it("derives the exact loaded suite files for every parity fixture", () => {
+    const inventory = buildParityTestInventory({
+      suiteRoot,
+      matrixCasesFile: resolve(libRoot, "matrixCases.ts"),
+    });
+    expect(inventory.suiteFilesByFixture["vue-parity"]).toContain("parity/vue/matrix.test.js");
+    expect(inventory.suiteFilesByFixture["svelte-parity"]).toContain(
+      "parity/svelte/matrix.test.js",
+    );
+    expect(inventory.suiteFilesByFixture["mixed-parity"]).toEqual([
+      "parity/mixed/workspace.test.js",
+    ]);
+    expect(inventory.suiteFilesByFixture["multi-root-parity"]).toEqual([
       "parity/multi-root/workspace.test.js",
     ]);
-    expect(requiredParitySuiteFiles("ecosystem-parity")).toEqual([
+    expect(inventory.suiteFilesByFixture["ecosystem-parity"]).toEqual([
       "parity/ecosystem/paths.test.js",
     ]);
+  });
+
+  it("selects an exact, non-empty test-ID inventory for a focused suite", () => {
+    const inventory = buildParityTestInventory({
+      suiteRoot,
+      matrixCasesFile: resolve(libRoot, "matrixCases.ts"),
+    });
+
+    const focused = selectParityTestInventory(
+      inventory,
+      "vue-parity",
+      "shared/dom-event-inference.test",
+    );
+
+    expect(focused.loadedFiles).toEqual(["parity/shared/dom-event-inference.test.js"]);
+    expect(focused.testIds).toEqual([
+      "shared.js-jsdoc.dom-event.member-completion",
+      "shared.js-jsdoc.dom-event.member-definition",
+      "shared.js-jsdoc.dom-event.parameter-hover-concrete",
+      "shared.js-lax.dom-event.diagnostics-follow-config",
+      "shared.js-lax.dom-event.unannotated-remains-any",
+      "shared.js.dom-event.checked-diagnostics-follow-config",
+      "shared.js.dom-event.classic-or-legacy-not-contextual",
+      "shared.js.dom-event.unannotated-checked-remains-any",
+      "shared.ts.dom-event.classic-or-legacy-not-contextual",
+      "shared.ts.dom-event.invalid-member-expect-error-consumed",
+      "shared.ts.dom-event.member-completion",
+      "shared.ts.dom-event.member-definition",
+      "shared.ts.dom-event.parameter-hover-concrete",
+    ]);
+    expect(() => selectParityTestInventory(inventory, "vue-parity", "missing-suite.test")).toThrow(
+      /selected no suite files/,
+    );
   });
 });

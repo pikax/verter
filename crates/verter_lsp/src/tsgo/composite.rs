@@ -703,7 +703,14 @@ impl TsgoCompositeProvider {
             )
             .await
             {
-                Ok(Some(provider)) => return Some(provider),
+                Ok(Some(provider)) => {
+                    tracing::info!(
+                        feature = feature.name(),
+                        source = %source,
+                        "editor-owned tsgo served carrier feature; managed fallback remained cold"
+                    );
+                    return Some(provider);
+                }
                 Ok(None) => tracing::info!(
                     feature = feature.name(),
                     source = %source,
@@ -757,7 +764,13 @@ impl TsgoCompositeProvider {
             )
             .await
             {
-                Ok(Some(diagnostics)) => return Ok(diagnostics),
+                Ok(Some(diagnostics)) => {
+                    tracing::info!(
+                        source = %source,
+                        "editor-owned tsgo served carrier diagnostics; managed fallback remained cold"
+                    );
+                    return Ok(diagnostics);
+                }
                 Ok(None) => tracing::info!(
                     source = %source,
                     "editor-owned tsgo diagnostics did not engage; activating managed fallback"

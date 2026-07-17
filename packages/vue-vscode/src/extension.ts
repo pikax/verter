@@ -71,6 +71,7 @@ import {
 } from "./claudeCodeDetection";
 import { createActivationGate } from "./activationGate";
 import { readE2eEnv } from "./e2eEnv";
+import { installE2eLogMirror } from "./e2eLogMirror";
 import {
   frameworkDocumentSelector,
   frameworkClientLanguageIds,
@@ -133,37 +134,11 @@ async function activateExtension(context: ExtensionContext) {
     try {
       writeFileSync(testLogFile, "");
     } catch {}
-    const writeLog = (level: string, msg: string, ...args: unknown[]) => {
-      const line = `[${level}] ${msg}${args.length ? " " + args.map(String).join(" ") : ""}\n`;
+    installE2eLogMirror(log, (text) => {
       try {
-        appendFileSync(testLogFile, line);
+        appendFileSync(testLogFile, text);
       } catch {}
-    };
-    const origInfo = log.info.bind(log);
-    const origWarn = log.warn.bind(log);
-    const origError = log.error.bind(log);
-    const origDebug = log.debug.bind(log);
-    const origTrace = log.trace.bind(log);
-    log.info = ((msg: string, ...args: unknown[]) => {
-      writeLog("INFO", msg, ...args);
-      origInfo(msg, ...args);
-    }) as typeof log.info;
-    log.warn = ((msg: string, ...args: unknown[]) => {
-      writeLog("WARN", msg, ...args);
-      origWarn(msg, ...args);
-    }) as typeof log.warn;
-    log.error = ((msg: string, ...args: unknown[]) => {
-      writeLog("ERROR", msg, ...args);
-      origError(msg, ...args);
-    }) as typeof log.error;
-    log.debug = ((msg: string, ...args: unknown[]) => {
-      writeLog("DEBUG", msg, ...args);
-      origDebug(msg, ...args);
-    }) as typeof log.debug;
-    log.trace = ((msg: string, ...args: unknown[]) => {
-      writeLog("TRACE", msg, ...args);
-      origTrace(msg, ...args);
-    }) as typeof log.trace;
+    });
   }
   writeTimingMarker("activation_start", Date.now());
 

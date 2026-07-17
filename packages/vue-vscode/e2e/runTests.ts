@@ -16,12 +16,20 @@ import {
   requiredFrameworkContractIds,
   type ContractFramework,
 } from "./lib/frameworkContractManifest";
-import { requiredParitySuiteFiles } from "./lib/parityManifest";
-import type { ParityFixture } from "./lib/parityTestInventory";
+import {
+  selectParityTestInventory,
+  type ParityFixture,
+  type ParityTestInventory,
+} from "./lib/parityTestInventory";
+import {
+  e2eRouteLabel,
+  parseE2eRouteLabel,
+  selectE2eRoutes,
+  type E2eRoute,
+} from "./lib/routeInventory";
 
 const EDITOR_ACCEPTANCE_FIXTURE = "editor-owned-project";
 const NATIVE_PREVIEW_EXTENSION = "TypeScriptTeam.native-preview@0.20260708.2";
-const TYPE_PROVIDER_ROUTES = ["tsserver", "tsgo", "shared-tsgo"] as const;
 const CONTRACT_FIXTURES: Readonly<Record<string, { framework: ContractFramework; only: string }>> =
   {
     "vue-contract": { framework: "vue", only: "frameworks/vue/contract.test" },
@@ -36,74 +44,72 @@ const PARITY_FIXTURE_CONFIGS: Readonly<Record<ParityFixture, { only: string }>> 
   "ecosystem-parity": { only: "parity/" },
 };
 
-function requiredParityIds(fixture: string): readonly string[] | undefined {
+function requiredParityRun(
+  fixture: string,
+  onlyPattern?: string,
+): { readonly testIds: readonly string[]; readonly loadedFiles: readonly string[] } | undefined {
   if (!(fixture in PARITY_FIXTURE_CONFIGS)) return undefined;
   const manifestPath = path.resolve(__dirname, "../e2e-suite-build-manifest.json");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
     version?: number;
-    parity?: {
-      literalRegistrationCount?: number;
-      matrixCaseCount?: number;
-      testIdsByFixture?: Partial<Record<ParityFixture, unknown>>;
-    };
+    parity?: Partial<ParityTestInventory>;
   };
+  const parity = manifest.parity;
   if (
-    manifest.version !== 2 ||
-    manifest.parity?.literalRegistrationCount !== 223 ||
-    manifest.parity.matrixCaseCount !== 73
+    manifest.version !== 4 ||
+    !parity ||
+    !Number.isSafeInteger(parity.literalRegistrationCount) ||
+    (parity.literalRegistrationCount ?? 0) <= 0 ||
+    !Number.isSafeInteger(parity.matrixCaseCount) ||
+    (parity.matrixCaseCount ?? 0) <= 0
   ) {
     throw new Error(
       `E2E parity manifest has an unsupported or incomplete inventory: ${manifestPath}`,
     );
   }
-  const value = manifest.parity.testIdsByFixture?.[fixture as ParityFixture];
+  const value = parity.testIdsByFixture?.[fixture as ParityFixture];
+  const loadedFiles = parity.suiteFilesByFixture?.[fixture as ParityFixture];
+  const bySuiteFile = parity.testIdsBySuiteFileByFixture?.[fixture as ParityFixture];
   if (!Array.isArray(value) || value.length === 0 || !value.every((id) => typeof id === "string")) {
     throw new Error(`E2E parity manifest has no stable test-ID inventory for ${fixture}`);
+  }
+  if (
+    !Array.isArray(loadedFiles) ||
+    loadedFiles.length === 0 ||
+    !loadedFiles.every((file) => typeof file === "string")
+  ) {
+    throw new Error(`E2E parity manifest has no stable suite-file inventory for ${fixture}`);
+  }
+  if (!bySuiteFile || typeof bySuiteFile !== "object" || Array.isArray(bySuiteFile)) {
+    throw new Error(`E2E parity manifest has no suite-to-test-ID inventory for ${fixture}`);
   }
   if (new Set(value).size !== value.length) {
     throw new Error(`E2E parity manifest contains duplicate test IDs for ${fixture}`);
   }
-  return value;
+  if (new Set(loadedFiles).size !== loadedFiles.length) {
+    throw new Error(`E2E parity manifest contains duplicate suite files for ${fixture}`);
+  }
+  return selectParityTestInventory(
+    parity as ParityTestInventory,
+    fixture as ParityFixture,
+    onlyPattern,
+  );
 }
 
 /**
- * Fixture entries: plain name uses auto type provider,
- * "name@provider" forces a specific type provider (tsserver or tsgo).
- * Every fixture runs with both providers to ensure full coverage.
+ * Select a non-empty subset of the canonical route inventory. A fixture-only
+ * selector expands to every applicable provider instead of inventing an auto route.
  */
-const STANDARD_FIXTURES = [
-  "single-project",
-  "monorepo",
-  "tsconfig-extends",
-  "tsconfig-references",
-  "path-aliases",
-  "composite-paths",
-  "no-config",
-  "single-file",
-  "barrel-exports",
-  ...Object.keys(CONTRACT_FIXTURES),
-  ...Object.keys(PARITY_FIXTURE_CONFIGS),
-];
-const FIXTURES = [
-  ...STANDARD_FIXTURES.flatMap((fixture) =>
-    TYPE_PROVIDER_ROUTES.map((provider) => `${fixture}@${provider}`),
-  ),
-  `${EDITOR_ACCEPTANCE_FIXTURE}@tsserver`,
-  `${EDITOR_ACCEPTANCE_FIXTURE}@shared-tsgo`,
-];
-
-/**
- * Parse a fixture entry into fixture name and optional type provider override.
- * "composite-paths" → { fixture: "composite-paths", typeProvider: undefined }
- * "composite-paths@tsgo" → { fixture: "composite-paths", typeProvider: "tsgo" }
- */
-function parseFixtureEntry(entry: string): { fixture: string; typeProvider?: string } {
-  const atIndex = entry.indexOf("@");
-  if (atIndex === -1) return { fixture: entry };
-  return {
-    fixture: entry.slice(0, atIndex),
-    typeProvider: entry.slice(atIndex + 1),
-  };
+function selectRoutes(options: {
+  readonly fixtureArg?: string;
+  readonly envFixture?: string;
+  readonly envTypeProvider?: string;
+}): E2eRoute[] {
+  if (options.fixtureArg?.includes("@")) return [parseE2eRouteLabel(options.fixtureArg)];
+  return selectE2eRoutes({
+    fixture: options.fixtureArg ?? options.envFixture,
+    typeProvider: options.envTypeProvider,
+  });
 }
 
 /**
@@ -168,29 +174,16 @@ async function main() {
   const onlyPattern = onlyArg?.slice("--only=".length) || readE2eEnv("ONLY");
   const envFixture = readE2eEnv("FIXTURE");
   const envTypeProvider = readE2eEnv("TYPE_PROVIDER");
-  const fixturesToRun = fixtureArg
-    ? [fixtureArg.replace("--fixture=", "")]
-    : envFixture
-      ? [envTypeProvider ? `${envFixture}@${envTypeProvider}` : envFixture]
-      : envTypeProvider
-        ? FIXTURES.filter((entry) => parseFixtureEntry(entry).typeProvider === envTypeProvider)
-        : FIXTURES;
+  const routesToRun = selectRoutes({
+    fixtureArg: fixtureArg?.replace("--fixture=", ""),
+    envFixture,
+    envTypeProvider,
+  });
 
   const vscodeExecutablePath = await resolveVscodeExecutablePath(vscodeVersion, {
     explicitExecutablePath: readE2eEnv("VSCODE_EXECUTABLE"),
   });
-  const parsedFixtures = fixturesToRun.map(parseFixtureEntry);
-  for (const { fixture, typeProvider } of parsedFixtures) {
-    if (
-      !typeProvider ||
-      !TYPE_PROVIDER_ROUTES.includes(typeProvider as (typeof TYPE_PROVIDER_ROUTES)[number])
-    ) {
-      throw new Error(
-        `E2E fixture ${fixture} must select exactly one provider route: ${TYPE_PROVIDER_ROUTES.join(", ")}`,
-      );
-    }
-  }
-  const requiresRcTsgo = parsedFixtures.some(
+  const requiresRcTsgo = routesToRun.some(
     ({ typeProvider }) => typeProvider === "tsgo" || typeProvider === "shared-tsgo",
   );
   const rcTsgoBinaryPath = requiresRcTsgo
@@ -208,9 +201,9 @@ async function main() {
 
   let totalFailures = 0;
 
-  for (const [index, entry] of fixturesToRun.entries()) {
-    const { fixture, typeProvider } = parseFixtureEntry(entry);
-    const label = typeProvider ? `${fixture}@${typeProvider}` : fixture;
+  for (const [index, route] of routesToRun.entries()) {
+    const { fixture, typeProvider } = route;
+    const label = e2eRouteLabel(route);
     const fixtureDir = path.join(extensionDevelopmentPath, "e2e", "fixtures", fixture);
 
     console.log(`\n${"=".repeat(60)}`);
@@ -303,7 +296,10 @@ async function main() {
             : CONTRACT_FIXTURES[fixture]
               ? { VERTER_E2E_ONLY: CONTRACT_FIXTURES[fixture].only }
               : fixture in PARITY_FIXTURE_CONFIGS
-                ? { VERTER_E2E_ONLY: PARITY_FIXTURE_CONFIGS[fixture as ParityFixture].only }
+                ? {
+                    VERTER_E2E_ONLY:
+                      onlyPattern ?? PARITY_FIXTURE_CONFIGS[fixture as ParityFixture].only,
+                  }
                 : onlyPattern
                   ? { VERTER_E2E_ONLY: onlyPattern }
                   : {}),
@@ -316,14 +312,17 @@ async function main() {
       // and on a vacuous 0-test execution or a MISSING summary. Every matrix entry is a
       // required gate; no ordinary fixture is allowed a legacy zero-execution pass.
       const contract = CONTRACT_FIXTURES[fixture];
-      const parityIds = requiredParityIds(fixture);
+      const parity = requiredParityRun(fixture, onlyPattern);
       const requiredLoadedFiles = contract
         ? [`frameworks/${contract.framework}/contract.test.js`]
-        : requiredParitySuiteFiles(fixture);
+        : parity?.loadedFiles;
       await enforceRunSummary(logFile, label, {
         expectedFixture: fixture,
+        expectedTypeProvider: typeProvider,
         requiredLoadedFiles,
-        requiredTestIds: contract ? requiredFrameworkContractIds(contract.framework) : parityIds,
+        requiredTestIds: contract
+          ? requiredFrameworkContractIds(contract.framework)
+          : parity?.testIds,
       });
       console.log(`  PASSED: ${label}`);
     } catch (err) {

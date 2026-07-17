@@ -17,6 +17,15 @@ export interface ParityTestInventory {
   readonly literalRegistrationCount: number;
   readonly matrixCaseCount: number;
   readonly testIdsByFixture: Readonly<Record<ParityFixture, readonly string[]>>;
+  readonly suiteFilesByFixture: Readonly<Record<ParityFixture, readonly string[]>>;
+  readonly testIdsBySuiteFileByFixture: Readonly<
+    Record<ParityFixture, Readonly<Record<string, readonly string[]>>>
+  >;
+}
+
+export interface SelectedParityTestInventory {
+  readonly testIds: readonly string[];
+  readonly loadedFiles: readonly string[];
 }
 
 function testSources(directory: string): string[] {
@@ -115,6 +124,12 @@ export function buildParityTestInventory(options: {
   const ids = Object.fromEntries(
     PARITY_FIXTURES.map((fixture) => [fixture, [] as string[]]),
   ) as Record<ParityFixture, string[]>;
+  const suiteFiles = Object.fromEntries(
+    PARITY_FIXTURES.map((fixture) => [fixture, [] as string[]]),
+  ) as Record<ParityFixture, string[]>;
+  const testIdsBySuiteFile = Object.fromEntries(
+    PARITY_FIXTURES.map((fixture) => [fixture, {} as Record<string, string[]>]),
+  ) as Record<ParityFixture, Record<string, string[]>>;
   let literalRegistrationCount = 0;
 
   for (const file of testSources(options.suiteRoot).sort()) {
@@ -127,6 +142,11 @@ export function buildParityTestInventory(options: {
       ts.ScriptKind.TS,
     );
     const ownedFixtures = fixturesForSuite(relativeFile);
+    const compiledSuiteFile = `parity/${relativeFile.replace(/\.ts$/, ".js")}`;
+    for (const fixture of ownedFixtures) {
+      suiteFiles[fixture].push(compiledSuiteFile);
+      testIdsBySuiteFile[fixture][compiledSuiteFile] = [];
+    }
     const visit = (node: ts.Node): void => {
       if (ts.isCallExpression(node)) {
         if (
@@ -140,7 +160,10 @@ export function buildParityTestInventory(options: {
         if (ts.isIdentifier(node.expression) && node.expression.text === "test") {
           const id = literal(node.arguments[0], `${relativeFile} test title`);
           literalRegistrationCount += 1;
-          for (const fixture of ownedFixtures) ids[fixture].push(id);
+          for (const fixture of ownedFixtures) {
+            ids[fixture].push(id);
+            testIdsBySuiteFile[fixture][compiledSuiteFile].push(id);
+          }
         }
         if (ts.isIdentifier(node.expression) && node.expression.text === "registerFrameworkTest") {
           const framework = literal(node.arguments[0], `${relativeFile} framework`);
@@ -156,6 +179,7 @@ export function buildParityTestInventory(options: {
           }
           literalRegistrationCount += 1;
           ids[fixture].push(id);
+          testIdsBySuiteFile[fixture][compiledSuiteFile].push(id);
         }
       }
       ts.forEachChild(node, visit);
@@ -174,6 +198,16 @@ export function buildParityTestInventory(options: {
   const svelteMatrixIds = matrixIds(matrixSource, "SVELTE_MATRIX_CASES");
   ids["vue-parity"].push(...vueMatrixIds);
   ids["svelte-parity"].push(...svelteMatrixIds);
+  if (vueMatrixIds.length > 0) {
+    const fileIds = testIdsBySuiteFile["vue-parity"]["parity/vue/matrix.test.js"];
+    if (!fileIds) throw new Error("VUE_MATRIX_CASES has no parity/vue/matrix.test.ts suite");
+    fileIds.push(...vueMatrixIds);
+  }
+  if (svelteMatrixIds.length > 0) {
+    const fileIds = testIdsBySuiteFile["svelte-parity"]["parity/svelte/matrix.test.js"];
+    if (!fileIds) throw new Error("SVELTE_MATRIX_CASES has no parity/svelte/matrix.test.ts suite");
+    fileIds.push(...svelteMatrixIds);
+  }
 
   for (const fixture of PARITY_FIXTURES) {
     const duplicateIds = [
@@ -185,11 +219,56 @@ export function buildParityTestInventory(options: {
       );
     }
     ids[fixture].sort();
+    suiteFiles[fixture].sort();
+    for (const file of suiteFiles[fixture]) {
+      const fileIds = testIdsBySuiteFile[fixture][file];
+      if (!fileIds || fileIds.length === 0) {
+        throw new Error(`${fixture} suite ${file} has no required test IDs`);
+      }
+      fileIds.sort();
+    }
   }
 
   return {
     literalRegistrationCount,
     matrixCaseCount: vueMatrixIds.length + svelteMatrixIds.length,
     testIdsByFixture: ids,
+    suiteFilesByFixture: suiteFiles,
+    testIdsBySuiteFileByFixture: testIdsBySuiteFile,
   };
+}
+
+/**
+ * Resolve the exact file and test-ID contract for a parity run. A focused
+ * selector is allowed only when it matches a non-empty subset of the attested
+ * suite inventory, so narrowing cannot turn a typo or stale build into a pass.
+ */
+export function selectParityTestInventory(
+  inventory: ParityTestInventory,
+  fixture: ParityFixture,
+  onlyPattern?: string,
+): SelectedParityTestInventory {
+  const normalizedPattern = onlyPattern?.replace(/\\/g, "/");
+  const loadedFiles = inventory.suiteFilesByFixture[fixture].filter(
+    (file) => !normalizedPattern || file.includes(normalizedPattern),
+  );
+  if (loadedFiles.length === 0) {
+    throw new Error(
+      `${fixture} parity selector ${JSON.stringify(onlyPattern)} selected no suite files`,
+    );
+  }
+
+  const bySuiteFile = inventory.testIdsBySuiteFileByFixture[fixture];
+  const testIds = loadedFiles.flatMap((file) => bySuiteFile[file] ?? []);
+  if (testIds.length === 0) {
+    throw new Error(
+      `${fixture} parity selector ${JSON.stringify(onlyPattern)} selected no test IDs`,
+    );
+  }
+  if (new Set(testIds).size !== testIds.length) {
+    throw new Error(
+      `${fixture} parity selector ${JSON.stringify(onlyPattern)} selected duplicate test IDs`,
+    );
+  }
+  return { testIds: [...testIds].sort(), loadedFiles };
 }

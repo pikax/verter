@@ -6,12 +6,17 @@ release works.
 
 Green evidence includes:
 
-- all 73 Vue/Svelte matrix cases;
-- the broader 221-test parity and hardening inventory;
+- every Vue/Svelte matrix case discovered from the authored matrix;
+- every literal parity and hardening test discovered from the authored suite tree;
 - exact loaded-suite and build-content attestation;
 - framework contract suites as an additional focused gate;
 - no hidden product-gap skips; and
-- tsserver, managed tsgo, and shared editor-owned tsgo coverage where applicable.
+- tsserver and managed tsgo coverage for every standard fixture, plus shared editor-owned
+  tsgo for every fixture with a configured project binding.
+
+The build manifest records the current tree-derived test IDs and suite files, while one canonical
+route inventory drives both the local runner and CI. Documentation deliberately does not repeat
+hand-maintained totals that can drift from those executable contracts.
 
 It still does not establish exhaustive framework syntax, all real-world monorepos, long-run
 race freedom, or production-load performance. Those require representative external corpora,

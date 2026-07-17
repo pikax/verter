@@ -14,6 +14,7 @@ Status: `open` · `partial` · `fixed`
 | ISSUE-depth-mapping-slot | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-depth-rename-apply | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-depth-undo-hover | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
+| ISSUE-dom-event-over-inference-boundary | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-eco-hash-imports | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-eco-kit-routes | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-eco-nuxt-composable | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
@@ -31,7 +32,12 @@ Status: `open` · `partial` · `fixed`
 | ISSUE-find-function | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-find-js-exact | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-find-ts-exact | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
+| ISSUE-js-dom-event-config | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
+| ISSUE-js-dom-event-jsdoc | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
+| ISSUE-js-dom-event-non-inference | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-js-hover-markup | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
+| ISSUE-js-lax-dom-event-config | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
+| ISSUE-js-lax-dom-event-non-inference | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-js-references | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-js-rename-markup | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-js-rename-script | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
@@ -84,6 +90,7 @@ Status: `open` · `partial` · `fixed`
 | ISSUE-svelte-bind-value | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-svelte-bind-value-hover | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-svelte-bindable | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
+| ISSUE-svelte-button-type-literal | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-svelte-component-tag-completion | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-svelte-confidence-cross-file | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-svelte-confidence-hover-any | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
@@ -93,6 +100,7 @@ Status: `open` · `partial` · `fixed`
 | ISSUE-svelte-confidence-no-virtual | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-svelte-confidence-revert | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-svelte-derived-hover | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
+| ISSUE-svelte-dom-event-current-target | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-svelte-each-hover | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-svelte-effect | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-svelte-effect-clean | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
@@ -186,6 +194,7 @@ Status: `open` · `partial` · `fixed`
 | ISSUE-svelte-slots-wrong-render | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-svelte-snippet | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-svelte-state-hover | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
+| ISSUE-svelte-state-interpolation-diagnostic | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-svelte-strict-rest-props | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-svelte-strict-unknown-prop | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-svelte-testing-api-isolation | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
@@ -196,6 +205,10 @@ Status: `open` · `partial` · `fixed`
 | ISSUE-svelte-type-neg-expect-error | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-svelte-type-neg-props | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-ts-code-actions | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
+| ISSUE-ts-dom-event-completion | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
+| ISSUE-ts-dom-event-definition | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
+| ISSUE-ts-dom-event-hover | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
+| ISSUE-ts-dom-event-invalid-member | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-ts-rename-script | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-typing-definition-after-edit | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-typing-hover-after-edit | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |

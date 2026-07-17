@@ -102,6 +102,19 @@ describe("enforceRunSummary result semantics", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("refuses pending tests even when the run has no named capability manifest", async () => {
+    writeSummary({
+      failures: 0,
+      executed: 2,
+      passedTestIds: ["activation starts"],
+      pendingTestIds: ["hover fixture token is absent"],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "single-project@tsserver", { pollMs: 0 }),
+    ).rejects.toThrow(/pending test.*hover fixture token is absent/i);
+  });
+
   it("refuses pending tests for a required capability contract", async () => {
     writeSummary({
       failures: 0,
@@ -201,6 +214,25 @@ describe("enforceRunSummary result semantics", () => {
         requiredLoadedFiles: ["parity/svelte/daily.test.js", "parity/svelte/matrix.test.js"],
       }),
     ).resolves.toBeUndefined();
+  });
+
+  it("refuses a run summary produced by a different provider route", async () => {
+    writeSummary({
+      failures: 0,
+      executed: 1,
+      fixture: "svelte-parity",
+      typeProvider: "tsgo",
+      passedTestIds: ["svelte.clean-diagnostics.daily"],
+      pendingTestIds: [],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "svelte-parity@shared-tsgo", {
+        expectedFixture: "svelte-parity",
+        expectedTypeProvider: "shared-tsgo",
+        pollMs: 0,
+      }),
+    ).rejects.toThrow(/provider route mismatch/i);
   });
 
   it("refuses missing, unexpected, duplicate, or wrong-fixture run inventory", async () => {

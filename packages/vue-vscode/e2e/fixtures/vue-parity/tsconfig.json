@@ -4,6 +4,8 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "strict": true,
+    "allowJs": true,
+    "checkJs": true,
     "jsx": "preserve",
     "skipLibCheck": true,
     "noEmit": true,
@@ -13,5 +15,6 @@
     },
     "baseUrl": "."
   },
-  "include": ["src/**/*.ts", "src/**/*.vue", "src/**/*.d.ts"]
+  "include": ["src/**/*.ts", "src/**/*.js", "src/**/*.vue", "src/**/*.d.ts"],
+  "exclude": ["src/js-lax"]
 }
