@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   createEditorNeutralContractInventory,
+  EditorNeutralContractFailure,
   executeEditorNeutralContractCase,
   type EditorNeutralProviderRoute,
 } from "@verter/lsp-test-client";
@@ -48,6 +49,7 @@ interface ExecutionOutcome {
   readonly feature: string;
   readonly status: "passed" | "failed";
   readonly durationMs: number;
+  readonly localDefinitionDurationsMs?: readonly [number, number];
   readonly error?: string;
 }
 
@@ -214,7 +216,7 @@ for (const route of ROUTES) {
         counters.attempted += 1;
         const startedAt = performance.now();
         try {
-          await executeEditorNeutralContractCase(testCase, driver, driver.sources);
+          const evidence = await executeEditorNeutralContractCase(testCase, driver, driver.sources);
           counters.passed += 1;
           outcomes.push({
             route,
@@ -223,6 +225,7 @@ for (const route of ROUTES) {
             feature: testCase.feature,
             status: "passed",
             durationMs: Math.round(performance.now() - startedAt),
+            localDefinitionDurationsMs: evidence?.localDefinitionDurationsMs,
           });
         } catch (error) {
           counters.failed += 1;
@@ -233,6 +236,10 @@ for (const route of ROUTES) {
             feature: testCase.feature,
             status: "failed",
             durationMs: Math.round(performance.now() - startedAt),
+            localDefinitionDurationsMs:
+              error instanceof EditorNeutralContractFailure
+                ? error.evidence.localDefinitionDurationsMs
+                : undefined,
             error: error instanceof Error ? error.message : String(error),
           });
           throw error;

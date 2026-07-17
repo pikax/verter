@@ -29,6 +29,16 @@ const TYPE_PROVIDER_STATUS_METHOD = "$/verter/typeProviderStatus";
 const TYPE_PROVIDER_STARTED_METHOD = "$/verter/typeProviderStarted";
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+/** Environment that keeps editor-neutral completion evidence provider-owned. */
+export function editorNeutralServerEnvironment(tsgoBin: string): Readonly<Record<string, string>> {
+  return {
+    VERTER_TSGO_BIN: tsgoBin,
+    VERTER_LOG: "info",
+    VERTER_E2E_TEST: "1",
+    VERTER_E2E_PROVIDER_ONLY_COMPLETIONS: "1",
+  };
+}
+
 export interface RawEditorNeutralLspDriverOptions {
   readonly route: EditorNeutralProviderRoute;
   readonly repoRoot: string;
@@ -331,7 +341,7 @@ export class RawEditorNeutralLspDriver implements EditorNeutralContractDriver {
 
     const client = new LspClient("verter-lsp", lspBin, args, workspaceRoot, {
       defaultTimeout: DEFAULT_TIMEOUT_MS,
-      env: { VERTER_TSGO_BIN: tsgoBin, VERTER_LOG: "info" },
+      env: editorNeutralServerEnvironment(tsgoBin),
       onAnyNotification(method, params) {
         if (method === DIAGNOSTICS_METHOD && typeof params?.uri === "string") {
           diagnosticsByUri.set(

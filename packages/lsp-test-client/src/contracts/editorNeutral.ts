@@ -129,13 +129,32 @@ export interface EditorNeutralContractCase {
   readonly document: string;
   readonly documents?: readonly string[];
   readonly anchor?: ContractAnchor;
-  readonly expectedTargetSuffix?: string;
+  readonly expectedDefinitionDocument?: string;
+  readonly expectedDefinitionAnchor?: ContractAnchor;
+  readonly expectedDefinitionRange?: LspRange;
+  readonly expectedRenameAnchors?: readonly ContractAnchor[];
   readonly requiredHoverFragments?: readonly string[];
   readonly forbiddenHoverPatterns?: readonly RegExp[];
   readonly expectedCompletion?: string;
   readonly expectedDiagnosticCode?: number;
   readonly renameTo?: string;
   readonly providers: readonly EditorNeutralProviderRoute[];
+}
+
+export interface EditorNeutralContractEvidence {
+  /** First/repeated local script↔markup definition requests, bounded by the suite timeout. */
+  readonly localDefinitionDurationsMs?: readonly [number, number];
+}
+
+/** A hard contract failure that still carries completed request-timing evidence. */
+export class EditorNeutralContractFailure extends Error {
+  readonly evidence: EditorNeutralContractEvidence;
+
+  constructor(message: string, evidence: EditorNeutralContractEvidence) {
+    super(message);
+    this.name = "EditorNeutralContractFailure";
+    this.evidence = evidence;
+  }
 }
 
 interface CarrierContractSpec {
@@ -145,6 +164,7 @@ interface CarrierContractSpec {
   readonly document: string;
   readonly errorDocument: string;
   readonly localAnchor: ContractAnchor;
+  readonly localDeclarationAnchor: ContractAnchor;
   readonly completionAnchor: ContractAnchor;
   readonly expectedCompletion: string;
   readonly requiredLocalHover: readonly string[];
@@ -154,7 +174,6 @@ interface CarrierContractSpec {
   readonly barrelConsumer: string;
   readonly barrelHoverAnchor: ContractAnchor;
   readonly barrelDefinitionAnchor: ContractAnchor;
-  readonly expectedTargetSuffix: string;
   readonly requiredPublicHover: readonly string[];
   readonly forbiddenPublicHover: readonly RegExp[];
 }
@@ -173,10 +192,15 @@ interface LaxDomEventContractSpec {
   readonly framework: EditorNeutralFramework;
   readonly document: string;
   readonly eventAnchor: ContractAnchor;
+  readonly declarationAnchor: ContractAnchor;
   readonly completionAnchor: ContractAnchor;
 }
 
 const ALL_PROVIDERS = ["tsserver", "tsgo", "shared-tsgo"] as const;
+const FILE_START_RANGE: LspRange = {
+  start: { line: 0, character: 0 },
+  end: { line: 0, character: 0 },
+};
 
 const CARRIERS: readonly CarrierContractSpec[] = [
   {
@@ -187,6 +211,11 @@ const CARRIERS: readonly CarrierContractSpec[] = [
     errorDocument: "src/diagnostics/InvalidTypeScript.vue",
     localAnchor: {
       text: "{{ vueTsLocal.toFixed(0) }}",
+      occurrence: 0,
+      token: "vueTsLocal",
+    },
+    localDeclarationAnchor: {
+      text: "const vueTsLocal = 1;",
       occurrence: 0,
       token: "vueTsLocal",
     },
@@ -220,7 +249,6 @@ const CARRIERS: readonly CarrierContractSpec[] = [
       occurrence: 0,
       token: "VueTypeScriptCase",
     },
-    expectedTargetSuffix: "/vue/TypeScriptCase.vue",
     requiredPublicHover: ["label"],
     forbiddenPublicHover: [/\bany\b/i, /\bunknown\b/i, /__Verter\w*/],
   },
@@ -232,6 +260,11 @@ const CARRIERS: readonly CarrierContractSpec[] = [
     errorDocument: "src/diagnostics/InvalidJavaScript.vue",
     localAnchor: {
       text: "{{ vueJsLocal.toFixed(0) }}",
+      occurrence: 0,
+      token: "vueJsLocal",
+    },
+    localDeclarationAnchor: {
+      text: "const vueJsLocal = 1;",
       occurrence: 0,
       token: "vueJsLocal",
     },
@@ -265,7 +298,6 @@ const CARRIERS: readonly CarrierContractSpec[] = [
       occurrence: 0,
       token: "VueJavaScriptCase",
     },
-    expectedTargetSuffix: "/vue/JavaScriptCase.vue",
     requiredPublicHover: ["label"],
     forbiddenPublicHover: [/\bany\b/i, /\bunknown\b/i, /__Verter\w*/],
   },
@@ -277,6 +309,11 @@ const CARRIERS: readonly CarrierContractSpec[] = [
     errorDocument: "src/diagnostics/InvalidTypeScript.svelte",
     localAnchor: {
       text: "{svelteTsLocal.toFixed(0)}",
+      occurrence: 0,
+      token: "svelteTsLocal",
+    },
+    localDeclarationAnchor: {
+      text: "let svelteTsLocal = $state(1);",
       occurrence: 0,
       token: "svelteTsLocal",
     },
@@ -310,7 +347,6 @@ const CARRIERS: readonly CarrierContractSpec[] = [
       occurrence: 0,
       token: "SvelteTypeScriptCase",
     },
-    expectedTargetSuffix: "/svelte/TypeScriptCase.svelte",
     requiredPublicHover: ["Component", "label", "focus"],
     forbiddenPublicHover: [
       /\bany\b/i,
@@ -327,6 +363,11 @@ const CARRIERS: readonly CarrierContractSpec[] = [
     errorDocument: "src/diagnostics/InvalidJavaScript.svelte",
     localAnchor: {
       text: "{svelteJsLocal.toFixed(0)}",
+      occurrence: 0,
+      token: "svelteJsLocal",
+    },
+    localDeclarationAnchor: {
+      text: "let svelteJsLocal = $state(1);",
       occurrence: 0,
       token: "svelteJsLocal",
     },
@@ -360,7 +401,6 @@ const CARRIERS: readonly CarrierContractSpec[] = [
       occurrence: 0,
       token: "SvelteJavaScriptCase",
     },
-    expectedTargetSuffix: "/svelte/JavaScriptCase.svelte",
     requiredPublicHover: ["Component", "label", "focus"],
     forbiddenPublicHover: [
       /\bany\b/i,
@@ -432,6 +472,11 @@ const LAX_DOM_EVENT_HANDLERS: readonly LaxDomEventContractSpec[] = [
       occurrence: 0,
       token: "e.pointerId",
     },
+    declarationAnchor: {
+      text: "function myClick(e) {",
+      occurrence: 0,
+      token: "e",
+    },
     completionAnchor: {
       text: "e.pointerId;",
       occurrence: 0,
@@ -447,6 +492,11 @@ const LAX_DOM_EVENT_HANDLERS: readonly LaxDomEventContractSpec[] = [
       text: "e.pointerId;",
       occurrence: 0,
       token: "e.pointerId",
+    },
+    declarationAnchor: {
+      text: "function myClick(e) {",
+      occurrence: 0,
+      token: "e",
     },
     completionAnchor: {
       text: "e.pointerId;",
@@ -496,7 +546,8 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
         feature: "definition",
         document: carrier.document,
         anchor: carrier.localAnchor,
-        expectedTargetSuffix: `/${carrier.document.replaceAll("\\", "/")}`,
+        expectedDefinitionDocument: carrier.document,
+        expectedDefinitionAnchor: carrier.localDeclarationAnchor,
       },
       {
         ...base,
@@ -513,6 +564,7 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
         document: carrier.document,
         anchor: carrier.localAnchor,
         renameTo: `${carrier.id.replace("-", "_")}_renamed`,
+        expectedRenameAnchors: [carrier.localDeclarationAnchor, carrier.localAnchor],
       },
       {
         ...base,
@@ -529,7 +581,8 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
         feature: "direct-import-definition",
         document: carrier.directConsumer,
         anchor: carrier.directDefinitionAnchor,
-        expectedTargetSuffix: carrier.expectedTargetSuffix,
+        expectedDefinitionDocument: carrier.document,
+        expectedDefinitionRange: FILE_START_RANGE,
       },
       {
         ...base,
@@ -546,7 +599,8 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
         feature: "barrel-import-definition",
         document: carrier.barrelConsumer,
         anchor: carrier.barrelDefinitionAnchor,
-        expectedTargetSuffix: carrier.expectedTargetSuffix,
+        expectedDefinitionDocument: carrier.document,
+        expectedDefinitionRange: FILE_START_RANGE,
       },
     );
   }
@@ -646,7 +700,8 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
         feature: "definition",
         document: handler.document,
         anchor: handler.eventAnchor,
-        expectedTargetSuffix: `/${handler.document}`,
+        expectedDefinitionDocument: handler.document,
+        expectedDefinitionAnchor: handler.declarationAnchor,
       },
     );
   }
@@ -750,7 +805,12 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
         occurrence: 0,
         token: "plainControlNumber",
       },
-      expectedTargetSuffix: "/src/plain-control.ts",
+      expectedDefinitionDocument: "src/plain-control.ts",
+      expectedDefinitionAnchor: {
+        text: "export const plainControlNumber = 1;",
+        occurrence: 0,
+        token: "plainControlNumber",
+      },
       providers: ALL_PROVIDERS,
     },
     {
@@ -795,11 +855,13 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
 }
 
 /** Resolve a contextual source anchor in the driver's negotiated position encoding. */
-export function resolveContractAnchor(
+function contractAnchorUtf16Range(
   source: string,
   anchor: ContractAnchor,
-  encoding: PositionEncoding = "utf-16",
-): LspPosition {
+): {
+  readonly start: number;
+  readonly end: number;
+} {
   if (!Number.isInteger(anchor.occurrence) || (anchor.occurrence ?? -1) < 0) {
     throw new Error(`contract anchor occurrence must be an explicit non-negative integer`);
   }
@@ -825,9 +887,38 @@ export function resolveContractAnchor(
       `contract anchor token ${JSON.stringify(anchor.token)} is ambiguous in ${JSON.stringify(anchor.text)}`,
     );
   }
-  const sourceOffset = contextStart + tokenStart + (anchor.offset ?? 0);
+  const offset = anchor.offset ?? 0;
+  if (!Number.isInteger(offset) || offset < 0 || offset > anchor.token.length) {
+    throw new Error(`contract anchor offset must fall within its token`);
+  }
+  return {
+    start: contextStart + tokenStart + offset,
+    end: contextStart + tokenStart + anchor.token.length,
+  };
+}
+
+export function resolveContractAnchor(
+  source: string,
+  anchor: ContractAnchor,
+  encoding: PositionEncoding = "utf-16",
+): LspPosition {
+  const sourceOffset = contractAnchorUtf16Range(source, anchor).start;
   const byteOffset = Buffer.byteLength(source.slice(0, sourceOffset), "utf8");
   return new DocumentPositions(source).byteToPosition(byteOffset, encoding);
+}
+
+/** Resolve the exact source token range represented by a contextual anchor. */
+export function resolveContractAnchorRange(
+  source: string,
+  anchor: ContractAnchor,
+  encoding: PositionEncoding = "utf-16",
+): LspRange {
+  const offsets = contractAnchorUtf16Range(source, anchor);
+  const positions = new DocumentPositions(source);
+  return {
+    start: positions.utf16ToPosition(offsets.start, encoding),
+    end: positions.utf16ToPosition(offsets.end, encoding),
+  };
 }
 
 function diagnosticCode(diagnostic: LspDiagnostic): string | undefined {
@@ -882,6 +973,72 @@ function definitionLocations(result: unknown): readonly LspLocation[] {
   return (Array.isArray(result) ? result : [result]).filter(
     (entry): entry is LspLocation => entry !== null && typeof entry === "object",
   );
+}
+
+function normalizedUriPath(uri: string): string {
+  return decodeURIComponent(uri).replaceAll("\\", "/").toLowerCase();
+}
+
+function uriTargetsDocument(uri: string, document: string): boolean {
+  return normalizedUriPath(uri).endsWith(`/${document.replaceAll("\\", "/").toLowerCase()}`);
+}
+
+function definitionSelectionRange(location: LspLocation): LspRange | undefined {
+  return location.targetSelectionRange ?? location.range ?? location.targetRange;
+}
+
+function rangeKey(range: LspRange): string {
+  return `${range.start.line}:${range.start.character}-${range.end.line}:${range.end.character}`;
+}
+
+function validateDefinitionResult(
+  testCase: EditorNeutralContractCase,
+  result: unknown,
+  driver: EditorNeutralContractDriver,
+  sources: ReadonlyMap<string, string>,
+  attempt: string,
+): void {
+  const locations = definitionLocations(result);
+  if (locations.length === 0) throw new Error(`${testCase.id}: ${attempt} definition was empty`);
+  const uris = locations.map((location) => location.targetUri ?? location.uri ?? "");
+  if (uris.some((uri) => /\.(?:vue|svelte)\.(?:tsx|jsx|ts|js)$/.test(normalizedUriPath(uri)))) {
+    throw new Error(`${testCase.id}: generated carrier URI leaked: ${uris.join(", ")}`);
+  }
+
+  const targetDocument = testCase.expectedDefinitionDocument;
+  if (!targetDocument) throw new Error(`${testCase.id}: contract has no definition document`);
+  const targetLocations = locations.filter((location) =>
+    uriTargetsDocument(location.targetUri ?? location.uri ?? "", targetDocument),
+  );
+  if (targetLocations.length === 0) {
+    throw new Error(
+      `${testCase.id}: ${attempt} definition did not reach /${targetDocument}; got ${uris.join(", ")}`,
+    );
+  }
+
+  const hasAnchor = testCase.expectedDefinitionAnchor !== undefined;
+  const hasRange = testCase.expectedDefinitionRange !== undefined;
+  if (Number(hasAnchor) + Number(hasRange) !== 1) {
+    throw new Error(`${testCase.id}: contract must own exactly one declaration range`);
+  }
+  const expectedRange = testCase.expectedDefinitionAnchor
+    ? resolveContractAnchorRange(
+        sources.get(targetDocument) ??
+          (() => {
+            throw new Error(`${testCase.id}: missing definition source for ${targetDocument}`);
+          })(),
+        testCase.expectedDefinitionAnchor,
+        driver.positionEncoding ?? "utf-16",
+      )
+    : testCase.expectedDefinitionRange!;
+  const actualRanges = targetLocations
+    .map(definitionSelectionRange)
+    .filter((range): range is LspRange => range !== undefined);
+  if (!actualRanges.some((range) => rangeKey(range) === rangeKey(expectedRange))) {
+    throw new Error(
+      `${testCase.id}: ${attempt} definition reached the document at the wrong declaration range; expected ${rangeKey(expectedRange)}, got ${actualRanges.map(rangeKey).join(", ") || "no range"}`,
+    );
+  }
 }
 
 function completionLabels(result: unknown): readonly string[] {
@@ -952,7 +1109,7 @@ export async function executeEditorNeutralContractCase(
   testCase: EditorNeutralContractCase,
   driver: EditorNeutralContractDriver,
   sources: ReadonlyMap<string, string>,
-): Promise<void> {
+): Promise<void | EditorNeutralContractEvidence> {
   if (!testCase.providers.includes(driver.route)) {
     throw new Error(
       `${testCase.id}: route ${driver.route} is not applicable; filtering is required`,
@@ -1019,25 +1176,37 @@ export async function executeEditorNeutralContractCase(
     case "direct-import-definition":
     case "barrel-import-definition":
     case "plain-control-definition": {
-      const result = await driver.definition(
-        testCase.document,
-        positionFor(testCase, driver, sources),
-      );
-      const locations = definitionLocations(result);
-      if (locations.length === 0) throw new Error(`${testCase.id}: definition was empty`);
-      const suffix = testCase.expectedTargetSuffix!.replaceAll("\\", "/").toLowerCase();
-      const uris = locations
-        .map((location) => location.targetUri ?? location.uri ?? "")
-        .map((uri) => decodeURIComponent(uri).replaceAll("\\", "/").toLowerCase());
-      if (!uris.some((uri) => uri.endsWith(suffix))) {
-        throw new Error(
-          `${testCase.id}: definition did not reach ${suffix}; got ${uris.join(", ")}`,
+      const requestCount = testCase.feature === "definition" ? 2 : 1;
+      const durations: number[] = [];
+      const failures: string[] = [];
+      for (let index = 0; index < requestCount; index += 1) {
+        const startedAt = performance.now();
+        const result = await driver.definition(
+          testCase.document,
+          positionFor(testCase, driver, sources),
         );
+        durations.push(Math.round(performance.now() - startedAt));
+        try {
+          validateDefinitionResult(
+            testCase,
+            result,
+            driver,
+            sources,
+            requestCount === 2 ? (index === 0 ? "first" : "repeated") : "single",
+          );
+        } catch (error) {
+          failures.push(error instanceof Error ? error.message : String(error));
+        }
       }
-      if (uris.some((uri) => /\.(?:vue|svelte)\.(?:tsx|jsx|ts|js)$/.test(uri))) {
-        throw new Error(`${testCase.id}: generated carrier URI leaked: ${uris.join(", ")}`);
+      const evidence: EditorNeutralContractEvidence | undefined =
+        requestCount === 2
+          ? { localDefinitionDurationsMs: durations as [number, number] }
+          : undefined;
+      if (failures.length > 0) {
+        if (evidence) throw new EditorNeutralContractFailure(failures.join(" | "), evidence);
+        throw new Error(failures.join(" | "));
       }
-      return;
+      return evidence;
     }
     case "completion":
     case "plain-control-completion": {
@@ -1061,26 +1230,49 @@ export async function executeEditorNeutralContractCase(
         testCase.renameTo!,
       );
       const edits = workspaceEdits(result);
-      if (edits.length < 2) {
+      const expectedAnchors = testCase.expectedRenameAnchors ?? [];
+      if (expectedAnchors.length === 0) {
+        throw new Error(`${testCase.id}: contract has no exact rename anchors`);
+      }
+      if (edits.length !== expectedAnchors.length) {
         throw new Error(
-          `${testCase.id}: rename produced ${edits.length} edits, expected script + markup`,
+          `${testCase.id}: rename produced ${edits.length} edits, expected exactly ${expectedAnchors.length}`,
         );
       }
       if (edits.some(({ uri }) => /\.(?:vue|svelte)\.(?:tsx|jsx|ts|js)$/i.test(uri))) {
         throw new Error(`${testCase.id}: rename leaked a generated carrier URI`);
       }
-      const sourceEdits = edits.filter(({ uri }) =>
-        decodeURIComponent(uri)
-          .replaceAll("\\", "/")
-          .toLowerCase()
-          .endsWith(`/${testCase.document.replaceAll("\\", "/").toLowerCase()}`),
-      );
-      if (sourceEdits.length < 2) {
-        throw new Error(`${testCase.id}: rename did not map both edits to ${testCase.document}`);
+      if (edits.some(({ edit }) => edit.newText !== testCase.renameTo)) {
+        throw new Error(`${testCase.id}: rename edit newText did not equal ${testCase.renameTo}`);
       }
-      const distinctLines = new Set(sourceEdits.map(({ edit }) => edit.range.start.line));
-      if (distinctLines.size < 2) {
-        throw new Error(`${testCase.id}: rename did not span script and markup lines`);
+      const sourceEdits = edits.filter(({ uri }) => uriTargetsDocument(uri, testCase.document));
+      if (sourceEdits.length !== edits.length) {
+        throw new Error(`${testCase.id}: rename did not map every edit to ${testCase.document}`);
+      }
+
+      const source = requireSource(testCase, sources);
+      const encoding = driver.positionEncoding ?? "utf-16";
+      const positions = new DocumentPositions(source);
+      const originalToken = testCase.anchor?.token;
+      if (!originalToken) throw new Error(`${testCase.id}: rename contract has no original token`);
+      for (const { edit } of sourceEdits) {
+        const start = positions.positionToUtf16(edit.range.start, encoding);
+        const end = positions.positionToUtf16(edit.range.end, encoding);
+        if (source.slice(start, end) !== originalToken) {
+          throw new Error(
+            `${testCase.id}: rename edit did not select the original token ${JSON.stringify(originalToken)}`,
+          );
+        }
+      }
+
+      const expectedRangeKeys = expectedAnchors
+        .map((anchor) => rangeKey(resolveContractAnchorRange(source, anchor, encoding)))
+        .sort();
+      const actualRangeKeys = sourceEdits.map(({ edit }) => rangeKey(edit.range)).sort();
+      if (JSON.stringify(actualRangeKeys) !== JSON.stringify(expectedRangeKeys)) {
+        throw new Error(
+          `${testCase.id}: rename ranges differ; expected ${expectedRangeKeys.join(", ")}, got ${actualRangeKeys.join(", ")}`,
+        );
       }
       return;
     }

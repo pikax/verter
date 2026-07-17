@@ -31,7 +31,12 @@ The inventory is typed and fail-closed:
 - 71 standard-LSP cases cover diagnostics (including the absence of TS7026), hover, definition,
   completion, rename across script and markup, direct SFC imports, two-hop barrel imports, and a
   plain-TypeScript navigation control that distinguishes SFC projection defects from provider-route
-  defects. A dedicated Svelte 5 case requires `let title: string = $state("x")` to remain clean when
+  defects. Definition rows validate the exact declaration selection range rather than accepting a
+  matching document URI alone. Local script↔markup definitions run both a first and repeated request;
+  the receipt records both durations under the existing bounded request/case timeouts, without a
+  machine-speed micro-threshold. Rename rows require every edit to carry the requested `newText` and
+  to select exactly the original authored script or markup token. A dedicated Svelte 5 case requires
+  `let title: string = $state("x")` to remain clean when
   interpolated as `<p>{title}</p>` on every provider route. Unannotated TypeScript Vue `<script setup>`
   handlers and Svelte 5 runes-mode instance handlers referenced by DOM `pointerdown` bindings must infer
   `PointerEvent`: a valid `pointerId` access is clean, hover cannot degrade to `any` or generic
@@ -48,6 +53,8 @@ The inventory is typed and fail-closed:
   the standard-LSP executions. Nested authored-config rows separate strict checking from lax
   JavaScript policy: their authored JSDoc keeps hover, completion, and definition concretely
   `PointerEvent`-aware, while `checkJs: false`/`strict: false` keeps the invalid member diagnostic-free.
+  The lax invalid member is deliberately not hidden by `@ts-expect-error`, so the zero-diagnostic
+  result proves the authored policy is actually honored.
   The strict and lax rows are run together so a generated or hidden override of `allowJs`, `checkJs`,
   `strict`, or `noImplicitAny` cannot satisfy both policies. TypeScript 7 also compiles the nested lax
   project directly and records its zero-diagnostic result in the receipt, independently of Verter's
@@ -58,7 +65,9 @@ The inventory is typed and fail-closed:
 - The three routes produce exactly 217 required executions. A missing route, startup failure, empty
   response, skipped/N/A case, or incomplete execution count fails the run.
 
-The fixture intentionally has no configured `jsxImportSource`. Public Svelte hovers must expose the
+The fixture intentionally has no configured `jsxImportSource`. The raw server process sets the same
+provider-only E2E completion flags as the real-editor parity suites, so completion evidence cannot be
+satisfied by Verter-authored fallback suggestions. Public Svelte hovers must expose the
 Svelte 5 `Component` contract and must not leak generated carrier types such as
 `__VerterPublicInstance`. The runner writes a JSON receipt to `VERTER_EDITOR_NEUTRAL_RECEIPT`, or
 to the operating-system temporary directory when that variable is absent. The receipt records each
