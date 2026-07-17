@@ -48,9 +48,9 @@ use verter_semantic::analysis::type_eval::{
     ValueDeclGroup, ValueDeclKind,
 };
 use verter_semantic::analysis::type_eval_build::{
-    build_eval_env, lower_jsdoc_typedef_named, lower_statement_parts, register_statement_parts,
-    BuildEvalEnvContext, LoweredSignatureParts, LoweredTypeDeclParts, LoweredValueDeclParts,
-    StatementLowerCtx,
+    build_eval_env, lower_jsdoc_typedef_named, lower_statement_parts,
+    lower_svelte_runes_statement_parts, register_statement_parts, BuildEvalEnvContext,
+    LoweredSignatureParts, LoweredTypeDeclParts, LoweredValueDeclParts, StatementLowerCtx,
 };
 use verter_semantic::analysis::type_solver::prepared::{
     collect_heritage_base_facts, collect_key_domain_closedness_fact,
@@ -446,6 +446,11 @@ pub struct DeclBodyMemo {
     eval_source: Arc<str>,
     framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
     source_type: oxc_span::SourceType,
+    /// Scope-aware component mode captured from the SAME retained eval program
+    /// during cold indexing. This is separate from `.svelte.ts`/`.svelte.js`
+    /// rune-module classification: a `.svelte` carrier may be legacy or runes
+    /// depending on explicit options and unresolved rune references.
+    svelte_component_runes_mode: bool,
     /// `None` on a seeded memo (every entry pre-filled; nothing to
     /// compute lazily).
     service: Option<Arc<DeclLoweringService>>,
@@ -502,6 +507,7 @@ impl DeclBodyMemo {
         eval_source: Arc<str>,
         framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
         source_type: oxc_span::SourceType,
+        svelte_component_runes_mode: bool,
         service: Arc<DeclLoweringService>,
         header_index: Arc<DeclHeaderIndex>,
         provenance: Arc<MetaProvenance>,
@@ -516,6 +522,7 @@ impl DeclBodyMemo {
             eval_source,
             framework_parse,
             source_type,
+            svelte_component_runes_mode,
             service: Some(service),
             lease: lease_cell,
             header_index,
@@ -548,6 +555,7 @@ impl DeclBodyMemo {
             eval_source: Arc::from(""),
             framework_parse: None,
             source_type: oxc_span::SourceType::ts(),
+            svelte_component_runes_mode: false,
             service: None,
             lease: OnceLock::new(),
             header_index,
@@ -702,6 +710,14 @@ impl DeclBodyMemo {
     /// so a plain `.ts` / `.js` never reports `true`.
     pub(crate) fn is_rune_module(&self) -> bool {
         crate::host_resolve::is_svelte_rune_module(&self.rune_module_file_language())
+    }
+
+    /// Whether the centralized effective lookup may consult the Svelte rune
+    /// ambient for this file. Standalone rune modules are classified by their
+    /// language id; component carriers use the scope-aware mode fact captured
+    /// from their retained combined script program during cold indexing.
+    pub(crate) fn rune_ambient_visible(&self) -> bool {
+        self.is_rune_module() || self.svelte_component_runes_mode
     }
 
     /// The retained framework parse artifact for this content generation, when
@@ -1028,8 +1044,12 @@ impl DeclBodyMemo {
         // readers agree on rune visibility. Classify from the canonical
         // via the static registry (no host needed) so the lazy memo
         // path stays self-contained.
-        let file_language = self.rune_module_file_language();
-        crate::host_resolve::merge_rune_ambient_into_env(&mut env, &file_language);
+        if self.svelte_component_runes_mode {
+            crate::host_resolve::merge_rune_ambient_inventory_into_env(&mut env);
+        } else {
+            let file_language = self.rune_module_file_language();
+            crate::host_resolve::merge_rune_ambient_into_env(&mut env, &file_language);
+        }
         // Commit only the REAL env (idempotent — a cold race loses harmlessly).
         self.whole_env.get_or_init(|| Arc::new(env)).clone()
     }
@@ -1195,6 +1215,7 @@ impl DeclBodyMemo {
         let build_ctx = BuildEvalEnvContext::new(Arc::clone(&self.key.canonical));
         let lens = self.shallow_lens();
         let route_lens = self.route_fact_lens();
+        let svelte_component_runes_mode = self.svelte_component_runes_mode;
         let outcome = service.run_leased(&self.key, move |program| {
             let program = program?;
             let source = program.source_str();
@@ -1231,7 +1252,11 @@ impl DeclBodyMemo {
                 let Some(stmt) = program.body.get(*index as usize) else {
                     continue;
                 };
-                let parts = lower_statement_parts(stmt, source);
+                let parts = if svelte_component_runes_mode {
+                    lower_svelte_runes_statement_parts(stmt, source)
+                } else {
+                    lower_statement_parts(stmt, source)
+                };
                 for decl in &parts.type_decls {
                     retained_types
                         .entry(decl.name.clone())
@@ -1990,6 +2015,7 @@ impl DeclBodyMemo {
         };
         self.ensure_lease();
         let name = name.to_string();
+        let svelte_component_runes_mode = self.svelte_component_runes_mode;
         let outcome = service.run_leased(&self.key, move |program| {
             let program = program?;
             let source = program.source_str();
@@ -2000,7 +2026,11 @@ impl DeclBodyMemo {
                 let Some(stmt) = program.body.get(*index as usize) else {
                     continue;
                 };
-                let parts = lower_statement_parts(stmt, source);
+                let parts = if svelte_component_runes_mode {
+                    lower_svelte_runes_statement_parts(stmt, source)
+                } else {
+                    lower_statement_parts(stmt, source)
+                };
                 for decl in &parts.value_decls {
                     if decl.name != name {
                         continue;

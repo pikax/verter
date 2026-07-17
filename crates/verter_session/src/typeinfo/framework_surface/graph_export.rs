@@ -1312,6 +1312,9 @@ mod tests {
             name: name.to_string(),
             is_optional: false,
             value,
+            type_annotation: None,
+            type_references: Vec::new(),
+            source_span: None,
         };
         let normalized = NormalizedSurfaces {
             surfaces: vec![NormalizedSurface {

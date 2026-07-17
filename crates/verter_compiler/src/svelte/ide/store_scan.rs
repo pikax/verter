@@ -99,6 +99,14 @@ pub(super) struct StoreSub {
     pub kind: StoreSubKind,
 }
 
+/// One structural fragment scan. Store-subscription rewrites and the template
+/// `$host` mode fact are produced by the same lexical walk so they cannot
+/// disagree about shadowing.
+pub(super) struct StoreScanOutcome {
+    pub(super) subs: Vec<StoreSub>,
+    pub(super) uses_host_rune: bool,
+}
+
 /// The projection shape of a classified store-sub occurrence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StoreSubKind {
@@ -176,15 +184,31 @@ pub(super) fn scan_store_subscriptions_with(
     text: &str,
     extra_declared: &[String],
 ) -> Vec<StoreSub> {
+    scan_store_subscriptions_and_host_with(text, extra_declared).subs
+}
+
+/// Scan one script/template expression fragment once, returning both legacy
+/// store-subscription occurrences and whether it contains an unshadowed value
+/// reference to the Svelte `$host` rune.
+pub(super) fn scan_store_subscriptions_and_host_with(
+    text: &str,
+    extra_declared: &[String],
+) -> StoreScanOutcome {
     // Cheap bail: no `$`-identifier can exist without a `$` byte.
     if !text.contains('$') {
-        return Vec::new();
+        return StoreScanOutcome {
+            subs: Vec::new(),
+            uses_host_rune: false,
+        };
     }
     let allocator = Allocator::default();
     let source_type = SourceType::tsx();
     let parsed = Parser::new(&allocator, text, source_type).parse();
     if parsed.panicked {
-        return Vec::new();
+        return StoreScanOutcome {
+            subs: Vec::new(),
+            uses_host_rune: false,
+        };
     }
     // Classify every `$NAME` reference with LEXICALLY-SCOPED local-binding
     // suppression: the collector tracks a scope stack (function/arrow bodies) and
@@ -199,9 +223,13 @@ pub(super) fn scan_store_subscriptions_with(
         extra_declared,
         scopes: Vec::new(),
         subs: Vec::new(),
+        uses_host_rune: false,
     };
     collector.visit_program(&parsed.program);
-    collector.subs
+    StoreScanOutcome {
+        subs: collector.subs,
+        uses_host_rune: collector.uses_host_rune,
+    }
 }
 
 /// Scan a fragment with no extra (script-supplied) declared-name context — the
@@ -282,12 +310,15 @@ const PATTERN_WRAPPER_PREFIX_LEN: u32 = "const [".len() as u32;
 /// references a declared local stays an ordinary reference. A fragment that does
 /// not parse, or whose subs fall before the wrapper prefix, yields nothing
 /// (fail-open).
-pub(super) fn scan_pattern_default_store_subs(
+pub(super) fn scan_pattern_default_store_subs_and_host(
     pattern_text: &str,
     extra_declared: &[String],
-) -> Vec<StoreSub> {
+) -> StoreScanOutcome {
     if !pattern_text.contains('$') {
-        return Vec::new();
+        return StoreScanOutcome {
+            subs: Vec::new(),
+            uses_host_rune: false,
+        };
     }
     // The SAME wrapper `collect_pattern_dollar_names` uses, so a bare identifier,
     // a destructuring pattern, and a comma-separated param list all parse as one
@@ -295,22 +326,22 @@ pub(super) fn scan_pattern_default_store_subs(
     // the store-sub classifier finds reads there; the binding names are binding
     // identifiers (not references) and are never recorded.
     let wrapped = format!("const [{pattern_text}] = null as any;");
-    let mut subs = scan_store_subscriptions_with(&wrapped, extra_declared);
+    let mut outcome = scan_store_subscriptions_and_host_with(&wrapped, extra_declared);
     // A binding-pattern default is a pure VALUE expression — only READ-shaped
     // store-subs (`Read` / `ShorthandRead`, which carry just the `dollar` /
     // `ident_end` spans) are valid here. Restrict to those (a write-shaped kind,
     // whose extra operator/RHS offsets are NOT translated, cannot legitimately
     // appear in a default position) and drop any sub landing inside the wrapper
     // machinery (defensive — initializers are after the prefix).
-    subs.retain(|s| {
+    outcome.subs.retain(|s| {
         matches!(s.kind, StoreSubKind::Read | StoreSubKind::ShorthandRead)
             && s.dollar >= PATTERN_WRAPPER_PREFIX_LEN
     });
-    for s in &mut subs {
+    for s in &mut outcome.subs {
         s.dollar -= PATTERN_WRAPPER_PREFIX_LEN;
         s.ident_end -= PATTERN_WRAPPER_PREFIX_LEN;
     }
-    subs
+    outcome
 }
 
 /// Collect the SCRIPT-SCOPE (program/function-top-level) `$NAME` bindings: the
@@ -386,44 +417,6 @@ fn for_left_lexical_bindings(left: &oxc_ast::ast::ForStatementLeft<'_>) -> Vec<S
     names.names
 }
 
-/// Whether `text` (an instance/module script body) USES a Svelte 5 rune — any
-/// reference to a rune name (`$props`/`$state`/`$derived`/…, including member
-/// forms `$state.raw` whose base callee is the rune identifier). A component
-/// that uses ANY rune is in RUNES mode; one that uses none is LEGACY mode — and
-/// only legacy mode has the `$$props`/`$$restProps`/`$$slots` magic (F12). The
-/// classification is STRUCTURAL (OXC identifier references), not a substring
-/// scan, so a rune NAME inside a string literal / comment does not mis-classify.
-pub(super) fn text_uses_runes(text: &str) -> bool {
-    if !text.contains('$') {
-        return false;
-    }
-    let allocator = Allocator::default();
-    let parsed = Parser::new(&allocator, text, SourceType::tsx()).parse();
-    if parsed.panicked {
-        // A fragment that does not parse cleanly cannot be classified — treat as
-        // NOT-runes (legacy) is the conservative default for the magic objects,
-        // but an unparseable script is already a type error the body surfaces.
-        return false;
-    }
-    let mut detector = RuneUseDetector { used: false };
-    detector.visit_program(&parsed.program);
-    detector.used
-}
-
-/// Detects whether any rune identifier is referenced.
-struct RuneUseDetector {
-    used: bool,
-}
-
-impl<'a> Visit<'a> for RuneUseDetector {
-    fn visit_identifier_reference(&mut self, it: &IdentifierReference<'a>) {
-        if is_rune(it.name.as_str()) {
-            self.used = true;
-        }
-        walk::walk_identifier_reference(self, it);
-    }
-}
-
 /// Accumulator + scanners for the `$`-prefixed lexical bindings of ONE scope.
 ///
 /// Two scan modes model JS lexical scoping precisely so a binding suppresses a
@@ -445,10 +438,12 @@ struct LexicalDollarBindings {
 }
 
 impl LexicalDollarBindings {
-    /// Record a `$`-prefixed binding identifier (skipping runes / `$$`-magic).
+    /// Record a `$`-prefixed binding identifier (skipping `$$`-magic). A
+    /// rune-named binding is retained because it lexically suppresses rune
+    /// meaning even though it can never become a legacy store subscription.
     fn add_binding(&mut self, id: &BindingIdentifier<'_>) {
         let name = id.name.as_str();
-        if name.starts_with('$') && !is_rune(name) && !is_double_dollar_magic(name) {
+        if name.starts_with('$') && !is_double_dollar_magic(name) {
             self.names.push(name.to_string());
         }
     }
@@ -573,7 +568,7 @@ impl LexicalDollarBindings {
             Declaration::TSModuleDeclaration(m) => {
                 if let oxc_ast::ast::TSModuleDeclarationName::Identifier(id) = &m.id {
                     let name = id.name.as_str();
-                    if name.starts_with('$') && !is_rune(name) && !is_double_dollar_magic(name) {
+                    if name.starts_with('$') && !is_double_dollar_magic(name) {
                         self.names.push(name.to_string());
                     }
                 }
@@ -648,9 +643,18 @@ struct StoreSubCollector<'s, 'd> {
     /// the `$`-names declared directly in that scope.
     scopes: Vec<Vec<String>>,
     subs: Vec<StoreSub>,
+    uses_host_rune: bool,
 }
 
 impl<'s, 'd> StoreSubCollector<'s, 'd> {
+    fn is_declared(&self, name: &str) -> bool {
+        self.extra_declared.iter().any(|d| d == name)
+            || self
+                .scopes
+                .iter()
+                .any(|frame| frame.iter().any(|d| d == name))
+    }
+
     /// Whether `name` (a `$NAME` identifier) is a store auto-subscription:
     /// `$`-prefixed, not a rune, not `$$`-magic, and not lexically declared in any
     /// currently-active scope frame (or the script-scope `extra_declared` set).
@@ -658,11 +662,7 @@ impl<'s, 'd> StoreSubCollector<'s, 'd> {
         name.starts_with('$')
             && !is_rune(name)
             && !is_double_dollar_magic(name)
-            && !self.extra_declared.iter().any(|d| d == name)
-            && !self
-                .scopes
-                .iter()
-                .any(|frame| frame.iter().any(|d| d == name))
+            && !self.is_declared(name)
     }
 }
 
@@ -1148,6 +1148,9 @@ impl<'a, 's, 'd> Visit<'a> for StoreSubCollector<'s, 'd> {
 
     fn visit_identifier_reference(&mut self, it: &IdentifierReference<'a>) {
         let name = it.name.as_str();
+        if name == "$host" && !self.is_declared(name) {
+            self.uses_host_rune = true;
+        }
         if self.is_store_sub(name) {
             self.subs.push(StoreSub {
                 dollar: it.span.start,

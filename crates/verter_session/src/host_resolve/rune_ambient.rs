@@ -191,6 +191,16 @@ pub(crate) fn merge_rune_ambient_into_env(env: &mut EvalEnv, language: &FileLang
     if !is_svelte_rune_module(language) {
         return;
     }
+    merge_rune_ambient_inventory_into_env(env);
+}
+
+/// Merge the module-valid rune declarations into an environment after the
+/// caller has independently proved rune visibility (for example, a `.svelte`
+/// component classified as runes mode from its retained AST). This ungated
+/// primitive remains crate-private; the centralized file-state lookup owns the
+/// visibility decision, while this module remains the single declaration
+/// inventory.
+pub(crate) fn merge_rune_ambient_inventory_into_env(env: &mut EvalEnv) {
     let ambient = rune_ambient_inventory();
     for (name, group) in &ambient.env.value_symbols {
         if !env.value_symbols.contains_key(name) {

@@ -11,6 +11,8 @@
 //! scope in source order via CodeTransform MOVE operations.
 
 use oxc_allocator::Allocator;
+use oxc_parser::Parser;
+use oxc_span::SourceType;
 
 use verter_span::Span;
 
@@ -23,14 +25,13 @@ use super::emit::{is_css_custom_property, DiagnosticSeverity, UnsupportedKind};
 use super::prelude::{render_component_prelude, SvelteJsxNamespace};
 use super::store_scan::{
     collect_declared_dollar_names, collect_pattern_dollar_names, scan_store_subscriptions,
-    text_uses_runes,
 };
 use super::SvelteIdeDialect;
 use crate::svelte::bind_contract::{lookup_bind_contract, BindContract, BindDirection};
 use crate::svelte::parser::{
-    forced_runes_option, ParsedSvelte, SvelteAttribute, SvelteAttributeKind, SvelteAttributeValue,
-    SvelteBlock, SvelteBlockKind, SvelteClauseKind, SvelteDirectiveKind, SvelteElement,
-    SvelteElementKind, SvelteNode, SvelteScript, SvelteSpecialKind, SvelteTag, SvelteTagKind,
+    ParsedSvelte, SvelteAttribute, SvelteAttributeKind, SvelteAttributeValue, SvelteBlock,
+    SvelteBlockKind, SvelteClauseKind, SvelteDirectiveKind, SvelteElement, SvelteElementKind,
+    SvelteNode, SvelteScript, SvelteSpecialKind, SvelteTag, SvelteTagKind,
 };
 use store::rewrite_store_sub;
 
@@ -166,35 +167,10 @@ pub fn project_svelte_ide(
         remove_span(&mut ct, style_full_span(style));
     }
 
-    // 2) The unmapped prelude as the module INTRO — always emitted FIRST in
-    //    output (the `@jsxImportSource` pragma MUST be the leading bytes). Using
-    //    the intro (not `prepend_left(0)`) keeps the pragma ahead of any content
-    //    a trailing-script MOVE relocates to the top. The pragma variant is
-    //    selected by a top-level `<svelte:options namespace="svg|mathml">` (F10).
+    // 2) Capture the namespace axis now. The prelude remains the module intro,
+    // but its runes/legacy axis is finalized after the template expression walk
+    // has produced the structural free-`$host` fact.
     let namespace = detect_jsx_namespace(source, &parsed.template);
-    // Runes-vs-legacy classification (F12). An EXPLICIT `<svelte:options
-    // runes={true|false}>` is authoritative (Svelte's own forced-mode switch);
-    // otherwise a component using ANY rune is RUNES mode and one using none is
-    // LEGACY mode. Only legacy mode carries the `$$props`/`$$restProps`/`$$slots`
-    // magic — so the F12 prelude declarations are emitted only when the component
-    // is legacy. The rune-usage classification is STRUCTURAL (OXC), per script.
-    let legacy_mode = match forced_runes_option(source, &parsed.template) {
-        Some(forced_runes) => !forced_runes,
-        None => {
-            let uses_runes = [parsed.module_content(), parsed.instance_content()]
-                .into_iter()
-                .flatten()
-                .any(|c| text_uses_runes(&source[c.start as usize..c.end as usize]));
-            !uses_runes
-        }
-    };
-    let prelude = render_component_prelude(namespace, legacy_mode, dialect);
-    // Prepend the prelude as the unmapped intro AND register it as the helper-import preamble so the
-    // source map publishes the `x_verter_helper_preamble_end` boundary (the Vue carrier-IDE contract,
-    // now matched for Svelte). The prelude STAYS the intro — the `@jsxImportSource` pragma must lead
-    // the output bytes, ahead of any trailing-`<script>` MOVE to offset 0 — so the boundary rides the
-    // intro-capture path of `generate_map_with_preamble`. The emitted TSX bytes are unchanged.
-    ct.prepend_helper_preamble_content(&prelude);
 
     // 3) The render scope function wrapping the template. With trailing/
     //    interleaved scripts MOVED above the render fn, the markup is contiguous
@@ -222,8 +198,18 @@ pub fn project_svelte_ide(
         dialect,
         script_declared,
         block_declared: Vec::new(),
+        template_uses_host_rune: false,
     };
     projector.project_template(&parsed.template, region);
+    let template_uses_host_rune = projector.template_uses_host_rune;
+    drop(projector);
+
+    let legacy_mode = component_is_legacy(source, parsed, template_uses_host_rune);
+    let prelude = render_component_prelude(namespace, legacy_mode, dialect);
+    // Register the prelude as the unmapped intro after mode finalization.
+    // CodeTransform still emits it before every authored/moved chunk and
+    // publishes the `x_verter_helper_preamble_end` source-map boundary.
+    ct.prepend_helper_preamble_content(&prelude);
 
     // Emit the component's PUBLIC-FACADE default export onto the IDE carrier
     // (the self-diagnostics surface; the bare-import target is the declaration
@@ -279,6 +265,45 @@ pub fn project_svelte_ide(
         is_jsx: dialect.is_javascript(),
         diagnostics,
     }
+}
+
+/// Classify the component through the shared scope-aware Svelte mode authority.
+/// The synthetic program keeps every script byte at its carrier-absolute offset
+/// while blanking markup/style bytes, allowing instance and module top-level
+/// scopes to remain distinct without reparsing each slot independently.
+fn component_is_legacy(source: &str, parsed: &ParsedSvelte, template_uses_host_rune: bool) -> bool {
+    let source_bytes = source.as_bytes();
+    let mut eval = source_bytes
+        .iter()
+        .map(|byte| match byte {
+            b'\n' | b'\r' => *byte,
+            _ => b' ',
+        })
+        .collect::<Vec<_>>();
+    for region in [parsed.module_content(), parsed.instance_content()]
+        .into_iter()
+        .flatten()
+    {
+        let start = region.start as usize;
+        let end = region.end as usize;
+        if start <= end && end <= source_bytes.len() {
+            eval[start..end].copy_from_slice(&source_bytes[start..end]);
+        }
+    }
+    let eval = String::from_utf8(eval)
+        .expect("blanking non-script UTF-8 bytes with ASCII spaces preserves UTF-8");
+    let allocator = Allocator::default();
+    let program = Parser::new(&allocator, &eval, SourceType::tsx()).parse();
+    let module_region = parsed
+        .module_content()
+        .map(|region| (region.start, region.end));
+    !verter_parser::svelte_reactivity::infer_combined_program_mode(
+        &program.program,
+        module_region,
+        parsed.forced_runes,
+        template_uses_host_rune,
+    )
+    .is_runes()
 }
 
 /// The full span of a `<script>` block (open tag through `</script>`).
@@ -395,6 +420,10 @@ struct TemplateProjector<'ct, 'a> {
     /// so a `$`-named block binding is treated as an ORDINARY local (NOT a
     /// store-sub) inside its block, and never leaks to a sibling.
     block_declared: Vec<Vec<String>>,
+    /// Whether a structurally parsed template expression referenced the free
+    /// Svelte `$host` rune. Produced while that expression is already being
+    /// scanned for store rewrites; never inferred from source text.
+    template_uses_host_rune: bool,
 }
 
 /// A snippet declarator to hoist to the top of its scope function.

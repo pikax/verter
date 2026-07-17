@@ -408,15 +408,16 @@ mod tests {
         // File-watch globs are a SERVER concern, not a client-manifest one — the
         // manifest must carry no watch-glob field on a framework row.
         assert!(!a.contains("fileWatchGlobs"));
-        // Svelte's carrier, fixed `.tsx` IDE surface, null testing surface, and
-        // its rune-module adapter extensions.
+        // Svelte's carrier, language-sensitive JS/TS IDE surfaces, null testing
+        // surface, and rune-module adapter extensions. JavaScript SFCs project
+        // through `.svelte.jsx`; TypeScript SFCs through `.svelte.tsx`.
         assert!(a.contains(&format!("carrierExtensions: [\"{svelte_ext}\"]")));
         let svelte_module_exts = registry.adapter_module_extensions(&FrameworkAdapterId::svelte());
         assert_eq!(svelte_module_exts, vec!["svelte.js", "svelte.ts"]);
         assert!(a.contains(&format!(
             "adapterModuleExtensions: [\"{svelte_ext}.js\", \"{svelte_ext}.ts\"]"
         )));
-        assert!(a.contains("ide: [\".tsx\"]"));
+        assert!(a.contains("ide: [\".jsx\", \".tsx\"]"));
         // Vue has no adapter-module extensions.
         assert!(a.contains("adapterModuleExtensions: []"));
         // The base TS/JS surface is recorded (multi-line, oxfmt-stable). The

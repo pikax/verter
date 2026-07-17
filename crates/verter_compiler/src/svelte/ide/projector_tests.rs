@@ -2552,6 +2552,29 @@ fn forced_runes_option_omits_the_legacy_magic_even_without_a_rune_call() {
 }
 
 #[test]
+fn free_template_host_selects_runes_mode_but_shadowed_host_does_not() {
+    let runes = project("<button onclick={() => $host()}>host</button>");
+    assert!(
+        !runes.contains("declare const $$props"),
+        "a free template $host rune selects runes mode: {runes}"
+    );
+
+    let expression_shadowed = project("<button onclick={($host) => $host()}>host</button>");
+    assert!(
+        expression_shadowed.contains("declare const $$props"),
+        "an expression-local $host parameter does not select runes mode: {expression_shadowed}"
+    );
+
+    let script_shadowed = project(
+        "<script lang=\"ts\">const $host = () => document.body;</script>\n<button onclick={() => $host()}>host</button>",
+    );
+    assert!(
+        script_shadowed.contains("declare const $$props"),
+        "a script-authored $host binding remains an ordinary template reference: {script_shadowed}"
+    );
+}
+
+#[test]
 fn store_subs_in_tag_await_and_legacy_on_surfaces_are_rewritten() {
     // F11: store-subs in `{@html $x}`, `{#await $p}`, and a legacy
     // `on:click={$h}` value are all rewritten (no raw `$store` residue in those

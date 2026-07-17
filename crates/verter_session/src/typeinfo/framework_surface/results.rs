@@ -311,6 +311,19 @@ pub struct NamedTypeMember {
     /// The two states stay distinct on the wire (different opaque
     /// diagnostics).
     pub value: Option<NamedTypeMemberOutput>,
+    /// Exact TypeScript display of the resolved member value when the producing
+    /// output sink materialized the full value type. This is a display-only
+    /// publication sidecar: semantic decisions continue to use the graph node
+    /// and [`Self::value`] remains the closed shallow wire vocabulary.
+    pub type_annotation: Option<String>,
+    /// Named type references preserved by [`Self::type_annotation`]. Public
+    /// declaration projectors use this inventory to retain only the imports
+    /// required by the emitted annotation; it is never a resolution input.
+    pub type_references: Vec<String>,
+    /// The most relevant authored member-name span in the owning carrier, when
+    /// the framework capture can provide one. Generated declaration source maps
+    /// use this anchor for definition/navigation fidelity.
+    pub source_span: Option<verter_span::Span>,
 }
 
 /// The framework-neutral macro-payload result covering all six surfaces.

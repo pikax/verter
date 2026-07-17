@@ -32,6 +32,29 @@ fn a_bare_store_reference_is_a_read_sub() {
 }
 
 #[test]
+fn free_host_rune_is_reported_without_misclassifying_shadowed_references() {
+    let free = scan_store_subscriptions_and_host_with("$host()", &[]);
+    assert!(free.subs.is_empty(), "$host is a rune, never a store sub");
+    assert!(
+        free.uses_host_rune,
+        "a free $host reference selects runes mode"
+    );
+
+    let shadowed = scan_store_subscriptions_and_host_with("($host) => $host()", &[]);
+    assert!(shadowed.subs.is_empty());
+    assert!(
+        !shadowed.uses_host_rune,
+        "an expression-local parameter must suppress the rune meaning"
+    );
+
+    let script_shadowed = scan_store_subscriptions_and_host_with("$host()", &["$host".to_string()]);
+    assert!(
+        !script_shadowed.uses_host_rune,
+        "a template expression must respect an enclosing authored $host binding"
+    );
+}
+
+#[test]
 fn a_simple_assignment_target_is_a_write_sub() {
     let text = "$count = 5;";
     let subs = scan_store_subscriptions(text);

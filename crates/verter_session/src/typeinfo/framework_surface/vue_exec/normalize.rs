@@ -345,6 +345,9 @@ pub(crate) fn object_members_from_typeinfo_surface(
                 value: raise_member_value(ctx, member).map(|raised| {
                     crate::typeinfo::framework_surface::results::NamedTypeMemberOutput::classify_shallow(&raised)
                 }),
+                type_annotation: None,
+                type_references: Vec::new(),
+                source_span: None,
             },
         )
         .collect()

@@ -200,11 +200,13 @@ impl<'a> SvelteParser<'a> {
         self.style_body_probes.sort_by_key(|p| p.encounter_order);
         self.options_custom_element_probes
             .sort_by_key(|p| p.encounter_order);
+        let forced_runes = super::template_ast::forced_runes_option(self.text, &self.template);
         ParsedSvelte {
             instance_script: self.instance_script,
             module_script: self.module_script,
             styles: self.styles,
             template: self.template,
+            forced_runes,
             diagnostics: self.diagnostics,
             close_tag_violations: self.close_tag_violations,
             strict_parse_errors: self.strict_parse_errors,

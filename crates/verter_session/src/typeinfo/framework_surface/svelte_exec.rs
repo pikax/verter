@@ -36,6 +36,10 @@ use crate::framework::surface_store::{FullKey, StoredSurfaceDto};
 use crate::meta_resolve::callable_view::{CallableNodeView, PositionalParamNode};
 use crate::project_semantic_dispatch::output_materialization::OutputProjector;
 use crate::resolver_core::ResolverContext;
+use crate::semantic_query::{
+    PartialReasonSet, ProjectionMode, ProjectionReductionContext, QueryResult, ScopeId,
+    ValueRootKey,
+};
 use crate::typeinfo::framework_surface::resolved_surface_access::ResolvedSurfaceAccess;
 use crate::typeinfo::framework_surface::results::{
     EmitsSurface, MacroSurfaceDtos, ModelBinding, ModelSurface, PropsSurface, ResolvedEmitField,
@@ -132,9 +136,41 @@ pub(crate) fn resolve_svelte_surface(
 
     // Cold compute under an installed fact tracer so the CROSS-FILE facts the
     // captured-`TypeExpr` resolution reads enter the entry's `ReadSetSignature`.
+    let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
     let (outcome, finalise) = crate::fact_signature_helpers::install_fact_tracer(host, || {
         compute_svelte_surface(host, ctx, owner, source)
     });
+    let completeness = crate::request_context::current_cold_compute_completeness();
+    let outcome = if completeness.is_partial() {
+        let diagnostics = partial_diagnostic_messages(completeness.reasons());
+        match outcome {
+            ResolvedOutcome::Resolved(value) => ResolvedOutcome::Partial { value, diagnostics },
+            ResolvedOutcome::Partial {
+                value,
+                diagnostics: mut existing,
+            } => {
+                existing.extend(diagnostics);
+                existing.sort();
+                existing.dedup();
+                ResolvedOutcome::Partial {
+                    value,
+                    diagnostics: existing,
+                }
+            }
+            // A contributing read tripped after the family was identified but
+            // before it could materialize a row. Preserve an explicit empty
+            // carrier as PARTIAL; laundering this to `Missing` would make the
+            // public surface look like an ordinary absent macro.
+            ResolvedOutcome::Missing | ResolvedOutcome::Unsupported { .. } => {
+                ResolvedOutcome::Partial {
+                    value: Arc::new(MacroSurfaceDtos::default()),
+                    diagnostics,
+                }
+            }
+        }
+    } else {
+        outcome
+    };
     let non_cacheable_read_observed = matches!(
         &finalise,
         crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
@@ -187,8 +223,29 @@ fn compute_svelte_surface(
         SvelteSurfaceSource::CallbackPropEvents => {
             resolve_callback_prop_events(ctx, owner, facts.as_deref())
         }
-        SvelteSurfaceSource::InstanceExports => resolve_instance_exports(facts.as_deref()),
+        SvelteSurfaceSource::InstanceExports => {
+            resolve_instance_exports(ctx, owner, facts.as_deref())
+        }
     }
+}
+
+/// Stable output messages for the typed partiality accumulated by one Svelte
+/// framework-surface demand. The typed [`PartialReasonSet`] remains the cache
+/// admission authority; these strings are the existing DTO diagnostic rail.
+fn partial_diagnostic_messages(reasons: PartialReasonSet) -> Vec<String> {
+    let mut diagnostics = Vec::new();
+    if reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT) {
+        diagnostics.push("Type expansion exceeded Verter's safe evaluation budget.".to_string());
+    }
+    if reasons.contains(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT) {
+        diagnostics.push(
+            "Type evaluation exceeded Verter's safe connected-query depth limit.".to_string(),
+        );
+    }
+    if diagnostics.is_empty() {
+        diagnostics.push("Type evaluation produced a safe partial result.".to_string());
+    }
+    diagnostics
 }
 
 /// Svelte-private mint seal. With no constructor reachable outside
@@ -1142,7 +1199,11 @@ pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_payload_t
 /// EXPOSE from the exported instance-script members. Each export is a named
 /// member of the public instance; the member type stays a shallow `Ref` to the
 /// exported binding (shallow-by-default — the consumer re-resolves on demand).
-fn resolve_instance_exports(facts: Option<&SvelteScriptFacts>) -> ResolvedMacroPayload {
+fn resolve_instance_exports(
+    ctx: &dyn ResolverContext,
+    owner: &str,
+    facts: Option<&SvelteScriptFacts>,
+) -> ResolvedMacroPayload {
     use crate::typeinfo::framework_surface::results::{
         ExposeSurface, NamedTypeMember, NamedTypeMemberOutput,
     };
@@ -1152,15 +1213,58 @@ fn resolve_instance_exports(facts: Option<&SvelteScriptFacts>) -> ResolvedMacroP
     if facts.instance_exports.is_empty() {
         return ResolvedOutcome::Missing;
     }
+    let dispatch = ctx.dispatch();
+    let cap = TypeinfoSvelteSurfaceOutputCap::new(&dispatch);
     let members = facts
         .instance_exports
         .iter()
-        .map(|name| NamedTypeMember {
-            name: name.clone(),
-            is_optional: false,
-            value: Some(NamedTypeMemberOutput::Ref {
-                name: Arc::from(name.as_str()),
-            }),
+        .map(|export| {
+            let read = dispatch.execute_read(dispatch.typeof_key_for(
+                ValueRootKey {
+                    scope: ScopeId::file(Arc::from(owner)),
+                    name: Arc::from(export.local_name.as_str()),
+                },
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+            ));
+            crate::request_context::observe_component_meta_read_suppress(&read);
+
+            let node = match read.value {
+                QueryResult::Value(node) | QueryResult::Recursive(node) => Some(node),
+                QueryResult::Error(_) => None,
+            };
+            let (value, type_annotation, type_references) =
+                node.map_or((None, None, Vec::new()), |node| {
+                    let materialized = cap.materialize_reduced_output_type_expr(
+                        node,
+                        ProjectionReductionContext::published(ProjectionMode::Expanded),
+                    );
+                    if materialized.result_is_partial() {
+                        crate::request_context::mark_request_result_partial();
+                    }
+                    let raised = materialized.into_type_expr(&cap);
+                    let shallow = NamedTypeMemberOutput::classify_shallow(&raised);
+                    match verter_type_expr::render_type_expr_display(&raised) {
+                        Ok(rendered) => (
+                            Some(shallow),
+                            Some(rendered.text),
+                            rendered
+                                .referenced_type_names
+                                .into_iter()
+                                .map(|name| name.to_string())
+                                .collect(),
+                        ),
+                        Err(_) => (Some(shallow), None, Vec::new()),
+                    }
+                });
+
+            NamedTypeMember {
+                name: export.exported_name.clone(),
+                is_optional: false,
+                value,
+                type_annotation,
+                type_references,
+                source_span: Some(export.source_span),
+            }
         })
         .collect();
     let dtos = MacroSurfaceDtos {

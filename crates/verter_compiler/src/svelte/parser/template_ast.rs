@@ -38,6 +38,14 @@ pub struct ParsedSvelte {
     pub styles: Vec<SvelteStyle>,
     /// The template node tree (everything outside the script/style blocks).
     pub template: Vec<SvelteNode>,
+    /// The parser-owned explicit Svelte reactivity mode, when a top-level
+    /// `<svelte:options runes={...}>` declares one. `None` means the component
+    /// leaves mode to script/template usage inference.
+    ///
+    /// This fact is captured while the parser still owns the original source,
+    /// so downstream script-fact and IDE consumers do not rescan markup or
+    /// require raw source solely to recover the option.
+    pub forced_runes: Option<bool>,
     /// Parse diagnostics collected inline (never a hard failure).
     pub diagnostics: Vec<SvelteParseDiagnostic>,
     /// The CLOSE-TAG well-formedness violations the parser observed and silently

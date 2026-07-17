@@ -14,7 +14,8 @@ use crate::code_transform::CodeTransform;
 
 use super::super::await_scan::{rewrite_await_exprs_on, rewrite_pattern_default_awaits_on};
 use super::super::store_scan::{
-    scan_pattern_default_store_subs, scan_store_subscriptions_with, StoreSub, StoreSubKind,
+    scan_pattern_default_store_subs_and_host, scan_store_subscriptions_and_host_with, StoreSub,
+    StoreSubKind,
 };
 use super::TemplateProjector;
 
@@ -43,7 +44,9 @@ impl TemplateProjector<'_, '_> {
         let source = self.source;
         let body = &source[span.start as usize..span.end as usize];
         let declared = self.declared_dollar_names();
-        for sub in scan_store_subscriptions_with(body, &declared) {
+        let scan = scan_store_subscriptions_and_host_with(body, &declared);
+        self.template_uses_host_rune |= scan.uses_host_rune;
+        for sub in scan.subs {
             rewrite_store_sub(self.ct, span.start, &sub);
         }
     }
@@ -68,11 +71,13 @@ impl TemplateProjector<'_, '_> {
     /// emitted here (the text carries no source span) — the caller records it
     /// against the absolute span via `record_await_diagnostics_in`.
     pub(super) fn rewrite_pattern_default_store_subs_text(
-        &self,
+        &mut self,
         pattern_text: &str,
         declared: &[String],
     ) -> String {
-        let subs = scan_pattern_default_store_subs(pattern_text, declared);
+        let scan = scan_pattern_default_store_subs_and_host(pattern_text, declared);
+        self.template_uses_host_rune |= scan.uses_host_rune;
+        let subs = scan.subs;
         let has_await = pattern_text.contains("await");
         if subs.is_empty() && !has_await {
             return pattern_text.to_string();
@@ -128,8 +133,11 @@ impl TemplateProjector<'_, '_> {
     /// source span) — the caller records it against the absolute span via
     /// `record_await_diagnostics_in`. The script-declared `$`-names are consulted
     /// so a script-declared local stays an ordinary reference.
-    pub(super) fn rewrite_store_subs_in_text(&self, text: &str) -> String {
-        rewrite_store_subs_text(text, &self.declared_dollar_names())
+    pub(super) fn rewrite_store_subs_in_text(&mut self, text: &str) -> String {
+        let declared = self.declared_dollar_names();
+        let scan = scan_store_subscriptions_and_host_with(text, &declared);
+        self.template_uses_host_rune |= scan.uses_host_rune;
+        rewrite_store_subs_text_with_scan(text, scan.subs)
     }
 }
 
@@ -151,8 +159,7 @@ impl TemplateProjector<'_, '_> {
 /// the TEXT path await-safe: `__verter_render` stays SYNC, so a raw `await` left
 /// in a re-emitted markup expression would be INVALID TSX — every text entry now
 /// routes the await rewrite, so no markup await position leaks a raw keyword.
-fn rewrite_store_subs_text(text: &str, declared: &[String]) -> String {
-    let subs = scan_store_subscriptions_with(text, declared);
+fn rewrite_store_subs_text_with_scan(text: &str, subs: Vec<StoreSub>) -> String {
     let has_await = text.contains("await");
     if subs.is_empty() && !has_await {
         return text.to_string();
