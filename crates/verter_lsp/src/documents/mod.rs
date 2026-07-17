@@ -616,8 +616,39 @@ impl DocumentRegistry {
     }
 
     /// Check if a document's IDE output is JavaScript (JSX) rather than TypeScript (TSX).
+    ///
+    /// The IDE compile is the authority, but a cold caller (no compiled IDE
+    /// output yet) must not GUESS `.tsx`: the parse-level script dialect is
+    /// available after upsert and names the companion correctly from the
+    /// start. Without the fallback a JS carrier first opens `{carrier}.tsx`,
+    /// then flips to `{carrier}.jsx` once the compile lands — and tsserver's
+    /// output-file membership check excludes the `.jsx` while the stale
+    /// `.tsx` is still in the Program.
     pub fn is_jsx(&self, uri: &Uri) -> bool {
-        self.get_ide(uri).map(|r| r.is_jsx).unwrap_or(false)
+        if let Some(ide) = self.get_ide(uri) {
+            return ide.is_jsx;
+        }
+        self.get_analysis(uri)
+            .map(|analysis| !analysis.is_typescript)
+            .unwrap_or(false)
+    }
+
+    /// Canonical-id variant of [`Self::is_jsx`], host-level (no open-document
+    /// requirement): the IDE compile is authoritative and the parse-level
+    /// script dialect is the cold fallback. Gateway/publish call sites that
+    /// hold an `Option<IdeResponse>` must route through this rather than
+    /// `map(is_jsx).unwrap_or(false)` — the `unwrap_or(false)` guesses `.tsx`
+    /// for a JS carrier whose compile is momentarily unavailable (the
+    /// `.tsx` → `.jsx` companion flip tsserver's output-file check rejects).
+    pub fn is_jsx_for_canonical(&self, canonical_id: &str) -> bool {
+        let profile = self.tsx_profile.read().clone();
+        if let Some(ide) = self.host.get_ide(canonical_id, &profile) {
+            return ide.is_jsx;
+        }
+        self.host
+            .get_analysis(canonical_id)
+            .map(|analysis| !analysis.is_typescript)
+            .unwrap_or(false)
     }
 
     /// Get the analysis snapshot for a document.
@@ -1503,6 +1534,54 @@ mod tests {
         assert!(
             registry.get_projection(&uri).is_none(),
             "an unknown-extension document must not get a provider projection"
+        );
+    }
+
+    /// With no compiled IDE output (a cold caller), `is_jsx_for_canonical`
+    /// must fall back to the parse-level script dialect — a JS carrier is
+    /// `.jsx` from the start, never a `.tsx` guess that flips later.
+    #[test]
+    fn is_jsx_for_canonical_falls_back_to_parse_dialect_without_ide_compile() {
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(Arc::clone(&host));
+
+        // A no-lang Svelte component: the parse reports the JS dialect.
+        let js_svelte = "<script>\nlet msg = 'hi';\n</script>\n<p>{msg}</p>";
+        let _ = host.upsert(verter_session::UpsertRequest {
+            canonical_id: Some("/x/JsComp.svelte".to_string()),
+            input_id: "/x/JsComp.svelte".to_string(),
+            source: Arc::from(js_svelte),
+            file_language: verter_session::FileLanguage::svelte(),
+            aliases: vec![],
+        });
+        let ts_vue = "<script setup lang=\"ts\">\nconst msg: string = 'hi'\n</script>\n<template><div>{{ msg }}</div></template>";
+        let _ = host.upsert(verter_session::UpsertRequest {
+            canonical_id: Some("/x/TsComp.vue".to_string()),
+            input_id: "/x/TsComp.vue".to_string(),
+            source: Arc::from(ts_vue),
+            file_language: verter_session::FileLanguage::vue(),
+            aliases: vec![],
+        });
+
+        // No IDE compile ran — the parse-level dialect decides.
+        let analysis = host.get_analysis("/x/JsComp.svelte");
+        assert!(
+            analysis.is_some(),
+            "analysis must exist for the fallback to consult"
+        );
+        assert!(
+            !analysis.unwrap().is_typescript,
+            "a no-lang Svelte script is not TypeScript"
+        );
+        assert!(
+            registry.is_jsx_for_canonical("/x/JsComp.svelte"),
+            "a no-lang (JS) Svelte carrier is .jsx without an IDE compile"
+        );
+        assert!(
+            !registry.is_jsx_for_canonical("/x/TsComp.vue"),
+            "a lang=ts Vue carrier is .tsx without an IDE compile"
         );
     }
 

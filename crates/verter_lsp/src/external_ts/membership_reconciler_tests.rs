@@ -217,6 +217,100 @@ async fn advertise(
 // ── Owned ───────────────────────────────────────────────────────────────────
 
 #[tokio::test]
+async fn extension_flip_closes_stale_companion_before_registering_the_new_one() {
+    // DISCRIMINATION: a `.tsx` → `.jsx` companion EXTENSION FLIP for the SAME
+    // carrier (not an owner change) must close the stale `.tsx` BEFORE
+    // registering the new `.jsx`. tsserver's wildcard membership check
+    // excludes a newly opened `.jsx` while a same-stem `.tsx` is still a
+    // program member ("Detected output file" — the `.jsx` looks like the
+    // `.tsx`'s emit), so register-first strands the `.jsx` in an inferred
+    // project and every projectFileName-targeted query fails closed. An
+    // owner CHANGE (different stem) keeps the register-first ordering so the
+    // new project's buffer is live before the old one drops.
+    let mock = Arc::new(MockTypeProvider::new());
+    let (reconciler, _ledger) = reconciler_with(mock.clone());
+    let source = CanonicalSource::from("/proj/src/Comp.vue");
+    advertise(
+        &reconciler,
+        &source,
+        "/proj/tsconfig.json",
+        vec![ide("/proj/src/Comp.vue.tsx")],
+    )
+    .await;
+    mock.clear_calls();
+
+    // The carrier's script kind is corrected to JS: the IDE companion flips
+    // `.tsx` → `.jsx` under the SAME project.
+    advertise(
+        &reconciler,
+        &source,
+        "/proj/tsconfig.json",
+        vec![companion(
+            "/proj/src/Comp.vue.jsx",
+            SnapshotRole::CarrierIde,
+            ScriptKind::Jsx,
+        )],
+    )
+    .await;
+
+    let calls = mock.calls();
+    let close_pos = calls
+        .iter()
+        .position(
+            |call| matches!(call, MockCall::CloseFile { path } if path == "/proj/src/Comp.vue.tsx"),
+        )
+        .expect("the stale .tsx must be closed");
+    let register_pos = calls
+        .iter()
+        .position(|call| matches!(call, MockCall::RegisterCarrierMember { companion_path, .. } if companion_path == "/proj/src/Comp.vue.jsx"))
+        .expect("the new .jsx must be registered");
+    assert!(
+        close_pos < register_pos,
+        "the stale .tsx must close BEFORE the .jsx registers (tsserver output-file exclusion): {calls:?}"
+    );
+}
+
+#[tokio::test]
+async fn owner_change_registers_new_companion_before_closing_the_old_one() {
+    // The counter-ordering guard: an owner CHANGE (same companion identity,
+    // different owning project) keeps the register-first ordering — the new
+    // project's buffer goes live before the old one drops, so a query landing
+    // mid-transition never finds a dead window.
+    let mock = Arc::new(MockTypeProvider::new());
+    let (reconciler, _ledger) = reconciler_with(mock.clone());
+    let source = CanonicalSource::from("/proj/src/Comp.vue");
+    advertise(
+        &reconciler,
+        &source,
+        "/proj/tsconfig.json",
+        vec![ide("/proj/src/Comp.vue.tsx")],
+    )
+    .await;
+    mock.clear_calls();
+
+    advertise(
+        &reconciler,
+        &source,
+        "/other/tsconfig.json",
+        vec![ide("/proj/src/Comp.vue.tsx")],
+    )
+    .await;
+
+    let calls = mock.calls();
+    let register_pos = calls
+        .iter()
+        .position(|call| matches!(call, MockCall::RegisterCarrierMember { companion_path, project_file_name, .. } if companion_path == "/proj/src/Comp.vue.tsx" && project_file_name == "/other/tsconfig.json"))
+        .expect("the companion must re-register under the new project");
+    // No close of the companion may precede that re-registration.
+    assert!(
+        !calls[..register_pos].iter().any(
+            |call| matches!(call, MockCall::CloseFile { path } if path == "/proj/src/Comp.vue.tsx")
+        ),
+        "an owner change must register the new buffer before closing the old one: {calls:?}"
+    );
+}
+
+#[tokio::test]
 async fn owned_advertises_exactly_its_companions_under_project() {
     // DISCRIMINATION: an impl that skips the ledger commit, registers under the wrong
     // project, or drops a companion leaves the source un-advertised / mis-keyed —

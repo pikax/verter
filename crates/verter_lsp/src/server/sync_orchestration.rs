@@ -456,7 +456,9 @@ impl VerterLanguageServer {
         });
         let ide =
             block_in_place_if_available(|| self.documents.host.get_ide(canonical_id, &profile));
-        let is_jsx = ide.as_ref().map(|o| o.is_jsx).unwrap_or(false);
+        // The dialect comes from the compile, falling back to the parse-level
+        // script language when the compile is unavailable — never a `.tsx` guess.
+        let is_jsx = self.documents.is_jsx_for_canonical(canonical_id);
 
         // This is the MEMBERSHIP-refresh entry (eager carrier refresh / cross-file
         // prewarm): route through the SINGLE carrier-sync gateway for the store
@@ -967,7 +969,9 @@ impl VerterLanguageServer {
         self.documents.recompile_and_refresh_mapper(uri);
 
         let ide = self.documents.get_ide(uri);
-        let is_jsx = ide.as_ref().map(|r| r.is_jsx).unwrap_or(false);
+        // The dialect comes from the compile, falling back to the parse-level
+        // script language when the compile is unavailable — never a `.tsx` guess.
+        let is_jsx = self.documents.is_jsx_for_canonical(&canonical_id);
 
         // Route the carrier MEMBERSHIP decision through the SINGLE carrier-sync
         // gateway and capture the POST-open commit authorization that GATES the
@@ -2226,7 +2230,9 @@ impl VerterLanguageServer {
             }
 
             if let Some(sync) = &self.project_sync {
-                let is_jsx = ide.as_ref().map(|output| output.is_jsx).unwrap_or(false);
+                // The dialect comes from the compile, falling back to the
+                // parse-level script language when the compile is unavailable.
+                let is_jsx = self.documents.is_jsx_for_canonical(canonical_id);
                 // Route through the SINGLE carrier-sync gateway (membership fused with
                 // the provider-state transition + receipt). An imported child carrier
                 // reaches tsserver as a store-backed configured-project member
@@ -2482,7 +2488,9 @@ impl VerterLanguageServer {
             return;
         };
         let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
-        let is_jsx = ide.map(|output| output.is_jsx).unwrap_or(false);
+        // The dialect comes from the compile, falling back to the parse-level
+        // script language when the compile is unavailable — never a `.tsx` guess.
+        let is_jsx = self.documents.is_jsx_for_canonical(canonical_id);
         if is_tsgo {
             if let Some(snapshot) = self.published_resolver() {
                 configure_provider_paths_for_source(sync, &snapshot, canonical_id, true).await;

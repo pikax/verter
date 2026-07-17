@@ -827,10 +827,47 @@ impl MembershipReconciler {
             })?;
 
         // 2. Provider-buffer transition through the resilient actor command API. NO
-        // ledger lock is held across these awaits. Register the new companions
-        // first (so an owner change re-points the buffer to the new project before
-        // the old buffer is dropped), then close the stale ones.
+        // ledger lock is held across these awaits.
+        //
+        // Ordering splits by transition kind:
+        //
+        // - **Extension flip** (a stale companion and a NEW companion share the
+        //   same path stem — e.g. `.tsx` → `.jsx` when a carrier's script kind is
+        //   corrected): the stale path must be CLOSED BEFORE the new one
+        //   registers. tsserver's wildcard membership check excludes a newly
+        //   opened `.jsx` while a same-stem `.tsx` is still a program member
+        //   ("Detected output file" — the `.jsx` looks like the `.tsx`'s emit),
+        //   so register-first strands the new companion in an inferred project
+        //   and every `projectFileName`-targeted query fails closed.
+        // - **Owner change** (stale companions under a different project, no
+        //   same-stem new companion): register first (so the new project's
+        //   buffer is live before the old one drops), then close the stale ones.
+        fn stem_of(path: &str) -> &str {
+            // The path without its final extension: `Comp.vue.tsx` → `Comp.vue`.
+            // Same-stem paths are the SAME carrier's companion before/after an
+            // extension flip; different stems are unrelated buffers.
+            match path.rsplit_once('.') {
+                Some((stem, _)) => stem,
+                None => path,
+            }
+        }
+        let new_stems: HashSet<&str> = companions
+            .iter()
+            .map(|companion| stem_of(companion.provider_uri.as_ref()))
+            .collect();
+        let (flip_stale, owner_stale): (Vec<Arc<str>>, Vec<Arc<str>>) = stale
+            .iter()
+            .cloned()
+            .partition(|path| new_stems.contains(stem_of(path.as_ref())));
         if let Some(provider) = &self.provider {
+            for stale_path in &flip_stale {
+                provider.close_file(stale_path).await.map_err(|err| {
+                    ReconcileErr::ProviderTransition {
+                        desired: desired.clone(),
+                        detail: err.to_string(),
+                    }
+                })?;
+            }
             for companion in &companions {
                 provider
                     .register_carrier_member(
@@ -845,7 +882,7 @@ impl MembershipReconciler {
                         detail: err.to_string(),
                     })?;
             }
-            for stale_path in &stale {
+            for stale_path in &owner_stale {
                 provider.close_file(stale_path).await.map_err(|err| {
                     ReconcileErr::ProviderTransition {
                         desired: desired.clone(),

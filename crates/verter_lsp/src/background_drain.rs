@@ -977,7 +977,10 @@ async fn apply_owner_resolved_carrier_sync(
     carrier_publish: Option<&CarrierPublishCtx<'_>>,
     carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
 ) -> CarrierApplyOutcome {
-    let is_jsx = ide.map(|output| output.is_jsx).unwrap_or(false);
+    // The dialect comes from the compile, falling back to the parse-level
+    // script language when the compile is unavailable — never a `.tsx` guess
+    // (the `.tsx` → `.jsx` companion flip tsserver's output-file check rejects).
+    let is_jsx = documents.is_jsx_for_canonical(canonical_id);
     let membership = carrier_publish
         .and_then(|publish| publish.coordinator)
         .map(|coordinator| crate::external_ts::CarrierMembershipCtx {

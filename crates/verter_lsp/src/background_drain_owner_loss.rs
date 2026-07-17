@@ -28,9 +28,10 @@ pub(super) async fn reconcile_unowned_carrier_buffer(
 ) {
     if documents.canonical_id_to_uri(canonical_id).is_some() {
         // Open document: keep its TSX live as unresolved open-document state.
-        // `is_jsx` is derived from the compiled IDE output (false when absent —
-        // a transient compile miss preserves the prior path regardless).
-        let is_jsx = ide.map(|output| output.is_jsx).unwrap_or(false);
+        // The dialect comes from the compile, falling back to the parse-level
+        // script language when the compile is unavailable — never a `.tsx`
+        // guess (a transient compile miss must not flip a JS carrier's path).
+        let is_jsx = documents.is_jsx_for_canonical(canonical_id);
         sync_open_unresolved_carrier_provider_file(
             sync,
             documents,
@@ -82,8 +83,9 @@ pub(super) async fn reconcile_unowned_carrier_provider_file(
     // Owner-absent ⇒ route the membership RETRACT/DEFER through the gateway; it
     // resolves the empty companion set to Absent (retract) / Bootstrap (defer) and
     // returns a no-owner outcome (`Unresolved` terminal / `NotReady` transient), or
-    // `Pending` when the store retract FAILED.
-    let is_jsx = ide.map(|output| output.is_jsx).unwrap_or(false);
+    // `Pending` when the store retract FAILED. The dialect comes from the compile,
+    // falling back to the parse-level script language when it is unavailable.
+    let is_jsx = documents.is_jsx_for_canonical(canonical_id);
     let membership = carrier_publish
         .and_then(|publish| publish.coordinator)
         .map(|coordinator| crate::external_ts::CarrierMembershipCtx {
