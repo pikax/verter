@@ -175,7 +175,7 @@ fn virtual_file_branches_validate_after_the_provider_await() {
 #[test]
 fn background_diagnostics_paths_use_captured_surface_and_revalidate() {
     let sync_coordinator = read_server_source("sync_coordinator.rs");
-    // The carrier + rune diagnostics helpers each capture and each revalidate.
+    // The carrier + self-file diagnostics helpers each capture and each revalidate.
     assert!(
         sync_coordinator
             .matches("capture_committed_carrier_ide_surface(")
@@ -188,7 +188,7 @@ fn background_diagnostics_paths_use_captured_surface_and_revalidate() {
             .matches("capture_committed_shadow_surface(")
             .count()
             >= 1,
-        "the coordinator's rune diagnostics must capture the committed Shadow surface"
+        "the coordinator's self-file diagnostics must capture the committed Shadow surface"
     );
     assert!(
         sync_coordinator
@@ -211,7 +211,7 @@ fn background_diagnostics_paths_use_captured_surface_and_revalidate() {
         let end = rest.find("\n}\n").map(|i| i + 2).unwrap_or(rest.len());
         rest[..end].to_string()
     };
-    for helper in ["carrier_provider_diagnostics", "rune_module_diagnostics"] {
+    for helper in ["carrier_provider_diagnostics", "self_file_diagnostics"] {
         let body = top_level_fn_slice(&sync_coordinator, helper);
         for forbidden in [
             "get_ide(",

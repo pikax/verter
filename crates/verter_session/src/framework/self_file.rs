@@ -1,21 +1,28 @@
 #![deny(missing_docs)]
-//! Standalone Svelte rune-module (`.svelte.ts`/`.svelte.js`) provider surface.
+//! SELF-FILE provider surface — documents whose TypeProvider buffer is served
+//! from their OWN canonical path rather than from a generated companion.
 //!
-//! A rune module is a NON-COMPONENT carrier: it has no template, no
-//! component API, and never dispatches through the carrier parse path. Its
-//! TypeProvider surface (Channel B) is `<module rune prelude> + <real module
-//! bytes>`, served from the module's OWN canonical path so a consumer resolving
-//! the module from disk sees its inferred rune-derived exported types
-//! (`export const s = $state(0)` ⇒ `s: number`).
+//! Two document kinds are self-file:
 //!
-//! The prelude is the SINGLE shared rune source rendered in
+//! - a Svelte standalone rune module (`.svelte.ts` / `.svelte.js`) — a
+//!   NON-COMPONENT carrier: no template, no component API, and never
+//!   dispatched through the carrier parse path. Its TypeProvider surface
+//!   (Channel B) is `<module rune prelude> + <real module bytes>`, served from
+//!   the module's OWN canonical path so a consumer resolving the module from
+//!   disk sees its inferred rune-derived exported types (`export const s =
+//!   $state(0)` ⇒ `s: number`).
+//! - a plain TS-family script (`.ts` / `.tsx` / `.js` / `.jsx` / `.d.ts` …) —
+//!   its TypeProvider surface is the source bytes VERBATIM (a zero-line
+//!   prelude).
+//!
+//! The rune prelude is the SINGLE shared rune source rendered in
 //! [`RunePreludeMode::Module`](verter_compiler::svelte::ide::prelude::RunePreludeMode::Module),
 //! with a leading `export {};` keeping the prepended declarations MODULE-LOCAL
 //! (a bare top-level `declare` in a script-context file leaks the runes
 //! globally). The `.ts` form uses TS `declare`; the `.js` form uses JS-valid
 //! JSDoc-typed functions (checked under `checkJs`). The prelude is prepended as
 //! WHOLE LINES, so the user-source positions shift by exactly
-//! [`RuneModuleProviderContent::prelude_line_count`] lines — a uniform offset a
+//! [`SelfFileProviderContent::prelude_line_count`] lines — a uniform offset a
 //! position mapper applies to the rune module's own diagnostics/hover.
 
 use verter_compiler::svelte::ide::prelude::{
@@ -23,15 +30,15 @@ use verter_compiler::svelte::ide::prelude::{
 };
 use verter_language::{FileLanguage, ScriptSourceType};
 
-/// The provider content for a Svelte rune module, plus the prelude line count
+/// The provider content for a SELF-FILE document, plus the prelude line count
 /// the position mapper applies to map the provider content back to the real
-/// module source.
+/// source.
 ///
-/// Also serves plain TS-family scripts through
-/// [`self_file_provider_content`]: their provider content is the source bytes
-/// verbatim with a zero-line prelude.
+/// A Svelte rune module gets `<module rune prelude> + <bytes>`; a plain
+/// TS-family script is served through [`self_file_provider_content`] with its
+/// source bytes verbatim and a zero-line prelude.
 #[derive(Debug, Clone)]
-pub struct RuneModuleProviderContent {
+pub struct SelfFileProviderContent {
     /// `<module rune prelude> + <module bytes>` — the content fed to the
     /// TypeProvider for the rune module's canonical path.
     pub content: String,
@@ -59,7 +66,7 @@ pub struct RuneModuleProviderContent {
 pub fn self_file_provider_content(
     language: &FileLanguage,
     source: &str,
-) -> Option<RuneModuleProviderContent> {
+) -> Option<SelfFileProviderContent> {
     if let Some(built) = rune_module_provider_content(language, source) {
         return Some(built);
     }
@@ -70,7 +77,7 @@ pub fn self_file_provider_content(
             ..
         }
     ) {
-        return Some(RuneModuleProviderContent {
+        return Some(SelfFileProviderContent {
             content: source.to_string(),
             prelude_line_count: 0,
         });
@@ -104,13 +111,13 @@ pub fn serves_self_file_provider_buffer(language: &FileLanguage) -> bool {
 pub fn rune_module_provider_content(
     language: &FileLanguage,
     module_bytes: &str,
-) -> Option<RuneModuleProviderContent> {
+) -> Option<SelfFileProviderContent> {
     let source_type = svelte_rune_module_source_type(language)?;
     let prelude = render_rune_prelude(RunePreludeMode::Module { source_type });
     let prelude_line_count =
         u32::try_from(prelude.bytes().filter(|&b| b == b'\n').count()).unwrap_or(u32::MAX);
     let content = format!("{prelude}{module_bytes}");
-    Some(RuneModuleProviderContent {
+    Some(SelfFileProviderContent {
         content,
         prelude_line_count,
     })
