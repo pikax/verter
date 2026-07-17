@@ -675,10 +675,32 @@ impl CarrierPublishStore {
                         .iter()
                         .map(|o| o.source_uri.as_str())
                         .collect();
+                    // The provider URIs the touched sources advertised BEFORE this
+                    // delta. A companion identity change (the `.tsx` → `.jsx`
+                    // extension flip on a script-kind correction) must retract the
+                    // superseded ready entry: a stale entry stays resolvable
+                    // through `ready_files`, joins the tsserver Program, and
+                    // tsserver's output-file membership check then excludes the
+                    // current same-stem companion from the configured project.
+                    let prior_provider_uris: std::collections::HashSet<String> = project
+                        .owned_sources
+                        .iter()
+                        .filter(|o| touched.contains(o.source_uri.as_str()))
+                        .map(|o| o.provider_uri.clone())
+                        .collect();
                     project
                         .owned_sources
                         .retain(|existing| !touched.contains(existing.source_uri.as_str()));
                     project.owned_sources.extend(batch.owned_sources.clone());
+                    let current_provider_uris: std::collections::HashSet<&str> = project
+                        .owned_sources
+                        .iter()
+                        .map(|o| o.provider_uri.as_str())
+                        .collect();
+                    project.ready_files.retain(|provider_uri, _| {
+                        !prior_provider_uris.contains(provider_uri.as_str())
+                            || current_provider_uris.contains(provider_uri.as_str())
+                    });
                 }
             }
         }

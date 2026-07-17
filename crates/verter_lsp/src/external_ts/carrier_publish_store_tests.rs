@@ -217,6 +217,74 @@ fn epoch_is_monotonic_across_publishes() {
     );
 }
 
+// ── SourceDelta flip prune: a superseded companion identity is retracted ────
+
+#[test]
+fn source_delta_republish_with_flipped_companion_extension_retracts_stale_ready_entry() {
+    // A per-source (SourceDelta) publish that changes a carrier's IDE companion
+    // identity (`.tsx` → `.jsx` on a script-kind correction) must retract the
+    // SUPERSEDED ready entry. Otherwise the stale companion stays resolvable
+    // through `ready_files`, joins the tsserver Program, and tsserver's
+    // output-file membership check then excludes the current same-stem
+    // companion from the configured project ("Detected output file").
+    let (store, _ut) = fresh_store();
+    let ws = _ut.path().to_string_lossy().to_string();
+    let publish = |provider_uri: &str, kind: ScriptKind| {
+        let snap = snapshot(
+            "d:/ws/tsconfig.json",
+            vec![
+                file(
+                    provider_uri,
+                    "d:/ws/src/Comp.vue",
+                    SnapshotRole::CarrierIde,
+                    kind,
+                    "export const c = 1;",
+                    None,
+                    1,
+                ),
+                // A SIBLING carrier's companion — must survive every delta.
+                file(
+                    "d:/ws/src/Other.vue.tsx",
+                    "d:/ws/src/Other.vue",
+                    SnapshotRole::CarrierIde,
+                    ScriptKind::Tsx,
+                    "export const o = 1;",
+                    None,
+                    1,
+                ),
+            ],
+        );
+        store
+            .publish_batch(&PublishBatch::from_snapshot(
+                ws.clone(),
+                snap,
+                None,
+                OwnedSetScope::SourceDelta,
+            ))
+            .expect("publish");
+    };
+    publish("d:/ws/src/Comp.vue.tsx", ScriptKind::Tsx);
+    publish("d:/ws/src/Comp.vue.jsx", ScriptKind::Jsx);
+
+    let manifest = store.current_manifest();
+    let project = manifest
+        .projects
+        .get("d:/ws/tsconfig.json")
+        .expect("project");
+    assert!(
+        project.ready_files.contains_key("d:/ws/src/Comp.vue.jsx"),
+        "the current companion is advertised"
+    );
+    assert!(
+        !project.ready_files.contains_key("d:/ws/src/Comp.vue.tsx"),
+        "the superseded companion identity must be retracted by the delta publish"
+    );
+    assert!(
+        project.ready_files.contains_key("d:/ws/src/Other.vue.tsx"),
+        "a sibling carrier's ready entry is preserved"
+    );
+}
+
 // ── owned_sources vs ready_files split ──────────────────────────────────────
 
 #[test]
