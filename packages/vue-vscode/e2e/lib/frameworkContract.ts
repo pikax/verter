@@ -13,6 +13,9 @@ import type {
 import { frameworkContractId, type FrameworkContractCapability } from "./frameworkContractManifest";
 import { VIRTUAL_CARRIER_PATTERN } from "./virtualCarrier";
 
+const WARM_DEFINITION_SAMPLE_COUNT = 5;
+const WARM_DEFINITION_BUDGET_MS = 2_500;
+
 function workspaceRoot(): string {
   const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   assert.ok(root, "framework contract requires one workspace root");
@@ -144,6 +147,99 @@ async function assertDefinitionTargetsAnchor(
     }),
     `definition from ${source.file}#${source.token} did not reach ${target.file}#${target.token}; ` +
       `got ${locations.map((location) => `${location.uri.fsPath}:${location.range.start.line + 1}`).join(", ")}`,
+  );
+}
+
+function exactDefinitionFailure(
+  locations: readonly vscode.Location[],
+  targetDoc: vscode.TextDocument,
+  target: ContractAnchor,
+): string | undefined {
+  const expectedStart = anchorOffset(targetDoc, target);
+  const expectedEnd = expectedStart + target.token.length;
+  const expectedFile = absoluteFile(target.file);
+  if (locations.length !== 1) {
+    return `expected one authored definition, got ${locations.length}: ${locations
+      .map(
+        (location) =>
+          `${location.uri.fsPath}:${location.range.start.line + 1}:${location.range.start.character + 1}-${location.range.end.line + 1}:${location.range.end.character + 1}`,
+      )
+      .join(", ")}`;
+  }
+  const [location] = locations;
+  const actualFile = locationPath(location);
+  if (actualFile !== expectedFile) {
+    return `expected ${target.file}, got ${location.uri.fsPath}`;
+  }
+  const actualStart = targetDoc.offsetAt(location.range.start);
+  const actualEnd = targetDoc.offsetAt(location.range.end);
+  if (actualStart !== expectedStart || actualEnd !== expectedEnd) {
+    return `expected ${target.file}#${target.token}[${target.occurrence ?? 0}] offsets ${expectedStart}-${expectedEnd}, got ${actualStart}-${actualEnd}`;
+  }
+  return undefined;
+}
+
+async function assertDefinitionTargetsExactAnchorStable(
+  source: ContractAnchor,
+  target: ContractAnchor,
+): Promise<void> {
+  assert.equal(
+    process.env.VERTER_E2E_PROVIDER_ONLY_COMPLETIONS,
+    "1",
+    "TEST_DEFECT: framework contract must disable Verter-owned suggestions",
+  );
+  const sourceDoc = await openWorkspaceFile(source.file);
+  const targetDoc = await vscode.workspace.openTextDocument(
+    vscode.Uri.file(absoluteFile(target.file)),
+  );
+  const sourcePosition = anchorPosition(sourceDoc, source);
+  const request = async (): Promise<vscode.Location[]> => {
+    const locations = toLocations(
+      await vscode.commands.executeCommand<Array<vscode.Location | vscode.LocationLink>>(
+        "vscode.executeDefinitionProvider",
+        sourceDoc.uri,
+        sourcePosition,
+      ),
+    );
+    assertNoVirtualLocations(locations, "definition");
+    return locations;
+  };
+
+  let latest: vscode.Location[] = [];
+  try {
+    await poll(
+      `exact definition ${source.file}#${source.token}`,
+      async () => {
+        latest = await request();
+        return latest;
+      },
+      (locations) => exactDefinitionFailure(locations, targetDoc, target) === undefined,
+    );
+  } catch (error) {
+    throw new Error(
+      `${String(error)}; latest=${exactDefinitionFailure(latest, targetDoc, target) ?? "exact"}`,
+    );
+  }
+
+  const timings: number[] = [];
+  for (let sample = 0; sample < WARM_DEFINITION_SAMPLE_COUNT; sample++) {
+    const startedAt = Date.now();
+    const locations = await request();
+    const elapsedMs = Date.now() - startedAt;
+    timings.push(elapsedMs);
+    const failure = exactDefinitionFailure(locations, targetDoc, target);
+    assert.equal(
+      failure,
+      undefined,
+      `warm definition sample ${sample + 1}/${WARM_DEFINITION_SAMPLE_COUNT} flapped: ${failure}`,
+    );
+    assert.ok(
+      elapsedMs <= WARM_DEFINITION_BUDGET_MS,
+      `warm definition sample ${sample + 1}/${WARM_DEFINITION_SAMPLE_COUNT} took ${elapsedMs}ms, budget ${WARM_DEFINITION_BUDGET_MS}ms`,
+    );
+  }
+  console.log(
+    `    definition stability ${source.file}#${source.token} -> ${target.file}#${target.token}: ${timings.join(", ")}ms`,
   );
 }
 
@@ -410,7 +506,6 @@ export function registerFrameworkContract(descriptor: FrameworkContractDescripto
       await ensureTypeProviderSynced();
       const entry = await openWorkspaceFile(descriptor.entry);
       assert.equal(entry.languageId, descriptor.languageId);
-      await assertDefinitionTargetsAnchor(descriptor.ts.markupUse, descriptor.ts.declaration);
     });
 
     test(id("ts.clean-diagnostics"), () => assertCleanDiagnostics(descriptor.ts));
@@ -420,6 +515,12 @@ export function registerFrameworkContract(descriptor: FrameworkContractDescripto
     );
     test(id("js.definition.markup-to-script"), () =>
       assertDefinitionTargetsAnchor(descriptor.js.markupUse, descriptor.js.declaration),
+    );
+    test(id("ts.definition.markup-to-script.exact-stable-warm"), () =>
+      assertDefinitionTargetsExactAnchorStable(descriptor.ts.markupUse, descriptor.ts.declaration),
+    );
+    test(id("js.definition.markup-to-script.exact-stable-warm"), () =>
+      assertDefinitionTargetsExactAnchorStable(descriptor.js.markupUse, descriptor.js.declaration),
     );
     test(id("ts.references.script-and-markup"), () => assertReferences(descriptor.ts));
     test(id("js.references.script-and-markup"), () => assertReferences(descriptor.js));
@@ -443,6 +544,12 @@ export function registerFrameworkContract(descriptor: FrameworkContractDescripto
     test(id("import.direct.plain-ts-to-child"), () =>
       assertDefinitionTargetsFile(descriptor.directConsumerUse, descriptor.directChildFile),
     );
+    test(id("import.direct.public-prop-definition.exact-stable-warm"), () =>
+      assertDefinitionTargetsExactAnchorStable(
+        descriptor.directConsumerPropUse,
+        descriptor.directChildPropDeclaration,
+      ),
+    );
     test(id("import.direct.sfc-tag-hover.typed"), () =>
       assertTypedComponentHover(descriptor.directParentTag, descriptor.directComponentHoverNeedles),
     );
@@ -457,6 +564,12 @@ export function registerFrameworkContract(descriptor: FrameworkContractDescripto
     );
     test(id("import.deep-barrel.plain-ts-to-child"), () =>
       assertDefinitionTargetsFile(descriptor.barrelConsumerUse, descriptor.barrelChildFile),
+    );
+    test(id("import.deep-barrel.public-prop-definition.exact-stable-warm"), () =>
+      assertDefinitionTargetsExactAnchorStable(
+        descriptor.barrelConsumerPropUse,
+        descriptor.barrelChildPropDeclaration,
+      ),
     );
     test(id("import.deep-barrel.sfc-tag-hover.typed"), () =>
       assertTypedComponentHover(descriptor.barrelParentTag, descriptor.barrelComponentHoverNeedles),

@@ -24,10 +24,14 @@ export interface FrameworkContractDescriptor {
   readonly directParentTag: ContractAnchor;
   readonly directChildFile: string;
   readonly directConsumerUse: ContractAnchor;
+  readonly directConsumerPropUse: ContractAnchor;
+  readonly directChildPropDeclaration: ContractAnchor;
   readonly directComponentHoverNeedles: readonly string[];
   readonly barrelParentTag: ContractAnchor;
   readonly barrelChildFile: string;
   readonly barrelConsumerUse: ContractAnchor;
+  readonly barrelConsumerPropUse: ContractAnchor;
+  readonly barrelChildPropDeclaration: ContractAnchor;
   readonly publicTypeConsumer: string;
   readonly barrelComponentHoverNeedles: readonly string[];
 }
