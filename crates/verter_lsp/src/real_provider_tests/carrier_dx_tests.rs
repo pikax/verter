@@ -382,6 +382,19 @@ async fn assert_carrier_dx_contract_carrier_surface(session: &RealProviderTestSe
     // (its `ProviderPositionMapper` built) AND didOpen'd into the OWNED tsgo `--lsp`
     // session (project-bound membership). Opening the consumers prewarms imports.
     let comp_uri = session.open_fixture_file("src/Comp.vue").await;
+    let comp_state = session
+        .provider_sync_state(&comp_uri)
+        .expect("opening an owned Vue carrier must commit provider state");
+    assert!(
+        comp_state.ide_background_loaded
+            && comp_state
+                .ide_path
+                .as_deref()
+                .is_some_and(|path| path.ends_with("Comp.vue.tsx"))
+            && comp_state.committed_ide_surface.is_some(),
+        "opening an owned Vue carrier must make its receipt-attested IDE TSX a live project \
+         member before template navigation; got: {comp_state:#?}"
+    );
     let widget_uri = session.open_fixture_file("src/Widget.svelte").await;
     // The plain `.ts` importers are opened so their bare `.vue`/`.svelte` imports
     // make the carriers project members (membership prewarm); their own definition/

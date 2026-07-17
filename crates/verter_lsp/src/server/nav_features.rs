@@ -132,6 +132,14 @@ pub(super) async fn handle_hover(
     // Enhance with TypeProvider if available.
     // Extract all context synchronously — no DashMap guard held across await.
     if let Some(tp) = &server.type_provider {
+        let repaired_current_file = server.current_file_needs_inline_type_provider_sync(uri);
+        if repaired_current_file {
+            tracing::debug!(
+                "hover: repairing current-file provider sync for {}",
+                uri.as_str()
+            );
+            server.ensure_current_file_synced(uri).await;
+        }
         if let Some(ctx) = server.type_provider_context(uri) {
             // Use validated mapping to avoid querying TSGO at synthetic TSX
             // positions (e.g., <div> → generated JSX) which can crash it.
@@ -152,6 +160,18 @@ pub(super) async fn handle_hover(
                         before.replace('\n', "↵"),
                         after.replace('\n', "↵"),
                     );
+                }
+                // The store-backed tsserver plugin applies a publication-token
+                // refresh on the next Node event-loop turn to avoid re-entrant
+                // configured-project mutation inside `configurePlugin`. When this
+                // request just repaired a stale current-file surface, the first
+                // ordered quickinfo response is the synchronization probe that lets
+                // that turn run; discard it and issue the user-visible query against
+                // the refreshed ScriptInfo. Warm hovers and tsgo pay no duplicate.
+                if repaired_current_file
+                    && matches!(server.type_provider_kind, crate::TypeProviderKind::Tsserver)
+                {
+                    let _ = tp.get_hover(&ctx.tsx_path, tsx_offset).await;
                 }
                 match tp.get_hover(&ctx.tsx_path, tsx_offset).await {
                     Ok(hover) => {

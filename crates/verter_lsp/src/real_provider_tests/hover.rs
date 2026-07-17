@@ -308,6 +308,40 @@ real_provider_test!(
         let text = hover.unwrap();
         assert!(text.contains("string"), "mixed hover should mention string, got: {text}");
         assert!(text.contains("number"), "mixed hover should mention number, got: {text}");
+
+        // Advance the live document registry without going through the lifecycle's
+        // eager provider sync. This models an external host update racing the next
+        // request and discriminates the hover handler's foreground freshness gate:
+        // returning the old provider surface (or Verter-only fallback) would omit
+        // `boolean`, while a request-time sync resolves the edited union exactly.
+        let edited = session
+            .server()
+            .test_documents()
+            .get(&type_res_uri)
+            .expect("type-resolution document remains open")
+            .source
+            .replacen(
+                "ref<string | number>(0)",
+                "ref<string | boolean>(false)",
+                1,
+            );
+        let update = session
+            .server()
+            .test_documents()
+            .did_change(&type_res_uri, 2, &edited);
+        assert!(update.changed, "the controlled union edit must advance host state");
+
+        let pos = session.find_position(&type_res_uri, "{{ mixed }}", 3);
+        let hover = session.hover_text(&type_res_uri, pos).await;
+        let text = hover.expect("hover must recover a typed result from the advanced host state");
+        assert!(
+            text.contains("string") && text.contains("boolean"),
+            "hover must synchronize and expose the edited union, got: {text}"
+        );
+        assert!(
+            !text.contains("number"),
+            "hover must not serve the superseded provider union, got: {text}"
+        );
     }
 );
 

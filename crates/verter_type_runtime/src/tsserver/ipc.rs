@@ -797,6 +797,11 @@ pub struct TsserverTypeProvider {
     /// while the async `contents` guard is held, so the `(content, generation)`
     /// pair is consistent and no lock spans an `.await`.
     content_generations: Arc<ContentGenerations>,
+    /// Monotonic publication token delivered to the Verter tsserver plugin on
+    /// every carrier-store advance. The plugin uses token changes to reload only
+    /// ScriptInfos whose manifest identity changed; an `updateOpen` touch alone
+    /// does not replace an already-warm external-file snapshot.
+    carrier_store_refresh_generation: AtomicU64,
 }
 
 impl Drop for TsserverTypeProvider {
@@ -1040,6 +1045,7 @@ impl TsserverTypeProvider {
             carrier_projects: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             carrier_sources: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             content_generations: Arc::new(ContentGenerations::default()),
+            carrier_store_refresh_generation: AtomicU64::new(0),
         })
     }
 
@@ -1356,7 +1362,28 @@ impl TypeProvider for TsserverTypeProvider {
     fn notify_carrier_changed(&self, companion_path: &str) -> ProviderFuture<'_, ()> {
         let file = Self::normalize_path(companion_path);
         let transport = Arc::clone(&self.transport);
+        let refresh_generation = self
+            .carrier_store_refresh_generation
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
         Box::pin(async move {
+            // Advance the plugin's project-scoped carrier-store token first. The
+            // plugin compares manifest versions, reloads changed virtual ScriptInfos,
+            // clears that configured project's semantic cache, and refreshes its
+            // external-file list on the next event-loop turn. This is the warm-
+            // snapshot invalidation path; the updateOpen touch below remains the
+            // cold negative-resolution eviction path.
+            transport
+                .command_no_response(
+                    "configurePlugin",
+                    serde_json::json!({
+                        "pluginName": "@verter/typescript-plugin",
+                        "configuration": {
+                            "carrierStoreRefreshToken": refresh_generation,
+                        }
+                    }),
+                )
+                .await?;
             // Evict tsserver's sticky resolution cache for a companion whose
             // content the carrier-publish store has now warmed. `updateOpen` with
             // an empty `changedFiles` edit is the documented file-changed signal:

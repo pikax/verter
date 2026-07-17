@@ -370,6 +370,13 @@ real_provider_test!(
             return;
         }
 
+        // The prerequisite probes open two additional carriers. Their host upserts can
+        // invalidate the original fixture's compiled surface, so settle the document
+        // under test again before asserting its event members. This is test setup, not
+        // a retry waiver: the separate request-surface race contract requires provider
+        // items to be dropped while an edit is genuinely unsynchronized.
+        session.ensure_synced(&uri).await;
+
         // --- Inline arrow event parameter: @click="(ev) => handle(ev.clientX)" ---
         // The parameter `ev` must be typed as the native `click` payload
         // (MouseEvent), so member completion exposes DOM event members.

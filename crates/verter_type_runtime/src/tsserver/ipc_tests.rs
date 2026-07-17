@@ -1216,10 +1216,9 @@ async fn test_update_file_single_line_content() {
     assert_ne!(end_line, 1_000_000, "must NOT use hardcoded 1_000_000");
 }
 
-/// Capture the wire frame the `notify_carrier_changed` eviction body produces for
-/// a companion path — the same `updateOpen { changedFiles }` lever the live method
-/// issues (factored here so the eviction frame is asserted without standing up a
-/// full provider).
+/// Capture the wire frames the `notify_carrier_changed` body produces for a
+/// companion path: a plugin publication-token advance for warm ScriptInfo refresh,
+/// followed by the `updateOpen { changedFiles }` cold-resolution eviction.
 async fn run_notify_carrier_changed_capture(companion: &str) -> Vec<serde_json::Value> {
     let (client_reader, server_writer) = tokio::io::duplex(65536);
     let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
@@ -1230,11 +1229,17 @@ async fn run_notify_carrier_changed_capture(companion: &str) -> Vec<serde_json::
         next_seq: AtomicI64::new(1),
     });
 
-    // The exact body of `TsserverTypeProvider::notify_carrier_changed`: an
-    // `updateOpen` with an EMPTY `changedFiles` edit forces tsserver to re-resolve
-    // references to the companion, evicting a negative `fileExists`/module-
-    // resolution result cached while the companion's blob was not yet on disk.
+    // The exact command sequence of `TsserverTypeProvider::notify_carrier_changed`.
     let file = TsserverTypeProvider::normalize_path(companion);
+    let _ = transport
+        .command_no_response(
+            "configurePlugin",
+            serde_json::json!({
+                "pluginName": "@verter/typescript-plugin",
+                "configuration": { "carrierStoreRefreshToken": 1 }
+            }),
+        )
+        .await;
     let _ = transport
         .command_no_response(
             "updateOpen",
@@ -1268,22 +1273,32 @@ async fn run_notify_carrier_changed_capture(companion: &str) -> Vec<serde_json::
     frames
 }
 
-/// C10 eviction discriminator: `notify_carrier_changed` fires an `updateOpen`
-/// `changedFiles` frame for the COMPANION path so tsserver re-resolves a path it
-/// probed COLD (a negative resolution cached while the companion's blob did not
-/// yet exist) — NOT a sticky `TS2307`. A no-eviction model would send NO frame, so
-/// this asserting a frame IS sent discriminates the eviction lever.
+/// C10 eviction discriminator: `notify_carrier_changed` advances the plugin's
+/// carrier-store publication token (warm ScriptInfo replacement) and then fires an
+/// `updateOpen` `changedFiles` frame for the COMPANION path (cold negative-cache
+/// eviction). Omitting either command leaves one of those two stale states live.
 #[tokio::test]
 async fn tsserver_cold_read_no_sticky_ts2307() {
     let frames = run_notify_carrier_changed_capture("/proj/src/Comp.vue.tsx").await;
 
     assert_eq!(
         frames.len(),
-        1,
-        "the eviction must issue EXACTLY ONE updateOpen frame (a no-eviction model \
-         would send none — leaving a cold-probed companion pinned to a sticky TS2307)"
+        2,
+        "carrier invalidation must issue exactly the warm-refresh token and cold-eviction touch"
     );
-    let frame = &frames[0];
+    let configure = &frames[0];
+    assert_eq!(configure["command"].as_str(), Some("configurePlugin"));
+    assert_eq!(
+        configure["arguments"]["pluginName"].as_str(),
+        Some("@verter/typescript-plugin")
+    );
+    assert_eq!(
+        configure["arguments"]["configuration"]["carrierStoreRefreshToken"].as_u64(),
+        Some(1),
+        "a changed token is the plugin's warm ScriptInfo reload signal"
+    );
+
+    let frame = &frames[1];
     assert_eq!(
         frame["command"].as_str(),
         Some("updateOpen"),
