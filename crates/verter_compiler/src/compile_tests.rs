@@ -6892,7 +6892,7 @@ function handleClick(e) {
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
         tsx.code.contains(
-            r#"function handleClick(...[e]: Parameters<NonNullable<import('vue').IntrinsicElementAttributes["button"]["onClick"]>>)"#
+            r#"function handleClick(...[e]: [(GlobalEventHandlersEventMap & { [___VERTER___EventKey: string]: Event })["click"]])"#
         ),
         "Expected inferred click handler parameter type, got:\n{}",
         tsx.code
@@ -6916,7 +6916,7 @@ function handler(a, b, c) {
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
         tsx.code.contains(
-            r#"...[a, b, c]: Parameters<NonNullable<import('vue').IntrinsicElementAttributes["input"]["onInput"]>>"#
+            r#"...[a, b, c]: [(GlobalEventHandlersEventMap & { [___VERTER___EventKey: string]: Event })["input"]]"#
         ),
         "Expected inferred tuple rest parameter type, got:\n{}",
         tsx.code
@@ -6924,81 +6924,66 @@ function handler(a, b, c) {
 }
 
 #[test]
-fn tsx_infer_function_native_event_matrix_matches_v5_process_cases() {
+fn tsx_infer_function_native_event_matrix_uses_dom_event_authority() {
     let cases = [
         (
             "handleChange",
             "e",
             r#"<select @change="handleChange"></select>"#,
-            "select",
-            "onChange",
+            "change",
         ),
         (
             "handleSubmit",
             "e",
             r#"<form @submit="handleSubmit"></form>"#,
-            "form",
-            "onSubmit",
+            "submit",
         ),
         (
             "handleKeydown",
             "e",
             r#"<input @keydown="handleKeydown" />"#,
-            "input",
-            "onKeydown",
+            "keydown",
         ),
         (
             "handleFocus",
             "e",
             r#"<input @focus="handleFocus" />"#,
-            "input",
-            "onFocus",
+            "focus",
         ),
-        (
-            "handleBlur",
-            "e",
-            r#"<input @blur="handleBlur" />"#,
-            "input",
-            "onBlur",
-        ),
+        ("handleBlur", "e", r#"<input @blur="handleBlur" />"#, "blur"),
         (
             "handleMouseEnter",
             "e",
             r#"<div @mouseenter="handleMouseEnter"></div>"#,
-            "div",
-            "onMouseenter",
+            "mouseenter",
         ),
         (
             "handleMouseLeave",
             "e",
             r#"<div @mouseleave="handleMouseLeave"></div>"#,
-            "div",
-            "onMouseleave",
+            "mouseleave",
         ),
         (
             "handleAnchorClick",
             "e",
             r##"<a href="#" @click="handleAnchorClick">Link</a>"##,
-            "a",
-            "onClick",
+            "click",
         ),
         (
             "handleDblClick",
             "e",
             r#"<div @dblclick="handleDblClick"></div>"#,
-            "div",
-            "onDblclick",
+            "dblclick",
         ),
         (
             "handleContextMenu",
             "e",
             r#"<div @contextmenu="handleContextMenu"></div>"#,
-            "div",
-            "onContextmenu",
+            "contextmenu",
         ),
     ];
 
-    for (fn_name, param, template, element, event_prop) in cases {
+    for (fn_name, param, template, event_name) in cases {
         let source = format!(
             r#"<script setup lang="ts">
 function {fn_name}({param}) {{ return {param} }}
@@ -7015,7 +7000,7 @@ function {fn_name}({param}) {{ return {param} }}
 
         let tsx = result.tsx.as_ref().expect("tsx block");
         let expected = format!(
-            "...[{param}]: Parameters<NonNullable<import('vue').IntrinsicElementAttributes[\"{element}\"][\"{event_prop}\"]>>"
+            "...[{param}]: [(GlobalEventHandlersEventMap & {{ [___VERTER___EventKey: string]: Event }})[\"{event_name}\"]]"
         );
         assert!(
             tsx.code.contains(&expected),
@@ -7139,7 +7124,7 @@ function noParams() {
 }
 
 #[test]
-fn tsx_infer_function_supports_non_setup_scripts() {
+fn tsx_infer_function_does_not_connect_classic_script_to_template() {
     let result = compile_tsx(
         r#"<script lang="ts">
 function handleClick(e) {
@@ -7156,10 +7141,13 @@ export default {}
 
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains(
-            r#"function handleClick(...[e]: Parameters<NonNullable<import('vue').IntrinsicElementAttributes["button"]["onClick"]>>)"#
-        ),
-        "Expected inference in non-setup script mode, got:\n{}",
+        tsx.code.contains("function handleClick(e)"),
+        "Classic-script parameter must stay authored, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("...[e]"),
+        "Template-driven inference is script-setup-only, got:\n{}",
         tsx.code
     );
 }

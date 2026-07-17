@@ -24,9 +24,9 @@ use crate::template::code_gen::types::CodeGenOutput;
 use crate::utils::oxc::vue::{parse_script, DefaultExportType, ScriptItem, ScriptMode};
 
 use super::{
-    apply_event_handler_param_inference, apply_template_ref_call_inference, collect_binding_names,
-    directive_accessor_declaration, emit_helper_imports, emit_helper_imports_with_define_component,
-    emit_type_constructs, instance_declaration_ambient, should_infer_function_types,
+    apply_template_ref_call_inference, collect_binding_names, directive_accessor_declaration,
+    emit_helper_imports, emit_helper_imports_with_define_component, emit_type_constructs,
+    instance_declaration_ambient, should_infer_function_types,
 };
 
 // ── Companion Script Processing ──────────────────────────────────
@@ -159,14 +159,6 @@ pub(super) fn process_tsx_script_only<'alloc>(
 
     if should_infer_function_types(script.lang) {
         let available_bindings = collect_binding_names(&parse_result.bindings, source, content_str);
-        apply_event_handler_param_inference(
-            &parser_ret.program.body,
-            template_ast,
-            source,
-            content_start,
-            &available_bindings,
-            out,
-        );
         apply_template_ref_call_inference(
             &parser_ret.program.body,
             template_ast,

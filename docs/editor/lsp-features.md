@@ -188,6 +188,14 @@ so Verter owns the closed MathML attribute table while reusing Svelte's
 official `DOMAttributes<MathMLElement>` event base. None of these declarations
 merge a global JSX namespace or alter the public `.svelte` module type.
 
+Named DOM-handler parameter inference is deliberately framework- and
+scope-specific. Vue TypeScript `<script setup>` handlers use the ambient DOM
+event map, while Svelte TypeScript runes-instance handlers use the installed
+`SvelteHTMLElements[tag][event]` tuple. Existing author annotations always win.
+Classic/legacy scripts and JavaScript do not receive synthetic parameter types;
+JavaScript follows authored JSDoc and the workspace's `allowJs`/`checkJs` and
+strictness settings.
+
 ::: warning TSGO Limitation
 TSGO has a known limitation: re-exported `.vue` components (e.g., barrel files) may lose their typing. This is why `auto` mode defaults to tsserver when a workspace TypeScript installation is found.
 :::

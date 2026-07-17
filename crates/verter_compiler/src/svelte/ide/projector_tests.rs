@@ -1845,6 +1845,130 @@ fn bound_expression_maps_back_to_the_original_source_byte() {
     );
 }
 
+#[test]
+fn inferred_event_parameter_in_a_moved_script_maps_to_the_authored_identifier() {
+    use oxc_sourcemap::SourceMap;
+
+    let source = r#"<svelte:options runes={true} />
+<button onclick={handleClick}>click</button>
+<script lang="ts">
+function handleClick(event) {
+  return event.clientX;
+}
+</script>"#;
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("MovedEvent.svelte"), false);
+
+    let generated_function = projection
+        .code
+        .find("function handleClick")
+        .expect("the trailing instance script is moved above the render body");
+    let generated_parameter = generated_function
+        + projection.code[generated_function..]
+            .find("event")
+            .expect("the inferred parameter keeps the authored identifier bytes");
+    let authored_parameter = source
+        .find("handleClick(event)")
+        .expect("the authored handler declaration is present")
+        + "handleClick(".len();
+
+    let (generated_line, generated_col) =
+        byte_offset_to_line_col(&projection.code, generated_parameter as u32);
+    let (authored_line, authored_col) = byte_offset_to_line_col(source, authored_parameter as u32);
+    let map = SourceMap::from_json_string(&projection.source_map).expect("decode map");
+    let token = map
+        .get_tokens()
+        .filter(|token| {
+            token.get_dst_line() == generated_line
+                && token.get_dst_col() <= generated_col
+                && token.get_source_id().is_some()
+        })
+        .max_by_key(|token| token.get_dst_col())
+        .expect("a mapped token covers the inferred parameter identifier");
+
+    assert_eq!(token.get_src_line(), authored_line);
+    let within_chunk_delta = generated_col - token.get_dst_col();
+    assert_eq!(
+        token.get_src_col() + within_chunk_delta,
+        authored_col,
+        "the generated event parameter must map byte-accurately to the authored identifier"
+    );
+
+    let generated_tuple = generated_function
+        + projection.code[generated_function..]
+            .find("Parameters<")
+            .expect("the inferred official event tuple is emitted");
+    let (tuple_line, tuple_col) = byte_offset_to_line_col(&projection.code, generated_tuple as u32);
+    let tuple_boundary = map
+        .get_tokens()
+        .filter(|token| token.get_dst_line() == tuple_line && token.get_dst_col() <= tuple_col)
+        .max_by_key(|token| token.get_dst_col())
+        .expect("an explicit source-map segment covers the synthetic tuple");
+    assert!(
+        tuple_boundary.get_source_id().is_none(),
+        "the synthetic event tuple must not claim an authored source range"
+    );
+}
+
+#[test]
+fn moved_typescript_assertion_preserves_type_and_value_source_identity() {
+    use oxc_sourcemap::SourceMap;
+
+    let source = r#"<button>{boxed.value} {count}</button>
+<script lang="ts">
+type Box = { value: string };
+const sourceValue = { value: "mapped" };
+const boxed = <Box>sourceValue;
+let count = $state(0);
+</script>"#;
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("MovedAssertion.svelte"), false);
+    let map = SourceMap::from_json_string(&projection.source_map).expect("decode map");
+
+    let generated_type = projection
+        .code
+        .find(" as Box")
+        .expect("the assertion type is relocated into `as` syntax")
+        + " as ".len();
+    let generated_value = projection
+        .code
+        .find("(sourceValue as")
+        .expect("the asserted value remains in the rewritten expression")
+        + 1;
+    let authored_type = source.find("<Box>").expect("the authored type is present") + 1;
+    let authored_value = source
+        .rfind("sourceValue;")
+        .expect("the authored asserted value is present");
+
+    for (label, generated, authored) in [
+        ("type reference", generated_type, authored_type),
+        ("value reference", generated_value, authored_value),
+    ] {
+        let (generated_line, generated_col) =
+            byte_offset_to_line_col(&projection.code, generated as u32);
+        let (authored_line, authored_col) = byte_offset_to_line_col(source, authored as u32);
+        let token = map
+            .get_tokens()
+            .filter(|token| {
+                token.get_dst_line() == generated_line
+                    && token.get_dst_col() <= generated_col
+                    && token.get_source_id().is_some()
+            })
+            .max_by_key(|token| token.get_dst_col())
+            .unwrap_or_else(|| panic!("a mapped token must cover the rewritten {label}"));
+        assert_eq!(
+            token.get_src_line(),
+            authored_line,
+            "the rewritten {label} must map to its authored line"
+        );
+        assert_eq!(
+            token.get_src_col() + generated_col - token.get_dst_col(),
+            authored_col,
+            "the rewritten {label} must map byte-accurately through the trailing-script move"
+        );
+    }
+}
+
 // Pins the source-map reporting site for native Svelte component prop
 // assignability diagnostics selected from the private call check.
 #[test]

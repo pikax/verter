@@ -38,12 +38,12 @@ Generic components work with all Vue features including slots, emits, and expose
 
 ## Automatic Event Handler Type Inference
 
-When you bind an event handler to a native HTML element, Verter infers the event parameter type from `HTMLElementEventMap`. You do not need to manually annotate the event parameter -- the correct type is inferred from the element and event name.
+In a TypeScript `<script setup>`, Verter connects an unannotated named handler to the native event used by the template. The type comes from the standard `GlobalEventHandlersEventMap`; no project-wide JSX setting is required.
 
 ```vue
 <script setup lang="ts">
 function handleClick(e) {
-  // e is inferred as MouseEvent from HTMLElementEventMap["click"]
+  // e is inferred as PointerEvent from GlobalEventHandlersEventMap["click"]
   console.log(e.clientX, e.clientY);
 }
 </script>
@@ -53,7 +53,15 @@ function handleClick(e) {
 </template>
 ```
 
-This works for all native DOM events. The inference is based on the element type (`HTMLButtonElement`, `HTMLInputElement`, etc.) and the event name, using the standard `HTMLElementEventMap` type definitions.
+This works for native DOM events in Vue TypeScript script-setup scope. Classic
+`<script>` and JavaScript parameters remain authored types; use a TypeScript
+annotation or JSDoc there instead of relying on template-driven inference.
+
+Svelte has the equivalent TypeScript-only connection in a Svelte 5 runes-mode
+instance script. Its type is derived from the installed framework contract,
+`SvelteHTMLElements[tag][event]`, so Verter follows Svelte's own event choices
+(for example, Svelte 5.56 declares `onclick` as a `MouseEventHandler`). Legacy
+Svelte scripts and JavaScript remain authored-type/JSDoc surfaces.
 
 ## Fully Typed Vue Directives
 

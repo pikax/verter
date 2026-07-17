@@ -16,6 +16,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::ast::types::TemplateAst;
 use crate::code_transform::CodeTransform;
 use crate::compile::types::{DestructuredBindingInfo, DestructuredBlockMeta};
+use crate::cursor::ScriptLanguage;
 use crate::ide::{IdeGenericInfo, IdeScriptOptions};
 use crate::parser::types::RootNodeScript;
 use crate::template::code_gen::binding::BindingType;
@@ -154,18 +155,22 @@ pub(super) fn process_tsx_script_setup<'alloc>(
         content_start,
     );
 
-    // Infer event-handler parameter types from template usage (v5/process parity).
+    // Named template-driven event parameters are owned by exact TypeScript
+    // script-setup scope. TSX remains eligible for unrelated template-ref
+    // inference below, but its authored function parameters are not rewritten.
     if should_infer_function_types(setup.lang) {
         let available_bindings =
             collect_binding_names(&parse_result.bindings, source, effective_content_str);
-        apply_event_handler_param_inference(
-            &effective_program.body,
-            template_ast,
-            source,
-            content_start,
-            &available_bindings,
-            out,
-        );
+        if setup.lang == Some(ScriptLanguage::TypeScript) {
+            apply_event_handler_param_inference(
+                &effective_program.body,
+                template_ast,
+                source,
+                content_start,
+                &available_bindings,
+                out,
+            );
+        }
         apply_template_ref_call_inference(
             &effective_program.body,
             template_ast,

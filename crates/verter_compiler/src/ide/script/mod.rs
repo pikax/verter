@@ -88,7 +88,7 @@ use setup::process_tsx_script_setup;
 use template_ref::{
     apply_template_ref_call_inference, callee_identifier_name, collect_binding_names,
 };
-use ts_assertions::rewrite_ts_type_assertions;
+pub(crate) use ts_assertions::rewrite_ts_type_assertions;
 use type_constructs::{
     build_binding_source_info, collect_builtin_components, emit_attrs_type_aliases,
     emit_helper_imports, emit_helper_imports_with_define_component, emit_type_constructs,

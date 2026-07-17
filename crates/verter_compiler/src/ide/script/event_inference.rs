@@ -1,10 +1,9 @@
-//! Event-handler parameter inference (ownership-domain analysis).
+//! Named event-handler parameter inference for Vue TypeScript script setup.
 //!
 //! For simple native-element handlers like `<button @click="handleClick">`,
 //! rewrite `function handleClick(e) {}` into
-//! `function handleClick(...[e]: Parameters<...>) {}` so type checkers can
-//! infer event handler parameters automatically without porting plugin
-//! architecture from `v5/process`.
+//! `function handleClick(...[e]: [...]) {}` so the handler receives the same
+//! concrete event payload as its template binding.
 
 use oxc_ast::ast::{BindingPattern, Declaration, Function, Statement};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -17,10 +16,10 @@ use crate::template::code_gen::types::CodeGenOutput;
 
 /// Infer untyped function-declaration parameters from template event bindings.
 ///
-/// Mirrors the `v5/process` infer-function intent without porting plugin
-/// architecture: for simple native-element handlers like
-/// `<button @click="handleClick">`, rewrite `function handleClick(e) {}`
-/// into `function handleClick(...[e]: Parameters<import('vue').IntrinsicElementAttributes["button"]["onClick"]>) {}`.
+/// For a simple native-element handler such as `<button
+/// @click="handleClick">`, rewrites `function handleClick(e) {}` into a tuple
+/// parameter derived from the ambient DOM event map. Component handlers use
+/// the component's public event prop tuple instead.
 pub(super) fn apply_event_handler_param_inference(
     body: &[Statement<'_>],
     template_ast: Option<&TemplateAst>,
@@ -68,14 +67,14 @@ pub(super) fn apply_event_handler_param_inference(
 
 /// Annotate untyped function parameters with inferred event handler types.
 ///
-/// Uses two targeted overwrites around the parameter identifiers instead of one
+/// Uses targeted removals and unmapped insertions around the parameter identifiers instead of one
 /// big overwrite of the entire params span. This preserves per-character source
 /// map mappings for identifiers, enabling hover-to-definition on parameters.
 ///
 /// Transform: `(event)` → `(...[event]: Type)` where `event` stays as Original source.
 fn maybe_annotate_function_params(
     func: &Function<'_>,
-    handler_type_hints: &FxHashMap<String, String>,
+    handler_type_hints: &FxHashMap<String, Vec<String>>,
     source: &str,
     content_start: u32,
     out: &mut CodeGenOutput<'_>,
@@ -83,9 +82,10 @@ fn maybe_annotate_function_params(
     let Some(id) = &func.id else {
         return;
     };
-    let Some(type_expr) = handler_type_hints.get(id.name.as_str()) else {
+    let Some(type_exprs) = handler_type_hints.get(id.name.as_str()) else {
         return;
     };
+    let type_expr = type_exprs.join(" | ");
 
     // Keep existing typing intact.
     if func.params.rest.is_some() || func.params.items.is_empty() {
@@ -125,24 +125,26 @@ fn maybe_annotate_function_params(
     let first_ident_start = ident_spans[0].0;
     let last_ident_end = ident_spans[ident_spans.len() - 1].1;
 
-    // Overwrite before first ident: "(" → "(...["
+    // Remove authored punctuation and insert synthetic scaffolding through the
+    // unmapped prepend channel. The identifier bytes remain source-owned.
     let prefix = if has_parens { "(...[" } else { "...[" };
-    out.overwrite(params_start, first_ident_start, prefix);
+    out.overwrite(params_start, first_ident_start, "");
+    out.prepend_alloc(first_ident_start, prefix);
 
-    // Overwrite after last ident: ")" → "]: Type)"
     let suffix = if has_parens {
         format!("]: {})", type_expr)
     } else {
         format!("]: {}", type_expr)
     };
-    out.overwrite(last_ident_end, params_end, &suffix);
+    out.overwrite(last_ident_end, params_end, "");
+    out.prepend_alloc(params_end, &suffix);
 }
 
 fn collect_event_handler_type_hints(
     ast: &TemplateAst,
     source: &str,
     available_bindings: &FxHashSet<String>,
-) -> FxHashMap<String, String> {
+) -> FxHashMap<String, Vec<String>> {
     let mut hints = FxHashMap::default();
 
     let Some(content) = &ast.root.content else {
@@ -178,7 +180,7 @@ fn collect_event_handler_type_hints_from_node(
     source: &str,
     available_bindings: &FxHashSet<String>,
     components: &TemplateComponentBindings,
-    hints: &mut FxHashMap<String, String>,
+    hints: &mut FxHashMap<String, Vec<String>>,
 ) {
     let node = &ast.nodes[id.0];
     let AstNodeKind::Element(el_box) = &node.kind else {
@@ -227,16 +229,18 @@ fn collect_event_handler_type_hints_from_node(
             _ => None,
         };
         let Some(type_expr) = crate::ide::event_handler_params_type(
-            tag_name,
             el.tag_type,
             component_binding.as_deref(),
             &event_prop,
+            Some(event_name),
         ) else {
             continue;
         };
 
-        // Keep first discovered hint for deterministic behavior.
-        hints.entry(handler.to_string()).or_insert(type_expr);
+        let handler_hints = hints.entry(handler.to_string()).or_default();
+        if !handler_hints.contains(&type_expr) {
+            handler_hints.push(type_expr);
+        }
     }
 
     if let Some(content) = &el.content {

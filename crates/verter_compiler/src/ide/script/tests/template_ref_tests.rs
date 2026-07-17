@@ -276,8 +276,9 @@ const v = {} as unknown as V
 #[test]
 fn event_handler_param_sourcemap_preserved() {
     // Verify that hovering over the `event` parameter in `function handleClick(event) {}`
-    // maps back to the original source. The fix uses two targeted overwrites to leave
-    // identifiers as Original source chunks instead of one big overwrite.
+    // maps back to the original source. Authored punctuation is removed and
+    // synthetic scaffolding is inserted unmapped, leaving the identifier as an
+    // Original source chunk.
     let source = r#"<script setup lang="ts">
 function handleClick(event) {}
 </script>
@@ -349,6 +350,16 @@ function handleClick(event) {}
         output.contains("...[event]"),
         "should contain tuple param with event: {output}"
     );
+    assert!(
+        output.contains(
+            r#"]: [(GlobalEventHandlersEventMap & { [___VERTER___EventKey: string]: Event })["click"]])"#
+        ),
+        "native setup handlers must use the provider-stable DOM event tuple: {output}"
+    );
+    assert!(
+        !output.contains("IntrinsicElementAttributes"),
+        "native handler inference must not use the unresolved Vue indexed-access formula: {output}"
+    );
 
     // Find position of "event" in the original SFC source (inside function params)
     let event_src_offset =
@@ -379,6 +390,27 @@ function handleClick(event) {}
         event_gen_line, event_gen_col, event_src_line, event_src_col, output,
         tokens.iter().filter(|t| t.get_dst_line() == event_gen_line).collect::<Vec<_>>()
     );
+
+    let tuple_gen_pos = output
+        .find("GlobalEventHandlersEventMap")
+        .expect("the synthetic event tuple is present");
+    let tuple_gen_line = output[..tuple_gen_pos].matches('\n').count() as u32;
+    let tuple_gen_col = (tuple_gen_pos
+        - output[..tuple_gen_pos]
+            .rfind('\n')
+            .map(|position| position + 1)
+            .unwrap_or(0)) as u32;
+    let tuple_segment = tokens
+        .iter()
+        .filter(|token| {
+            token.get_dst_line() == tuple_gen_line && token.get_dst_col() <= tuple_gen_col
+        })
+        .max_by_key(|token| token.get_dst_col())
+        .expect("a source-map segment covers the synthetic tuple");
+    assert!(
+        tuple_segment.get_source_id().is_none(),
+        "the synthetic event tuple must not claim an authored source range"
+    );
 }
 
 #[test]
@@ -404,5 +436,162 @@ function handleDrag(startEvent, endEvent) {}
     assert!(
         code.contains("endEvent"),
         "endEvent should be in output: {code}"
+    );
+}
+
+#[test]
+fn classic_script_function_is_not_inferred_from_template_usage() {
+    let source = r#"<script lang="ts">
+function handleClick(event) {}
+export default { methods: { handleClick } }
+</script>
+<template><button @click="handleClick">click</button></template>"#;
+    let (code, _) = gen_tsx_script(source);
+    assert!(
+        code.contains("function handleClick(event)"),
+        "classic-script parameter must remain authored: {code}"
+    );
+    assert!(
+        !code.contains("...[event]"),
+        "template-driven inference is owned by script setup, not classic script: {code}"
+    );
+}
+
+#[test]
+fn javascript_script_setup_does_not_synthesize_event_parameter_jsdoc() {
+    let source = r#"<script setup>
+function handleClick(event) {}
+</script>
+<template><button @click="handleClick">click</button></template>"#;
+    let (code, _) = gen_jsx_script(source);
+    assert!(
+        code.contains("function handleClick(event)"),
+        "JavaScript handler must preserve the authored parameter: {code}"
+    );
+    assert!(
+        !code.contains("GlobalEventHandlersEventMap") && !code.contains("...[event]"),
+        "JavaScript event parameter typing remains authored-JSDoc-only: {code}"
+    );
+}
+
+#[test]
+fn tsx_script_setup_keeps_authored_event_parameters() {
+    use oxc_ast::ast::Function;
+    use oxc_ast_visit::{walk, Visit};
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+    use oxc_syntax::scope::ScopeFlags;
+
+    #[derive(Default)]
+    struct HandlerFacts {
+        found: bool,
+        has_rest: bool,
+        first_param_has_annotation: bool,
+        param_count: usize,
+    }
+    impl<'a> Visit<'a> for HandlerFacts {
+        fn visit_function(&mut self, function: &Function<'a>, flags: ScopeFlags) {
+            if function
+                .id
+                .as_ref()
+                .is_some_and(|id| id.name == "handleClick")
+            {
+                self.found = true;
+                self.has_rest = function.params.rest.is_some();
+                self.param_count = function.params.items.len();
+                self.first_param_has_annotation = function
+                    .params
+                    .items
+                    .first()
+                    .is_some_and(|param| param.type_annotation.is_some());
+            }
+            walk::walk_function(self, function, flags);
+        }
+    }
+
+    let source = r#"<script setup lang="tsx">
+function handleClick(event) {}
+</script>
+<template><button @click="handleClick">click</button></template>"#;
+    let (code, _) = gen_tsx_script(source);
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = Parser::new(&allocator, &code, SourceType::tsx()).parse();
+    assert!(parsed.errors.is_empty(), "generated TSX must parse cleanly");
+    let mut facts = HandlerFacts::default();
+    facts.visit_program(&parsed.program);
+    assert!(facts.found, "the authored handler remains in the carrier");
+    assert!(
+        !facts.has_rest,
+        "TSX is outside the exact TypeScript event-inference scope"
+    );
+    assert_eq!(facts.param_count, 1);
+    assert!(!facts.first_param_has_annotation);
+}
+
+#[test]
+fn typescript_handler_used_by_distinct_events_has_a_union_tuple_annotation() {
+    use oxc_ast::ast::{Function, TSType};
+    use oxc_ast_visit::{walk, Visit};
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+    use oxc_syntax::scope::ScopeFlags;
+
+    #[derive(Default)]
+    struct HandlerFacts {
+        found: bool,
+        has_typed_rest: bool,
+        union_arms: usize,
+        all_arms_are_tuples: bool,
+    }
+    impl<'a> Visit<'a> for HandlerFacts {
+        fn visit_function(&mut self, function: &Function<'a>, flags: ScopeFlags) {
+            if function
+                .id
+                .as_ref()
+                .is_some_and(|id| id.name == "handleEvent")
+            {
+                self.found = true;
+                if let Some(annotation) = function
+                    .params
+                    .rest
+                    .as_ref()
+                    .and_then(|rest| rest.type_annotation.as_ref())
+                {
+                    self.has_typed_rest = true;
+                    if let TSType::TSUnionType(union) = &annotation.type_annotation {
+                        self.union_arms = union.types.len();
+                        self.all_arms_are_tuples = union
+                            .types
+                            .iter()
+                            .all(|event_tuple| matches!(event_tuple, TSType::TSTupleType(_)));
+                    }
+                }
+            }
+            walk::walk_function(self, function, flags);
+        }
+    }
+
+    let source = r#"<script setup lang="ts">
+function handleEvent(event) {}
+</script>
+<template><button @click="handleEvent" @keydown="handleEvent">both</button></template>"#;
+    let (code, _) = gen_tsx_script(source);
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = Parser::new(&allocator, &code, SourceType::tsx()).parse();
+    assert!(parsed.errors.is_empty(), "generated TSX must parse cleanly");
+    let mut facts = HandlerFacts::default();
+    facts.visit_program(&parsed.program);
+    assert!(facts.found, "the authored handler remains in the carrier");
+    assert!(
+        facts.has_typed_rest,
+        "the inferred handler must be represented by a typed tuple rest"
+    );
+    assert_eq!(
+        facts.union_arms, 2,
+        "click and keydown must both contribute a distinct tuple arm"
+    );
+    assert!(
+        facts.all_arms_are_tuples,
+        "every union arm must be a parameter tuple"
     );
 }

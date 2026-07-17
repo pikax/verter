@@ -1,196 +1,119 @@
-//! TS angle-bracket type-assertion rewriter (D5 of
-//! ownership-domain analysis).
+//! TypeScript angle-bracket assertion normalization for TSX IDE carriers.
 //!
-//! TypeScript's `TSTypeAssertion` syntax (`<string>foo`) is ambiguous with
-//! JSX elements in TSX files. This module rewrites them to the equivalent
-//! `as` syntax: `(foo as string)`.
-//!
-//! Since the main script parse uses TSX mode (where `<T>expr` is parsed as
-//! JSX rather than a type assertion), we perform a separate lightweight TS
-//! parse here to correctly detect them.
+//! TypeScript accepts `<Type>value`, while TSX parses the same bytes as JSX.
+//! Framework scripts authored with the TypeScript grammar therefore normalize
+//! every `TSTypeAssertion` to `(value as Type)` before entering a TSX carrier.
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{Argument, ArrayExpressionElement, Expression, ObjectPropertyKind, Statement};
+use oxc_ast::ast::Expression;
+use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 
 use crate::code_transform::CodeTransform;
 
-/// Rewrite `<Type>expr` angle bracket type assertions to `(expr as Type)` for TSX validity.
-pub(super) fn rewrite_ts_type_assertions(
-    content_str: &str,
+#[derive(Debug, Clone, Copy)]
+struct TypeAssertionEdit {
+    assertion_start: u32,
+    expression_start: u32,
+    assertion_end: u32,
+    type_start: u32,
+    type_end: u32,
+}
+
+#[derive(Default)]
+struct TypeAssertionCollector {
+    edits: Vec<TypeAssertionEdit>,
+}
+
+impl<'a> Visit<'a> for TypeAssertionCollector {
+    fn visit_expression(&mut self, expression: &Expression<'a>) {
+        // Post-order is required for nested assertions that share an end
+        // boundary: the inner ` as T)` suffix must be emitted before the outer.
+        walk::walk_expression(self, expression);
+        if let Expression::TSTypeAssertion(assertion) = expression {
+            let type_span = assertion.type_annotation.span();
+            self.edits.push(TypeAssertionEdit {
+                assertion_start: assertion.span.start,
+                expression_start: assertion.expression.span().start,
+                assertion_end: assertion.span.end,
+                type_start: type_span.start,
+                type_end: type_span.end,
+            });
+        }
+    }
+}
+
+/// Rewrite every `<Type>value` assertion in an authored TypeScript body to
+/// `(value as Type)` for TSX validity.
+///
+/// The full AST visitor covers assertions in functions, classes, exports,
+/// control-flow constructs, and nested expressions. Only the assertion prefix
+/// punctuation is removed; the value expression remains source-owned and the
+/// authored type span is moved, rather than copied, so both retain exact source
+/// identity. Only the replacement `(`, ` as `, and `)` bytes are unmapped IDE
+/// scaffolding.
+pub(crate) fn rewrite_ts_type_assertions(
+    content: &str,
     content_start: u32,
-    ct: &mut CodeTransform<'_>,
+    out: &mut CodeTransform<'_>,
 ) {
-    // Parse as TypeScript (not TSX) so OXC produces TSTypeAssertion nodes
-    let ts_alloc = Allocator::default();
-    let ts_source_type = SourceType::ts();
-    let ts_ret = Parser::new(&ts_alloc, content_str, ts_source_type).parse();
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, content, SourceType::ts()).parse();
+    let mut collector = TypeAssertionCollector::default();
+    collector.visit_program(&parsed.program);
 
-    let mut assertions: Vec<(u32, u32, u32)> = Vec::new(); // (assertion_start, expr_start, assertion_end)
-    collect_type_assertions_from_stmts(&ts_ret.program.body, &mut assertions);
+    for edit in collector.edits {
+        let Some(closing_angle) = type_assertion_closing_angle(content, edit) else {
+            continue;
+        };
+        let assertion_start = content_start + edit.assertion_start;
+        let expression_start = content_start + edit.expression_start;
+        let assertion_end = content_start + edit.assertion_end;
+        let type_start = content_start + edit.type_start;
+        let type_end = content_start + edit.type_end;
+        let closing_angle = content_start + closing_angle;
 
-    if assertions.is_empty() {
-        return;
-    }
-
-    for &(assertion_start, expr_start, assertion_end) in &assertions {
-        // Extract type text from between `<` and `>`
-        // The range `assertion_start..expr_start` in content_str is `<Type>`
-        let type_text = &content_str[(assertion_start + 1) as usize..(expr_start - 1) as usize];
-
-        let abs_start = content_start + assertion_start;
-        let abs_expr_start = content_start + expr_start;
-        let abs_end = content_start + assertion_end;
-
-        // Replace `<Type>` with `(`
-        ct.overwrite(abs_start, abs_expr_start, "(");
-        // Append ` as Type)` after the expression
-        ct.append_left(abs_end, &format!(" as {})", type_text));
+        out.move_wrapped(type_start, type_end, assertion_end, " as ", ")");
+        out.remove(assertion_start, assertion_start + 1);
+        out.remove(closing_angle, closing_angle + 1);
+        out.prepend_left(expression_start, "(");
     }
 }
 
-fn collect_type_assertions_from_stmts(stmts: &[Statement<'_>], out: &mut Vec<(u32, u32, u32)>) {
-    for stmt in stmts {
-        collect_type_assertions_from_stmt(stmt, out);
-    }
-}
+/// Locate the assertion's closing `>` without mistaking `>` bytes in trivia
+/// for syntax. The parser owns the type and expression spans; this small lexer
+/// only bridges the trivia gap between those two authoritative boundaries.
+fn type_assertion_closing_angle(content: &str, edit: TypeAssertionEdit) -> Option<u32> {
+    let bytes = content.as_bytes();
+    let mut cursor = edit.type_end as usize;
+    let expression_start = edit.expression_start as usize;
 
-fn collect_type_assertions_from_stmt(stmt: &Statement<'_>, out: &mut Vec<(u32, u32, u32)>) {
-    match stmt {
-        Statement::ExpressionStatement(es) => {
-            collect_type_assertions_from_expr(&es.expression, out);
-        }
-        Statement::VariableDeclaration(vd) => {
-            for decl in &vd.declarations {
-                if let Some(init) = &decl.init {
-                    collect_type_assertions_from_expr(init, out);
+    while cursor < expression_start {
+        match bytes[cursor] {
+            byte if byte.is_ascii_whitespace() => cursor += 1,
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor += 2;
+                while cursor < expression_start && !matches!(bytes[cursor], b'\n' | b'\r') {
+                    cursor += 1;
                 }
             }
-        }
-        Statement::ReturnStatement(ret) => {
-            if let Some(arg) = &ret.argument {
-                collect_type_assertions_from_expr(arg, out);
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor += 2;
+                while cursor + 1 < expression_start
+                    && !(bytes[cursor] == b'*' && bytes[cursor + 1] == b'/')
+                {
+                    cursor += 1;
+                }
+                if cursor + 1 >= expression_start {
+                    return None;
+                }
+                cursor += 2;
             }
+            b'>' => return Some(cursor as u32),
+            _ => return None,
         }
-        Statement::IfStatement(ifs) => {
-            collect_type_assertions_from_expr(&ifs.test, out);
-            collect_type_assertions_from_stmt(&ifs.consequent, out);
-            if let Some(alt) = &ifs.alternate {
-                collect_type_assertions_from_stmt(alt, out);
-            }
-        }
-        Statement::BlockStatement(block) => {
-            collect_type_assertions_from_stmts(&block.body, out);
-        }
-        Statement::ForStatement(fs) => {
-            if let Some(body) = Some(&fs.body) {
-                collect_type_assertions_from_stmt(body, out);
-            }
-        }
-        Statement::WhileStatement(ws) => {
-            collect_type_assertions_from_expr(&ws.test, out);
-            collect_type_assertions_from_stmt(&ws.body, out);
-        }
-        _ => {}
     }
-}
 
-fn collect_type_assertions_from_expr(expr: &Expression<'_>, out: &mut Vec<(u32, u32, u32)>) {
-    match expr {
-        Expression::TSTypeAssertion(ta) => {
-            // Record this assertion (process inner first for nesting)
-            collect_type_assertions_from_expr(&ta.expression, out);
-            out.push((ta.span.start, ta.expression.span().start, ta.span.end));
-        }
-        Expression::AssignmentExpression(ae) => {
-            collect_type_assertions_from_expr(&ae.right, out);
-        }
-        Expression::BinaryExpression(be) => {
-            collect_type_assertions_from_expr(&be.left, out);
-            collect_type_assertions_from_expr(&be.right, out);
-        }
-        Expression::LogicalExpression(le) => {
-            collect_type_assertions_from_expr(&le.left, out);
-            collect_type_assertions_from_expr(&le.right, out);
-        }
-        Expression::ConditionalExpression(ce) => {
-            collect_type_assertions_from_expr(&ce.test, out);
-            collect_type_assertions_from_expr(&ce.consequent, out);
-            collect_type_assertions_from_expr(&ce.alternate, out);
-        }
-        Expression::CallExpression(call) => {
-            collect_type_assertions_from_expr(&call.callee, out);
-            for arg in &call.arguments {
-                if let Argument::SpreadElement(spread) = arg {
-                    collect_type_assertions_from_expr(&spread.argument, out);
-                } else {
-                    collect_type_assertions_from_expr(arg.to_expression(), out);
-                }
-            }
-        }
-        Expression::ParenthesizedExpression(pe) => {
-            collect_type_assertions_from_expr(&pe.expression, out);
-        }
-        Expression::SequenceExpression(se) => {
-            for e in &se.expressions {
-                collect_type_assertions_from_expr(e, out);
-            }
-        }
-        Expression::ArrayExpression(ae) => {
-            for el in &ae.elements {
-                match el {
-                    ArrayExpressionElement::SpreadElement(spread) => {
-                        collect_type_assertions_from_expr(&spread.argument, out);
-                    }
-                    ArrayExpressionElement::TSTypeAssertion(ta) => {
-                        collect_type_assertions_from_expr(&ta.expression, out);
-                        out.push((ta.span.start, ta.expression.span().start, ta.span.end));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Expression::ObjectExpression(oe) => {
-            for prop in &oe.properties {
-                if let ObjectPropertyKind::ObjectProperty(op) = prop {
-                    collect_type_assertions_from_expr(&op.value, out);
-                }
-            }
-        }
-        Expression::ArrowFunctionExpression(afe) => {
-            collect_type_assertions_from_stmts(&afe.body.statements, out);
-        }
-        Expression::TSAsExpression(tsa) => {
-            collect_type_assertions_from_expr(&tsa.expression, out);
-        }
-        Expression::TSSatisfiesExpression(tss) => {
-            collect_type_assertions_from_expr(&tss.expression, out);
-        }
-        Expression::TSNonNullExpression(tsnn) => {
-            collect_type_assertions_from_expr(&tsnn.expression, out);
-        }
-        Expression::AwaitExpression(ae) => {
-            collect_type_assertions_from_expr(&ae.argument, out);
-        }
-        Expression::UnaryExpression(ue) => {
-            collect_type_assertions_from_expr(&ue.argument, out);
-        }
-        Expression::TemplateLiteral(tl) => {
-            for expr in &tl.expressions {
-                collect_type_assertions_from_expr(expr, out);
-            }
-        }
-        Expression::ComputedMemberExpression(cme) => {
-            collect_type_assertions_from_expr(&cme.object, out);
-            collect_type_assertions_from_expr(&cme.expression, out);
-        }
-        Expression::StaticMemberExpression(sme) => {
-            collect_type_assertions_from_expr(&sme.object, out);
-        }
-        Expression::PrivateFieldExpression(pfe) => {
-            collect_type_assertions_from_expr(&pfe.object, out);
-        }
-        _ => {}
-    }
+    None
 }

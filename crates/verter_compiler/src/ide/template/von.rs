@@ -661,9 +661,10 @@ fn spread_event_types<'alloc>(
         TagType::Component => {
             let tag_name = &source[(el.tag_open.start + 1) as usize..el.tag_open.name_end as usize];
             let binding = components.resolve(tag_name, el.tag_type, |n| resolver.get(n).is_some());
-            match binding.as_deref().and_then(|b| {
-                event_handler_params_type(tag_name, el.tag_type, Some(b), jsx_event_name)
-            }) {
+            match binding
+                .as_deref()
+                .and_then(|b| event_handler_params_type(el.tag_type, Some(b), jsx_event_name, None))
+            {
                 Some(params_tuple) => {
                     let payload = format!("{params_tuple}[0]");
                     SpreadEventTypes {
