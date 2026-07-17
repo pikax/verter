@@ -5,8 +5,8 @@ editor-owned tsgo. Compiling the harness alone does not satisfy the release gate
 
 ## Enforced inventory
 
-- 38 parity suite files containing 221 literal tests.
-- 73 declarative matrix cases: 38 Vue and 35 Svelte.
+- Every parity suite file and literal test discovered from the authored TypeScript tree.
+- Every declarative Vue/Svelte matrix case discovered from the matrix source.
 - The 22-case framework contract remains a separate focused surface; it is not a
   substitute for the parity inventory.
 - Run summaries attest the exact fixture, loaded compiled files, complete applicable ID
@@ -35,6 +35,10 @@ pnpm --filter verter-vscode test:e2e:lib:unit
 pnpm --filter verter-vscode test:e2e:dx:unit
 ```
 
-The applicable live fixtures then run on `tsserver`, `tsgo`, and `shared-tsgo`. A red test
+Every standard live fixture runs on `tsserver` and `tsgo`; every configured-project fixture
+also runs on `shared-tsgo`. The shared route must prove an actual editor-owned carrier result
+and zero managed-fallback activation. Project-less fixtures cannot establish a project-bound
+shared carrier and are excluded from that route by the canonical inventory.
+A red test
 is triaged as a fixture/test defect or a product gap; assertions are not weakened to make
 the release green.

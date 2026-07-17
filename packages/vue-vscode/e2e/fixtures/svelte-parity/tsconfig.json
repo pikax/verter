@@ -15,5 +15,6 @@
     },
     "baseUrl": "."
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": ["src/js-lax"]
 }

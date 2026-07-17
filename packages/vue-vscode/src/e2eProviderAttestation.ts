@@ -9,6 +9,25 @@ export interface E2eTypeProviderAttestation {
 const STATUS_PATTERN =
   /Type provider status:\s+(tsgo|tsserver|editor-tsserver|none)(?: \((.+?)\))?/g;
 const SHARED_ARMED_PATTERN = /\[shared-tsgo\] armed:[^\n]*\bcontrolDir=/;
+const SHARED_SERVED_PATTERN =
+  /editor-owned tsgo served carrier (?:feature|diagnostics); managed fallback remained cold/;
+const SHARED_FALLBACK_PATTERN =
+  /editor-owned tsgo .*?(?:did not engage|timed out); activating managed fallback|managed (?:TSGO|tsgo) provider .*started with PID/i;
+
+/**
+ * Prove that a shared-tsgo E2E route served at least one carrier request through
+ * the editor-owned Program and never admitted the managed fallback.
+ */
+export function assertSharedTsgoServedWithoutFallback(log: string): void {
+  if (SHARED_FALLBACK_PATTERN.test(log)) {
+    throw new Error("Requested shared-tsgo, but the managed fallback was activated");
+  }
+  if (!SHARED_SERVED_PATTERN.test(log)) {
+    throw new Error(
+      "Requested shared-tsgo, but no carrier feature was served by the editor-owned Program",
+    );
+  }
+}
 
 /**
  * Validate the public provider identity before an E2E feature assertion can run.

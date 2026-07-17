@@ -125,6 +125,6 @@ Legend: **done** = suite exists · **thin** = smoke only · **gap** = not covere
 | No open IntrinsicElements[string]:any | done |
 | Public surface no secret leak | done (Vue); Svelte parallel |
 | @ts-expect-error unused fails | done (type-neg + slots) |
-| Required matrix ID set | done (all 73 cases required; exact loaded-suite attestation) |
+| Required matrix ID set | done (all tree-discovered cases required; exact loaded-suite attestation) |
 
 When adding a case: write the **failing** diagnostic / expect-error fixture first, then wire `PRODUCT_GAP` ISSUE ids — do not weaken to name-only hovers.

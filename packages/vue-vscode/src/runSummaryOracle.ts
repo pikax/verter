@@ -28,6 +28,7 @@ export interface RunSummary {
   /** Detailed failure records (id + message); required for triage when failures > 0. */
   failedTests?: Array<{ id?: string; err?: string; stack?: string }>;
   fixture?: string;
+  typeProvider?: string;
   loadedFiles?: string[];
 }
 
@@ -65,6 +66,8 @@ export function clearRunArtifacts(logFile: string): void {
 export interface EnforceRunSummaryOptions {
   /** Fixture identity expected from the extension-host process. */
   expectedFixture?: string;
+  /** Provider route expected from the extension-host process. */
+  expectedTypeProvider?: string;
   /**
    * The cross-process flush-lag poll window in ms (the summary is written as the runner's
    * LAST act, so it can be briefly invisible right after `runTests()` resolves). Default
@@ -127,9 +130,18 @@ export async function enforceRunSummary(
   if ((summary.executed ?? 0) === 0) {
     throw new Error(`${label}: run executed 0 tests (vacuous pass refused)`);
   }
+  const pending = summary.pendingTestIds ?? [];
+  if (pending.length > 0) {
+    throw new Error(`${label}: pending test ID(s) in required run: ${pending.join(", ")}`);
+  }
   if (opts.expectedFixture && summary.fixture !== opts.expectedFixture) {
     throw new Error(
       `${label}: run summary fixture mismatch; expected ${opts.expectedFixture}, got ${String(summary.fixture)}`,
+    );
+  }
+  if (opts.expectedTypeProvider && summary.typeProvider !== opts.expectedTypeProvider) {
+    throw new Error(
+      `${label}: provider route mismatch; expected ${opts.expectedTypeProvider}, got ${String(summary.typeProvider)}`,
     );
   }
   if (opts.requiredLoadedFiles) {
@@ -156,10 +168,6 @@ export async function enforceRunSummary(
       throw new Error(`${label}: required capability manifest itself contains duplicate IDs`);
     }
     const passed = summary.passedTestIds ?? [];
-    const pending = summary.pendingTestIds ?? [];
-    if (pending.length > 0) {
-      throw new Error(`${label}: pending test ID(s) in required run: ${pending.join(", ")}`);
-    }
     const counts = new Map<string, number>();
     for (const id of passed) counts.set(id, (counts.get(id) ?? 0) + 1);
     const duplicates = [...counts]

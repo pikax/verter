@@ -10,8 +10,11 @@ import {
   getAppVuePath,
   TYPE_PROVIDER,
   FIXTURE_NAME,
+  readTestLog,
 } from "../helpers";
 import { suiteAllowedForFixture } from "../lib/fixtureSuiteMap";
+import { assertSharedTsgoServedWithoutFallback } from "../../src/e2eProviderAttestation";
+import { assertNotVacuousPassLog } from "../lib/vacuousPass";
 
 /** Recursively find the authored test sources under a directory. */
 function findTestSources(dir: string): string[] {
@@ -47,7 +50,7 @@ function discoverCompiledTests(compiledRoot: string): string[] {
       compiledSha256?: string;
     }>;
   };
-  if (manifest.version !== 2 || !Array.isArray(manifest.entries)) {
+  if (manifest.version !== 4 || !Array.isArray(manifest.entries)) {
     throw new Error(`E2E build manifest has an unsupported shape: ${manifestPath}`);
   }
   const packageRoot = path.resolve(compiledRoot, "../../..");
@@ -154,6 +157,11 @@ export async function run(): Promise<void> {
         throw err;
       }
     },
+    afterAll() {
+      if (TYPE_PROVIDER === "shared-tsgo") {
+        assertSharedTsgoServedWithoutFallback(readTestLog());
+      }
+    },
   });
 
   return new Promise((resolve, reject) => {
@@ -161,13 +169,21 @@ export async function run(): Promise<void> {
     const pendingTestIds: string[] = [];
     const failedTests: Array<{ id: string; err: string; stack?: string }> = [];
 
+    const originalConsoleLog = console.log;
+    console.log = (...args: unknown[]) => {
+      assertNotVacuousPassLog(args.map(String).join(" "));
+      originalConsoleLog(...args);
+    };
+
     const runner = mocha.run((failures: number) => {
+      console.log = originalConsoleLog;
       getTimer().flush();
 
       const stats = runner.stats ?? { passes: 0, failures: 0, pending: 0, tests: 0 };
       const executed = (stats.passes ?? 0) + (stats.failures ?? 0) + (stats.pending ?? 0);
       writeRunSummary({
         fixture: FIXTURE_NAME,
+        typeProvider: TYPE_PROVIDER ?? null,
         onlyPattern: onlyPattern ?? null,
         loadedFiles: files.map((f) => path.relative(testsRoot, f).replace(/\\/g, "/")),
         passes: stats.passes ?? 0,

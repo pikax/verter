@@ -653,6 +653,8 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.vscode == 'true' || needs.detect-changes.outputs.editor_lsp == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.e2e-matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -675,6 +677,10 @@ jobs:
         run: pnpm --filter verter-vscode test:e2e:lib:unit
       - name: Prepare VS Code E2E artifacts
         run: pnpm --filter verter-vscode prepare:e2e
+      - name: Derive VS Code E2E route matrix
+        id: e2e-matrix
+        shell: bash
+        run: echo "matrix=$(node packages/vue-vscode/out-test/e2e/printCiMatrix.js)" >> "$GITHUB_OUTPUT"
       - name: Upload editor integration binaries
         uses: actions/upload-artifact@v6
         with:
@@ -741,52 +747,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        fixture:
-          - single-project
-          - barrel-exports
-          - path-aliases
-          - monorepo
-          - tsconfig-extends
-          - tsconfig-references
-          - composite-paths
-          - no-config
-          - single-file
-          - vue-contract
-          - svelte-contract
-          - vue-parity
-          - svelte-parity
-          - mixed-parity
-          - multi-root-parity
-          - ecosystem-parity
-        type_provider:
-          - tsserver
-          - tsgo
-          - shared-tsgo
-        exclude:
-          - fixture: single-project
-            type_provider: shared-tsgo
-          - fixture: barrel-exports
-            type_provider: shared-tsgo
-          - fixture: path-aliases
-            type_provider: shared-tsgo
-          - fixture: monorepo
-            type_provider: shared-tsgo
-          - fixture: tsconfig-extends
-            type_provider: shared-tsgo
-          - fixture: tsconfig-references
-            type_provider: shared-tsgo
-          - fixture: composite-paths
-            type_provider: shared-tsgo
-          - fixture: no-config
-            type_provider: shared-tsgo
-          - fixture: single-file
-            type_provider: shared-tsgo
-        include:
-          - fixture: editor-owned-project
-            type_provider: tsserver
-          - fixture: editor-owned-project
-            type_provider: shared-tsgo
+      matrix: ${{ fromJSON(needs.build-vscode-e2e.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4

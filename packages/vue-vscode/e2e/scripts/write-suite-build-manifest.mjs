@@ -12,6 +12,9 @@ const require = createRequire(import.meta.url);
 const { buildParityTestInventory } = require(
   join(packageRoot, "out-test", "e2e", "lib", "parityTestInventory.js"),
 );
+const ACCEPTED_SUITE_COUNT = 72;
+const ACCEPTED_PARITY_LITERAL_COUNT = 239;
+const ACCEPTED_MATRIX_CASE_COUNT = 73;
 
 function discover(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -27,6 +30,11 @@ function sha256(file) {
 
 const sources = discover(sourceRoot).sort();
 if (sources.length === 0) throw new Error(`no authored E2E suites found under ${sourceRoot}`);
+if (sources.length !== ACCEPTED_SUITE_COUNT) {
+  throw new Error(
+    `accepted E2E suite inventory mismatch: expected ${ACCEPTED_SUITE_COUNT}, got ${sources.length}`,
+  );
+}
 
 const entries = sources.map((source) => {
   const sourceRelative = relative(packageRoot, source).replace(/\\/g, "/");
@@ -48,12 +56,15 @@ const parity = buildParityTestInventory({
   suiteRoot: join(sourceRoot, "parity"),
   matrixCasesFile: join(packageRoot, "e2e", "lib", "matrixCases.ts"),
 });
-if (parity.literalRegistrationCount !== 223 || parity.matrixCaseCount !== 73) {
+if (
+  parity.literalRegistrationCount !== ACCEPTED_PARITY_LITERAL_COUNT ||
+  parity.matrixCaseCount !== ACCEPTED_MATRIX_CASE_COUNT
+) {
   throw new Error(
-    `accepted parity inventory mismatch: expected 223 literal registrations + 73 matrix cases, got ${parity.literalRegistrationCount} + ${parity.matrixCaseCount}`,
+    `accepted parity inventory mismatch: expected ${ACCEPTED_PARITY_LITERAL_COUNT} literal registrations + ${ACCEPTED_MATRIX_CASE_COUNT} matrix cases, got ${parity.literalRegistrationCount} + ${parity.matrixCaseCount}`,
   );
 }
-writeFileSync(output, `${JSON.stringify({ version: 2, entries, parity }, null, 2)}\n`, "utf8");
+writeFileSync(output, `${JSON.stringify({ version: 4, entries, parity }, null, 2)}\n`, "utf8");
 console.log(
   `attested ${entries.length} E2E suite files, ${parity.literalRegistrationCount} parity registrations, and ${parity.matrixCaseCount} matrix cases in ${output}`,
 );

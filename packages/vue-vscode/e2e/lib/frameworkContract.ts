@@ -2,6 +2,8 @@ import { strict as assert } from "node:assert";
 import * as path from "node:path";
 import * as vscode from "vscode";
 
+import { assertSafeComponentHoverCarrier } from "./componentHoverContract";
+
 import { ensureTypeProviderSynced, sleep, waitForDiagnosticsSettled } from "../helpers";
 import type {
   ContractAnchor,
@@ -362,9 +364,7 @@ async function assertTypedComponentHover(
   for (const needle of requiredSurface) {
     assert.ok(text.includes(needle), `component hover missing ${needle}: ${text}`);
   }
-  assert.ok(!/\bany\b/.test(text), `component hover exposed an unsafe any carrier: ${text}`);
-  assert.ok(!/__Verter\w*/.test(text), `component hover leaked generated symbols: ${text}`);
-  assert.ok(!/\bunknown\b/.test(text), `component hover lost its concrete prop surface: ${text}`);
+  assertSafeComponentHoverCarrier(text);
 }
 
 async function assertCtrlClick(local: LocalCarrierCase): Promise<void> {
