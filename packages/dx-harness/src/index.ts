@@ -189,6 +189,11 @@ export {
   type StartupLspClient,
 } from "./core/startupGate.js";
 
+export {
+  RawEditorNeutralLspDriver,
+  type RawEditorNeutralLspDriverOptions,
+} from "./editor-neutral/rawLspDriver.js";
+
 // The authored scenario model + trust-boundary validator. The sub-barrel is
 // curated; re-exported wholesale so external consumers reach the scenario surface
 // without a deep import.

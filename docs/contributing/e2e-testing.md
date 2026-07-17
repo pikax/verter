@@ -1,6 +1,8 @@
-# VS Code Extension E2E Testing
+# Editor Integration E2E Testing
 
-This guide covers how to run and write E2E tests for the Verter VS Code extension.
+This guide covers the editor-neutral LSP contract and the real VS Code extension E2E suites. Keep
+the two layers distinct: standard LSP behavior belongs in the reusable contract, while extension
+activation and VS Code command wiring belong in the VS Code suites.
 
 ## Prerequisites
 
@@ -11,6 +13,37 @@ This guide covers how to run and write E2E tests for the Verter VS Code extensio
    - `@types/mocha` + `@types/chai` (v4) + `@types/node` — TypeScript types
 
 > **Note**: chai v4 is required because tests compile to CommonJS (`tsconfig.test.json`). chai v5 is ESM-only and cannot be `require()`'d.
+
+## Editor-neutral LSP contract
+
+Run the complete raw-stdio contract from the repository root:
+
+```bash
+pnpm test:lsp:neutral
+```
+
+The command builds the real `verter-lsp` and `verter-relay-shim` binaries, the TypeScript provider
+plugin, and then executes one immutable Vue/Svelte, JavaScript/TypeScript fixture against
+`tsserver`, managed `tsgo`, and real relay-backed `shared-tsgo`.
+
+The inventory is typed and fail-closed:
+
+- 41 standard-LSP cases cover diagnostics (including the absence of TS7026), hover, definition,
+  completion, rename across script and markup, direct SFC imports, and two-hop barrel imports.
+- One Verter custom-protocol case attests the selected provider route separately from standard LSP.
+- One provider-topology case applies only to `shared-tsgo`; it requires a live editor-owned relay
+  and forbids activation of a managed fallback provider.
+- The three routes produce exactly 127 required executions. A missing route, startup failure, empty
+  response, skipped/N/A case, or incomplete execution count fails the run.
+
+The fixture intentionally has no configured `jsxImportSource`. Public Svelte hovers must expose the
+Svelte 5 `Component` contract and must not leak generated carrier types such as
+`__VerterPublicInstance`. The runner writes a JSON receipt to `VERTER_EDITOR_NEUTRAL_RECEIPT`, or
+to the operating-system temporary directory when that variable is absent.
+
+The shared contract and fixture live under `packages/lsp-test-client`; the real-process driver and
+gate live under `packages/dx-harness`. Editor clients can implement the same narrow driver interface
+for their own smoke suites without reclassifying Verter notifications as standard LSP.
 
 ## Running Tests
 
@@ -23,7 +56,9 @@ E2E_FIXTURE=single-project E2E_TYPE_PROVIDER=tsserver pnpm --filter verter-vscod
 
 `pnpm --filter verter-vscode test:e2e` now prepares the Rust binary, extension bundle, and compiled E2E tests before launching VS Code. Use `pnpm --filter verter-vscode test:e2e:run` only when artifacts are already prepared, such as in CI.
 
-The `E2E_FIXTURE` environment variable selects which test workspace to open. `E2E_TYPE_PROVIDER` selects the provider under test (`tsserver` or `tsgo`). Available fixtures:
+The `E2E_FIXTURE` environment variable selects which test workspace to open. `E2E_TYPE_PROVIDER`
+selects the provider under test (`tsserver`, `tsgo`, or, for relay-enabled fixtures,
+`shared-tsgo`). Available fixtures include:
 
 - `single-project` — Standard Vue project with tsconfig
 - `monorepo` — pnpm workspace with cross-package imports
@@ -33,9 +68,10 @@ The `E2E_FIXTURE` environment variable selects which test workspace to open. `E2
 - `no-config` — Bare folder, no configuration
 - `single-file` — Just one .vue file
 
-Every CI E2E run is fixture x provider, so provider-specific regressions are caught explicitly instead of relying on `auto` mode.
+Every CI E2E run is fixture x applicable provider, so provider-specific regressions are caught
+explicitly instead of relying on `auto` mode.
 
-### All fixtures and both providers
+### All fixtures and applicable providers
 
 ```bash
 pnpm run test:e2e
@@ -58,13 +94,18 @@ E2E_FIXTURE=no-config E2E_TYPE_PROVIDER=tsgo pnpm run test:e2e:single
 
 ## CI Integration
 
-The E2E tests run as part of the CI workflow on every push to `main` and every pull request (when `packages/vue-vscode/**` or `crates/**` files change). The CI job:
+The editor-neutral contract and VS Code E2E tests run as separate CI jobs on relevant changes. The
+neutral job builds the shared contract packages, downloads the same native/provider artifacts used
+by editor integration E2E, executes all three provider routes without a display server, and uploads
+the non-vacuity receipt.
+
+The VS Code job:
 
 1. Prepares the LSP binary, extension bundle, and compiled E2E tests once
 2. Downloads those artifacts into the E2E job
-3. Runs the fixture matrix against both `tsserver` and `tsgo` with `xvfb-run` (headless display)
+3. Runs the fixture matrix against each applicable provider with `xvfb-run` (headless display)
 
-See `.github/workflows/ci.yml` → `vscode-e2e` job.
+See `.github/workflows/ci.yml` jobs `editor-neutral-lsp` and `vscode-e2e`.
 
 ## Writing New Tests
 
