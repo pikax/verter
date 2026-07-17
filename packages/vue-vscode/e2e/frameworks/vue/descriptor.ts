@@ -49,7 +49,9 @@ export const vueContract: FrameworkContractDescriptor = {
   barrelConsumerPropUse: {
     file: "src/barrel-consumer.ts",
     token: "barrelProp",
-    occurrence: 0,
+    // Occurrence 0 lands inside the `barrelPropControl` identifier (substring
+    // match); the intended usage is the `["barrelProp"]` type-index access.
+    occurrence: 1,
   },
   barrelChildPropDeclaration: {
     file: "src/components/BarrelChild.vue",
