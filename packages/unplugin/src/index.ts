@@ -979,31 +979,78 @@ function createFrameworkFactory(
           });
 
           const scriptRequest = `${filename}?vue&type=script&lang.${mainLang}`;
-          // Build style imports. Prefer the compiler-parsed cache (accurate lang, scoped flag);
-          // fall back to a simple regex scan of the raw SFC source when compiler-sfc is absent.
+          // Build style imports. Prefer the compiler-parsed cache (accurate lang,
+          // scoped, module flags); fall back to a simple regex scan of the raw
+          // SFC source when compiler-sfc is absent.
+          //
+          // CSS modules match @vitejs/plugin-vue:
+          //   import styleN from "…?vue&type=style&index=N&lang.module.css"
+          //   const cssModules = { "$style": styleN }
+          //   export default _export_sfc(_sfc_main, [["__cssModules", cssModules]])
+          // Vite's CSS pipeline treats `lang.module.*` as CSS modules and
+          // default-exports the class-name map; Vue's instance proxy reads
+          // `$style` from `type.__cssModules`.
           const cachedStyles = styleBlockCache.get(filename);
-          const styleEntries: Array<{ lang: string }> =
-            cachedStyles ??
+          const styleEntries: Array<{ lang: string; module: boolean | string }> =
+            cachedStyles?.map((s) => ({ lang: s.lang, module: s.module })) ??
             (() => {
-              const entries: Array<{ lang: string }> = [];
+              const entries: Array<{ lang: string; module: boolean | string }> = [];
               const re = /<style\b([^>]*)>/gi;
               let m;
               while ((m = re.exec(code)) !== null) {
-                const langMatch = /\blang\s*=\s*["']([^"']+)["']/.exec(m[1]);
-                entries.push({ lang: langMatch?.[1] ?? "css" });
+                const attrs = m[1];
+                const langMatch = /\blang\s*=\s*["']([^"']+)["']/.exec(attrs);
+                let module: boolean | string = false;
+                const moduleNamed = /\bmodule\s*=\s*["']([^"']+)["']/.exec(attrs);
+                if (moduleNamed) {
+                  module = moduleNamed[1];
+                } else if (/\bmodule\b/.test(attrs)) {
+                  module = true;
+                }
+                entries.push({ lang: langMatch?.[1] ?? "css", module });
               }
               return entries;
             })();
-          const styleImports = styleEntries.map(
-            (entry, i) =>
-              `import "${filename}?vue&type=style&index=${i}&lang.${entry.lang ?? "css"}"`,
-          );
-          const mainModule = [
-            `import _sfc_main from "${scriptRequest}"`,
-            ...styleImports,
-            `export * from "${scriptRequest}"`,
-            `export default _sfc_main`,
-          ].join("\n");
+
+          const styleLines: string[] = [];
+          const cssModulesMap: Record<string, string> = {};
+          for (let i = 0; i < styleEntries.length; i++) {
+            const entry = styleEntries[i];
+            const lang = entry.lang || "css";
+            const baseRequest = `${filename}?vue&type=style&index=${i}&lang.${lang}`;
+            if (entry.module) {
+              // plugin-vue: rewrite `lang.css` → `lang.module.css` so Vite's
+              // CSS-modules pipeline returns a class map as the default export.
+              const moduleRequest = baseRequest.replace(/\.([A-Za-z0-9]+)$/, ".module.$1");
+              const styleVar = `style${i}`;
+              const exposedName = typeof entry.module === "string" ? entry.module : "$style";
+              styleLines.push(`import ${styleVar} from ${JSON.stringify(moduleRequest)}`);
+              cssModulesMap[exposedName] = styleVar;
+            } else {
+              styleLines.push(`import ${JSON.stringify(baseRequest)}`);
+            }
+          }
+
+          const hasCssModules = Object.keys(cssModulesMap).length > 0;
+          const mainLines = [
+            `import _sfc_main from ${JSON.stringify(scriptRequest)}`,
+            ...styleLines,
+          ];
+          if (hasCssModules) {
+            mainLines.push(`import _export_sfc from ${JSON.stringify(EXPORT_HELPER_ID)}`);
+            const mappingBody = Object.entries(cssModulesMap)
+              .map(([key, value]) => `  ${JSON.stringify(key)}: ${value}`)
+              .join(",\n");
+            mainLines.push(`const cssModules = {\n${mappingBody}\n}`);
+            mainLines.push(`export * from ${JSON.stringify(scriptRequest)}`);
+            mainLines.push(
+              `export default /*@__PURE__*/_export_sfc(_sfc_main, [["__cssModules", cssModules]])`,
+            );
+          } else {
+            mainLines.push(`export * from ${JSON.stringify(scriptRequest)}`);
+            mainLines.push(`export default _sfc_main`);
+          }
+          const mainModule = mainLines.join("\n");
 
           return {
             code: mainModule,
