@@ -1135,3 +1135,153 @@ fn stored_macro_payload_locator_anchors_absolutize_to_the_producing_canonical() 
         "the hydrated body is the authored `{{ name: string }}` annotation"
     );
 }
+
+// ── Test: Svelte api carrier source map ─────────────────────────────────
+
+/// Byte offset → (0-based line, byte column) over ASCII test sources, the
+/// same byte-orientation the carrier map builder uses.
+fn byte_line_col(text: &str, offset: usize) -> (u32, u32) {
+    let mut line = 0u32;
+    let mut col = 0u32;
+    for (index, ch) in text.char_indices() {
+        if index == offset {
+            return (line, col);
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    assert_eq!(offset, text.len(), "offset must be inside the text");
+    (line, col)
+}
+
+#[test]
+fn svelte_public_api_source_map_links_prop_names_to_authored_annotation() {
+    // The `.svelte.verter.ts` API carrier resolves a consumer's prop
+    // go-to-definition through its props object; the published source map is
+    // the ONLY way that response remaps back into the authored component
+    // (the store/plugin fail closed without it). The prop NAME token in the
+    // generated props object must map to the AUTHORED `$props()` type-
+    // annotation member — NOT the destructured binding (occurrence 0).
+    let host = host();
+    let source = "<script lang=\"ts\">\n  let { contractProp }: { contractProp: string } = $props();\n</script>\n\n<strong>{contractProp}</strong>\n";
+    upsert_svelte(&host, "/DirectChild.svelte", source);
+
+    let api = host
+        .get_public_api("/DirectChild.svelte")
+        .expect("a `.svelte` with props projects a public API");
+    let code = api.code.as_ref();
+    let map_json = api
+        .source_map
+        .as_deref()
+        .expect("the svelte public-API carrier carries a source map");
+    let map = sourcemap::SourceMap::from_slice(map_json.as_bytes())
+        .expect("the published map parses as V3 JSON");
+
+    // The map names the authored component as its one source and embeds the
+    // exact source bytes the mappings were produced against (the plugin's
+    // `sourcesContent` fallback authority).
+    assert_eq!(
+        map.get_source(0),
+        Some("/DirectChild.svelte"),
+        "the map source is the authored component canonical"
+    );
+    assert_eq!(
+        map.get_source_contents(0),
+        Some(source),
+        "the map embeds the exact authored source bytes"
+    );
+
+    let generated_offset = code
+        .find("contractProp")
+        .expect("the shim renders the prop name in the props object");
+    // Occurrence 1 in the SOURCE is the annotation member token; occurrence 0
+    // is the destructured binding, which must NOT be the mapping target.
+    let binding_offset = source.find("contractProp").expect("destructured binding");
+    let authored_offset = source
+        .find(": { contractProp: string }")
+        .map(|at| at + ": { ".len())
+        .expect("the authored annotation member");
+    assert_ne!(binding_offset, authored_offset);
+
+    let (dst_line, dst_col) = byte_line_col(code, generated_offset);
+    let (src_line, src_col) = byte_line_col(source, authored_offset);
+    let token = map
+        .tokens()
+        .find(|token| token.get_dst_line() == dst_line && token.get_dst_col() == dst_col)
+        .unwrap_or_else(|| {
+            panic!(
+                "a mapping segment starts at the generated prop-name token \
+                 ({dst_line}:{dst_col}); tokens: {:?}",
+                map.tokens()
+                    .map(|t| (
+                        t.get_dst_line(),
+                        t.get_dst_col(),
+                        t.get_src_line(),
+                        t.get_src_col()
+                    ))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        (token.get_src_line(), token.get_src_col()),
+        (src_line, src_col),
+        "the prop-name token maps to the AUTHORED annotation member, not the binding"
+    );
+}
+
+#[test]
+fn svelte_public_api_source_map_covers_every_local_interface_prop_member() {
+    // The `interface Props { … }; let { … }: Props = $props()` spelling
+    // renders the RESOLVED props object; every prop name token maps to its
+    // authored interface member (a Local origin), in order.
+    let host = host();
+    let source = "<script lang=\"ts\">\ninterface Props { contractProp: string; optionalCount?: number }\nlet { contractProp, optionalCount = 0 }: Props = $props();\n</script>\n<p>{contractProp}: {optionalCount}</p>\n";
+    upsert_svelte(&host, "/EditorContract.svelte", source);
+
+    let api = host
+        .get_public_api("/EditorContract.svelte")
+        .expect("a `.svelte` with props projects a public API");
+    let code = api.code.as_ref();
+    let map_json = api
+        .source_map
+        .as_deref()
+        .expect("the svelte public-API carrier carries a source map");
+    let map = sourcemap::SourceMap::from_slice(map_json.as_bytes())
+        .expect("the published map parses as V3 JSON");
+
+    let props_object = "{ contractProp: string; optionalCount?: number }";
+    let object_offset = code
+        .find(props_object)
+        .unwrap_or_else(|| panic!("the shim renders the resolved props object:\n{code}"));
+    let interface_offset = source
+        .find("interface Props { ")
+        .map(|at| at + "interface Props { ".len())
+        .expect("the authored interface members");
+    for (name, member_at) in [
+        ("contractProp", interface_offset),
+        (
+            "optionalCount",
+            interface_offset + "contractProp: string; ".len(),
+        ),
+    ] {
+        let generated_offset = object_offset
+            + code[object_offset..object_offset + props_object.len()]
+                .find(name)
+                .expect("the prop name is in the props object");
+        let (dst_line, dst_col) = byte_line_col(code, generated_offset);
+        let (src_line, src_col) = byte_line_col(source, member_at);
+        let token = map
+            .tokens()
+            .find(|token| token.get_dst_line() == dst_line && token.get_dst_col() == dst_col)
+            .unwrap_or_else(|| panic!("a mapping segment starts at the generated `{name}` token"));
+        assert_eq!(
+            (token.get_src_line(), token.get_src_col()),
+            (src_line, src_col),
+            "`{name}` maps to its authored interface member"
+        );
+    }
+}

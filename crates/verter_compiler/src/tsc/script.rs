@@ -181,10 +181,18 @@ struct LocalTypeDecl<'a> {
     text: &'a str,
 }
 
+/// One generated-code byte offset mapped to its authored source byte span.
+///
+/// Shared with framework declaration carriers rendered outside this module
+/// (the Svelte public-API projector maps its generated prop-name tokens back
+/// to the authored `$props()` annotation members through the same
+/// [`build_tsc_source_map`] V3 JSON the store/plugin consume for `.vue`).
 #[derive(Clone, Copy)]
-struct GeneratedMapping {
-    generated_offset: usize,
-    source_span: Span,
+pub struct GeneratedMapping {
+    /// Byte offset of the mapped token's start in the generated code.
+    pub generated_offset: usize,
+    /// The authored byte span the token maps to (only `start` is encoded).
+    pub source_span: Span,
 }
 
 #[derive(Default)]
@@ -3501,7 +3509,12 @@ fn minimal_source_map() -> String {
     r#"{"version":3,"file":"","sourceRoot":"","sources":[],"names":[],"mappings":""}"#.to_string()
 }
 
-fn build_tsc_source_map(
+/// Build the V3 source-map JSON (oxc_sourcemap) for a generated TypeScript
+/// carrier against its authored SFC source: one source (the component file,
+/// content embedded), one token per mapping. This is the exact JSON shape the
+/// carrier store publishes and the editor plugin consumes for `.vue` /
+/// `.svelte` carriers alike.
+pub fn build_tsc_source_map(
     code: &str,
     sfc_source: &str,
     filename: Option<&str>,
