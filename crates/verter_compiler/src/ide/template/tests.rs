@@ -227,6 +227,74 @@ fn jsx_element_body_facts(code: &str) -> JsxElementBodyFacts {
     scanner.facts
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct JsxAttributeFact {
+    name: String,
+    start: u32,
+}
+
+fn jsx_attributes_for_element(code: &str, wanted_element: &str) -> Vec<JsxAttributeFact> {
+    use oxc_ast::ast::{JSXAttributeItem, JSXAttributeName, JSXElement, JSXElementName};
+    use oxc_ast_visit::{walk, Visit};
+
+    struct Scanner<'wanted> {
+        wanted_element: &'wanted str,
+        attributes: Vec<JsxAttributeFact>,
+    }
+
+    impl<'a> Visit<'a> for Scanner<'_> {
+        fn visit_jsx_element(&mut self, element: &JSXElement<'a>) {
+            let is_wanted = match &element.opening_element.name {
+                JSXElementName::Identifier(name) => name.name == self.wanted_element,
+                JSXElementName::IdentifierReference(name) => name.name == self.wanted_element,
+                _ => false,
+            };
+            if is_wanted {
+                self.attributes
+                    .extend(
+                        element
+                            .opening_element
+                            .attributes
+                            .iter()
+                            .filter_map(|attribute| match attribute {
+                                JSXAttributeItem::Attribute(attribute) => match &attribute.name {
+                                    JSXAttributeName::Identifier(name) => Some(JsxAttributeFact {
+                                        name: name.name.to_string(),
+                                        start: name.span.start,
+                                    }),
+                                    JSXAttributeName::NamespacedName(name) => {
+                                        Some(JsxAttributeFact {
+                                            name: format!(
+                                                "{}:{}",
+                                                name.namespace.name, name.name.name
+                                            ),
+                                            start: name.span.start,
+                                        })
+                                    }
+                                },
+                                JSXAttributeItem::SpreadAttribute(_) => None,
+                            }),
+                    );
+            }
+            walk::walk_jsx_element(self, element);
+        }
+    }
+
+    let alloc = Allocator::default();
+    let parsed = oxc_parser::Parser::new(&alloc, code, oxc_span::SourceType::tsx()).parse();
+    assert!(
+        !parsed.panicked && parsed.errors.is_empty(),
+        "generated template must be valid TSX: {:?}\n{code}",
+        parsed.errors
+    );
+    let mut scanner = Scanner {
+        wanted_element,
+        attributes: Vec::new(),
+    };
+    scanner.visit_program(&parsed.program);
+    scanner.attributes
+}
+
 #[test]
 fn vue_slot_bodies_are_fragment_siblings_not_jsx_element_children() {
     let result = gen_tsx_template_with_bindings(
@@ -484,6 +552,62 @@ fn comment_preserved() {
 fn self_closing_element() {
     let result = gen_tsx_template("<template><br/></template>");
     assert!(result.contains("<br/>"), "got: {}", result);
+}
+
+/// @ai-generated - Guards Vue component prop normalization without weakening native JSX attrs.
+///
+/// Mutation recipe: at the component-only normalization call site, replace the normalized
+/// name with the authored name. This test must fail while `basic_div` remains green; restore
+/// the call site, verify a clean worktree, then rerun both tests green.
+#[test]
+fn component_kebab_props_are_camelized_but_native_attributes_are_not() {
+    let source = r#"<template><DirectChild contract-prop="literal" :optional-flag="enabled"/><div aria-label="label" :data-test="enabled"/></template>"#;
+    let output = gen_tsx_template_with_bindings(
+        source,
+        &[
+            ("DirectChild", BindingType::SetupConst),
+            ("enabled", BindingType::SetupConst),
+        ],
+    );
+
+    assert_eq!(
+        jsx_attributes_for_element(&output, "DirectChild")
+            .into_iter()
+            .map(|attribute| attribute.name)
+            .collect::<Vec<_>>(),
+        vec!["contractProp", "optionalFlag"],
+        "Vue component props must use the public camel-case JSX contract: {output}"
+    );
+    assert_eq!(
+        jsx_attributes_for_element(&output, "div")
+            .into_iter()
+            .map(|attribute| attribute.name)
+            .collect::<Vec<_>>(),
+        vec!["aria-label", "data-test"],
+        "native DOM attributes retain their authored JSX spelling: {output}"
+    );
+
+    let mapped_source = r#"<template><DirectChild :contract-prop="enabled"/></template>"#;
+    let (mapped_output, tokens) = gen_tsx_template_with_map(
+        mapped_source,
+        &[
+            ("DirectChild", BindingType::SetupConst),
+            ("enabled", BindingType::SetupConst),
+        ],
+    );
+    let generated_prop = jsx_attributes_for_element(&mapped_output, "DirectChild")
+        .into_iter()
+        .find(|attribute| attribute.name == "contractProp")
+        .expect("normalized component prop must remain a parsed JSX attribute");
+    let authored_prop = mapped_source
+        .find("contract-prop")
+        .expect("fixture contains authored component prop") as u32;
+    assert!(
+        tokens.iter().any(|&(line, generated, original)| {
+            line == 0 && generated == generated_prop.start && original == authored_prop
+        }),
+        "normalized component prop must map to the authored kebab-name start; attr={generated_prop:?}, tokens={tokens:?}, output={mapped_output}"
+    );
 }
 
 #[test]

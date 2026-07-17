@@ -21,6 +21,7 @@ use crate::ide::{event_to_jsx_name, get_directive_name, TemplateComponentBinding
 use crate::template::code_gen::binding::BindingResolver;
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
+use crate::template::code_gen::vdom::props::camelize;
 use crate::template::oxc::types::{OxcParsedElement, OxcParsedProp};
 use crate::types::NodeProp;
 
@@ -172,6 +173,15 @@ pub fn process_element_props<'alloc>(
         }
 
         if !prop.is_directive {
+            if static_class_idx != Some(i) && static_style_idx != Some(i) {
+                normalize_component_prop_name(
+                    el.tag_type == TagType::Component,
+                    prop.start,
+                    prop.name_end,
+                    source,
+                    out,
+                );
+            }
             // Static class/style props that need merging: remove from output
             // (they'll be merged into the dynamic binding's normalizeClass/normalizeStyle)
             if static_class_idx == Some(i) {
@@ -244,7 +254,15 @@ pub fn process_element_props<'alloc>(
 
         match dir_name {
             "bind" => process_v_bind(
-                prop, oxc_prop, source, out, alloc, resolver, v_if_guard, is_jsx,
+                prop,
+                oxc_prop,
+                source,
+                out,
+                alloc,
+                resolver,
+                v_if_guard,
+                is_jsx,
+                el.tag_type == TagType::Component,
             ),
             "on" => {
                 // Check if this event name has been seen before (duplicate handler)
@@ -419,6 +437,7 @@ fn process_v_bind<'alloc>(
     resolver: &BindingResolver<'alloc>,
     v_if_guard: Option<&str>,
     is_jsx: bool,
+    is_component: bool,
 ) {
     let has_arg = prop.arg_start.is_some();
     let raw_name = &source[prop.start as usize..prop.name_end as usize];
@@ -430,6 +449,7 @@ fn process_v_bind<'alloc>(
             if key.is_empty() {
                 return;
             }
+            let jsx_key = normalized_component_prop_name(is_component, key);
             if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
                 // `bar` is preserved in place; `key={` / `}` are unmapped boundaries.
                 emit_in_place_jsx_value(
@@ -440,7 +460,7 @@ fn process_v_bind<'alloc>(
                     resolver,
                     vs,
                     ve,
-                    &format!("{}={{", key),
+                    &format!("{}={{", jsx_key),
                     "}",
                 );
             } else {
@@ -460,6 +480,9 @@ fn process_v_bind<'alloc>(
                 // modifiers) so only the key `foo` survives in place; the value is
                 // inserted right after it.
                 out.overwrite(prop.start, key_start, "");
+                if jsx_key != key {
+                    out.overwrite(key_start, key_end, jsx_key.as_ref());
+                }
                 out.overwrite(key_end, prop_end, "");
                 let at = SourceByteOffset(key_end);
                 emit_op(
@@ -592,6 +615,7 @@ fn process_v_bind<'alloc>(
     }
 
     // Static key: :prop="expr" → prop={expr}
+    normalize_component_prop_name(is_component, arg_start, arg_end, source, out);
     let prop_end = get_prop_end(prop);
 
     // CSSProperties satisfies annotation for :style with object literal (#31).
@@ -959,23 +983,36 @@ fn compute_function_guard_injection(
 }
 
 pub(super) fn kebab_to_camel_case(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut upper_next = false;
-    for ch in input.chars() {
-        if ch == '-' {
-            upper_next = true;
-            continue;
-        }
-        if upper_next {
-            for uc in ch.to_uppercase() {
-                out.push(uc);
-            }
-            upper_next = false;
-        } else {
-            out.push(ch);
-        }
+    camelize(input).into_owned()
+}
+
+/// Normalize an authored Vue component prop to the public TSX contract while
+/// retaining the original source span as the sourcemap anchor. Native elements
+/// and standard data/aria fallthrough attributes intentionally keep their
+/// authored spelling.
+fn normalize_component_prop_name(
+    is_component: bool,
+    start: u32,
+    end: u32,
+    source: &str,
+    out: &mut CodeGenOutput<'_>,
+) {
+    if !is_component || start >= end {
+        return;
     }
-    out
+    let authored = &source[start as usize..end as usize];
+    let normalized = normalized_component_prop_name(is_component, authored);
+    if normalized != authored {
+        out.overwrite(start, end, normalized.as_ref());
+    }
+}
+
+fn normalized_component_prop_name(is_component: bool, authored: &str) -> std::borrow::Cow<'_, str> {
+    if !is_component || authored.starts_with("data-") || authored.starts_with("aria-") {
+        std::borrow::Cow::Borrowed(authored)
+    } else {
+        camelize(authored)
+    }
 }
 
 #[cfg(test)]
