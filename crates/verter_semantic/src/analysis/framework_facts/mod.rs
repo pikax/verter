@@ -217,6 +217,25 @@ pub struct ResolvedValidationCx<'a> {
     pub capability_on: &'a dyn Fn(&str) -> bool,
 }
 
+/// Parser-owned, non-script inputs to a framework's shared mode classifier.
+///
+/// Most files use [`None`]. A carrier parser that owns an explicit framework
+/// option or a template-side mode fact supplies it here so the provider can
+/// combine those facts with the already-parsed script through the shared mode
+/// authority. The enum is closed deliberately: a new framework mode contract
+/// must add a typed arm rather than smuggling unstructured metadata through
+/// the capture boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameworkScriptModeHint {
+    /// Svelte's non-script inputs. `forced_runes` is the explicit
+    /// `<svelte:options runes={...}>` override; `template_uses_host_rune` is
+    /// the scope-resolved template `$host` inference fact.
+    Svelte {
+        forced_runes: Option<bool>,
+        template_uses_host_rune: bool,
+    },
+}
+
 /// The syntax-only capture context handed to a [`ScriptFactProvider::capture`].
 ///
 /// Carries ONLY the parse-domain inputs (source text + OXC program + the
@@ -235,6 +254,9 @@ pub struct ScriptCandidateCx<'a> {
     /// no module split is available (every top-level export is an instance
     /// export — the conservative default).
     pub module_script_region: Option<(u32, u32)>,
+    /// Parser-owned explicit framework mode, when the carrier declared one.
+    /// Script-inferred mode uses `None` and remains the provider's job.
+    pub framework_mode_hint: Option<FrameworkScriptModeHint>,
 }
 
 /// One provider's syntax candidates for one file.
@@ -364,6 +386,29 @@ pub fn capture_script_candidates_with_module_region(
     program: &Program<'_>,
     module_script_region: Option<(u32, u32)>,
 ) -> FrameworkScriptCandidateSet {
+    capture_script_candidates_with_context(
+        active_providers,
+        source,
+        program,
+        module_script_region,
+        None,
+    )
+}
+
+/// As [`capture_script_candidates_with_module_region`], with an optional
+/// parser-owned framework mode override.
+///
+/// This is the carrier-aware entry used by the session. Keeping the override
+/// beside the parsed program makes explicit mode part of the parse-domain
+/// capture input while preserving the provider-less zero-work path.
+#[must_use]
+pub fn capture_script_candidates_with_context(
+    active_providers: &[Arc<dyn ScriptFactProvider>],
+    source: &str,
+    program: &Program<'_>,
+    module_script_region: Option<(u32, u32)>,
+    framework_mode_hint: Option<FrameworkScriptModeHint>,
+) -> FrameworkScriptCandidateSet {
     if active_providers.is_empty() {
         return FrameworkScriptCandidateSet::default();
     }
@@ -373,6 +418,7 @@ pub fn capture_script_candidates_with_module_region(
             source,
             program,
             module_script_region,
+            framework_mode_hint,
         };
         if let Some(candidates) = provider.capture(cx) {
             per_provider.push(candidates);

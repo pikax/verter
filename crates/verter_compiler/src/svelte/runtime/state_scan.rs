@@ -19,7 +19,6 @@ use super::expr::{
     is_derived_callee, is_props_callee, state_rune_call, BindingInfo, BindingRuntimeKind,
     BindingTable, ProxyInit, ScopeGraph, ScopeId, ScriptUseCollector, StateRuneKind,
 };
-use super::rune_scan::ScopeAwareRuneDetector;
 
 /// Collect the top-level `$state` / `$state.raw` binding declarations of an
 /// instance-script program, returning `(name, declared, proxiable)` rows. Only
@@ -336,9 +335,9 @@ pub(super) fn collect_proxy_inits(program: &Program<'_>) -> FxHashMap<String, Pr
 /// SHADOWED by a local — most importantly a function PARAMETER named `$state`
 /// (`function f($state){ return $state }`) — does NOT count, so such a component
 /// stays in LEGACY mode. A rune name inside a string / comment is not an
-/// identifier reference, so it never mis-classifies. The detection delegates to the
-/// shared [`ScopeAwareRuneDetector`] in [`super::rune_scan`], which reuses the same
-/// lexical-scope `ShadowStack` model the other syntax-side collectors use.
+/// identifier reference, so it never mis-classifies. The detection delegates to
+/// `verter_parser`'s shared component-mode authority, which is also consumed by
+/// semantic script-fact capture and the IDE projection path.
 ///
 /// `store_exempt` is the rune-root ACCESSOR exemption set
 /// ([`rune_root_accessor_exemptions`](super::store_subscriptions::rune_root_accessor_exemptions)):
@@ -351,9 +350,7 @@ pub fn script_uses_runes(
     program: &Program<'_>,
     store_exempt: &rustc_hash::FxHashSet<String>,
 ) -> bool {
-    let mut detector = ScopeAwareRuneDetector::with_store_exemptions(store_exempt.clone());
-    detector.visit_program(program);
-    detector.used()
+    verter_parser::svelte_reactivity::script_uses_runes(program, store_exempt)
 }
 
 /// Whether the instance script contains a DEFINITIVELY-LEGACY top-level construct

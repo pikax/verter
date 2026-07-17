@@ -28,6 +28,14 @@ fn lowered(source: &str) -> LoweredFileParts {
     parse_and_lower_parts(source)
 }
 
+fn svelte_runes_statement(source: &str) -> crate::analysis::type_eval_build::LoweredStatementParts {
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    assert!(!parsed.panicked, "fixture must parse: {source}");
+    let statement = parsed.program.body.first().expect("one statement fixture");
+    crate::analysis::type_eval_build::lower_svelte_runes_statement_parts(statement, source)
+}
+
 // =============================================================================
 // Type alias extraction
 // =============================================================================
@@ -1181,11 +1189,11 @@ fn extracts_function_declaration() {
 }
 
 #[test]
-fn inferred_return_mints_no_authored_return_slot() {
+fn inferred_return_mints_semantic_replay_without_an_authored_span() {
     // `function inferred() { return "" }` has NO authored return annotation:
-    // the transient lowering still INFERS the return type, but the stored fact
-    // must NOT mint a `FunctionReturn` locator (there is no authored `TSType`
-    // position to address — a fabricated slot would deref to a wrong miss).
+    // the transient lowering still INFERS the return type and the stored fact
+    // keeps a content-free replay locator. Span recovery remains independent,
+    // so no authored return-type source site is fabricated.
     let source = r#"function inferred(name: string) { return name }"#;
     let parts = lowered(source);
     let sig = &parts.value_decl("inferred").expect("lowered").signatures[0];
@@ -1197,13 +1205,39 @@ fn inferred_return_mints_no_authored_return_slot() {
 
     let env = parse_and_build_env(source);
     let fact = &env.value_symbols["inferred"].primary().signatures[0];
-    assert!(
-        fact.return_ty.is_none(),
-        "no authored return annotation ⇒ no minted return slot"
+    let inferred = fact
+        .return_ty
+        .as_ref()
+        .expect("an inferred return keeps its semantic replay slot");
+    assert_eq!(
+        &*inferred.path,
+        &[
+            TypeBodyPathStep::ValueSignature { ordinal: 0 },
+            TypeBodyPathStep::FunctionReturn,
+        ]
     );
     // The authored parameter still mints its slot.
     assert_eq!(fact.parameters.len(), 1);
     assert!(fact.parameters[0].has_ts_annotation);
+}
+
+#[test]
+fn empty_implementation_infers_void_without_fabricating_an_authored_slot() {
+    let source = "export function focus() {}";
+    let parts = lowered(source);
+    let signature = &parts.value_decl("focus").expect("lowered focus").signatures[0];
+    assert_eq!(
+        signature.return_type,
+        Some(TypeExpr::Primitive(PrimitiveName::Void))
+    );
+    assert!(!signature.has_authored_return);
+
+    let env = parse_and_build_env(source);
+    let stored = &env.value_symbols["focus"].primary().signatures[0];
+    assert!(
+        stored.return_ty.is_some(),
+        "the inferred void result remains replayable through the semantic body locator"
+    );
 }
 
 #[test]
@@ -2132,6 +2166,75 @@ fn simple_call_expression_does_not_degrade_to_any() {
     assert!(
         decl.type_annotation.is_some(),
         "call expression should produce a type annotation"
+    );
+}
+
+#[test]
+fn svelte_runes_state_initializer_preserves_argument_type() {
+    let parts = svelte_runes_statement("let count = $state(0)");
+    let decl = parts
+        .value_decls
+        .iter()
+        .find(|decl| decl.name == "count")
+        .expect("lowered count");
+    assert_eq!(
+        decl.type_annotation,
+        Some(TypeExpr::Primitive(PrimitiveName::Number)),
+        "a mutable state binding is the widened type of its initial value"
+    );
+}
+
+#[test]
+fn svelte_runes_explicit_state_type_argument_is_authoritative() {
+    let parts = svelte_runes_statement("let item = $state<{ id: string }>({ id: 'x' })");
+    let decl = parts
+        .value_decls
+        .iter()
+        .find(|decl| decl.name == "item")
+        .expect("lowered item");
+    let TypeExpr::Object(object) = decl.type_annotation.as_ref().expect("inferred annotation")
+    else {
+        panic!(
+            "expected the explicit object type, got {:?}",
+            decl.type_annotation
+        );
+    };
+    let id = object
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "id" => Some(property),
+            _ => None,
+        })
+        .expect("id property");
+    assert_eq!(id.ty, TypeExpr::Primitive(PrimitiveName::String));
+}
+
+#[test]
+fn standard_lowering_does_not_reinterpret_a_user_function_named_state() {
+    let parts = lowered("declare function $state<T>(value: T): boolean; let value = $state(0)");
+    let decl = parts.value_decl("value").expect("lowered value");
+    assert!(
+        matches!(
+            decl.type_annotation,
+            Some(TypeExpr::Ref { ref name, .. }) if name.as_ref() == "ReturnType"
+        ),
+        "plain TypeScript retains ordinary call semantics: {:?}",
+        decl.type_annotation
+    );
+}
+
+#[test]
+fn svelte_runes_derived_by_uses_the_callback_return_type() {
+    let parts = svelte_runes_statement("let doubled = $derived.by(() => 2)");
+    let decl = parts
+        .value_decls
+        .iter()
+        .find(|decl| decl.name == "doubled")
+        .expect("lowered doubled");
+    assert_eq!(
+        decl.type_annotation,
+        Some(TypeExpr::Primitive(PrimitiveName::Number))
     );
 }
 

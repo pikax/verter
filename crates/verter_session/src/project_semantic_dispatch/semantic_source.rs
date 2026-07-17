@@ -291,8 +291,8 @@ impl ProjectSemanticDispatch<'_> {
     ///   the conservative interior fail-close; see
     ///   [`SourceRaiseContext::check_raised_unknown_materializing`]).
     ///
-    /// Genuinely ABSENT schema positions (an unannotated parameter, an
-    /// inferred return, an absent constraint/default) stay typed misses
+    /// Genuinely ABSENT schema positions (an unannotated parameter, a
+    /// deliberately slot-less signature return, an absent constraint/default) stay typed misses
     /// exactly as in the lenient raise and keep rendering the typed
     /// `Unknown` — the two are distinguished by the SCHEMA (present locator
     /// vs absent option), never a heuristic.

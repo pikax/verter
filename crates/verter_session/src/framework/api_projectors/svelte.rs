@@ -127,6 +127,8 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             .map(|ctx| ctx as &dyn crate::resolver_core::ResolverContext);
         let script_facts = resolver_ctx
             .and_then(|ctx| host.resolve_svelte_script_facts_with_ctx(ctx, resolved_canonical));
+        let resolved_exports =
+            resolver_ctx.and_then(|ctx| resolve_public_exports_text(host, ctx, resolved_canonical));
 
         // Collect the PRESERVED type-reference names (leaf refs in the props
         // fact + the dispatcher event-map fact + export member facts) so the
@@ -145,6 +147,9 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         if let Some(facts) = script_facts.as_ref() {
             referenced.extend(facts.props_type_references.iter().cloned());
             referenced.extend(facts.dispatcher_event_references.iter().cloned());
+        }
+        if let Some(exports) = resolved_exports.as_ref() {
+            referenced.extend(exports.type_references.iter().cloned());
         }
 
         let mut out = ShimBuilder::default();
@@ -215,7 +220,10 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
                     .chain(export_members.iter().map(|(name, _)| *name)),
             ),
         );
-        let exports_text = render_member_object(&export_members);
+        let exports_text = resolved_exports
+            .as_ref()
+            .map(|exports| exports.text.clone())
+            .unwrap_or_else(|| render_member_object(&export_members));
         if let Some(generics) = component_generics {
             let native = format!(
                 "import(\"svelte\").Component<{component_props_text}, {exports_text}, {bindings_text}>"
@@ -270,6 +278,11 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
 struct ResolvedPublicProps {
     text: String,
     props: Vec<ComponentPublicProp>,
+}
+
+struct ResolvedPublicExports {
+    text: String,
+    type_references: BTreeSet<String>,
 }
 
 /// Read the authored Svelte tooling `generics="..."` declaration from the
@@ -471,6 +484,62 @@ fn resolve_public_dispatcher_text(
     } else {
         Some(format!("{{ {} }}", fields.join("; ")))
     }
+}
+
+/// Resolve public instance value exports through the same typed Svelte surface
+/// executor that component-meta uses. Each field is rooted at the local value
+/// binding's `typeof`, so an alias export keeps the public key while deriving
+/// its type from the real local identity.
+fn resolve_public_exports_text(
+    host: &crate::VerterHost,
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    owner: &str,
+) -> Option<ResolvedPublicExports> {
+    use crate::typeinfo::framework_surface::results::NamedTypeMemberOutput;
+    use crate::typeinfo::framework_surface::SvelteSurfaceSource;
+
+    let outcome = crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface(
+        host,
+        ctx,
+        owner,
+        SvelteSurfaceSource::InstanceExports,
+    );
+    let expose = outcome.value()?.expose.as_ref()?;
+    let mut type_references = BTreeSet::new();
+    let fields = expose
+        .members
+        .iter()
+        .map(|member| {
+            type_references.extend(member.type_references.iter().cloned());
+            let name = render_property_name(&member.name);
+            let optional = if member.is_optional { "?" } else { "" };
+            let ty = member
+                .type_annotation
+                .clone()
+                .or_else(|| match member.value.as_ref() {
+                    Some(NamedTypeMemberOutput::Primitive(name)) => Some(name.as_str().to_string()),
+                    Some(NamedTypeMemberOutput::Literal(value)) => Some(match value {
+                        verter_type_expr::LiteralValue::String(value) => format!("{value:?}"),
+                        verter_type_expr::LiteralValue::Number(value) => value.to_string(),
+                        verter_type_expr::LiteralValue::BigInt(value) => value.clone(),
+                        verter_type_expr::LiteralValue::Boolean(value) => value.to_string(),
+                    }),
+                    Some(NamedTypeMemberOutput::EmptyObject) => Some("{}".to_string()),
+                    Some(NamedTypeMemberOutput::Ref { name }) => Some(name.to_string()),
+                    Some(NamedTypeMemberOutput::Opaque) | None => None,
+                })
+                .unwrap_or_else(|| "unknown".to_string());
+            format!("{name}{optional}: {ty}")
+        })
+        .collect::<Vec<_>>();
+    Some(ResolvedPublicExports {
+        text: if fields.is_empty() {
+            "{}".to_string()
+        } else {
+            format!("{{ {} }}", fields.join("; "))
+        },
+        type_references,
+    })
 }
 
 /// Use the AST-captured type spelling only when every local reference it names

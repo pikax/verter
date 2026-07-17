@@ -886,11 +886,15 @@ impl VerterHost {
             .and_then(crate::parse::module_script_region);
         let source_type =
             crate::parse::carrier_eval_source_type(framework_parse.map(|fp| fp.as_ref()));
+        let framework_mode_hint = framework_parse
+            .map(|fp| fp.as_ref())
+            .and_then(crate::parse::framework_script_mode_hint);
         let candidates = crate::parse::capture_synth_script_candidates(
             &active,
             canonical_id,
             eval_source,
             module_region,
+            framework_mode_hint,
             source_type,
         );
         let cx = crate::framework::synth::ComponentDefaultSynthCtx {

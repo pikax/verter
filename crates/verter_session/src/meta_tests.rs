@@ -27474,7 +27474,8 @@ fn component_meta_output_failed_interior_locator_fails_closed_per_source_family(
 }
 
 /// FIX-3 non-conflation control: a genuinely ABSENT schema position (an
-/// unannotated parameter, an inferred return — `ty: None` by SCHEMA) is NOT
+/// unannotated parameter, a deliberately slot-less signature return — `None`
+/// by SCHEMA) is NOT
 /// a failed dereference: the output SUCCEEDS and the position renders as
 /// typed `Unknown`, exactly as before. The absent-vs-failed split is the
 /// schema `Option`, never a heuristic over the materialized `TypeExpr`.
@@ -27509,7 +27510,7 @@ fn component_meta_output_genuinely_absent_positions_stay_typed_unknown_not_failu
                 }]
                 .into_boxed_slice(),
             ),
-            return_ty: None, // inferred return — genuinely absent
+            return_ty: None, // deliberately absent synthetic return slot
             has_implementation_body: false,
             spans_origin: verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(
                 SourceSynthetic,

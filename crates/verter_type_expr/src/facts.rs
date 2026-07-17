@@ -1287,7 +1287,11 @@ pub struct FunctionSignatureFact {
     pub type_parameters: Arc<[NarrowTypeParam]>,
     /// Ordered parameter facts.
     pub parameters: Arc<[FunctionParamFact]>,
-    /// The return type body locator (absent = inferred / void).
+    /// The return type body locator. Authored and inferred return types both
+    /// use this content-free path: the locator replays the retained declaration
+    /// lowering, while [`Self::spans_origin`] independently determines whether
+    /// an authored return-type source span exists. `None` therefore means the
+    /// signature has no recoverable return carrier, not merely "inferred".
     pub return_ty: Option<TypeBodySlot>,
     /// Overload-visibility fact: hide the trailing implementation signature.
     pub has_implementation_body: bool,

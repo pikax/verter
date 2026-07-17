@@ -226,6 +226,9 @@ pub(crate) fn capture_synth_script_candidates(
     canonical_id: &str,
     eval_source: Option<&str>,
     module_script_region: Option<(u32, u32)>,
+    framework_mode_hint: Option<
+        verter_semantic::analysis::framework_facts::FrameworkScriptModeHint,
+    >,
     source_type: SourceType,
 ) -> verter_semantic::analysis::framework_facts::FrameworkScriptCandidateSet {
     use verter_semantic::analysis::framework_facts::FrameworkScriptCandidateSet;
@@ -247,11 +250,12 @@ pub(crate) fn capture_synth_script_candidates(
         .parse()
         .program;
     let mut set =
-        verter_semantic::analysis::framework_facts::capture_script_candidates_with_module_region(
+        verter_semantic::analysis::framework_facts::capture_script_candidates_with_context(
             active_providers,
             source,
             &program,
             module_script_region,
+            framework_mode_hint,
         );
     // Producer-side locator absolutization: route each envelope through its
     // OWNING provider (typed downcast + coherent `stable_hash` rebuild) so the
@@ -363,6 +367,52 @@ pub(crate) fn module_script_region(
         .iter()
         .find(|region| region.kind == verter_language::ScriptRegionKind::Module)
         .map(|region| (region.span.start, region.span.end))
+}
+
+/// The parser-owned non-script mode inputs carried by a neutral parse artifact.
+///
+/// Svelte captures `<svelte:options runes={...}>` during its single carrier
+/// parse. Script-fact capture receives that typed fact rather than rescanning
+/// markup and combines it with the already-parsed scripts through the shared
+/// reactivity-mode classifier.
+pub(crate) fn framework_script_mode_hint(
+    artifact: &verter_language::FrameworkParseArtifact,
+) -> Option<verter_semantic::analysis::framework_facts::FrameworkScriptModeHint> {
+    let parsed = crate::typeinfo::adapters::svelte::svelte_parse(artifact)?;
+    Some(
+        verter_semantic::analysis::framework_facts::FrameworkScriptModeHint::Svelte {
+            forced_runes: parsed.forced_runes,
+            // This capture produces SCRIPT candidates only. A template-only
+            // `$host` cannot create a script declaration or public script
+            // surface, so it is deliberately outside this producer's domain;
+            // the IDE projector derives that fact from its typed expression
+            // walk when selecting the template prelude.
+            template_uses_host_rune: false,
+        },
+    )
+}
+
+/// Classify a retained Svelte carrier's combined eval program under the shared
+/// scope-aware reactivity authority. The caller already owns both the neutral
+/// parse artifact and the retained OXC program, so this performs no text scan
+/// and no reparse.
+pub(crate) fn svelte_component_runes_mode(
+    artifact: &verter_language::FrameworkParseArtifact,
+    program: &oxc_ast::ast::Program<'_>,
+) -> bool {
+    let Some(parsed) = crate::typeinfo::adapters::svelte::svelte_parse(artifact) else {
+        return false;
+    };
+    verter_parser::svelte_reactivity::infer_combined_program_mode(
+        program,
+        module_script_region(artifact),
+        parsed.forced_runes,
+        // DeclBodyMemo indexes only the position-preserving script program. A
+        // template-only `$host` has no declaration-body lookup to affect; the
+        // IDE expression path owns its ambient template typing.
+        false,
+    )
+    .is_runes()
 }
 
 /// Build a Svelte carrier file's `ParseSnapshot` from its position-preserving

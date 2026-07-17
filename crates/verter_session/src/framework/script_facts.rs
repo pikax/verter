@@ -440,6 +440,9 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     let module_region = framework_parse
         .as_deref()
         .and_then(crate::parse::module_script_region);
+    let framework_mode_hint = framework_parse
+        .as_deref()
+        .and_then(crate::parse::framework_script_mode_hint);
 
     // The file's imports (specifier + the session-resolved canonical) — the
     // resolved data the provider's validation inspects. The session resolves
@@ -535,7 +538,14 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
         .get(&candidate_key)
         .or_else(|| {
             let source_type = crate::parse::carrier_eval_source_type(framework_parse.as_deref());
-            capture_candidates_for(&provider, &source, source_type, module_region).map(|c| {
+            capture_candidates_for(
+                &provider,
+                &source,
+                source_type,
+                module_region,
+                framework_mode_hint,
+            )
+            .map(|c| {
                 // Producer-side locator absolutization: fill the capture's
                 // empty-sentinel payload-ref anchors with the PRODUCING
                 // canonical BEFORE the envelope enters the content-addressed
@@ -722,6 +732,9 @@ fn capture_candidates_for(
     source: &str,
     source_type: SourceType,
     module_script_region: Option<(u32, u32)>,
+    framework_mode_hint: Option<
+        verter_semantic::analysis::framework_facts::FrameworkScriptModeHint,
+    >,
 ) -> Option<FrameworkScriptCandidates> {
     let alloc = Allocator::new();
     let parser = Parser::new(&alloc, source, source_type).with_options(ParseOptions {
@@ -732,13 +745,13 @@ fn capture_candidates_for(
     if result.panicked {
         return None;
     }
-    let set =
-        verter_semantic::analysis::framework_facts::capture_script_candidates_with_module_region(
-            std::slice::from_ref(provider),
-            source,
-            &result.program,
-            module_script_region,
-        );
+    let set = verter_semantic::analysis::framework_facts::capture_script_candidates_with_context(
+        std::slice::from_ref(provider),
+        source,
+        &result.program,
+        module_script_region,
+        framework_mode_hint,
+    );
     set.per_provider.into_iter().next()
 }
 

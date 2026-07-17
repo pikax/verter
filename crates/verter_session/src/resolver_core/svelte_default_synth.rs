@@ -98,11 +98,11 @@ pub fn synthesise_svelte_default_value_symbol(
     // The exported instance-script members (each exported binding is a member
     // of the component instance). The member values stay bare `Ref` leaves so
     // consumers re-resolve the binding on demand (shallow-by-default).
-    for name in &candidates.instance_exports {
+    for export in &candidates.instance_exports {
         members.push(synthetic_member(
-            name,
+            &export.exported_name,
             false,
-            FactOrLocator::Leaf(LeafTypeFact::Ref(name.clone())),
+            FactOrLocator::Leaf(LeafTypeFact::Ref(export.local_name.clone())),
         ));
     }
 
@@ -209,7 +209,7 @@ fn props_instance_fact(candidates: &SvelteScriptCandidates) -> FactOrLocator {
 mod tests {
     use super::*;
     use verter_semantic::analysis::framework_facts::svelte::{
-        SvelteLegacyProp, SveltePropsCandidate,
+        SvelteInstanceExport, SvelteLegacyProp, SveltePropsCandidate,
     };
     use verter_semantic::analysis::type_eval::ValueDeclKind;
     use verter_type_expr::locators::{
@@ -345,7 +345,18 @@ mod tests {
                 props_type: None,
                 ..Default::default()
             }),
-            instance_exports: vec!["focus".to_string(), "reset".to_string()],
+            instance_exports: vec![
+                SvelteInstanceExport {
+                    exported_name: "focus".to_string(),
+                    local_name: "focus".to_string(),
+                    source_span: verter_span::Span::new(0, 5),
+                },
+                SvelteInstanceExport {
+                    exported_name: "reset".to_string(),
+                    local_name: "reset".to_string(),
+                    source_span: verter_span::Span::new(6, 11),
+                },
+            ],
             ..Default::default()
         };
         let sym = synthesise_svelte_default_value_symbol(&candidates);

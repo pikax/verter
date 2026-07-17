@@ -31,6 +31,10 @@ mod span_transform;
 /// module; kept out of the crate root for file-size hygiene).
 mod recursive_traversal;
 
+/// Stack-safe TypeScript display projection for complete [`TypeExpr`] values.
+mod display;
+pub use display::{render_type_expr_display, RenderedTypeExpr, TypeExprDisplayError};
+
 /// Hand-rolled JSON (de)serialisation for [`TypeExpr`]: the
 /// [`serde::Serialize`]/[`serde::Deserialize`] impls,
 /// [`TypeExpr::to_json_value`], and [`type_expr_from_json`]

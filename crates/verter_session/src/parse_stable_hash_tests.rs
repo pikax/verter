@@ -57,6 +57,7 @@ fn indexed_for(source: &str) -> Arc<IndexedReady> {
         Arc::clone(&eval_source),
         None,
         SourceType::ts(),
+        false,
         Arc::new(DeclLoweringService::new()),
         header_index,
         Arc::new(MetaProvenance::default()),

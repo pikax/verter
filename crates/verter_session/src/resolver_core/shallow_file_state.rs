@@ -631,6 +631,7 @@ impl ShallowFileState {
             Arc::clone(&eval_source),
             None,
             oxc_span::SourceType::ts(),
+            false,
             Arc::new(crate::decl_lowering::DeclLoweringService::new()),
             header_index,
             Arc::clone(&provenance),
@@ -1284,7 +1285,7 @@ impl ShallowFileState {
         if let Some(decl) = self.value_decl(name) {
             return Some(decl);
         }
-        if self.decl_bodies.is_rune_module() {
+        if self.decl_bodies.rune_ambient_visible() {
             return crate::host_resolve::rune_ambient_value_decl(name);
         }
         None
@@ -1300,7 +1301,7 @@ impl ShallowFileState {
         {
             return true;
         }
-        self.decl_bodies.is_rune_module() && crate::host_resolve::rune_ambient_has_value(name)
+        self.decl_bodies.rune_ambient_visible() && crate::host_resolve::rune_ambient_has_value(name)
     }
 
     /// TYPE-space counterpart of [`Self::effective_value_decl`]: a user
@@ -1310,7 +1311,7 @@ impl ShallowFileState {
         if let Some(decl) = self.type_decl(name) {
             return Some(decl);
         }
-        if self.decl_bodies.is_rune_module() {
+        if self.decl_bodies.rune_ambient_visible() {
             return crate::host_resolve::rune_ambient_type_decl(name);
         }
         None
@@ -1321,7 +1322,7 @@ impl ShallowFileState {
         if self.decl_bodies.header_index().type_header(name).is_some() {
             return true;
         }
-        self.decl_bodies.is_rune_module() && crate::host_resolve::rune_ambient_has_type(name)
+        self.decl_bodies.rune_ambient_visible() && crate::host_resolve::rune_ambient_has_type(name)
     }
 
     /// Demand the dependency-edge classification of a local TYPE symbol —

@@ -89,7 +89,8 @@ impl TemplateProjector<'_, '_> {
         // `await` here would leak into the SYNC render IIFE (invalid TSX), so this
         // markup position is await-safe like every other.
         self.record_await_diagnostics_in(this_expr);
-        let component = self.rewrite_store_subs_in_text(self.slice(this_expr).trim());
+        let component_source = self.slice(this_expr).trim().to_string();
+        let component = self.rewrite_store_subs_in_text(&component_source);
         self.emit_dynamic_component(el, &component, Some(find_this_attr_span(el)));
     }
 
@@ -192,7 +193,8 @@ impl TemplateProjector<'_, '_> {
         let void_check = match find_slot_value(self.source, el) {
             Some(SlotValue::Expression(span)) => {
                 self.record_await_diagnostics_in(span);
-                let expr = self.rewrite_store_subs_in_text(self.slice(span));
+                let expr_source = self.slice(span).to_string();
+                let expr = self.rewrite_store_subs_in_text(&expr_source);
                 format!("{{__verter_void({expr})}}")
             }
             Some(SlotValue::Literal(text)) => format!("{{__verter_void({text})}}"),

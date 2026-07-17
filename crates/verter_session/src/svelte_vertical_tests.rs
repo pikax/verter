@@ -592,7 +592,7 @@ fn svelte_get_public_api_renders_the_declaration_shim() {
         "the shim exports a Svelte-native public component value:\n{code}"
     );
     assert!(
-        code.contains("{ props: WidgetProps }") && code.contains("focus: unknown"),
+        code.contains("{ props: WidgetProps }") && code.contains("focus: () => void"),
         "the native Component generics carry props and exports:\n{code}"
     );
     assert!(
@@ -622,6 +622,52 @@ fn svelte_get_public_api_renders_the_declaration_shim() {
     assert!(
         code.contains("import type") && code.contains("WidgetProps") && code.contains("./props"),
         "the type-only import prelude imports the preserved WidgetProps reference:\n{code}"
+    );
+}
+
+#[test]
+fn svelte_runes_state_export_projects_the_native_component_exports_generic() {
+    // Official Svelte 5 returns explicitly exported runes state from the
+    // callable `Component`, so `ReturnType<typeof Component>` exposes the
+    // binding with its resolved value type. Internal state must stay private.
+    let host = host();
+    upsert_svelte(
+        &host,
+        "/ExposePublic.svelte",
+        r#"<script lang="ts">
+  let publicCount = $state(0);
+  let secretInternal = $state("secret");
+  export { publicCount };
+</script>
+<div data-secret={secretInternal}>{publicCount}</div>
+"#,
+    );
+
+    let indexed = host
+        .ensure_indexed_ready("/ExposePublic.svelte")
+        .expect("the runes component indexes");
+    assert!(
+        indexed.shallow_state.value_symbol("publicCount").is_some(),
+        "the exported local binding must remain addressable by the shared typeof resolver"
+    );
+
+    let declaration = host
+        .get_public_api_with_mode("/ExposePublic.svelte", PublicApiMode::Declaration, None)
+        .expect("the runes component projects a public declaration")
+        .code
+        .to_string();
+
+    assert!(
+        declaration.contains("publicCount: number"),
+        "the native Component Exports generic must carry the resolved public state type:\n{declaration}"
+    );
+    assert!(
+        !declaration.contains("secretInternal"),
+        "non-exported runes state must stay off the public component surface:\n{declaration}"
+    );
+    assert!(
+        !declaration.contains("publicCount: unknown"),
+        "a known public value must not be degraded to unknown:\n{declaration}"
     );
 }
 

@@ -140,6 +140,22 @@ pub struct SvelteLegacyProp {
     pub has_default: bool,
 }
 
+/// One public instance-script export.
+///
+/// `export { local as public }` has two distinct identities: `public` is the
+/// component API member while `local` is the value binding whose `typeof` the
+/// shared resolver must demand. Keeping both prevents alias exports from being
+/// resolved against a fabricated same-name local.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr)]
+pub struct SvelteInstanceExport {
+    /// The user-visible name on Svelte's `Component` exports surface.
+    pub exported_name: String,
+    /// The local value binding used to resolve the export's type.
+    pub local_name: String,
+    /// The authored export-name token span in the owning Svelte file.
+    pub source_span: Span,
+}
+
 /// The parse-domain Svelte script candidates for one component.
 #[derive(Debug, Clone, Default, NoTypeExpr)]
 pub struct SvelteScriptCandidates {
@@ -149,7 +165,7 @@ pub struct SvelteScriptCandidates {
     pub snippet_candidates: Vec<SvelteSnippetImportCandidate>,
     /// INSTANCE-script export names — the synth folds these onto the component
     /// instance (`<script module>` exports do NOT appear here).
-    pub instance_exports: Vec<String>,
+    pub instance_exports: Vec<SvelteInstanceExport>,
     /// MODULE-script (`<script module>` / legacy `context="module"`) export
     /// names — top-level named declarations of the module, NOT instance members.
     /// The api-projector surfaces these as top-level declarations.
@@ -250,7 +266,7 @@ pub struct SvelteScriptFacts {
     /// Syntactic reference inventory of the validated dispatcher map.
     pub dispatcher_event_references: Arc<[String]>,
     /// The exported instance-script members (the EXPOSE surface).
-    pub instance_exports: Arc<[String]>,
+    pub instance_exports: Arc<[SvelteInstanceExport]>,
 }
 
 impl FrameworkScriptFactPayload for SvelteScriptFacts {
@@ -288,7 +304,13 @@ impl SvelteScriptProvider {
     /// reference-name inventory for props and dispatcher payloads. This is
     /// display/prelude data only; authored payload locators remain semantic
     /// authority. Old candidate keys intentionally miss.
-    pub const VERSION: u32 = 6;
+    ///
+    /// `7` — Svelte mode is now classified structurally (including store
+    /// accessor and explicit-runes distinctions), and instance exports retain
+    /// both exported and local binding identities. Old candidate keys
+    /// intentionally miss so legacy-prop and aliased-export surfaces cannot
+    /// remain warm under the corrected semantics.
+    pub const VERSION: u32 = 7;
 }
 
 impl ScriptFactProvider for SvelteScriptProvider {
@@ -305,7 +327,20 @@ impl ScriptFactProvider for SvelteScriptProvider {
     }
 
     fn capture(&self, cx: ScriptCandidateCx<'_>) -> Option<FrameworkScriptCandidates> {
-        let candidates = capture_svelte_candidates(cx.source, cx.program, cx.module_script_region);
+        let (forced_runes, template_uses_host_rune) = match cx.framework_mode_hint {
+            Some(super::FrameworkScriptModeHint::Svelte {
+                forced_runes,
+                template_uses_host_rune,
+            }) => (forced_runes, template_uses_host_rune),
+            None => (None, false),
+        };
+        let candidates = capture_svelte_candidates(
+            cx.source,
+            cx.program,
+            cx.module_script_region,
+            forced_runes,
+            template_uses_host_rune,
+        );
         if candidates.is_empty() {
             return None;
         }
@@ -466,8 +501,17 @@ fn capture_svelte_candidates(
     source: &str,
     program: &Program<'_>,
     module_region: Option<(u32, u32)>,
+    forced_runes: Option<bool>,
+    template_uses_host_rune: bool,
 ) -> SvelteScriptCandidates {
     let mut out = SvelteScriptCandidates::default();
+    let runes_mode = verter_parser::svelte_reactivity::infer_combined_program_mode(
+        program,
+        module_region,
+        forced_runes,
+        template_uses_host_rune,
+    )
+    .is_runes();
     // The local type names imported as the structural `Snippet` candidate,
     // mapped to their import source. Built first so the props destructuring can
     // pair annotated members to a candidate import. (The dispatcher-import
@@ -479,7 +523,11 @@ fn capture_svelte_candidates(
     // PROP, NOT an instance EXPOSE member; built first so the specifier loop can
     // classify. Scoped to the instance region (a module-script `let` is not a
     // prop), and a same-name `const`/function/class wins (it is an EXPOSE member).
-    let prop_kind_locals = collect_prop_kind_local_names(program, module_region);
+    let prop_kind_locals = if runes_mode {
+        std::collections::HashSet::new()
+    } else {
+        collect_prop_kind_local_names(program, module_region)
+    };
     // ONE shared macro-ordinal walk ([`MacroOrdinalWalk`] — the addressing
     // engine the deref-side accessor replays) assigns each captured macro CALL
     // its source-order ordinal; the candidate builders below only CONSUME the
@@ -511,11 +559,6 @@ fn capture_svelte_candidates(
                 // INSTANCE. With no module region (the trait `capture` entry,
                 // conservative) every export is an instance export.
                 let in_module_block = statement_in_module(export.span.start, module_region);
-                let exports = if in_module_block {
-                    &mut out.module_exports
-                } else {
-                    &mut out.instance_exports
-                };
                 if let Some(decl) = &export.declaration {
                     // In the INSTANCE block a legacy `export let` / `export var`
                     // is a PROP, NOT an instance-script EXPOSE member, so it must
@@ -524,8 +567,26 @@ fn capture_svelte_candidates(
                     // plain module binding and IS an export. `export const` /
                     // `export function` / `export class` are instance EXPOSE
                     // members in both blocks.
-                    let skip_legacy_prop_vars = !in_module_block;
-                    collect_declaration_exports(decl, exports, skip_legacy_prop_vars);
+                    let skip_legacy_prop_vars = !in_module_block && !runes_mode;
+                    let mut declaration_names = Vec::new();
+                    collect_declaration_exports(
+                        decl,
+                        &mut declaration_names,
+                        skip_legacy_prop_vars,
+                    );
+                    if in_module_block {
+                        out.module_exports
+                            .extend(declaration_names.into_iter().map(|(name, _)| name));
+                    } else {
+                        for (name, source_span) in declaration_names {
+                            push_instance_export(
+                                &mut out.instance_exports,
+                                name.clone(),
+                                name,
+                                source_span,
+                            );
+                        }
+                    }
                 }
                 for spec in &export.specifiers {
                     // An inline `type` specifier (`export { type Bar, baz }`) is a
@@ -556,7 +617,25 @@ fn capture_svelte_candidates(
                         }
                         continue;
                     }
-                    exports.push(spec.exported.name().to_string());
+                    let exported_name = spec.exported.name().to_string();
+                    if in_module_block {
+                        out.module_exports.push(exported_name);
+                    } else {
+                        // A source re-export has no same-file local binding. Its
+                        // exported name is the shallow export root the shared
+                        // `typeof` resolver follows through the re-export edge.
+                        let value_root = if export.source.is_some() {
+                            exported_name.clone()
+                        } else {
+                            local_name.to_string()
+                        };
+                        push_instance_export(
+                            &mut out.instance_exports,
+                            exported_name,
+                            value_root,
+                            oxc_span_to_verter(spec.exported.span()),
+                        );
+                    }
                 }
                 // Legacy-`export let` capture is INSTANCE-ONLY semantics: a
                 // `<script module>` `export let` is a module binding, NOT a
@@ -565,7 +644,7 @@ fn capture_svelte_candidates(
                 // them). An exported `$props()` declarator is already yielded
                 // by the shared ordinal walk above (same instance-only gate).
                 let in_module = statement_in_module(export.span.start, module_region);
-                if !in_module {
+                if !in_module && !runes_mode {
                     if let Some(decl) = &export.declaration {
                         capture_legacy_export_let(decl, &mut out, true);
                     }
@@ -586,6 +665,29 @@ fn capture_svelte_candidates(
 /// instance export, the conservative trait-`capture` default).
 fn statement_in_module(start: u32, module_region: Option<(u32, u32)>) -> bool {
     matches!(module_region, Some((s, e)) if start >= s && start < e)
+}
+
+/// Insert one instance export while preserving first-seen source order.
+/// Duplicate export names are invalid JavaScript, but error-recovery programs
+/// can still contain them; keeping the first prevents a malformed file from
+/// publishing duplicate declaration fields.
+fn push_instance_export(
+    exports: &mut Vec<SvelteInstanceExport>,
+    exported_name: String,
+    local_name: String,
+    source_span: Span,
+) {
+    if exports
+        .iter()
+        .any(|existing| existing.exported_name == exported_name)
+    {
+        return;
+    }
+    exports.push(SvelteInstanceExport {
+        exported_name,
+        local_name,
+        source_span,
+    });
 }
 
 /// Collect import specifiers that import a `Snippet`-candidate binding,
@@ -716,7 +818,7 @@ fn collect_prop_kind_local_names(
 /// classes are instance members and are always collected.
 fn collect_declaration_exports(
     decl: &Declaration<'_>,
-    exports: &mut Vec<String>,
+    exports: &mut Vec<(String, Span)>,
     skip_legacy_prop_vars: bool,
 ) {
     use oxc_ast::ast::VariableDeclarationKind;
@@ -734,18 +836,18 @@ fn collect_declaration_exports(
             }
             for d in &var.declarations {
                 if let Some(name) = binding_name(&d.id) {
-                    exports.push(name);
+                    exports.push((name, oxc_span_to_verter(d.id.span())));
                 }
             }
         }
         Declaration::FunctionDeclaration(func) => {
             if let Some(id) = &func.id {
-                exports.push(id.name.as_str().to_string());
+                exports.push((id.name.as_str().to_string(), oxc_span_to_verter(id.span)));
             }
         }
         Declaration::ClassDeclaration(class) => {
             if let Some(id) = &class.id {
-                exports.push(id.name.as_str().to_string());
+                exports.push((id.name.as_str().to_string(), oxc_span_to_verter(id.span)));
             }
         }
         // Runtime-emit follows the TS stripper (`strip_types::typescript`): a
@@ -753,7 +855,10 @@ fn collect_declaration_exports(
         // to a runtime JS object (`convert_enum`), so `export enum E` IS an
         // instance EXPOSE member. An ambient `declare enum` has no runtime emit.
         Declaration::TSEnumDeclaration(en) if !en.declare => {
-            exports.push(en.id.name.as_str().to_string());
+            exports.push((
+                en.id.name.as_str().to_string(),
+                oxc_span_to_verter(en.id.span),
+            ));
         }
         // Everything else is NOT a runtime instance member and contributes no
         // export name: pure type-space declarations (`export type Foo = ...`,

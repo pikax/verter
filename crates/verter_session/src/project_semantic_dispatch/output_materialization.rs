@@ -547,6 +547,13 @@ mod carrier {
             self.result_is_partial
         }
 
+        /// Consume this materialized output carrier and unwrap its raised type
+        /// payload at the owning output sink. The capability argument preserves
+        /// the same compiler-enforced unwrap boundary as [`OutputTypeExpr`].
+        pub(crate) fn into_type_expr<P: OutputProjector + ?Sized>(self, cap: &P) -> TypeExpr {
+            self.type_expr.into_type_expr(cap)
+        }
+
         /// Borrow the inner [`TypeExpr`] payload. Requires an
         /// [`OutputProjector`] capability — the compiler-enforced
         /// unwrap-locality gate for the borrowing read sites. Delegates to the

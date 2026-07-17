@@ -243,10 +243,11 @@ mod tests {
         assert!(a.contains("importSurface: { kind: \"suffix\", suffix: \".verter.ts\" }"));
         assert!(a.contains("testingApiSuffix: \".__verter_test.ts\""));
         assert!(a.contains("sidecarSuffixes: []"));
-        // The Svelte COMPONENT row renders its fixed `.tsx` IDE suffix policy,
-        // the `.verter.ts` import surface, and a NULL testing surface.
+        // The Svelte COMPONENT row selects `.jsx` for JavaScript SFCs and
+        // `.tsx` for TypeScript SFCs, preserving JS+JSDoc projection semantics.
+        // Its import surface remains `.verter.ts` and its testing surface null.
         assert!(a.contains("FRAMEWORK_TAG_SVELTE: {"));
-        assert!(a.contains("ide: { kind: \"suffix\", suffix: \".tsx\" }"));
+        assert!(a.contains("ide: { kind: \"jsxConditional\", jsx: \".jsx\", nonJsx: \".tsx\" }"));
         // The Svelte row's testing surface is null (no `.svelte.__verter_test`).
         assert!(!a.contains(".svelte.__verter_test"));
         // The rune-module row: same-file model (selfFile/selfFile),

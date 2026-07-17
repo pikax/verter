@@ -621,6 +621,7 @@ impl VerterHost {
             header_index: verter_semantic::analysis::decl_headers::DeclHeaderIndex,
             analysis: verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource,
             snapshot: Option<crate::types::FileAnalysisSnapshot>,
+            svelte_component_runes_mode: bool,
         }
         let job_canonical = analysis_canonical_id.to_string();
         let job_raw_source = Arc::clone(&raw_source);
@@ -647,6 +648,14 @@ impl VerterHost {
         let outcome = self.decl_lowering.run_leased(
             &snapshot_key,
             move |program: Option<&crate::ParsedEvalProgram>| {
+                let svelte_component_runes_mode = program.is_some_and(|parsed| {
+                    job_framework_parse.as_deref().is_some_and(|artifact| {
+                        crate::parse::svelte_component_runes_mode(
+                            artifact,
+                            parsed.borrow_dependent(),
+                        )
+                    })
+                });
                 let (header_index, analysis) = match program {
                     Some(parsed) => {
                         let body = parsed.borrow_dependent();
@@ -713,6 +722,7 @@ impl VerterHost {
                     header_index,
                     analysis,
                     snapshot,
+                    svelte_component_runes_mode,
                 }
             },
         );
@@ -743,6 +753,7 @@ impl VerterHost {
             Arc::clone(&eval_source),
             framework_parse.clone(),
             source_type,
+            products.svelte_component_runes_mode,
             Arc::clone(&self.decl_lowering),
             Arc::new(products.header_index),
             Arc::clone(&self.provenance),

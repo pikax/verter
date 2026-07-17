@@ -319,6 +319,27 @@ pub fn lower_statement_parts(stmt: &Statement<'_>, source: &str) -> LoweredState
     out
 }
 
+/// Lower one top-level statement under Svelte 5 runes semantics.
+///
+/// This is deliberately a narrow extension of [`lower_statement_parts`], not a
+/// second declaration-lowering engine: the ordinary statement walk produces
+/// the complete transient declaration inventory first, then this function
+/// replaces only an inferred top-level variable annotation whose initializer
+/// is a supported identity-like rune call (`$state`, `$state.raw`,
+/// `$state.snapshot`, `$state.eager`, `$derived`, or `$derived.by`). Explicit
+/// TypeScript/JSDoc annotations continue to win, and callers must select this
+/// entry only after the component's scope-aware mode classifier has proved
+/// runes mode. Consequently a legacy store accessor named `$state` is never
+/// reinterpreted as a rune.
+pub fn lower_svelte_runes_statement_parts(
+    stmt: &Statement<'_>,
+    source: &str,
+) -> LoweredStatementParts {
+    let mut out = lower_statement_parts(stmt, source);
+    apply_svelte_rune_initializer_inference(stmt, source, &mut out.value_decls);
+    out
+}
+
 /// Mint the stored facts/locators from TRANSIENT statement parts and register
 /// them on `env`, discarding the transient typed IR.
 ///
@@ -758,9 +779,15 @@ fn signature_fact(
                 }
             })
             .collect(),
+        // Return inference is a semantic body product even when no authored
+        // `TSType` node exists. Keep the content-free replay path whenever the
+        // lowering produced a return carrier; `spans_origin` remains the
+        // independent source-span authority and therefore never fabricates an
+        // authored return span for this inferred slot.
         return_ty: sig
-            .has_authored_return
-            .then(|| anchored_slot(anchor, vec![first_step, TypeBodyPathStep::FunctionReturn])),
+            .return_type
+            .as_ref()
+            .map(|_| anchored_slot(anchor, vec![first_step, TypeBodyPathStep::FunctionReturn])),
         has_implementation_body: sig.has_implementation_body,
         spans_origin,
     }
@@ -2249,6 +2276,163 @@ fn enrich_function_expr_with_jsdoc(
     function.return_type = return_type.map(Arc::new);
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SvelteRuneInitializer {
+    State { allows_omitted_initial: bool },
+    Derived,
+    DerivedBy,
+}
+
+fn apply_svelte_rune_initializer_inference(
+    stmt: &Statement<'_>,
+    source: &str,
+    lowered: &mut [LoweredValueDeclParts],
+) {
+    let variable = match stmt {
+        Statement::VariableDeclaration(variable) => Some(variable.as_ref()),
+        Statement::ExportNamedDeclaration(export) => {
+            export
+                .declaration
+                .as_ref()
+                .and_then(|declaration| match declaration {
+                    Declaration::VariableDeclaration(variable) => Some(variable.as_ref()),
+                    _ => None,
+                })
+        }
+        _ => None,
+    };
+    let Some(variable) = variable else {
+        return;
+    };
+
+    for declarator in &variable.declarations {
+        let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
+            continue;
+        };
+        let Some(initializer) = declarator.init.as_ref() else {
+            continue;
+        };
+        let Some(inferred) = infer_svelte_rune_initializer(initializer, source) else {
+            continue;
+        };
+        let inferred = if matches!(
+            variable.kind,
+            VariableDeclarationKind::Let | VariableDeclarationKind::Var
+        ) {
+            widen_literal_type(inferred)
+        } else {
+            inferred
+        };
+        let Some(parts) = lowered
+            .iter_mut()
+            .find(|parts| parts.name == identifier.name.as_str())
+        else {
+            continue;
+        };
+        if !parts.annotation_is_authored {
+            parts.type_annotation = Some(inferred);
+        }
+    }
+}
+
+fn infer_svelte_rune_initializer(expr: &Expression<'_>, source: &str) -> Option<TypeExpr> {
+    let expr = unwrap_expression_wrappers(expr);
+    let Expression::CallExpression(call) = expr else {
+        return None;
+    };
+    let kind = classify_svelte_rune_initializer(&call.callee)?;
+
+    let explicit = call
+        .type_arguments
+        .as_ref()
+        .and_then(|arguments| arguments.params.first())
+        .map(|argument| lower_ts_type(argument, source));
+    if let Some(explicit) = explicit {
+        return match kind {
+            SvelteRuneInitializer::State {
+                allows_omitted_initial: true,
+            } if call.arguments.is_empty() => Some(TypeExpr::union(vec![
+                explicit,
+                TypeExpr::Primitive(PrimitiveName::Undefined),
+            ])),
+            _ => Some(explicit),
+        };
+    }
+
+    let first_argument = call
+        .arguments
+        .first()
+        .and_then(|argument| argument.as_expression());
+    match kind {
+        SvelteRuneInitializer::State {
+            allows_omitted_initial: true,
+        } if first_argument.is_none() => Some(TypeExpr::union(vec![
+            TypeExpr::Primitive(PrimitiveName::Unknown),
+            TypeExpr::Primitive(PrimitiveName::Undefined),
+        ])),
+        SvelteRuneInitializer::State { .. } | SvelteRuneInitializer::Derived => {
+            first_argument.map(|argument| {
+                infer_expression_type_ctx(argument, source, MemberLiteralPolicy::Widen)
+            })
+        }
+        SvelteRuneInitializer::DerivedBy => {
+            let callback = first_argument?;
+            let callback_type =
+                infer_expression_type_ctx(callback, source, MemberLiteralPolicy::Widen);
+            if let TypeExpr::Function(function) = &callback_type {
+                function.return_type.as_deref().cloned()
+            } else if !matches!(callback_type, TypeExpr::Primitive(PrimitiveName::Any)) {
+                Some(TypeExpr::Ref {
+                    name: Arc::from("ReturnType"),
+                    type_arguments: Arc::from(vec![callback_type]),
+                })
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn classify_svelte_rune_initializer(callee: &Expression<'_>) -> Option<SvelteRuneInitializer> {
+    match unwrap_expression_wrappers(callee) {
+        Expression::Identifier(identifier) => match identifier.name.as_str() {
+            "$state" => Some(SvelteRuneInitializer::State {
+                allows_omitted_initial: true,
+            }),
+            "$derived" => Some(SvelteRuneInitializer::Derived),
+            _ => None,
+        },
+        Expression::StaticMemberExpression(member) => {
+            let Expression::Identifier(root) = unwrap_expression_wrappers(&member.object) else {
+                return None;
+            };
+            match (root.name.as_str(), member.property.name.as_str()) {
+                ("$state", "raw") => Some(SvelteRuneInitializer::State {
+                    allows_omitted_initial: true,
+                }),
+                ("$state", "snapshot" | "eager") => Some(SvelteRuneInitializer::State {
+                    allows_omitted_initial: false,
+                }),
+                ("$derived", "by") => Some(SvelteRuneInitializer::DerivedBy),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn unwrap_expression_wrappers<'a>(mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
+    loop {
+        expr = match expr {
+            Expression::ParenthesizedExpression(parenthesized) => &parenthesized.expression,
+            Expression::TSAsExpression(assertion) => &assertion.expression,
+            Expression::TSSatisfiesExpression(satisfies) => &satisfies.expression,
+            Expression::TSNonNullExpression(non_null) => &non_null.expression,
+            _ => return expr,
+        };
+    }
+}
+
 fn lower_variable_parts(
     decl: &VariableDeclarator<'_>,
     kind: VariableDeclarationKind,
@@ -2643,8 +2827,10 @@ fn push_object_member_with_override(members: &mut Vec<ObjectMember>, member: Obj
 
 /// Infer the return type of a function body by scanning return statements.
 ///
-/// Returns `Some(TypeExpr)` if all return statements return the same shape.
-/// Returns `None` if the body has no returns or returns are too complex.
+/// Returns `Some(TypeExpr)` for every implementation body. A body with no
+/// value-returning statement has TypeScript's `void` return type; it must not
+/// become an absent return fact (which is reserved for an ambient/bodiless
+/// signature and would surface as a semantic miss).
 fn infer_return_type(body: &oxc_ast::ast::FunctionBody<'_>, source: &str) -> Option<TypeExpr> {
     let mut return_types: Vec<TypeExpr> = Vec::new();
 
@@ -2653,7 +2839,7 @@ fn infer_return_type(body: &oxc_ast::ast::FunctionBody<'_>, source: &str) -> Opt
     }
 
     if return_types.is_empty() {
-        return None;
+        return Some(TypeExpr::Primitive(PrimitiveName::Void));
     }
 
     // If all returns produce the same type, use it; otherwise union them
@@ -2675,6 +2861,8 @@ fn collect_return_types(
         Statement::ReturnStatement(ret) => {
             if let Some(ref arg) = ret.argument {
                 results.push(infer_expression_type(arg, source));
+            } else {
+                results.push(TypeExpr::Primitive(PrimitiveName::Undefined));
             }
         }
         Statement::BlockStatement(block) => {

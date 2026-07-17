@@ -63,8 +63,8 @@ pub(crate) use frontier_adapter::HostFrontierAdapter;
 pub(crate) use rune_ambient::is_svelte_rune_module;
 #[allow(unused_imports)]
 pub(crate) use rune_ambient::{
-    merge_rune_ambient_into_env, rune_ambient_has_type, rune_ambient_has_value,
-    rune_ambient_type_decl, rune_ambient_value_decl,
+    merge_rune_ambient_into_env, merge_rune_ambient_inventory_into_env, rune_ambient_has_type,
+    rune_ambient_has_value, rune_ambient_type_decl, rune_ambient_value_decl,
 };
 #[cfg(test)]
 #[allow(unused_imports)]

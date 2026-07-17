@@ -979,6 +979,60 @@ void native; void props; void binding; void wrongBinding; void wrongEvent;
 }
 
 #[test]
+fn runes_state_export_is_a_native_component_export_with_its_inferred_type() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/RunesState.svelte";
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(canonical.to_string()),
+            input_id: canonical.to_string(),
+            source: Arc::from(
+                r#"<script lang="ts">
+let publicCount = $state(0);
+let secretInternal = $state('secret');
+export { publicCount };
+</script>
+<button onclick={() => publicCount++}>{publicCount}</button>
+"#,
+            ),
+            file_language: FileLanguage::svelte(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert runes state component");
+    let declaration = host
+        .get_public_api_with_mode(canonical, PublicApiMode::Declaration, None)
+        .expect("runes state declaration")
+        .code;
+
+    let consumer = r#"import RunesState from './RunesState.svelte.verter';
+import type { Component } from 'svelte';
+
+type Exports = ReturnType<typeof RunesState>;
+const native: Component<Record<string, never>, Exports, ''> = RunesState;
+declare const exports: Exports;
+const count: number = exports.publicCount;
+// @ts-expect-error publicCount is inferred as number, not string
+const wrong: string = exports.publicCount;
+// @ts-expect-error non-exported state is not part of the public Component exports
+exports.secretInternal;
+void native; void count; void wrong;
+"#;
+    let Some((ok, out)) = typecheck_projected(
+        &declaration,
+        "RunesState.svelte.verter.ts",
+        &[("consumer.ts", consumer)],
+        true,
+    ) else {
+        skip_note("runes state native Component export");
+        return;
+    };
+    assert!(
+        ok,
+        "an exported rune state value must flow through ReturnType<Component> with its inferred type while private state remains absent:\n{out}\n{declaration}"
+    );
+}
+
+#[test]
 fn precondition_pragma_overrides_project_level_vue_jsx_import_source_under_tsgo() {
     // GATE PRECONDITION: a `.svelte.tsx`-shaped file whose
     // `@jsxImportSource @verter/svelte-jsx` pragma overrides the project-level

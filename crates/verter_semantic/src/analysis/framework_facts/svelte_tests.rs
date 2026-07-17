@@ -16,7 +16,26 @@ fn capture_with_module_region(
 ) -> SvelteScriptCandidates {
     let alloc = Allocator::default();
     let program = Parser::new(&alloc, src, SourceType::ts()).parse().program;
-    capture_svelte_candidates(src, &program, module_region)
+    capture_svelte_candidates(src, &program, module_region, None, false)
+}
+
+fn has_instance_export(candidates: &SvelteScriptCandidates, name: &str) -> bool {
+    candidates
+        .instance_exports
+        .iter()
+        .any(|export| export.exported_name == name)
+}
+
+fn instance_export(
+    exported_name: &str,
+    local_name: &str,
+    source_span: Span,
+) -> SvelteInstanceExport {
+    SvelteInstanceExport {
+        exported_name: exported_name.to_string(),
+        local_name: local_name.to_string(),
+        source_span,
+    }
 }
 
 /// The macro-payload locator `capture` emits: anchored to the component's
@@ -172,7 +191,7 @@ fn captures_props_from_eval_source_with_imports_and_exports() {
     // import-type, the props destructuring, and an exported function.
     let src = "                  \n  import type { WidgetProps } from './props';\n  let { props }: WidgetProps = $props();\n  export function focus() {}\n";
     let c = capture(src);
-    let props = c.props.expect("props candidate from eval-source");
+    let props = c.props.as_ref().expect("props candidate from eval-source");
     let payload = props
         .props_type
         .as_ref()
@@ -181,7 +200,7 @@ fn captures_props_from_eval_source_with_imports_and_exports() {
         payload.locator,
         macro_payload_locator(0, MacroPayloadPosition::TypeAnnotation)
     );
-    assert!(c.instance_exports.contains(&"focus".to_string()));
+    assert!(has_instance_export(&c, "focus"));
 }
 
 #[test]
@@ -297,9 +316,9 @@ fn records_userland_snippet_import_source_for_resolved_validation_rejection() {
 #[test]
 fn captures_instance_exports() {
     let c = capture("export const helper = 1;\nexport function go() {}\nlet local = 2;");
-    assert!(c.instance_exports.contains(&"helper".to_string()));
-    assert!(c.instance_exports.contains(&"go".to_string()));
-    assert!(!c.instance_exports.contains(&"local".to_string()));
+    assert!(has_instance_export(&c, "helper"));
+    assert!(has_instance_export(&c, "go"));
+    assert!(!has_instance_export(&c, "local"));
 }
 
 #[test]
@@ -313,17 +332,17 @@ fn exported_runtime_enum_is_an_instance_export() {
     let src = "export enum E { A, B }\nexport declare enum D { X }\nexport type Foo = number;";
     let c = capture(src);
     assert!(
-        c.instance_exports.contains(&"E".to_string()),
+        has_instance_export(&c, "E"),
         "the runtime enum `E` must surface as an instance export, got {:?}",
         c.instance_exports
     );
     assert!(
-        !c.instance_exports.contains(&"D".to_string()),
+        !has_instance_export(&c, "D"),
         "the ambient `declare enum D` has no runtime emit and must NOT be a member, got {:?}",
         c.instance_exports
     );
     assert!(
-        !c.instance_exports.contains(&"Foo".to_string()),
+        !has_instance_export(&c, "Foo"),
         "the type alias `Foo` must NOT be a member, got {:?}",
         c.instance_exports
     );
@@ -340,12 +359,12 @@ fn exported_namespace_is_not_an_instance_export() {
     let src = "export namespace N { export const x = 1; }\nexport const real = 2;";
     let c = capture(src);
     assert!(
-        c.instance_exports.contains(&"real".to_string()),
+        has_instance_export(&c, "real"),
         "the runtime `const real` must be an instance export, got {:?}",
         c.instance_exports
     );
     assert!(
-        !c.instance_exports.contains(&"N".to_string()),
+        !has_instance_export(&c, "N"),
         "a stripped `namespace N` must NOT surface as a runtime member, got {:?}",
         c.instance_exports
     );
@@ -364,22 +383,22 @@ fn type_only_exports_are_not_instance_exports() {
     let src = "type Foo = number;\nconst Bar = 1;\nconst baz = 2;\nexport type { Foo };\nexport { type Bar, baz };\nexport const qux = 3;";
     let c = capture(src);
     assert!(
-        c.instance_exports.contains(&"baz".to_string()),
+        has_instance_export(&c, "baz"),
         "the value re-export `baz` must surface as an instance export, got {:?}",
         c.instance_exports
     );
     assert!(
-        c.instance_exports.contains(&"qux".to_string()),
+        has_instance_export(&c, "qux"),
         "the value export `qux` must surface as an instance export, got {:?}",
         c.instance_exports
     );
     assert!(
-        !c.instance_exports.contains(&"Foo".to_string()),
+        !has_instance_export(&c, "Foo"),
         "the type-only re-export `Foo` must NOT surface as an instance member, got {:?}",
         c.instance_exports
     );
     assert!(
-        !c.instance_exports.contains(&"Bar".to_string()),
+        !has_instance_export(&c, "Bar"),
         "the inline `type Bar` specifier must NOT surface as an instance member, got {:?}",
         c.instance_exports
     );
@@ -402,11 +421,11 @@ fn module_exports_are_split_from_instance_exports_by_region() {
         c.instance_exports
     );
     assert!(
-        !c.instance_exports.contains(&"meta".to_string()),
+        !has_instance_export(&c, "meta"),
         "`meta` (module export) must NOT be an instance member"
     );
     assert!(
-        c.instance_exports.contains(&"ready".to_string()),
+        has_instance_export(&c, "ready"),
         "`ready` outside the module region is an instance export"
     );
 }
@@ -440,18 +459,18 @@ fn legacy_export_let_and_var_are_props_not_instance_exports() {
         "`export var legacyVar` is a legacy prop"
     );
     assert!(
-        !c.instance_exports.contains(&"name".to_string()),
+        !has_instance_export(&c, "name"),
         "`export let name` must NOT be an instance EXPOSE member, got {:?}",
         c.instance_exports
     );
     assert!(
-        !c.instance_exports.contains(&"legacyVar".to_string()),
+        !has_instance_export(&c, "legacyVar"),
         "`export var legacyVar` must NOT be an instance EXPOSE member, got {:?}",
         c.instance_exports
     );
     // `export const` / `export function` ARE instance members.
-    assert!(c.instance_exports.contains(&"ready".to_string()));
-    assert!(c.instance_exports.contains(&"focus".to_string()));
+    assert!(has_instance_export(&c, "ready"));
+    assert!(has_instance_export(&c, "focus"));
 }
 
 #[test]
@@ -469,17 +488,52 @@ fn reexport_specifier_of_a_prop_local_is_a_prop_not_an_instance_export() {
         c.legacy_props
     );
     assert!(
-        !c.instance_exports.contains(&"leaked".to_string()),
+        !has_instance_export(&c, "leaked"),
         "the re-exported prop-local `leaked` must NOT be an instance EXPOSE member, got {:?}",
         c.instance_exports
     );
     // A `const` re-export IS an instance member.
     assert!(
-        c.instance_exports.contains(&"exposed".to_string()),
+        has_instance_export(&c, "exposed"),
         "the re-exported const `exposed` IS an instance member, got {:?}",
         c.instance_exports
     );
     assert!(!c.legacy_props.iter().any(|p| p.name == "exposed"));
+}
+
+#[test]
+fn runes_state_reexport_is_an_instance_export_not_a_legacy_prop() {
+    // Svelte 5 runes mode changes the meaning of a top-level `let` re-export:
+    // `let value = $state(...); export { value }` is a public component export,
+    // not a legacy prop. The unresolved `$state` reference is the structural
+    // mode discriminator; comments/strings or a shadowed name must not count.
+    let c = capture("let publicCount = $state(0);\nexport { publicCount };");
+    assert!(
+        has_instance_export(&c, "publicCount"),
+        "the runes state re-export must be an instance EXPOSE member, got instance={:?} props={:?}",
+        c.instance_exports,
+        c.legacy_props
+    );
+    assert!(
+        !c.legacy_props.iter().any(|p| p.name == "publicCount"),
+        "the runes state re-export must not be reported as a legacy prop"
+    );
+}
+
+#[test]
+fn store_accessor_named_like_state_does_not_force_runes_export_semantics() {
+    // `$state` is a legacy store subscription when a non-rune top-level
+    // `state` binding exists. Official Svelte removes store-classified names
+    // before runes-mode inference, so this remains the legacy prop spelling.
+    let c =
+        capture("const state = makeStore();\nlet publicCount = $state;\nexport { publicCount };");
+    assert!(
+        c.legacy_props.iter().any(|p| p.name == "publicCount"),
+        "a store accessor must retain legacy prop semantics, got instance={:?} props={:?}",
+        c.instance_exports,
+        c.legacy_props
+    );
+    assert!(!has_instance_export(&c, "publicCount"));
 }
 
 #[test]
@@ -493,7 +547,7 @@ fn module_region_let_does_not_misclassify_an_instance_const_reexport() {
     let module_end = src.find('\n').unwrap() as u32;
     let c = capture_with_module_region(src, Some((0, module_end)));
     assert!(
-        c.instance_exports.contains(&"exposed".to_string()),
+        has_instance_export(&c, "exposed"),
         "an instance `const` re-export is an EXPOSE member, got instance={:?} props={:?}",
         c.instance_exports,
         c.legacy_props
@@ -509,7 +563,7 @@ fn const_local_reexport_is_expose_even_with_same_name_let_absent() {
     // Subtraction rule: a `const x; export { x as y }` is EXPOSE (no `let x`
     // exists to mark it prop-kind).
     let c = capture("const x = 1;\nexport { x as y };");
-    assert!(c.instance_exports.contains(&"y".to_string()));
+    assert!(has_instance_export(&c, "y"));
     assert!(!c.legacy_props.iter().any(|p| p.name == "y"));
 }
 
@@ -529,7 +583,7 @@ fn module_const_does_not_subtract_an_instance_prop_let_reexport() {
             c.instance_exports
         );
     assert!(
-        !c.instance_exports.contains(&"propValue".to_string()),
+        !has_instance_export(&c, "propValue"),
         "the instance prop-let re-export must NOT be EXPOSE"
     );
 }
@@ -872,7 +926,7 @@ fn validate_passes_through_parse_domain_inventory() {
             bindable_members: vec!["value".to_string()],
             ..Default::default()
         }),
-        instance_exports: vec!["focus".to_string()],
+        instance_exports: vec![instance_export("focus", "focus", Span::new(10, 15))],
         ..Default::default()
     };
     let envelope = FrameworkScriptCandidates {
@@ -895,7 +949,10 @@ fn validate_passes_through_parse_domain_inventory() {
         "the props payload ref passes through verbatim"
     );
     assert_eq!(facts.bindable_members.as_ref(), &["value".to_string()][..]);
-    assert_eq!(facts.instance_exports.as_ref(), &["focus".to_string()][..]);
+    assert_eq!(
+        facts.instance_exports.as_ref(),
+        &[instance_export("focus", "focus", Span::new(10, 15))][..]
+    );
 }
 
 /// A fully-populated candidate set exercising EVERY stable-hash input.
@@ -920,7 +977,7 @@ fn full_candidates() -> SvelteScriptCandidates {
             import_source: "svelte".to_string(),
             member_name: "row".to_string(),
         }],
-        instance_exports: vec!["focus".to_string()],
+        instance_exports: vec![instance_export("focus", "focus", Span::new(31, 36))],
         module_exports: vec!["meta".to_string()],
         legacy_props: vec![SvelteLegacyProp {
             name: "legacy".to_string(),
@@ -1013,7 +1070,7 @@ fn stable_candidate_hash_discriminates_every_input() {
 
     // (8) instance exports.
     let mut c = full_candidates();
-    c.instance_exports = vec!["blur".to_string()];
+    c.instance_exports = vec![instance_export("blur", "focus", Span::new(31, 36))];
     assert_ne!(
         stable_candidate_hash(&c),
         base_hash,
@@ -1080,7 +1137,7 @@ fn stable_candidate_hash_discriminates_every_input() {
 
 #[test]
 fn stable_candidate_hash_golden_is_deterministic() {
-    // Deterministic golden for the VERSION 5 candidate hash: two independent
+    // Deterministic golden for the VERSION 7 candidate hash: two independent
     // constructions hash identically, and the bytes are pinned so a silently
     // dropped / reordered hash input fails loudly. An INTENTIONAL hash-shape
     // change must bump `SvelteScriptProvider::VERSION` and re-pin.
@@ -1090,10 +1147,10 @@ fn stable_candidate_hash_golden_is_deterministic() {
     assert_eq!(
         a,
         [
-            0x7f, 0x9b, 0xab, 0x9d, 0x8f, 0x39, 0x29, 0xf3, 0x52, 0xe6, 0xff, 0x36, 0x57, 0x3b,
-            0x1f, 0x73
+            0x58, 0x04, 0xb7, 0x16, 0xa6, 0x24, 0x4a, 0x16, 0x94, 0x2c, 0xb0, 0x08, 0x6e, 0x2d,
+            0x4c, 0x49
         ],
-        "the VERSION 5 golden candidate hash"
+        "the VERSION 7 golden candidate hash"
     );
 }
 
@@ -1307,6 +1364,7 @@ fn provider_capture(src: &str) -> FrameworkScriptCandidates {
             source: src,
             program: &program,
             module_script_region: None,
+            framework_mode_hint: None,
         })
         .expect("candidates captured")
 }

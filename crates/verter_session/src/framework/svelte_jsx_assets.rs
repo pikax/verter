@@ -87,7 +87,8 @@ mod tests {
         // The namespace is Svelte-true (SvelteHTMLElements), brands snippets,
         // and privately adapts native Svelte Component props — never Vue's table.
         assert!(SVELTE_JSX_RUNTIME_DTS.contains("export namespace JSX"));
-        assert!(SVELTE_JSX_RUNTIME_DTS.contains("IntrinsicElements extends SvelteHTMLElements"));
+        assert!(SVELTE_JSX_RUNTIME_DTS
+            .contains("[Name in keyof SvelteHTMLElements]: SvelteHTMLElements[Name]"));
         assert!(SVELTE_JSX_RUNTIME_DTS.contains("LibraryManagedAttributes"));
         assert!(SVELTE_JSX_RUNTIME_DTS.contains("import(\"svelte\").Component"));
         assert!(SVELTE_JSX_RUNTIME_DTS.contains("ReturnType<Snippet>"));
@@ -109,7 +110,7 @@ mod tests {
         assert!(SVELTE_JSX_SVG_RUNTIME_DTS
             .contains("import type { SvelteHTMLElements } from \"svelte/elements\""));
         assert!(SVELTE_JSX_SVG_RUNTIME_DTS
-            .contains("extends Pick<SvelteHTMLElements, SvelteSVGElementNames>"));
+            .contains("[Name in SvelteSVGElementNames]: SvelteHTMLElements[Name]"));
         assert!(SVELTE_JSX_SVG_RUNTIME_DTS.contains("ReturnType<Snippet>"));
         assert!(SVELTE_JSX_SVG_DEV_RUNTIME_DTS.contains("export { JSX } from \"./jsx-runtime\""));
     }
