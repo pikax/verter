@@ -178,6 +178,28 @@ pub(crate) fn assemble_vue_main_module(
         }
     }
 
+    // Vite SSR asset collection: register this module id on the request's
+    // `ssrContext.modules` set (same shape as @vitejs/plugin-vue). Without this,
+    // Vite cannot collect CSS/JS deps for the SSR render tree.
+    if profile.ssr {
+        let runtime = profile.runtime_module_name.as_deref().unwrap_or("vue");
+        let _ = writeln!(
+            out,
+            "import {{ useSSRContext as __vite_useSSRContext }} from \"{}\"",
+            runtime
+        );
+        out.push_str("const _sfc_setup = _sfc_main.setup\n");
+        out.push_str("_sfc_main.setup = (props, ctx) => {\n");
+        out.push_str("  const ssrContext = __vite_useSSRContext()\n");
+        let _ = writeln!(
+            out,
+            "  ;(ssrContext.modules || (ssrContext.modules = new Set())).add({:?})",
+            canonical_id
+        );
+        out.push_str("  return _sfc_setup ? _sfc_setup(props, ctx) : undefined\n");
+        out.push_str("}\n");
+    }
+
     out.push_str("export default _sfc_main");
 
     out
@@ -548,6 +570,66 @@ mod tests {
         let result = assemble_vue_main_module("Comp.vue", &compiled, &meta, &profile);
         assert!(!result.contains("import.meta.hot"));
         assert!(!result.contains("module.hot"));
+    }
+
+    /// SSR must register the module on `ssrContext.modules` so Vite can collect
+    /// CSS/JS assets for the render tree (drop-in parity with plugin-vue).
+    #[test]
+    fn assemble_main_module_ssr_registers_ssr_context_module() {
+        let compiled = basic_compiled_result();
+        let profile = CompileProfile {
+            is_production: true,
+            ssr: true,
+            ..CompileProfile::default()
+        };
+        let meta = FileMeta {
+            has_script: true,
+            has_template: true,
+            ..FileMeta::default()
+        };
+        let result = assemble_vue_main_module("src/Comp.vue", &compiled, &meta, &profile);
+        // Positive: wrap setup with useSSRContext + modules.add
+        assert!(
+            result.contains("useSSRContext as __vite_useSSRContext"),
+            "must import useSSRContext, got:\n{result}"
+        );
+        assert!(
+            result.contains("ssrContext.modules"),
+            "must register on ssrContext.modules, got:\n{result}"
+        );
+        assert!(
+            result.contains("\"src/Comp.vue\"") || result.contains("'src/Comp.vue'"),
+            "must add the component path to modules set, got:\n{result}"
+        );
+        assert!(
+            result.contains("const _sfc_setup = _sfc_main.setup"),
+            "must preserve original setup, got:\n{result}"
+        );
+        // Negative: client HMR must not appear in SSR assembly
+        assert!(!result.contains("import.meta.hot"));
+        assert!(!result.contains("module.hot"));
+    }
+
+    /// Non-SSR assembly must NOT inject useSSRContext wrapping.
+    #[test]
+    fn assemble_main_module_client_no_ssr_context_wrap() {
+        let compiled = basic_compiled_result();
+        let profile = CompileProfile {
+            is_production: false,
+            ssr: false,
+            ..CompileProfile::default()
+        };
+        let meta = FileMeta {
+            has_script: true,
+            has_template: true,
+            ..FileMeta::default()
+        };
+        let result = assemble_vue_main_module("src/Comp.vue", &compiled, &meta, &profile);
+        assert!(
+            !result.contains("useSSRContext"),
+            "client assembly must not wrap setup with useSSRContext, got:\n{result}"
+        );
+        assert!(!result.contains("ssrContext.modules"));
     }
 
     /// @ai-generated - Webpack HMR strategy uses module.hot
