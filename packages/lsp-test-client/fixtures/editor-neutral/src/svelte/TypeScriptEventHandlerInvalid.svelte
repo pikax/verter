@@ -1,7 +1,11 @@
 <script lang="ts">
+  let lastPointerId = $state(0);
+
   function myClick(e) {
-    return e.__verterMissingPointerMember;
+    // @ts-expect-error inferred PointerEvent has no such member; any would leave this unused
+    lastPointerId = e.__verterMissingPointerMember;
   }
 </script>
 
-<button onclick={myClick}>Click</button>
+<button onpointerdown={myClick}>Click</button>
+<output>{lastPointerId}</output>

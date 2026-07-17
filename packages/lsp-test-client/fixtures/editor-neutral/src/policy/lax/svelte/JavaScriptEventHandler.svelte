@@ -1,8 +1,13 @@
 <script>
+  let lastPointerId = $state(0);
+
+  /** @param {PointerEvent} e */
   function myClick(e) {
     e.pointerId;
-    return e.__verterMissingPointerMember;
+    // @ts-expect-error authored PointerEvent has no such member; lax policy suppresses diagnostics
+    lastPointerId = e.__verterMissingPointerMember;
   }
 </script>
 
-<button onclick={myClick}>Click</button>
+<button onpointerdown={myClick}>Click</button>
+<output>{lastPointerId}</output>

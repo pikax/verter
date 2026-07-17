@@ -76,28 +76,34 @@ function groupedCounts<T>(
 const counters: RunCounters = { attempted: 0, passed: 0, failed: 0, setupFailures: [] };
 const outcomes: ExecutionOutcome[] = [];
 const typeScriptCliControls: Partial<Record<"jsx" | "tsx", TypeScriptCliControlOutcome>> = {};
+let laxJavaScriptPolicyControl: TypeScriptCliControlOutcome | undefined;
+
+async function resolveTypeScript7Compiler(): Promise<{ compiler: string; version: string }> {
+  const resolver = path.join(REPO_ROOT, "node_modules", "typescript", "lib", "getExePath.js");
+  const module = (await import(pathToFileURL(resolver).href)) as {
+    default?: () => string;
+  };
+  if (typeof module.default !== "function") {
+    throw new Error(`TypeScript executable resolver has no default function: ${resolver}`);
+  }
+  const compiler = module.default();
+  const version = spawnSync(compiler, ["--version"], { encoding: "utf8" });
+  if (version.status !== 0) {
+    throw new Error(`TypeScript version command failed: ${version.stderr || version.stdout}`);
+  }
+  const versionText = version.stdout.trim();
+  const major = Number(/^Version\s+(\d+)/.exec(versionText)?.[1]);
+  if (!Number.isInteger(major) || major < 7) {
+    throw new Error(`TypeScript >=7 is required, got ${JSON.stringify(versionText)}`);
+  }
+  return { compiler, version: versionText };
+}
 
 describe.sequential("TypeScript >=7 authority control", () => {
   for (const extension of ["jsx", "tsx"] as const) {
     it(`contextually types the plain .${extension} handler as PointerEvent`, async () => {
       try {
-        const resolver = path.join(REPO_ROOT, "node_modules", "typescript", "lib", "getExePath.js");
-        const module = (await import(pathToFileURL(resolver).href)) as {
-          default?: () => string;
-        };
-        if (typeof module.default !== "function") {
-          throw new Error(`TypeScript executable resolver has no default function: ${resolver}`);
-        }
-        const compiler = module.default();
-        const version = spawnSync(compiler, ["--version"], { encoding: "utf8" });
-        if (version.status !== 0) {
-          throw new Error(`TypeScript version command failed: ${version.stderr || version.stdout}`);
-        }
-        const versionText = version.stdout.trim();
-        const major = Number(/^Version\s+(\d+)/.exec(versionText)?.[1]);
-        if (!Number.isInteger(major) || major < 7) {
-          throw new Error(`TypeScript >=7 is required, got ${JSON.stringify(versionText)}`);
-        }
+        const { compiler, version } = await resolveTypeScript7Compiler();
 
         const controlFile = path.join(WORKSPACE_ROOT, "src", `plain-pointer-control.${extension}`);
         const control = spawnSync(
@@ -127,7 +133,7 @@ describe.sequential("TypeScript >=7 authority control", () => {
         );
         typeScriptCliControls[extension] = {
           status: "passed",
-          version: versionText,
+          version,
           diagnosticCodes,
           output,
         };
@@ -147,6 +153,37 @@ describe.sequential("TypeScript >=7 authority control", () => {
       }
     });
   }
+
+  it("honors the authored lax JavaScript project policy", async () => {
+    try {
+      const { compiler, version } = await resolveTypeScript7Compiler();
+      const project = path.join(WORKSPACE_ROOT, "src", "policy", "lax", "tsconfig.json");
+      const control = spawnSync(compiler, ["--project", project], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+      });
+      const output = `${control.stdout}${control.stderr}`.trim();
+      const diagnosticCodes = [...output.matchAll(/error TS(\d+):/g)].map((match) =>
+        Number(match[1]),
+      );
+      laxJavaScriptPolicyControl = {
+        status: "passed",
+        version,
+        diagnosticCodes,
+        output,
+      };
+      expect(control.status, "checkJs:false must keep the invalid JS member diagnostic-free").toBe(
+        0,
+      );
+      expect(diagnosticCodes).toEqual([]);
+    } catch (error) {
+      laxJavaScriptPolicyControl = {
+        status: "failed",
+        error: error instanceof Error ? error.message : String(error),
+      };
+      throw error;
+    }
+  });
 });
 
 for (const route of ROUTES) {
@@ -253,7 +290,10 @@ afterAll(() => {
           .length,
         routes: ROUTES,
         expectedExecutions: EXPECTED_EXECUTIONS,
-        authorityControls: { typeScriptCli: typeScriptCliControls },
+        authorityControls: {
+          typeScriptCli: typeScriptCliControls,
+          authoredPolicy: { laxJavaScript: laxJavaScriptPolicyControl },
+        },
         inventoryGroups,
         executionGroups,
         ...counters,
@@ -266,8 +306,8 @@ afterAll(() => {
   );
   console.log(`editor-neutral LSP receipt: ${receiptPath}`);
 
-  expect(INVENTORY.length, "the complete shared inventory must be discovered").toBe(71);
-  expect(EXPECTED_EXECUTIONS, "69 standard + custom on each route, plus shared topology").toBe(211);
+  expect(INVENTORY.length, "the complete shared inventory must be discovered").toBe(73);
+  expect(EXPECTED_EXECUTIONS, "71 standard + custom on each route, plus shared topology").toBe(217);
   expect(
     counters.setupFailures,
     "every provider route must start; no route may be skipped",
@@ -284,11 +324,15 @@ afterAll(() => {
   ).toBe(EXPECTED_EXECUTIONS);
   expect(outcomes.filter((outcome) => outcome.status === "passed")).toHaveLength(counters.passed);
   expect(outcomes.filter((outcome) => outcome.status === "failed")).toHaveLength(counters.failed);
-  expect(inventoryGroups.byRoute).toEqual({ tsserver: 70, tsgo: 70, "shared-tsgo": 71 });
+  expect(inventoryGroups.byRoute).toEqual({ tsserver: 72, tsgo: 72, "shared-tsgo": 73 });
   expect(
     typeScriptCliControls,
     "both TypeScript >=7 authority controls must execute",
   ).toMatchObject({ jsx: { status: "passed" }, tsx: { status: "passed" } });
+  expect(
+    laxJavaScriptPolicyControl?.status,
+    "the authored lax-JavaScript TypeScript >=7 control must execute",
+  ).toBe("passed");
   for (const route of ROUTES) {
     expect(executionGroups[route]?.attempted, `${route} receipt group must be complete`).toBe(
       inventoryGroups.byRoute[route],

@@ -2,6 +2,10 @@
  * @ai-generated - Verifies the typed, editor-neutral LSP contract inventory,
  * anchor resolution, and fail-closed result validation.
  */
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -40,15 +44,15 @@ function fakeDriver(diagnostics: readonly LspDiagnostic[]): EditorNeutralContrac
 }
 
 describe("editor-neutral LSP contract inventory", () => {
-  it("is a non-vacuous, exact 71-case cross-framework inventory", () => {
+  it("is a non-vacuous, exact 73-case cross-framework inventory", () => {
     const inventory = createEditorNeutralContractInventory();
-    expect(inventory).toHaveLength(71);
-    expect(new Set(inventory.map((testCase) => testCase.id)).size).toBe(71);
+    expect(inventory).toHaveLength(73);
+    expect(new Set(inventory.map((testCase) => testCase.id)).size).toBe(73);
 
     const standard = inventory.filter((testCase) => testCase.surface === "standard-lsp");
     const custom = inventory.filter((testCase) => testCase.surface === "verter-custom-protocol");
     const topology = inventory.filter((testCase) => testCase.surface === "provider-topology");
-    expect(standard).toHaveLength(69);
+    expect(standard).toHaveLength(71);
     expect(custom).toHaveLength(1);
     expect(topology).toHaveLength(1);
 
@@ -97,15 +101,24 @@ describe("editor-neutral LSP contract inventory", () => {
     for (const framework of ["vue", "svelte"] as const) {
       for (const language of ["js", "ts"] as const) {
         const prefix = `${framework}-${language}-dom-event.`;
-        expect(standard.filter((testCase) => testCase.id.startsWith(prefix))).toHaveLength(3);
-        expect(standard.find((testCase) => testCase.id === `${prefix}hover`)).toMatchObject({
+        const eventCases = standard.filter((testCase) => testCase.id.startsWith(prefix));
+        expect(eventCases).toHaveLength(3);
+        expect(eventCases.find((testCase) => testCase.feature === "hover")).toMatchObject({
           framework,
           language,
           requiredHoverFragments: ["PointerEvent"],
         });
         expect(
-          standard.find((testCase) => testCase.id === `${prefix}diagnostics.invalid-member`),
-        ).toMatchObject({ expectedDiagnosticCode: 2339 });
+          eventCases.find((testCase) => testCase.id.endsWith("invalid-member-consumed")),
+        ).toMatchObject({ feature: "diagnostics-clean" });
+        if (language === "js") {
+          expect(
+            eventCases.find((testCase) => testCase.id.endsWith("non-inference-boundary")),
+          ).toMatchObject({ feature: "diagnostics-clean" });
+          expect(eventCases.find((testCase) => testCase.feature === "hover")?.id).toContain(
+            ".jsdoc.",
+          );
+        }
       }
     }
     expect(
@@ -116,6 +129,12 @@ describe("editor-neutral LSP contract inventory", () => {
       feature: "diagnostics-clean",
       providers: ["tsserver", "tsgo", "shared-tsgo"],
     });
+    expect(
+      standard.filter((testCase) => /^svelte-classic-[jt]s-dom-event\./.test(testCase.id)),
+    ).toEqual([
+      expect.objectContaining({ language: "js", feature: "diagnostics-clean" }),
+      expect.objectContaining({ language: "ts", feature: "diagnostics-clean" }),
+    ]);
   });
 });
 
@@ -131,6 +150,22 @@ describe("editor-neutral anchor resolution", () => {
     expect(() => resolveContractAnchor(source, { text: "local", token: "local" })).toThrow(
       /occurrence/i,
     );
+    expect(() =>
+      resolveContractAnchor("return event", {
+        text: "return event",
+        occurrence: 0,
+        token: "e",
+      }),
+    ).toThrow(/anchor token.*ambiguous/i);
+  });
+
+  it("resolves every committed inventory anchor unambiguously", () => {
+    const fixtureRoot = fileURLToPath(new URL("../fixtures/editor-neutral/", import.meta.url));
+    for (const testCase of createEditorNeutralContractInventory()) {
+      if (!testCase.anchor || !testCase.document) continue;
+      const source = readFileSync(resolve(fixtureRoot, testCase.document), "utf8");
+      expect(() => resolveContractAnchor(source, testCase.anchor!), testCase.id).not.toThrow();
+    }
   });
 });
 
