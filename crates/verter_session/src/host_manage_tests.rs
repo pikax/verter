@@ -3551,7 +3551,7 @@ fn get_export_span_ts_file() {
     );
 }
 
-/// @ai-generated - get_export_span for .vue default import finds first binding
+/// @ai-generated - get_export_span for .vue default import anchors at file start
 #[test]
 fn get_export_span_vue_default() {
     let host = make_host();
@@ -3561,10 +3561,13 @@ fn get_export_span_vue_default() {
         "<script setup>\nconst msg = 'hello'\n</script>\n<template><div/></template>",
     );
 
+    // The component default export has no authored source token; the honest
+    // anchor is the file start, never an unrelated internal local's span.
     let span = host.get_export_span("Child.vue", "default");
-    assert!(
-        span.is_some(),
-        "default export of .vue should resolve to first binding"
+    assert_eq!(
+        span,
+        Some((0, 0)),
+        "default export of .vue should anchor at file start (0, 0)"
     );
 }
 
@@ -3723,9 +3726,11 @@ fn get_export_span_follows_reexport_to_vue() {
         canonical_id, "/project/Popup.vue",
         "should resolve to Popup.vue canonical ID"
     );
-    assert!(
-        start < end,
-        "should have a valid span in Popup.vue (start={start}, end={end})"
+    // The component default export anchors at the file start, like Svelte.
+    assert_eq!(
+        (start, end),
+        (0, 0),
+        "should anchor at the Popup.vue file start (start={start}, end={end})"
     );
     // Negative: should NOT return index.ts
     assert_ne!(
@@ -3761,7 +3766,11 @@ fn get_export_span_follows_reexport_to_vue_full_paths() {
         canonical_id, "/project/src/components/BarrelComp.vue",
         "should resolve to the full child Vue canonical ID"
     );
-    assert!(start < end, "should return a valid span in BarrelComp.vue");
+    assert_eq!(
+        (start, end),
+        (0, 0),
+        "should anchor at the BarrelComp.vue file start"
+    );
 }
 
 #[test]
