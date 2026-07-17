@@ -268,6 +268,9 @@ Status: `open` · `partial` · `fixed`
 | ISSUE-vue-ide-complete-slot-prop-member | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-vue-ide-def-event | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-vue-ide-def-event-name | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
+| ISSUE-vue-ide-def-kebab-event | fixed | closed | kebab `@my-event` must land on camel `myEvent` emit | Case-map attr contract | Hard-fail suite (no catch-all skip) |
+| ISSUE-vue-ide-def-kebab-prop | fixed | closed | kebab `:my-prop` must land on camel `myProp` declare | Case-map attr contract | Hard-fail suite (no catch-all skip) |
+| ISSUE-vue-ide-def-kebab-slot | fixed | closed | kebab `#my-slot` must land on camel `mySlot` declare | Case-map attr contract | Hard-fail suite (no catch-all skip) |
 | ISSUE-vue-ide-def-prop-attr | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-vue-ide-def-slot-name | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-vue-ide-def-slot-prop | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
