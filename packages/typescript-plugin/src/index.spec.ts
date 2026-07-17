@@ -751,8 +751,8 @@ describe("host-proxy matrix: resolveModuleNameLiterals (in-project → IDE carri
   });
 });
 
-describe("getExternalFiles = ready framework source identities only", () => {
-  it("returns only source identities backed by ready IDE carriers", () => {
+describe("getExternalFiles = ready carrier source + companion identities", () => {
+  it("returns source and companion identities backed by ready IDE carriers", () => {
     const dir = track(
       writeStore(vueAndSvelteManifest(), {
         "blobs/A.vue.tsx": "x",
@@ -765,13 +765,20 @@ describe("getExternalFiles = ready framework source identities only", () => {
     plugin.create(info);
 
     // The opened source stays the project member while host hooks substitute its
-    // ready generated carrier content.
+    // ready generated carrier content. The companion must ALSO be advertised:
+    // without companion roots, tsserver attaches the Rust-opened companion only
+    // transiently and any project reload evicts it into an inferred project,
+    // breaking every projectFileName-targeted query.
     const files = plugin.getExternalFiles!(info.project, 0 as any);
-    expect(files.sort()).toEqual(["d:/ws/src/A.vue", "d:/ws/src/W.svelte"]);
-    // B.vue is owned but not ready, so it must not be advertised.
+    expect(files.sort()).toEqual([
+      "d:/ws/src/A.vue",
+      "d:/ws/src/A.vue.tsx",
+      "d:/ws/src/W.svelte",
+      "d:/ws/src/W.svelte.tsx",
+    ]);
+    // B.vue is owned but not ready, so neither identity may be advertised.
     expect(files).not.toContain("d:/ws/src/B.vue");
-    // The companion path must not become a second project identity.
-    expect(files).not.toContain("d:/ws/src/A.vue.tsx");
+    expect(files).not.toContain("d:/ws/src/B.vue.tsx");
   });
 
   it("returns [] when the store is unavailable", () => {
@@ -793,7 +800,11 @@ describe("getExternalFiles = ready framework source identities only", () => {
     const plugin = init({ typescript: ts } as any);
     plugin.create(info);
 
-    expect(plugin.getExternalFiles!(info.project, 0 as any)).toEqual(["d:/ws/src/W.svelte"]);
+    expect(plugin.getExternalFiles!(info.project, 0 as any).sort()).toEqual([
+      "d:/ws/src/A.vue.tsx",
+      "d:/ws/src/W.svelte",
+      "d:/ws/src/W.svelte.tsx",
+    ]);
   });
 
   // @ai-generated - Plugin externals become Program files after the first graph
@@ -817,7 +828,12 @@ describe("getExternalFiles = ready framework source identities only", () => {
     graphRoots = [...second];
     const third = plugin.getExternalFiles!(info.project, 0 as any).sort();
 
-    expect(first).toEqual(["d:/ws/src/A.vue", "d:/ws/src/W.svelte"]);
+    expect(first).toEqual([
+      "d:/ws/src/A.vue",
+      "d:/ws/src/A.vue.tsx",
+      "d:/ws/src/W.svelte",
+      "d:/ws/src/W.svelte.tsx",
+    ]);
     expect(second).toEqual(first);
     expect(third).toEqual(first);
   });
@@ -930,7 +946,9 @@ describe("getExternalFiles = ready framework source identities only", () => {
 
     expect(plugin.getExternalFiles!(info.project, 0 as any).sort()).toEqual([
       "d:/ws/src/A.vue",
+      "d:/ws/src/A.vue.tsx",
       "d:/ws/src/W.svelte",
+      "d:/ws/src/W.svelte.tsx",
     ]);
     const snap = info.languageServiceHost.getScriptSnapshot("d:/ws/src/A.vue");
     expect(snap.getText(0, snap.getLength())).toBe("x");
@@ -1331,8 +1349,8 @@ describe("getExternalFiles is project-scoped (no cross-tsconfig leak)", () => {
     const filesB = pluginB.getExternalFiles!(infoB.project, 0 as any);
 
     // Project A sees ONLY its Vue carrier; project B sees ONLY its Svelte carrier.
-    expect(filesA).toEqual(["d:/ws/a/src/A.vue"]);
-    expect(filesB).toEqual(["d:/ws/b/src/B.svelte"]);
+    expect(filesA).toEqual(["d:/ws/a/src/A.vue", "d:/ws/a/src/A.vue.tsx"]);
+    expect(filesB).toEqual(["d:/ws/b/src/B.svelte", "d:/ws/b/src/B.svelte.tsx"]);
     // The leak the fix closes: neither project advertises the OTHER's carrier.
     expect(filesA).not.toContain("d:/ws/b/src/B.svelte");
     expect(filesB).not.toContain("d:/ws/a/src/A.vue");
@@ -1361,7 +1379,7 @@ describe("getExternalFiles is project-scoped (no cross-tsconfig leak)", () => {
       projectService: { logger: { info: () => {} } },
     };
     const filesB = plugin.getExternalFiles!(projectB, 0 as any);
-    expect(filesB).toEqual(["d:/ws/b/src/B.svelte"]);
+    expect(filesB).toEqual(["d:/ws/b/src/B.svelte", "d:/ws/b/src/B.svelte.tsx"]);
     expect(filesB).not.toContain("d:/ws/a/src/A.vue");
   });
 

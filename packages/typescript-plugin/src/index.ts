@@ -2915,10 +2915,27 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         .map(canonical)
         .filter((root) => !priorExternals.has(root)),
     );
-    const out = store.readyIdeSources().filter((source) => !configuredRoots.has(canonical(source)));
+    // Advertise BOTH identities of every ready carrier:
+    // - the SOURCE identity, so host hooks substitute its generated content
+    //   without a second document identity;
+    // - the COMPANION identity (`{carrier}.tsx`/`.jsx`), so the configured
+    //   project KEEPS the companion the Rust host opened. Without a companion
+    //   root, the open companion's membership is transient: any project
+    //   structure reload (reloadProjects, tsconfig recompute) drops it into a
+    //   per-file inferred project, and every projectFileName-targeted query
+    //   then fails closed ("Could not find source file"). Companions are
+    //   distinct paths from their sources, so the double-identity hazard above
+    //   does not apply to them.
+    const sources = store
+      .readyIdeSources()
+      .filter((source) => !configuredRoots.has(canonical(source)));
+    const companions = store
+      .readyIdeCompanions()
+      .filter((companion) => !configuredRoots.has(canonical(companion)));
+    const out = [...new Set([...sources, ...companions])];
     priorNonEditorExternalsByProject.set(project, new Set(out.map(canonical)));
     project.projectService.logger.info(
-      `[Verter] getExternalFiles(${projectKey}): ${out.length} ready carrier source(s)`,
+      `[Verter] getExternalFiles(${projectKey}): ${sources.length} ready carrier source(s), ${companions.length} companion(s)`,
     );
     return out;
   };
