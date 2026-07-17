@@ -3767,6 +3767,94 @@ const items = ref([])
     );
 }
 
+// ── Vue 3.4 same-name v-bind shorthand on COMPONENTS ─────────────
+// `:foo` ≡ `:foo="foo"`. Dropping these is a runtime prop-missing bug.
+
+/// Minimal: setup const + `:cards` alone must emit `cards: _ctx.cards`.
+#[test]
+fn ssr_component_same_name_shorthand_setup_const() {
+    let code = gen_ssr_template(
+        r#"<script setup>
+import Child from './Child.vue'
+const cards = [1, 2]
+</script>
+<template><Child :cards /></template>"#,
+    );
+    assert!(
+        code.contains("cards: _ctx.cards") || code.contains("cards: $setup.cards"),
+        "`:cards` shorthand must emit cards binding, got:\n{code}"
+    );
+    // Negative: must not pass only _attrs (would drop the prop)
+    assert!(
+        !code.contains("_ssrRenderComponent(_ctx.Child, _attrs, null")
+            && !code.contains("_ssrRenderComponent($setup[\"Child\"], _attrs, null"),
+        "must not collapse to bare _attrs when :cards is present, got:\n{code}"
+    );
+}
+
+/// `:cards` must still appear when combined with `v-bind="props"` (spread).
+#[test]
+fn ssr_component_same_name_shorthand_with_vbind_spread() {
+    let code = gen_ssr_template(
+        r#"<script setup>
+import Child from './Child.vue'
+const props = defineProps<{ x?: number }>()
+const cards = [1]
+</script>
+<template><Child :cards v-bind="props" /></template>"#,
+    );
+    assert!(
+        code.contains("cards: _ctx.cards") || code.contains("cards:"),
+        "`:cards` must survive next to v-bind spread, got:\n{code}"
+    );
+    // Spread must still be present
+    assert!(
+        code.contains("_ctx.props") || code.contains("props"),
+        "v-bind=\"props\" spread must remain, got:\n{code}"
+    );
+}
+
+/// Destructuring defineProps + `:invert` / `:brightness` same-name shorthands.
+#[test]
+fn ssr_component_same_name_shorthand_destructured_props() {
+    let code = gen_ssr_template(
+        r#"<script setup lang="ts">
+import Child from './Child.vue'
+const { invert = false, brightness = 0 } = defineProps<{
+  invert?: boolean
+  brightness?: number
+}>()
+</script>
+<template><Child :invert :brightness /></template>"#,
+    );
+    // Official resolves destructured props through _ctx./bindings
+    assert!(
+        code.contains("invert:") && code.contains("brightness:"),
+        "destructured prop shorthands must emit invert + brightness, got:\n{code}"
+    );
+}
+
+/// Source-order: explicit keys stay in template order with shorthand.
+#[test]
+fn ssr_component_same_name_shorthand_preserves_source_order() {
+    let code = gen_ssr_template(
+        r#"<script setup>
+import Child from './Child.vue'
+const a = 1
+const b = 2
+const c = 3
+</script>
+<template><Child :a :b="b" :c /></template>"#,
+    );
+    let ia = code.find("a:").expect("a key");
+    let ib = code.find("b:").expect("b key");
+    let ic = code.find("c:").expect("c key");
+    assert!(
+        ia < ib && ib < ic,
+        "prop keys must follow template declaration order a,b,c; got positions a={ia} b={ib} c={ic} in:\n{code}"
+    );
+}
+
 /// @ai-generated — Static class + v-bind spread should NOT duplicate class in attrs.
 #[test]
 fn ssr_class_dedup_with_vbind_spread() {

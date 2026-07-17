@@ -5016,18 +5016,22 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                     if prop_name.starts_with(':')
                         || (prop_name == "v-bind" && prop.arg_start.is_some())
                     {
-                        if let (Some(as_), Some(ae), Some(vs), Some(ve)) = (
-                            prop.arg_start,
-                            prop.arg_end,
-                            prop.value_start,
-                            prop.value_end,
-                        ) {
+                        if let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) {
                             let attr = &source[as_ as usize..ae as usize];
-                            // :key is passed through on components (unlike HTML elements)
-                            let expr = &source[vs as usize..ve as usize];
-                            let oxc_prop = oxc.and_then(|o| find_oxc_prop(o, i));
-                            let oxc_expr = oxc_prop.and_then(|p| p.exp.as_ref());
-                            let resolved = self.resolve_expr(expr, vs, oxc_expr);
+                            // :key is passed through on components (unlike HTML elements).
+                            // Vue 3.4+ same-name shorthand: `:cards` (no value) ≡
+                            // `:cards="cards"`. Camelize for binding lookup so
+                            // `:heading-value` resolves to `headingValue`.
+                            let resolved =
+                                if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                                    let expr = &source[vs as usize..ve as usize];
+                                    let oxc_prop = oxc.and_then(|o| find_oxc_prop(o, i));
+                                    let oxc_expr = oxc_prop.and_then(|p| p.exp.as_ref());
+                                    self.resolve_expr(expr, vs, oxc_expr)
+                                } else {
+                                    let camelized = camelize(attr);
+                                    self.resolver.resolve_simple_expr(&camelized)
+                                };
                             props_parts.push(format!(
                                 "{}: {}",
                                 html_attr_to_js_key(attr),
