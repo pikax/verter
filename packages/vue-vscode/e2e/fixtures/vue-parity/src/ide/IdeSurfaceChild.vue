@@ -6,16 +6,22 @@ defineProps<{
   label: string;
   count: number;
   enabled?: boolean;
+  /** camelCase declare; template may use kebab `my-prop` */
+  myProp?: string;
 }>();
 
 const emit = defineEmits<{
   pick: [value: string];
   change: [next: number];
+  /** camelCase declare; template may use kebab `@my-event` */
+  myEvent: [payload: string];
 }>();
 
 defineSlots<{
   header(props: { title: string; count: number }): any;
   default(props: { body: string }): any;
+  /** camelCase declare; template may use kebab `#my-slot` */
+  mySlot(props: { note: string }): any;
 }>();
 
 function fire() {

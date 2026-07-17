@@ -12,6 +12,12 @@ function onChange(next: number): void {
   void next;
 }
 
+function onMyEvent(payload: string): void {
+  void payload;
+}
+
+const myPropValue = "kebab-prop";
+
 interface IdePerson {
   name: string;
   age: number;
@@ -26,8 +32,10 @@ const person: IdePerson | null = { name: "Ada", age: 36 };
     <IdeSurfaceChild
       :label="label"
       :count="count"
+      :my-prop="myPropValue"
       @pick="onPick"
       @change="onChange"
+      @my-event="onMyEvent"
     >
       <!-- SLOT_HEADER_SITE -->
       <template #header="{ title, count: slotCount }">
@@ -35,6 +43,9 @@ const person: IdePerson | null = { name: "Ada", age: 36 };
       </template>
       <template #default="{ body }">
         <p>{{ body }}</p>
+      </template>
+      <template #my-slot="{ note }">
+        <em>{{ note }}</em>
       </template>
     </IdeSurfaceChild>
 

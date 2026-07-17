@@ -234,6 +234,84 @@ suite(`IDE navigation + completion [${FIXTURE_NAME}]`, function () {
     }
   });
 
+  test("ide.def.kebab-prop-to-camel-declare", async function () {
+    const fw = parityFramework();
+    if (!fw) throw new Error("TEST_DEFECT: parity suite loaded for an inapplicable fixture");
+    if (fw !== "vue") return; // Svelte has no HTML-case kebab contract on prop names
+    const parent = parentFile(fw);
+    const child = childFile(fw);
+    try {
+      await assertDefinitionTargetsFile(
+        { file: parent, token: ":my-prop=", occurrence: 0, caretOffset: 1 },
+        child,
+      );
+      await assertDefinitionTargetsToken(
+        { file: parent, token: "my-prop", occurrence: 0 },
+        { file: child, token: "myProp", occurrence: 0 },
+      );
+    } catch (err) {
+      failParityGap(
+        this,
+        "ide.def.kebab-prop-to-camel-declare",
+        "ISSUE-vue-ide-def-kebab-prop",
+        `kebab :my-prop must land on camel myProp: ${String(err)}`,
+        "product-gap",
+      );
+    }
+  });
+
+  test("ide.def.kebab-event-to-camel-emit", async function () {
+    const fw = parityFramework();
+    if (!fw) throw new Error("TEST_DEFECT: parity suite loaded for an inapplicable fixture");
+    if (fw !== "vue") return;
+    const parent = parentFile(fw);
+    const child = childFile(fw);
+    try {
+      await assertDefinitionTargetsFile(
+        { file: parent, token: "@my-event=", occurrence: 0, caretOffset: 1 },
+        child,
+      );
+      await assertDefinitionTargetsToken(
+        { file: parent, token: "my-event", occurrence: 0 },
+        { file: child, token: "myEvent", occurrence: 0 },
+      );
+    } catch (err) {
+      failParityGap(
+        this,
+        "ide.def.kebab-event-to-camel-emit",
+        "ISSUE-vue-ide-def-kebab-event",
+        `kebab @my-event must land on camel myEvent: ${String(err)}`,
+        "product-gap",
+      );
+    }
+  });
+
+  test("ide.def.kebab-slot-to-camel-declare", async function () {
+    const fw = parityFramework();
+    if (!fw) throw new Error("TEST_DEFECT: parity suite loaded for an inapplicable fixture");
+    if (fw !== "vue") return;
+    const parent = parentFile(fw);
+    const child = childFile(fw);
+    try {
+      await assertDefinitionTargetsFile(
+        { file: parent, token: "#my-slot=", occurrence: 0, caretOffset: 1 },
+        child,
+      );
+      await assertDefinitionTargetsToken(
+        { file: parent, token: "my-slot", occurrence: 0 },
+        { file: child, token: "mySlot", occurrence: 0 },
+      );
+    } catch (err) {
+      failParityGap(
+        this,
+        "ide.def.kebab-slot-to-camel-declare",
+        "ISSUE-vue-ide-def-kebab-slot",
+        `kebab #my-slot must land on camel mySlot: ${String(err)}`,
+        "product-gap",
+      );
+    }
+  });
+
   // ── Completions ───────────────────────────────────────────────
 
   test("ide.complete.component-props", async function () {
