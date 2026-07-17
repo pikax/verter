@@ -28,18 +28,33 @@ plugin, and then executes one immutable Vue/Svelte, JavaScript/TypeScript fixtur
 
 The inventory is typed and fail-closed:
 
-- 41 standard-LSP cases cover diagnostics (including the absence of TS7026), hover, definition,
-  completion, rename across script and markup, direct SFC imports, and two-hop barrel imports.
+- 69 standard-LSP cases cover diagnostics (including the absence of TS7026), hover, definition,
+  completion, rename across script and markup, direct SFC imports, two-hop barrel imports, and a
+  plain-TypeScript navigation control that distinguishes SFC projection defects from provider-route
+  defects. A dedicated Svelte 5 case requires `let title: string = $state("x")` to remain clean when
+  interpolated as `<p>{title}</p>` on every provider route. Unannotated JavaScript and TypeScript Vue
+  and Svelte handlers referenced by DOM click bindings must infer `PointerEvent`: a valid `pointerId`
+  access is clean, hover cannot degrade to `any` or generic `Event`, and a nonexistent member must
+  produce exactly TS2339. `.jsx` and `.tsx` `HTMLElement.onclick` controls record provider behavior
+  without JSDoc, parameter annotations, or JSX-runtime shims. Both controls are compiled directly by
+  TypeScript 7 or newer, and their versions plus exact TS2339 diagnostics are recorded as authority
+  evidence separately from the standard-LSP executions. Nested authored-config rows separate strict
+  checking from lax JavaScript policy: `checkJs: false`/`strict: false` keeps the invalid member
+  diagnostic-free while hover, completion, and definition remain concretely `PointerEvent`-aware.
+  The strict and lax rows are run together so a generated or hidden override of `allowJs`, `checkJs`,
+  `strict`, or `noImplicitAny` cannot satisfy both policies.
 - One Verter custom-protocol case attests the selected provider route separately from standard LSP.
 - One provider-topology case applies only to `shared-tsgo`; it requires a live editor-owned relay
   and forbids activation of a managed fallback provider.
-- The three routes produce exactly 127 required executions. A missing route, startup failure, empty
+- The three routes produce exactly 211 required executions. A missing route, startup failure, empty
   response, skipped/N/A case, or incomplete execution count fails the run.
 
 The fixture intentionally has no configured `jsxImportSource`. Public Svelte hovers must expose the
 Svelte 5 `Component` contract and must not leak generated carrier types such as
 `__VerterPublicInstance`. The runner writes a JSON receipt to `VERTER_EDITOR_NEUTRAL_RECEIPT`, or
-to the operating-system temporary directory when that variable is absent.
+to the operating-system temporary directory when that variable is absent. The receipt records each
+route/case outcome, duration, and failure message, plus stable inventory and execution groupings by
+route, surface, feature, and framework/language in addition to exact attempted/passed/failed totals.
 
 The shared contract and fixture live under `packages/lsp-test-client`; the real-process driver and
 gate live under `packages/dx-harness`. Editor clients can implement the same narrow driver interface

@@ -40,15 +40,15 @@ function fakeDriver(diagnostics: readonly LspDiagnostic[]): EditorNeutralContrac
 }
 
 describe("editor-neutral LSP contract inventory", () => {
-  it("is a non-vacuous, exact 43-case cross-framework inventory", () => {
+  it("is a non-vacuous, exact 71-case cross-framework inventory", () => {
     const inventory = createEditorNeutralContractInventory();
-    expect(inventory).toHaveLength(43);
-    expect(new Set(inventory.map((testCase) => testCase.id)).size).toBe(43);
+    expect(inventory).toHaveLength(71);
+    expect(new Set(inventory.map((testCase) => testCase.id)).size).toBe(71);
 
     const standard = inventory.filter((testCase) => testCase.surface === "standard-lsp");
     const custom = inventory.filter((testCase) => testCase.surface === "verter-custom-protocol");
     const topology = inventory.filter((testCase) => testCase.surface === "provider-topology");
-    expect(standard).toHaveLength(41);
+    expect(standard).toHaveLength(69);
     expect(custom).toHaveLength(1);
     expect(topology).toHaveLength(1);
 
@@ -75,10 +75,47 @@ describe("editor-neutral LSP contract inventory", () => {
           ).toBe(true);
         }
       }
+      const laxPrefix = `${framework}-js-dom-event-policy-lax.`;
+      const laxCases = standard.filter((testCase) => testCase.id.startsWith(laxPrefix));
+      expect(laxCases).toHaveLength(4);
+      expect(laxCases.map((testCase) => testCase.feature).sort()).toEqual([
+        "completion",
+        "definition",
+        "diagnostics-clean",
+        "hover",
+      ]);
     }
     expect(standard.filter((testCase) => testCase.feature === "consumer-diagnostics")).toHaveLength(
       1,
     );
+    expect(
+      standard.filter((testCase) => testCase.feature.startsWith("plain-control-")),
+    ).toHaveLength(5);
+    expect(
+      standard.filter((testCase) => /^plain-[jt]sx-pointer-event\./.test(testCase.id)),
+    ).toHaveLength(4);
+    for (const framework of ["vue", "svelte"] as const) {
+      for (const language of ["js", "ts"] as const) {
+        const prefix = `${framework}-${language}-dom-event.`;
+        expect(standard.filter((testCase) => testCase.id.startsWith(prefix))).toHaveLength(3);
+        expect(standard.find((testCase) => testCase.id === `${prefix}hover`)).toMatchObject({
+          framework,
+          language,
+          requiredHoverFragments: ["PointerEvent"],
+        });
+        expect(
+          standard.find((testCase) => testCase.id === `${prefix}diagnostics.invalid-member`),
+        ).toMatchObject({ expectedDiagnosticCode: 2339 });
+      }
+    }
+    expect(
+      standard.find((testCase) => testCase.id === "svelte-ts-state-string.diagnostics.clean"),
+    ).toMatchObject({
+      framework: "svelte",
+      language: "ts",
+      feature: "diagnostics-clean",
+      providers: ["tsserver", "tsgo", "shared-tsgo"],
+    });
   });
 });
 

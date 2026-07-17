@@ -2,11 +2,11 @@
  * @ai-generated - Drives the complete editor-neutral behavioral contract against
  * real tsserver, managed tsgo, and real relay-backed shared-tsgo routes.
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   createEditorNeutralContractInventory,
@@ -41,7 +41,113 @@ interface RunCounters {
   setupFailures: string[];
 }
 
+interface ExecutionOutcome {
+  readonly route: EditorNeutralProviderRoute;
+  readonly id: string;
+  readonly surface: string;
+  readonly feature: string;
+  readonly status: "passed" | "failed";
+  readonly durationMs: number;
+  readonly error?: string;
+}
+
+interface TypeScriptCliControlOutcome {
+  readonly status: "passed" | "failed";
+  readonly version?: string;
+  readonly diagnosticCodes?: readonly number[];
+  readonly output?: string;
+  readonly error?: string;
+}
+
+function groupedCounts<T>(
+  items: readonly T[],
+  keyFor: (item: T) => string,
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const item of items) {
+    const key = keyFor(item);
+    counts[key] = (counts[key] ?? 0) + 1;
+  }
+  return Object.fromEntries(
+    Object.entries(counts).sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
 const counters: RunCounters = { attempted: 0, passed: 0, failed: 0, setupFailures: [] };
+const outcomes: ExecutionOutcome[] = [];
+const typeScriptCliControls: Partial<Record<"jsx" | "tsx", TypeScriptCliControlOutcome>> = {};
+
+describe.sequential("TypeScript >=7 authority control", () => {
+  for (const extension of ["jsx", "tsx"] as const) {
+    it(`contextually types the plain .${extension} handler as PointerEvent`, async () => {
+      try {
+        const resolver = path.join(REPO_ROOT, "node_modules", "typescript", "lib", "getExePath.js");
+        const module = (await import(pathToFileURL(resolver).href)) as {
+          default?: () => string;
+        };
+        if (typeof module.default !== "function") {
+          throw new Error(`TypeScript executable resolver has no default function: ${resolver}`);
+        }
+        const compiler = module.default();
+        const version = spawnSync(compiler, ["--version"], { encoding: "utf8" });
+        if (version.status !== 0) {
+          throw new Error(`TypeScript version command failed: ${version.stderr || version.stdout}`);
+        }
+        const versionText = version.stdout.trim();
+        const major = Number(/^Version\s+(\d+)/.exec(versionText)?.[1]);
+        if (!Number.isInteger(major) || major < 7) {
+          throw new Error(`TypeScript >=7 is required, got ${JSON.stringify(versionText)}`);
+        }
+
+        const controlFile = path.join(WORKSPACE_ROOT, "src", `plain-pointer-control.${extension}`);
+        const control = spawnSync(
+          compiler,
+          [
+            "--ignoreConfig",
+            "--noEmit",
+            "--allowJs",
+            "--checkJs",
+            "--target",
+            "es2022",
+            "--module",
+            "esnext",
+            "--moduleResolution",
+            "bundler",
+            "--lib",
+            "es2022,dom",
+            "--jsx",
+            "preserve",
+            controlFile,
+          ],
+          { cwd: REPO_ROOT, encoding: "utf8" },
+        );
+        const output = `${control.stdout}${control.stderr}`.trim();
+        const diagnosticCodes = [...output.matchAll(/error TS(\d+):/g)].map((match) =>
+          Number(match[1]),
+        );
+        typeScriptCliControls[extension] = {
+          status: "passed",
+          version: versionText,
+          diagnosticCodes,
+          output,
+        };
+        expect(control.status, "the deliberate invalid-member control must fail typecheck").toBe(1);
+        expect(diagnosticCodes, "the control must report exactly the anti-any diagnostic").toEqual([
+          2339,
+        ]);
+        expect(output, "the diagnostic must expose the concrete contextual event type").toMatch(
+          /type 'PointerEvent'/,
+        );
+      } catch (error) {
+        typeScriptCliControls[extension] = {
+          status: "failed",
+          error: error instanceof Error ? error.message : String(error),
+        };
+        throw error;
+      }
+    });
+  }
+});
 
 for (const route of ROUTES) {
   describe.sequential(`editor-neutral LSP contract [${route}]`, () => {
@@ -69,11 +175,29 @@ for (const route of ROUTES) {
     for (const testCase of INVENTORY.filter((candidate) => candidate.providers.includes(route))) {
       it(`${testCase.surface}: ${testCase.id}`, async () => {
         counters.attempted += 1;
+        const startedAt = performance.now();
         try {
           await executeEditorNeutralContractCase(testCase, driver, driver.sources);
           counters.passed += 1;
+          outcomes.push({
+            route,
+            id: testCase.id,
+            surface: testCase.surface,
+            feature: testCase.feature,
+            status: "passed",
+            durationMs: Math.round(performance.now() - startedAt),
+          });
         } catch (error) {
           counters.failed += 1;
+          outcomes.push({
+            route,
+            id: testCase.id,
+            surface: testCase.surface,
+            feature: testCase.feature,
+            status: "failed",
+            durationMs: Math.round(performance.now() - startedAt),
+            error: error instanceof Error ? error.message : String(error),
+          });
           throw error;
         }
       }, 60_000);
@@ -89,18 +213,51 @@ afterAll(() => {
     cwd: REPO_ROOT,
     encoding: "utf8",
   }).trim();
+  const inventoryGroups = {
+    bySurface: groupedCounts(INVENTORY, (testCase) => testCase.surface),
+    byFeature: groupedCounts(INVENTORY, (testCase) => testCase.feature),
+    byFrameworkLanguage: groupedCounts(
+      INVENTORY,
+      (testCase) => `${testCase.framework ?? "none"}:${testCase.language ?? "none"}`,
+    ),
+    byRoute: Object.fromEntries(
+      ROUTES.map((route) => [
+        route,
+        INVENTORY.filter((testCase) => testCase.providers.includes(route)).length,
+      ]),
+    ),
+  };
+  const executionGroups = Object.fromEntries(
+    ROUTES.map((route) => {
+      const routeOutcomes = outcomes.filter((outcome) => outcome.route === route);
+      return [
+        route,
+        {
+          attempted: routeOutcomes.length,
+          passed: routeOutcomes.filter((outcome) => outcome.status === "passed").length,
+          failed: routeOutcomes.filter((outcome) => outcome.status === "failed").length,
+          bySurface: groupedCounts(routeOutcomes, (outcome) => outcome.surface),
+          byFeature: groupedCounts(routeOutcomes, (outcome) => outcome.feature),
+        },
+      ];
+    }),
+  );
   writeFileSync(
     receiptPath,
     `${JSON.stringify(
       {
-        schemaVersion: 1,
+        schemaVersion: 2,
         sourceSha: sha,
         inventoryCases: INVENTORY.length,
         standardLspCases: INVENTORY.filter((testCase) => testCase.surface === "standard-lsp")
           .length,
         routes: ROUTES,
         expectedExecutions: EXPECTED_EXECUTIONS,
+        authorityControls: { typeScriptCli: typeScriptCliControls },
+        inventoryGroups,
+        executionGroups,
         ...counters,
+        outcomes,
       },
       null,
       2,
@@ -109,8 +266,8 @@ afterAll(() => {
   );
   console.log(`editor-neutral LSP receipt: ${receiptPath}`);
 
-  expect(INVENTORY.length, "the complete shared inventory must be discovered").toBe(43);
-  expect(EXPECTED_EXECUTIONS, "41 standard + custom on each route, plus shared topology").toBe(127);
+  expect(INVENTORY.length, "the complete shared inventory must be discovered").toBe(71);
+  expect(EXPECTED_EXECUTIONS, "69 standard + custom on each route, plus shared topology").toBe(211);
   expect(
     counters.setupFailures,
     "every provider route must start; no route may be skipped",
@@ -118,4 +275,23 @@ afterAll(() => {
   expect(counters.attempted, "all applicable cases must execute; zero/N/A is a failure").toBe(
     EXPECTED_EXECUTIONS,
   );
+  expect(outcomes, "every execution must have an auditable receipt outcome").toHaveLength(
+    EXPECTED_EXECUTIONS,
+  );
+  expect(
+    new Set(outcomes.map((outcome) => `${outcome.route}:${outcome.id}`)).size,
+    "receipt outcomes must be unique by route and case",
+  ).toBe(EXPECTED_EXECUTIONS);
+  expect(outcomes.filter((outcome) => outcome.status === "passed")).toHaveLength(counters.passed);
+  expect(outcomes.filter((outcome) => outcome.status === "failed")).toHaveLength(counters.failed);
+  expect(inventoryGroups.byRoute).toEqual({ tsserver: 70, tsgo: 70, "shared-tsgo": 71 });
+  expect(
+    typeScriptCliControls,
+    "both TypeScript >=7 authority controls must execute",
+  ).toMatchObject({ jsx: { status: "passed" }, tsx: { status: "passed" } });
+  for (const route of ROUTES) {
+    expect(executionGroups[route]?.attempted, `${route} receipt group must be complete`).toBe(
+      inventoryGroups.byRoute[route],
+    );
+  }
 });
