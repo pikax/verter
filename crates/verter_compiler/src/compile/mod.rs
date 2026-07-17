@@ -858,8 +858,8 @@ fn compile_inner(
             })
         } else if has_scoped_style || use_vapor || verter_options.ssr {
             // Template-only component with scoped styles, vapor mode, or SSR:
-            // Emit a synthetic script block so __scopeId / __vapor / __ssrInlineRender
-            // propagates to consumers (playground, bundler, etc.).
+            // Emit a synthetic script block so __scopeId / __vapor propagates
+            // to consumers (playground, bundler, etc.).
             let mut code = String::with_capacity(128);
             code.push_str("const __sfc__ = {};\n");
             if has_scoped_style {
@@ -870,9 +870,8 @@ fn compile_inner(
             if use_vapor {
                 code.push_str("__sfc__.__vapor = true;\n");
             }
-            if verter_options.ssr {
-                code.push_str("__sfc__.__ssrInlineRender = true;\n");
-            }
+            // Non-inline SSR attaches `ssrRender` on the component after
+            // template codegen; do not claim `__ssrInlineRender`.
             code.push_str("export default __sfc__;\n");
             Some(VerterScriptBlock {
                 code,

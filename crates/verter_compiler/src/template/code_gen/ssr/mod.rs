@@ -262,10 +262,20 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
         let directive_name = prop_name.strip_prefix("v-")?;
         let binding_name = directive_to_camel(directive_name);
 
-        // Resolve directive reference: setup binding or _resolveDirective()
+        // Resolve directive reference: setup binding or _resolveDirective().
+        // Non-inline SSR reaches setup directives through the instance proxy
+        // (`_ctx.vFocus`); free `$setup[...]` would ReferenceError in ssrRender.
         let directive_ref = if let Some(bt) = self.resolver.get(&binding_name) {
             if bt.is_setup() {
-                format!("$setup[\"{}\"]", binding_name)
+                let prefix = self.resolver.resolve_prefix(&binding_name);
+                if prefix == "$setup." {
+                    format!("$setup[\"{}\"]", binding_name)
+                } else if prefix.is_empty() {
+                    binding_name
+                } else {
+                    // `_ctx.` / other proxy prefixes: keep valid identifier form
+                    format!("{}{}", prefix, binding_name)
+                }
             } else {
                 self.resolve_directive_global(directive_name, out)
             }
@@ -5934,9 +5944,10 @@ fn find_oxc_prop<'a, 'alloc>(
 
 // ======================== Utility functions ========================
 
-/// Convert `$setup.Foo` to `$setup["Foo"]` for SSR component references.
-/// Vue's SSR compiler uses bracket notation for $setup component references.
-/// Non-$setup references (e.g. `_ctx.Foo`, `_component_Foo`) pass through unchanged.
+/// Convert `$setup.Foo` to `$setup["Foo"]` for legacy client-style setup
+/// component references. Non-inline SSR uses `_ctx.Foo` (no `$setup` param in
+/// `ssrRender`), which passes through unchanged — bracket form is only needed
+/// for the free `$setup` namespace that appears in VDOM-style signatures.
 fn setup_dot_to_bracket(s: &str) -> String {
     if let Some(name) = s.strip_prefix("$setup.") {
         format!("$setup[\"{}\"]", name)

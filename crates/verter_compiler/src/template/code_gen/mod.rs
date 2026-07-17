@@ -216,7 +216,18 @@ pub fn generate_template<'alloc>(
             r.set_vapor(true);
             r
         }
-        CodeGenMode::Vdom | CodeGenMode::Ssr => {
+        CodeGenMode::Ssr => {
+            let mut r = BindingResolver::new_with_const_props(
+                bindings,
+                options.is_inline,
+                const_props_alloc,
+            );
+            // Non-inline ssrRender(_ctx, _push, _parent, _attrs) has no $setup
+            // param — bindings must go through the instance proxy as _ctx.*.
+            r.set_ssr(true);
+            r
+        }
+        CodeGenMode::Vdom => {
             BindingResolver::new_with_const_props(bindings, options.is_inline, const_props_alloc)
         }
     };

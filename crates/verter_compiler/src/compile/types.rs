@@ -259,8 +259,10 @@ pub struct VerterCompileOptions {
     pub source_map: bool,
     /// When true, compile for server-side rendering.
     /// Emits string-concatenation code (`_push()`, `_ssrRenderAttrs()`, etc.)
-    /// instead of VDOM render functions. Also sets `__ssrInlineRender: true`
-    /// on the component and attaches the render function as `ssrRender`.
+    /// instead of VDOM render functions, and attaches the render function as
+    /// `ssrRender` on the component. Non-inline SSR reads setup state through
+    /// the instance proxy (`_ctx.*`); it does not set `__ssrInlineRender`
+    /// (that flag is only for setup-returned render functions).
     pub ssr: bool,
     /// Pre-resolved external types for cross-file type resolution.
     ///
