@@ -234,7 +234,16 @@ impl VerterHost {
                     return true;
                 }
                 let specifier = import.source_specifier.as_str();
-                if specifier.starts_with("./") || specifier.starts_with("../") {
+                // Relative classification is the full TS `pathIsRelative`
+                // class (bare `.`/`..` + `./`/`../`/`.\`/`..\` prefixes) —
+                // the SAME predicate the workspace resolver uses. A
+                // narrower `./`/`../` prefix check buckets a bare-`..`
+                // import as `ExternalSpecifier("..")`, which a relative
+                // `declare module './index'` fact can never match: the
+                // probe reports "no augmenters", and a Content request
+                // admits a content-addressed entry with NO augmenter
+                // fingerprint — stale serves after the augmenter edits.
+                if verter_workspace::resolver::is_relative_specifier(specifier) {
                     per_import_targets.push(AugmentationTargetKind::ResolvedRelativeCanonical(
                         Arc::from(import.canonical_id.as_str()),
                     ));
@@ -377,13 +386,16 @@ impl VerterHost {
                             per_import_targets.push(AugmentationTargetKind::WildcardAmbient(
                                 InternedGlobPattern::from(fact_specifier),
                             ));
-                        } else if fact_specifier.starts_with("./")
-                            || fact_specifier.starts_with("../")
+                        } else if verter_workspace::resolver::is_relative_specifier(fact_specifier)
                         {
                             // Resolve the augmenter's relative
                             // `declare module "./X"` against the
                             // augmenter's own canonical — same authority
-                            // `augmenter_matches_target` uses. Routed
+                            // `augmenter_matches_target` uses (and the
+                            // same full `pathIsRelative` class, so a
+                            // `declare module '..'` fact resolves to the
+                            // parent index instead of masquerading as an
+                            // external module named `..`). Routed
                             // through the invocation-local memo so the
                             // same `(augmenter, specifier)` tuple
                             // resolves at most once across the per-fact

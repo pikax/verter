@@ -1032,17 +1032,41 @@ fn rewrite_quoted_path(after: &str, vue_dir: &Path) -> Option<(String, usize)> {
     let path_end = after[path_start..].find(quote)? + path_start;
     let import_path = &after[path_start..path_end];
 
-    let result = if import_path.starts_with("./") || import_path.starts_with("../") {
+    // Relative classification is the full TS `pathIsRelative` class (bare
+    // `.`/`..` plus the `./`/`../`/`.\`/`..\` prefixes) — the SAME shared
+    // predicate the workspace resolver uses. A narrower `./`/`../` prefix
+    // check leaves the bare and backslash spellings un-absolutized in the
+    // generated temp TSX, and TypeScript then resolves them against the
+    // TEMP directory: spurious missing-module diagnostics on this lane.
+    let result = if verter_workspace::resolver::is_relative_specifier(import_path) {
         // Check if the path after "./" is already an absolute path (e.g., "./D:/...")
         // This happens when the IDE codegen embeds a full filename in import('./filename.vue.verter.ts').
         let after_dot = import_path.strip_prefix("./").unwrap_or(import_path);
         if after_dot.contains(':') || after_dot.starts_with('/') {
             // Already absolute — just strip the "./" prefix
             format!("{quote}{after_dot}{quote}")
+        } else if import_path == "." {
+            // Bare `.` — the importer directory's own index module.
+            // Joining "." would leave a trailing `/.` segment
+            // (Path::join does not normalize "." segments on all
+            // platforms), so emit the directory itself.
+            let abs_path = vue_dir.to_string_lossy().replace('\\', "/");
+            format!("{quote}{abs_path}{quote}")
         } else {
-            // Strip leading "./" before joining to avoid "dir/./rest" in the result.
-            // Path::join does not normalize "." segments on all platforms.
-            let clean_rel = import_path.strip_prefix("./").unwrap_or(import_path);
+            // `\` is a module-specifier separator in the same
+            // `pathIsRelative` class (TS `normalizeSlashes`) — normalize
+            // before joining so `..\x` joins identically to `../x`.
+            // Then strip a leading "./" before joining to avoid
+            // "dir/./rest" in the result (Path::join does not normalize
+            // "." segments on all platforms). Bare `..` joins as-is —
+            // TypeScript normalizes the `..` segment during resolution,
+            // exactly as it does for the `../x` forms.
+            let normalized: std::borrow::Cow<'_, str> = if import_path.contains('\\') {
+                std::borrow::Cow::Owned(import_path.replace('\\', "/"))
+            } else {
+                std::borrow::Cow::Borrowed(import_path)
+            };
+            let clean_rel = normalized.strip_prefix("./").unwrap_or(&normalized);
             let resolved = vue_dir.join(clean_rel);
             let abs_path = resolved.to_string_lossy().replace('\\', "/");
             format!("{quote}{abs_path}{quote}")
@@ -2470,6 +2494,81 @@ const props = defineProps<{ msg: string }>()
         assert!(
             !result.contains("/./"),
             "resolved path must not contain '/./' segment: {result}"
+        );
+    }
+
+    #[test]
+    fn rewrite_relative_imports_absolutizes_bare_dot_dot() {
+        // TS `pathIsRelative` classifies bare `..` as relative (the parent
+        // directory's index module). Left un-absolutized in the generated
+        // temp TSX, TypeScript resolves it against the TEMP directory —
+        // spurious missing module on the validation lane.
+        let code = r#"import type { Foo } from '..'"#;
+        let result = rewrite_relative_imports(code, Path::new("/project/src"));
+        assert!(
+            result.contains("from '/project/src/..'"),
+            "bare '..' must absolutize against the vue dir (TS normalizes \
+             the '..' segment during resolution): {result}"
+        );
+        assert!(
+            !result.contains("from '..'"),
+            "the bare '..' specifier must not survive un-absolutized: {result}"
+        );
+    }
+
+    #[test]
+    fn rewrite_relative_imports_absolutizes_bare_dot() {
+        // Bare `.` — the importer directory's own index module.
+        let code = r#"import type { Foo } from '.'"#;
+        let result = rewrite_relative_imports(code, Path::new("/project/src"));
+        assert!(
+            result.contains("from '/project/src'"),
+            "bare '.' must absolutize to the vue dir itself: {result}"
+        );
+        assert!(
+            !result.contains("from '.'"),
+            "the bare '.' specifier must not survive un-absolutized: {result}"
+        );
+        assert!(
+            !result.contains("/src/.'"),
+            "bare '.' must not leave a trailing '/.' segment: {result}"
+        );
+    }
+
+    #[test]
+    fn rewrite_relative_imports_absolutizes_backslash_relative() {
+        // `..\x` / `.\x` are the same TS `pathIsRelative` class ([\\/]);
+        // the rewritten output is separator-normalized.
+        let code = r#"import type { Foo } from '..\x'"#;
+        let result = rewrite_relative_imports(code, Path::new("/project/src"));
+        assert!(
+            result.contains("'/project/src/../x'"),
+            "'..\\x' must absolutize with normalized separators: {result}"
+        );
+        let code = r#"import type { Foo } from '.\x'"#;
+        let result = rewrite_relative_imports(code, Path::new("/project/src"));
+        assert!(
+            result.contains("'/project/src/x'"),
+            "'.\\x' must absolutize with normalized separators: {result}"
+        );
+    }
+
+    #[test]
+    fn rewrite_relative_imports_preserves_non_relative_dot_prefixed_and_bare() {
+        // `.foo` is NOT in the pathIsRelative class (no separator after
+        // the leading `.`) — package-ish, preserved byte-for-byte, like a
+        // bare package name.
+        let code = r#"import { x } from '.foo'"#;
+        let result = rewrite_relative_imports(code, Path::new("/project/src"));
+        assert!(
+            result.contains("from '.foo'"),
+            "non-relative dot-prefixed specifier must be preserved: {result}"
+        );
+        let code = r#"import { x } from 'pkg'"#;
+        let result = rewrite_relative_imports(code, Path::new("/project/src"));
+        assert!(
+            result.contains("from 'pkg'"),
+            "bare package specifier must be preserved: {result}"
         );
     }
 

@@ -1945,9 +1945,26 @@ pub fn parent_dir(path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Check if a specifier is relative (`./` or `../`).
+/// Check if a specifier is relative. Matches TypeScript's `pathIsRelative`
+/// (`/^\.\.?($|[\\/])/`) exactly: the bare `.` / `..` directory specifiers
+/// plus the `./`, `../`, `.\`, `..\` prefixes (the regex's `[\\/]` class
+/// covers both separators) — `import ... from '..'` resolves to the parent
+/// directory's index module, never as a bare package name.
+///
+/// Classification runs on the raw specifier text (like TS), and this
+/// predicate does NOT normalize anything: separator normalization for a
+/// specifier classified relative happens in the relative resolution
+/// branches' [`join_paths`] call, whose `normalize_canonical_id` pass
+/// rewrites `\` → `/` (TS `combinePaths`/`normalizeSlashes` semantics), so
+/// `'..\index'` resolves byte-identically to `'../index'`. Non-relative
+/// specifiers (package names, `#imports`) keep their bytes — `pkg\sub`
+/// stays a package name.
 pub fn is_relative_specifier(specifier: &str) -> bool {
-    specifier.starts_with("./") || specifier.starts_with("../")
+    matches!(specifier, "." | "..")
+        || specifier.starts_with("./")
+        || specifier.starts_with("../")
+        || specifier.starts_with(".\\")
+        || specifier.starts_with("..\\")
 }
 
 /// Check if a specifier is an absolute path.

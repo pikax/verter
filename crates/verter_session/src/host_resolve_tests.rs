@@ -5206,6 +5206,254 @@ fn found_macro_type_surface_arm_error_clears_when_missing_source_appears() {
     assert_compiles_without_macro_type_dep_diag(&host, "/src/A.vue");
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Bare directory import specifiers (`.` / `..`) — in-tree relative routes
+// that resolve to a directory index. TypeScript treats a bare `.`/`..` as a
+// relative path (`pathIsRelative`: /^\.\.?($|[\\/])/), so the shared
+// resolver and the surface-arm adjudicator must resolve them exactly like
+// the `./`/`../` forms: an in-tree heritage arm imported `from '..'` must
+// materialise (no false-positive fatal HOST_MISSING_MACRO_TYPE_DEP), while
+// a name provably absent from the resolved parent index stays fatal.
+// (reka-ui `ListboxFilter.vue` / `_DatePicker.vue` regression shape.)
+// ───────────────────────────────────────────────────────────────────────────
+
+/// The reka-ui anchor fixture: `PrimitiveProps` is declared in a directory
+/// module, re-exported by its directory index, re-exported again by the
+/// package root index (a directory-hop named re-export chain), and consumed
+/// as heritage through `heritage_specifier` — the bare parent-directory
+/// specifier `'..'` under test, or its spelled-out `'../index'` control.
+fn upsert_parent_dir_barrel_fixture(host: &VerterHost, heritage_specifier: &str) {
+    upsert_non_sfc(
+        host,
+        "/src/Primitive/Primitive.ts",
+        "export interface PrimitiveProps { as?: string }",
+    );
+    upsert_non_sfc(
+        host,
+        "/src/Primitive/index.ts",
+        "export { type PrimitiveProps } from './Primitive'",
+    );
+    upsert_non_sfc(
+        host,
+        "/src/index.ts",
+        "export { type PrimitiveProps } from './Primitive'\nexport * from './Listbox'",
+    );
+    upsert_non_sfc(
+        host,
+        "/src/Listbox/index.ts",
+        "export { type ListboxFilterProps } from './ListboxFilter.vue'",
+    );
+    upsert_vue(
+        host,
+        "/src/Listbox/ListboxFilter.vue",
+        &format!(
+            "<script lang=\"ts\">\nimport type {{ PrimitiveProps }} from '{heritage_specifier}'\nexport interface ListboxFilterProps extends PrimitiveProps {{ modelValue?: string }}\n</script>\n<script setup lang=\"ts\">\nconst props = defineProps<ListboxFilterProps>()\n</script>\n<template><input/></template>"
+        ),
+    );
+    upsert_vue(
+        host,
+        "/src/Autocomplete/AutocompleteInput.vue",
+        "<script lang=\"ts\">\nimport type { ListboxFilterProps } from '../Listbox'\nexport interface AutocompleteInputProps extends ListboxFilterProps {}\n</script>\n<script setup lang=\"ts\">\nconst props = defineProps<AutocompleteInputProps>()\n</script>\n<template><div/></template>",
+    );
+}
+
+fn main_node_code(host: &VerterHost, canonical_id: &str) -> String {
+    host.get_virtual_file(VirtualQuery {
+        raw_id: None,
+        canonical_id: Some(canonical_id.to_string()),
+        node_kind: Some(VirtualNodeKind::Main),
+        compile_profile: profile(),
+    })
+    .unwrap_or_else(|err| panic!("{canonical_id} must serve a Main node, got {err:?}"))
+    .code
+    .to_string()
+}
+
+/// The exact corpus failure shape: the consumer's macro type dep RESOLVES
+/// (through a sibling barrel), but the dep type's own heritage is imported
+/// `from '..'`. The heritage arm must resolve through the parent-directory
+/// index — never adjudicate as an unresolvable surface arm — and the whole
+/// pipeline must behave byte-identically to the spelled-out `'../index'`
+/// control (a bare directory specifier is not a special case).
+#[test]
+fn found_macro_type_with_heritage_via_bare_parent_dir_import_compiles() {
+    let bare = strict_host();
+    upsert_parent_dir_barrel_fixture(&bare, "..");
+    let control = strict_host();
+    upsert_parent_dir_barrel_fixture(&control, "../index");
+
+    assert_compiles_without_macro_type_dep_diag(
+        &control,
+        "/src/Autocomplete/AutocompleteInput.vue",
+    );
+    assert_compiles_without_macro_type_dep_diag(&bare, "/src/Autocomplete/AutocompleteInput.vue");
+    assert_compiles_without_macro_type_dep_diag(&bare, "/src/Listbox/ListboxFilter.vue");
+
+    // The consumer sources are identical in both hosts — the emitted Main
+    // must be too (the `'..'` route resolves to the same declaration chain).
+    assert_eq!(
+        main_node_code(&bare, "/src/Autocomplete/AutocompleteInput.vue"),
+        main_node_code(&control, "/src/Autocomplete/AutocompleteInput.vue"),
+        "bare '..' heritage must produce the same consumer emission as '../index'"
+    );
+
+    // The dep's OWN compile enumerates its own-body member — and must not
+    // degrade it to a null runtime type under the bare-specifier route.
+    let dep_code = main_node_code(&bare, "/src/Listbox/ListboxFilter.vue");
+    assert!(
+        dep_code.contains("modelValue: { type: String }"),
+        "dep's own-body member must keep its runtime type under a '..' heritage import:\n{dep_code}"
+    );
+    assert!(
+        !dep_code.contains("type: null"),
+        "no member may degrade to a null runtime type when the '..' route resolves:\n{dep_code}"
+    );
+}
+
+/// Backslash spelling of the same heritage route: the `.vue` SOURCE TEXT
+/// carries `from '..\\index'`, whose JS-cooked module-specifier VALUE is
+/// `..\index` (one backslash). TS `pathIsRelative` (`/^\.\.?($|[\\/])/`)
+/// classifies it relative and normalizes `\` → `/` when combining paths, so
+/// it must resolve — end to end, through the macro-type dep pipeline —
+/// byte-identically to the `'../index'` spelling: no false-positive fatal
+/// HOST_MISSING_MACRO_TYPE_DEP, no node_modules ancestor-walk misroute.
+#[test]
+fn found_macro_type_with_heritage_via_backslash_parent_dir_import_compiles() {
+    let backslash = strict_host();
+    upsert_parent_dir_barrel_fixture(&backslash, "..\\\\index");
+    let control = strict_host();
+    upsert_parent_dir_barrel_fixture(&control, "../index");
+
+    assert_compiles_without_macro_type_dep_diag(
+        &control,
+        "/src/Autocomplete/AutocompleteInput.vue",
+    );
+    assert_compiles_without_macro_type_dep_diag(
+        &backslash,
+        "/src/Autocomplete/AutocompleteInput.vue",
+    );
+    assert_compiles_without_macro_type_dep_diag(&backslash, "/src/Listbox/ListboxFilter.vue");
+
+    // The consumer sources are identical in both hosts — the emitted Main
+    // must be too (the `'..\index'` route resolves to the same declaration
+    // chain as `'../index'`).
+    assert_eq!(
+        main_node_code(&backslash, "/src/Autocomplete/AutocompleteInput.vue"),
+        main_node_code(&control, "/src/Autocomplete/AutocompleteInput.vue"),
+        "'..\\index' heritage must produce the same consumer emission as '../index'"
+    );
+
+    // The dep's OWN compile enumerates its own-body member — and must not
+    // degrade it to a null runtime type under the backslash-specifier route.
+    let dep_code = main_node_code(&backslash, "/src/Listbox/ListboxFilter.vue");
+    assert!(
+        dep_code.contains("modelValue: { type: String }"),
+        "dep's own-body member must keep its runtime type under a '..\\index' heritage import:\n{dep_code}"
+    );
+    assert!(
+        !dep_code.contains("type: null"),
+        "no member may degrade to a null runtime type when the '..\\index' route resolves:\n{dep_code}"
+    );
+}
+
+/// Direct root-import shape: `defineProps<T>()` whose type argument is
+/// imported `from '..'` (the parent-directory index). The root import must
+/// load from the PARENT directory's index — a bare `'..'` is a relative
+/// specifier, never a bare package name. The importer's own directory also
+/// has an index (the reka-ui layout): a misrouted `'..'` that lands on the
+/// importer's own directory index cannot find `RootProps` there.
+#[test]
+fn macro_type_root_import_via_bare_parent_dir_specifier_compiles() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/index.ts",
+        "export interface RootProps { title?: string }",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/Comp/index.ts",
+        "export interface Unrelated { u?: number }",
+    );
+    upsert_vue(
+        &host,
+        "/src/Comp/Comp.vue",
+        "<script setup lang=\"ts\">\nimport type { RootProps } from '..'\nconst props = defineProps<RootProps>()\n</script>\n<template><div/></template>",
+    );
+
+    assert_compiles_without_macro_type_dep_diag(&host, "/src/Comp/Comp.vue");
+
+    // Positive: the imported root type's member materialises with its real
+    // runtime type — proving `'..'` loaded the PARENT index (the decoy
+    // `/src/Comp/index.ts` has no `RootProps`).
+    let code = main_node_code(&host, "/src/Comp/Comp.vue");
+    assert!(
+        code.contains("title: { type: String }"),
+        "the '..'-imported root type's member must enumerate with its runtime type:\n{code}"
+    );
+    assert!(
+        !code.contains("type: null"),
+        "no member may degrade to a null runtime type when '..' resolves:\n{code}"
+    );
+}
+
+/// Bare `'.'` — the current-directory index — is the same specifier class.
+#[test]
+fn macro_type_root_import_via_bare_current_dir_specifier_compiles() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/Comp/index.ts",
+        "export interface RootProps { title?: string }",
+    );
+    upsert_vue(
+        &host,
+        "/src/Comp/Comp.vue",
+        "<script setup lang=\"ts\">\nimport type { RootProps } from '.'\nconst props = defineProps<RootProps>()\n</script>\n<template><div/></template>",
+    );
+
+    assert_compiles_without_macro_type_dep_diag(&host, "/src/Comp/Comp.vue");
+    let code = main_node_code(&host, "/src/Comp/Comp.vue");
+    assert!(
+        code.contains("title: { type: String }"),
+        "the '.'-imported root type's member must enumerate with its runtime type:\n{code}"
+    );
+}
+
+/// Overcorrection guard (the honest-fatal direction): the `'..'` route now
+/// RESOLVES to the parent index, but the requested heritage name is provably
+/// absent from its export surface — the surface-arm error must survive.
+#[test]
+fn found_macro_type_arm_provably_absent_via_bare_parent_dir_import_fails_compile() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/index.ts",
+        "export interface Unrelated { u?: number }",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/Listbox/types.ts",
+        "import type { Ghost } from '..'\n\
+         export interface FoundGhostParent extends Ghost { a?: string }",
+    );
+    upsert_vue(
+        &host,
+        "/src/A.vue",
+        "<script setup lang=\"ts\">\nimport type { FoundGhostParent } from './Listbox/types'\nconst props = defineProps<FoundGhostParent>()\n</script>\n<template><div/></template>",
+    );
+
+    let diagnostics = ensure_compiled_error(&host, "/src/A.vue");
+    assert!(
+        diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP" && d.message.contains("Ghost")),
+        "a name provably absent from the resolved '..' index must stay fatal: {:?}",
+        diagnostics.diagnostics
+    );
+}
+
 #[test]
 fn render_legacy_body_operates_on_the_resolved_canonical_without_re_resolving() {
     // The legacy body renders the canonical it is GIVEN — it does NOT resolve
