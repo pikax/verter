@@ -1112,9 +1112,13 @@ pub(super) fn process_tsx_script_setup<'alloc>(
             tail.push_str("\nreturn {};\n} // close templateBindingFN\n");
             deferred_return_close = Some(tail);
         } else {
-            // No template: the block-scope close and the function close are
-            // already appended to the destructure segments above; emit the
-            // script-side wrapper (temp const) at </script>.
+            // No template: the destructured path already emitted the block-scope
+            // and function closes into its ordered segments. The non-destructured
+            // path (no setup bindings) emits them here into the wrapper tail.
+            if setup_bindings.is_empty() {
+                wrapper_end.push_str("\n} // close block scope\n");
+                wrapper_end.push_str("\nreturn {};\n} // close templateBindingFN\n");
+            }
             out.overwrite(tag_close.start, tag_close.end, &wrapper_end);
         }
     }
