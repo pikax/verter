@@ -1867,7 +1867,7 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                 if child_el.tag_type == TagType::Template {
                     if let Some(ref v_slot) = child_el.v_slot {
                         // Extract slot name from arg (including modifiers for dot-notation names)
-                        let slot_name = Self::build_slot_name(v_slot, source);
+                        let slot_name = self.build_slot_name(v_slot, source);
 
                         // Extract slot params from value
                         let params =
@@ -2550,7 +2550,7 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                                 continue;
                             }
 
-                            // Track dynamic class for root-path merge
+                            // Track dynamic class/style for root-path merge
                             if attr_name == "class" {
                                 dynamic_class_resolved = Some(resolved);
                                 dynamic_class_prop_idx = Some(i);
@@ -2561,6 +2561,18 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                                         attrs_obj.push_str(", ");
                                     }
                                     attrs_obj.push_str("__CLASS_PLACEHOLDER__");
+                                }
+                            } else if attr_name == "style" {
+                                // Defer to static+dynamic style merge (array form).
+                                // Emitting a second `style:` key would drop the static
+                                // style (last-wins) — official uses `style: [static, dyn]`.
+                                dynamic_style_resolved = Some(resolved);
+                                has_dynamic_attrs = true;
+                                if !attrs_obj.contains("__STYLE_PLACEHOLDER__") {
+                                    if !attrs_obj.is_empty() {
+                                        attrs_obj.push_str(", ");
+                                    }
+                                    attrs_obj.push_str("__STYLE_PLACEHOLDER__");
                                 }
                             } else {
                                 if !attrs_obj.is_empty() {
@@ -2684,6 +2696,19 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                     // isn't used when inline path returns early).
                 }
 
+                // Track static style for potential merge with :style on root path
+                if attr_name == "style" && (is_root || has_v_bind_spread || has_custom_directives) {
+                    static_style_value = Some(css_to_js_object(value));
+                    static_style_prop_idx = Some(i);
+                    if !attrs_obj.contains("__STYLE_PLACEHOLDER__") {
+                        if !attrs_obj.is_empty() {
+                            attrs_obj.push_str(", ");
+                        }
+                        attrs_obj.push_str("__STYLE_PLACEHOLDER__");
+                    }
+                    continue;
+                }
+
                 if !attrs_obj.is_empty() {
                     attrs_obj.push_str(", ");
                 }
@@ -2787,6 +2812,58 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                 // in the source-order loop (it wasn't skipped from props).
             }
             (None, None) => {}
+        }
+
+        // Merge static + dynamic style into a single expression for the root /
+        // mergeProps path (mirrors class merge). Official form:
+        //   style: [{ "margin": "1px" }, _ctx.sty]
+        match (&dynamic_style_resolved, &static_style_value) {
+            (Some(dyn_expr), Some(stat_obj))
+                if is_root || has_v_bind_spread || has_custom_directives =>
+            {
+                let style_entry = format!("style: [{}, {}]", stat_obj, dyn_expr);
+                if attrs_obj.contains("__STYLE_PLACEHOLDER__") {
+                    attrs_obj = attrs_obj.replace("__STYLE_PLACEHOLDER__", &style_entry);
+                } else {
+                    if !attrs_obj.is_empty() {
+                        attrs_obj.push_str(", ");
+                    }
+                    attrs_obj.push_str(&style_entry);
+                }
+                has_dynamic_attrs = true;
+            }
+            (Some(dyn_expr), None) if is_root || has_v_bind_spread || has_custom_directives => {
+                let style_entry = format!("style: {}", dyn_expr);
+                if attrs_obj.contains("__STYLE_PLACEHOLDER__") {
+                    attrs_obj = attrs_obj.replace("__STYLE_PLACEHOLDER__", &style_entry);
+                } else {
+                    if !attrs_obj.is_empty() {
+                        attrs_obj.push_str(", ");
+                    }
+                    attrs_obj.push_str(&style_entry);
+                }
+                has_dynamic_attrs = true;
+            }
+            (None, Some(stat_obj)) if is_root || has_v_bind_spread || has_custom_directives => {
+                let style_entry = format!("style: {}", stat_obj);
+                if attrs_obj.contains("__STYLE_PLACEHOLDER__") {
+                    attrs_obj = attrs_obj.replace("__STYLE_PLACEHOLDER__", &style_entry);
+                } else {
+                    if !attrs_obj.is_empty() {
+                        attrs_obj.push_str(", ");
+                    }
+                    attrs_obj.push_str(&style_entry);
+                }
+            }
+            _ => {
+                // Drop any unresolved placeholder rather than emit invalid JS.
+                if attrs_obj.contains("__STYLE_PLACEHOLDER__") {
+                    attrs_obj = attrs_obj
+                        .replace(", __STYLE_PLACEHOLDER__", "")
+                        .replace("__STYLE_PLACEHOLDER__, ", "")
+                        .replace("__STYLE_PLACEHOLDER__", "");
+                }
+            }
         }
 
         // Handle v-model attrs injection
@@ -3072,7 +3149,11 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
         }
 
         if is_root
-            && (has_v_show || !parts.is_empty() || has_v_bind_spread || !directive_calls.is_empty())
+            && (has_v_show
+                || !parts.is_empty()
+                || has_v_bind_spread
+                || !directive_calls.is_empty()
+                || !self.options.ssr_css_vars.is_empty())
         {
             parts.push("_attrs".to_string());
         }
@@ -3087,6 +3168,11 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
         // Custom directive props
         for dir_call in &directive_calls {
             parts.push(dir_call.clone());
+        }
+
+        // Merge SSR CSS v-bind custom properties onto the root element.
+        if is_root && !self.options.ssr_css_vars.is_empty() {
+            parts.push("_cssVars".to_string());
         }
 
         // v-model on root input: use _temp0 pattern for _ssrGetDynamicModelProps.
@@ -3304,13 +3390,25 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
         false
     }
 
-    /// Build a slot name from a `v-slot` directive prop.
-    /// Dot-notation is already included in `arg_end` (parser merges modifiers).
-    /// `#header.id` → `"header.id"`, `#default` → `default`.
-    fn build_slot_name(v_slot: &NodeProp, source: &str) -> String {
+    /// Build a slot object key from a `v-slot` directive prop.
+    ///
+    /// - Static: `#header` / `#header.id` → `header` / `"header.id"`
+    /// - Dynamic: `#[name]` → `[_ctx.name]` (computed property key). Emitting the
+    ///   brackets as a quoted string (`"[name]"`) makes a literal slot named
+    ///   `"[name]"` instead of reading the binding — drop-in SSR fails.
+    fn build_slot_name(&self, v_slot: &NodeProp, source: &str) -> String {
         if let (Some(as_), Some(ae)) = (v_slot.arg_start, v_slot.arg_end) {
             let raw = &source[as_ as usize..ae as usize];
-            if needs_quoted_key(raw) {
+            if v_slot.is_dynamic == Some(true) {
+                let trimmed = raw.trim();
+                let inner = if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                    &trimmed[1..trimmed.len() - 1]
+                } else {
+                    trimmed
+                };
+                let resolved = self.resolver.resolve_simple_expr(inner);
+                format!("[{}]", resolved)
+            } else if needs_quoted_key(raw) {
                 format!("\"{}\"", raw)
             } else {
                 raw.to_string()
@@ -3980,6 +4078,19 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
         if self.temp_var_needed {
             self.buf.push_str("let _temp0\n");
         }
+        // SSR CSS v-bind(): inject `_cssVars` so root attrs carry the CSS custom
+        // properties. Client uses `_useCssVars`; SSR must put values in HTML.
+        if !self.options.ssr_css_vars.is_empty() {
+            self.buf.push_str("const _cssVars = { style: {\n");
+            for (i, (var_name, expr)) in self.options.ssr_css_vars.iter().enumerate() {
+                if i > 0 {
+                    self.buf.push_str(",\n");
+                }
+                let resolved = self.resolver.resolve_simple_expr(expr);
+                let _ = write!(self.buf, "  \"{}\": ({})", var_name, resolved);
+            }
+            self.buf.push_str("\n} }\n");
+        }
         let fn_sig = self.buf.clone();
 
         let (close_start, close_end) = match root.tag_close.as_ref() {
@@ -4532,8 +4643,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                                 if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
                                     tg_tag = source[vs as usize..ve as usize].to_string();
                                 }
-                            } else if prop_name == "name"
-                                || prop_name == "appear"
+                            } else if prop_name == "appear"
                                 || prop_name == "css"
                                 || prop_name == "duration"
                                 || prop_name == "mode"
@@ -4552,7 +4662,14 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                                 || prop_name == "leaveToClass"
                                 || prop_name == "leave-to-class"
                             {
-                                // TransitionGroup-specific props — skip in HTML
+                                // TransitionGroup transition-only props — skip in HTML
+                            } else if prop_name == "name" {
+                                // Official @vue/compiler-ssr forwards `name` onto the
+                                // host tag (e.g. `<ul name="list">`).
+                                if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                                    let value = &source[vs as usize..ve as usize];
+                                    tg_attrs.push(format!(" name=\"{}\"", escape_js_string(value)));
+                                }
                             } else if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end)
                             {
                                 let value = &source[vs as usize..ve as usize];
@@ -5170,7 +5287,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
             }
 
             let slot_name = if let Some(ref v_slot) = el.v_slot {
-                Self::build_slot_name(v_slot, source)
+                self.build_slot_name(v_slot, source)
             } else {
                 "default".to_string()
             };

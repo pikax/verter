@@ -980,6 +980,17 @@ fn compile_inner(
                         tpl_ct.remove(tpl_tag_end as u32, input.len() as u32);
                     }
 
+                    let ssr_css_vars = if verter_options.ssr {
+                        // Dedup by var_name (same v-bind may appear in multiple style blocks)
+                        let mut seen = rustc_hash::FxHashSet::default();
+                        all_v_bind_vars
+                            .iter()
+                            .filter(|v| seen.insert(v.var_name.clone()))
+                            .map(|v| (v.var_name.clone(), v.expression.clone()))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     let tpl_options = TemplateCodeGenOptions {
                         mode: if verter_options.ssr {
                             CodeGenMode::Ssr
@@ -1001,6 +1012,7 @@ fn compile_inner(
                         } else {
                             String::new()
                         },
+                        ssr_css_vars,
                     };
 
                     let tpl_imports = generate_template(

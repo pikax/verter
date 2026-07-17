@@ -83,6 +83,12 @@ pub struct TemplateCodeGenOptions {
     pub hoist_static: bool,
     /// Scope ID for scoped styles (e.g., `"data-v-a1b2c3d4"`).
     pub scope_id: String,
+    /// Style `v-bind()` variables for SSR. Each entry is `(css_var_name, expression)`
+    /// e.g. `("--a1b2c3d4-color", "color")`. Non-empty only for SSR mode: the
+    /// template injects `const _cssVars = { style: { ... } }` and merges it into
+    /// root `_ssrRenderAttrs` so CSS variables appear in the HTML (client uses
+    /// `_useCssVars` instead).
+    pub ssr_css_vars: Vec<(String, String)>,
 }
 
 impl Default for TemplateCodeGenOptions {
@@ -98,6 +104,7 @@ impl Default for TemplateCodeGenOptions {
             has_scoped_style: false,
             hoist_static: true,
             scope_id: String::new(),
+            ssr_css_vars: Vec::new(),
         }
     }
 }

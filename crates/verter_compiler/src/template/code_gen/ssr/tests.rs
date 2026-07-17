@@ -8513,3 +8513,99 @@ const props = defineProps<{ msg: string }>()
         );
     }
 }
+
+/// Dynamic `#[name]` slots must use a computed property key (`[_ctx.name]`),
+/// not a quoted literal `"[name]"` (which names a slot literally "[name]").
+#[test]
+fn ssr_dynamic_slot_name_computed_key() {
+    let code = gen_ssr_template(
+        r#"<script setup>
+import Slotty from './Slotty.vue'
+const name = "header"
+</script>
+<template>
+  <Slotty>
+    <template #[name]><b>dyn</b></template>
+    body
+  </Slotty>
+</template>"#,
+    );
+    assert!(
+        code.contains("[_ctx.name]") || code.contains("[name]"),
+        "dynamic slot name must be a computed key, got:\n{code}"
+    );
+    assert!(
+        !code.contains("\"[name]\"") && !code.contains("\"[_ctx.name]\""),
+        "must not quote the brackets into a literal slot name, got:\n{code}"
+    );
+    // Positive: still emits the slot body
+    assert!(code.contains("dyn"), "slot body missing, got:\n{code}");
+}
+
+/// Static + dynamic style on the root must merge into `style: [static, dynamic]`.
+#[test]
+fn ssr_root_static_and_dynamic_style_merge_array() {
+    let code = gen_ssr_template(
+        r#"<script setup>
+const sty = { color: "red" }
+</script>
+<template>
+  <div style="margin:1px" :style="sty">m</div>
+</template>"#,
+    );
+    assert!(
+        code.contains("style: [") && code.contains("margin"),
+        "static+dynamic style must merge into array, got:\n{code}"
+    );
+    // Negative: duplicate style keys (last-wins bug)
+    let style_keys = code.matches("style:").count();
+    assert!(
+        style_keys <= 2, // one in object is fine; not two sibling keys
+        "should not emit duplicate style keys (found {style_keys}), got:\n{code}"
+    );
+}
+
+/// TransitionGroup `name` is forwarded onto the host tag in SSR.
+#[test]
+fn ssr_transition_group_forwards_name_attr() {
+    let code = gen_ssr_template(
+        r#"<script setup></script>
+<template>
+  <TransitionGroup name="list" tag="ul">
+    <li v-for="i in 2" :key="i">{{ i }}</li>
+  </TransitionGroup>
+</template>"#,
+    );
+    assert!(
+        code.contains("name=\"list\"") || code.contains(" name=\\\"list\\\""),
+        "TransitionGroup name must appear on host tag, got:\n{code}"
+    );
+}
+
+/// SSR must inject `_cssVars` for style v-bind() so custom properties reach HTML.
+#[test]
+fn ssr_css_vbind_injects_css_vars() {
+    let code = gen_ssr_template(
+        r#"<script setup>
+import { ref } from 'vue'
+const color = ref('green')
+</script>
+<template><div class="vb">vbind</div></template>
+<style scoped>
+.vb { color: v-bind(color) }
+</style>"#,
+    );
+    assert!(
+        code.contains("_cssVars"),
+        "ssrRender must define _cssVars for v-bind CSS, got:\n{code}"
+    );
+    assert!(
+        code.contains("_cssVars")
+            && (code.contains("mergeProps") || code.contains("_ssrRenderAttrs")),
+        "root attrs must merge _cssVars, got:\n{code}"
+    );
+    assert!(
+        code.contains("_ctx.color") || code.contains("color"),
+        "css var expression must reference the binding, got:\n{code}"
+    );
+}
