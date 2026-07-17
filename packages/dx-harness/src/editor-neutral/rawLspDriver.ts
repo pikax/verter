@@ -50,6 +50,12 @@ interface StartedNotification {
   readonly kind?: string;
 }
 
+interface DiagnosticActivity {
+  revision: number;
+  lastAt: number;
+  readonly publishedUris: Set<string>;
+}
+
 interface OpenDocument {
   readonly relativePath: string;
   readonly uri: string;
@@ -98,7 +104,8 @@ function collectWorkspaceDocuments(workspaceRoot: string): readonly OpenDocument
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const absolute = path.join(dir, entry.name);
       if (entry.isDirectory()) visit(absolute);
-      else if (entry.isFile() && /\.(?:vue|svelte|ts|js)$/.test(entry.name)) files.push(absolute);
+      else if (entry.isFile() && /\.(?:vue|svelte|tsx?|jsx?)$/.test(entry.name))
+        files.push(absolute);
     }
   };
   visit(srcRoot);
@@ -114,7 +121,11 @@ function collectWorkspaceDocuments(workspaceRoot: string): readonly OpenDocument
           ? "svelte"
           : extension === ".js"
             ? "javascript"
-            : "typescript";
+            : extension === ".jsx"
+              ? "javascriptreact"
+              : extension === ".tsx"
+                ? "typescriptreact"
+                : "typescript";
     return {
       relativePath,
       uri: pathToFileURL(absolute).href,
@@ -143,6 +154,38 @@ function waitForRelayAdvertisement(controlDir: string, timeoutMs: number): Promi
       }
       if (Date.now() >= deadline) {
         reject(new Error(`real relay did not advertise in ${controlDir} within ${timeoutMs}ms`));
+        return;
+      }
+      timer = setTimeout(poll, 25);
+      timer.unref?.();
+    };
+    poll();
+  });
+}
+
+function waitForDiagnosticActivitySettled(
+  activity: DiagnosticActivity,
+  expectedUris: ReadonlySet<string>,
+  stableMs: number,
+  timeoutMs: number,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = () => {
+      const missingUris = [...expectedUris].filter((uri) => !activity.publishedUris.has(uri));
+      if (missingUris.length === 0 && Date.now() - activity.lastAt >= stableMs) {
+        if (timer) clearTimeout(timer);
+        resolve();
+        return;
+      }
+      if (Date.now() >= deadline) {
+        reject(
+          new Error(
+            `publishDiagnostics did not settle within ${timeoutMs}ms ` +
+              `(revision=${activity.revision}, missing=${JSON.stringify(missingUris)})`,
+          ),
+        );
         return;
       }
       timer = setTimeout(poll, 25);
@@ -271,6 +314,11 @@ export class RawEditorNeutralLspDriver implements EditorNeutralContractDriver {
     }
 
     const diagnosticsByUri = new Map<string, readonly LspDiagnostic[]>();
+    const diagnosticActivity: DiagnosticActivity = {
+      revision: 0,
+      lastAt: 0,
+      publishedUris: new Set(),
+    };
     const statuses: StatusNotification[] = [];
     const started: StartedNotification[] = [];
     const args = [workspaceRoot, `--type-provider=${options.route}`];
@@ -290,6 +338,9 @@ export class RawEditorNeutralLspDriver implements EditorNeutralContractDriver {
             params.uri,
             Array.isArray(params.diagnostics) ? params.diagnostics : [],
           );
+          diagnosticActivity.revision += 1;
+          diagnosticActivity.lastAt = Date.now();
+          diagnosticActivity.publishedUris.add(params.uri);
         } else if (method === TYPE_PROVIDER_STATUS_METHOD) {
           statuses.push(params ?? {});
         } else if (method === TYPE_PROVIDER_STARTED_METHOD) {
@@ -360,6 +411,16 @@ export class RawEditorNeutralLspDriver implements EditorNeutralContractDriver {
       if (!settled.quiesced) {
         throw new Error(`raw LSP did not quiesce after opening contract documents`);
       }
+      // Diagnostics are push-delivered independently of the statistics counters.
+      // Require a stable activity window before an empty array can be observed;
+      // otherwise an initial empty publication can race the provider's later
+      // semantic result and make a deliberate-error control vacuous.
+      await waitForDiagnosticActivitySettled(
+        diagnosticActivity,
+        new Set(documents.map((document) => document.uri)),
+        600,
+        DEFAULT_TIMEOUT_MS,
+      );
       return driver;
     } catch (error) {
       await client.kill().catch(() => {});

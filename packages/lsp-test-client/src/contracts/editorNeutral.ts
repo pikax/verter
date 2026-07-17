@@ -3,7 +3,7 @@
  *
  * The contract deliberately separates standard LSP behavior from Verter's
  * readiness/provider attestation and from provider-process topology. Editors can
- * reuse the 41 standard cases through their own driver without pretending that a
+ * reuse the standard cases through their own driver without pretending that a
  * Verter custom notification is part of the Language Server Protocol.
  */
 import { DocumentPositions, type LspPosition, type PositionEncoding } from "../positionEncoding.js";
@@ -27,6 +27,9 @@ export type EditorNeutralContractFeature =
   | "direct-import-definition"
   | "barrel-import-hover"
   | "barrel-import-definition"
+  | "plain-control-hover"
+  | "plain-control-definition"
+  | "plain-control-completion"
   | "consumer-diagnostics"
   | "provider-attestation"
   | "shared-provider-topology";
@@ -156,6 +159,23 @@ interface CarrierContractSpec {
   readonly forbiddenPublicHover: readonly RegExp[];
 }
 
+interface DomEventContractSpec {
+  readonly id: string;
+  readonly framework: EditorNeutralFramework;
+  readonly language: EditorNeutralScriptLanguage;
+  readonly document: string;
+  readonly errorDocument: string;
+  readonly hoverAnchor: ContractAnchor;
+}
+
+interface LaxDomEventContractSpec {
+  readonly id: string;
+  readonly framework: EditorNeutralFramework;
+  readonly document: string;
+  readonly eventAnchor: ContractAnchor;
+  readonly completionAnchor: ContractAnchor;
+}
+
 const ALL_PROVIDERS = ["tsserver", "tsgo", "shared-tsgo"] as const;
 
 const CARRIERS: readonly CarrierContractSpec[] = [
@@ -185,10 +205,9 @@ const CARRIERS: readonly CarrierContractSpec[] = [
       token: "VueTypeScriptCase",
     },
     directDefinitionAnchor: {
-      text: 'import VueTypeScriptCase from "./vue/TypeScriptCase.vue";',
+      text: "export const directVueTs = VueTypeScriptCase;",
       occurrence: 0,
-      token: "./vue/TypeScriptCase.vue",
-      offset: 3,
+      token: "VueTypeScriptCase",
     },
     barrelConsumer: "src/barrel-consumer.ts",
     barrelHoverAnchor: {
@@ -231,10 +250,9 @@ const CARRIERS: readonly CarrierContractSpec[] = [
       token: "VueJavaScriptCase",
     },
     directDefinitionAnchor: {
-      text: 'import VueJavaScriptCase from "./vue/JavaScriptCase.vue";',
+      text: "export const directVueJs = VueJavaScriptCase;",
       occurrence: 0,
-      token: "./vue/JavaScriptCase.vue",
-      offset: 3,
+      token: "VueJavaScriptCase",
     },
     barrelConsumer: "src/barrel-consumer.ts",
     barrelHoverAnchor: {
@@ -277,10 +295,9 @@ const CARRIERS: readonly CarrierContractSpec[] = [
       token: "SvelteTypeScriptCase",
     },
     directDefinitionAnchor: {
-      text: 'import SvelteTypeScriptCase from "./svelte/TypeScriptCase.svelte";',
+      text: "export const directSvelteTs = SvelteTypeScriptCase;",
       occurrence: 0,
-      token: "./svelte/TypeScriptCase.svelte",
-      offset: 3,
+      token: "SvelteTypeScriptCase",
     },
     barrelConsumer: "src/barrel-consumer.ts",
     barrelHoverAnchor: {
@@ -328,10 +345,9 @@ const CARRIERS: readonly CarrierContractSpec[] = [
       token: "SvelteJavaScriptCase",
     },
     directDefinitionAnchor: {
-      text: 'import SvelteJavaScriptCase from "./svelte/JavaScriptCase.svelte";',
+      text: "export const directSvelteJs = SvelteJavaScriptCase;",
       occurrence: 0,
-      token: "./svelte/JavaScriptCase.svelte",
-      offset: 3,
+      token: "SvelteJavaScriptCase",
     },
     barrelConsumer: "src/barrel-consumer.ts",
     barrelHoverAnchor: {
@@ -352,6 +368,92 @@ const CARRIERS: readonly CarrierContractSpec[] = [
       /__VerterPublicInstance/,
       /new\s*\(\.\.\.args/,
     ],
+  },
+];
+
+const DOM_EVENT_HANDLERS: readonly DomEventContractSpec[] = [
+  {
+    id: "vue-js-dom-event",
+    framework: "vue",
+    language: "js",
+    document: "src/vue/JavaScriptEventHandler.vue",
+    errorDocument: "src/vue/JavaScriptEventHandlerInvalid.vue",
+    hoverAnchor: {
+      text: "return e.pointerId;",
+      occurrence: 0,
+      token: "e",
+    },
+  },
+  {
+    id: "svelte-js-dom-event",
+    framework: "svelte",
+    language: "js",
+    document: "src/svelte/JavaScriptEventHandler.svelte",
+    errorDocument: "src/svelte/JavaScriptEventHandlerInvalid.svelte",
+    hoverAnchor: {
+      text: "return e.pointerId;",
+      occurrence: 0,
+      token: "e",
+    },
+  },
+  {
+    id: "vue-ts-dom-event",
+    framework: "vue",
+    language: "ts",
+    document: "src/vue/TypeScriptEventHandler.vue",
+    errorDocument: "src/vue/TypeScriptEventHandlerInvalid.vue",
+    hoverAnchor: {
+      text: "return e.pointerId;",
+      occurrence: 0,
+      token: "e",
+    },
+  },
+  {
+    id: "svelte-ts-dom-event",
+    framework: "svelte",
+    language: "ts",
+    document: "src/svelte/TypeScriptEventHandler.svelte",
+    errorDocument: "src/svelte/TypeScriptEventHandlerInvalid.svelte",
+    hoverAnchor: {
+      text: "return e.pointerId;",
+      occurrence: 0,
+      token: "e",
+    },
+  },
+];
+
+const LAX_DOM_EVENT_HANDLERS: readonly LaxDomEventContractSpec[] = [
+  {
+    id: "vue-js-dom-event-policy-lax",
+    framework: "vue",
+    document: "src/policy/lax/vue/JavaScriptEventHandler.vue",
+    eventAnchor: {
+      text: "e.pointerId;",
+      occurrence: 0,
+      token: "e",
+    },
+    completionAnchor: {
+      text: "e.pointerId;",
+      occurrence: 0,
+      token: ".",
+      offset: 1,
+    },
+  },
+  {
+    id: "svelte-js-dom-event-policy-lax",
+    framework: "svelte",
+    document: "src/policy/lax/svelte/JavaScriptEventHandler.svelte",
+    eventAnchor: {
+      text: "e.pointerId;",
+      occurrence: 0,
+      token: "e",
+    },
+    completionAnchor: {
+      text: "e.pointerId;",
+      occurrence: 0,
+      token: ".",
+      offset: 1,
+    },
   },
 ];
 
@@ -449,7 +551,176 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
     );
   }
 
+  for (const handler of DOM_EVENT_HANDLERS) {
+    const base = {
+      framework: handler.framework,
+      language: handler.language,
+      providers: ALL_PROVIDERS,
+      surface: "standard-lsp" as const,
+    };
+    cases.push(
+      {
+        ...base,
+        id: `${handler.id}.diagnostics.clean`,
+        feature: "diagnostics-clean",
+        document: handler.document,
+      },
+      {
+        ...base,
+        id: `${handler.id}.hover`,
+        feature: "hover",
+        document: handler.document,
+        anchor: handler.hoverAnchor,
+        requiredHoverFragments: ["PointerEvent"],
+        forbiddenHoverPatterns: [/\bany\b/i, /\bunknown\b/i],
+      },
+      {
+        ...base,
+        id: `${handler.id}.diagnostics.invalid-member`,
+        feature: "diagnostics-error",
+        document: handler.errorDocument,
+        expectedDiagnosticCode: 2339,
+      },
+    );
+  }
+
+  for (const handler of LAX_DOM_EVENT_HANDLERS) {
+    const base = {
+      framework: handler.framework,
+      language: "js" as const,
+      providers: ALL_PROVIDERS,
+      surface: "standard-lsp" as const,
+    };
+    cases.push(
+      {
+        ...base,
+        id: `${handler.id}.diagnostics.clean`,
+        feature: "diagnostics-clean",
+        document: handler.document,
+      },
+      {
+        ...base,
+        id: `${handler.id}.hover`,
+        feature: "hover",
+        document: handler.document,
+        anchor: handler.eventAnchor,
+        requiredHoverFragments: ["PointerEvent"],
+        forbiddenHoverPatterns: [/\bany\b/i, /\bunknown\b/i],
+      },
+      {
+        ...base,
+        id: `${handler.id}.completion`,
+        feature: "completion",
+        document: handler.document,
+        anchor: handler.completionAnchor,
+        expectedCompletion: "pointerId",
+      },
+      {
+        ...base,
+        id: `${handler.id}.definition`,
+        feature: "definition",
+        document: handler.document,
+        anchor: handler.eventAnchor,
+        expectedTargetSuffix: `/${handler.document}`,
+      },
+    );
+  }
+
   cases.push(
+    {
+      id: "svelte-ts-state-string.diagnostics.clean",
+      surface: "standard-lsp",
+      feature: "diagnostics-clean",
+      framework: "svelte",
+      language: "ts",
+      document: "src/svelte/StateStringInterpolation.svelte",
+      providers: ALL_PROVIDERS,
+    },
+    {
+      id: "plain-jsx-pointer-event.hover",
+      surface: "standard-lsp",
+      feature: "plain-control-hover",
+      document: "src/plain-pointer-control.jsx",
+      anchor: {
+        text: "e.pointerId;",
+        occurrence: 0,
+        token: "e",
+      },
+      requiredHoverFragments: ["PointerEvent"],
+      forbiddenHoverPatterns: [/\bany\b/i, /\bunknown\b/i],
+      providers: ALL_PROVIDERS,
+    },
+    {
+      id: "plain-jsx-pointer-event.diagnostics.invalid-member",
+      surface: "standard-lsp",
+      feature: "diagnostics-error",
+      document: "src/plain-pointer-control.jsx",
+      expectedDiagnosticCode: 2339,
+      providers: ALL_PROVIDERS,
+    },
+    {
+      id: "plain-tsx-pointer-event.hover",
+      surface: "standard-lsp",
+      feature: "plain-control-hover",
+      document: "src/plain-pointer-control.tsx",
+      anchor: {
+        text: "e.pointerId;",
+        occurrence: 0,
+        token: "e",
+      },
+      requiredHoverFragments: ["PointerEvent"],
+      forbiddenHoverPatterns: [/\bany\b/i, /\bunknown\b/i, /\bEvent\b/],
+      providers: ALL_PROVIDERS,
+    },
+    {
+      id: "plain-tsx-pointer-event.diagnostics.invalid-member",
+      surface: "standard-lsp",
+      feature: "diagnostics-error",
+      document: "src/plain-pointer-control.tsx",
+      expectedDiagnosticCode: 2339,
+      providers: ALL_PROVIDERS,
+    },
+    {
+      id: "plain-typescript.hover",
+      surface: "standard-lsp",
+      feature: "plain-control-hover",
+      document: "src/plain-control.ts",
+      anchor: {
+        text: "plainControlNumber.toFixed(0)",
+        occurrence: 0,
+        token: "plainControlNumber",
+      },
+      requiredHoverFragments: ["number"],
+      forbiddenHoverPatterns: [/\bany\b/i, /\bunknown\b/i],
+      providers: ALL_PROVIDERS,
+    },
+    {
+      id: "plain-typescript.definition",
+      surface: "standard-lsp",
+      feature: "plain-control-definition",
+      document: "src/plain-control.ts",
+      anchor: {
+        text: "plainControlNumber.toFixed(0)",
+        occurrence: 0,
+        token: "plainControlNumber",
+      },
+      expectedTargetSuffix: "/src/plain-control.ts",
+      providers: ALL_PROVIDERS,
+    },
+    {
+      id: "plain-typescript.completion",
+      surface: "standard-lsp",
+      feature: "plain-control-completion",
+      document: "src/plain-control.ts",
+      anchor: {
+        text: "plainControlNumber.toFixed(0)",
+        occurrence: 0,
+        token: ".",
+        offset: 1,
+      },
+      expectedCompletion: "toFixed",
+      providers: ALL_PROVIDERS,
+    },
     {
       id: "consumer-imports.diagnostics",
       surface: "standard-lsp",
@@ -676,7 +947,8 @@ export async function executeEditorNeutralContractCase(
     }
     case "hover":
     case "direct-import-hover":
-    case "barrel-import-hover": {
+    case "barrel-import-hover":
+    case "plain-control-hover": {
       const result = await driver.hover(testCase.document, positionFor(testCase, driver, sources));
       const text = hoverText(result);
       if (text.trim().length === 0) throw new Error(`${testCase.id}: hover was empty`);
@@ -694,7 +966,8 @@ export async function executeEditorNeutralContractCase(
     }
     case "definition":
     case "direct-import-definition":
-    case "barrel-import-definition": {
+    case "barrel-import-definition":
+    case "plain-control-definition": {
       const result = await driver.definition(
         testCase.document,
         positionFor(testCase, driver, sources),
@@ -715,7 +988,8 @@ export async function executeEditorNeutralContractCase(
       }
       return;
     }
-    case "completion": {
+    case "completion":
+    case "plain-control-completion": {
       const result = await driver.completion(
         testCase.document,
         positionFor(testCase, driver, sources),
