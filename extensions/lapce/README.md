@@ -35,12 +35,12 @@ servers. It ships **no grammar of its own** and attaches to Lapce's `vue` /
    Windows — the `.exe` suffix is Windows-only). Use the absolute path to that
    binary in your config below.
 
-3. **The `tsgo` type provider in your project** (for full type features). Verter
-   runs with `--type-provider=tsgo`, which discovers the native TypeScript
-   provider (`@typescript/native-preview`) from your project's `node_modules`
-   (the normal case for a typed Vue/Svelte project). Install it as a dev
-   dependency in the workspace you open. (No TypeScript SDK is bundled with the
-   volt.) The default type provider is `tsgo`; set `typeProvider = "off"` to run
+3. **TypeScript 7 in your project** (for full type features). Verter runs with
+   `--type-provider=tsgo`, which discovers the native
+   `@typescript/typescript-<platform>-<arch>` binary installed by `typescript@7`
+   from your project's `node_modules` (the normal case for a typed Vue/Svelte
+   project). Install it as a dev dependency in the workspace you open. (No
+   TypeScript SDK is bundled with the volt.) Set `typeProvider = "off"` to run
    Verter without TypeScript type checking.
 
 ## Build
@@ -109,11 +109,11 @@ extensions/lapce/scripts/install-local.sh --channel Lapce-Nightly
 
 If you prefer to copy the files yourself, the per-channel plugins directory is:
 
-| OS      | Plugins directory                                                       |
-| ------- | ----------------------------------------------------------------------- |
-| Windows | `%LOCALAPPDATA%\lapce\Lapce-Stable\data\plugins\`                        |
-| macOS   | `~/Library/Application Support/dev.lapce.Lapce-Stable/plugins/`          |
-| Linux   | `~/.local/share/lapce-stable/plugins/`                                   |
+| OS      | Plugins directory                                               |
+| ------- | --------------------------------------------------------------- |
+| Windows | `%LOCALAPPDATA%\lapce\Lapce-Stable\data\plugins\`               |
+| macOS   | `~/Library/Application Support/dev.lapce.Lapce-Stable/plugins/` |
+| Linux   | `~/.local/share/lapce-stable/plugins/`                          |
 
 The channel segment varies by the Lapce build you run — `Lapce-Stable`,
 `Lapce-Nightly`, or `Lapce-Debug` (and the matching `lapce-nightly` /
@@ -178,7 +178,7 @@ every Verter editor client ships). All are optional; defaults shown:
 
 ## How to verify it works
 
-1. Open a `.vue` or `.svelte` file in a project that has `@typescript/native-preview`
+1. Open a `.vue` or `.svelte` file in a project that has `typescript@7`
    installed.
 2. Paste this minimal `.vue` and hover over `count` — you should get hover type
    info, completion after `count.`, and diagnostics on a type error:
@@ -208,23 +208,19 @@ script, and **diagnostics** for type errors in both `<script>` and `<template>`.
 - **No diagnostics / the server never starts.** Check that `lsp.serverPath`
   points at an existing, executable `verter-lsp` (use the `.exe` on Windows), or
   that `verter-lsp` is on `PATH` and `lsp.serverSource = "path"` is set.
-- **Type information is missing or wrong.** Ensure `@typescript/native-preview`
-  (tsgo) is installed in the opened workspace's `node_modules`, or set
-  `typeProvider = "off"` if you want Verter without TypeScript type checking.
+- **Type information is missing or wrong.** Ensure `typescript@7` (tsgo) is
+  installed in the opened workspace's `node_modules`, or set `typeProvider =
+"off"` if you want Verter without TypeScript type checking.
 
 ## Testing this volt
 
-Lapce has **no headless extension-test harness**, so a real GUI launch cannot be
-exercised in CI. The volt's own CI (`.github/workflows/lapce.yml`) builds the wasm
-artifact and runs the host-target unit tests (the launch-contract tests in
-`src/lib.rs`).
-
-The **authoritative automated check of the shared launch path** — that
-`verter-lsp` actually launches over stdio and completes an LSP handshake — is the
-Rust stdio-launch smoke at
-[`crates/verter_lsp/tests/stdio_launch_smoke.rs`](../../crates/verter_lsp/tests/stdio_launch_smoke.rs).
-It spawns the real binary, drives an `initialize` handshake, and asserts the
-server returns a populated set of capabilities.
+Lapce has no headless GUI-extension harness. CI therefore tests the strongest
+automatable boundary: it builds the real `wasm32-wasip1` volt, asks the volt's
+production `plan_launch` function to export its exact command, arguments,
+selector, and initialization options, then drives that plan through the shared
+stdio LSP client. The smoke requires real Vue and Svelte diagnostics and concrete
+typed hover results from a real `verter-lsp`; missing binaries or providers fail
+the job. Host unit tests continue to cover discovery and refusal branches.
 
 ## What this volt does (and doesn't)
 

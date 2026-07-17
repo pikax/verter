@@ -52,8 +52,20 @@ jobs:
         # The real-server attach smoke (`smoke_spec.lua`) drives a REAL
         # `verter-lsp` over stdio, so the binary must exist. Build it in release
         # mode; the plenary step below exports `$VERTER_LSP_BIN` at it so the
-        # smoke runs for real instead of skipping.
+        # smoke runs against the provisioned binary; a missing binary is a hard
+        # test failure.
         run: cargo build -p verter_lsp --release
+
+      - name: Install the pinned real-client fixture toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: editors/nvim/tests/fixtures/real-client/package-lock.json
+
+      - name: Provision tsgo and framework types
+        working-directory: editors/nvim/tests/fixtures/real-client
+        run: npm ci --ignore-scripts
 
       - name: Install Neovim
         uses: rhysd/action-setup-vim@v1
@@ -65,6 +77,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: nvim-lua/plenary.nvim
+          ref: 74b06c6c75e4eeb3108ec01852001636d85a932b
           path: .ci/plenary.nvim
 
       - name: Run plenary busted suite
@@ -75,8 +88,8 @@ jobs:
           set -euo pipefail
           # Resolve the freshly built verter-lsp binary cross-platform and export
           # it as $VERTER_LSP_BIN in THIS shell, so `smoke_spec.lua` runs its REAL
-          # stdio attach (it honours $VERTER_LSP_BIN; without it the smoke skips
-          # vacuously). The Windows runner produces a .exe; branch on RUNNER_OS.
+          # stdio attach. The spec requires $VERTER_LSP_BIN and fails closed if it
+          # is missing. The Windows runner produces a .exe; branch on RUNNER_OS.
           if [ "${RUNNER_OS}" = "Windows" ]; then
             VERTER_LSP_BIN="${GITHUB_WORKSPACE}/target/release/verter-lsp.exe"
           else
@@ -87,7 +100,15 @@ jobs:
             exit 1
           fi
           export VERTER_LSP_BIN
+          VERTER_TSGO_BIN=$(node --input-type=module -e \
+            "import getExePath from './editors/nvim/tests/fixtures/real-client/node_modules/typescript/lib/getExePath.js'; console.log(getExePath().replaceAll('\\\\', '/'))")
+          if [ ! -x "${VERTER_TSGO_BIN}" ]; then
+            echo "::error::fixture TypeScript 7 engine not found/executable at ${VERTER_TSGO_BIN}"
+            exit 1
+          fi
+          export VERTER_TSGO_BIN
           echo "using VERTER_LSP_BIN=${VERTER_LSP_BIN}"
+          echo "using VERTER_TSGO_BIN=${VERTER_TSGO_BIN}"
           # Load minimal_init.lua into the PARENT nvim with `-u` so the
           # `PlenaryBustedDirectory` command exists (it is defined by
           # plenary, which minimal_init prepends to the rtp). Without `-u`
@@ -115,6 +136,10 @@ jobs:
             echo "::error::Neovim exited non-zero ($rc)"
             exit "$rc"
           fi
+          if ! printf '%s\n' "$out" | grep -Eq 'Success(es)?[[:space:]]*:[[:space:]]*[1-9]|[1-9][0-9]*[[:space:]]+success'; then
+            echo "::error::Neovim test output did not prove that any assertion-bearing test ran"
+            exit 1
+          fi
 
   rust-contract:
     name: nvim config contract
@@ -128,4 +153,4 @@ jobs:
 
       - name: Run Neovim init-options drift guard
         shell: bash
-        run: cargo test -p verter-editor-client --test nvim_config_contract
+        run: cargo test -p verter-editor-client --test main cases::nvim_config_contract

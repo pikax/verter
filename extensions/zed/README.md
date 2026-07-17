@@ -29,11 +29,12 @@ to the languages those official extensions define, so you need:
    If neither is configured, the extension **fails loudly** with setup guidance
    instead of silently launching nothing.
 
-3. **The `tsgo` type provider in your project** — Verter runs with
-   `--type-provider=tsgo`, which discovers the native TypeScript provider
-   (`@typescript/native-preview`) from your project's `node_modules` (the normal
-   case for a TS/Vue/Svelte project). Install it as a dev dependency in the
-   workspace you open. (No TypeScript SDK is bundled with the extension.)
+3. **TypeScript 7 in your project** — Verter runs with
+   `--type-provider=tsgo`, which discovers the native
+   `@typescript/typescript-<platform>-<arch>` binary installed by `typescript@7`
+   from your project's `node_modules` (the normal case for a TS/Vue/Svelte
+   project). Install it as a dev dependency in the workspace you open. (No
+   TypeScript SDK is bundled with the extension.)
 
 ## Install (dev extension)
 
@@ -59,11 +60,11 @@ Add this to your Zed `settings.json`:
   "languages": {
     "Vue.js": {
       // Verter first; disable the default Vue server; "..." keeps Zed's other defaults.
-      "language_servers": ["verter", "!vue-language-server", "..."]
+      "language_servers": ["verter", "!vue-language-server", "..."],
     },
     "Svelte": {
-      "language_servers": ["verter", "!svelte-language-server", "..."]
-    }
+      "language_servers": ["verter", "!svelte-language-server", "..."],
+    },
   },
   "lsp": {
     "verter": {
@@ -74,7 +75,7 @@ Add this to your Zed `settings.json`:
         // forwarded to the launch.
         "path": "/absolute/path/to/verter-lsp",
         "arguments": [],
-        "env": {}
+        "env": {},
       },
 
       // --- Verter server settings (forwarded as LSP initializationOptions) ---
@@ -89,10 +90,10 @@ Add this to your Zed `settings.json`:
         "viteConfig": { "enabled": true, "trustedFiles": [] },
         "experimental": { "conditionalRootNarrowing": false, "strictSlots": false },
         "hover": { "provenance": false },
-        "statistics": { "enabled": false }
-      }
-    }
-  }
+        "statistics": { "enabled": false },
+      },
+    },
+  },
 }
 ```
 
@@ -104,7 +105,7 @@ Notes:
   binary. Leave it unset and set `settings.serverSource = "path"` to use a
   `verter-lsp` on your `PATH`.
 - **`lint.preset`** accepts `essential | recommended | all | performance | a11y |
-  strict`; an unknown value clamps to `recommended`.
+strict`; an unknown value clamps to `recommended`.
 - The type provider is always `tsgo` (the SDK-free native provider); the extension
   never requests `tsserver`.
 
@@ -125,9 +126,18 @@ Notes:
   these keys when it can't resolve a binary.
 - **Duplicate diagnostics/completions.** You omitted the `!`-disable of the default
   server (`!vue-language-server` / `!svelte-language-server`).
-- **Type information is missing or wrong.** Ensure `@typescript/native-preview` is
-  installed in the opened workspace's `node_modules` (the `tsgo` provider needs
-  it).
+- **Type information is missing or wrong.** Ensure `typescript@7` is installed
+  in the opened workspace's `node_modules` (the `tsgo` provider needs its native
+  platform binary).
 - **The extension fails to load in Zed.** This extension targets `wasm32-wasip2`
   (required by `zed_extension_api` ≥ 0.5). A wasip1/wasip2 mismatch produces a
   `__wasi_init_tp` load error; rebuild with the wasip2 target.
+
+## Automated contract
+
+Zed has no headless GUI-extension harness. CI builds the real `wasm32-wasip2`
+extension, exports the exact command and arguments produced by its production
+`plan_launch` function, combines them with the production initialization-option
+builder, and drives that plan through the shared stdio LSP client. The fail-closed
+smoke requires real Vue and Svelte diagnostics and concrete typed hover results;
+the host unit suite separately covers discovery and refusal branches.

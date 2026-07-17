@@ -16,9 +16,10 @@ once at startup and spawns one `verter-lsp` per workspace root.
   snippet). There is **no managed download** — install it via your package
   manager / `cargo build -p verter_lsp --release`. Helix does not fetch
   language-server binaries.
-- For full type features, the project should have **`@typescript/native-preview`
-  (tsgo)** installed (the normal case for a typed Vue/Svelte project). The
-  default type provider is `tsgo`, which discovers its own binary
+- For full type features, the project should have **TypeScript 7 (`typescript@7`)**
+  installed (the normal case for a typed Vue/Svelte project). The default type
+  provider is `tsgo`, which discovers the native
+  `@typescript/typescript-<platform>-<arch>` binary installed by that package
   (`VERTER_TSGO_BIN` → project `node_modules` → `PATH` → npm/npx cache).
 
 ## Install
@@ -53,9 +54,9 @@ check is unambiguous on every Helix version.
 
 ## The `--type-provider=tsgo` flag
 
-The snippet launches `verter-lsp --type-provider=tsgo`. `tsgo` is the
-TypeScript-native-preview provider, which self-discovers its own binary and needs
-no TypeScript SDK passed on the command line.
+The snippet launches `verter-lsp --type-provider=tsgo`. `tsgo` is the native
+TypeScript 7 provider; it self-discovers the platform binary installed by the
+`typescript` package and needs no TypeScript SDK passed on the command line.
 
 > **Use `tsgo`, NOT `tgo`.** The `--type-provider` flag accepts
 > `auto | tsgo | tsserver | off` only. `tgo` is **not** a recognized value and
@@ -78,17 +79,17 @@ telemetry is opt-in — flip it to `true` to enable. The genuinely
 omitted/not-read keys are the VS-Code-UI-only surfaces `configuration`, `mcp`,
 `decorations`, and `frameworks`.
 
-| `config` key | Meaning | Default in the snippet |
-| --- | --- | --- |
-| `lint.enabled` | enable the Verter linter | `false` (VS Code parity) |
-| `lint.preset` | lint preset when enabled | `"recommended"` |
-| `inlayHints.enabled` | inlay hints | `true` |
-| `viteConfig.enabled` | read `vite.config.*` for resolution | `true` |
-| `viteConfig.trustedFiles` | trusted Vite config files | `[]` |
-| `experimental.conditionalRootNarrowing` | experimental root narrowing | `false` |
-| `experimental.strictSlots` | strict slot typing | `false` |
-| `hover.provenance` | show provenance in hovers | `false` |
-| `statistics.enabled` | emit server statistics (opt-in telemetry) | `false` |
+| `config` key                            | Meaning                                   | Default in the snippet   |
+| --------------------------------------- | ----------------------------------------- | ------------------------ |
+| `lint.enabled`                          | enable the Verter linter                  | `false` (VS Code parity) |
+| `lint.preset`                           | lint preset when enabled                  | `"recommended"`          |
+| `inlayHints.enabled`                    | inlay hints                               | `true`                   |
+| `viteConfig.enabled`                    | read `vite.config.*` for resolution       | `true`                   |
+| `viteConfig.trustedFiles`               | trusted Vite config files                 | `[]`                     |
+| `experimental.conditionalRootNarrowing` | experimental root narrowing               | `false`                  |
+| `experimental.strictSlots`              | strict slot typing                        | `false`                  |
+| `hover.provenance`                      | show provenance in hovers                 | `false`                  |
+| `statistics.enabled`                    | emit server statistics (opt-in telemetry) | `false`                  |
 
 Tune any of these in your own `languages.toml`; only these keys are read.
 
@@ -191,10 +192,12 @@ directory's `languages.toml` and asserts it against the shared launch contract
 `verter-lsp` process**:
 
 ```bash
-cargo test -p verter-editor-client --test helix_config_contract
+cargo test -p verter-editor-client --test main cases::helix_config_contract
 ```
 
-CI runs the same test across an OS matrix
-(`.github/workflows/helix.yml`). A real-Helix `hx --health` UI smoke is out of
-scope for v0 (mirroring how the zed / neovim / lapce jobs defer their
-real-server smoke).
+CI runs the parsed config contract across an OS matrix. Its Linux real-client
+lane also installs checksum-verified Helix 25.07.1, installs the shipped snippet
+unchanged, and fails unless `hx --health vue` and `hx --health svelte` resolve
+only the executable `verter-lsp`. It then exports the parsed command, arguments,
+and initialization options and requires real Vue/Svelte diagnostics and typed
+hover through the shared stdio LSP client.
