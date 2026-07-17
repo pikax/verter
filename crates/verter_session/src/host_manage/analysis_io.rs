@@ -2328,6 +2328,14 @@ impl VerterHost {
         binding_name: &str,
     ) -> Option<(u32, u32)> {
         if file_language.is_vue() {
+            // The component default export has no authored source token, so
+            // its honest definition anchor is the file start — the same
+            // anchor the framework-carrier arm below uses. Never point at an
+            // unrelated internal local (the old first-binding heuristic sent
+            // go-to-definition to an arbitrary script-local).
+            if binding_name == "default" {
+                return Some((0, 0));
+            }
             if let Some(binding) = script_analysis
                 .bindings
                 .iter()
@@ -2344,27 +2352,13 @@ impl VerterHost {
                     return Some((mac.span.start, mac.span.end));
                 }
             }
-            if binding_name == "default" {
-                if let Some(first_binding) = script_analysis.bindings.first() {
-                    if first_binding.span.start > 0 || first_binding.span.end > 0 {
-                        return Some((first_binding.span.start, first_binding.span.end));
-                    }
-                }
-                if let Some(first_macro) = script_analysis.macros.first() {
-                    if first_macro.span.start > 0 || first_macro.span.end > 0 {
-                        return Some((first_macro.span.start, first_macro.span.end));
-                    }
-                }
-                return Some((0, 0));
-            }
             return None;
         }
 
         // Framework component files synthesize one semantic default export.
         // Adapters without an authored source token for that value still need
         // an honest definition anchor so export-graph traversal can terminate
-        // at the component instead of aborting at the final barrel hop. Keep
-        // Vue's established, more precise binding/macro selection above.
+        // at the component instead of aborting at the final barrel hop.
         if file_language.is_framework_carrier() && binding_name == "default" {
             return Some((0, 0));
         }
