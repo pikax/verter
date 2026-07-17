@@ -1098,6 +1098,10 @@ pub struct SvelteBlock {
     pub kind: SvelteBlockKind,
     /// The full block span (open tag through the closing `{/...}`).
     pub span: Span,
+    /// The grammar-balanced opening-tag span, including the `{#` prefix and
+    /// closing `}`. The parser records this while it owns the balanced brace
+    /// boundary so downstream projectors never rescan ambiguous source bytes.
+    pub head_span: Span,
     /// The block's primary head expression span (the `{#if expr}` condition,
     /// the `{#each list as item}` list, the `{#await expr}` promise, the
     /// `{#key expr}` key). `None` for `{#snippet}` (its head is the name +

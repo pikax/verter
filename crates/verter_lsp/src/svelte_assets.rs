@@ -1008,5 +1008,28 @@ mod tests {
              this covers SvelteHTMLElements intrinsics and callable Component props:\n{out}\n{}",
             prepared.content
         );
+
+        // Negative control proving the managed-tsgo classic namespace checks
+        // native Svelte Component props at the authored JSX
+        // attribute rather than relying on a separate generated witness.
+        let invalid_source = concat!(
+            "/** @jsxImportSource @verter/svelte-jsx */\n",
+            "import type { Component } from \"svelte\";\n",
+            "declare const Child: Component<{ label: string }>;\n",
+            "function render() { return (<div><Child label={123} /></div>); }\n",
+            "void render; export {};\n",
+        );
+        let invalid =
+            prepare_managed_tsgo_svelte_carrier(&carrier_path.to_string_lossy(), invalid_source)
+                .expect("prepare invalid managed-tsgo carrier")
+                .expect("Svelte carrier with an installed owner must be specialized");
+        std::fs::write(&carrier_path, &invalid.content).unwrap();
+        let (invalid_ok, invalid_out) = typecheck_with_paths(root, &serde_json::json!({}));
+        assert!(
+            !invalid_ok && invalid_out.contains("TS2322"),
+            "a number supplied to a native Svelte `Component<{{ label: string }}>` must fail \
+             at the JSX attribute with TS2322; output:\n{invalid_out}\n{}",
+            invalid.content
+        );
     }
 }

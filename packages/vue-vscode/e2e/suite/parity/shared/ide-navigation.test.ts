@@ -161,18 +161,10 @@ suite(`IDE navigation + completion [${FIXTURE_NAME}]`, function () {
           );
         }
       } else {
-        // snippet name `header` → child prop or snippet decl
-        try {
-          await assertDefinitionTargetsFile(
-            { file: parent, token: "header", occurrence: 0 },
-            child,
-          );
-        } catch {
-          await assertDefinitionTargetsToken(
-            { file: parent, token: "header", occurrence: 1 },
-            { file: parent, token: "header", occurrence: 0 },
-          );
-        }
+        // Authored snippet prop `header` must resolve to the child's typed
+        // `header?: Snippet<...>` contract. There is only one `header` token in
+        // the parent fixture; a same-file fallback would be vacuous.
+        await assertDefinitionTargetsFile({ file: parent, token: "header", occurrence: 0 }, child);
       }
     } catch (err) {
       failParityGap(

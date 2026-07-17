@@ -2017,11 +2017,13 @@ impl<'a> SvelteParser<'a> {
                 );
                 // Best-effort: scan children until a matching `{/keyword}`.
                 let kw = keyword.to_string();
+                let head_span = Span::new(start as u32, self.pos as u32);
                 let children = self.parse_block_children(&[]);
                 self.consume_block_close(&kw);
                 vec![SvelteNode::Block(SvelteBlock {
                     kind: SvelteBlockKind::Key,
                     span: Span::new(start as u32, self.pos as u32),
+                    head_span,
                     head_expr: None,
                     children,
                     clauses: Vec::new(),
@@ -2036,6 +2038,7 @@ impl<'a> SvelteParser<'a> {
         head_rest_start: usize,
         head_rest: &str,
     ) -> Vec<SvelteNode> {
+        let head_span = Span::new(start as u32, self.pos as u32);
         let head_expr = nonempty_span(head_rest_start, head_rest);
         let children = self.parse_block_children(&["else", "/if"]);
         let mut clauses = Vec::new();
@@ -2060,6 +2063,7 @@ impl<'a> SvelteParser<'a> {
         vec![SvelteNode::Block(SvelteBlock {
             kind: SvelteBlockKind::If,
             span: Span::new(start as u32, self.pos as u32),
+            head_span,
             head_expr,
             children,
             clauses,
@@ -2072,6 +2076,7 @@ impl<'a> SvelteParser<'a> {
         head_rest_start: usize,
         head_rest: &str,
     ) -> Vec<SvelteNode> {
+        let head_span = Span::new(start as u32, self.pos as u32);
         // `expr as item, index (key)` — `as`/item optional (the no-item form).
         let (list_expr, item, index, key) =
             super::block_head::parse_each_head(head_rest_start, head_rest);
@@ -2090,6 +2095,7 @@ impl<'a> SvelteParser<'a> {
         vec![SvelteNode::Block(SvelteBlock {
             kind: SvelteBlockKind::Each { item, index, key },
             span: Span::new(start as u32, self.pos as u32),
+            head_span,
             head_expr: list_expr,
             children,
             clauses,
@@ -2102,6 +2108,7 @@ impl<'a> SvelteParser<'a> {
         head_rest_start: usize,
         head_rest: &str,
     ) -> Vec<SvelteNode> {
+        let head_span = Span::new(start as u32, self.pos as u32);
         // `{#await expr}` or `{#await expr then v}` or `{#await expr catch e}`.
         let trimmed = head_rest.trim();
         let (promise_expr, then_inline, catch_inline) =
@@ -2143,6 +2150,7 @@ impl<'a> SvelteParser<'a> {
                 catch_binding,
             },
             span: Span::new(start as u32, self.pos as u32),
+            head_span,
             head_expr: promise_expr,
             children,
             clauses,
@@ -2155,12 +2163,14 @@ impl<'a> SvelteParser<'a> {
         head_rest_start: usize,
         head_rest: &str,
     ) -> Vec<SvelteNode> {
+        let head_span = Span::new(start as u32, self.pos as u32);
         let head_expr = nonempty_span(head_rest_start, head_rest);
         let children = self.parse_block_children(&["/key"]);
         self.consume_block_close("key");
         vec![SvelteNode::Block(SvelteBlock {
             kind: SvelteBlockKind::Key,
             span: Span::new(start as u32, self.pos as u32),
+            head_span,
             head_expr,
             children,
             clauses: Vec::new(),
@@ -2173,6 +2183,7 @@ impl<'a> SvelteParser<'a> {
         head_rest_start: usize,
         head_rest: &str,
     ) -> Vec<SvelteNode> {
+        let head_span = Span::new(start as u32, self.pos as u32);
         // `name(params)`
         let (name_span, name_text, params) =
             super::block_head::parse_snippet_head(head_rest_start, head_rest);
@@ -2185,6 +2196,7 @@ impl<'a> SvelteParser<'a> {
                 params,
             },
             span: Span::new(start as u32, self.pos as u32),
+            head_span,
             head_expr: None,
             children,
             clauses: Vec::new(),

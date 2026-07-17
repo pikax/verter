@@ -141,6 +141,12 @@ Post-hoc string manipulation breaks sourcemap accuracy: `CodeTransform` generate
 
 The rule has NO scoped exceptions: the Svelte scoped-CSS renderer (`crates/verter_compiler/src/svelte/runtime/css/render.rs`) edits the original component source through the shared `CodeTransform`'s checked (`try_*`) operations -- whose insertion-affinity chunk model carries the `magic-string` semantics the official `svelte@5.56.3` `render_stylesheet` depends on (content-only `try_update` preserving the replaced range's first-chunk boundary insertions, left/right insertion affinity with per-affinity stacking, `try_remove` clearing interior insertions; pinned by `code_transform/edit_semantics_tests.rs`) -- and generates the css source map (`css.map`) from the SAME transform that built `css.code`. The guard `svelte_css_renderer_uses_code_transform` (`crates/verter_compiler/tests/`) asserts the renderer stays on the shared transform and bans any private edit buffer from the css matcher/render tree.
 
+### Svelte IDE structural projection
+
+Svelte block projectors consume parser-owned structural spans. In particular, `{#snippet ...}` uses `SvelteBlock.head_span`, whose end is the grammar-balanced outer brace; downstream code must not rediscover the head with a first-`}` scan because destructured/defaulted parameters can contain nested braces. Element-owned snippets lower into a lexical IIFE so same-name snippets in sibling elements do not collide and forward, mutual, and recursive references remain valid. Unchanged snippet names, parameter lists, and bodies move as original `CodeTransform` chunks; only punctuation, annotations, or parameter text that genuinely requires a store/await-default rewrite is synthetic.
+
+Private component-call checks may map only byte-identical authored tokens. Synthetic scaffolding, quoted/escaped property spellings, rewritten spreads, and transformed directive names stay unmapped. Legacy intrinsic `on:event|modifier={handler}` projects to the lowercase Svelte DOM attribute (`onevent={handler}`); modifiers are runtime listener behavior and never survive as TSX attribute syntax.
+
 ## Binding Metadata Flow
 
 1. `script/process.rs` parses `<script setup>` -> walks AST -> classifies bindings as `BindingType` (SetupConst, SetupRef, Props, etc.)

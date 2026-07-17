@@ -22,6 +22,7 @@
     <li>{item}:{index}</li>
   {/each}
   <input bind:value={model} class={klass} disabled={disabled} />
-  <button onclick={onClick} on:click|preventDefault={onClick}>toggle</button>
+  <button onclick={onClick}>toggle direct</button>
+  <button on:click|preventDefault={onClick}>toggle legacy</button>
   {@html raw}
 </div>

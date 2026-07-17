@@ -87,6 +87,53 @@ real_provider_test!(
     }
 );
 
+// Proves Svelte's carrier-owned JSX environment for both TypeScript and
+// JavaScript SFCs through the public diagnostic path.
+real_provider_test!(
+    diagnostics_svelte_class_uses_official_jsx_without_tsconfig_override,
+    fixture = "svelte-parity",
+    async fn run(session) {
+        // These fixtures deliberately have no `jsxImportSource`. A valid Svelte
+        // `class` attribute must resolve through Svelte's official element
+        // types, without ambient React JSX types leaking into the carrier.
+        let ts_uri = session
+            .open_fixture_file("src/diagnostics/JsxEnvironmentTs.svelte")
+            .await;
+        let js_uri = session
+            .open_fixture_file("src/diagnostics/JsxEnvironmentJs.svelte")
+            .await;
+
+        assert!(
+            session
+                .wait_until_ready(&ts_uri, "{doubled}", 1, "doubled")
+                .await,
+            "the TypeScript Svelte carrier must materialize a typed markup program before an empty diagnostic set can be accepted"
+        );
+        assert!(
+            session
+                .wait_until_ready(&js_uri, "{doubled}", 1, "doubled")
+                .await,
+            "the JavaScript Svelte carrier must materialize a typed markup program before an empty diagnostic set can be accepted"
+        );
+
+        for (label, uri) in [
+            ("TypeScript Svelte SFC", &ts_uri),
+            ("JavaScript Svelte SFC", &js_uri),
+        ] {
+            let diagnostics = session.merged_diagnostics(uri).await;
+            assert_framework_file_has_no_error_diagnostics(label, &diagnostics);
+            assert!(
+                diagnostics.iter().all(|diagnostic| {
+                    lsp_diagnostic_code(diagnostic).as_deref() != Some("7026")
+                        && !diagnostic.message.contains("JSX.IntrinsicElements")
+                        && !diagnostic.message.contains("React")
+                }),
+                "valid {label} markup must not leak an ambient React JSX environment or TS7026; got {diagnostics:?}"
+            );
+        }
+    }
+);
+
 // ---------------------------------------------------------------------------
 // Slot-content isolation must retain component prop checking.
 // ---------------------------------------------------------------------------
@@ -134,6 +181,60 @@ real_provider_test!(
             assignability[0].range.start < prop_end
                 && assignability[0].range.end > prop_start,
             "the component prop error must map onto the authored `:count` binding; got {:?}",
+            assignability[0].range
+        );
+    }
+);
+
+// Exercises Svelte public-component prop checking and source mapping against
+// both real TypeScript providers.
+real_provider_test!(
+    diagnostics_svelte_invalid_component_prop_remains_type_checked,
+    fixture = "svelte-parity",
+    async fn run(session) {
+        // The real-provider harness has no workspace scanner, so materialize the
+        // imported framework dependency before opening its consumer.
+        let child_uri = session
+            .open_fixture_file("src/diagnostics/BadPropChild.svelte")
+            .await;
+        session.ensure_synced(&child_uri).await;
+        let uri = session
+            .open_fixture_file("src/diagnostics/BadPropParent.svelte")
+            .await;
+
+        let child_state = session.provider_sync_state(&child_uri);
+        let parent_state = session.provider_sync_state(&uri);
+        let parent_provider_diagnostics = match parent_state
+            .as_ref()
+            .and_then(|state| state.ide_path.as_deref())
+        {
+            Some(path) => session.provider().get_diagnostics(path).await.unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let diagnostics = session.merged_diagnostics(&uri).await;
+        let assignability = diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.severity == Some(DiagnosticSeverity::ERROR)
+                    && lsp_diagnostic_code(diagnostic).as_deref() == Some("2322")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            assignability.len(),
+            1,
+            "the invalid Svelte child prop must produce exactly one mapped assignability error; public={diagnostics:?}; provider={parent_provider_diagnostics:?}; child_state={child_state:?}; parent_state={parent_state:?}"
+        );
+
+        let prop_start = session.find_position(&uri, "count={wrongCount}", 0);
+        let prop_end = session.find_position(
+            &uri,
+            "count={wrongCount}",
+            "count={wrongCount}".len(),
+        );
+        assert!(
+            assignability[0].range.start < prop_end
+                && assignability[0].range.end > prop_start,
+            "the Svelte child-prop error must map onto the authored `count={{wrongCount}}` binding; got {:?}",
             assignability[0].range
         );
     }

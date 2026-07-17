@@ -74,7 +74,7 @@ pub fn merge_diagnostics(
                 negotiated_encoding.clone(),
                 source_reader,
             );
-            result.push(Diagnostic {
+            let mapped = Diagnostic {
                 range,
                 severity: Some(convert_severity(diag.severity)),
                 code: diag.code.clone().map(NumberOrString::String),
@@ -83,7 +83,15 @@ pub fn merge_diagnostics(
                 tags: convert_tags(&diag.tags),
                 related_information: related,
                 ..Default::default()
-            });
+            };
+            if let Some(existing) = result
+                .iter_mut()
+                .find(|existing| same_mapped_diagnostic(existing, &mapped))
+            {
+                merge_mapped_diagnostic_metadata(existing, mapped);
+            } else {
+                result.push(mapped);
+            }
         } else {
             dropped += 1;
             tracing::debug!(
@@ -103,6 +111,55 @@ pub fn merge_diagnostics(
     }
 
     result
+}
+
+/// Identity of one diagnostic after projection onto the current source URI.
+///
+/// The URI is implicit in this current-file merge. TypeScript can report the
+/// same semantic error at both an authored JSX attribute and a private generated
+/// checker; once both positions map to the same source range they are one public
+/// diagnostic. Category (`severity`) remains part of the identity, so a hint and
+/// an error with otherwise equal text never collapse.
+fn same_mapped_diagnostic(left: &Diagnostic, right: &Diagnostic) -> bool {
+    left.range == right.range
+        && left.severity == right.severity
+        && left.code == right.code
+        && left.source == right.source
+        && left.message == right.message
+}
+
+/// Union metadata from two mapped copies while retaining the first diagnostic's
+/// stable identity fields. Neither tags nor related-information links may be
+/// lost merely because the richer copy arrived second.
+fn merge_mapped_diagnostic_metadata(into: &mut Diagnostic, from: Diagnostic) {
+    match (&mut into.tags, from.tags) {
+        (Some(into_tags), Some(from_tags)) => {
+            for tag in from_tags {
+                if !into_tags.contains(&tag) {
+                    into_tags.push(tag);
+                }
+            }
+        }
+        (slot @ None, Some(tags)) => *slot = Some(tags),
+        _ => {}
+    }
+    match (&mut into.related_information, from.related_information) {
+        (Some(into_related), Some(from_related)) => {
+            for related in from_related {
+                if !into_related.contains(&related) {
+                    into_related.push(related);
+                }
+            }
+        }
+        (slot @ None, Some(related)) => *slot = Some(related),
+        _ => {}
+    }
+    if into.code_description.is_none() {
+        into.code_description = from.code_description;
+    }
+    if into.data.is_none() {
+        into.data = from.data;
+    }
 }
 
 /// Map a diagnostic's carrier `related_information` spans to LSP
