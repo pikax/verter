@@ -26,7 +26,8 @@ function onClick() {
     <input v-model="model" :class="klass" :style="{ color }" :disabled="disabled" />
     <div v-html="raw"></div>
     <div v-text="label"></div>
-    <button v-on:click="onClick" @click.prevent="onClick">toggle</button>
+    <button v-on:click="onClick">toggle direct</button>
+    <button @click.prevent="onClick">toggle modified</button>
     <input v-bind:value="model" />
   </div>
 </template>

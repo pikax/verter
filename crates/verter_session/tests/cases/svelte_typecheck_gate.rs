@@ -1612,6 +1612,110 @@ fn projected_snippet_ordering_fixture_type_checks_clean_discriminating_tdz() {
 }
 
 #[test]
+fn projected_destructured_snippet_head_is_balanced_valid_tsx() {
+    // The object binding contributes inner `}` bytes to the snippet head. The
+    // projector must consume the parser-owned outer head boundary rather than
+    // treating the destructuring close as the Svelte tag close.
+    let projected = project(
+        "{@render row({ value: \"ok\" })}\n\
+         {#snippet row({ value } = { value: \"fallback\" })}<span>{value.toUpperCase()}</span>{/snippet}",
+    );
+    let Some((ok, out)) =
+        typecheck_projected(&projected, "SnippetDestructure.svelte.tsx", &[], true)
+    else {
+        skip_note("destructured snippet head syntax");
+        return;
+    };
+    assert!(
+        ok,
+        "a destructured/defaulted snippet head must project to clean, balanced TSX:\n{out}"
+    );
+}
+
+#[test]
+fn disjoint_snippet_scopes_preserve_names_and_forward_mutual_recursion() {
+    // Both element child scopes author the same names. Svelte scopes each pair
+    // to its containing element; flattening them to module `const`s creates
+    // duplicate identifiers. Calls precede declarations and the pair is
+    // mutually recursive, pinning the declaration-before-return lexical IIFE.
+    let projected = project(
+        "<div>\n\
+           {@render first()}\n\
+           {#snippet first()}<span>{@render second()}</span>{/snippet}\n\
+           {#snippet second()}<span>{@render first()}</span>{/snippet}\n\
+         </div>\n\
+         <div>\n\
+           {@render first()}\n\
+           {#snippet first()}<span>{@render second()}</span>{/snippet}\n\
+           {#snippet second()}<span>{@render first()}</span>{/snippet}\n\
+         </div>",
+    );
+    let Some((ok, out)) = typecheck_projected(&projected, "SnippetScopes.svelte.tsx", &[], true)
+    else {
+        skip_note("snippet lexical scopes");
+        return;
+    };
+    assert!(
+        ok,
+        "disjoint same-name snippets with forward/mutual references must type-check clean:\n{out}"
+    );
+}
+
+#[test]
+fn component_child_snippets_are_lexically_distinct_and_contextually_typed() {
+    let host = r#"import type { Component, Snippet } from 'svelte';
+declare const Host: Component<{
+  header: Snippet<[{ title: string; count: number }]>;
+}>;
+export default Host;
+"#;
+    let good = project(
+        r#"<script lang="ts">import Host from './Host.svelte';</script>
+<Host>
+  {#snippet header({ title, count })}<span>{title.toUpperCase()}{count.toFixed(0)}</span>{/snippet}
+</Host>
+<Host>
+  {#snippet header({ title, count })}<span>{title.toUpperCase()}{count.toFixed(0)}</span>{/snippet}
+</Host>"#,
+    );
+    let Some((good_ok, good_out)) = typecheck_projected(
+        &good,
+        "ComponentSnippetGood.svelte.tsx",
+        &[("Host.svelte.d.ts", host)],
+        true,
+    ) else {
+        skip_note("component child snippet context");
+        return;
+    };
+    assert!(
+        good_ok,
+        "same-name snippets in two component instances must be scoped and contextually typed:\n{good_out}\n{good}"
+    );
+
+    let bad = project(
+        r#"<script lang="ts">import Host from './Host.svelte';</script>
+<Host>
+  {#snippet header({ title, count })}<span>{title.toFixed(2)}{count.toUpperCase()}</span>{/snippet}
+</Host>"#,
+    );
+    let Some((bad_ok, bad_out)) = typecheck_projected(
+        &bad,
+        "ComponentSnippetBad.svelte.tsx",
+        &[("Host.svelte.d.ts", host)],
+        true,
+    ) else {
+        return;
+    };
+    assert!(
+        !bad_ok
+            && bad_out.contains("toFixed")
+            && bad_out.contains("toUpperCase")
+            && !bad_out.contains("TS1381"),
+        "wrong snippet-parameter member uses must surface semantic errors, never carrier syntax errors:\n{bad_out}\n{bad}"
+    );
+}
+
+#[test]
 fn runes_props_member_is_not_any_discriminating() {
     // DISCRIMINATING anti-`any`: a `$props()` member assigned to a deliberately
     // wrong type must FAIL — proving the member is typed (not `any`). If the

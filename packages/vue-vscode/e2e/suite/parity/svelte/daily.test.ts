@@ -4,7 +4,7 @@
 import { strict as assert } from "node:assert";
 import * as vscode from "vscode";
 
-import { FIXTURE_NAME } from "../../../helpers";
+import { FIXTURE_NAME, waitForFileReady } from "../../../helpers";
 import {
   assertCleanErrors,
   assertCompletionsInclude,
@@ -35,11 +35,25 @@ suite(`Svelte daily surface [${FIXTURE_NAME}]`, function () {
     onlySvelteParity(this);
     await assertCleanErrors("src/DailyBinding.svelte");
     await assertCleanErrors("src/JsDaily.svelte");
+  });
 
-    // @ai-generated - Proves public unused diagnostics discriminate authored
-    // script-only bindings from bindings consumed by Svelte markup projection.
+  test("svelte.diagnostics.class-uses-official-dom-environment", async function () {
+    onlySvelteParity(this);
+    for (const file of [
+      "src/diagnostics/JsxEnvironmentTs.svelte",
+      "src/diagnostics/JsxEnvironmentJs.svelte",
+    ]) {
+      const doc = await openRelative(file);
+      await waitForFileReady(doc);
+      await assertCleanErrors(file);
+    }
+  });
+
+  test("svelte.diagnostics.unused-script-markup-style-binding", async function () {
+    onlySvelteParity(this);
     const relative = "src/diagnostics/UnusedBindings.svelte";
     const doc = await openRelative(relative);
+    await waitForFileReady(doc);
     const diagnostics = await settledDiagnostics(relative);
     const errors = diagnostics.filter(
       (diagnostic) => diagnostic.severity === vscode.DiagnosticSeverity.Error,

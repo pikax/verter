@@ -1060,6 +1060,116 @@ fn merge_diagnostics_combines_both() {
     );
 }
 
+/// Two provider reporting sites that map onto one authored source diagnostic
+/// are deduplicated without losing richer editor metadata.
+#[test]
+fn merge_diagnostics_deduplicates_mapped_identity_and_unions_metadata() {
+    use crate::type_provider::protocol::{DiagnosticRelatedInfo, TypeDiagnosticTag};
+
+    let carrier_source = "count";
+    let tsx_source = "count____count";
+    let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+    let source_id = builder.set_source_and_content("Parent.svelte", carrier_source);
+    builder.add_token(0, 0, 0, 0, Some(source_id), None);
+    builder.add_token(0, 5, 0, 0, None, None);
+    builder.add_token(0, 9, 0, 0, Some(source_id), None);
+    let mapper = ProviderPositionMapper::source_map(
+        PositionMapper::from_json(&builder.into_sourcemap().to_json_string()).unwrap(),
+    );
+    let carrier_li = LineIndex::new_utf16(carrier_source);
+    let tsx_li = LineIndex::new_utf16(tsx_source);
+    let message = "Type 'string' is not assignable to type 'number'.";
+    let types = vec![
+        TypeDiagnostic {
+            message: message.to_string(),
+            severity: TypeDiagnosticSeverity::Error,
+            start: 0,
+            end: 5,
+            code: Some("2322".to_string()),
+            tags: Vec::new(),
+            related_information: Vec::new(),
+        },
+        TypeDiagnostic {
+            message: message.to_string(),
+            severity: TypeDiagnosticSeverity::Error,
+            start: 9,
+            end: 14,
+            code: Some("2322".to_string()),
+            tags: vec![TypeDiagnosticTag::Deprecated],
+            related_information: vec![DiagnosticRelatedInfo {
+                path: "Parent.svelte.tsx".to_string(),
+                start: 9,
+                end: 14,
+                message: "richer duplicate metadata".to_string(),
+            }],
+        },
+        // Category is part of the identity: a hint must remain distinct from
+        // the otherwise identical error.
+        TypeDiagnostic {
+            message: message.to_string(),
+            severity: TypeDiagnosticSeverity::Hint,
+            start: 9,
+            end: 14,
+            code: Some("2322".to_string()),
+            tags: Vec::new(),
+            related_information: Vec::new(),
+        },
+        // A distinct JSX-environment error at the same mapped range must not be
+        // hidden by prop-check deduplication.
+        TypeDiagnostic {
+            message: "JSX element implicitly has type 'any' because no interface 'JSX.IntrinsicElements' exists."
+                .to_string(),
+            severity: TypeDiagnosticSeverity::Error,
+            start: 9,
+            end: 14,
+            code: Some("7026".to_string()),
+            tags: Vec::new(),
+            related_information: Vec::new(),
+        },
+    ];
+
+    let result = merge_diagnostics(
+        Vec::new(),
+        types,
+        "Parent.svelte.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_external_source,
+    );
+    assert_eq!(
+        result.len(),
+        3,
+        "only the two identical mapped Error copies collapse; the Hint and JSX error remain distinct: {result:?}"
+    );
+    let error = result
+        .iter()
+        .find(|diagnostic| diagnostic.severity == Some(DiagnosticSeverity::ERROR))
+        .expect("the deduplicated error survives");
+    assert_eq!(
+        error.range,
+        Range::new(Position::new(0, 0), Position::new(0, 5))
+    );
+    assert_eq!(error.tags, Some(vec![DiagnosticTag::DEPRECATED]));
+    let related = error
+        .related_information
+        .as_ref()
+        .expect("the richer duplicate's related information survives");
+    assert_eq!(related.len(), 1);
+    assert_eq!(related[0].message, "richer duplicate metadata");
+    assert!(
+        result.iter().any(|diagnostic| {
+            diagnostic.severity == Some(DiagnosticSeverity::ERROR)
+                && diagnostic.code == Some(NumberOrString::String("7026".to_string()))
+                && diagnostic.message.contains("JSX.IntrinsicElements")
+        }),
+        "a class/JSX-environment diagnostic at the same range must remain public: {result:?}"
+    );
+}
+
 /// An `Unnecessary`/`Deprecated` carrier tag survives onto the published LSP
 /// `Diagnostic.tags` — this is what fades an unused `<script setup>` import in
 /// a `.vue` (TypeProvider is the sole diagnostic source there). Mirrors the

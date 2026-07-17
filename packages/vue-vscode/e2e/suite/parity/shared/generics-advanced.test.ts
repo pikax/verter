@@ -14,6 +14,7 @@ import { FIXTURE_NAME } from "../../../helpers";
 import {
   assertCleanErrors,
   assertCompletionsInclude,
+  assertDefinitionTargetsToken,
   assertHasErrorMatching,
   assertHoverNeedles,
   assertTsExpectErrorFileHolds,
@@ -23,6 +24,7 @@ import {
   hoverTextAt,
   openRelative,
   registerFrameworkTest,
+  renameEditsAt,
   failParityGap,
   type TokenAnchor,
 } from "../../../lib/parityHarness";
@@ -58,6 +60,72 @@ async function assertInferredHoverType(
   }
   void stripped;
   return text;
+}
+
+async function assertSvelteScopedSnippetNavigation(file: string): Promise<void> {
+  const first = { file, token: "selected", occurrence: 0 } as const;
+  const hover = await assertHoverNeedles(first, ["selected"]);
+  if (hover.includes("__verter")) {
+    throw new Error(`snippet-name hover leaked a generated identifier: ${hover}`);
+  }
+  await assertDefinitionTargetsToken(first, first);
+
+  const edit = await renameEditsAt(first, "selectedString");
+  if (!edit) throw new Error("rename on first scoped snippet returned no edit");
+  const doc = await openRelative(file);
+  const local = edit.entries().filter(([uri]) => uri.toString() === doc.uri.toString());
+  const external = edit.entries().filter(([uri]) => uri.toString() !== doc.uri.toString());
+  if (external.length > 0) {
+    throw new Error(
+      `scoped snippet rename leaked outside authored file: ${external.map(([u]) => u.toString())}`,
+    );
+  }
+  const edits = local.flatMap(([, edits]) => edits);
+  const firstOffset = doc.getText().indexOf("selected");
+  const secondOffset = doc.getText().indexOf("selected", firstOffset + "selected".length);
+  if (
+    edits.length !== 1 ||
+    doc.offsetAt(edits[0]!.range.start) !== firstOffset ||
+    doc.getText(edits[0]!.range) !== "selected" ||
+    (secondOffset >= 0 &&
+      edits.some(
+        (candidate) =>
+          doc.offsetAt(candidate.range.start) <= secondOffset &&
+          doc.offsetAt(candidate.range.end) > secondOffset,
+      ))
+  ) {
+    throw new Error(
+      `rename must edit only the first lexical selected declaration; edits=${edits.map((e) => `${doc.offsetAt(e.range.start)}:${doc.getText(e.range)}`)}`,
+    );
+  }
+
+  const param = { file, token: "selStr", occurrence: 0 } as const;
+  await assertDefinitionTargetsToken({ file, token: "selStr", occurrence: 1 }, param);
+  const paramEdit = await renameEditsAt(param, "selectedStringValue");
+  if (!paramEdit) throw new Error("rename on authored snippet parameter returned no edit");
+  const paramExternal = paramEdit
+    .entries()
+    .filter(([uri]) => uri.toString() !== doc.uri.toString());
+  const paramEdits = paramEdit
+    .entries()
+    .filter(([uri]) => uri.toString() === doc.uri.toString())
+    .flatMap(([, edits]) => edits);
+  const paramOffsets = paramEdits
+    .map((candidate) => doc.offsetAt(candidate.range.start))
+    .sort((a, b) => a - b);
+  const declarationOffset = doc.getText().indexOf("selStr");
+  const useOffset = doc.getText().indexOf("selStr", declarationOffset + "selStr".length);
+  if (
+    paramExternal.length > 0 ||
+    paramEdits.some((candidate) => doc.getText(candidate.range) !== "selStr") ||
+    paramOffsets.length !== 2 ||
+    paramOffsets[0] !== declarationOffset ||
+    paramOffsets[1] !== useOffset
+  ) {
+    throw new Error(
+      `snippet parameter rename must cover exactly declaration+body use; offsets=${paramOffsets}`,
+    );
+  }
 }
 
 suite(`Advanced generics [${FIXTURE_NAME}]`, function () {
@@ -337,7 +405,10 @@ suite(`Advanced generics [${FIXTURE_NAME}]`, function () {
     try {
       // Handler decls: parameter type must match inferred T
       await assertInferredHoverType({ file, token: "onSelect", occurrence: 0 }, "string");
-      await assertInferredHoverType({ file, token: "onUpdate", occurrence: 0 }, "string");
+      await assertInferredHoverType(
+        { file, token: fw === "vue" ? "onUpdate" : "onChange", occurrence: 0 },
+        "string",
+      );
       await assertInferredHoverType({ file, token: "onNumSelect", occurrence: 0 }, "number");
       // Event attribute tokens at call site (Vue @select / Svelte onSelect={})
       if (fw === "vue") {
@@ -373,6 +444,7 @@ suite(`Advanced generics [${FIXTURE_NAME}]`, function () {
       if (/\bnumber\b/.test(selHover) && !/\bstring\b/.test(selHover)) {
         throw new Error(`selStr hover looks like number, expected string: ${selHover}`);
       }
+      if (fw === "svelte") await assertSvelteScopedSnippetNavigation(file);
     } catch (err) {
       failParityGap(
         this,

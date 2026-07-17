@@ -26,8 +26,10 @@ impl TemplateProjector<'_, '_> {
             } => self.project_await(block, *then_binding, *catch_binding),
             SvelteBlockKind::Key => self.project_key(block),
             SvelteBlockKind::Snippet {
-                name_text, params, ..
-            } => self.project_snippet(block, name_text, *params),
+                name,
+                name_text,
+                params,
+            } => self.project_snippet(block, *name, name_text, *params),
         }
     }
 
@@ -406,20 +408,47 @@ impl TemplateProjector<'_, '_> {
     }
 
     /// `{#snippet name(params)}BODY{/snippet}` → hoisted branded declarator.
-    fn project_snippet(&mut self, block: &SvelteBlock, name: &str, params: Option<Span>) {
-        // Compute the body span: from the end of the `{#snippet ...}` head to
-        // the start of `{/snippet}`.
-        let head_close = self
-            .find_char_after(block.span.start, '}')
-            .map(|c| c + 1)
-            .unwrap_or(block.span.start);
-        let end_tag = self
-            .find_str_before(block.span.end, "{/snippet}")
-            .unwrap_or(block.span.end);
-        let body_span = Span::new(head_close, end_tag);
-        // Remove the original `{#snippet ...}` head and `{/snippet}` tail in
-        // place (the body is MOVED out, so its source bytes are relocated).
-        self.ct.remove(block.span.start, head_close);
+    fn project_snippet(
+        &mut self,
+        block: &SvelteBlock,
+        name_span: Span,
+        name: &str,
+        params: Option<Span>,
+    ) {
+        let snip = self.prepare_snippet_move(block, name_span, name, params);
+        self.snippet_moves.push(snip);
+    }
+
+    /// Prepare a snippet declarator without choosing its destination scope.
+    /// The caller can hoist it to the render scope or emit it in an element's
+    /// lexical IIFE. All boundaries come from the parser-owned block spans.
+    pub(super) fn prepare_snippet_move(
+        &mut self,
+        block: &SvelteBlock,
+        name_span: Span,
+        name: &str,
+        params: Option<Span>,
+    ) -> SnippetMove {
+        let close_len = "{/snippet}".len() as u32;
+        let end_tag = block.span.end.saturating_sub(close_len);
+        let body_span = Span::new(block.head_span.end, end_tag.max(block.head_span.end));
+        let params_rewrite = params.and_then(|span| {
+            let rewritten = self.rewrite_pattern_text_defaults(span);
+            (rewritten != self.slice(span)).then_some(rewritten)
+        });
+        // Preserve the authored name as its own Original chunk: remove the two
+        // surrounding portions of the head, then MOVE the name and unchanged
+        // parameter bytes into the declaration. This keeps provider identity.
+        self.ct.remove(block.head_span.start, name_span.start);
+        if let Some(params) = params {
+            self.ct.remove(name_span.end, params.start);
+            if params_rewrite.is_some() {
+                self.ct.remove(params.start, params.end);
+            }
+            self.ct.remove(params.end, block.head_span.end);
+        } else {
+            self.ct.remove(name_span.end, block.head_span.end);
+        }
         self.ct.remove(end_tag, block.span.end);
         // The snippet PARAMS scope to the snippet body — push their `$`-names so
         // a `$`-named snippet param is not mis-rewritten as a store-sub inside the
@@ -430,11 +459,12 @@ impl TemplateProjector<'_, '_> {
             self.project_node(child);
         }
         self.pop_block_bindings();
-        self.snippet_moves.push(SnippetMove {
-            block_span: block.span,
+        SnippetMove {
             name: name.to_string(),
+            name_span,
             params,
+            params_rewrite,
             body_span,
-        });
+        }
     }
 }

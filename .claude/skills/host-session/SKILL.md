@@ -154,6 +154,8 @@ Three layers prevent tokio runtime starvation during rapid typing:
 2. **Push diagnostics only**: LSP uses push diagnostics exclusively (no pull/`diagnostic_provider`). During typing, no new diagnostics published -- VS Code auto-adjusts existing push diagnostic positions as the document changes. SyncCoordinator publishes fresh merged diagnostics after 300ms of silence.
 3. **Hang detection** (`tsgo/ipc.rs`): `LspTransport` tracks `consecutive_failures` (AtomicU32). After 3 consecutive request timeouts, fires `crash_notify` to trigger `ResilientTypeProvider`'s existing restart machinery. Notifications use `try_send()` (non-blocking) to prevent channel backpressure.
 
+Provider diagnostics are published only when their generated range maps back to authored source; diagnostics wholly inside synthetic carrier scaffolding remain dropped. If multiple provider reporting sites map to the same current-file identity (range, severity, code, source, and message), the merge publishes one diagnostic and unions tags, related information, code descriptions, and data. Severity is part of identity, so an error and a hint never collapse. Carrier codegen must map the authored reporting token rather than re-anchoring synthetic diagnostics in the merge layer.
+
 ### Heartbeat Watchdog
 
 The server sends `$/verter/heartbeat` every 5s from `initialized()`. The VS Code extension monitors heartbeats -- if none arrive for 30s, it auto-restarts the server. Last-resort safety net for runtime starvation.

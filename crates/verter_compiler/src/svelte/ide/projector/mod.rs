@@ -399,12 +399,17 @@ struct TemplateProjector<'ct, 'a> {
 
 /// A snippet declarator to hoist to the top of its scope function.
 struct SnippetMove {
-    /// The full `{#snippet}` block span.
-    block_span: Span,
     /// The snippet name.
     name: String,
+    /// The original snippet-name span. The name bytes are moved into the
+    /// declarator so hover/definition/rename keep their authored identity.
+    name_span: Span,
     /// The params span (excludes parens), if any.
     params: Option<Span>,
+    /// A rewritten parameter list for store/await defaults. `None` keeps and
+    /// moves the original parameter bytes so declaration hover/rename/definition
+    /// remain mapped; `Some` is the bounded rewrite path.
+    params_rewrite: Option<String>,
     /// The body span (between the snippet head and `{/snippet}`).
     body_span: Span,
 }
@@ -539,28 +544,52 @@ impl TemplateProjector<'_, '_> {
     /// snippet body to the scope top while branding it through
     /// `__verter_snippet`.
     fn emit_snippet_declarator(&mut self, scope_anchor: u32, snip: &SnippetMove) {
-        // The snippet PARAM list is sliced into the synthesised
-        // `__verter_snippet((PARAMS) => …)` head, so a store-READ DEFAULT inside a
-        // param (`($item = $store)`) is rewritten on the TEXT
-        // (`__verter_store_get(store)`) — the param names stay locals.
-        let params = snip
-            .params
-            .map(|p| self.rewrite_pattern_text_defaults(p))
-            .unwrap_or_default();
-        let header = format!(
-            "const {} = __verter_snippet(({}) => (<>\n",
-            snip.name, params
-        );
-        // Move the snippet body to the scope anchor, wrapped so it becomes the
-        // branded declarator. The body keeps its mapped span.
+        self.emit_snippet_binding(scope_anchor, snip, "const ", "");
+    }
+
+    /// Emit one snippet binding while moving every unchanged authored chunk
+    /// (name, params, body) independently. Only synthetic punctuation/type
+    /// context is unmapped.
+    fn emit_snippet_binding(
+        &mut self,
+        scope_anchor: u32,
+        snip: &SnippetMove,
+        prefix: &str,
+        annotation: &str,
+    ) {
+        let header_tail = match (&snip.params_rewrite, snip.params) {
+            (Some(params), _) => format!("{} = __verter_snippet(({}) => (<>\n", annotation, params),
+            (None, Some(params)) if params.start < params.end => {
+                format!("{} = __verter_snippet((", annotation)
+            }
+            _ => format!("{} = __verter_snippet(() => (<>\n", annotation),
+        };
         self.ct.move_wrapped(
-            snip.body_span.start,
-            snip.body_span.end,
+            snip.name_span.start,
+            snip.name_span.end,
             scope_anchor,
-            &header,
-            "\n</>));\n",
+            prefix,
+            &header_tail,
         );
-        let _ = snip.block_span;
+        if snip.params_rewrite.is_none() {
+            if let Some(params) = snip.params.filter(|params| params.start < params.end) {
+                self.ct
+                    .move_wrapped(params.start, params.end, scope_anchor, "", ") => (<>\n");
+            }
+        }
+        // Move the snippet body separately so both the public binding name and
+        // parameter declarations/body retain their source-map identity.
+        if snip.body_span.start < snip.body_span.end {
+            self.ct.move_wrapped(
+                snip.body_span.start,
+                snip.body_span.end,
+                scope_anchor,
+                "",
+                "\n</>));\n",
+            );
+        } else {
+            self.ct.append_left(scope_anchor, "\n</>));\n");
+        }
     }
 
     fn slice(&self, span: Span) -> &str {
@@ -711,12 +740,78 @@ impl TemplateProjector<'_, '_> {
         if pushed {
             self.block_declared.push(let_binding_names);
         }
+        // Immediate `{#snippet}` children are lexical declarations owned by
+        // this element. Svelte component children also become named snippet
+        // props. Keep them in a declaration-before-return IIFE around the
+        // element: forward/mutual/recursive references work, sibling elements
+        // can reuse the same names, and no generated identifier leaks through
+        // hover/definition/rename.
+        let mut scoped_snippets = Vec::new();
         for child in &el.children {
-            self.project_node(child);
+            match child {
+                SvelteNode::Block(block) => match &block.kind {
+                    SvelteBlockKind::Snippet {
+                        name,
+                        name_text,
+                        params,
+                    } => scoped_snippets
+                        .push(self.prepare_snippet_move(block, *name, name_text, *params)),
+                    _ => self.project_node(child),
+                },
+                _ => self.project_node(child),
+            }
+        }
+        if !scoped_snippets.is_empty() {
+            self.emit_element_snippet_scope(el, &scoped_snippets);
         }
         if pushed {
             self.pop_block_bindings();
         }
+    }
+
+    /// Emit immediate child snippets in an IIFE whose lexical scope owns the
+    /// element. Component-owned snippets are also wired as named props and
+    /// contextually typed from the component's public Svelte prop contract.
+    fn emit_element_snippet_scope(&mut self, el: &SvelteElement, snippets: &[SnippetMove]) {
+        let anchor = el.open_span.start;
+        let is_component = matches!(el.kind, SvelteElementKind::Component);
+
+        for (index, snip) in snippets.iter().enumerate() {
+            let prefix = match (index == 0, is_component, self.dialect) {
+                (true, true, SvelteIdeDialect::JavaScript) => format!(
+                    "{{(() => {{\n/** @type {{NonNullable<__VerterComponentProps<typeof {}>[{:?}]>}} */\nconst ",
+                    el.name, snip.name
+                ),
+                (false, true, SvelteIdeDialect::JavaScript) => format!(
+                    "/** @type {{NonNullable<__VerterComponentProps<typeof {}>[{:?}]>}} */\nconst ",
+                    el.name, snip.name
+                ),
+                (true, _, _) => "{(() => {\nconst ".to_string(),
+                _ => "const ".to_string(),
+            };
+            let annotation = if is_component && self.dialect == SvelteIdeDialect::TypeScript {
+                format!(
+                    ": NonNullable<__VerterComponentProps<typeof {}>[{:?}]>",
+                    el.name, snip.name
+                )
+            } else {
+                String::new()
+            };
+            self.emit_snippet_binding(anchor, snip, &prefix, &annotation);
+        }
+
+        self.ct.append_left(anchor, "return (\n");
+        if is_component {
+            let insertion = snippets.iter().fold(String::new(), |mut out, snip| {
+                use std::fmt::Write;
+                let _ = write!(out, " {}={{{}}}", snip.name, snip.name);
+                out
+            });
+            self.ct
+                .append_left(el.open_span.end.saturating_sub(1), &insertion);
+        }
+        let close = el.close_span.unwrap_or(el.open_span).end;
+        self.ct.append_left(close, "\n); })()}");
     }
 
     /// Add a private direct-call check for a component's prop bag.
@@ -728,7 +823,11 @@ impl TemplateProjector<'_, '_> {
     /// unchanged for native components, so TypeScript infers the component's
     /// generic parameters from the authored prop object instead of first
     /// collapsing them through a conditional `ComponentProps<C>` projection.
-    /// The check is an unmapped JSX spread and contributes no runtime props.
+    /// The check is a JSX spread and contributes no runtime props. Its synthetic
+    /// scaffolding stays unmapped, while each copied object-literal prop key maps
+    /// to the authored attribute name. TypeScript can choose this private check
+    /// as the sole reporting site for an assignability error, so leaving the key
+    /// unmapped would silently drop a real user diagnostic at the LSP boundary.
     fn inject_native_component_call_check(&mut self, el: &SvelteElement) {
         if !is_valid_component_reference(&el.name) {
             return;
@@ -745,14 +844,38 @@ impl TemplateProjector<'_, '_> {
             return;
         }
 
-        let mut props = Vec::new();
+        let internals = match self.dialect {
+            SvelteIdeDialect::TypeScript => {
+                "null! as import(\"svelte\").ComponentInternals".to_string()
+            }
+            SvelteIdeDialect::JavaScript => {
+                "/** @type {import(\"svelte\").ComponentInternals} */ (null)".to_string()
+            }
+        };
+        let mut segments = vec![(
+            format!(" {{...(__verter_component({})({}, {{ ", el.name, internals),
+            None,
+        )];
+        let mut has_props = false;
         for attr in &el.attributes {
             match &attr.kind {
-                SvelteAttributeKind::Plain { name, value, .. } if !name.is_empty() => {
+                SvelteAttributeKind::Plain {
+                    name,
+                    name_span,
+                    value,
+                } if !name.is_empty() => {
                     if is_css_custom_property(name) {
                         continue;
                     }
-                    let key = format!("{name:?}");
+                    // Map only identifier-shaped keys whose generated bytes are
+                    // identical to the authored attribute. Quoting or escaping a
+                    // non-identifier changes offsets, so that synthetic spelling
+                    // must stay unmapped rather than producing a misleading range.
+                    let (key, key_source) = if is_valid_binding_identifier(name) {
+                        (name.clone(), Some(name_span.start))
+                    } else {
+                        (format!("{name:?}"), None)
+                    };
                     let value = match value {
                         Some(SvelteAttributeValue::Expression(span)) => {
                             let raw = self.slice(*span).to_string();
@@ -764,12 +887,27 @@ impl TemplateProjector<'_, '_> {
                         Some(SvelteAttributeValue::Mixed(_)) => return,
                         None => "true".to_string(),
                     };
-                    props.push(format!("{key}: {value}"));
+                    if has_props {
+                        segments.push((", ".to_string(), None));
+                    }
+                    segments.push((key, key_source));
+                    segments.push((format!(": {value}"), None));
+                    has_props = true;
                 }
                 SvelteAttributeKind::Spread(span) => {
                     let raw = self.slice(*span).trim().to_string();
                     let expr = raw.strip_prefix("...").unwrap_or(&raw).trim().to_string();
-                    props.push(format!("...({})", self.rewrite_store_subs_in_text(&expr)));
+                    if has_props {
+                        segments.push((", ".to_string(), None));
+                    }
+                    // Parentheses and store rewrites make this spelling differ
+                    // from the authored spread. Keep it synthetic; the ordinary
+                    // JSX spread remains the source-mapped reporting site.
+                    segments.push((
+                        format!("...({})", self.rewrite_store_subs_in_text(&expr)),
+                        None,
+                    ));
+                    has_props = true;
                 }
                 SvelteAttributeKind::Directive(dir)
                     if matches!(
@@ -801,29 +939,42 @@ impl TemplateProjector<'_, '_> {
                     } else {
                         dir.local.clone()
                     };
-                    props.push(format!("{name:?}: ({value})"));
+                    if has_props {
+                        segments.push((", ".to_string(), None));
+                    }
+                    let local_source_start = self
+                        .slice(attr.span)
+                        .find(&dir.local)
+                        .map_or(attr.span.start, |offset| attr.span.start + offset as u32);
+                    let (key, key_source) = if is_valid_binding_identifier(&name) {
+                        let source = (name == dir.local).then_some(local_source_start);
+                        (name, source)
+                    } else {
+                        // `on:` prefixes and quoted property names are generated
+                        // spellings, not byte-identical authored ranges.
+                        (format!("{name:?}"), None)
+                    };
+                    segments.push((key, key_source));
+                    segments.push((format!(": ({value})"), None));
+                    has_props = true;
                 }
                 _ => {}
             }
         }
-
-        let internals = match self.dialect {
-            SvelteIdeDialect::TypeScript => {
-                "null! as import(\"svelte\").ComponentInternals".to_string()
-            }
-            SvelteIdeDialect::JavaScript => {
-                "/** @type {import(\"svelte\").ComponentInternals} */ (null)".to_string()
-            }
-        };
-        let check = format!(
-            " {{...(__verter_component({})({}, {{ {} }}), {{}})}}",
-            el.name,
-            internals,
-            props.join(", ")
-        );
+        segments.push((" }), {})}".to_string(), None));
         let close_offset = if el.self_closing { 2 } else { 1 };
         if let Some(at) = el.open_span.end.checked_sub(close_offset) {
-            self.ct.prepend_left(at, &check);
+            let mapped = segments
+                .iter()
+                .map(|(content, source_start)| {
+                    (
+                        at,
+                        source_start.map(|source_start| (source_start, 0)),
+                        self.ct.alloc_str(content),
+                    )
+                })
+                .collect::<Vec<_>>();
+            self.ct.batch_prepend_left_with_source_map(&mapped);
         }
     }
 
@@ -1348,13 +1499,24 @@ impl TemplateProjector<'_, '_> {
     ) {
         // `on:click` → `onclick`. Overwrite `on:` with `on` (drop the colon),
         // keeping the event local + value.
+        let Some(SvelteAttributeValue::Expression(expr)) = dir.value else {
+            // Event forwarding and malformed static handlers have no authored
+            // callback expression to type-check. Leaving a valueless `onclick`
+            // would instead fabricate a boolean-handler TS2322.
+            remove_span(self.ct, attr.span);
+            return;
+        };
+
         let start = attr.span.start;
         let prefix_len = "on:".len() as u32;
         self.ct.overwrite(start, start + prefix_len, "on");
+        // Modifiers affect runtime listener behavior; they are never valid TSX
+        // attribute syntax. Keep the event local and handler chunks mapped while
+        // replacing only the directive punctuation/modifier span.
+        let local_end = start + prefix_len + dir.local.len() as u32;
+        self.ct.overwrite(local_end, expr.start, "={");
         // F11: a store-sub in the kept handler value (`on:click={$handler}`).
-        if let Some(SvelteAttributeValue::Expression(expr)) = dir.value {
-            self.rewrite_store_subs_in(expr);
-        }
+        self.rewrite_store_subs_in(expr);
     }
 
     /// Rewrite a COMPONENT element's legacy `on:event={handler}` to the checked

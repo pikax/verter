@@ -29,7 +29,7 @@ export const PARITY_LITERAL_TEST_COUNTS = {
   "shared/type-negatives.test.ts": 5,
   "shared/typing-dx-deep.test.ts": 4,
   "shared/typing-edit.test.ts": 5,
-  "svelte/daily.test.ts": 9,
+  "svelte/daily.test.ts": 11,
   "svelte/features.test.ts": 6,
   "svelte/intellisense.test.ts": 3,
   "svelte/matrix.test.ts": 0,

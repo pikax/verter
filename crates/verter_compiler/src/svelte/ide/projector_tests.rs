@@ -192,7 +192,7 @@ fn render_tag_projects_to_a_call_with_no_residue() {
 }
 
 #[test]
-fn snippet_block_projects_to_a_branded_declarator_hoisted_to_scope_top() {
+fn snippet_block_projects_to_a_branded_declarator_before_its_lexical_return() {
     let code = project("<div>{@render row()}{#snippet row()}<span>hi</span>{/snippet}</div>");
     assert!(!code.contains("{#snippet"), "no #snippet residue: {code}");
     assert!(!code.contains("{/snippet}"));
@@ -202,12 +202,75 @@ fn snippet_block_projects_to_a_branded_declarator_hoisted_to_scope_top() {
     );
     // The render call referencing `row` is still present.
     assert!(code.contains("{row()}"), "render call present: {code}");
-    // Ordering: the declarator precedes the `return (` of the render fn.
+    // Ordering: the lexical IIFE declares the snippet before returning the
+    // owning element, so forward references execute after initialization.
     let decl_idx = code.find("const row = __verter_snippet(").unwrap();
-    let return_idx = code.find("return (<>").unwrap();
+    let return_idx = decl_idx
+        + code[decl_idx..]
+            .find("return (\n<div>")
+            .expect("the owning element is returned from the lexical scope");
     assert!(
         decl_idx < return_idx,
-        "snippet declarator must be hoisted ABOVE the render return (TDZ): {code}"
+        "snippet declarator must precede its lexical element return (TDZ): {code}"
+    );
+}
+
+#[test]
+fn a_scoped_snippet_name_maps_back_to_the_authored_declaration() {
+    use oxc_sourcemap::SourceMap;
+
+    let source = "<div>{@render selected({ value: 'ok' })}{#snippet selected({ value })}<span>{value}</span>{/snippet}</div>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("Scoped.svelte"), false);
+    let declaration = projection
+        .code
+        .find("const selected")
+        .expect("the scoped snippet declaration is projected");
+    let out_off = (declaration + "const ".len()) as u32;
+    let src_off = source
+        .find("#snippet selected")
+        .expect("authored snippet declaration")
+        + "#snippet ".len();
+    let (out_line, out_col) = byte_offset_to_line_col(&projection.code, out_off);
+    let (src_line, src_col) = byte_offset_to_line_col(source, src_off as u32);
+    let map = SourceMap::from_json_string(&projection.source_map).expect("decode map");
+    let token = map
+        .get_tokens()
+        .filter(|token| token.get_dst_line() == out_line && token.get_dst_col() <= out_col)
+        .max_by_key(|token| token.get_dst_col())
+        .expect("a source-map token covers the moved snippet name");
+    let delta = out_col - token.get_dst_col();
+    assert_eq!(
+        (token.get_src_line(), token.get_src_col() + delta),
+        (src_line, src_col)
+    );
+    assert_eq!(
+        &projection.code[out_off as usize..out_off as usize + "selected".len()],
+        "selected",
+        "the generated binding preserves the authored public identifier"
+    );
+
+    let generated_param = projection
+        .code
+        .find("{ value }")
+        .expect("the authored snippet parameter is moved into the declaration")
+        + 2;
+    let authored_param = source
+        .find("#snippet selected({ value })")
+        .expect("authored snippet parameter declaration")
+        + "#snippet selected({ ".len();
+    let (out_line, out_col) = byte_offset_to_line_col(&projection.code, generated_param as u32);
+    let (src_line, src_col) = byte_offset_to_line_col(source, authored_param as u32);
+    let token = map
+        .get_tokens()
+        .filter(|token| token.get_dst_line() == out_line && token.get_dst_col() <= out_col)
+        .max_by_key(|token| token.get_dst_col())
+        .expect("a source-map token covers the moved snippet parameter");
+    let delta = out_col - token.get_dst_col();
+    assert_eq!(
+        (token.get_src_line(), token.get_src_col() + delta),
+        (src_line, src_col),
+        "the generated parameter binding maps to its authored declaration"
     );
 }
 
@@ -231,6 +294,21 @@ fn legacy_on_event_on_intrinsic_element_dom_rewrites_verbatim_lowercase() {
     assert!(
         !body.contains("__verter_event("),
         "intrinsic `on:` must NOT route the component event helper: {body}"
+    );
+}
+
+#[test]
+fn legacy_on_event_modifiers_do_not_leak_into_tsx_attribute_syntax() {
+    let code = project("<button on:click|preventDefault={handle}>x</button>");
+    let body = render_body(&code);
+    assert!(!body.contains("on:click"), "no on: residue: {body}");
+    assert!(
+        !body.contains("|preventDefault"),
+        "Svelte event modifiers are runtime behavior, not TSX attribute syntax: {body}"
+    );
+    assert!(
+        body.contains("onclick={handle}"),
+        "the handler must retain the official lowercase DOM event attribute: {body}"
     );
 }
 
@@ -1765,6 +1843,76 @@ fn bound_expression_maps_back_to_the_original_source_byte() {
         token.get_src_line(),
         token.get_src_col()
     );
+}
+
+// Pins the source-map reporting site for native Svelte component prop
+// assignability diagnostics selected from the private call check.
+#[test]
+fn native_component_call_prop_key_maps_to_the_authored_attribute() {
+    use oxc_sourcemap::SourceMap;
+
+    let source = "<script lang=\"ts\">import Child from './Child.svelte'; const wrongCount: string = 'x';</script>\n<Child title=\"x\" count={wrongCount} />";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("Parent.svelte"), false);
+
+    let generated_key = projection
+        .code
+        .find("count: (wrongCount)")
+        .expect("the private native-component call carries the count prop")
+        as u32;
+    let authored_key = source
+        .find("count={wrongCount}")
+        .expect("the authored count attribute is present") as u32;
+    let (generated_line, generated_col) = byte_offset_to_line_col(&projection.code, generated_key);
+    let (authored_line, authored_col) = byte_offset_to_line_col(source, authored_key);
+
+    let map = SourceMap::from_json_string(&projection.source_map).expect("decode map");
+    let token = map
+        .get_tokens()
+        .find(|token| {
+            token.get_dst_line() == generated_line
+                && token.get_dst_col() == generated_col
+                && token.get_source_id().is_some()
+        })
+        .expect("the generated call-check prop key must start a mapped token");
+    assert_eq!(token.get_src_line(), authored_line);
+    assert_eq!(token.get_src_col(), authored_col);
+
+    let synthetic_prefix_col = generated_col - 1;
+    assert!(
+        map.get_tokens().any(|token| {
+            token.get_dst_line() == generated_line
+                && token.get_dst_col() <= synthetic_prefix_col
+                && token.get_source_id().is_none()
+        }),
+        "the private check's synthetic scaffolding must remain unmapped"
+    );
+}
+
+#[test]
+fn rewritten_native_component_call_keys_and_spreads_stay_unmapped() {
+    use oxc_sourcemap::SourceMap;
+
+    let source = "<script lang=\"ts\">import Child from './Child.svelte'; const spread = { title: 'x' };</script>\n<Child aria-label=\"x\" {...spread} />";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("Parent.svelte"), false);
+    let map = SourceMap::from_json_string(&projection.source_map).expect("decode map");
+
+    for generated in ["\"aria-label\":", "...(spread)"] {
+        let offset = projection
+            .code
+            .find(generated)
+            .unwrap_or_else(|| panic!("private check must contain {generated:?}"));
+        let (line, col) = byte_offset_to_line_col(&projection.code, offset as u32);
+        let token = map
+            .get_tokens()
+            .find(|token| token.get_dst_line() == line && token.get_dst_col() == col)
+            .unwrap_or_else(|| panic!("a source-map boundary must start {generated:?}"));
+        assert!(
+            token.get_source_id().is_none(),
+            "rewritten generated bytes must not claim a byte-identical authored range: {generated}"
+        );
+    }
 }
 
 /// Convert a byte offset to a zero-based (line, column) pair (UTF-16-agnostic

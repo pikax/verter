@@ -539,14 +539,13 @@ export async function renameEditsAt(
 }
 
 /**
- * Apply a same-length rename (offsets stable), re-check definition markup→decl, restore.
+ * Apply a rename, re-check definition markup→decl, then restore exact source bytes.
  */
 export async function assertRenameCoversAndRestores(
   origin: TokenAnchor,
   newName: string,
   options?: { minEdits?: number; definitionFrom?: TokenAnchor; definitionTo?: TokenAnchor },
 ): Promise<void> {
-  assert.equal(newName.length, origin.token.length, "parity rename keeps token length stable");
   const edit = await renameEditsAt(origin, newName);
   assert.ok(edit, `rename from ${origin.file}#${origin.token} returned no edit`);
   const entries = edit.entries();

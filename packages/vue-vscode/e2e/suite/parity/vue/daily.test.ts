@@ -213,6 +213,7 @@ suite(`Vue daily surface [${FIXTURE_NAME}]`, function () {
     onlyVueParity(this);
     const file = "src/diagnostics/UnusedBindings.vue";
     const doc = await openRelative(file);
+    await waitForFileReady(doc);
     const diagnostics = await settledDiagnostics(file);
     const errors = diagnostics.filter(
       (diagnostic) => diagnostic.severity === vscode.DiagnosticSeverity.Error,

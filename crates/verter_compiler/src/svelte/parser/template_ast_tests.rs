@@ -563,6 +563,21 @@ fn snippet_block_records_name_and_params() {
     );
 }
 
+#[test]
+fn snippet_block_records_the_balanced_full_head_span() {
+    let src = "{#snippet row({ value, nested = { close: '}' } })}<td>{value}</td>{/snippet}";
+    let p = parse_clean(src);
+    let mut bs = Vec::new();
+    blocks(&p.template, &mut bs);
+    let block = &bs[0];
+
+    assert_eq!(
+        &src[block.head_span.start as usize..block.head_span.end as usize],
+        "{#snippet row({ value, nested = { close: '}' } })}",
+        "the parser-owned block head must end at the grammar-balanced outer brace"
+    );
+}
+
 // ── Tags ───────────────────────────────────────────────────────────────
 
 #[test]
