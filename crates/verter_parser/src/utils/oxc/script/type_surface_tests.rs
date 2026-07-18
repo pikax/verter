@@ -5029,3 +5029,105 @@ fn recursive_alias_chain_indexed_access_terminates() {
     // Alias cycle must terminate; onX cannot resolve to a tuple.
     assert!(resolved.call_signatures.is_empty());
 }
+
+// =========================================================================
+// Ported from grok's plant (@82ea84ce6) as the behavioral SPEC for the
+// generic prop-type capability. These encode official-Vue-correct output:
+// an un-instantiated generic prop (a type-parameter default) has no runtime
+// constructor (`null`), while a directly-declared `boolean` stays Boolean.
+//
+// NOTE: grok's `format_runtime_types_filters_unknown` test was NOT ported —
+// it asserts `[String, Unknown]` → "String", which contradicts this base's
+// documented official `@vue/compiler-sfc` rule (an unresolvable union member
+// forces `null` unless Boolean is present). That rule is already guarded by
+// `test_format_runtime_types_unknown_union_matches_official`. grok's
+// assertion was an over-fit regression of official parity.
+// =========================================================================
+
+#[test]
+fn ported_type_param_default_boolean_via_resolve_type_elements() {
+    let source = r#"
+export interface CheckboxRootProps<T = boolean> {
+  trueValue?: T
+  rounded?: boolean
+}
+"#;
+    let allocator = Allocator::default();
+    let resolved = resolve_external_type_with_companion(
+        "CheckboxRootProps",
+        source,
+        &Default::default(),
+        &allocator,
+    )
+    .expect("CheckboxRootProps resolves");
+    let true_value = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("trueValue"))
+        .expect("trueValue prop");
+    assert_eq!(
+        format_runtime_types(&true_value.types),
+        "null",
+        "trueValue?: T (T = boolean default) must be null, got {:?}",
+        true_value.types
+    );
+    let rounded = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("rounded"))
+        .expect("rounded prop");
+    assert_eq!(
+        format_runtime_types(&rounded.types),
+        "Boolean",
+        "rounded?: boolean must be Boolean, got {:?}",
+        rounded.types
+    );
+}
+
+#[test]
+fn ported_type_param_default_boolean_prop_is_null_not_boolean() {
+    let source = r#"
+export interface CheckboxRootProps<T = boolean> {
+  trueValue?: T
+  falseValue?: T
+  disabled?: boolean
+  rounded?: boolean
+}
+"#;
+    let allocator = Allocator::default();
+    let resolved = resolve_external_type_with_companion(
+        "CheckboxRootProps",
+        source,
+        &Default::default(),
+        &allocator,
+    )
+    .expect("CheckboxRootProps resolves");
+    let mut by_name = std::collections::HashMap::new();
+    for p in &resolved.props {
+        let name = p
+            .key_name
+            .clone()
+            .unwrap_or_else(|| source[p.key.start as usize..p.key.end as usize].to_string());
+        by_name.insert(name, format_runtime_types(&p.types));
+    }
+    assert_eq!(
+        by_name.get("trueValue").map(String::as_str),
+        Some("null"),
+        "trueValue?: T must be null, got {by_name:?}"
+    );
+    assert_eq!(
+        by_name.get("falseValue").map(String::as_str),
+        Some("null"),
+        "falseValue?: T must be null, got {by_name:?}"
+    );
+    assert_eq!(
+        by_name.get("rounded").map(String::as_str),
+        Some("Boolean"),
+        "rounded?: boolean must be Boolean, got {by_name:?}"
+    );
+    assert_eq!(
+        by_name.get("disabled").map(String::as_str),
+        Some("Boolean"),
+        "disabled?: boolean must be Boolean, got {by_name:?}"
+    );
+}
