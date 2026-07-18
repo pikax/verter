@@ -20,11 +20,12 @@ import {
   loadHost,
   getWorkspace,
   generateComponentId,
+  peekHost,
   processStyle,
   resetHost,
 } from "./core/compiler";
 import { collectResolvableModuleReferenceSpecifiers } from "./core/dependency-resolution";
-import { hydrateMacroTypeDeps } from "./core/macro-type-hydration";
+import { evictHydratedPath, hydrateMacroTypeDeps } from "./core/macro-type-hydration";
 import { parseVueRequest } from "./core/utils";
 import { preprocessBlock } from "./core/preprocessor";
 import { replaceImportMetaSsr, stripComponents } from "./core/ssr-transforms";
@@ -1093,6 +1094,13 @@ function createFrameworkFactory(
       },
 
       watchChange(id) {
+        // A changed dependency file (type .d.ts/.ts, hydrated .vue dep)
+        // must re-hydrate on next demand — evict from the per-host
+        // hydration memo without lazily creating a host.
+        const existing = peekHost();
+        if (existing) {
+          evictHydratedPath(existing, id);
+        }
         if (filter(id)) {
           const host = loadHost();
           host.remove(id);
@@ -1125,6 +1133,13 @@ function createFrameworkFactory(
         },
 
         handleHotUpdate({ file, server, modules }) {
+          {
+            // Changed hydrated dependency files re-hydrate on next demand.
+            const existing = peekHost();
+            if (existing) {
+              evictHydratedPath(existing, file);
+            }
+          }
           if (!filter(file)) return;
 
           const host = loadHost();

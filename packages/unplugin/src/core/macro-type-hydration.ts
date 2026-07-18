@@ -96,6 +96,49 @@ function isRelativeImport(specifier: string): boolean {
 }
 
 /**
+ * Package-backed classification for a RESOLVED filesystem path: true when a
+ * `node_modules` path SEGMENT is present. Segment-exact (never a substring
+ * match on other names). TS-side stand-in for the workspace ownership
+ * oracle (`workspace_is_package_backed`) until the native workspace exposes
+ * it to the plugin layer.
+ */
+function isPackageBackedPath(normalized: string): boolean {
+  return normalized.split("/").includes("node_modules");
+}
+
+/**
+ * Per-host memo of files already hydrated + closure-walked. Keeps the
+ * transform hook demand-driven: each dependency file is read, upserted, and
+ * traversed ONCE per host generation instead of once per importing SFC
+ * transform. [`evictHydratedPath`] drops a single entry when the watcher
+ * reports a change so the next transform re-hydrates fresh content.
+ */
+const hydratedClosureByHost = new WeakMap<object, Set<string>>();
+
+function hydratedSetFor(host: VerterHost): Set<string> {
+  let set = hydratedClosureByHost.get(host as unknown as object);
+  if (!set) {
+    set = new Set();
+    hydratedClosureByHost.set(host as unknown as object, set);
+  }
+  return set;
+}
+
+/**
+ * React to a watcher change/delete of `path`. When the file is part of the
+ * host's hydrated graph, the WHOLE memo clears so the next transform
+ * re-walks and re-reads fresh content — a changed leaf is only reachable
+ * through its importers, so per-entry eviction could never re-reach it.
+ * Changes to files outside the hydrated graph leave the memo untouched.
+ */
+export function evictHydratedPath(host: VerterHost, path: string): void {
+  const set = hydratedClosureByHost.get(host as unknown as object);
+  if (set?.has(normalizePath(path))) {
+    set.clear();
+  }
+}
+
+/**
  * Parse a bare package specifier into package name + sub-path.
  * e.g. "echarts/types/dist/shared" → { pkgName: "echarts", subPath: "types/dist/shared" }
  * e.g. "@scope/pkg/foo" → { pkgName: "@scope/pkg", subPath: "foo" }
@@ -247,6 +290,16 @@ async function resolveTypeImportPath(
   if (resolveId) {
     const result = resolvedIdFromHookResult(await resolveId(source, importer, { skipSelf: true }));
     if (result) {
+      const normalizedResult = normalizePath(result);
+      // Closure traversal never walks into packages: a non-relative
+      // specifier resolving into `node_modules` is a BARE package import.
+      // Package declaration entries are hydrated exactly once by the
+      // entry-level bare-specifier phase of `hydrateMacroTypeDeps` —
+      // re-walking them per transform is the eager-crawl anti-pattern.
+      // Aliases (`@/…`) resolving to project-local files stay in scope.
+      if (!isRelativeImport(source) && isPackageBackedPath(normalizedResult)) {
+        return null;
+      }
       // Prefer companion .d.ts next to a JS runtime entry (pre-built packages).
       const jsExtMatch = result.match(/\.(js|mjs|cjs)$/);
       if (jsExtMatch) {
@@ -258,7 +311,7 @@ async function resolveTypeImportPath(
           }
         }
       }
-      return normalizePath(result);
+      return normalizedResult;
     }
   }
 
@@ -421,25 +474,24 @@ export async function hydrateMacroTypeDeps(
     return;
   }
 
+  // Demand gate: hydration exists FOR macro type resolution. An SFC whose
+  // analysis demands no macro type deps hydrates nothing — the tiered
+  // macro-dep analysis already includes LOCAL declaration heritage
+  // (`interface SeparatorProps extends ImportedBase` under
+  // `defineProps<SeparatorProps>()` records the heritage import as a
+  // SURFACE dep), so macroTypeDeps is the complete demand set and
+  // broadening to ALL imports/re-exports would turn every transform into
+  // an eager dependency-graph crawl.
+  if (!analysis.macroTypeDeps?.length) return;
+
   // Create file access from workspace or fall back to disk
   const fa: FileAccess = ws ? fileAccessFromWorkspace(ws) : fileAccessFromDisk();
 
-  const hydratedVisited = new Set<string>();
+  // Per-host memo: dependency files already hydrated + walked stay walked
+  // across transforms (watcher eviction re-opens single entries).
+  const hydratedVisited = hydratedSetFor(host);
 
-  // Specifiers to hydrate:
-  // 1. macroTypeDeps import sources (direct `defineProps<ImportedType>()`)
-  // 2. ALL file imports — covers the radix pattern where a LOCAL interface
-  //    extends an imported type (`export interface SeparatorProps extends
-  //    BaseSeparatorProps`) and defineProps uses the local name. Without
-  //    hydrating those imports, heritage (PrimitiveProps via nested `@/`)
-  //    never loads and runtime props miss fallthrough/heritage keys.
-  const macroSources = (analysis.macroTypeDeps ?? []).map((dep) => dep.importSource);
-  const importSources = (analysis.imports ?? []).map((imp) => imp.source);
-  const reexportSources = (analysis.exportSignatures ?? [])
-    .filter((sig) => sig.reexportSource)
-    .map((sig) => sig.reexportSource!);
-  const specifiers = [...new Set([...macroSources, ...importSources, ...reexportSources])];
-  if (specifiers.length === 0) return;
+  const specifiers = [...new Set(analysis.macroTypeDeps.map((dep) => dep.importSource))];
 
   const resolutions: HostDependencyResolution[] = [];
 
@@ -475,6 +527,12 @@ export async function hydrateMacroTypeDeps(
     if (resolvedPath) {
       const normalized = normalizePath(resolvedPath);
       if (normalized.endsWith(".vue")) {
+        // Per-host memo: an already-hydrated dep only records its
+        // resolution for THIS entry file.
+        if (hydratedVisited.has(normalized)) {
+          resolutions.push({ specifier, resolvedCanonicalId: normalized });
+          continue;
+        }
         // Upsert the .vue file as SFC so the host can read its exported types
         try {
           const vueSrc = fa.readFile(normalized);
@@ -498,7 +556,7 @@ export async function hydrateMacroTypeDeps(
       const isProjectLocal =
         isRelativeImport(specifier) ||
         (resolvedPath !== null &&
-          !normalized.includes("/node_modules/") &&
+          !isPackageBackedPath(normalized) &&
           (normalized.endsWith(".ts") ||
             normalized.endsWith(".tsx") ||
             normalized.endsWith(".d.ts") ||
@@ -525,6 +583,12 @@ export async function hydrateMacroTypeDeps(
               break;
             }
           }
+        }
+        // Per-host memo: an already-hydrated dep only records its
+        // resolution for THIS entry file.
+        if (hydratedVisited.has(effectiveNormalized)) {
+          resolutions.push({ specifier, resolvedCanonicalId: effectiveNormalized });
+          continue;
         }
         try {
           const depSrc = fa.readFile(normalizePath(effectivePath));
@@ -618,7 +682,7 @@ export async function hydrateMacroTypeDeps(
       if (
         !entryPath &&
         runtimeEntry &&
-        !normalizePath(runtimeEntry).includes("/node_modules/") &&
+        !isPackageBackedPath(normalizePath(runtimeEntry)) &&
         fa.fileExists(normalizePath(runtimeEntry))
       ) {
         entryPath = runtimeEntry;
@@ -675,6 +739,13 @@ export async function hydrateMacroTypeDeps(
     // Upsert the entry file
     const normalizedEntryPath = normalizePath(entryPath);
     const isVueEntry = normalizedEntryPath.endsWith(".vue");
+
+    // Per-host memo: an already-hydrated package declaration entry only
+    // records its resolution for THIS entry file.
+    if (hydratedVisited.has(normalizedEntryPath)) {
+      resolutions.push({ specifier, resolvedCanonicalId: normalizedEntryPath });
+      continue;
+    }
 
     try {
       const source = fa.readFile(normalizedEntryPath);
