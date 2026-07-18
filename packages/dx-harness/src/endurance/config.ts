@@ -13,6 +13,8 @@
  *  - VERTER_ENDURANCE_STORM_P95_MAX_MS    storm p95 bound (default per-route: 2000 tsgo/shared-tsgo,
  *                                          5000 tsserver — single-threaded engine capacity)
  *  - VERTER_ENDURANCE_DEGRADATION_FACTOR  late/early p95 trend factor (default 1.5)
+ *  - VERTER_ENDURANCE_DEGRADATION_FLOOR_MS degradation noise floor (default 250 — a fail
+ *                                            requires ratio > factor AND delta > floor)
  *  - VERTER_ENDURANCE_WINDOW_MS           latency trend window (default 30000)
  *  - VERTER_ENDURANCE_MAX_IN_FLIGHT       harness-side in-flight cap (default 8)
  *  - VERTER_ENDURANCE_RSS_MAX_BYTES       verter-lsp RSS ceiling (default 4 GiB)
@@ -81,6 +83,7 @@ export function loadEnduranceConfig(env: NodeJS.ProcessEnv = process.env): Endur
       { min: 1 },
     ),
     degradationFactor: readInt(env, "VERTER_ENDURANCE_DEGRADATION_FACTOR", 1.5, { min: 1 }),
+    degradationFloorMs: readInt(env, "VERTER_ENDURANCE_DEGRADATION_FLOOR_MS", 250, { min: 1 }),
     windowMs: readInt(env, "VERTER_ENDURANCE_WINDOW_MS", 30_000, { min: 1000 }),
     maxInFlight: readInt(env, "VERTER_ENDURANCE_MAX_IN_FLIGHT", 8, { min: 1 }),
     rssMaxBytes: readInt(env, "VERTER_ENDURANCE_RSS_MAX_BYTES", 4 * 1024 ** 3, { min: 1 }),

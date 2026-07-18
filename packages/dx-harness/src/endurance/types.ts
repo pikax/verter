@@ -83,6 +83,14 @@ export interface EnduranceConfig {
   readonly stormP95MaxMs: number;
   /** Late-window p95 must be <= early-window p95 * this factor (soak trend). */
   readonly degradationFactor: number;
+  /**
+   * Absolute floor (ms) for the degradation check: a window-over-window
+   * increase only counts as a MEANINGFUL degradation when the late window
+   * exceeds BOTH the relative factor AND this floor (VERTER_ENDURANCE_DEGRADATION_FLOOR_MS,
+   * default 250). A fast-baseline route wiggling sub-floor is noise, not a
+   * trend; a genuine climb (ratio > factor AND delta > floor) still fails.
+   */
+  readonly degradationFloorMs: number;
   /** Latency time-window size (ms) for trend analysis. */
   readonly windowMs: number;
   /** Max in-flight LSP requests the harness allows itself (semaphore). */
@@ -146,6 +154,8 @@ export interface EnduranceReceipt {
     readonly earlyWindowP95: number;
     readonly lateWindowP95: number;
     readonly factor: number;
+    /** Absolute noise floor (ms): failure requires ratio > factor AND delta > floor. */
+    readonly floorMs: number;
     readonly pass: boolean;
   } | null;
   /**

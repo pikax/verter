@@ -64,12 +64,14 @@ describe.sequential(`endurance: soak [${config.route}]`, () => {
     // Degradation trend: only meaningful with >=2 usable windows; a shorter
     // run reports null and is honestly trend-skipped (never vacuously passed).
     if (receipt.degradationCheck) {
+      const check = receipt.degradationCheck;
       expect(
-        receipt.degradationCheck.pass,
-        `late-window p95 ${receipt.degradationCheck.lateWindowP95}ms exceeds early-window p95 ` +
-          `${receipt.degradationCheck.earlyWindowP95}ms * ${receipt.degradationCheck.factor}`,
+        check.pass,
+        `late-window p95 ${check.lateWindowP95}ms is a meaningful degradation over early-window ` +
+          `p95 ${check.earlyWindowP95}ms (fails only when ratio > ${check.factor}x AND ` +
+          `delta > ${check.floorMs}ms floor; actual delta ${check.lateWindowP95 - check.earlyWindowP95}ms)`,
       ).toBe(true);
-      expect(receipt.degradationCheck.lateWindowP95).toBeLessThanOrEqual(config.p95MaxMs);
+      expect(check.lateWindowP95).toBeLessThanOrEqual(config.p95MaxMs);
     } else {
       console.log(
         "[endurance] soak too short for a two-window trend check — degradation trend skipped explicitly",

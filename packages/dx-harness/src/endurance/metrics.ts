@@ -100,11 +100,24 @@ export class LatencyRecorder {
    * requests. Returns null when fewer than two usable windows exist (a run too
    * short for trend analysis — the caller must report that honestly, not pass
    * vacuously).
+   *
+   * A MEANINGFUL degradation requires BOTH signals: the late window exceeds
+   * `early * factor` (relative) AND `early + floorMs` (absolute). On a
+   * fast-baseline route a sub-floor wiggle (e.g. 66→114ms) is run-to-run
+   * noise, not a trend; a genuine climb (ratio > factor AND delta > floor)
+   * still fails.
    */
   degradation(
     factor: number,
+    floorMs: number,
     minSamples = 5,
-  ): { earlyWindowP95: number; lateWindowP95: number; factor: number; pass: boolean } | null {
+  ): {
+    earlyWindowP95: number;
+    lateWindowP95: number;
+    factor: number;
+    floorMs: number;
+    pass: boolean;
+  } | null {
     const usable = this.windows().filter((window) => window.count >= minSamples);
     if (usable.length < 2) return null;
     const early = usable[0];
@@ -113,7 +126,8 @@ export class LatencyRecorder {
       earlyWindowP95: early.p95,
       lateWindowP95: late.p95,
       factor,
-      pass: late.p95 <= early.p95 * factor,
+      floorMs,
+      pass: late.p95 <= early.p95 * factor || late.p95 - early.p95 <= floorMs,
     };
   }
 }

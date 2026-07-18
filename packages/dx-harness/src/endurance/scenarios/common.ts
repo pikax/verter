@@ -209,7 +209,10 @@ export function buildReceipt(
   },
 ): EnduranceReceipt {
   const { session, config } = context;
-  const degradation = session.recorder.degradation(config.degradationFactor);
+  const degradation = session.recorder.degradation(
+    config.degradationFactor,
+    config.degradationFloorMs,
+  );
   const durationMs = Date.now() - startedAtMs;
   // INFORMATIONAL edit-pipeline measurement: offered didChange rate × the
   // server-measured did_change handler cost → pipeline utilization. Never
