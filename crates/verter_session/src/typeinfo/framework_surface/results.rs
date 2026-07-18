@@ -276,6 +276,22 @@ pub enum NamedTypeMemberOutput {
 }
 
 impl NamedTypeMemberOutput {
+    /// Convert the graph-native raised-shape classifier into the wire-facing
+    /// shallow vocabulary. No reverse materialization occurs on this path.
+    pub(crate) fn from_raised_shallow(
+        raised: crate::project_semantic_dispatch::raise::RaisedShallowMemberOutput,
+    ) -> Self {
+        use crate::project_semantic_dispatch::raise::RaisedShallowMemberOutput;
+
+        match raised {
+            RaisedShallowMemberOutput::Primitive(name) => Self::Primitive(name),
+            RaisedShallowMemberOutput::Literal(lit) => Self::Literal(lit),
+            RaisedShallowMemberOutput::Ref { name } => Self::Ref { name },
+            RaisedShallowMemberOutput::EmptyObject => Self::EmptyObject,
+            RaisedShallowMemberOutput::Opaque => Self::Opaque,
+        }
+    }
+
     /// Classify a producer-transient raised [`TypeExpr`] into the closed
     /// shallow output vocabulary. The `TypeExpr` is read ONCE at the
     /// publication boundary and discarded — it never enters the DTO.

@@ -48,6 +48,27 @@ mod shape_engine;
 // conversion so fact producers (the macro-output expansion sink's leaf-fact
 // projection) reuse the shape engine's mapping instead of duplicating it.
 pub(crate) use shape_engine::semantic_primitive_to_primitive_name;
+pub(crate) use shape_engine::RaisedShallowMemberOutput;
+
+/// Graph-native result of reducing one output demand before the terminal sink
+/// performs its single display materialization.
+pub(crate) struct ReducedOutputNode {
+    node_id: SemanticNodeId,
+    dep_signature: DepSignature,
+    result_is_partial: bool,
+}
+
+impl ReducedOutputNode {
+    #[must_use]
+    pub(crate) fn node_id(&self) -> SemanticNodeId {
+        self.node_id
+    }
+
+    #[must_use]
+    pub(crate) fn result_is_partial(&self) -> bool {
+        self.result_is_partial
+    }
+}
 
 // Dispatch-wide re-export of the shape engine's failed-query-carrier
 // classification (the SAME `Opaque` variant mapping its materialize /
@@ -447,20 +468,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> MaterializedOutputTypeExpr {
-        let mut state = ReduceState::default();
-        let reduced = self.reduce_graph_node_iterative(node, context, &mut state);
-        let type_expr = self
-            .raise_node_to_type_expr(reduced)
-            .unwrap_or(TypeExpr::Unknown {
-                raw: "<raise miss after reduction>".to_string(),
-            });
-        let result_is_partial = state.result_is_partial;
+        let reduced = self.reduce_output_node_with_context(node, context);
+        let type_expr =
+            self.raise_node_to_type_expr(reduced.node_id)
+                .unwrap_or(TypeExpr::Unknown {
+                    raw: "<raise miss after reduction>".to_string(),
+                });
         MaterializedOutputTypeExpr::from_parts(
-            Some(reduced),
+            Some(reduced.node_id),
             OutputTypeExpr::from_raise(type_expr),
-            state.into_dep_signature(),
-            result_is_partial,
+            reduced.dep_signature,
+            reduced.result_is_partial,
         )
+    }
+
+    /// Reduce one output demand entirely in the semantic-node domain. A true
+    /// output sink can inspect node-domain shape facts and then shell-raise the
+    /// returned node exactly once for display/publication.
+    pub(crate) fn reduce_output_node_with_context(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> ReducedOutputNode {
+        let mut state = ReduceState::default();
+        let node_id = self.reduce_graph_node_iterative(node, context, &mut state);
+        let result_is_partial = state.result_is_partial;
+        ReducedOutputNode {
+            node_id,
+            dep_signature: state.into_dep_signature(),
+            result_is_partial,
+        }
     }
 
     /// Consumer-OBSERVATION variant of [`Self::raise_and_reduce_with_context`]:
@@ -4287,6 +4324,16 @@ pub(crate) fn node_raised_shape_facts_with_dispatch(
     node: SemanticNodeId,
 ) -> Option<RaisedNodeShapeFacts> {
     shape_engine::project_node_facts(dispatch, node)
+}
+
+/// Classify a node's normalized raised shape into the closed shallow member
+/// output vocabulary without reverse-materializing a `TypeExpr`.
+#[must_use]
+pub(crate) fn node_shallow_member_output_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Option<RaisedShallowMemberOutput> {
+    shape_engine::project_node_shallow_member_output(dispatch, node)
 }
 
 /// Node-domain equivalent of `type_expr_root_is_unmaterialized_sentinel(raise(node))`:

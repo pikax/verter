@@ -68,6 +68,17 @@ pub(in crate::project_semantic_dispatch) use publication::type_expr_publication_
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(in crate::project_semantic_dispatch) struct RaisedShapeKey(u32);
 
+/// Closed shallow member-value vocabulary projected directly from a node's
+/// normalized raised shape, without allocating a `TypeExpr`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RaisedShallowMemberOutput {
+    Primitive(PrimitiveName),
+    Literal(LiteralValue),
+    Ref { name: Arc<str> },
+    EmptyObject,
+    Opaque,
+}
+
 /// A faithful structural mirror of the raised `TypeExpr` shape, with nested
 /// types replaced by interned [`RaisedShapeKey`] child handles so the term is
 /// built bottom-up WITHOUT allocating a `TypeExpr`. Carries EXACTLY the fields
@@ -270,6 +281,10 @@ impl ShapeInterner {
         self.terms.push(Arc::clone(&term));
         self.table.insert(term, key);
         key
+    }
+
+    fn term(&self, key: RaisedShapeKey) -> &RaisedTerm {
+        &self.terms[key.0 as usize]
     }
 }
 
@@ -1270,6 +1285,32 @@ pub(in crate::project_semantic_dispatch) fn project_node_facts(
     let mut active = FxHashSet::default();
     let facts = fold_node(&mut alg, dispatch, node, &mut active)?.facts;
     Some(RaisedNodeShapeFacts { node, facts })
+}
+
+/// Project the wire-facing shallow named-member value from the SAME normalized
+/// raised-shape fold used by output materialization. The decision stays in the
+/// node domain; callers may materialize once afterwards solely for display.
+pub(in crate::project_semantic_dispatch) fn project_node_shallow_member_output(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Option<RaisedShallowMemberOutput> {
+    let mut interner = ShapeInterner::default();
+    let result = {
+        let mut alg = RaisedShapeAlg {
+            interner: &mut interner,
+        };
+        let mut active = FxHashSet::default();
+        fold_node(&mut alg, dispatch, node, &mut active)?
+    };
+    Some(match interner.term(result.key) {
+        RaisedTerm::Primitive(name) => RaisedShallowMemberOutput::Primitive(*name),
+        RaisedTerm::Literal(lit) => RaisedShallowMemberOutput::Literal(lit.clone()),
+        RaisedTerm::Ref { name, .. } => RaisedShallowMemberOutput::Ref {
+            name: Arc::clone(name),
+        },
+        RaisedTerm::Object(members) if members.is_empty() => RaisedShallowMemberOutput::EmptyObject,
+        _ => RaisedShallowMemberOutput::Opaque,
+    })
 }
 
 /// Whether `node`'s OWN raised root term is an unmaterialised sentinel — the
