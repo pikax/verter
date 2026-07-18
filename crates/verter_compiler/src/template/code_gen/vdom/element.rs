@@ -2241,8 +2241,6 @@ pub fn process_element_leave<'alloc>(
     // (`Cannot read properties of null (reading 'length')`).
     if dynamic_props.is_empty() {
         patch_flag &= !helpers::PATCH_PROPS;
-    } else if element.tag_type.is_component() {
-        patch_flag |= helpers::PATCH_PROPS;
     } else {
         patch_flag |= helpers::PATCH_PROPS;
     }

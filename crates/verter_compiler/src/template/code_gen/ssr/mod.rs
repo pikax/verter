@@ -2353,17 +2353,17 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
         let mut v_bind_spread_expr = String::new();
         let mut directive_calls: Vec<String> = Vec::new();
 
-        // Pre-scan for v-bind spread and v-show so that static class/style processing
-        // knows upfront whether to use the mergeProps path (source order matters).
+        // Pre-scan for v-bind spread so that static class/style processing
+        // knows upfront whether to use the mergeProps path (source order
+        // matters). Style parts no longer need a v-show pre-scan: static +
+        // dynamic + v-show styles ALWAYS fold into the single merged
+        // emission.
         let mut has_v_bind_spread = false;
-        let mut has_v_show_prescan = false;
         for p in el.props.iter() {
             if p.is_directive {
                 let pn = &source[p.start as usize..p.name_end as usize];
                 if pn == "v-bind" && p.arg_start.is_none() {
                     has_v_bind_spread = true;
-                } else if pn == "v-show" {
-                    has_v_show_prescan = true;
                 }
             }
         }

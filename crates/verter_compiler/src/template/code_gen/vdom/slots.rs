@@ -498,6 +498,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
     /// ```js
     /// _createVNode(Comp, null, { header: _withCtx(() => [...]), _: 1 })
     /// ```
+    #[allow(clippy::too_many_arguments)] // walker-context threading (id for hasScopeRef)
     pub(super) fn leave_component_with_slots(
         &mut self,
         id: NodeId,
@@ -773,9 +774,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         // Bare object-spread emission (`_normalizeProps(_guardReactiveProps(...))`)
         // always needs FULL_PROPS, matching official Vue — even when `dynamic_props`
         // is empty and regardless of whether `prop_flag` retained the spread bit.
-        if uses_full_props_spread {
-            props_patch_flag |= helpers::PATCH_FULL_PROPS;
-        } else if el.prop_flag.has_spread() || el.has_spread() {
+        if uses_full_props_spread || el.prop_flag.has_spread() || el.has_spread() {
             props_patch_flag |= helpers::PATCH_FULL_PROPS;
         }
 
@@ -1060,6 +1059,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
 
     /// Process a component element with implicit default slot (non-slot children).
     /// Wraps children in `{ default: _withCtx(() => [...]), _: 1 }`.
+    #[allow(clippy::too_many_arguments)] // walker-context threading (id for hasScopeRef)
     pub(super) fn leave_component_with_default_slot(
         &mut self,
         id: NodeId,

@@ -410,12 +410,8 @@ impl<'a> Scanner<'a> {
                     b'(' | b'[' | b'{' | b'<' => depth += 1,
                     b']' | b'}' => depth -= 1,
                     b')' => depth -= 1,
-                    b'>' => {
-                        // `=>` in function types never closes a `<`.
-                        if prev_nonspace != b'=' {
-                            depth -= 1;
-                        }
-                    }
+                    // `=>` in function types never closes a `<`.
+                    b'>' if prev_nonspace != b'=' => depth -= 1,
                     _ => {}
                 }
                 if depth == 0 {

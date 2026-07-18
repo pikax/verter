@@ -1098,9 +1098,9 @@ const props = defineProps<BaseSeparatorProps>()
 }
 
 /// radix Separator pattern: local empty interface re-export of an imported
-/// props type (`export interface SeparatorProps extends BaseSeparatorProps {}`
-/// + `defineProps<SeparatorProps>()`) must expand full heritage runtime props
-/// (asChild/as from PrimitiveProps + orientation/decorative from base).
+/// props type (`export interface SeparatorProps extends BaseSeparatorProps`
+/// plus `defineProps<SeparatorProps>()`) must expand full heritage runtime
+/// props (asChild/as from PrimitiveProps, orientation/decorative from base).
 #[test]
 fn define_props_local_empty_interface_extends_imported_expands_heritage_props() {
     let host = strict_host();
