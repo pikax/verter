@@ -92,5 +92,6 @@ mod vue_adapter;
 mod vue_adapter_cache;
 mod vue_adapter_slots;
 mod vue_import_recursion;
+mod vue_macro_codegen;
 mod vue_sfc_absolute_spans;
 mod wide_deep;

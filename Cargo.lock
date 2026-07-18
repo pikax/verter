@@ -4294,6 +4294,7 @@ dependencies = [
  "verter_audit",
  "verter_compiler",
  "verter_language",
+ "verter_macro_dto",
  "verter_no_storedspan",
  "verter_no_typeexpr",
  "verter_parser",
