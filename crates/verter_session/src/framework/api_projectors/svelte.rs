@@ -236,6 +236,7 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         //    members are inlined so quick-info never leaks projector aliases.
         let component_name = public_component_name(
             resolved_canonical,
+            descriptor.carrier_extension().as_deref(),
             referenced.iter().map(String::as_str).chain(
                 shallow
                     .exports
@@ -399,13 +400,16 @@ fn svelte_component_generics(indexed: &crate::project_type_store::IndexedReady) 
 /// declaration shim remains valid even when a component imports its namesake.
 fn public_component_name<'a>(
     canonical: &str,
+    carrier_extension: Option<&str>,
     occupied: impl IntoIterator<Item = &'a str>,
 ) -> String {
     let file_name = canonical
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or("SvelteComponent");
-    let stem = file_name.strip_suffix(".svelte").unwrap_or(file_name);
+    let stem = carrier_extension
+        .and_then(|extension| file_name.strip_suffix(extension))
+        .unwrap_or(file_name);
     let mut base = String::new();
     let mut capitalize = true;
     for ch in stem.chars() {
