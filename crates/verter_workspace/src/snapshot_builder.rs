@@ -293,8 +293,10 @@ pub fn configured_membership_from_raw(
 /// project root directory to expand `include` patterns (minus `exclude`).
 /// `files` entries are always included — they are immune to `exclude`.
 ///
-/// When `ws` is `None` or `walk()` returns `UnsupportedOperation`, only
-/// `files` entries are materialized (bridge mode for Engine path / WASM).
+/// When `ws` is `None` or `walk()` returns `UnsupportedOperation` (a
+/// filesystem-less environment — the in-memory Engine path or WASM), only
+/// `files` entries are materialized; `ConfiguredMembership::contains` then
+/// decides the rest through the compiled spec globs.
 fn materialize_from_spec(
     spec: &StaticMembershipSpec,
     project_root: &CanonicalPath,

@@ -95,8 +95,9 @@ impl IdeProjectConfig {
     }
 
     /// Whether `file_id` is a member of this project, per the exact
-    /// [`ConfiguredMembership`] (materialized file set, or the static spec in
-    /// bridge mode). One membership engine — no second glob evaluator.
+    /// [`ConfiguredMembership`] (its materialized file set, or the compiled
+    /// spec globs for a match-all / filesystem-less membership). One
+    /// membership engine — no second glob evaluator.
     pub fn matches_file(&self, file_id: &str) -> bool {
         self.membership.contains(&CanonicalPath::new(file_id))
     }
