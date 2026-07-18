@@ -386,6 +386,7 @@ fn self_closing_no_props() {
         &make_ast(),
         false, // not block root (inner element test)
         false, // not force-open-block
+        None,  // no injected branch key
         None,  // no hoisting in unit tests
         None,  // no cache in unit tests
         None,  // no resolved components in unit tests
@@ -434,6 +435,7 @@ fn empty_element_no_props() {
         &make_ast(),
         false, // not block root (inner element test)
         false, // not force-open-block
+        None,  // no injected branch key
         None,  // no hoisting in unit tests
         None,  // no cache in unit tests
         None,  // no resolved components in unit tests
@@ -486,6 +488,7 @@ fn element_with_static_text() {
         &make_ast(),
         false, // not block root (inner element test)
         false, // not force-open-block
+        None,  // no injected branch key
         None,  // no hoisting in unit tests
         None,  // no cache in unit tests
         None,  // no resolved components in unit tests
@@ -543,6 +546,7 @@ fn element_with_static_class() {
         &make_ast(),
         false, // not block root (inner element test)
         false, // not force-open-block
+        None,  // no injected branch key
         None,  // no hoisting in unit tests
         None,  // no cache in unit tests
         None,  // no resolved components in unit tests
@@ -608,6 +612,7 @@ fn element_with_multiple_static_props() {
         &make_ast(),
         false, // not block root (inner element test)
         false, // not force-open-block
+        None,  // no injected branch key
         None,  // no hoisting in unit tests
         None,  // no cache in unit tests
         None,  // no resolved components in unit tests
@@ -673,6 +678,7 @@ fn element_with_props_and_text_child() {
         &make_ast(),
         false, // not block root (inner element test)
         false, // not force-open-block
+        None,  // no injected branch key
         None,  // no hoisting in unit tests
         None,  // no cache in unit tests
         None,  // no resolved components in unit tests
@@ -723,6 +729,7 @@ fn element_with_boolean_attr() {
         &make_ast(),
         false, // not block root (inner element test)
         false, // not force-open-block
+        None,  // no injected branch key
         None,  // no hoisting in unit tests
         None,  // no cache in unit tests
         None,  // no resolved components in unit tests
@@ -780,6 +787,7 @@ fn element_with_click_handler() {
         &make_ast(),
         false, // not block root (inner element test)
         false, // not force-open-block
+        None,  // no injected branch key
         None,  // no hoisting in unit tests
         None,  // no cache in unit tests
         None,  // no resolved components in unit tests
@@ -853,6 +861,7 @@ fn element_with_leading_trailing_whitespace_removed() {
         &make_ast(),
         false, // not block root (inner element test)
         false, // not force-open-block
+        None,  // no injected branch key
         None,  // no hoisting in unit tests
         None,  // no cache in unit tests
         None,  // no resolved components in unit tests

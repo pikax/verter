@@ -435,6 +435,148 @@ fn multi_root_fragment_with_comment_stays_stable_not_dev_root() {
     );
 }
 
+/// F13: sibling v-if/v-else chains under one parent get a GLOBAL running branch
+/// key (0,1 then 2,3), never a per-chain reset (0,1,0,1). Duplicate keys break
+/// Vue's keyed patching and log "Duplicate keys".
+#[test]
+fn sibling_v_if_chains_get_global_running_branch_keys() {
+    let code = gen_vdom_template(
+        r#"<template><div><p v-if="a">A</p><p v-else>B</p><span v-if="c">C</span><span v-else>D</span></div></template>
+<script setup>const a = 1; const c = 2;</script>"#,
+    );
+    assert!(
+        code.contains("{ key: 0 }"),
+        "first branch must be key 0.\n{code}"
+    );
+    assert!(
+        code.contains("{ key: 1 }"),
+        "second branch must be key 1.\n{code}"
+    );
+    // The counter must CONTINUE across the sibling chain, not reset.
+    assert!(
+        code.contains("{ key: 2 }"),
+        "third branch must be key 2 (counter must not reset to 0).\n{code}"
+    );
+    assert!(
+        code.contains("{ key: 3 }"),
+        "fourth branch must be key 3.\n{code}"
+    );
+}
+
+/// F13: a lone v-if branch (native element) is keyed `{ key: 0 }` and keeps its
+/// comment false-edge.
+#[test]
+fn single_v_if_branch_element_gets_key_zero() {
+    let code = gen_vdom_template(
+        r#"<template><div><p v-if="a">A</p></div></template><script setup>const a = 1;</script>"#,
+    );
+    assert!(
+        code.contains("_createElementBlock(\"p\", { key: 0 }"),
+        "lone v-if <p> branch must carry {{ key: 0 }}.\n{code}"
+    );
+    assert!(
+        code.contains(": _createCommentVNode(\"v-if\", true)"),
+        "false edge must remain.\n{code}"
+    );
+}
+
+/// F8: `<template v-if>` routes through key injection — its Fragment carries
+/// `{ key: 0 }`, and the following `<p v-else>` continues the counter to key 1.
+#[test]
+fn template_v_if_injects_fragment_branch_key() {
+    let code = gen_vdom_template(
+        r#"<template><div><template v-if="a"><b>x</b><i>y</i></template><p v-else>z</p></div></template><script setup>const a = 1;</script>"#,
+    );
+    assert!(
+        code.contains("_createElementBlock(_Fragment, { key: 0 }"),
+        "<template v-if> Fragment must carry {{ key: 0 }} (not null).\n{code}"
+    );
+    assert!(
+        code.contains("{ key: 1 }"),
+        "the <p v-else> must continue the branch counter to key 1.\n{code}"
+    );
+}
+
+/// F5/F13: a lone `<li v-if v-for>` injects the branch key on the OUTER
+/// `_renderList` Fragment (`{ key: 0 }`), matching official Vue.
+#[test]
+fn v_if_v_for_outer_fragment_gets_branch_key() {
+    let code = gen_vdom_template(
+        r#"<template><ul><li v-if="ok" v-for="x in xs">{{x}}</li></ul></template><script setup>const ok = 1; const xs = [];</script>"#,
+    );
+    assert!(
+        code.contains("_createElementBlock(_Fragment, { key: 0 }, _renderList"),
+        "v-if+v-for outer Fragment must carry branch key 0.\n{code}"
+    );
+}
+
+/// F13: a v-if branch with an explicit `:key` uses the user key — no synthetic
+/// branch key is injected.
+#[test]
+fn v_if_branch_with_user_key_is_not_double_keyed() {
+    let code = gen_vdom_template(
+        r#"<template><div><p v-if="a" :key="myKey">A</p></div></template><script setup>const a = 1; const myKey = 'k';</script>"#,
+    );
+    assert!(
+        !code.contains("{ key: 0 }"),
+        "explicit :key must suppress the synthetic branch key.\n{code}"
+    );
+    assert!(
+        code.contains("key: $setup.myKey") || code.contains("key: myKey"),
+        "the user-authored key must be emitted.\n{code}"
+    );
+}
+
+/// F13: a v-if branch that is a COMPONENT gets the injected key inside the
+/// component props object (official Vue `_createBlock(_Hidden, { key: 0 })`).
+#[test]
+fn v_if_component_branch_gets_injected_key() {
+    let code = gen_vdom_template(
+        r#"<template><div>a</div><Hidden v-if="show" /></template>
+<script setup>import Hidden from './Hidden.vue'; const show = true;</script>"#,
+    );
+    assert!(
+        code.contains("{ key: 0 }"),
+        "v-if component branch must carry {{ key: 0 }}.\n{code}"
+    );
+    assert!(
+        !code.contains("_createBlock($setup.Hidden, null")
+            && !code.contains("_createBlock($setup.Hidden)"),
+        "component branch props must not be null/absent when a key is injected.\n{code}"
+    );
+}
+
+/// F13 (ported from grok spec, verified against official @vue/compiler-dom):
+/// when v-for coexists with v-else, the OUTER `_renderList` Fragment carries the
+/// branch key `{ key: 1 }` while loop items keep their own `:key`. Official Vue
+/// output: `_createElementBlock(_Fragment, { key: 1 }, _renderList(...))` with
+/// item `key: parsed.name`.
+#[test]
+fn v_for_on_v_else_fragment_gets_branch_key() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <!-- comment forces multi-root fragment -->
+  <Comp v-if="empty" :key="name" />
+  <Comp v-for="parsed in items" v-else :key="parsed.name" />
+</template>
+<script setup>
+import Comp from './Comp.vue'
+const empty = false
+const name = 'n'
+const items = [{ name: 'a' }]
+</script>"#,
+    );
+    assert!(
+        code.contains("_createElementBlock(_Fragment, { key: 1 }, _renderList"),
+        "v-else v-for Fragment must carry branch key 1 (Vue parity).\n{code}"
+    );
+    // The v-if arm keeps its user-authored :key (no synthetic branch key).
+    assert!(
+        code.contains("key: $setup.name") || code.contains("key: name"),
+        "the v-if arm must keep its explicit :key.\n{code}"
+    );
+}
+
 #[test]
 fn block_tree_single_root_element_uses_create_element_block() {
     let code = gen_vdom_template("<template><div>hello</div></template>");

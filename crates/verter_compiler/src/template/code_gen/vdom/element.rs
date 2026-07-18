@@ -1985,6 +1985,40 @@ pub(crate) fn emit_with_directives_close<'alloc>(
     buf.push_str("])");
 }
 
+/// Inject a synthetic vnode `key: N` as the FIRST property of a props object
+/// already written into `buf` starting at byte `props_start`.
+///
+/// Official Vue injects the `v-if`/`v-else` branch key ahead of user props.
+/// Handles a plain `{ … }` object (including the empty `{  }` case) and a
+/// `_mergeProps(…)` wrapper (the key becomes the first merge argument, matching
+/// `_mergeProps({ key: 0 }, _ctx.spread)`).
+///
+/// Operates on the pre-`CodeTransform` assembly buffer, so string edits here do
+/// not desync any source map.
+pub(crate) fn inject_branch_key(buf: &mut String, props_start: usize, key: u32) {
+    let obj = &buf[props_start..];
+    let is_merge = obj.starts_with("_mergeProps(");
+    let has_leading_space = obj.starts_with("{ ");
+    let inner_empty = obj
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .trim()
+        .is_empty();
+    let key_prop = format!("key: {key}");
+
+    if is_merge {
+        let ins = props_start + "_mergeProps(".len();
+        buf.insert_str(ins, &format!("{{ {key_prop} }}, "));
+    } else if inner_empty {
+        buf.truncate(props_start);
+        buf.push_str(&format!("{{ {key_prop} }}"));
+    } else if has_leading_space {
+        buf.insert_str(props_start + 2, &format!("{key_prop}, "));
+    } else {
+        buf.insert_str(props_start + 1, &format!(" {key_prop}, "));
+    }
+}
+
 /// Process the leave phase of a VDOM element node.
 ///
 /// 1. Resolves whitespace in children
@@ -1995,6 +2029,10 @@ pub(crate) fn emit_with_directives_close<'alloc>(
 /// `is_block_root` indicates this element is at a block-tree root position
 /// (template single root, v-if branch, or v-for item). Block roots use
 /// `_createElementBlock`/`_createBlock` and get `(_openBlock(), ...)` wrapping.
+///
+/// `injected_key` is the synthetic `v-if` branch key (`Some(n)` on a
+/// conditional-branch root without an explicit `:key`), injected ahead of user
+/// props so ternary arms patch as distinct nodes.
 #[allow(clippy::too_many_arguments)]
 pub fn process_element_leave<'alloc>(
     element: &ElementNode,
@@ -2009,6 +2047,7 @@ pub fn process_element_leave<'alloc>(
     ast: &TemplateAst,
     is_block_root: bool,
     force_open_block: bool,
+    injected_key: Option<u32>,
     mut hoisted_constants: Option<&mut Vec<String>>,
     cache_index: Option<usize>,
     resolved_components: Option<&mut Vec<(String, String)>>,
@@ -2178,6 +2217,7 @@ pub fn process_element_leave<'alloc>(
         // - not already cached (redundant)
         let can_hoist_props = options.hoist_static
             && !has_cached_patchflag
+            && injected_key.is_none()
             && !element.tag_type.is_component()
             && props_result.dynamic_props.is_empty()
             && !props_result.has_vnode_key
@@ -2203,6 +2243,10 @@ pub fn process_element_leave<'alloc>(
                     buf.push_str(&format!("_hoisted_{idx}"));
                 }
             }
+        } else if let Some(k) = injected_key {
+            // v-if branch root with user props: inject `key: N` as the first
+            // property. Hoisting is disabled above for this element.
+            inject_branch_key(buf, props_start, k);
         }
         if props_result.uses_merge {
             out.add_vdom_import(VdomHelper::MergeProps);
@@ -2233,6 +2277,13 @@ pub fn process_element_leave<'alloc>(
             props_result.native_vmodel,
             props_result.directive_entries,
         )
+    } else if let Some(k) = injected_key {
+        // v-if branch root with no user props: the branch key IS the props
+        // object — `_createElementBlock("p", { key: 0 }, …)`.
+        buf.push_str(", { key: ");
+        buf.push_str(&k.to_string());
+        buf.push_str(" }");
+        (Vec::new(), None, Vec::new())
     } else {
         if has_children || patch_flag != 0 {
             // Need null placeholder for props when there are children or patch flags

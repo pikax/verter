@@ -6,9 +6,9 @@
 //! These are pure helper functions that build output strings. The caller
 //! (VdomCodeGen enter_element/leave_element) integrates them into overwrites.
 
-use crate::ast::types::ElementNodeConditionKind;
+use crate::ast::types::{AstNodeKind, ElementNode, ElementNodeConditionKind, TemplateAst};
 use crate::template::oxc::types::OxcParsedElement;
-use crate::types::NodeProp;
+use crate::types::{NodeId, NodeProp};
 
 use super::super::binding::BindingResolver;
 use super::super::shared::helpers::{extract_directive_value, parse_v_for_expression, VdomHelper};
@@ -71,6 +71,7 @@ pub fn build_for_prefix<'alloc>(
     is_keyed: bool,
     oxc: Option<&OxcParsedElement<'alloc>>,
     resolver: &BindingResolver<'alloc>,
+    branch_key: Option<u32>,
 ) -> (String, ScopeClose, Option<u32>) {
     let full_expr = extract_directive_value(v_for, source);
 
@@ -104,7 +105,17 @@ pub fn build_for_prefix<'alloc>(
     };
 
     let mut prefix = String::with_capacity(128);
-    prefix.push_str("(_openBlock(true), _createElementBlock(_Fragment, null, _renderList(");
+    // When a v-for shares its element with a v-if/v-else-if/v-else branch, the
+    // outer `_renderList` Fragment receives the branch `{ key: n }` (official
+    // Vue injects the if-branch key on the Fragment, even when items have their
+    // own `:key`). Otherwise the Fragment props stay `null`.
+    if let Some(k) = branch_key {
+        prefix.push_str("(_openBlock(true), _createElementBlock(_Fragment, { key: ");
+        prefix.push_str(&k.to_string());
+        prefix.push_str(" }, _renderList(");
+    } else {
+        prefix.push_str("(_openBlock(true), _createElementBlock(_Fragment, null, _renderList(");
+    }
     prefix.push_str(&resolved_iterable);
     prefix.push_str(", (");
     prefix.push_str(params);
@@ -168,6 +179,75 @@ pub(crate) fn build_prefixed_iterable(
     }
 
     result
+}
+
+// ======================== Branch key injection ========================
+
+/// True when the element already carries an explicit vnode `key` (`key=`,
+/// `:key`, or `v-bind:key`), so no synthetic branch key should be injected.
+pub fn element_has_vnode_key(el: &ElementNode, source: &str) -> bool {
+    el.props.iter().any(|p| {
+        if p.is_directive {
+            if let (Some(as_), Some(ae)) = (p.arg_start, p.arg_end) {
+                &source[as_ as usize..ae as usize] == "key"
+            } else {
+                false
+            }
+        } else {
+            &source[p.start as usize..p.name_end as usize] == "key"
+        }
+    })
+}
+
+/// The 0-based branch `key` official Vue injects on a `v-if`/`v-else-if`/`v-else`
+/// arm.
+///
+/// Vue keeps a RUNNING counter across sibling conditional chains under one
+/// parent (`key += prior sibling IF branch count`), so two adjacent chains get
+/// keys `0,1` then `2,3` — never `0,1` then `0,1` (duplicate keys break keyed
+/// patching). In Verter's flat sibling model, where each branch is a separate
+/// element, that equals the number of prior sibling elements carrying a
+/// v-condition.
+///
+/// Returns `None` when `id` is not a conditional-branch element.
+pub fn condition_branch_index(ast: &TemplateAst, id: NodeId) -> Option<u32> {
+    let node = ast.nodes.get(id.0)?;
+    match &node.kind {
+        AstNodeKind::Element(el) if el.v_condition.is_some() => {}
+        _ => return None,
+    }
+
+    let siblings: &[NodeId] = if let Some(parent_id) = node.parent {
+        match &ast.nodes.get(parent_id.0)?.kind {
+            AstNodeKind::Element(parent) => parent
+                .content
+                .as_ref()
+                .map(|c| c.children.as_slice())
+                .unwrap_or(&[]),
+            _ => return None,
+        }
+    } else {
+        ast.root
+            .content
+            .as_ref()
+            .map(|c| c.children.as_slice())
+            .unwrap_or(&[])
+    };
+
+    let mut count: u32 = 0;
+    for &sib_id in siblings {
+        if sib_id == id {
+            return Some(count);
+        }
+        if let Some(sib) = ast.nodes.get(sib_id.0) {
+            if let AstNodeKind::Element(sib_el) = &sib.kind {
+                if sib_el.v_condition.is_some() {
+                    count = count.saturating_add(1);
+                }
+            }
+        }
+    }
+    None
 }
 
 // ======================== Scope close emission ========================
@@ -385,7 +465,8 @@ mod tests {
         let resolver = make_empty_resolver();
         let prop = make_directive_prop(Some(7), Some(21));
         let source = "v-for=\"item in items\"";
-        let (prefix, close, iterable_src) = build_for_prefix(&prop, source, false, None, &resolver);
+        let (prefix, close, iterable_src) =
+            build_for_prefix(&prop, source, false, None, &resolver, None);
 
         assert!(prefix
             .starts_with("(_openBlock(true), _createElementBlock(_Fragment, null, _renderList("));
@@ -402,7 +483,7 @@ mod tests {
         let resolver = make_empty_resolver();
         let prop = make_directive_prop(Some(7), Some(21));
         let source = "v-for=\"item in items\"";
-        let (_, close, _) = build_for_prefix(&prop, source, true, None, &resolver);
+        let (_, close, _) = build_for_prefix(&prop, source, true, None, &resolver, None);
         assert!(matches!(close, ScopeClose::For { is_keyed: true }));
     }
 
@@ -411,7 +492,8 @@ mod tests {
         let resolver = make_empty_resolver();
         let prop = make_directive_prop(Some(7), Some(29));
         let source = "v-for=\"(item, index) in items\"";
-        let (prefix, _, iterable_src) = build_for_prefix(&prop, source, false, None, &resolver);
+        let (prefix, _, iterable_src) =
+            build_for_prefix(&prop, source, false, None, &resolver, None);
 
         assert!(prefix.contains("items, (item, index)"));
         // "(item, index) in items" — iterable "items" starts at offset 7 + 22 = 29

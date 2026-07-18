@@ -1992,7 +1992,8 @@ fn test_v_if_block_treatment() {
     );
 }
 
-/// @ai-generated — v-if branches: key injection not implemented in new pipeline
+/// @ai-generated — v-if branches: official Vue injects `{ key: 0 }` on the
+/// branch root so ternary arms patch as distinct nodes; Verter matches this.
 #[test]
 fn test_v_if_key_injection() {
     let allocator = Allocator::new();
@@ -2008,17 +2009,17 @@ fn test_v_if_key_injection() {
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
-    // New pipeline does not inject keys into v-if branches
     assert!(
         template.code.contains("(_ctx.show) ?"),
         "v-if should produce ternary, got:\n{}",
         template.code
     );
+    // Official Vue injects the branch key on the v-if root.
     assert!(
         template
             .code
-            .contains(r#"_createElementBlock("div", null, "yes")"#),
-        "v-if branch should produce block element, got:\n{}",
+            .contains(r#"_createElementBlock("div", { key: 0 }, "yes")"#),
+        "v-if branch must inject {{ key: 0 }} on the branch root, got:\n{}",
         template.code
     );
 }

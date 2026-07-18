@@ -652,8 +652,19 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                         false
                     }
                 });
-                let (prefix, _for_close, iterable_src) =
-                    directives::build_for_prefix(v_for, source, is_keyed, oxc, &self.resolver);
+                // v-for on a conditional branch: the outer `_renderList`
+                // Fragment carries the if-branch `{ key: n }` (official Vue puts
+                // the branch key on the Fragment even when items have their own
+                // `:key`).
+                let branch_key = directives::condition_branch_index(self.ast, id);
+                let (prefix, _for_close, iterable_src) = directives::build_for_prefix(
+                    v_for,
+                    source,
+                    is_keyed,
+                    oxc,
+                    &self.resolver,
+                    branch_key,
+                );
                 let condition = match close {
                     ScopeClose::IfTernary => {
                         crate::template::code_gen::types::ConditionBranchClose::IfTernary
@@ -687,7 +698,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                 }
             });
             let (prefix, close, iterable_src) =
-                directives::build_for_prefix(v_for, source, is_keyed, oxc, &self.resolver);
+                directives::build_for_prefix(v_for, source, is_keyed, oxc, &self.resolver, None);
             directives::collect_scope_imports(&close, out);
             // NOTE: v-for prefix is NOT prepended here. It is stored and
             // included in the open tag overwrite by process_element_leave.
@@ -766,6 +777,19 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             return;
         }
 
+        // Synthetic v-if branch key (official Vue injects `{ key: n }` on a
+        // conditional-branch root that has no explicit `:key`). Only for a plain
+        // conditional branch — when v-for also applies, the key rides the outer
+        // `_renderList` Fragment built in enter_element.
+        let injected_key = if el.v_condition.is_some()
+            && el.v_for.is_none()
+            && !directives::element_has_vnode_key(el, source)
+        {
+            directives::condition_branch_index(self.ast, _id)
+        } else {
+            None
+        };
+
         // Handle <template v-if> / <template v-for>: renders as Fragment, not
         // as a <template> element. These are transparent structural wrappers
         // whose children become the Fragment's children.
@@ -773,7 +797,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             && el.v_slot.is_none()
             && (el.v_condition.is_some() || el.v_for.is_some())
         {
-            self.leave_template_fragment(el, source, out);
+            self.leave_template_fragment(el, source, out, injected_key);
             return;
         }
 
@@ -809,7 +833,16 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             && !raw_children_builtin
             && self.has_slot_children(el_children)
         {
-            self.leave_component_with_slots(_id, el, oxc, el_children, source, out, is_block_root);
+            self.leave_component_with_slots(
+                _id,
+                el,
+                oxc,
+                el_children,
+                source,
+                out,
+                is_block_root,
+                injected_key,
+            );
             return;
         }
 
@@ -824,6 +857,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                 source,
                 out,
                 is_block_root,
+                injected_key,
             );
             return;
         }
@@ -918,6 +952,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             self.ast,
             is_block_root,
             force_open_block,
+            injected_key,
             Some(&mut self.hoisted_constants),
             cache_idx,
             Some(&mut self.resolved_components),
