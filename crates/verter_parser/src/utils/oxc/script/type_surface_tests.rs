@@ -4531,3 +4531,597 @@ fn alias_to_companion_emits_via_named_local() {
             .collect::<Vec<_>>()
     );
 }
+
+// =========================================================================
+// Generic type-parameter runtime prop-type resolution
+//
+// A member whose type is a generic type parameter must resolve its runtime
+// prop type through the parameter's binding: an explicit instantiation
+// argument (`Foo<string>`) or the declared `extends` constraint
+// (`T extends number`). A type-parameter DEFAULT (`T = boolean`) is never a
+// runtime bound — it must NOT leak a `Boolean` prop constructor.
+// =========================================================================
+
+#[test]
+fn type_param_explicit_arg_resolves_member_runtime_type() {
+    let (resolved, diagnostics) =
+        resolve_with_ctx("interface Foo<T> { value: T }\ntype Test = Foo<string>;");
+    let value = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("value"))
+        .expect("value prop should resolve");
+    assert_eq!(
+        format_runtime_types(&value.types),
+        "String",
+        "explicit `Foo<string>` must resolve member `value: T` to String, got {:?}",
+        value.types
+    );
+    assert!(
+        !value.types.contains(&RuntimeType::Unknown),
+        "explicit generic argument must not leave the member Unknown"
+    );
+    assert!(diagnostics.is_empty());
+}
+
+#[test]
+fn type_param_explicit_arg_resolves_member_runtime_type_ref_path() {
+    let (resolved, _) =
+        resolve_with_ctx_ref("interface Foo<T> { value: T }\ntype Test = Foo<number>;");
+    let value = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("value"))
+        .expect("value prop should resolve");
+    assert_eq!(
+        format_runtime_types(&value.types),
+        "Number",
+        "explicit `Foo<number>` (ref path) must resolve `value: T` to Number, got {:?}",
+        value.types
+    );
+}
+
+#[test]
+fn type_param_constraint_resolves_member_runtime_type() {
+    // A generic referenced without an explicit argument falls back to the
+    // declared `extends` constraint for its runtime prop type.
+    let (resolved, _) =
+        resolve_with_ctx("interface Foo<T extends string> { value: T }\ntype Test = Foo;");
+    let value = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("value"))
+        .expect("value prop should resolve");
+    assert_eq!(
+        format_runtime_types(&value.types),
+        "String",
+        "`T extends string` must resolve `value: T` to String, got {:?}",
+        value.types
+    );
+}
+
+#[test]
+fn type_param_default_does_not_leak_boolean_runtime_type() {
+    // A type-parameter DEFAULT is not a runtime constructor: `trueValue: T`
+    // (T defaulting to boolean) must stay `null`, while a directly-declared
+    // `boolean` member stays `Boolean`.
+    let (resolved, _) = resolve_with_ctx(
+        "interface Foo<T = boolean> { trueValue?: T; rounded?: boolean }\ntype Test = Foo;",
+    );
+    let true_value = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("trueValue"))
+        .expect("trueValue prop should resolve");
+    assert_eq!(
+        format_runtime_types(&true_value.types),
+        "null",
+        "type-param default `T = boolean` must NOT leak a Boolean runtime type, got {:?}",
+        true_value.types
+    );
+    assert!(
+        !true_value.types.contains(&RuntimeType::Boolean),
+        "defaulted generic member must not become a Boolean prop"
+    );
+    let rounded = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("rounded"))
+        .expect("rounded prop should resolve");
+    assert_eq!(
+        format_runtime_types(&rounded.types),
+        "Boolean",
+        "directly-declared boolean member stays Boolean, got {:?}",
+        rounded.types
+    );
+}
+
+#[test]
+fn type_param_constraint_default_prefers_constraint_runtime_type() {
+    // With both a constraint and a default, the constraint is the runtime
+    // bound (the default is ignored), so `value: T` resolves to Number.
+    let (resolved, _) =
+        resolve_with_ctx("interface Foo<T extends number = 3> { value: T }\ntype Test = Foo;");
+    let value = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("value"))
+        .expect("value prop should resolve");
+    assert_eq!(
+        format_runtime_types(&value.types),
+        "Number",
+        "constraint `extends number` is the runtime bound even with a default, got {:?}",
+        value.types
+    );
+}
+
+#[test]
+fn type_param_heritage_generic_resolves_member_runtime_type() {
+    // reka-ui heritage pattern: `interface Child extends Base<string>`.
+    // The production resolution path (immutable `_ref`, the one the Vue
+    // macro pipeline uses) instantiates the heritage type argument, so the
+    // inherited `value: T` resolves to String.
+    let (resolved, _) = resolve_with_ctx_ref(
+        "interface Base<T> { value: T }\ninterface Child extends Base<string> { count: number }\ntype Test = Child;",
+    );
+    let value = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("value"))
+        .expect("inherited generic member should resolve");
+    assert_eq!(
+        format_runtime_types(&value.types),
+        "String",
+        "heritage `extends Base<string>` must resolve inherited `value: T` to String, got {:?}",
+        value.types
+    );
+    assert!(resolved
+        .props
+        .iter()
+        .any(|p| p.key_name.as_deref() == Some("count")));
+}
+
+#[test]
+fn type_param_transitive_binding_resolves_member_runtime_type() {
+    // Nested instantiation through heritage on the production `_ref` path:
+    // `Outer<string>` binds `T = string`, forwarded into `Inner<T>` so the
+    // inherited `value: U` resolves to String.
+    let (resolved, _) = resolve_with_ctx_ref(
+        "interface Inner<U> { value: U }\ninterface Outer<T> extends Inner<T> { count: number }\ntype Test = Outer<string>;",
+    );
+    let value = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("value"))
+        .expect("inherited generic member should resolve");
+    assert_eq!(
+        format_runtime_types(&value.types),
+        "String",
+        "transitive generic binding must resolve inherited `value: U` to String, got {:?}",
+        value.types
+    );
+}
+
+// =========================================================================
+// Props-vs-emits surface discrimination for tuple-shaped member values
+//
+// A tuple / indexed-access-to-tuple member VALUE is the Vue emit shorthand
+// ONLY on an emits surface. On a props surface it is a genuine prop and
+// must NOT be reclassified into `call_signatures` (where the props consumer
+// would drop it). With no surface set, the legacy reclassifying behavior is
+// preserved.
+// =========================================================================
+
+/// Resolve `type Test = ...` on the immutable `_ref` path with an explicit
+/// resolution surface set on the context.
+fn resolve_with_surface(source: &str, surface: Option<BlockedTypeSurface>) -> ResolvedElements {
+    let allocator = Allocator::default();
+    let source_type = SourceType::ts();
+    let parser = Parser::new(&allocator, source, source_type);
+    let result = parser.parse();
+    assert!(
+        result.errors.is_empty(),
+        "Source should parse without errors: {:?}",
+        result.errors
+    );
+    let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
+    ctx.current_surface = surface;
+    for stmt in &result.program.body {
+        if let Statement::TSTypeAliasDeclaration(alias) = stmt {
+            if alias.id.name.as_str() == "Test" {
+                return resolve_type_elements_with_ctx_ref(&alias.type_annotation, 0, &ctx, true);
+            }
+        }
+    }
+    panic!("No `type Test = ...` declaration found in source");
+}
+
+#[test]
+fn indexed_access_tuple_stays_prop_on_props_surface() {
+    let resolved = resolve_with_surface(
+        "interface LayerEmits { close: [] }\ninterface Props { onClose: LayerEmits['close'] }\ntype Test = Props;",
+        Some(BlockedTypeSurface::DefineProps),
+    );
+    assert!(
+        resolved
+            .props
+            .iter()
+            .any(|p| p.key_name.as_deref() == Some("onClose")),
+        "on a props surface `onClose: LayerEmits['close']` must stay a prop, props: {:?}",
+        resolved
+            .props
+            .iter()
+            .filter_map(|p| p.key_name.as_deref())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        resolved.call_signatures.is_empty(),
+        "props-surface member must NOT be reclassified as an emit, got call_signatures: {:?}",
+        resolved
+            .call_signatures
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn direct_tuple_stays_prop_on_props_surface() {
+    let resolved = resolve_with_surface(
+        "interface Props { tags: [string, number] }\ntype Test = Props;",
+        Some(BlockedTypeSurface::DefineProps),
+    );
+    assert!(
+        resolved
+            .props
+            .iter()
+            .any(|p| p.key_name.as_deref() == Some("tags")),
+        "a tuple-typed prop on a props surface stays a prop"
+    );
+    assert!(resolved.call_signatures.is_empty());
+}
+
+#[test]
+fn indexed_access_tuple_reclassifies_on_emits_surface() {
+    // Regression guard: the reka-ui emit-forwarding pattern must still
+    // reclassify on an emits surface.
+    let resolved = resolve_with_surface(
+        "interface LayerEmits { close: [] }\ninterface Emits { onClose: LayerEmits['close'] }\ntype Test = Emits;",
+        Some(BlockedTypeSurface::DefineEmits),
+    );
+    assert!(
+        resolved.call_signatures.iter().any(|c| c.name == "onClose"),
+        "on an emits surface the indexed-access-to-tuple member must become an emit"
+    );
+    assert!(
+        !resolved
+            .props
+            .iter()
+            .any(|p| p.key_name.as_deref() == Some("onClose")),
+        "the emit member must not also remain a prop"
+    );
+}
+
+#[test]
+fn indexed_access_tuple_reclassifies_when_surface_unset() {
+    // Legacy default (no surface): reclassification is preserved.
+    let resolved = resolve_with_surface(
+        "interface LayerEmits { close: [] }\ninterface Emits { onClose: LayerEmits['close'] }\ntype Test = Emits;",
+        None,
+    );
+    assert!(
+        resolved.call_signatures.iter().any(|c| c.name == "onClose"),
+        "with no surface set the legacy reclassifying behavior is preserved"
+    );
+}
+
+// =========================================================================
+// Emit-tuple detection is TSType-node driven, not text-driven: `readonly`
+// and parenthesized tuples are still the emit shorthand, and the payload
+// text is the inner tuple. An array type (`string[]`) is never an emit.
+// =========================================================================
+
+#[test]
+fn readonly_tuple_member_is_emit_shorthand() {
+    let (resolved, _) = resolve_with_ctx(
+        "interface Emits { escapeKeydown: readonly [ev: string] }\ntype Test = Emits;",
+    );
+    let emit = resolved
+        .call_signatures
+        .iter()
+        .find(|c| c.name == "escapeKeydown")
+        .expect("`readonly [ev: string]` must be detected as an emit");
+    match &emit.signature {
+        ResolvedCallPayloadForm::Tuple { tuple_text } => assert_eq!(
+            tuple_text, "[ev: string]",
+            "emit payload text is the inner tuple, not the `readonly` wrapper"
+        ),
+        other => panic!("expected tuple payload, got {:?}", other),
+    }
+    assert!(
+        !resolved
+            .props
+            .iter()
+            .any(|p| p.key_name.as_deref() == Some("escapeKeydown")),
+        "the emit member must not also remain a prop"
+    );
+}
+
+#[test]
+fn parenthesized_tuple_member_is_emit_shorthand() {
+    let (resolved, _) =
+        resolve_with_ctx("interface Emits { wrapped: ([ev: number]) }\ntype Test = Emits;");
+    assert!(
+        resolved.call_signatures.iter().any(|c| c.name == "wrapped"),
+        "a parenthesized tuple `([ev: number])` must be detected as an emit, call_sigs={:?}",
+        resolved
+            .call_signatures
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn readonly_indexed_access_tuple_member_is_emit_shorthand() {
+    // The context path (indexed-access-to-tuple) also unwraps `readonly`.
+    let (resolved, _) = resolve_with_ctx(
+        "interface LayerEmits { close: readonly [ev: string] }\ninterface Emits { onClose: LayerEmits['close'] }\ntype Test = Emits;",
+    );
+    assert!(
+        resolved.call_signatures.iter().any(|c| c.name == "onClose"),
+        "indexed access to a `readonly` tuple must resolve as an emit"
+    );
+}
+
+#[test]
+fn array_type_member_stays_prop_not_emit() {
+    // Negative guard: an array type is NOT the emit tuple shorthand.
+    let (resolved, _) = resolve_with_ctx("interface Emits { list: string[] }\ntype Test = Emits;");
+    assert!(
+        resolved
+            .props
+            .iter()
+            .any(|p| p.key_name.as_deref() == Some("list")),
+        "an array-typed member stays a prop"
+    );
+    assert!(
+        resolved.call_signatures.is_empty(),
+        "an array type must not be reclassified as an emit"
+    );
+}
+
+// =========================================================================
+// Instantiated-generic indexed-access emit: `BoxEmits<string>['save']` must
+// resolve as an emit whose payload has the instantiation substituted
+// (`[value: string]`), not the unsubstituted `[value: T]`. Typed-IR driven.
+// =========================================================================
+
+fn emit_tuple_text<'a>(resolved: &'a ResolvedElements, name: &str) -> &'a str {
+    let sig = resolved
+        .call_signatures
+        .iter()
+        .find(|c| c.name == name)
+        .unwrap_or_else(|| {
+            panic!(
+                "expected emit `{name}`, call_sigs: {:?}",
+                resolved
+                    .call_signatures
+                    .iter()
+                    .map(|c| c.name.as_str())
+                    .collect::<Vec<_>>()
+            )
+        });
+    match &sig.signature {
+        ResolvedCallPayloadForm::Tuple { tuple_text } => tuple_text.as_str(),
+        other => panic!("expected tuple payload for `{name}`, got {:?}", other),
+    }
+}
+
+#[test]
+fn instantiated_generic_indexed_access_emit_substitutes_interface() {
+    let (resolved, _) = resolve_with_ctx(
+        "interface BoxEmits<T> { save: [value: T] }\ninterface Emits { onSave: BoxEmits<string>['save'] }\ntype Test = Emits;",
+    );
+    let text = emit_tuple_text(&resolved, "onSave");
+    assert_eq!(
+        text, "[value: string]",
+        "the instantiation `BoxEmits<string>` must substitute T into the emit payload"
+    );
+    assert!(
+        !text.contains(": T"),
+        "the emit payload must not carry the unsubstituted type parameter, got {text:?}"
+    );
+    assert!(
+        !resolved
+            .props
+            .iter()
+            .any(|p| p.key_name.as_deref() == Some("onSave")),
+        "onSave must be an emit, not a prop"
+    );
+}
+
+#[test]
+fn instantiated_generic_indexed_access_emit_substitutes_alias() {
+    let (resolved, _) = resolve_with_ctx(
+        "type BoxEmits<T> = { save: [value: T] }\ninterface Emits { onSave: BoxEmits<number>['save'] }\ntype Test = Emits;",
+    );
+    assert_eq!(emit_tuple_text(&resolved, "onSave"), "[value: number]");
+}
+
+#[test]
+fn instantiated_generic_indexed_access_emit_substitutes_multi_param() {
+    let (resolved, _) = resolve_with_ctx(
+        "interface BoxEmits<K, V> { change: [key: K, value: V] }\ninterface Emits { onChange: BoxEmits<string, number>['change'] }\ntype Test = Emits;",
+    );
+    assert_eq!(
+        emit_tuple_text(&resolved, "onChange"),
+        "[key: string, value: number]"
+    );
+}
+
+#[test]
+fn instantiated_generic_indexed_access_non_tuple_member_stays_prop() {
+    // Negative guard: an instantiated indexed access to a NON-tuple member
+    // is not an emit — it stays a prop.
+    let (resolved, _) = resolve_with_ctx(
+        "interface BoxEmits<T> { current: T }\ninterface Props { value: BoxEmits<string>['current'] }\ntype Test = Props;",
+    );
+    assert!(
+        resolved
+            .props
+            .iter()
+            .any(|p| p.key_name.as_deref() == Some("value")),
+        "an indexed access to a non-tuple member stays a prop"
+    );
+    assert!(
+        !resolved.call_signatures.iter().any(|c| c.name == "value"),
+        "a non-tuple indexed access must not become an emit"
+    );
+}
+
+// =========================================================================
+// Recursion safety: the indexed-access-to-tuple emit walk must terminate on
+// cyclic interface/alias references (`interface A{x:B['y']} B{y:A['x']}`).
+// The `visited` name guard in `ctx_indexed_member_tuple_text` /
+// `ctx_resolved_tuple_text` is load-bearing — removing it infinite-loops.
+// =========================================================================
+
+#[test]
+fn mutually_recursive_indexed_access_terminates() {
+    // Must not stack-overflow. Neither member resolves to a tuple, so both
+    // stay props.
+    let (resolved, _) =
+        resolve_with_ctx("interface A { x: B['y'] }\ninterface B { y: A['x'] }\ntype Test = A;");
+    assert!(
+        resolved
+            .props
+            .iter()
+            .any(|p| p.key_name.as_deref() == Some("x")),
+        "cyclic indexed access terminates with the member as a prop"
+    );
+    assert!(resolved.call_signatures.is_empty());
+}
+
+#[test]
+fn self_referential_indexed_access_terminates() {
+    let (resolved, _) =
+        resolve_with_ctx("interface Emits { close: Emits['close'] }\ntype Test = Emits;");
+    // Terminates; the self-referential member cannot resolve to a tuple.
+    assert!(resolved.call_signatures.is_empty());
+    assert!(resolved
+        .props
+        .iter()
+        .any(|p| p.key_name.as_deref() == Some("close")));
+}
+
+#[test]
+fn recursive_alias_chain_indexed_access_terminates() {
+    let (resolved, _) = resolve_with_ctx(
+        "type A = B\ntype B = A\ninterface Emits { onX: A['x'] }\ntype Test = Emits;",
+    );
+    // Alias cycle must terminate; onX cannot resolve to a tuple.
+    assert!(resolved.call_signatures.is_empty());
+}
+
+// =========================================================================
+// Ported from grok's plant (@82ea84ce6) as the behavioral SPEC for the
+// generic prop-type capability. These encode official-Vue-correct output:
+// an un-instantiated generic prop (a type-parameter default) has no runtime
+// constructor (`null`), while a directly-declared `boolean` stays Boolean.
+//
+// NOTE: grok's `format_runtime_types_filters_unknown` test was NOT ported —
+// it asserts `[String, Unknown]` → "String", which contradicts this base's
+// documented official `@vue/compiler-sfc` rule (an unresolvable union member
+// forces `null` unless Boolean is present). That rule is already guarded by
+// `test_format_runtime_types_unknown_union_matches_official`. grok's
+// assertion was an over-fit regression of official parity.
+// =========================================================================
+
+#[test]
+fn ported_type_param_default_boolean_via_resolve_type_elements() {
+    let source = r#"
+export interface CheckboxRootProps<T = boolean> {
+  trueValue?: T
+  rounded?: boolean
+}
+"#;
+    let allocator = Allocator::default();
+    let resolved = resolve_external_type_with_companion(
+        "CheckboxRootProps",
+        source,
+        &Default::default(),
+        &allocator,
+    )
+    .expect("CheckboxRootProps resolves");
+    let true_value = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("trueValue"))
+        .expect("trueValue prop");
+    assert_eq!(
+        format_runtime_types(&true_value.types),
+        "null",
+        "trueValue?: T (T = boolean default) must be null, got {:?}",
+        true_value.types
+    );
+    let rounded = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("rounded"))
+        .expect("rounded prop");
+    assert_eq!(
+        format_runtime_types(&rounded.types),
+        "Boolean",
+        "rounded?: boolean must be Boolean, got {:?}",
+        rounded.types
+    );
+}
+
+#[test]
+fn ported_type_param_default_boolean_prop_is_null_not_boolean() {
+    let source = r#"
+export interface CheckboxRootProps<T = boolean> {
+  trueValue?: T
+  falseValue?: T
+  disabled?: boolean
+  rounded?: boolean
+}
+"#;
+    let allocator = Allocator::default();
+    let resolved = resolve_external_type_with_companion(
+        "CheckboxRootProps",
+        source,
+        &Default::default(),
+        &allocator,
+    )
+    .expect("CheckboxRootProps resolves");
+    let mut by_name = std::collections::HashMap::new();
+    for p in &resolved.props {
+        let name = p
+            .key_name
+            .clone()
+            .unwrap_or_else(|| source[p.key.start as usize..p.key.end as usize].to_string());
+        by_name.insert(name, format_runtime_types(&p.types));
+    }
+    assert_eq!(
+        by_name.get("trueValue").map(String::as_str),
+        Some("null"),
+        "trueValue?: T must be null, got {by_name:?}"
+    );
+    assert_eq!(
+        by_name.get("falseValue").map(String::as_str),
+        Some("null"),
+        "falseValue?: T must be null, got {by_name:?}"
+    );
+    assert_eq!(
+        by_name.get("rounded").map(String::as_str),
+        Some("Boolean"),
+        "rounded?: boolean must be Boolean, got {by_name:?}"
+    );
+    assert_eq!(
+        by_name.get("disabled").map(String::as_str),
+        Some("Boolean"),
+        "disabled?: boolean must be Boolean, got {by_name:?}"
+    );
+}

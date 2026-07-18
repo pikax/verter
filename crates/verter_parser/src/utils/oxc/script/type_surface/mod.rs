@@ -468,9 +468,10 @@ pub struct TypeResolutionContext<'ctx, 'a: 'ctx> {
     /// Local class declarations keyed by symbol bytes.
     /// Classes resolve to their instance-side shape in type position.
     pub classes: FxHashMap<Box<[u8]>, &'ctx Class<'a>>,
-    /// Generic type parameters with constraints: (name_span, constraint_type)
-    pub type_params: Vec<(Span, Option<&'ctx TSType<'a>>)>,
-    /// Bound generic type parameters for the current instantiation.
+    /// Bound generic type parameters for the current instantiation:
+    /// `(name_span, bound_type)`. A bound is the explicit instantiation
+    /// argument or the declared `extends` constraint (never a default —
+    /// see [`choose_type_param_bound`]).
     pub type_param_bindings: Vec<(Span, &'ctx TSType<'a>)>,
     /// Diagnostics collected during resolution
     pub diagnostics: Vec<ResolutionDiagnostic>,
@@ -686,7 +687,6 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
             type_aliases: FxHashMap::default(),
             interfaces: FxHashMap::default(),
             classes: FxHashMap::default(),
-            type_params: Vec::new(),
             type_param_bindings: Vec::new(),
             diagnostics: Vec::new(),
             companion_types: rustc_hash::FxHashMap::default(),
@@ -758,6 +758,21 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
         })
     }
 
+    /// True when the current resolution surface is a props surface
+    /// (`defineProps` / root-props fallthrough).
+    ///
+    /// On a props surface a tuple-shaped or indexed-access-to-tuple member
+    /// VALUE (`onClose: LayerEmits['close']`, `tags: [string, number]`) is a
+    /// genuine PROP, not the emit shorthand — the tuple-as-emit
+    /// reclassification only applies when the type feeds an emits surface
+    /// (or when the surface is unknown, preserving the legacy default).
+    pub fn is_props_surface(&self) -> bool {
+        matches!(
+            self.current_surface,
+            Some(BlockedTypeSurface::DefineProps | BlockedTypeSurface::RootProps)
+        )
+    }
+
     /// Look up a type alias by comparing spans against source bytes
     pub fn find_type_alias(
         &self,
@@ -798,20 +813,18 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
         self.classes.get(name).copied()
     }
 
-    /// Look up a type parameter constraint by comparing spans against source bytes
+    /// Look up the bound runtime type for a generic type parameter by name.
+    ///
+    /// Returns the explicit instantiation argument or declared `extends`
+    /// constraint bound in the current instantiation (most-recent binding
+    /// wins). Returns `None` for an unbound parameter — including one that
+    /// only carries a default (see [`choose_type_param_bound`]).
     pub fn find_type_param(&self, name: &[u8]) -> Option<&'ctx TSType<'a>> {
-        if let Some(bound) = self
-            .type_param_bindings
+        self.type_param_bindings
             .iter()
             .rev()
             .find(|(span, _)| &self.source[span.start as usize..span.end as usize] == name)
-        {
-            return Some(bound.1);
-        }
-        self.type_params
-            .iter()
-            .find(|(span, _)| &self.source[span.start as usize..span.end as usize] == name)
-            .and_then(|(_, constraint)| *constraint)
+            .map(|(_, bound)| *bound)
     }
 }
 
@@ -987,10 +1000,7 @@ fn instantiate_type_params_ctx<'ctx, 'a: 'ctx>(
 
     let mut chosen_bounds = Vec::new();
     for (index, param) in decl_params.params.iter().enumerate() {
-        let bound = type_args
-            .and_then(|args| args.params.get(index))
-            .or(param.default.as_ref())
-            .or(param.constraint.as_ref());
+        let bound = choose_type_param_bound(param, type_args, index);
         if let Some(bound) = bound {
             chosen_bounds.push(bound);
         }
@@ -999,10 +1009,7 @@ fn instantiate_type_params_ctx<'ctx, 'a: 'ctx>(
     child.type_param_bindings = collect_relevant_outer_type_param_bindings(ctx, &chosen_bounds);
 
     for (index, param) in decl_params.params.iter().enumerate() {
-        let bound = type_args
-            .and_then(|args| args.params.get(index))
-            .or(param.default.as_ref())
-            .or(param.constraint.as_ref());
+        let bound = choose_type_param_bound(param, type_args, index);
         if let Some(bound) = bound {
             child
                 .type_param_bindings
@@ -1011,6 +1018,25 @@ fn instantiate_type_params_ctx<'ctx, 'a: 'ctx>(
     }
 
     child
+}
+
+/// Choose the runtime-relevant bound for a declared type parameter.
+///
+/// Priority is the explicit instantiation argument, then the declared
+/// `extends` constraint. A type-parameter DEFAULT (`T = boolean`) is
+/// deliberately NOT a runtime bound: Vue never lowers a type-parameter
+/// default to a prop constructor, and doing so leaks a spurious `Boolean`
+/// (false default) surface through `v-bind="props"`. An un-instantiated
+/// defaulted parameter therefore stays unbound and resolves to `Unknown`,
+/// while an explicit argument or a constraint resolves to its runtime type.
+fn choose_type_param_bound<'ctx, 'a: 'ctx>(
+    param: &'ctx TSTypeParameter<'a>,
+    type_args: Option<&'ctx TSTypeParameterInstantiation<'a>>,
+    index: usize,
+) -> Option<&'ctx TSType<'a>> {
+    type_args
+        .and_then(|args| args.params.get(index))
+        .or(param.constraint.as_ref())
 }
 
 /// Extract pre-resolved types from a companion `<script>` program.

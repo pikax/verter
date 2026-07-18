@@ -14,10 +14,71 @@ use oxc_span::GetSpan;
 use crate::common::Span;
 
 use super::{
-    get_type_reference_name, infer_runtime_type, resolve_type_elements_with_ctx_ref,
-    ResolvedCallPayloadForm, ResolvedElements, ResolvedMemberVisibility,
-    ResolvedNamedCallSignature, ResolvedProp, RuntimeType, TypeResolutionContext,
+    get_type_reference_name, infer_runtime_type, instantiate_type_params_ctx,
+    resolve_type_elements_with_ctx_ref, ResolvedCallPayloadForm, ResolvedElements,
+    ResolvedMemberVisibility, ResolvedNamedCallSignature, ResolvedProp, RuntimeType,
+    TypeResolutionContext,
 };
+
+/// Context-aware runtime type inference.
+///
+/// Behaves like [`infer_runtime_type`] except that a bare reference to a
+/// generic type parameter bound in the current instantiation
+/// (`ctx.type_param_bindings`) resolves to the bound type's runtime type:
+/// `Foo<string>` makes a member `value: T` a `String`, and `T extends
+/// number` makes it a `Number`. A type-parameter DEFAULT is never bound
+/// (see [`super::choose_type_param_bound`]), so an un-instantiated
+/// defaulted parameter stays `Unknown` — Vue does not lower a type-param
+/// default to a runtime prop constructor.
+///
+/// Only a genuine bound type parameter is substituted: a reference whose
+/// name resolves to a local alias / interface / class keeps its ordinary
+/// resolution, and generic references (`T<...>`) are left untouched.
+pub(super) fn infer_runtime_type_with_ctx<'ctx, 'a: 'ctx>(
+    node: &TSType<'a>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+) -> Vec<RuntimeType> {
+    let mut visited = Vec::new();
+    infer_runtime_type_with_ctx_inner(node, ctx, &mut visited)
+}
+
+fn infer_runtime_type_with_ctx_inner<'ctx, 'a: 'ctx>(
+    node: &TSType<'a>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+    visited: &mut Vec<String>,
+) -> Vec<RuntimeType> {
+    // Peel parentheses so `(T)` substitutes like `T`.
+    let mut inner = node;
+    while let TSType::TSParenthesizedType(paren) = inner {
+        inner = &paren.type_annotation;
+    }
+
+    if let TSType::TSTypeReference(type_ref) = inner {
+        if type_ref.type_arguments.is_none() {
+            let name = get_type_reference_name(&type_ref.type_name);
+            let name_bytes = name.as_bytes();
+            // Never shadow a local named type of the same spelling.
+            if ctx.find_type_alias(name_bytes).is_none()
+                && ctx.find_interface(name_bytes).is_none()
+                && ctx.find_class(name_bytes).is_none()
+            {
+                if visited.contains(&name) {
+                    // Cyclic binding (`T -> U -> T`): stop substituting and
+                    // fall back to the context-free inference.
+                    return infer_runtime_type(node);
+                }
+                if let Some(bound) = ctx.find_type_param(name_bytes) {
+                    visited.push(name);
+                    let resolved = infer_runtime_type_with_ctx_inner(bound, ctx, visited);
+                    visited.pop();
+                    return resolved;
+                }
+            }
+        }
+    }
+
+    infer_runtime_type(node)
+}
 
 /// Resolve members from a type literal's members array.
 pub(super) fn resolve_type_literal_members(
@@ -58,19 +119,31 @@ pub(super) fn resolve_type_literal_members_with_ctx<'ctx, 'a: 'ctx>(
     from_root_body: bool,
     ctx: Option<&TypeResolutionContext<'ctx, 'a>>,
 ) {
+    // A tuple-shaped member VALUE (`change: [id: number]`) or an
+    // indexed-access-to-tuple member VALUE (`escapeKeydown:
+    // LayerEmits['escapeKeydown']`) is the Vue emit shorthand ONLY when the
+    // type feeds an emits surface. On a props surface the same member is a
+    // genuine prop, so the reclassification is suppressed (F22). When the
+    // surface is unknown (`ctx = None`, or no surface set) the legacy
+    // reclassifying behavior is preserved.
+    let reclassify_tuple_as_emit = !ctx.is_some_and(|ctx| ctx.is_props_surface());
+
     for member in members {
         match member {
             TSSignature::TSPropertySignature(prop) => {
-                // Check if this is a shorthand emit: { change: [id: number] }
-                // Properties with tuple/array type values are treated as emits
-                if let Some(emit) = resolve_property_as_emit(prop, base_offset, source) {
-                    result.call_signatures.push(emit);
-                } else if let Some(emit) =
-                    ctx.and_then(|ctx| resolve_property_as_emit_via_ctx(prop, base_offset, ctx))
-                {
+                let emit = if reclassify_tuple_as_emit {
+                    // Direct tuple shorthand (`change: [id: number]`) first,
+                    // then the local-context indexed-access-to-tuple form.
+                    resolve_property_as_emit(prop, base_offset, source).or_else(|| {
+                        ctx.and_then(|ctx| resolve_property_as_emit_via_ctx(prop, base_offset, ctx))
+                    })
+                } else {
+                    None
+                };
+                if let Some(emit) = emit {
                     result.call_signatures.push(emit);
                 } else if let Some(resolved) =
-                    resolve_property_signature(prop, base_offset, source, from_root_body)
+                    resolve_property_signature(prop, base_offset, source, from_root_body, ctx)
                 {
                     result.props.push(resolved);
                 }
@@ -153,6 +226,11 @@ fn ctx_resolved_tuple_text<'ctx, 'a: 'ctx>(
         TSType::TSParenthesizedType(paren) => {
             ctx_resolved_tuple_text(&paren.type_annotation, ctx, visited)
         }
+        TSType::TSTypeOperatorType(op)
+            if matches!(op.operator, TSTypeOperatorOperator::Readonly) =>
+        {
+            ctx_resolved_tuple_text(&op.type_annotation, ctx, visited)
+        }
         TSType::TSTypeReference(type_ref) if type_ref.type_arguments.is_none() => {
             let name = get_type_reference_name(&type_ref.type_name);
             if visited.contains(&name) {
@@ -208,8 +286,126 @@ fn ctx_indexed_member_tuple_text<'ctx, 'a: 'ctx>(
             visited.pop();
             result
         }
+        // Instantiated generic: `BoxEmits<string>['save']`. Bind the type
+        // arguments and render the target member's tuple with the parameter
+        // substitution applied, so the emit payload is `[value: string]`
+        // rather than the unsubstituted `[value: T]`.
+        TSType::TSTypeReference(type_ref) => {
+            let name = get_type_reference_name(&type_ref.type_name);
+            if visited.contains(&name) {
+                return None;
+            }
+            visited.push(name.clone());
+            let type_args = type_ref.type_arguments.as_deref();
+            let result =
+                if let Some((members, _, _, decl_params)) = ctx.find_interface(name.as_bytes()) {
+                    let child = instantiate_type_params_ctx(ctx, decl_params, type_args);
+                    member_value_tuple_substituted(members, key, &child)
+                } else if let Some((aliased, decl_params)) = ctx.find_type_alias(name.as_bytes()) {
+                    let child = instantiate_type_params_ctx(ctx, decl_params, type_args);
+                    match aliased {
+                        TSType::TSTypeLiteral(lit) => {
+                            member_value_tuple_substituted(&lit.members, key, &child)
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+            visited.pop();
+            result
+        }
         _ => None,
     }
+}
+
+/// Find `key` among property signatures and render its tuple VALUE with the
+/// current instantiation's type-parameter substitution applied (see
+/// [`render_tuple_substituted`]). Used for the instantiated-generic
+/// indexed-access emit path (`BoxEmits<string>['save']`).
+fn member_value_tuple_substituted<'ctx, 'a: 'ctx>(
+    members: &[TSSignature<'a>],
+    key: &str,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+) -> Option<String> {
+    members.iter().find_map(|member| {
+        let TSSignature::TSPropertySignature(prop) = member else {
+            return None;
+        };
+        if get_property_key_name(&prop.key).as_deref() != Some(key) {
+            return None;
+        }
+        let ann = prop.type_annotation.as_ref()?;
+        let tuple = peel_to_tuple(&ann.type_annotation)?;
+        render_tuple_substituted(tuple, ctx)
+    })
+}
+
+/// Render a tuple's source text with bound type parameters substituted for
+/// their instantiation arguments (`[value: T]` under `T = string` becomes
+/// `[value: string]`). Typed-IR driven: each element is walked structurally
+/// and only a bound type-parameter reference is replaced with the bound
+/// type's own source text.
+fn render_tuple_substituted<'ctx, 'a: 'ctx>(
+    tuple: &TSTupleType<'a>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+) -> Option<String> {
+    let mut parts = Vec::with_capacity(tuple.element_types.len());
+    for element in &tuple.element_types {
+        parts.push(render_tuple_element_substituted(element, ctx)?);
+    }
+    Some(format!("[{}]", parts.join(", ")))
+}
+
+fn render_tuple_element_substituted<'ctx, 'a: 'ctx>(
+    element: &TSTupleElement<'a>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+) -> Option<String> {
+    match element {
+        TSTupleElement::TSNamedTupleMember(named) => {
+            let ty = named.element_type.as_ts_type()?;
+            let optional = if named.optional { "?" } else { "" };
+            Some(format!(
+                "{}{}: {}",
+                named.label.name.as_str(),
+                optional,
+                render_type_substituted(ty, ctx)?
+            ))
+        }
+        TSTupleElement::TSOptionalType(optional) => Some(format!(
+            "{}?",
+            render_type_substituted(&optional.type_annotation, ctx)?
+        )),
+        TSTupleElement::TSRestType(rest) => Some(format!(
+            "...{}",
+            render_type_substituted(&rest.type_annotation, ctx)?
+        )),
+        _ => render_type_substituted(element.as_ts_type()?, ctx),
+    }
+}
+
+/// Render a type's source text, substituting a bound type-parameter
+/// reference for the bound type's own source text. Non-parameter types
+/// (and generic references) keep their verbatim source slice.
+fn render_type_substituted<'ctx, 'a: 'ctx>(
+    ty: &TSType<'a>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+) -> Option<String> {
+    if let TSType::TSTypeReference(type_ref) = ty {
+        if type_ref.type_arguments.is_none() {
+            let name = get_type_reference_name(&type_ref.type_name);
+            let name_bytes = name.as_bytes();
+            if ctx.find_type_alias(name_bytes).is_none()
+                && ctx.find_interface(name_bytes).is_none()
+                && ctx.find_class(name_bytes).is_none()
+            {
+                if let Some(bound) = ctx.find_type_param(name_bytes) {
+                    return slice_source_span(ctx.source, bound.span().start, bound.span().end);
+                }
+            }
+        }
+    }
+    slice_source_span(ctx.source, ty.span().start, ty.span().end)
 }
 
 /// Find `key` among property signatures and resolve its value to a tuple's
@@ -273,7 +469,7 @@ pub(super) fn resolve_mapped_type_with_ctx<'ctx, 'a: 'ctx>(
     let types = mapped
         .type_annotation
         .as_ref()
-        .map(|ann| infer_runtime_type(ann))
+        .map(|ann| infer_runtime_type_with_ctx(ann, ctx))
         .unwrap_or_else(|| vec![RuntimeType::Unknown]);
     let optional_override = mapped_optional_override(mapped.optional);
 
@@ -389,6 +585,24 @@ pub(super) fn resolve_mapped_string_literal_key(
     }
 }
 
+/// Peel transparent wrappers (parentheses and the `readonly` operator) to
+/// the underlying tuple, AST-shape driven. `readonly [ev: E]` and
+/// `([ev: E])` are the same emit payload as `[ev: E]`. Returns `None` for a
+/// non-tuple (an array type `string[]` is a regular array prop, never an
+/// emit).
+fn peel_to_tuple<'t, 'a>(ty: &'t TSType<'a>) -> Option<&'t TSTupleType<'a>> {
+    match ty {
+        TSType::TSTupleType(tuple) => Some(tuple),
+        TSType::TSParenthesizedType(paren) => peel_to_tuple(&paren.type_annotation),
+        TSType::TSTypeOperatorType(op)
+            if matches!(op.operator, TSTypeOperatorOperator::Readonly) =>
+        {
+            peel_to_tuple(&op.type_annotation)
+        }
+        _ => None,
+    }
+}
+
 /// Try to resolve a property signature as an emit (shorthand style).
 /// Shorthand style: `{ change: [id: number] }` or `{ update: [] }`
 pub(super) fn resolve_property_as_emit(
@@ -400,16 +614,13 @@ pub(super) fn resolve_property_as_emit(
     let name = get_property_key_name(&prop.key)?;
     let key_span = get_property_key_span(&prop.key, base_offset)?;
 
-    // Check if the type is a tuple type - this indicates emit shorthand
-    // Note: Only TSTupleType (e.g., `[id: number]`) is emit shorthand.
-    // TSArrayType (e.g., `string[]`) is a regular array prop type.
+    // Check if the type is a tuple type - this indicates emit shorthand.
+    // Only a tuple (`[id: number]`), possibly wrapped in `readonly` /
+    // parentheses, is emit shorthand; an array type (`string[]`) is a
+    // regular array prop. Detection is on the `TSType` node, never text.
     if let Some(ann) = &prop.type_annotation {
-        if let TSType::TSTupleType(_) = &ann.type_annotation {
-            let tuple_text = slice_source_span(
-                source,
-                ann.type_annotation.span().start,
-                ann.type_annotation.span().end,
-            )?;
+        if let Some(tuple) = peel_to_tuple(&ann.type_annotation) {
+            let tuple_text = slice_source_span(source, tuple.span.start, tuple.span.end)?;
             return Some(ResolvedNamedCallSignature {
                 span: Span {
                     start: prop.span.start + base_offset,
@@ -588,11 +799,12 @@ pub(super) fn has_immediate_vue_ignore_comment(source: &[u8], start: u32) -> boo
 /// `from_root_body` is stamped onto the produced `ResolvedProp` as the
 /// `declared_in_macro_type_arg` fact. See [`resolve_type_literal_members`]
 /// for the propagation contract.
-pub(super) fn resolve_property_signature(
-    prop: &TSPropertySignature,
+pub(super) fn resolve_property_signature<'ctx, 'a: 'ctx>(
+    prop: &TSPropertySignature<'a>,
     base_offset: u32,
     source: &[u8],
     from_root_body: bool,
+    ctx: Option<&TypeResolutionContext<'ctx, 'a>>,
 ) -> Option<ResolvedProp> {
     let key = get_property_key_span(&prop.key, base_offset)?;
     let optional = prop.optional;
@@ -600,7 +812,10 @@ pub(super) fn resolve_property_signature(
     let types = prop
         .type_annotation
         .as_ref()
-        .map(|ann| infer_runtime_type(&ann.type_annotation))
+        .map(|ann| match ctx {
+            Some(ctx) => infer_runtime_type_with_ctx(&ann.type_annotation, ctx),
+            None => infer_runtime_type(&ann.type_annotation),
+        })
         .unwrap_or_else(|| vec![RuntimeType::Unknown]);
 
     // Full span from the property signature, adjusted by base_offset
