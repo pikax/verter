@@ -4544,9 +4544,8 @@ fn alias_to_companion_emits_via_named_local() {
 
 #[test]
 fn type_param_explicit_arg_resolves_member_runtime_type() {
-    let (resolved, diagnostics) = resolve_with_ctx(
-        "interface Foo<T> { value: T }\ntype Test = Foo<string>;",
-    );
+    let (resolved, diagnostics) =
+        resolve_with_ctx("interface Foo<T> { value: T }\ntype Test = Foo<string>;");
     let value = resolved
         .props
         .iter()
@@ -4567,9 +4566,8 @@ fn type_param_explicit_arg_resolves_member_runtime_type() {
 
 #[test]
 fn type_param_explicit_arg_resolves_member_runtime_type_ref_path() {
-    let (resolved, _) = resolve_with_ctx_ref(
-        "interface Foo<T> { value: T }\ntype Test = Foo<number>;",
-    );
+    let (resolved, _) =
+        resolve_with_ctx_ref("interface Foo<T> { value: T }\ntype Test = Foo<number>;");
     let value = resolved
         .props
         .iter()
@@ -4587,9 +4585,8 @@ fn type_param_explicit_arg_resolves_member_runtime_type_ref_path() {
 fn type_param_constraint_resolves_member_runtime_type() {
     // A generic referenced without an explicit argument falls back to the
     // declared `extends` constraint for its runtime prop type.
-    let (resolved, _) = resolve_with_ctx(
-        "interface Foo<T extends string> { value: T }\ntype Test = Foo;",
-    );
+    let (resolved, _) =
+        resolve_with_ctx("interface Foo<T extends string> { value: T }\ntype Test = Foo;");
     let value = resolved
         .props
         .iter()
@@ -4643,9 +4640,8 @@ fn type_param_default_does_not_leak_boolean_runtime_type() {
 fn type_param_constraint_default_prefers_constraint_runtime_type() {
     // With both a constraint and a default, the constraint is the runtime
     // bound (the default is ignored), so `value: T` resolves to Number.
-    let (resolved, _) = resolve_with_ctx(
-        "interface Foo<T extends number = 3> { value: T }\ntype Test = Foo;",
-    );
+    let (resolved, _) =
+        resolve_with_ctx("interface Foo<T extends number = 3> { value: T }\ntype Test = Foo;");
     let value = resolved
         .props
         .iter()
@@ -4718,10 +4714,7 @@ fn type_param_transitive_binding_resolves_member_runtime_type() {
 
 /// Resolve `type Test = ...` on the immutable `_ref` path with an explicit
 /// resolution surface set on the context.
-fn resolve_with_surface(
-    source: &str,
-    surface: Option<BlockedTypeSurface>,
-) -> ResolvedElements {
+fn resolve_with_surface(source: &str, surface: Option<BlockedTypeSurface>) -> ResolvedElements {
     let allocator = Allocator::default();
     let source_type = SourceType::ts();
     let parser = Parser::new(&allocator, source, source_type);
@@ -4797,10 +4790,7 @@ fn indexed_access_tuple_reclassifies_on_emits_surface() {
         Some(BlockedTypeSurface::DefineEmits),
     );
     assert!(
-        resolved
-            .call_signatures
-            .iter()
-            .any(|c| c.name == "onClose"),
+        resolved.call_signatures.iter().any(|c| c.name == "onClose"),
         "on an emits surface the indexed-access-to-tuple member must become an emit"
     );
     assert!(
@@ -4833,8 +4823,9 @@ fn indexed_access_tuple_reclassifies_when_surface_unset() {
 
 #[test]
 fn readonly_tuple_member_is_emit_shorthand() {
-    let (resolved, _) =
-        resolve_with_ctx("interface Emits { escapeKeydown: readonly [ev: string] }\ntype Test = Emits;");
+    let (resolved, _) = resolve_with_ctx(
+        "interface Emits { escapeKeydown: readonly [ev: string] }\ntype Test = Emits;",
+    );
     let emit = resolved
         .call_signatures
         .iter()
@@ -4886,8 +4877,7 @@ fn readonly_indexed_access_tuple_member_is_emit_shorthand() {
 #[test]
 fn array_type_member_stays_prop_not_emit() {
     // Negative guard: an array type is NOT the emit tuple shorthand.
-    let (resolved, _) =
-        resolve_with_ctx("interface Emits { list: string[] }\ntype Test = Emits;");
+    let (resolved, _) = resolve_with_ctx("interface Emits { list: string[] }\ntype Test = Emits;");
     assert!(
         resolved
             .props
@@ -4912,8 +4902,16 @@ fn emit_tuple_text<'a>(resolved: &'a ResolvedElements, name: &str) -> &'a str {
         .call_signatures
         .iter()
         .find(|c| c.name == name)
-        .unwrap_or_else(|| panic!("expected emit `{name}`, call_sigs: {:?}",
-            resolved.call_signatures.iter().map(|c| c.name.as_str()).collect::<Vec<_>>()));
+        .unwrap_or_else(|| {
+            panic!(
+                "expected emit `{name}`, call_sigs: {:?}",
+                resolved
+                    .call_signatures
+                    .iter()
+                    .map(|c| c.name.as_str())
+                    .collect::<Vec<_>>()
+            )
+        });
     match &sig.signature {
         ResolvedCallPayloadForm::Tuple { tuple_text } => tuple_text.as_str(),
         other => panic!("expected tuple payload for `{name}`, got {:?}", other),
@@ -4993,9 +4991,8 @@ fn instantiated_generic_indexed_access_non_tuple_member_stays_prop() {
 fn mutually_recursive_indexed_access_terminates() {
     // Must not stack-overflow. Neither member resolves to a tuple, so both
     // stay props.
-    let (resolved, _) = resolve_with_ctx(
-        "interface A { x: B['y'] }\ninterface B { y: A['x'] }\ntype Test = A;",
-    );
+    let (resolved, _) =
+        resolve_with_ctx("interface A { x: B['y'] }\ninterface B { y: A['x'] }\ntype Test = A;");
     assert!(
         resolved
             .props
@@ -5008,17 +5005,14 @@ fn mutually_recursive_indexed_access_terminates() {
 
 #[test]
 fn self_referential_indexed_access_terminates() {
-    let (resolved, _) = resolve_with_ctx(
-        "interface Emits { close: Emits['close'] }\ntype Test = Emits;",
-    );
+    let (resolved, _) =
+        resolve_with_ctx("interface Emits { close: Emits['close'] }\ntype Test = Emits;");
     // Terminates; the self-referential member cannot resolve to a tuple.
     assert!(resolved.call_signatures.is_empty());
-    assert!(
-        resolved
-            .props
-            .iter()
-            .any(|p| p.key_name.as_deref() == Some("close"))
-    );
+    assert!(resolved
+        .props
+        .iter()
+        .any(|p| p.key_name.as_deref() == Some("close")));
 }
 
 #[test]

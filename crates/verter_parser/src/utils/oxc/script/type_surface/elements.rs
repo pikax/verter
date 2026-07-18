@@ -297,22 +297,21 @@ fn ctx_indexed_member_tuple_text<'ctx, 'a: 'ctx>(
             }
             visited.push(name.clone());
             let type_args = type_ref.type_arguments.as_deref();
-            let result = if let Some((members, _, _, decl_params)) =
-                ctx.find_interface(name.as_bytes())
-            {
-                let child = instantiate_type_params_ctx(ctx, decl_params, type_args);
-                member_value_tuple_substituted(members, key, &child)
-            } else if let Some((aliased, decl_params)) = ctx.find_type_alias(name.as_bytes()) {
-                let child = instantiate_type_params_ctx(ctx, decl_params, type_args);
-                match aliased {
-                    TSType::TSTypeLiteral(lit) => {
-                        member_value_tuple_substituted(&lit.members, key, &child)
+            let result =
+                if let Some((members, _, _, decl_params)) = ctx.find_interface(name.as_bytes()) {
+                    let child = instantiate_type_params_ctx(ctx, decl_params, type_args);
+                    member_value_tuple_substituted(members, key, &child)
+                } else if let Some((aliased, decl_params)) = ctx.find_type_alias(name.as_bytes()) {
+                    let child = instantiate_type_params_ctx(ctx, decl_params, type_args);
+                    match aliased {
+                        TSType::TSTypeLiteral(lit) => {
+                            member_value_tuple_substituted(&lit.members, key, &child)
+                        }
+                        _ => None,
                     }
-                    _ => None,
-                }
-            } else {
-                None
-            };
+                } else {
+                    None
+                };
             visited.pop();
             result
         }
@@ -373,12 +372,14 @@ fn render_tuple_element_substituted<'ctx, 'a: 'ctx>(
                 render_type_substituted(ty, ctx)?
             ))
         }
-        TSTupleElement::TSOptionalType(optional) => {
-            Some(format!("{}?", render_type_substituted(&optional.type_annotation, ctx)?))
-        }
-        TSTupleElement::TSRestType(rest) => {
-            Some(format!("...{}", render_type_substituted(&rest.type_annotation, ctx)?))
-        }
+        TSTupleElement::TSOptionalType(optional) => Some(format!(
+            "{}?",
+            render_type_substituted(&optional.type_annotation, ctx)?
+        )),
+        TSTupleElement::TSRestType(rest) => Some(format!(
+            "...{}",
+            render_type_substituted(&rest.type_annotation, ctx)?
+        )),
         _ => render_type_substituted(element.as_ts_type()?, ctx),
     }
 }

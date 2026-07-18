@@ -741,15 +741,14 @@ pub fn parse_macro_call<'a>(
                         // Verify it's defineProps
                         if let Expression::Identifier(id) = &inner.callee {
                             if id.name.as_bytes() == b"defineProps" {
-                                let inner_type_params =
-                                    inner.type_arguments.as_ref().map(|tp| {
-                                        extract_type_params(
-                                            tp,
-                                            ctx,
-                                            type_ctx,
-                                            Some(BlockedTypeSurface::DefineProps),
-                                        )
-                                    });
+                                let inner_type_params = inner.type_arguments.as_ref().map(|tp| {
+                                    extract_type_params(
+                                        tp,
+                                        ctx,
+                                        type_ctx,
+                                        Some(BlockedTypeSurface::DefineProps),
+                                    )
+                                });
                                 return Some((Some(Span::from(inner.span)), inner_type_params));
                             }
                         }
@@ -843,16 +842,9 @@ fn extract_type_params<'a>(
                 // discrimination applies. The clone is once per macro.
                 let mut surface_ctx = type_ctx.clone();
                 surface_ctx.current_surface = Some(surface);
-                resolve_type_elements_with_ctx_ref(
-                    ts_type,
-                    ctx.content_offset,
-                    &surface_ctx,
-                    true,
-                )
+                resolve_type_elements_with_ctx_ref(ts_type, ctx.content_offset, &surface_ctx, true)
             }
-            None => {
-                resolve_type_elements_with_ctx_ref(ts_type, ctx.content_offset, type_ctx, true)
-            }
+            None => resolve_type_elements_with_ctx_ref(ts_type, ctx.content_offset, type_ctx, true),
         })
         .unwrap_or_default();
 
