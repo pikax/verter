@@ -141,7 +141,7 @@ impl<'a> SupportedClientIr<'a> {
                             super::reactive_fold::ChunkFold::Live { .. } => {}
                             super::reactive_fold::ChunkFold::Refuse(reason) => {
                                 // The span is unused on the accept-path refusal (matching
-                                // the other 5a `mixed_attr_value` refusals); the `ExprId`
+                                // the other `mixed_attr_value` refusals); the `ExprId`
                                 // arena does not carry a source span.
                                 return Err(UnsupportedSvelteRuntimeSurface::ConstFoldThrow {
                                     reason: reason.label(),

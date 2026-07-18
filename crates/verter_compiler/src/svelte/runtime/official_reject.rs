@@ -361,7 +361,7 @@ fn single_expression_source<'s>(
 /// - ANY non-intrinsic (component / special) host — official has no DOM name/host/host-attr
 ///   check there and validates straight to expression shape, so the shape scans always run
 ///   (this PRESERVES the official-matching shape codes for component / special-element binds,
-///   which 5f owns; it never OPENS such a host — a shape reject is fail-closed).
+///   which the component / special-element backend owns; it never OPENS such a host — a shape reject is fail-closed).
 ///
 /// Within a valid bind, the order is group policy (the data-driven `IdentifierOrMemberOnly`
 /// [`BindTargetPolicy`] — only `bind:group` — rejects ANY sequence target) → author-paren

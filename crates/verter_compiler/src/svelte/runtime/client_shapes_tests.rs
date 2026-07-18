@@ -118,7 +118,7 @@ fn classify_bind_value_accepts_an_explicit_signal_identifier_source() {
 fn classify_bind_this_requires_a_declared_local_target() {
     // A `bind:this={el}` where `el` IS a declared instance-script local is the
     // supported shape-3 target (accepted); a FREE `bind:this={button}` (no declared
-    // local) fails closed (5c) — official accepts it but reserves a fresh local,
+    // local) fails closed — official accepts it but reserves a fresh local,
     // whereas Verter's element-local allocation would collide with the synthesized
     // DOM local, so the free target is refused to moot the collision.
     let (bindings, scopes, root) = signal_value_env();
@@ -167,7 +167,7 @@ fn classify_bind_this_requires_a_declared_local_target() {
             free,
             Err(UnsupportedSvelteRuntimeSurface::Binding { ref target, .. }) if target == "this"
         ),
-        "a free / undeclared bind:this target must fail closed (5c): {free:?}"
+        "a free / undeclared bind:this target must fail closed: {free:?}"
     );
 }
 

@@ -867,7 +867,7 @@ fn logical_assign_to_object_state_proxies() {
 
 #[test]
 fn destructured_state_object_classifies_as_advanced() {
-    // R1: a destructured `let { a } = $state({a:1})` is classified ADVANCED (5g) —
+    // R1: a destructured `let { a } = $state({a:1})` is classified ADVANCED —
     // NOT a basic supported state declarator (which would route into
     // `lower_state_declarator` and panic). The full fail-closed is asserted at the
     // `compile_client` integration level; here we pin the shape gate.

@@ -210,11 +210,11 @@ pub(super) fn refuse_invalid_animate_placement(
 /// Refuse a bindings-breadth special-content host (`<textarea>` / `<select>` /
 /// `<option>`) whose INTERIOR content is not the supported `bind:value` host shape.
 ///
-/// 5c emits these elements ONLY as the DOM-bind hosts the pinned `svelte@5.56.3`
+/// The DOM-bind backend emits these elements ONLY as the DOM-bind hosts the pinned `svelte@5.56.3`
 /// oracle proves: a `<textarea bind:value>` is cleared EMPTY (`$.remove_textarea_child`
 /// strips its content), and a `<select bind:value>` carries STATIC `<option>`
 /// children (`<select><option>a</option></select>`). The official compiler gives
-/// these elements a SPECIAL content model 5c does not own — a `<textarea>` with
+/// these elements a SPECIAL content model the DOM-bind backend does not own — a `<textarea>` with
 /// text/interpolation content is the raw-text-value surface, and an `<option>` with
 /// an INTERPOLATION child is the `option.__value` / `option_value` reactive-tracking
 /// surface. Those forms are refused HERE (before the per-attr / child walk) so a
@@ -242,7 +242,7 @@ pub(super) fn refuse_unsupported_special_content(
         // the static-text fallback is supported (the official `<textarea
         // bind:value>fallback</textarea>` bakes the text into the cloned skeleton, then
         // clears it — the bind is unaffected). A DYNAMIC / interpolation child is the
-        // official `$.set_value(textarea, expr)` content channel 5c does NOT own (a
+        // official `$.set_value(textarea, expr)` content channel the DOM-bind backend does NOT own (a
         // distinct surface owned by a later content-model layer — ledger D-22), so it
         // still fails closed. A static-text child WITHOUT a `bind:value` is also out of
         // the supported empty/bind-host shape and fails closed.

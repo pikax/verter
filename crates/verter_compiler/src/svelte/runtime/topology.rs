@@ -346,7 +346,7 @@ fn walk_component_slot_topology(
 /// Record the helper topology + delegated events for one attribute.
 ///
 /// `host_tag` is the DOM host tag for an `IrNode::Element` attribute, or `None` for a
-/// component / special-element host (whose hosts are not yet supported, owned by 5f, and
+/// component / special-element host (whose hosts are not yet supported, and
 /// record no DOM bind helper). `host_attrs` is the host element's full typed attribute
 /// inventory — fed to the official host-attribute bind gate (the SAME gate the
 /// emitter applies), empty for a component/special host. The bind helper + its

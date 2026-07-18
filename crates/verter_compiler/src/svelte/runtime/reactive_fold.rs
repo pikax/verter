@@ -46,7 +46,7 @@ pub(super) use super::reactive_fold_tristate::{ChunkFold, ConstFoldRefuse, LiveF
 /// (`false && (1n / 0n)`) still refuses. A template literal stops after the first unknown
 /// interpolation.
 ///
-/// For Verter's §5a surface the sole foldable IDENTIFIER is a DEMOTED `$state(<literal>)`
+/// For Verter's const-fold surface the sole foldable IDENTIFIER is a DEMOTED `$state(<literal>)`
 /// (a never-reassigned `$state`, lowered to a plain `let d = <lit>`, resolving to
 /// `PlainLocal`); a bare `const`/`let`/`import` is refused upstream, so it cannot reach
 /// here. Official's `Evaluation` recurses into the binding's initializer
@@ -536,7 +536,7 @@ impl ChunkEvalCtx<'_, '_> {
             },
 
             // Identifier — official resolves the binding and recurses into its initializer
-            // when `!updated && initial !== null && !is_prop`. In §5a the foldable case is a
+            // when `!updated && initial !== null && !is_prop`. In the const-fold surface the foldable case is a
             // DEMOTED `$state` (`PlainLocal`); `undefined` is the global undefined.
             Expression::Identifier(id) => self.evaluate_identifier(id.name.as_str(), visited),
 
@@ -1330,7 +1330,7 @@ fn js_strict_eq(a: &EvalValue, b: &EvalValue) -> bool {
     }
 }
 
-/// JS loose equality (`==`) over two known concrete values — the subset reachable from §5a
+/// JS loose equality (`==`) over two known concrete values — the subset reachable from const
 /// folds (string/number/bigint/boolean/null/undefined). `null == undefined` is `true`;
 /// otherwise numeric coercion applies across types (`5n == 5` is `true`).
 fn js_loose_eq(a: &EvalValue, b: &EvalValue) -> bool {
@@ -1355,7 +1355,7 @@ fn js_loose_eq(a: &EvalValue, b: &EvalValue) -> bool {
 }
 
 /// The cooked text of a template-literal quasi (`cooked` is `None` only for an invalid
-/// escape, which a clean parse never produces in §5a — fall back to the raw text).
+/// escape, which a clean parse never produces here — fall back to the raw text).
 fn cooked_quasi<'a>(q: &'a oxc_ast::ast::TemplateElement<'a>) -> &'a str {
     q.value
         .cooked

@@ -153,7 +153,7 @@ pub(super) fn classify_special_host(
 /// child (the unified slot choke-point at `classify_node` entry accepts exactly that
 /// filler placement and official folds it — `$.attribute_effect($$element, () => ({ slot:
 /// 'x' }))`); a top-level / non-direct / dynamic `slot` was refused upstream. A `use:` /
-/// `transition:` / `let:` directive is a 5f-c surface and fails closed. The children are
+/// `transition:` / `let:` directive is an unsupported directive surface and fails closed. The children are
 /// the element's OWN body region (classified independently by the scope loop), so they are
 /// not recursed here.
 pub(super) fn classify_svelte_element(

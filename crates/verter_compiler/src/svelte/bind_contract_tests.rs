@@ -292,7 +292,7 @@ fn readonly_bindings_carry_the_read_direction() {
 
 #[test]
 fn runtime_helper_metadata_matches_the_pinned_oracle_shapes() {
-    // The runtime columns the 5c emitter consumes, pinned to the empirical
+    // The runtime columns the DOM-bind emitter consumes, pinned to the empirical
     // svelte@5.56.3 shapes (oracle-probe-out.txt). A registry edit that flips a
     // helper / arity / event / prelude is caught here.
     let row = |name: &str| {
@@ -577,7 +577,7 @@ fn every_runtime_routable_row_matches_the_pinned_official_helper() {
             "clientWidth" | "clientHeight" | "offsetWidth" | "offsetHeight" => ElementSize,
             // $.bind_content_editable for contenteditable binds.
             "innerHTML" | "innerText" | "textContent" => ContentEditable,
-            // The special-host (5f-b) bind helpers — visited when the host walk includes
+            // The special-host bind helpers — visited when the host walk includes
             // the special-host tokens below.
             "innerWidth" | "innerHeight" | "outerWidth" | "outerHeight" => WindowSize,
             "scrollX" | "scrollY" => WindowScroll,
@@ -791,7 +791,7 @@ fn bind_target_policy_is_data_driven_and_group_only() {
 
 /// `bind:focused` is an EXPLICIT shared-contract row recording the dedicated official
 /// helper `$.bind_focused`, with `host_scope: Universal` (svelte's `focused: {}` has no
-/// valid/invalid_elements ⇒ valid on EVERY host). 5f-b flips it to RUNTIME-supported: the
+/// valid/invalid_elements ⇒ valid on EVERY host). The special-host bind backend flips it to RUNTIME-supported: the
 /// native client emits `$.bind_focused(host, set)` — the host is the element var on a
 /// regular element and `$.window` on the window host. Verified against svelte@5.56.3
 /// (`<input bind:focused={x}>` emits `$.bind_focused(input, ($$value) => $.set(x,
@@ -809,7 +809,7 @@ fn bind_focused_is_an_explicit_universal_supported_contract_row() {
     assert_eq!(
         row.support,
         RuntimeSupport::Supported,
-        "5f-b makes bind:focused runtime-supported"
+        "the special-host bind backend makes bind:focused runtime-supported"
     );
     assert_eq!(
         row.host_scope,
@@ -990,7 +990,7 @@ fn official_helper_maps_to_the_matching_emittable_runtime_helper() {
         (O::ContentEditable, R::ContentEditable),
         (O::Property, R::Property),
         (O::This, R::This),
-        // The special-host (5f-b) emittable helpers.
+        // The special-host emittable helpers.
         (O::Focused, R::Focused),
         (O::WindowSize, R::WindowSize),
         (O::WindowScroll, R::WindowScroll),

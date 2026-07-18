@@ -675,7 +675,7 @@ mod tests {
             SupportedStaticAttr::classify("src", Img, Some("image.png")),
             Some(SupportedStaticAttr::ImageSrc)
         );
-        // The bindings-breadth static attrs (5c): `<select multiple>` (the
+        // The bindings-breadth static attrs: `<select multiple>` (the
         // multi-select boolean) + `contenteditable` (the editable-host marker, any
         // element) bake into the cloned skeleton.
         assert_eq!(

@@ -38,7 +38,7 @@ impl<'a> SupportedClientIr<'a> {
         // SOLE acceptance authority — `bind:this` plus the DATA-DRIVEN DOM value/
         // property family (`value`/`checked`/`group`/media/dimension/contenteditable/
         // property). A bind op with NO recorded shape was NOT accepted (a
-        // component/special-host bind, not yet supported and owned by 5f, or an
+        // component/special-host bind, not yet supported by the component / special-element backend, or an
         // unsupported name) — fail closed defensively (never emit an unclassified bind).
         let shape = self
             .bind_shapes

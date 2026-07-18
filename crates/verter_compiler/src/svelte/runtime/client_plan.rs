@@ -1300,7 +1300,7 @@ impl<'a> SupportedClientIr<'a> {
                 }
             }
             // A "cannot be set statically" attribute init (`autofocus` / media `muted`) —
-            // the §1.2-class non-static-property surface (5a).
+            // the non-static-property surface.
             RuntimeOp::NonStaticProperty { target, property } => {
                 out = Some(self.project_non_static_property_op(*target, property)?);
             }

@@ -797,7 +797,7 @@ pub fn props_shape(instance_source: &str) -> PropsShape {
             count += 1;
             // `$props()` accepts ZERO arguments; ANY argument is the official
             // `rune_invalid_arguments` compile error ("$props cannot be called with
-            // arguments", CallExpression.js). Fail closed (5g) rather than emitting the
+            // arguments", CallExpression.js). Fail closed rather than emitting the
             // prop reads regardless of the bogus argument. Checked on the FIRST
             // over-arity declarator so a later valid one cannot mask it.
             if !call.arguments.is_empty() {

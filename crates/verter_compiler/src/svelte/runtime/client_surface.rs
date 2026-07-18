@@ -291,7 +291,7 @@ impl ClientSyntaxSurface {
             return Err(surface);
         }
 
-        // (5b) `<svelte:self>` PLACEMENT gate: the official `svelte_self_invalid_placement`
+        // `<svelte:self>` PLACEMENT gate: the official `svelte_self_invalid_placement`
         // rule — a `<svelte:self>` may only appear inside an `{#if}` / `{#each}` /
         // `{#snippet}` block or a slot passed to a component. At the component root (or
         // nested only in elements at the root, or in an `{#await}` / `{#key}` block with no
@@ -491,7 +491,7 @@ pub(super) struct ClientSyntaxSurface;
 ///   (`AnchorReason::EmptyRoot`) comment-anchor root has no `root()` clone frame and
 ///   REFUSES (5q) as a `RootTextRegion`.
 /// - [`TemplateFactory::Standalone`] — a `<Component>` / `{@render}` root, already
-///   refused by the node walk (5f); never reaches here on the accept path. Treated
+///   refused by the node walk; never reaches here on the accept path. Treated
 ///   as supported here so this check owns ONLY the node-vs-factory clone-frame
 ///   mismatch.
 ///
@@ -694,8 +694,7 @@ fn classify_node(
             // (1) Reject a NON-HTML namespace. An SVG / MathML subtree inherits its
             // namespace; otherwise an `<svg>` / `<math>` introduces one. An element in
             // a non-HTML namespace needs the `$.from_svg` / `$.from_mathml` factory
-            // (a distinct root-helper layer Verter does not emit), so it fails closed
-            // (5a).
+            // (a distinct root-helper layer Verter does not emit), so it fails closed.
             let element_namespace = element_own_namespace(namespace, &el.tag);
             if element_namespace != Namespace::Html {
                 return Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
@@ -737,7 +736,7 @@ fn classify_node(
                 });
             }
             // (5) Accept ONLY a tag in the finite `SupportedHtmlElement` allowlist;
-            // (6) everything else fails closed with the regular-element refusal (5a).
+            // (6) everything else fails closed with the regular-element refusal.
             // The accepted element is recorded as a TYPED fact so the emitter reads the
             // DOM var stem from `SupportedHtmlElement::var_stem`, never the raw tag.
             let Some(element) = SupportedHtmlElement::try_from(&el.tag) else {
@@ -747,17 +746,17 @@ fn classify_node(
                 });
             };
             facts.borrow_mut().element_facts.push((node_id, element));
-            // (5c) SPECIAL-CONTENT-MODEL gate for the bindings-breadth hosts
+            // SPECIAL-CONTENT-MODEL gate for the bindings-breadth hosts
             // (`textarea` / `select` / `option`). These elements have a SPECIAL
             // official content model (raw-text for `<textarea>`, the `__value`/
-            // option-tracking surface for `<select>`/`<option>`) that 5c does NOT
-            // emit: 5c emits them ONLY as the `bind:value` host shapes the pinned
+            // option-tracking surface for `<select>`/`<option>`) that the DOM-bind backend does NOT
+            // emit: the DOM-bind backend emits them ONLY as the `bind:value` host shapes the pinned
             // oracle proves (`<textarea bind:value></textarea>` cleared empty;
             // `<select bind:value><option>static</option></select>`). Any other
             // interior content — a `<textarea>` with text/interpolation children, an
             // `<option>` with an INTERPOLATION child (the `option.__value` tracking
             // surface), a `<select>` child that is not a static `<option>` — is the
-            // special-content surface 5c does not own; it fails closed HERE (before
+            // special-content surface the DOM-bind backend does not own; it fails closed HERE (before
             // the per-attr / child walk) so a divergent module is never emitted.
             refuse_unsupported_special_content(ir, element, el, el.span)?;
             // A SPREAD on the element switches its WHOLE attribute strategy to the single
@@ -951,7 +950,7 @@ fn classify_node(
 /// official `is_dom_property('muted')` is element-agnostic (`muted` is in
 /// `DOM_BOOLEAN_ATTRIBUTES` → `DOM_PROPERTIES` with no host check), so `<div muted>`
 /// emits `div.muted = true` exactly like `<video muted>`. `defaultValue` /
-/// `defaultChecked` are the form-default family (5c) and are NOT accepted here (they
+/// `defaultChecked` are the form-default family and are NOT accepted here (they
 /// fall through to the static-attr allowlist, which refuses them).
 fn static_non_static_property_shape(name: &str) -> Option<ClientDynamicAttrShape> {
     match name {
@@ -1090,7 +1089,7 @@ fn classify_attr(
             // (`cannot_be_set_statically`) applied at runtime via `$.autofocus` / a
             // property write — NOT a baked skeleton attr. Accept it ,
             // recording the dynamic-attr shape so the plan emits the `NonStaticProperty`
-            // op. `defaultValue` / `defaultChecked` are the form-default family (5c) and
+            // op. `defaultValue` / `defaultChecked` are the form-default family and
             // are NOT accepted here — they fall through to the static-attr allowlist,
             // which refuses them.
             if let Some(shape) = static_non_static_property_shape(name) {
@@ -1105,7 +1104,7 @@ fn classify_attr(
             // `$.set_style` (it is pulled OUT of the skeleton). Accept it as the
             // Class / Style surface — the plan reads the static base when coalescing.
             // (Without this, a static `style="x"` would fail the static-attr allowlist
-            // even though the `style:` directive makes the whole element a 5a surface.)
+            // even though the `style:` directive makes the whole element a typed-setter surface.)
             // The NAME matches case-insensitively — official normalizes HTML attribute
             // names (`get_attribute_name` → `normalize_attribute`) before routing.
             if (name.eq_ignore_ascii_case("class") && element_has_class_directive(ir, node_id))
@@ -1125,7 +1124,7 @@ fn classify_attr(
             // (a3) A static `value="X"` on an `<input>` that ALSO carries a
             // `bind:group` is the GROUP VALUE source (the official `bind:group` form
             // emits `input.value = input.__value = 'X'` as a per-input runtime write,
-            // NOT a baked static `value` attr). 5c accepts it as the group-value fact;
+            // NOT a baked static `value` attr). The DOM-bind backend accepts it as the group-value fact;
             // the serializer strips it from the skeleton and the emitter writes the
             // `__value`. (A static `value` on a NON-group input is still the
             // form-control deferral and fails closed at (b).)
@@ -1152,13 +1151,13 @@ fn classify_attr(
             // write (`input.defaultValue = 'x'` / `input.defaultChecked = true`) BEFORE the
             // bind — and the default attr SUPPRESSES the `remove_input_defaults` prelude.
             // `defaultValue` pairs with `bind:value` (on an `<input>` OR `<textarea>`);
-            // `defaultChecked` pairs with `bind:checked` (on an `<input>`). 5c accepts ONLY
+            // `defaultChecked` pairs with `bind:checked` (on an `<input>`). The DOM-bind backend accepts ONLY
             // the co-located form — the property-write op is already projected from the IR
             // (`NonStaticProperty`), so the accept just lets the attr through the gate. A
             // STANDALONE default (no matching bind) stays the form-default deferral and
             // fails closed at (b); a MISMATCHED default+bind (`defaultChecked` with
             // `bind:value`) is a CONSERVATIVE refusal — NARROWER than official, which
-            // accepts the mixed form, but 5c keeps the strict co-location boundary.
+            // accepts the mixed form, but the DOM-bind backend keeps the strict co-location boundary.
             if super::bind_target_names::default_attr_has_matching_bind(name, element, ir, node_id)
             {
                 return Ok(());
@@ -1225,7 +1224,7 @@ fn classify_attr(
             }
             // A DYNAMIC attribute (`id={x}` / `id="a{x}"`) is the dynamic-attribute / class / style surface:
             // classify its emission shape (a DOM-property write, `$.set_attribute`,
-            // `$.autofocus`), refusing the form-control setters (5c) and the `dir`
+            // `$.autofocus`), refusing the form-control setters and the `dir`
             // reflected-attr quirk. `muted` is a DOM property on ANY element (official
             // `is_dom_property('muted')` is element-agnostic), so `<div muted={x}>`
             // emits `div.muted = $.get(x)` exactly like a `<video>` host.
@@ -1272,7 +1271,7 @@ fn classify_attr(
             // The narrow bind classifier: `bind:value` on an `<input>` to a
             // signal/plain identifier or a public member, and element `bind:this` to
             // an identifier. A PROP target, a non-lvalue (`{f()}`), a sequence
-            // get/set pair, or a member `bind:this` fails closed (5c). Drives the
+            // get/set pair, or a member `bind:this` fails closed. Drives the
             // SCOPE-AWARE prop/signal resolution from the binding table.
             // The analyzed bound expression carries its source AND the shared
             // bind-target fact; the classifier reads both from it (no reparse).
@@ -1282,7 +1281,7 @@ fn classify_attr(
                 .unwrap_or_else(|| ir.root_scope().scope);
             // The DECLARED instance + module script top-level locals — a `bind:this`
             // target must name one of these (the §1.2-core shape-3 `let el;` local);
-            // a free / undeclared target fails closed (5c), mooting the DOM-local
+            // a free / undeclared target fails closed, mooting the DOM-local
             // collision an undeclared target would otherwise cause. Computed ONCE per
             // compile and threaded in (loop-invariant), never re-parsed per bind attr.
             // The host element's typed attribute inventory — the input to the
