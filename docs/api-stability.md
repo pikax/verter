@@ -48,7 +48,7 @@ The project-level configuration file format:
 
 ### Diagnostic Rule Names
 
-All ~164 lint rule names (e.g., `no-v-html`, `unused-css-selector`) are stable identifiers. Rules may be added in minor releases but existing rule names will not be renamed or removed without a deprecation period.
+All ~186 lint rule names (e.g., `no-v-html`, `unused-css-selector`) are stable identifiers. Rules may be added in minor releases but existing rule names will not be renamed or removed without a deprecation period.
 
 ### Comment Directives
 
@@ -117,7 +117,7 @@ The following are explicitly **not** part of the public API and may change at an
 - Generated TSX/JSX output format (IDE codegen path)
 - Generated VDOM/Vapor render function output format
 - Internal host data structures (`FileAnalysisSnapshot`, `CompileSlot`, etc.)
-- `verter_analysis` crate types (used by diagnostics/actions, not published)
+- `verter_semantic` crate types (used by diagnostics/actions, not published)
 - MCP server tool schemas (still evolving)
 - WASM binding API (`@verter/wasm`) — mirrors native but not independently versioned
 - `@verter/component-meta` type IR — schema still stabilizing

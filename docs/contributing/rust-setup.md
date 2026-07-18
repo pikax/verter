@@ -26,12 +26,13 @@ All Rust crates are in the `crates/` directory:
 
 | Crate                | Purpose                                                                                                                         |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `verter_compiler`        | Template compiler -- tokenizer, parser, AST, script processing, template codegen (VDOM + Vapor), TSX generation, CSS processing |
-| `verter_analysis`    | Static analysis -- imports, exports, bindings, type resolution, CSS selector parsing, template element analysis                 |
+| `verter_parser`      | SFC/carrier tokenizer, parser, and AST                                                                                          |
+| `verter_compiler`        | Template compiler -- script processing, template codegen (VDOM + Vapor), TSX generation, CSS processing                         |
+| `verter_semantic`    | Semantic authority -- component surface resolution, cross-file symbol identity, binding analysis, type resolution, reactivity provenance |
 | `verter_session`        | File host -- in-memory caching, dependency tracking, multi-file compilation                                                     |
 | `verter_scheduler`   | Async file scheduler -- per-file Source→Analysis→Artifact stages, priority queue, blocker registry                              |
 | `verter_diagnostics` | Diagnostic engine -- Vue SFC lint rules, rule trait, visitor, diagnostic set                                                    |
-| `verter_actions`     | Code actions engine -- quick fixes, refactoring (depends on `verter_diagnostics` + `verter_analysis`)                           |
+| `verter_actions`     | Code actions engine -- quick fixes, refactoring (depends on `verter_diagnostics` + `verter_semantic`)                           |
 | `verter_lsp`         | LSP server binary -- stdio transport, feature handlers, document synchronization, TypeProvider integration (TSGO + tsserver)    |
 | `verter_ffi`         | FFI types -- shared serializable structs for NAPI and WASM boundaries                                                           |
 | `verter_napi`        | NAPI-RS bindings -- Node.js native addon (cdylib)                                                                               |
@@ -40,28 +41,33 @@ All Rust crates are in the `crates/` directory:
 
 ### Dependency Graph
 
+Simplified — leaf utility crates (`verter_span`, `verter_audit`, `verter_language`,
+`verter_workspace`, the `verter_type_expr*` crates) are omitted for clarity.
+
 ```
-verter_compiler (no deps on other verter crates)
+verter_parser (tokenizer, parser, AST)
     |
-    +-- verter_analysis (depends on verter_compiler)
-    |       |
-    |       +-- verter_session (depends on verter_compiler + verter_analysis + verter_scheduler[optional])
-    |       |       |
-    |       |       +-- verter_lsp (depends on verter_session + verter_scheduler + verter_diagnostics + verter_actions)
+    +-- verter_compiler (VDOM/Vapor + IDE TSX codegen, CSS processing)
     |
-    +-- verter_scheduler (depends on verter_span only — domain-agnostic)
-    |       |
-    |       +-- verter_diagnostics (depends on verter_analysis)
-    |       |
-    |       +-- verter_actions (depends on verter_diagnostics + verter_analysis)
-    |
-    +-- verter_ffi (depends on verter_compiler)
-    |       |
-    |       +-- verter_napi (depends on verter_ffi + verter_session)
-    |       |
-    |       +-- verter_wasm (depends on verter_ffi + verter_compiler)
-    |
-    +-- verter_bench (depends on verter_compiler + verter_session + verter_workspace + verter_diagnostics + verter_analysis)
+    +-- verter_semantic (semantic authority: surfaces, bindings, type resolution)
+            |
+            +-- verter_diagnostics (depends on verter_semantic + verter_workspace)
+            |       |
+            |       +-- verter_actions (depends on verter_diagnostics + verter_semantic)
+            |
+            +-- verter_session (depends on verter_compiler + verter_semantic + verter_parser + verter_scheduler)
+                    |
+                    +-- verter_lsp (depends on verter_session + verter_scheduler + verter_semantic + verter_diagnostics + verter_actions + verter_ffi)
+                    |
+                    +-- verter_ffi (depends on verter_session + verter_semantic + verter_diagnostics + verter_actions)
+                            |
+                            +-- verter_napi (depends on verter_ffi + verter_session + verter_compiler)
+                            |
+                            +-- verter_wasm (depends on verter_ffi + verter_compiler + verter_session)
+
+verter_scheduler (depends on verter_span + verter_audit + verter_language — domain-agnostic)
+
+verter_bench (depends on verter_compiler + verter_parser + verter_session + verter_workspace + verter_diagnostics + verter_semantic)
 ```
 
 ## Building
@@ -176,16 +182,16 @@ When working on specific areas, these are the primary entry points:
 
 | Area                   | Entry Point                                       |
 | ---------------------- | ------------------------------------------------- |
-| Compilation pipeline   | `crates/verter_compiler/src/compile.rs`               |
-| SFC tokenizer          | `crates/verter_compiler/src/tokenizer/byte.rs`        |
-| Template AST           | `crates/verter_compiler/src/ast/types.rs`             |
+| Compilation pipeline   | `crates/verter_compiler/src/compile/mod.rs`           |
+| SFC tokenizer          | `crates/verter_parser/src/tokenizer/byte.rs`          |
+| Template AST           | `crates/verter_parser/src/ast/`                       |
 | VDOM codegen           | `crates/verter_compiler/src/template/code_gen/vdom/`  |
 | Vapor codegen          | `crates/verter_compiler/src/template/code_gen/vapor/` |
 | TSX codegen (LSP)      | `crates/verter_compiler/src/ide/template/mod.rs`      |
 | Script processing      | `crates/verter_compiler/src/script/process.rs`        |
 | CSS processing         | `crates/verter_compiler/src/css/mod.rs`               |
-| Static analysis        | `crates/verter_analysis/src/lib.rs`               |
-| LSP server             | `crates/verter_lsp/src/server.rs`                 |
+| Semantic analysis      | `crates/verter_semantic/src/lib.rs`               |
+| LSP server             | `crates/verter_lsp/src/server/`                   |
 | TSGO type provider     | `crates/verter_lsp/src/tsgo/ipc.rs`               |
 | tsserver type provider | `crates/verter_lsp/src/tsserver/ipc.rs`           |
 | Diagnostics            | `crates/verter_diagnostics/src/lib.rs`            |

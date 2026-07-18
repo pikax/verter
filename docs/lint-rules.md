@@ -1,6 +1,6 @@
 # Lint Rules Reference
 
-Verter ships with approximately **164 built-in lint rules** organized into 11 categories. Rules run natively in Rust inside the LSP, providing instant diagnostics without external tooling.
+Verter ships with approximately **186 built-in lint rules** organized into 12 categories. Rules run natively in Rust inside the LSP, providing instant diagnostics without external tooling.
 
 ## Comment Directives
 
@@ -180,6 +180,23 @@ Rules that analyze patterns across multiple files. These require the host to hav
 | `provide-inject-validation` | warn             | --       | Validate that `provide()` and `inject()` calls have matching types across files |
 | `deep-composable-tracking`  | warn             | --       | Track deep composable usage patterns for potential issues                       |
 | `no-duplicate-vue`          | warn             | --       | Detect duplicate `.vue` file names that may cause import conflicts              |
+
+### SSR
+
+Server-side-rendering safety rules for components that must render correctly on the server (undefined DOM globals, hydration mismatches, client-only side effects).
+
+| Rule Name                           | Default Severity | Auto-fix | Description                                                                       |
+| ----------------------------------- | ---------------- | -------- | -------------------------------------------------------------------------------- |
+| `no-client-only-lifecycle-in-setup` | error            | --       | Detect client-only lifecycle hooks (`onMounted`, `onUpdated`, etc.) in SSR setup |
+| `no-dom-query-in-setup`             | error            | --       | Detect DOM query calls (`querySelector`, `getElementById`) at `setup` scope      |
+| `no-browser-globals-in-setup`       | warn             | --       | Warn about browser globals (`window`, `document`, `localStorage`) in `setup`     |
+| `no-css-var-manipulation-in-setup`  | warn             | --       | Warn about CSS variable manipulation (`setProperty`) on the DOM in `setup`       |
+| `no-nondeterministic-in-template`   | warn             | --       | Warn about nondeterministic template expressions (hydration mismatch risk)       |
+| `no-side-effects-in-setup-for-ssr`  | warn             | --       | Warn about timer / event-listener calls (`setInterval`, `setTimeout`) in `setup` |
+| `no-template-ref-in-setup`          | warn             | --       | Warn about `useTemplateRef` at `setup` scope — refs are null during SSR          |
+| `require-client-only-wrapper`       | warn             | --       | Warn when client-only components are used without a `<ClientOnly>` wrapper        |
+| `no-v-show-prefer-v-if`             | hint             | --       | Suggest `v-if` instead of `v-show` during SSR                                     |
+| `prefer-server-prefetch`            | hint             | --       | Suggest `onServerPrefetch` when `onMounted` contains an async callback            |
 
 ## Preset Contents
 

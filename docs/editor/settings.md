@@ -86,17 +86,19 @@ See [MCP Server](/editor/mcp-server) for details on setup and available tools.
 
 | Setting                  | Type                                            | Default  | Description                                                                                         |
 | ------------------------ | ----------------------------------------------- | -------- | --------------------------------------------------------------------------------------------------- |
-| `verter.typeProvider`    | `"auto"` \| `"tsgo"` \| `"tsserver"` \| `"off"` | `"auto"` | TypeScript type provider for Vue files. Changing this setting restarts the server.                  |
+| `verter.typeProvider`    | `"auto"` \| `"shared-tsgo"` \| `"tsgo"` \| `"tsserver"` \| `"extension"` \| `"off"` | `"auto"` | TypeScript type provider for Vue files. Changing this setting restarts the server.                  |
 | `verter.typescript.tsdk` | `string`                                        | `""`     | Path to TypeScript SDK directory (e.g., `node_modules/typescript/lib`). Leave empty to auto-detect. |
 
 **Provider modes:**
 
-| Mode       | Behavior                                                                                                        |
-| ---------- | --------------------------------------------------------------------------------------------------------------- |
-| `auto`     | Detects workspace TS version — if TS 5.x/6.x installed, uses tsserver and recommends TSGO; otherwise tries TSGO |
-| `tsgo`     | Uses TSGO only (faster, native Go binary)                                                                       |
-| `tsserver` | Uses workspace TypeScript version (tsserver)                                                                    |
-| `off`      | Disables TypeScript type checking (verter-only mode)                                                            |
+| Mode          | Behavior                                                                                                        |
+| ------------- | --------------------------------------------------------------------------------------------------------------- |
+| `auto`        | Detects workspace TS version — if TS 5.x/6.x installed, uses tsserver and recommends TSGO; otherwise tries TSGO |
+| `shared-tsgo` | Prefer the exact editor-owned Native Preview Program; activate managed TSGO only after an observed attach failure |
+| `tsgo`        | Uses a separately managed TSGO process (operator override, native Go binary)                                    |
+| `tsserver`    | Uses workspace TypeScript version (tsserver)                                                                    |
+| `extension`   | Hosts the TypeScript language service in the extension process (experimental)                                  |
+| `off`         | Disables TypeScript type checking (verter-only mode)                                                            |
 
 ::: warning TSGO Limitation
 TSGO has a known limitation: **re-exported `.vue` components** (e.g., barrel files like `export { default as MyComp } from './MyComp.vue'`) may lose their typing when imported in another SFC. This is why `auto` mode defaults to tsserver when a workspace TypeScript installation is found. If you experience missing types with TSGO, switch to `tsserver`.

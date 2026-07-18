@@ -10,7 +10,7 @@ A Vue compiler, Language Server Protocol (LSP) implementation, and build tool �
 
 ## Project Vision
 
-Verter is a **full Vue compiler and toolchain** built in Rust: it compiles templates to optimized render functions for production, generates typed TSX for IDE analysis, runs ~169 lint rules without ESLint, and powers a Language Server with type-provider integration (TSGO/tsserver). A bundler plugin, MCP server for AI agents, and component metadata extraction round out the toolchain.
+Verter is a **full Vue compiler and toolchain** built in Rust: it compiles templates to optimized render functions for production, generates typed TSX for IDE analysis, runs ~186 lint rules without ESLint, and powers a Language Server with type-provider integration (TSGO/tsserver). A bundler plugin, MCP server for AI agents, and component metadata extraction round out the toolchain.
 
 ## Features
 
@@ -23,8 +23,8 @@ Verter is a **full Vue compiler and toolchain** built in Rust: it compiles templ
 - **Automatic Event Handler Type Inference**: Infers parameter types for functions used as template event handlers
 - **Fully Typed Vue Directives**: Complete type safety for directives with strict modifier, argument, and value validation
 - **Rust-Powered Template Compilation**: High-performance template-to-render-function compilation via native bindings or WASM
-- **Built-in Linting**: ~169 lint rules across 11 categories (Vue, a11y, CSS, performance, security, and more) — runs natively in Rust, no ESLint needed
-- **MCP Server**: Built-in Model Context Protocol server with 36+ Vue analysis tools for AI agents
+- **Built-in Linting**: ~186 lint rules across 12 categories (Vue, a11y, CSS, performance, security, SSR, and more) — runs natively in Rust, no ESLint needed
+- **MCP Server**: Built-in Model Context Protocol server with 49 Vue analysis tools for AI agents
 - **TypeScript Type Provider**: Delegates type checking to TSGO (fast Go binary) or tsserver (workspace TS version)
 - **Experimental Native Svelte Compilation**: Compiles a pinned, tested client-runtime surface against `svelte@5.56.3`; unsupported runtime features fail closed with typed diagnostics instead of producing successful placeholder modules
 - **Component-Meta Audit Footprint**: Opt-in per-request observability (loaded files, derivation graph, cache counters) with deterministic JSON serialization. See [docs/audit-footprint/](./docs/audit-footprint/).
@@ -114,9 +114,9 @@ Verter is a ground-up reimagining of Vue tooling — a single Rust-powered toolc
 
 - **Compiler**: Native runtime and IDE compilation for Vue, plus a bounded experimental Svelte client surface
 - **Language Server**: Full LSP with hover, completions, diagnostics, go-to-definition, rename, and more — with type checking delegated to TSGO or tsserver
-- **Linter**: ~169 built-in lint rules across 11 categories (Vue, a11y, CSS, performance, security) — no ESLint or extra plugins needed
+- **Linter**: ~186 built-in lint rules across 12 categories (Vue, a11y, CSS, performance, security, SSR) — no ESLint or extra plugins needed
 - **Bundler Plugin**: Universal plugin for Vite, Webpack, Rollup, esbuild, Rspack, Rolldown, and Farm
-- **MCP Server**: 36+ analysis tools for AI agents via Model Context Protocol
+- **MCP Server**: 49 analysis tools for AI agents via Model Context Protocol
 - **Component Metadata**: Prop/event/slot extraction with adapters for Storybook, Histoire, Zod, and JSON Schema
 
 ### Verter vs Volar
@@ -127,7 +127,7 @@ Verter is a ground-up reimagining of Vue tooling — a single Rust-powered toolc
 | Language             | Rust compiler + TypeScript IDE glue            | TypeScript only                  |
 | IDE approach         | SFC → valid typed TSX for direct TS analysis   | Virtual file mapping             |
 | Template compilation | Built-in (VDOM + Vapor output)                 | Delegates to `@vue/compiler-sfc` |
-| Linting              | ~169 built-in rules (no ESLint needed)         | Relies on eslint-plugin-vue      |
+| Linting              | ~186 built-in rules (no ESLint needed)         | Relies on eslint-plugin-vue      |
 | Type provider        | TSGO (fast) or tsserver (compatible)           | TypeScript language service      |
 | AI integration       | Built-in MCP server                            | —                                |
 
@@ -170,8 +170,8 @@ graph TB
         MCP["verter_mcp<br/>(MCP Server)"]
         Host["verter_session<br/>(File Host + Caching)"]
         Compiler["verter_compiler<br/>(Template Compiler)"]
-        Analysis["verter_analysis<br/>(Static Analysis)"]
-        Diagnostics["verter_diagnostics<br/>(~169 Lint Rules)"]
+        Analysis["verter_semantic<br/>(Semantic Analysis)"]
+        Diagnostics["verter_diagnostics<br/>(~186 Lint Rules)"]
         Actions["verter_actions<br/>(Quick Fixes)"]
     end
 
@@ -219,10 +219,11 @@ flowchart LR
 ```
 verter/
 ├── crates/                        # Rust crates (core of the project)
-│   ├── verter_compiler/               # Template compiler: parser, VDOM/Vapor codegen, IDE TSX codegen
-│   ├── verter_analysis/           # Static analysis: imports, exports, bindings, type resolution
+│   ├── verter_compiler/               # Template compiler: VDOM/Vapor codegen, IDE TSX codegen
+│   ├── verter_parser/             # SFC/carrier tokenizer, parser, and AST
+│   ├── verter_semantic/           # Semantic analysis: component surface, bindings, type resolution
 │   ├── verter_session/               # In-memory file host: caching, dependency tracking
-│   ├── verter_diagnostics/        # Diagnostic engine: ~169 lint rules, visitor, DiagnosticSet
+│   ├── verter_diagnostics/        # Diagnostic engine: ~186 lint rules, visitor, DiagnosticSet
 │   ├── verter_actions/            # Code actions: quick fixes, refactoring
 │   ├── verter_lsp/                # LSP server binary (stdio)
 │   ├── verter_mcp/                # MCP server binary (stdio + HTTP)
@@ -260,7 +261,7 @@ verter-vscode (VS Code extension)
 
 verter_mcp (MCP server binary, stdio + HTTP)
 ├── verter_session (file host + compilation)
-├── verter_analysis (static analysis snapshots)
+├── verter_semantic (semantic analysis + type resolution)
 ├── verter_diagnostics (lint rules + DiagnosticSet)
 └── verter_actions (quick fixes + refactoring)
 
@@ -429,7 +430,7 @@ See [.github/INTEGRATION_TEST.md](./.github/INTEGRATION_TEST.md) for details.
 | Package                     | README                                           | Description                                |
 | --------------------------- | ------------------------------------------------ | ------------------------------------------ |
 | `verter-vscode`             | [README](./packages/vue-vscode/readme.md)        | VS Code extension                          |
-| `@verter/unplugin`          | [README](./packages/unplugin/README.md)          | Universal bundler plugin (7 bundlers)      |
+| `@verter/unplugin`          | [Docs](./docs/api/unplugin.md)                   | Universal bundler plugin (7 bundlers)      |
 | `@verter/native`            | [README](./packages/native/README.md)            | NAPI-RS binding loader + platform packages |
 | `@verter/wasm`              | [README](./packages/wasm/README.md)              | WASM bindings for browser                  |
 | `@verter/typescript-plugin` | [README](./packages/typescript-plugin/readme.md) | TypeScript language service plugin         |
@@ -451,10 +452,11 @@ See [.github/INTEGRATION_TEST.md](./.github/INTEGRATION_TEST.md) for details.
 
 | Crate                | Description                                       |
 | -------------------- | ------------------------------------------------- |
-| `verter_compiler`        | Core template compiler                            |
-| `verter_analysis`    | Static analysis: imports, exports, bindings       |
+| `verter_compiler`        | Core template compiler (VDOM/Vapor + IDE TSX)     |
+| `verter_parser`      | SFC/carrier tokenizer, parser, and AST            |
+| `verter_semantic`    | Semantic analysis: component surface, bindings, type resolution |
 | `verter_session`        | In-memory file host: caching, dependency tracking |
-| `verter_diagnostics` | Diagnostic engine: ~169 lint rules                |
+| `verter_diagnostics` | Diagnostic engine: ~186 lint rules                |
 | `verter_actions`     | Code actions: quick fixes, refactoring            |
 | `verter_lsp`         | Rust LSP server binary (stdio)                    |
 | `verter_mcp`         | MCP server binary (stdio + HTTP)                  |
