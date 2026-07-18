@@ -125,12 +125,13 @@ pub static SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS: AtomicU64 = AtomicU64::new(0
 ///  14 = ResolveAmbientNamespace
 ///  15 = ResolveEnum
 ///  16 = ResolveOverloadSet
-///  17 = ApparentType
-///  18 = TemplateLiteralReduce
-///  19 = FlowNarrowingAt
-///  20 = ContextualTypeAt
-///  21 = LowerLocator
-pub const DISPATCH_OPERATOR_KIND_COUNT: usize = 22;
+///  17 = ClassifyBroadRuntime
+///  18 = ApparentType
+///  19 = TemplateLiteralReduce
+///  20 = FlowNarrowingAt
+///  21 = ContextualTypeAt
+///  22 = LowerLocator
+pub const DISPATCH_OPERATOR_KIND_COUNT: usize = 23;
 
 /// Human-readable labels for each operator-kind index. Kept in sync
 /// with the comment on `DISPATCH_OPERATOR_KIND_COUNT` and with the
@@ -153,6 +154,7 @@ pub const DISPATCH_OPERATOR_KIND_LABELS: [&str; DISPATCH_OPERATOR_KIND_COUNT] = 
     "ResolveAmbientNamespace",
     "ResolveEnum",
     "ResolveOverloadSet",
+    "ClassifyBroadRuntime",
     "ApparentType",
     "TemplateLiteralReduce",
     "FlowNarrowingAt",
@@ -188,6 +190,7 @@ pub static DISPATCH_OPERATOR_KIND_CALLS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUN
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
+    AtomicU64::new(0),
 ];
 
 /// Per-kind nanoseconds spent inside `dispatch_operator_with_recurse`
@@ -198,6 +201,7 @@ pub static DISPATCH_OPERATOR_KIND_CALLS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUN
 pub static DISPATCH_OPERATOR_KIND_NS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUNT] = [
     // All zero-initialised; order within the array is immaterial —
     // `kind_index_for_key` keys it.
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -357,11 +361,12 @@ pub fn kind_index_for_key(key: &crate::semantic_query::SemanticQueryKey) -> usiz
         SemanticQueryKey::ResolveAmbientNamespace { .. } => 14,
         SemanticQueryKey::ResolveEnum { .. } => 15,
         SemanticQueryKey::ResolveOverloadSet { .. } => 16,
-        SemanticQueryKey::ApparentType { .. } => 17,
-        SemanticQueryKey::TemplateLiteralReduce { .. } => 18,
-        SemanticQueryKey::FlowNarrowingAt { .. } => 19,
-        SemanticQueryKey::ContextualTypeAt { .. } => 20,
-        SemanticQueryKey::LowerLocator { .. } => 21,
+        SemanticQueryKey::ClassifyBroadRuntime { .. } => 17,
+        SemanticQueryKey::ApparentType { .. } => 18,
+        SemanticQueryKey::TemplateLiteralReduce { .. } => 19,
+        SemanticQueryKey::FlowNarrowingAt { .. } => 20,
+        SemanticQueryKey::ContextualTypeAt { .. } => 21,
+        SemanticQueryKey::LowerLocator { .. } => 22,
     }
 }
 
@@ -900,6 +905,10 @@ mod tests {
                 resolve_env_hash: Default::default(),
             },
         };
+        let broad_runtime = SemanticQueryKey::ClassifyBroadRuntime {
+            subject: dummy_node,
+            context: Default::default(),
+        };
         let apparent_type = SemanticQueryKey::ApparentType {
             base: dummy_node,
             context: crate::semantic_query::ApparentTypeContext {
@@ -966,13 +975,14 @@ mod tests {
             kind_index_for_key(&ambient_namespace),
             kind_index_for_key(&resolve_enum),
             kind_index_for_key(&overload_set),
+            kind_index_for_key(&broad_runtime),
             kind_index_for_key(&apparent_type),
             kind_index_for_key(&template_literal_reduce),
             kind_index_for_key(&flow_narrowing_at),
             kind_index_for_key(&contextual_type_at),
         ];
         let expected = [
-            0usize, 1, 2, 3, 4, 6, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20,
+            0usize, 1, 2, 3, 4, 6, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21,
         ];
         assert_eq!(observed, expected);
         // No off-by-one in the static label table:

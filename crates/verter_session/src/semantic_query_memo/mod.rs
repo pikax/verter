@@ -37,7 +37,7 @@ use rustc_hash::FxHashMap;
 
 use crate::semantic_query::{
     CacheRead, DepSignature, NodeScopeId, OriginEdge, OriginEdgeKind, QueryError, QueryResult,
-    SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryValue, SemanticQueryValueTag,
 };
 #[cfg(test)]
 use crate::semantic_query::{PathSegment, ProjectionMode, SemanticGraphStats};
@@ -116,6 +116,30 @@ pub fn family_variant_label_for_tests(
 ) -> &'static str {
     let (family, _slot) = family_and_slot(key);
     family.variant_label()
+}
+
+fn narrow_value_result(result: QueryResult<SemanticQueryValue>) -> QueryResult<SemanticNodeId> {
+    match result {
+        QueryResult::Value(SemanticQueryValue::TypeNode(node)) => QueryResult::Value(node),
+        QueryResult::Value(other) => QueryResult::Error(QueryError::ValueDomainMismatch {
+            expected: SemanticQueryValueTag::TypeNode,
+            actual: other.tag(),
+        }),
+        QueryResult::Recursive(node) => QueryResult::Recursive(node),
+        QueryResult::Error(error) => QueryResult::Error(error),
+    }
+}
+
+fn narrow_cache_read(
+    read: CacheRead<QueryResult<SemanticQueryValue>>,
+) -> CacheRead<QueryResult<SemanticNodeId>> {
+    CacheRead {
+        value: narrow_value_result(read.value),
+        dep_signature: read.dep_signature,
+        walker_diagnostics: read.walker_diagnostics,
+        cache_suppress: read.cache_suppress,
+        result_is_partial: read.result_is_partial,
+    }
 }
 
 /// Test-only: `std::mem::size_of::<FamilyKey>()`. Lets the size-discipline
@@ -2023,7 +2047,7 @@ impl SemanticGraphStore {
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
-        result
+        result.map(narrow_cache_read)
     }
 
     /// Carrier-aware warm read that validates BEFORE bubbling. Returns
@@ -2057,7 +2081,8 @@ impl SemanticGraphStore {
         let requested = crate::semantic_query::demand::MaterializedPoint::new(
             family::point_for_slot(slot, &requested_path_for_key(key)),
         );
-        self.get_validated_impl(&family, slot, &requested, ctx)
+        self.get_validated_value_impl(&family, slot, &requested, ctx)
+            .map(narrow_cache_read)
     }
 
     /// Prepared-token variant of [`Self::get_validated`] — reads the
@@ -2065,12 +2090,12 @@ impl SemanticGraphStore {
     /// re-projecting the key. Used by the cooperative slow path's
     /// step-1 warm re-read.
     #[must_use]
-    fn get_validated_prepared(
+    fn get_validated_value_prepared(
         &self,
         prepared: &PreparedKeyHandle,
         ctx: &dyn crate::resolver_core::ResolverContext,
-    ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
-        self.get_validated_impl(
+    ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
+        self.get_validated_value_impl(
             prepared.family(),
             prepared.slot(),
             prepared.requested_point(),
@@ -2078,13 +2103,13 @@ impl SemanticGraphStore {
         )
     }
 
-    fn get_validated_impl(
+    fn get_validated_value_impl(
         &self,
         family: &FamilyKey,
         slot: ModeSlot,
         requested: &crate::semantic_query::demand::MaterializedPoint,
         ctx: &dyn crate::resolver_core::ResolverContext,
-    ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
+    ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
         // Snapshot the candidate list under the lock, then validate
         // OUTSIDE the lock. Holding `entries` across `MemoEntry::validate`
         // — which walks the path-precise fact rail against the resolver
@@ -2256,6 +2281,8 @@ impl SemanticGraphStore {
     /// waits and abort-driven retries are unaffected: a populated
     /// warm slot means no joiner participation is needed.
     #[must_use = "the CacheRead carries both the resolved node id and the dep signature callers must fold into their dependency-fact set for the publish-side completion-fence revalidation"]
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)] // test-support feature can be enabled without the in-crate memo tests
     pub(crate) fn execute_cooperative<F, R, O>(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
@@ -2265,7 +2292,30 @@ impl SemanticGraphStore {
     ) -> CacheRead<QueryResult<SemanticNodeId>>
     where
         F: FnOnce() -> O,
-        O: Into<crate::project_semantic_dispatch::walk::QueryBuildOutput>,
+        O: Into<crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticNodeId>>,
+        R: FnOnce() -> SemanticNodeId,
+    {
+        narrow_cache_read(self.execute_cooperative_value(ctx, key, recursion_sentinel, || {
+            let output: crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticNodeId> =
+                build().into();
+            crate::project_semantic_dispatch::walk::QueryBuildOutput::<SemanticQueryValue>::from(
+                output,
+            )
+        }))
+    }
+
+    /// Domain-agnostic cooperative admission. This is the canonical memo
+    /// path for semantic queries whose value is not a graph node.
+    pub(crate) fn execute_cooperative_value<F, R, O>(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        key: SemanticQueryKey,
+        recursion_sentinel: R,
+        build: F,
+    ) -> CacheRead<QueryResult<SemanticQueryValue>>
+    where
+        F: FnOnce() -> O,
+        O: Into<crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>>,
         R: FnOnce() -> SemanticNodeId,
     {
         // Loop-5 instrumentation — count every logical entry. Logged
@@ -2298,13 +2348,13 @@ impl SemanticGraphStore {
         // execution falls through to the cooperative slow path that
         // owns same-path recursion, in-flight admission, and cold-build
         // publish.
-        if let Some(hit) = self.try_warm_hit_fast_path(ctx, &prepared) {
+        if let Some(hit) = self.try_warm_value_hit_fast_path(ctx, &prepared) {
             return hit;
         }
 
         // Slow path — cooperative-admission flow. Handles same-path
         // recursion, joiner-condvar waits, cold-build publish.
-        self.execute_cooperative_slow(ctx, prepared, recursion_sentinel, build)
+        self.execute_cooperative_value_slow(ctx, prepared, recursion_sentinel, build)
     }
 
     /// Warm-hit fast path for [`Self::execute_cooperative`]. Returns
@@ -2345,11 +2395,11 @@ impl SemanticGraphStore {
     /// `Vec` reorder, no fact-rail work. Mirrors the relation memo's
     /// `get_relation`.
     #[inline]
-    fn try_warm_hit_fast_path(
+    fn try_warm_value_hit_fast_path(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         prepared: &PreparedKeyHandle,
-    ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
+    ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
         let key = prepared.key();
         let family = prepared.family();
         let slot = prepared.slot();
@@ -2461,16 +2511,16 @@ impl SemanticGraphStore {
     /// dispatch recording for the COLD/MISS / JOINER paths live here.
     /// The warm-hit branch is intentionally absent — the fast path
     /// handles every warm hit before this function is called.
-    fn execute_cooperative_slow<F, R, O>(
+    fn execute_cooperative_value_slow<F, R, O>(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         prepared: PreparedKeyHandle,
         recursion_sentinel: R,
         build: F,
-    ) -> CacheRead<QueryResult<SemanticNodeId>>
+    ) -> CacheRead<QueryResult<SemanticQueryValue>>
     where
         F: FnOnce() -> O,
-        O: Into<crate::project_semantic_dispatch::walk::QueryBuildOutput>,
+        O: Into<crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>>,
         R: FnOnce() -> SemanticNodeId,
     {
         let mut miss_recorded = false;
@@ -2513,7 +2563,7 @@ impl SemanticGraphStore {
             //    variant of `get_validated` — a freshly-published entry
             //    validates; a slot a concurrent invalidation made stale
             //    misses and the cold-build path below recomputes.
-            if let Some(hit) = self.get_validated_prepared(&prepared, ctx) {
+            if let Some(hit) = self.get_validated_value_prepared(&prepared, ctx) {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
                 if let Some(sched_ctx) = verter_scheduler::request_context::current_context() {
                     sched_ctx
@@ -2794,7 +2844,9 @@ impl SemanticGraphStore {
         let mut panic_guard =
             InflightPanicGuard::new(Arc::clone(&inflight), &self.inflight, prepared.clone());
         let build_start = Instant::now();
-        let build_output: crate::project_semantic_dispatch::walk::QueryBuildOutput = build().into();
+        let build_output: crate::project_semantic_dispatch::walk::QueryBuildOutput<
+            SemanticQueryValue,
+        > = build().into();
         let build_held_ns = build_start.elapsed().as_nanos() as u64;
         let crate::project_semantic_dispatch::walk::QueryBuildOutput {
             result,
@@ -3133,7 +3185,7 @@ impl SemanticGraphStore {
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         prepared: &PreparedKeyHandle,
-        result: &QueryResult<SemanticNodeId>,
+        result: &QueryResult<SemanticQueryValue>,
         walker_diagnostics: &Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
         read_set_signature: &crate::fact_signature_helpers::ReadSetSignature,
         dispatch_dep_signature: &DepSignature,
@@ -3369,7 +3421,11 @@ impl SemanticGraphStore {
         let validated_at_generation = ctx.project_type_store().project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
         let entry = MemoEntry {
-            result,
+            result: match result {
+                QueryResult::Value(node) => QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+                QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                QueryResult::Error(error) => QueryResult::Error(error),
+            },
             read_set_signature: read_set_signature.clone(),
             dispatch_dep_signature,
             self_root_canonicals,
@@ -3714,7 +3770,11 @@ impl SemanticGraphStore {
         let admission_seq = self.alloc_candidate_admission_seq();
         let dispatch_dep_signature = self.dep_signature_interner.intern(&dispatch_dep_signature);
         let entry = MemoEntry {
-            result,
+            result: match result {
+                QueryResult::Value(node) => QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+                QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                QueryResult::Error(error) => QueryResult::Error(error),
+            },
             read_set_signature: read_set_signature.clone(),
             dispatch_dep_signature: Arc::clone(&dispatch_dep_signature),
             self_root_canonicals,

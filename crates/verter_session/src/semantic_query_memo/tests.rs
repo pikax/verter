@@ -762,7 +762,7 @@ fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
     store.warm_publish_one(
         &host,
         &super::prepared::PreparedKeyHandle::prepare(key.clone()),
-        &QueryResult::Value(value),
+        &QueryResult::Value(SemanticQueryValue::TypeNode(value)),
         &walker_diagnostics,
         &carrier,
         &dep_sig,
@@ -1443,7 +1443,7 @@ fn warm_publish_one_debug_asserts_against_sub_slot_mode_terminal() {
     store.warm_publish_one(
         &host,
         &super::prepared::PreparedKeyHandle::prepare(key_expanded),
-        &QueryResult::Value(value),
+        &QueryResult::Value(SemanticQueryValue::TypeNode(value)),
         &walker_diagnostics,
         &carrier,
         &empty_signature(),
@@ -9236,6 +9236,16 @@ mod prepared_identity_bijection {
                     context: OverloadSetContext {
                         resolve_env_hash: h16(0),
                     },
+                },
+            ),
+            SemanticQueryKeyTag::ClassifyBroadRuntime => (
+                SemanticQueryKey::ClassifyBroadRuntime {
+                    subject: node(1),
+                    context: Default::default(),
+                },
+                SemanticQueryKey::ClassifyBroadRuntime {
+                    subject: node(2),
+                    context: Default::default(),
                 },
             ),
             SemanticQueryKeyTag::ApparentType => (

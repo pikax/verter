@@ -15,11 +15,12 @@ use crate::semantic_query::demand::{
 use crate::semantic_query::{
     DepSignature, IndexKey, MapperKey, PathSegment, ProjectionMode, ProjectionReductionContext,
     QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeId, SemanticQueryKey,
+    SemanticQueryValue,
 };
 
 #[derive(Clone)]
 pub(super) struct MemoEntry {
-    pub(super) result: QueryResult<SemanticNodeId>,
+    pub(super) result: QueryResult<SemanticQueryValue>,
     /// Carrier holding the path-precise R28 fact signature for this
     /// entry — the sole cache-validity rail. Warm-hit reads validate
     /// the carrier against the live store view — validating every
@@ -332,6 +333,10 @@ pub(super) enum FamilyKey {
         type_args: Arc<[SemanticNodeId]>,
         resolve_env_hash: crate::semantic_query::HashValue,
     },
+    ClassifyBroadRuntime {
+        subject: SemanticNodeId,
+        context: crate::semantic_query::BroadRuntimeContext,
+    },
     /// DEDICATED, non-aliasing `Relate` family identity carrying the FULL
     /// relation identity [`crate::semantic_query::RelateMemoKey`] (source /
     /// target / relation kind / policy / source freshness / inference context /
@@ -487,6 +492,7 @@ impl FamilyKey {
             FamilyKey::ResolveAmbientNamespace { .. } => "ResolveAmbientNamespace",
             FamilyKey::ResolveEnum { .. } => "ResolveEnum",
             FamilyKey::ResolveOverloadSet { .. } => "ResolveOverloadSet",
+            FamilyKey::ClassifyBroadRuntime { .. } => "ClassifyBroadRuntime",
             FamilyKey::Relate { .. } => "Relate",
             FamilyKey::ApparentType { .. } => "ApparentType",
             FamilyKey::TemplateLiteralReduce { .. } => "TemplateLiteralReduce",
@@ -1369,6 +1375,13 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
                 callee: *callee,
                 type_args: Arc::clone(type_args),
                 resolve_env_hash: context.resolve_env_hash,
+            },
+            ModeSlot::Single,
+        ),
+        SemanticQueryKey::ClassifyBroadRuntime { subject, context } => (
+            FamilyKey::ClassifyBroadRuntime {
+                subject: *subject,
+                context: *context,
             },
             ModeSlot::Single,
         ),

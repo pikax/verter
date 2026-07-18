@@ -274,6 +274,7 @@ fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
         SemanticQueryKey::ResolveAmbientNamespace { .. } => "ResolveAmbientNamespace",
         SemanticQueryKey::ResolveEnum { .. } => "ResolveEnum",
         SemanticQueryKey::ResolveOverloadSet { .. } => "ResolveOverloadSet",
+        SemanticQueryKey::ClassifyBroadRuntime { .. } => "ClassifyBroadRuntime",
         SemanticQueryKey::ApparentType { .. } => "ApparentType",
         SemanticQueryKey::TemplateLiteralReduce { .. } => "TemplateLiteralReduce",
         SemanticQueryKey::FlowNarrowingAt { .. } => "FlowNarrowingAt",
@@ -447,7 +448,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `execute_cooperative`. Routing both `execute` and
         // `execute_read` through one helper ensures fact-tracer
         // installation never bypasses any cold-build path.
-        self.execute_via_cold_build_helper(key)
+        super::narrow_value_cache_read(self.execute_via_cold_build_helper(key))
     }
 
     /// Context-explicit reduce-then-raise reducer (demand-driven reducer

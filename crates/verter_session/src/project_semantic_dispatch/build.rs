@@ -4838,22 +4838,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// never matches the name string directly.
     pub(super) fn is_promise_global_name(&self, name: &str) -> bool {
         matches!(
-            self.ctx
-                .project_type_store()
-                .intrinsic_registry()
-                .lookup(name),
-            crate::intrinsic_registry::IntrinsicLookup::Found(
-                crate::intrinsic_registry::IntrinsicImpl::PromiseGlobal
-            )
+            self.runtime_nominal_global_name(name),
+            Some(crate::intrinsic_registry::RuntimeNominal::Promise)
         )
+    }
+
+    pub(super) fn runtime_nominal_global_name(
+        &self,
+        name: &str,
+    ) -> Option<crate::intrinsic_registry::RuntimeNominal> {
+        crate::intrinsic_registry::RuntimeNominal::from_global_name(name)
+    }
+
+    pub(super) fn runtime_nominal_identity(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> Option<crate::intrinsic_registry::RuntimeNominal> {
+        (identity.canonical_id.as_ref() == "__builtin__")
+            .then(|| self.runtime_nominal_global_name(identity.decl_name.as_ref()))
+            .flatten()
     }
 
     /// Whether `identity` is the builtin-sentinel `Promise` carrier
     /// identity the lowering fast path interns for an unshadowed global
     /// `Promise<...>` reference.
     fn is_promise_global_identity(&self, identity: &crate::semantic_query::DeclIdentity) -> bool {
-        identity.canonical_id.as_ref() == "__builtin__"
-            && self.is_promise_global_name(identity.decl_name.as_ref())
+        matches!(
+            self.runtime_nominal_identity(identity),
+            Some(crate::intrinsic_registry::RuntimeNominal::Promise)
+        )
     }
 
     /// `Awaited<T>` reduction over a SETTLED operand.

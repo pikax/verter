@@ -4,7 +4,7 @@
     "generatedBy": "scripts/gen-vue-macro-runtime-oracle.mjs",
     "compiler": "@vue/compiler-sfc",
     "version": "3.5.34",
-    "fixtureSha256": "60d192ab8b8a6434c8504554b2844b6e155016137cc9bbb9ae84195025df2197",
+    "fixtureSha256": "ea72b5bf4baa693add1390d249b98f79092669431efa2b16bc52cf5a09a6d8e0",
     "compileOptions": {
       "isProd": false,
       "inlineTemplate": false
@@ -19,7 +19,7 @@
         "literal",
         "bigint"
       ],
-      "sourceSha256": "659e7917f9be0c018c830586d15b3ce444b707d0c5e6ee030a6ffef322294834",
+      "sourceSha256": "3347643663ff08a45872a6b1985f16b965fe514217ebdfdc64fd2b25e5d7759e",
       "runtime": {
         "props": [
           {
@@ -77,6 +77,15 @@
           {
             "name": "huge",
             "constructors": [],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "hugeLiteral",
+            "constructors": [
+              "Number"
+            ],
             "required": true,
             "skipCheck": false,
             "default": null

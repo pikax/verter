@@ -11,6 +11,7 @@ defineProps<{
   nothing: null
   literal: 'fixed'
   huge: bigint
+  hugeLiteral: 1n
 }>()
 </script>`,
   },

@@ -471,7 +471,8 @@ fn query_projection_mode(key: &SemanticQueryKey) -> ProjectionMode {
         | SemanticQueryKey::ContextualTypeAt { .. }
         // LowerLocator is the fixed locator-shape lowering — mode-free by
         // design (no projection demand to consume a budget).
-        | SemanticQueryKey::LowerLocator { .. } => ProjectionMode::Identity,
+        | SemanticQueryKey::LowerLocator { .. }
+        | SemanticQueryKey::ClassifyBroadRuntime { .. } => ProjectionMode::Identity,
     }
 }
 

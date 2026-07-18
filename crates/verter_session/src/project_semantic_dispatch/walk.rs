@@ -223,8 +223,8 @@ pub struct PrefixBackfill {
 }
 
 #[derive(Debug)]
-pub struct QueryBuildOutput {
-    pub result: QueryResult<SemanticNodeId>,
+pub struct QueryBuildOutput<T = SemanticNodeId> {
+    pub result: QueryResult<T>,
     pub dep_signature: DepSignature,
     pub walker_diagnostics: Vec<ShallowDiagnostic>,
     /// **Inner-memo non-cacheability** — see
@@ -312,9 +312,9 @@ pub struct QueryBuildOutput {
     pub satisfied_projection: crate::semantic_query::demand::MaterializedSet,
 }
 
-impl From<(QueryResult<SemanticNodeId>, DepSignature)> for QueryBuildOutput {
+impl<T> From<(QueryResult<T>, DepSignature)> for QueryBuildOutput<T> {
     #[inline]
-    fn from((result, dep_signature): (QueryResult<SemanticNodeId>, DepSignature)) -> Self {
+    fn from((result, dep_signature): (QueryResult<T>, DepSignature)) -> Self {
         Self {
             result,
             dep_signature,
@@ -331,7 +331,53 @@ impl From<(QueryResult<SemanticNodeId>, DepSignature)> for QueryBuildOutput {
     }
 }
 
-impl QueryBuildOutput {
+impl From<QueryBuildOutput<SemanticNodeId>>
+    for QueryBuildOutput<crate::semantic_query::SemanticQueryValue>
+{
+    fn from(output: QueryBuildOutput<SemanticNodeId>) -> Self {
+        let result = match output.result {
+            QueryResult::Value(node) => {
+                QueryResult::Value(crate::semantic_query::SemanticQueryValue::TypeNode(node))
+            }
+            QueryResult::Recursive(node) => QueryResult::Recursive(node),
+            QueryResult::Error(error) => QueryResult::Error(error),
+        };
+        Self {
+            result,
+            dep_signature: output.dep_signature,
+            walker_diagnostics: output.walker_diagnostics,
+            cache_suppress: output.cache_suppress,
+            result_is_partial: output.result_is_partial,
+            taint: output.taint,
+            observed_self_roots: output.observed_self_roots,
+            graph_carrier: output.graph_carrier,
+            self_root_canonicals: output.self_root_canonicals,
+            pending_prefix_backfills: output.pending_prefix_backfills,
+            satisfied_projection: output.satisfied_projection,
+        }
+    }
+}
+
+impl<T> QueryBuildOutput<T> {
+    pub fn map_result<U>(
+        self,
+        map: impl FnOnce(QueryResult<T>) -> QueryResult<U>,
+    ) -> QueryBuildOutput<U> {
+        QueryBuildOutput {
+            result: map(self.result),
+            dep_signature: self.dep_signature,
+            walker_diagnostics: self.walker_diagnostics,
+            cache_suppress: self.cache_suppress,
+            result_is_partial: self.result_is_partial,
+            taint: self.taint,
+            observed_self_roots: self.observed_self_roots,
+            graph_carrier: self.graph_carrier,
+            self_root_canonicals: self.self_root_canonicals,
+            pending_prefix_backfills: self.pending_prefix_backfills,
+            satisfied_projection: self.satisfied_projection,
+        }
+    }
+
     /// Attach the cold build's observed self-roots and return `self`.
     ///
     /// Builders that produce a `(QueryResult, DepSignature)` tuple coerce

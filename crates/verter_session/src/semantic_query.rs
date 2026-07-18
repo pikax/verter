@@ -2908,9 +2908,10 @@ pub enum QueryResult<T> {
 ///
 /// Every live [`SemanticQueryKey`] that PRODUCES a value produces
 /// [`TypeNode`](Self::TypeNode) — the interned graph node id for the
-/// resolved type — EXCEPT [`SemanticQueryKey::ResolveOverloadSet`], whose
-/// live producer fills [`OverloadSet`](Self::OverloadSet) (the boundary
-/// `execute` wrap converts its signature-group-bearing node). The
+/// resolved type — EXCEPT [`SemanticQueryKey::ResolveOverloadSet`] and
+/// [`SemanticQueryKey::ClassifyBroadRuntime`], whose live producers fill
+/// [`OverloadSet`](Self::OverloadSet) and
+/// [`BroadRuntime`](Self::BroadRuntime), respectively. The
 /// non-producing keys (`Relate`, plus the `NonProducingPendingReducer`
 /// variants `ResolveAmbientNamespace`, `ResolveEnum`, `ApparentType`,
 /// `FlowNarrowingAt`, `ContextualTypeAt`) return `Miss` and forward-declare
@@ -2921,8 +2922,8 @@ pub enum QueryResult<T> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SemanticQueryValue {
     /// The interned graph node id for the resolved type — the domain every
-    /// live query produces, EXCEPT [`SemanticQueryKey::ResolveOverloadSet`],
-    /// whose live producer fills [`OverloadSet`](Self::OverloadSet).
+    /// live query produces, EXCEPT [`SemanticQueryKey::ResolveOverloadSet`]
+    /// and [`SemanticQueryKey::ClassifyBroadRuntime`].
     TypeNode(SemanticNodeId),
     /// Narrowed / contextual type produced by flow or contextual program
     /// analysis. No live producer.
@@ -2945,6 +2946,10 @@ pub enum SemanticQueryValue {
     /// The tri-state outcome of a relation query. No live producer; the
     /// live relation path is the separate relation memo.
     Relation(RelationPayload),
+    /// Ordered, terminal broad runtime classification used by Vue macro
+    /// runtime lowering. The classifier is a semantic query, not a consumer-
+    /// local graph walk.
+    BroadRuntime(BroadRuntimeClassification),
     /// Reserved native-checker seam for diagnostic analysis. NON-LIVE: no
     /// producer, no key spec row. Uses a local shell so this crate keeps no
     /// back-edge to `verter_tsc::CheckResult`.
@@ -2961,6 +2966,7 @@ pub enum SemanticQueryValueTag {
     DeclarationAnalysis,
     OverloadSet,
     Relation,
+    BroadRuntime,
     DiagnosticAnalysis,
 }
 
@@ -2974,8 +2980,69 @@ impl SemanticQueryValue {
             Self::DeclarationAnalysis(_) => SemanticQueryValueTag::DeclarationAnalysis,
             Self::OverloadSet(_) => SemanticQueryValueTag::OverloadSet,
             Self::Relation(_) => SemanticQueryValueTag::Relation,
+            Self::BroadRuntime(_) => SemanticQueryValueTag::BroadRuntime,
             Self::DiagnosticAnalysis(_) => SemanticQueryValueTag::DiagnosticAnalysis,
         }
+    }
+}
+
+/// Closed runtime constructor vocabulary shared by the canonical semantic
+/// classifier and downstream framework adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum BroadRuntimeKind {
+    String,
+    Number,
+    Boolean,
+    Symbol,
+    Null,
+    Array,
+    Function,
+    Date,
+    Map,
+    Set,
+    Promise,
+    Error,
+    Object,
+    Unknown,
+}
+
+impl BroadRuntimeKind {
+    const fn bit(self) -> u16 {
+        1 << (self as u16)
+    }
+}
+
+/// Stable first-occurrence-deduplicated broad runtime facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BroadRuntimeClassification {
+    kinds: Arc<[BroadRuntimeKind]>,
+}
+
+impl BroadRuntimeClassification {
+    #[must_use]
+    pub fn new(kinds: impl IntoIterator<Item = BroadRuntimeKind>) -> Self {
+        let mut seen = 0u16;
+        let mut ordered = Vec::new();
+        for kind in kinds {
+            let bit = kind.bit();
+            if seen & bit == 0 {
+                seen |= bit;
+                ordered.push(kind);
+            }
+        }
+        Self {
+            kinds: Arc::from(ordered.into_boxed_slice()),
+        }
+    }
+
+    #[must_use]
+    pub fn kinds(&self) -> &[BroadRuntimeKind] {
+        &self.kinds
+    }
+
+    #[must_use]
+    pub fn contains_unknown(&self) -> bool {
+        self.kinds.contains(&BroadRuntimeKind::Unknown)
     }
 }
 
@@ -3532,6 +3599,19 @@ pub struct EnumContext {
 pub struct OverloadSetContext {
     /// Import / name-resolution dimension (`R`).
     pub resolve_env_hash: HashValue,
+}
+
+/// Environment a modeless broad-runtime classification depends on.
+///
+/// The subject node carries substitution identity. Classification may settle
+/// unresolved carrier heads and global nominal types, so the key includes the
+/// complete `{R,T,L,J}` environment and no projection-mode axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct BroadRuntimeContext {
+    pub resolve_env_hash: HashValue,
+    pub type_env_hash: HashValue,
+    pub lib_env_hash: HashValue,
+    pub project_identity: u32,
 }
 
 /// Env a [`SemanticQueryKey::ApparentType`] value depends on (env dims
@@ -4521,8 +4601,8 @@ pub enum SemanticQueryKey {
     ///
     /// **Value domain** [`SemanticQueryValueTag::OverloadSet`]
     /// (`SemanticQueryValue::OverloadSet(Arc<[SignatureRef]>)`): the inner
-    /// pipeline carries the signature-group-bearing node; the public
-    /// `execute` boundary converts it into the `OverloadSet` carrier.
+    /// pipeline carries the signature-group-bearing node; the cold build
+    /// converts it into the typed `OverloadSet` value before memo publication.
     /// Node-narrowing consumers (`execute_type_node`) report
     /// [`QueryError::ValueDomainMismatch`] instead of leaking the carrier
     /// node as a type node.
@@ -4532,6 +4612,13 @@ pub enum SemanticQueryKey {
         callee: SemanticNodeId,
         type_args: Arc<[SemanticNodeId]>,
         context: OverloadSetContext,
+    },
+    /// Classify a semantic subject into Vue-compatible broad runtime kinds.
+    /// Modeless and terminal: the reducer follows semantic carriers and union
+    /// arms but never enumerates object members.
+    ClassifyBroadRuntime {
+        subject: SemanticNodeId,
+        context: BroadRuntimeContext,
     },
     /// Resolve the APPARENT type of `base` — the member surface a value of
     /// that type exposes (a primitive widens to its lib wrapper:
@@ -4715,6 +4802,7 @@ pub enum SemanticQueryKeyTag {
     ResolveAmbientNamespace,
     ResolveEnum,
     ResolveOverloadSet,
+    ClassifyBroadRuntime,
     ApparentType,
     TemplateLiteralReduce,
     FlowNarrowingAt,
@@ -4744,6 +4832,7 @@ impl SemanticQueryKeyTag {
         SemanticQueryKeyTag::ResolveAmbientNamespace,
         SemanticQueryKeyTag::ResolveEnum,
         SemanticQueryKeyTag::ResolveOverloadSet,
+        SemanticQueryKeyTag::ClassifyBroadRuntime,
         SemanticQueryKeyTag::ApparentType,
         SemanticQueryKeyTag::TemplateLiteralReduce,
         SemanticQueryKeyTag::FlowNarrowingAt,
@@ -4775,6 +4864,7 @@ impl SemanticQueryKeyTag {
             SemanticQueryKeyTag::ResolveAmbientNamespace => "ResolveAmbientNamespace",
             SemanticQueryKeyTag::ResolveEnum => "ResolveEnum",
             SemanticQueryKeyTag::ResolveOverloadSet => "ResolveOverloadSet",
+            SemanticQueryKeyTag::ClassifyBroadRuntime => "ClassifyBroadRuntime",
             SemanticQueryKeyTag::ApparentType => "ApparentType",
             SemanticQueryKeyTag::TemplateLiteralReduce => "TemplateLiteralReduce",
             SemanticQueryKeyTag::FlowNarrowingAt => "FlowNarrowingAt",
@@ -4791,7 +4881,7 @@ impl SemanticQueryKeyTag {
     /// nested `execute_read` sub-dispatches are recorded too) ORs
     /// `1 << bit_index()` into a `u32` mask surfaced on
     /// [`verter_audit::TypeResolutionPayload::semantic_query_dispatch_mask`];
-    /// `ALL.len()` is 22 (≤ 32) so the mask never overflows `u32`.
+    /// `ALL.len()` is 23 (≤ 32) so the mask never overflows `u32`.
     #[must_use]
     pub fn bit_index(self) -> u32 {
         Self::ALL
@@ -4853,6 +4943,9 @@ impl SemanticQueryKey {
             }
             SemanticQueryKey::ResolveEnum { .. } => SemanticQueryKeyTag::ResolveEnum,
             SemanticQueryKey::ResolveOverloadSet { .. } => SemanticQueryKeyTag::ResolveOverloadSet,
+            SemanticQueryKey::ClassifyBroadRuntime { .. } => {
+                SemanticQueryKeyTag::ClassifyBroadRuntime
+            }
             SemanticQueryKey::ApparentType { .. } => SemanticQueryKeyTag::ApparentType,
             SemanticQueryKey::TemplateLiteralReduce { .. } => {
                 SemanticQueryKeyTag::TemplateLiteralReduce
@@ -5756,7 +5849,8 @@ pub trait SemanticQueryApi {
     /// [`SemanticQueryValue`] wrapped with the provenance of the producing
     /// work. Every live key that produces a value resolves to
     /// [`SemanticQueryValue::TypeNode`] except `ResolveOverloadSet`
-    /// ([`SemanticQueryValue::OverloadSet`]); the non-producing keys
+    /// ([`SemanticQueryValue::OverloadSet`]) and `ClassifyBroadRuntime`
+    /// ([`SemanticQueryValue::BroadRuntime`]); the non-producing keys
     /// (e.g. `Relate`) return `Miss`. Callers that want the node narrow
     /// with [`execute_type_node`].
     ///
@@ -6223,6 +6317,12 @@ mod tests {
                 SemanticQueryValueTag::Relation,
             ),
             (
+                SemanticQueryValue::BroadRuntime(BroadRuntimeClassification::new([
+                    BroadRuntimeKind::Object,
+                ])),
+                SemanticQueryValueTag::BroadRuntime,
+            ),
+            (
                 SemanticQueryValue::DiagnosticAnalysis(DiagnosticAnalysisShell),
                 SemanticQueryValueTag::DiagnosticAnalysis,
             ),
@@ -6230,13 +6330,13 @@ mod tests {
         for (value, tag) in &cases {
             assert_eq!(value.tag(), *tag, "tag must match the value domain");
         }
-        // Distinctness: six cases, six unique tags. Sort before dedup so
+        // Distinctness: seven cases, seven unique tags. Sort before dedup so
         // non-adjacent duplicates are caught (`Vec::dedup` only collapses
         // consecutive runs).
         let mut tags: Vec<SemanticQueryValueTag> = cases.iter().map(|(_, t)| *t).collect();
         tags.sort_by_key(|t| *t as u8);
         tags.dedup();
-        assert_eq!(tags.len(), 6, "every value domain must have a distinct tag");
+        assert_eq!(tags.len(), 7, "every value domain must have a distinct tag");
     }
 
     /// Taint shape: every `ResultTaint` / `BrokenInputClass` variant is

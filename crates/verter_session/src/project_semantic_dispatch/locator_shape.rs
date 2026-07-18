@@ -992,7 +992,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Unshadowed global lib heads: `Promise` and the builtin utilities
         // intern the nominal `__builtin__` carrier — NEVER an executed
         // `Instantiate`, in any position.
-        if self.is_promise_global_name(name.as_ref())
+        if self.runtime_nominal_global_name(name.as_ref()).is_some()
             || verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
                 name.as_ref(),
             )

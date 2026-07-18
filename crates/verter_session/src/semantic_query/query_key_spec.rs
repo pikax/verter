@@ -22,7 +22,8 @@
 //!    source (fails when a variant is added/removed without regenerating).
 //! 3. **Per-row sanity** — every row is `Live`; every row carries the
 //!    `TypeNode` value domain EXCEPT `Relate` (`Relation`),
-//!    `ResolveOverloadSet` (`OverloadSet`), and `FlowNarrowingAt` /
+//!    `ResolveOverloadSet` (`OverloadSet`), `ClassifyBroadRuntime`
+//!    (`BroadRuntime`), and `FlowNarrowingAt` /
 //!    `ContextualTypeAt` (`ProgramAnalysis`), which is the current-tree truth,
 //!    and the
 //!    [`SemanticQueryKeyTag::ALL`](crate::semantic_query::SemanticQueryKeyTag::ALL)
@@ -32,7 +33,8 @@
 //!
 //! - Every live variant resolves to
 //!   [`SemanticQueryValueTag::TypeNode`] EXCEPT `Relate`,
-//!   `ResolveOverloadSet`, `FlowNarrowingAt`, and `ContextualTypeAt`:
+//!   `ResolveOverloadSet`, `ClassifyBroadRuntime`, `FlowNarrowingAt`, and
+//!   `ContextualTypeAt`:
 //!   `ProjectSemanticDispatch::execute` wraps the
 //!   `TypeNode` keys' results as `SemanticQueryValue::TypeNode(node)`.
 //!   `Relate` records its value domain as
@@ -46,10 +48,11 @@
 //!   [`RelationMemo`](AdmissionSpec::RelationMemo). `ResolveOverloadSet`
 //!   records [`SemanticQueryValueTag::OverloadSet`] as its LIVE value
 //!   domain: the execute arm projects the callee's ordered VISIBLE
-//!   signature group and the boundary `execute` wrap converts the
-//!   group-bearing node into `OverloadSet(Arc<[SignatureRef]>)` — a
+//!   signature group and the cold build converts the group-bearing node
+//!   into the memoized `OverloadSet(Arc<[SignatureRef]>)` value — a
 //!   signature-less callee is an honest `Miss`, never a fabricated empty
-//!   set. `FlowNarrowingAt`
+//!   set. `ClassifyBroadRuntime` records the live terminal
+//!   [`SemanticQueryValueTag::BroadRuntime`] domain. `FlowNarrowingAt`
 //!   and `ContextualTypeAt` both record
 //!   [`SemanticQueryValueTag::ProgramAnalysis`] as a FORWARD-DECLARED
 //!   value domain: each `execute` arm is non-producing (returns `Miss`,
@@ -803,6 +806,19 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             cross_context_guard: "resolve_overload_set_do_not_warm_hit",
             admission: AdmissionSpec::Singleflight,
         },
+        // ClassifyBroadRuntime { subject, context } — terminal, modeless
+        // semantic classification. Carrier settling and global nominal
+        // recognition read R T L J; the subject carries substitution identity.
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::ClassifyBroadRuntime,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "BroadRuntimeContext",
+            value_domain: SemanticQueryValueTag::BroadRuntime,
+            env_dims: EnvDimSpec::Static(env_resolve()),
+            allowed_demand: AxisMask::empty(),
+            cross_context_guard: "classify_broad_runtime_contexts_do_not_warm_hit",
+            admission: AdmissionSpec::Singleflight,
+        },
         // ApparentType { base, context } — resolves the apparent member
         // surface of an already-substituted node (a primitive widens to its
         // lib wrapper). The surface is a function of the base node + the
@@ -949,6 +965,7 @@ fn render_value_domain(tag: SemanticQueryValueTag) -> &'static str {
         SemanticQueryValueTag::DeclarationAnalysis => "DeclarationAnalysis",
         SemanticQueryValueTag::OverloadSet => "OverloadSet",
         SemanticQueryValueTag::Relation => "Relation",
+        SemanticQueryValueTag::BroadRuntime => "BroadRuntime",
         SemanticQueryValueTag::DiagnosticAnalysis => "DiagnosticAnalysis",
     }
 }

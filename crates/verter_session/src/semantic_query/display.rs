@@ -106,6 +106,14 @@ pub fn display(
             DisplayString(rendered.join("; "))
         }
         SemanticQueryValue::Relation(payload) => display_relation(payload),
+        SemanticQueryValue::BroadRuntime(classification) => DisplayString(
+            classification
+                .kinds()
+                .iter()
+                .map(|kind| format!("{kind:?}"))
+                .collect::<Vec<_>>()
+                .join(" | "),
+        ),
         SemanticQueryValue::DeclarationAnalysis(d) => display_declaration_analysis(store, d, needs),
         SemanticQueryValue::ProgramAnalysis(p) => display_program_analysis(store, p, needs),
         // §14.1: the reserved native-checker seam. No producer constructs it,

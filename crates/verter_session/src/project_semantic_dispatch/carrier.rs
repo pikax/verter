@@ -365,15 +365,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let reduction_context = ctx.reduction_context();
         let mode = ctx.mode();
 
-        // Global lib-type fast path: an unshadowed `Promise<...>` interns a
-        // nominal `InstantiationRef` carrier in EVERY mode — `Promise` has no
-        // structural reducer arm, so the carrier preserves the declaration
-        // identity + already-lowered type arguments for the demand points.
+        // Global lib-type fast path: an unshadowed runtime nominal interns a
+        // `DeclRef` / `InstantiationRef` carrier in EVERY mode, preserving its
+        // declaration identity for semantic classifiers and reducers.
         // Userland shadowing wins via the same `name_resolution` /
         // `ScopeShadowing` gates the builtin utilities use.
         if !name_resolution.contains_key(name.as_ref())
             && !shadowing.is_shadowing_lib(name.as_ref())
-            && self.is_promise_global_name(name.as_ref())
+            && self.runtime_nominal_global_name(name.as_ref()).is_some()
         {
             return CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::Intern {
                 head: RefHeadResolution::Builtin(DeclIdentity {
@@ -1155,6 +1154,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     context,
                 }
             }
+            SemanticQueryKey::ClassifyBroadRuntime { subject, context } => {
+                let subject = self.resolve_carrier_subject_node(
+                    subject,
+                    ProjectionReductionContext::structural_transit_with_mode(
+                        ProjectionMode::Navigate,
+                    ),
+                );
+                SemanticQueryKey::ClassifyBroadRuntime { subject, context }
+            }
             // Every other key carries no `SemanticNodeId` subject that could be a
             // carrier (or carries content-free slot identities) — return
             // verbatim. Nested carriers inside Intersection / Union / heritage
@@ -1178,6 +1186,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticQueryKey::IndexedAccess { base, .. }
             | SemanticQueryKey::KeyOf { base, .. } => *base,
             SemanticQueryKey::MappedType { source, .. } => *source,
+            SemanticQueryKey::ClassifyBroadRuntime { subject, .. } => *subject,
             _ => return false,
         };
         let graph = self.graph();
