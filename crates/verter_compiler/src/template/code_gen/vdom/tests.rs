@@ -116,7 +116,8 @@ fn enter_template_standalone_defers_to_leave() {
         None,
     );
     let ast = make_empty_ast(&root);
-    let mut gen = VdomCodeGen::new(&ast, resolver, &options);
+    let oxc_ast = crate::template::oxc::types::OxcParsedAst::new(Vec::new());
+    let mut gen = VdomCodeGen::new(&ast, &oxc_ast, resolver, &options);
     gen.enter_template(&root, "", &mut out);
 
     // Open tag overwrite is deferred to leave_template
@@ -140,7 +141,8 @@ fn enter_template_inline_defers_to_leave() {
         None,
     );
     let ast = make_empty_ast(&root);
-    let mut gen = VdomCodeGen::new(&ast, resolver, &options);
+    let oxc_ast = crate::template::oxc::types::OxcParsedAst::new(Vec::new());
+    let mut gen = VdomCodeGen::new(&ast, &oxc_ast, resolver, &options);
     gen.enter_template(&root, "", &mut out);
 
     // Open tag overwrite is deferred to leave_template
@@ -177,7 +179,8 @@ fn leave_template_empty_returns_null() {
         }),
     );
     let ast = make_empty_ast(&root);
-    let mut gen = VdomCodeGen::new(&ast, resolver, &options);
+    let oxc_ast = crate::template::oxc::types::OxcParsedAst::new(Vec::new());
+    let mut gen = VdomCodeGen::new(&ast, &oxc_ast, resolver, &options);
 
     gen.enter_template(&root, source, &mut out);
     gen.leave_template(&root, source, &mut out);
@@ -225,7 +228,8 @@ fn leave_template_single_root_prepends_return() {
         }],
         root,
     };
-    let mut gen = VdomCodeGen::new(&ast, resolver, &options);
+    let oxc_ast = crate::template::oxc::types::OxcParsedAst::new(Vec::new());
+    let mut gen = VdomCodeGen::new(&ast, &oxc_ast, resolver, &options);
 
     gen.enter_template(&ast.root, source, &mut out);
     gen.leave_template(&ast.root, source, &mut out);
@@ -287,7 +291,8 @@ fn leave_template_multi_root_wraps_in_fragment() {
         ],
         root,
     };
-    let mut gen = VdomCodeGen::new(&ast, resolver, &options);
+    let oxc_ast = crate::template::oxc::types::OxcParsedAst::new(Vec::new());
+    let mut gen = VdomCodeGen::new(&ast, &oxc_ast, resolver, &options);
 
     gen.enter_template(&ast.root, source, &mut out);
     gen.leave_template(&ast.root, source, &mut out);
@@ -345,7 +350,8 @@ fn leave_template_multi_root_production_no_comment() {
         ],
         root,
     };
-    let mut gen = VdomCodeGen::new(&ast, resolver, &options);
+    let oxc_ast = crate::template::oxc::types::OxcParsedAst::new(Vec::new());
+    let mut gen = VdomCodeGen::new(&ast, &oxc_ast, resolver, &options);
 
     gen.enter_template(&ast.root, source, &mut out);
     gen.leave_template(&ast.root, source, &mut out);
@@ -2054,7 +2060,6 @@ import MyComp from './MyComp.vue'
 const attrs = {}
 </script>"#,
     );
-    eprintln!("SELF_CLOSING:\n{code}");
     assert!(
         code.contains("FULL_PROPS") || code.contains(", 16"),
         "self-closing component v-bind must emit FULL_PROPS, got:\n{code}"
@@ -2070,7 +2075,6 @@ import MyComp from './MyComp.vue'
 const attrs = {}
 </script>"#,
     );
-    eprintln!("STATIC_CHILD:\n{code}");
     assert!(
         code.contains("FULL_PROPS") || code.contains(", 16"),
         "component v-bind + static child must emit FULL_PROPS, got:\n{code}"
@@ -2108,5 +2112,147 @@ const items = [{ id: 1, x: 'a' }]
     assert!(
         code.contains("KEYED_FRAGMENT"),
         ":key on the loop element makes the fragment keyed, got:\n{code}"
+    );
+}
+
+// ==================== hasScopeRef slot flags (official parity) ====================
+
+/// Official oracle: a component whose OWN `v-slot="{ x }"` params are the
+/// only scope variables in its slot content compiles to `_: 1 /* STABLE */`
+/// with NO DYNAMIC_SLOTS — the child's own effect re-invokes the slot
+/// function with fresh args. (`@vue/compiler-core` build-mode
+/// `hasScopeRef`: own slot params are out of scope at buildSlots.)
+#[test]
+fn own_scoped_slot_params_alone_stay_stable() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <Picker v-slot="{ grid }">
+    <span>{{ grid.rows }}</span>
+  </Picker>
+</template>
+<script setup>
+import Picker from './Picker.vue'
+</script>"#,
+    );
+    assert!(
+        code.contains("_: 1 /* STABLE */"),
+        "own scoped slot params alone must stay STABLE like official, got:\n{code}"
+    );
+    assert!(
+        !code.contains("_: 2"),
+        "own scoped slot params must NOT force DYNAMIC, got:\n{code}"
+    );
+    assert!(
+        !code.contains("DYNAMIC_SLOTS") && !code.contains("1024"),
+        "no DYNAMIC_SLOTS patch flag for a stable scoped slot, got:\n{code}"
+    );
+    // The wiring itself: params destructure through _withCtx.
+    assert!(
+        code.contains("_withCtx(({ grid })"),
+        "slot params must thread through _withCtx, got:\n{code}"
+    );
+}
+
+/// Official oracle: a named `<template #body=\"{ row }\">` scoped slot with
+/// no outer-scope references is STABLE.
+#[test]
+fn named_template_scoped_slot_params_alone_stay_stable() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <Table>
+    <template #body="{ row }"><b>{{ row.id }}</b></template>
+  </Table>
+</template>
+<script setup>
+import Table from './Table.vue'
+</script>"#,
+    );
+    assert!(
+        code.contains("_: 1 /* STABLE */"),
+        "named scoped slot with own params only must stay STABLE, got:\n{code}"
+    );
+    assert!(
+        !code.contains("DYNAMIC_SLOTS") && !code.contains("1024"),
+        "no DYNAMIC_SLOTS for own-params-only named slot, got:\n{code}"
+    );
+}
+
+/// Official oracle (the under-mark direction): a component whose slot
+/// content references an OUTER component's slot parameter must be DYNAMIC —
+/// official forces this via `hasScopeRef`; STABLE would let
+/// `shouldUpdateComponent` skip and serve stale content.
+#[test]
+fn inner_component_referencing_outer_slot_param_is_dynamic() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <Outer v-slot="{ a }">
+    <Inner><em>{{ a }}</em></Inner>
+  </Outer>
+</template>
+<script setup>
+import Outer from './Outer.vue'
+import Inner from './Inner.vue'
+</script>"#,
+    );
+    // Inner (referencing `a` from Outer's scope) must be DYNAMIC + 1024.
+    assert!(
+        code.contains("_: 2 /* DYNAMIC */"),
+        "inner component referencing outer slot param must be DYNAMIC, got:\n{code}"
+    );
+    assert!(
+        code.contains("1024") || code.contains("DYNAMIC_SLOTS"),
+        "inner component must set DYNAMIC_SLOTS, got:\n{code}"
+    );
+    // Outer itself only uses its OWN params → STABLE.
+    assert!(
+        code.contains("_: 1 /* STABLE */"),
+        "outer component with own params only stays STABLE, got:\n{code}"
+    );
+}
+
+/// Official oracle (build-mode refinement): a component inside `v-for`
+/// whose slot content is SCOPE-INDEPENDENT stays STABLE — official's
+/// `hasScopeRef` replaces the coarse in-v-for check.
+#[test]
+fn scope_independent_slot_inside_vfor_stays_stable() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <div v-for="item in items" :key="item.id">
+    <Card><span>static</span></Card>
+  </div>
+</template>
+<script setup>
+import Card from './Card.vue'
+const items = [{ id: 1 }]
+</script>"#,
+    );
+    assert!(
+        code.contains("_: 1 /* STABLE */"),
+        "scope-independent slot content inside v-for stays STABLE (official refined check), got:\n{code}"
+    );
+    assert!(
+        !code.contains("_: 2"),
+        "no DYNAMIC flag without a scope reference, got:\n{code}"
+    );
+}
+
+/// A descendant v-for ITERABLE referencing an outer slot param also counts
+/// as a scope reference (expression position does not matter).
+#[test]
+fn descendant_vfor_iterable_referencing_outer_slot_param_is_dynamic() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <Outer v-slot="{ list }">
+    <Inner><i v-for="x in list" :key="x">{{ x }}</i></Inner>
+  </Outer>
+</template>
+<script setup>
+import Outer from './Outer.vue'
+import Inner from './Inner.vue'
+</script>"#,
+    );
+    assert!(
+        code.contains("_: 2 /* DYNAMIC */"),
+        "iterable referencing outer slot param must make Inner DYNAMIC, got:\n{code}"
     );
 }

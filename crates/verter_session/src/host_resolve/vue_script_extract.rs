@@ -425,25 +425,6 @@ fn find_ascii_tag(bytes: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     None
 }
 
-#[allow(dead_code)] // retained for potential boundary-bounded scans
-fn find_last_ascii_tag(bytes: &[u8], needle: &[u8], from: usize, to: usize) -> Option<usize> {
-    if needle.is_empty() || from >= to || bytes.len() < needle.len() {
-        return None;
-    }
-
-    let search_end = to.min(bytes.len());
-    let mut last = None;
-    let mut cursor = from;
-    while let Some(idx) = find_ascii_tag(bytes, needle, cursor) {
-        if idx >= search_end {
-            break;
-        }
-        last = Some(idx);
-        cursor = idx.saturating_add(needle.len());
-    }
-    last
-}
-
 fn find_tag_end(bytes: &[u8], open_start: usize) -> Option<usize> {
     let mut idx = open_start.saturating_add(1);
     let mut quote = None;
@@ -479,18 +460,6 @@ fn is_self_closing_tag(bytes: &[u8], tag_end: usize) -> bool {
     }
 
     false
-}
-
-#[allow(dead_code)] // superseded by JS-context-aware script-close scan
-fn find_next_known_root_block(bytes: &[u8], from: usize) -> Option<usize> {
-    [
-        b"<script".as_slice(),
-        b"<template".as_slice(),
-        b"<style".as_slice(),
-    ]
-    .into_iter()
-    .filter_map(|needle| find_ascii_tag(bytes, needle, from))
-    .min()
 }
 
 fn string_from_span(source: &str, span: Option<verter_compiler::common::Span>) -> Option<String> {

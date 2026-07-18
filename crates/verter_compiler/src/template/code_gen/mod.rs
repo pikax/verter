@@ -242,7 +242,7 @@ pub fn generate_template<'alloc>(
 
     match options.mode {
         CodeGenMode::Vdom => {
-            let mut gen = vdom::VdomCodeGen::new(ast, resolver, options);
+            let mut gen = vdom::VdomCodeGen::new(ast, oxc_ast, resolver, options);
             walker::walk_template(ast, oxc_ast, source, &mut gen, &mut out);
         }
         CodeGenMode::Vapor => {

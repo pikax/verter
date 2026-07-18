@@ -90,6 +90,10 @@ use super::{TemplateCodeGen, TemplateCodeGenOptions};
 pub struct VdomCodeGen<'ast, 'alloc> {
     /// Reference to the template AST arena for O(1) node lookups.
     ast: &'ast TemplateAst,
+    /// NodeId-aligned OXC parse data — used for the official-parity
+    /// `hasScopeRef` slot-flag decision (scanning a component's slot
+    /// subtree for references to outer template-scope variables).
+    oxc_ast: &'ast crate::template::oxc::types::OxcParsedAst<'alloc>,
     resolver: BindingResolver<'alloc>,
     options: TemplateCodeGenOptions,
     /// Reusable buffer for building open/close tag strings.
@@ -137,11 +141,13 @@ pub struct VdomCodeGen<'ast, 'alloc> {
 impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
     pub fn new(
         ast: &'ast TemplateAst,
+        oxc_ast: &'ast crate::template::oxc::types::OxcParsedAst<'alloc>,
         resolver: BindingResolver<'alloc>,
         options: &TemplateCodeGenOptions,
     ) -> Self {
         Self {
             ast,
+            oxc_ast,
             resolver,
             options: options.clone(),
             buf: String::with_capacity(128),
@@ -782,13 +788,14 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
 
         // Handle component with slot children: wrap in slot object instead of array
         if el.tag_type.is_component() && self.has_slot_children(el_children) {
-            self.leave_component_with_slots(el, oxc, el_children, source, out, is_block_root);
+            self.leave_component_with_slots(_id, el, oxc, el_children, source, out, is_block_root);
             return;
         }
 
         // Handle component with implicit default slot (non-slot children)
         if el.tag_type.is_component() && !el_children.is_empty() {
             self.leave_component_with_default_slot(
+                _id,
                 el,
                 oxc,
                 el_children,

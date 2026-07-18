@@ -1483,7 +1483,6 @@ fn make_external_types(
     map
 }
 
-#[test]
 /// `withDefaults(defineProps<T>(), { as: 'td' })` must declare `as` even when
 /// `T` only partially expands (heritage props missing). Otherwise `_ctx.as`
 /// is undefined and table cells render as `div` (reka-ui Calendar).
@@ -1578,6 +1577,7 @@ const { trapFocus, disableOutsidePointerEvents, loop } = toRefs(props)
     }
 }
 
+#[test]
 fn external_type_defineprops_generates_runtime_props() {
     let alloc = Allocator::default();
     let external_types = make_external_types(

@@ -815,12 +815,6 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
     }
 }
 
-fn symbol_key_from_span(source: &[u8], span: Span) -> Box<[u8]> {
-    source[span.start as usize..span.end as usize]
-        .to_vec()
-        .into_boxed_slice()
-}
-
 fn binding_name_from_span(source: &[u8], span: Span) -> Option<&str> {
     std::str::from_utf8(&source[span.start as usize..span.end as usize]).ok()
 }

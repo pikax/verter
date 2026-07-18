@@ -325,7 +325,6 @@ pub fn process_script_setup<'alloc>(
         macro_state.props_section.as_deref(),
         macro_state.emits_section.as_deref(),
         macro_state.options_section.as_deref(),
-        options.ssr,
     );
 
     // Overwrite open tag with wrapper
@@ -498,7 +497,6 @@ fn build_setup_wrapper_start(
     props_section: Option<&str>,
     emits_section: Option<&str>,
     options_section: Option<&str>,
-    ssr: bool,
 ) -> String {
     let mut s = String::with_capacity(256);
     s.push_str("const __sfc__ = /*@__PURE__*/_defineComponent({\n");
@@ -515,10 +513,6 @@ fn build_setup_wrapper_start(
         s.push_str(component_name);
         s.push_str("',\n");
     }
-
-    // Non-inline SSR does not return a render function from setup; the template
-    // is attached as `Component.ssrRender`. Do not set `__ssrInlineRender`.
-    let _ = ssr;
 
     // Props section
     if let Some(props) = props_section {
@@ -602,9 +596,6 @@ fn build_setup_wrapper_end(
     if is_vapor {
         s.push_str("__sfc__.__vapor = true;\n");
     }
-    // Non-inline SSR attaches `ssrRender` separately — do not set
-    // `__ssrInlineRender` (that flag means setup returns the render function).
-    let _ = ssr;
     if let Some(id) = scope_id {
         s.push_str("__sfc__.__scopeId = \"");
         s.push_str(id);

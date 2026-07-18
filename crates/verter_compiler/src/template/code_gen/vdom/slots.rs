@@ -12,7 +12,7 @@ use crate::template::oxc::types::{ExpressionFlag, OxcParsedElement};
 use crate::types::NodeId;
 
 use super::super::shared::helpers::{self, VdomHelper};
-use super::super::types::{ChildKind, ChildRecord, CodeGenOutput, ConditionChainRole, ScopeClose};
+use super::super::types::{ChildKind, ChildRecord, CodeGenOutput, ConditionChainRole};
 use super::{children, component, directives, element, props, VdomCodeGen};
 
 /// Check if a string is a valid JS identifier (can be used as a bare property name).
@@ -500,6 +500,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
     /// ```
     pub(super) fn leave_component_with_slots(
         &mut self,
+        id: NodeId,
         el: &ElementNode,
         oxc: Option<&OxcParsedElement<'alloc>>,
         el_children: &[NodeId],
@@ -799,20 +800,18 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             }
             buf.push(')');
         } else if has_children {
-            // Static named/default slots object. Inside v-for → DYNAMIC +
-            // DYNAMIC_SLOTS; scoped params / forwarded <slot> → see helper.
-            let has_scoped = el
-                .v_slot
-                .as_ref()
-                .is_some_and(|vs| vs.value_start.zip(vs.value_end).is_some_and(|(s, e)| s < e))
-                || self.children_have_scoped_slot_params(el_children, source);
+            // Static named/default slots object: DYNAMIC iff the slot
+            // subtree references an OUTER template-scope variable
+            // (official-parity `hasScopeRef`); forwarded `<slot>` → see
+            // helper.
+            let slots_dynamic = self.component_slots_reference_outer_scope(id, oxc, source);
             self.emit_named_slots_object_close(
                 &mut buf,
                 out,
                 el_children,
                 props_patch_flag,
                 &dynamic_props,
-                has_scoped,
+                slots_dynamic,
             );
             buf.push(')');
         } else {
@@ -1063,6 +1062,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
     /// Wraps children in `{ default: _withCtx(() => [...]), _: 1 }`.
     pub(super) fn leave_component_with_default_slot(
         &mut self,
+        id: NodeId,
         el: &ElementNode,
         oxc: Option<&OxcParsedElement<'alloc>>,
         el_children: &[NodeId],
@@ -1302,15 +1302,17 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         self.emit_slot_children_with_cache(&children, out, source, el_children);
 
         buf.clear();
-        // Inside v-for / scoped slot params → DYNAMIC; forwarded → FORWARDED;
+        // DYNAMIC iff the slot subtree references an OUTER template-scope
+        // variable (official-parity `hasScopeRef`); forwarded → FORWARDED;
         // else STABLE. TEXT is stripped (slots are not element text children).
+        let slots_dynamic = self.component_slots_reference_outer_scope(id, oxc, source);
         self.emit_component_slot_close(
             &mut buf,
             out,
             el_children,
             props_patch_flag,
             &dynamic_props,
-            has_slot_params,
+            slots_dynamic,
         );
         buf.push(')');
         // Close `_withDirectives(...)` for v-show / custom dirs on components
@@ -1337,28 +1339,157 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         }
     }
 
-    /// True when this component (or any ancestor) is under a `v-for`.
+    /// Official-parity `hasScopeRef`: a component's static-format slots are
+    /// `_: 2 /* DYNAMIC */` iff the slot subtree references a template-scope
+    /// variable bound OUTSIDE the slot boundary — an enclosing `v-for` alias
+    /// (including the component's OWN `v-for`) or an enclosing component's
+    /// slot parameters. The component's OWN `v-slot` params do NOT count:
+    /// a STABLE slot re-renders through the child's own effect, which
+    /// re-invokes the slot function with fresh args (`v-slot="{ grid }"` at
+    /// top level is STABLE in official output).
     ///
-    /// Official Vue marks component slots as `_: 2 /* DYNAMIC */` and sets the
-    /// `DYNAMIC_SLOTS` patch flag in that case so reused keyed instances re-run
-    /// slot content when the iterated item changes. STABLE freezes
-    /// `{{ item.value }}` after the first render (reka-ui TimeField segments).
-    pub(super) fn is_inside_v_for(&self) -> bool {
-        self.scope_closes
-            .iter()
-            .any(|c| matches!(c, Some(ScopeClose::For { .. })))
+    /// Matches official build-mode (`prefixIdentifiers`) semantics, which
+    /// REPLACE the coarse in-v-for/in-v-slot scope counters: a component
+    /// inside `v-for` whose slot content is scope-independent stays STABLE.
+    /// Like official, the check is name-based (shadowing below the boundary
+    /// still counts as a reference — the safe, over-marking direction).
+    fn component_slots_reference_outer_scope(
+        &self,
+        id: NodeId,
+        oxc: Option<&OxcParsedElement<'alloc>>,
+        source: &str,
+    ) -> bool {
+        let outer = self.outer_scope_names(id, oxc, source);
+        if outer.is_empty() {
+            return false;
+        }
+        let el_children = match &self.ast.nodes[id.0].kind {
+            AstNodeKind::Element(el) => el
+                .content
+                .as_ref()
+                .map(|c| c.children.as_slice())
+                .unwrap_or(&[]),
+            _ => return false,
+        };
+        self.subtree_references_scope_names(el_children, &outer)
     }
 
-    /// True when any child `<template v-slot="params">` has scope parameters.
-    fn children_have_scoped_slot_params(&self, el_children: &[NodeId], source: &str) -> bool {
-        for &child_id in el_children {
-            let node = &self.ast.nodes[child_id.0];
-            if let AstNodeKind::Element(ref child_el) = node.kind {
-                if let Some(ref v_slot) = child_el.v_slot {
-                    if let (Some(vs), Some(ve)) = (v_slot.value_start, v_slot.value_end) {
-                        if !source[vs as usize..ve as usize].trim().is_empty() {
+    /// Template-scope variable names active at `id` from OUTER scopes:
+    /// every enclosing `v-for` alias / `v-slot` param plus the element's
+    /// own `v-for` aliases — but NOT its own `v-slot` params.
+    ///
+    /// `provided_locals` on the element's OXC parse already carries
+    /// inherited + own locals (own pushed LAST, v-for before v-slot), so
+    /// own slot params are removed by last-occurrence; an element without
+    /// scoping directives inherits the nearest ancestor's set.
+    fn outer_scope_names(
+        &self,
+        id: NodeId,
+        oxc: Option<&OxcParsedElement<'alloc>>,
+        source: &str,
+    ) -> Vec<String> {
+        // The element's own locals row, if it has scoping directives.
+        if let Some(oxc_el) = oxc {
+            if let Some(locals) = &oxc_el.provided_locals {
+                let mut names: Vec<String> = locals.iter().map(|s| s.to_string()).collect();
+                if let Some(v_slot) = &oxc_el.v_slot {
+                    for span in &v_slot.parsed.locals {
+                        let name = span.slice(source);
+                        if let Some(pos) = names.iter().rposition(|n| n == name) {
+                            names.remove(pos);
+                        }
+                    }
+                }
+                return names;
+            }
+        }
+        // No own scoping directives: nearest ancestor's provided locals.
+        let mut current = self.ast.nodes[id.0].parent;
+        while let Some(pid) = current {
+            if let Some(crate::template::oxc::types::OxcNodeData::Element(ancestor)) =
+                self.oxc_ast.data.get(pid.0)
+            {
+                if let Some(locals) = &ancestor.provided_locals {
+                    return locals.iter().map(|s| s.to_string()).collect();
+                }
+            }
+            current = self.ast.nodes[pid.0].parent;
+        }
+        Vec::new()
+    }
+
+    /// True when any expression under `children` references one of `names`.
+    /// Scans interpolations, prop values/args, v-if conditions, v-for
+    /// iterables, and v-slot default-value expressions, recursing through
+    /// the subtree. Name-based like official `hasScopeRef` — descendant
+    /// shadowing is deliberately not subtracted.
+    fn subtree_references_scope_names(&self, children: &[NodeId], names: &[String]) -> bool {
+        let name_hit = |n: &str| names.iter().any(|outer| outer == n);
+        for &child_id in children {
+            match self.oxc_ast.data.get(child_id.0) {
+                Some(crate::template::oxc::types::OxcNodeData::Interpolation(expr)) => {
+                    if let Some(bindings) = &expr.bindings {
+                        if bindings
+                            .bindings
+                            .iter()
+                            .any(|b| b.ignore && name_hit(b.name))
+                        {
                             return true;
                         }
+                    }
+                }
+                Some(crate::template::oxc::types::OxcNodeData::Element(oxc_el)) => {
+                    let expr_hits =
+                        |expr: &crate::template::oxc::types::OxcParsedExpression<'alloc>| {
+                            expr.bindings.as_ref().is_some_and(|bindings| {
+                                bindings
+                                    .bindings
+                                    .iter()
+                                    .any(|b| b.ignore && name_hit(b.name))
+                            })
+                        };
+                    if oxc_el.condition.as_ref().is_some_and(expr_hits) {
+                        return true;
+                    }
+                    for prop in &oxc_el.props {
+                        if prop.exp.as_ref().is_some_and(expr_hits)
+                            || prop.arg.as_ref().is_some_and(expr_hits)
+                        {
+                            return true;
+                        }
+                    }
+                    // v-for iterables / v-slot defaults record their
+                    // template-scope references in the dedicated
+                    // scope-local name set (their `references` and
+                    // liveness sets both EXCLUDE scope locals).
+                    if let Some(v_for) = &oxc_el.v_for {
+                        if v_for
+                            .parsed
+                            .scope_local_reference_names
+                            .iter()
+                            .any(|n| name_hit(n))
+                        {
+                            return true;
+                        }
+                    }
+                    if let Some(v_slot) = &oxc_el.v_slot {
+                        if v_slot
+                            .parsed
+                            .scope_local_reference_names
+                            .iter()
+                            .any(|n| name_hit(n))
+                        {
+                            return true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            // Recurse into element children.
+            if let AstNodeKind::Element(child_el) = &self.ast.nodes[child_id.0].kind {
+                if let Some(content) = &child_el.content {
+                    if self.subtree_references_scope_names(&content.children, names) {
+                        return true;
                     }
                 }
             }
@@ -1368,10 +1499,9 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
 
     /// Emit the slot-flag / patch-flag tail for a component with children.
     ///
-    /// - Inside `v-for` → `_: 2 /* DYNAMIC */` + `DYNAMIC_SLOTS` (and props flags)
-    /// - Scoped slot params (`v-slot="{ grid }"`) → DYNAMIC + DYNAMIC_SLOTS so
-    ///   updates to provider state (e.g. MonthPicker grid after nextPage)
-    ///   re-invoke the slot body. STABLE freezes `grid.rows` after first paint.
+    /// - Slot subtree references an OUTER template-scope variable
+    ///   (official-parity `hasScopeRef`) → `_: 2 /* DYNAMIC */` +
+    ///   `DYNAMIC_SLOTS` (and props flags)
     /// - Forwarded `<slot>` → `_: 3 /* FORWARDED */`
     /// - Otherwise → `_: 1 /* STABLE */`
     ///
@@ -1384,16 +1514,14 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         el_children: &[NodeId],
         mut props_patch_flag: u32,
         dynamic_props: &[String],
-        has_scoped_slot_params: bool,
+        slots_dynamic: bool,
     ) {
         // TEXT applies to element children only; strip for components.
         props_patch_flag &= !helpers::PATCH_TEXT;
 
-        let inside_vfor = self.is_inside_v_for();
-        let has_scoped = has_scoped_slot_params;
-        let forwarded = !inside_vfor && !has_scoped && self.has_forwarded_slots(el_children);
+        let forwarded = !slots_dynamic && self.has_forwarded_slots(el_children);
 
-        if inside_vfor || has_scoped {
+        if slots_dynamic {
             if self.options.is_production {
                 buf.push_str("]), _: 2}");
             } else {
@@ -1439,15 +1567,13 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         el_children: &[NodeId],
         mut props_patch_flag: u32,
         dynamic_props: &[String],
-        has_scoped_slot_params: bool,
+        slots_dynamic: bool,
     ) {
         props_patch_flag &= !helpers::PATCH_TEXT;
 
-        let inside_vfor = self.is_inside_v_for();
-        let has_scoped = has_scoped_slot_params;
-        let forwarded = !inside_vfor && !has_scoped && self.has_forwarded_slots(el_children);
+        let forwarded = !slots_dynamic && self.has_forwarded_slots(el_children);
 
-        if inside_vfor || has_scoped {
+        if slots_dynamic {
             if self.options.is_production {
                 buf.push_str(", _: 2}");
             } else {
