@@ -17,7 +17,8 @@ const TS_FIXTURE: &str =
     "export interface Box { v: number }\nexport const make = (): Box => ({ v: 1 });\n";
 
 /// Byte-exact dispatch capture for `VUE_FIXTURE` (see module docs).
-const EXPECTED_IDE_CODE: &str = r#"import { ref } from 'vue';
+const EXPECTED_IDE_CODE: &str = r#"/** @jsxImportSource vue */
+import { ref } from 'vue';
 import type { Prettify as ___VERTER___Prettify, ExtractComponentProps as ___VERTER___ExtractComponentProps, ExtractLeafElement as ___VERTER___ExtractLeafElement } from "@verter/types";
 import { shallowUnwrapRef as ___VERTER___shallowUnwrapRef, enhanceElementWithProps as ___VERTER___enhanceElementWithProps, extractRenderComponent as ___VERTER___extractRenderComponent, instantiateComponent as ___VERTER___instantiateComponent, extractArgumentsFromRenderSlot as ___VERTER___extractArgumentsFromRenderSlot, runCustomDirective as ___VERTER___runCustomDirective, retrieveSetupDirectives as ___VERTER___retrieveSetupDirectives, strictRenderSlot as ___VERTER___strictRenderSlot, checkRequiredSlots as ___VERTER___checkRequiredSlots } from "@verter/types";
 ;export function ___VERTER___TemplateBindingFN() {
@@ -37,7 +38,7 @@ const ___VERTER___unwrapped = ___VERTER___shallowUnwrapRef({
 { /* verter-destructured-start */let { 
     count } = ___VERTER___unwrapped; /* verter-destructured-end */
 <>
-  <div data-count={count}>{ count }</div>
+  <><div data-count={count}></div>{ count }</>
 </>
 } // close block scope
 

@@ -1,3 +1,4 @@
+/** @jsxImportSource vue */
 interface Props {
   count: number
   label: string
