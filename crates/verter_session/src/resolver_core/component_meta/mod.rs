@@ -7,15 +7,21 @@ use verter_semantic::analysis::types::{
 };
 
 use crate::resolver_core::{
-    resolve_type_declaration, DeclarationMetadataResolver, FactVersionRef, ResolvedMacroElements,
-    ResolvedNativeProp, ResolvedTypeDeclaration,
+    resolve_type_declaration, DeclarationMetadataResolver, FactVersionRef, ResolvedTypeDeclaration,
 };
 
 mod cold_resolver;
 mod direct_macro;
+mod native_props;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod native_props_rehome_contract_tests;
+
+pub(crate) use native_props::named_native_props_outcome;
+pub use native_props::{NativePropProjectionCache, ResolvedNativeProp, ResolvedNativePropsOutcome};
 
 pub use cold_resolver::resolve_component_meta_parts;
 pub(crate) use direct_macro::imported_registry_seed_can_skip_refresh;
@@ -76,13 +82,11 @@ pub struct ResolvedMacroMeta {
 }
 
 /// The combined imported-macro resolution: declaration identity plus the
-/// [`ResolvedMacroElements`] payload (the legacy elements DTO AND the
-/// keep-all `native_props` rows, both projected from the same dispatch
-/// surface resolution).
+/// component-meta-owned native visibility rows.
 #[derive(Debug, Clone)]
 pub struct ResolvedImportedMacroSurface {
     pub declaration: ResolvedTypeDeclaration,
-    pub resolution: ResolvedMacroElements,
+    pub native_props: Vec<ResolvedNativeProp>,
 }
 
 #[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
@@ -329,19 +333,16 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
         false
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn resolve_macro_elements(
+    fn resolve_native_props(
         &self,
         owner_canonical: &str,
         import_source: &str,
         exported_name: &str,
         tracked_deps: &mut BTreeSet<String>,
         resolution_deps: &mut BTreeSet<String>,
-        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        visiting: &mut FxHashSet<(String, String)>,
-    ) -> Option<ResolvedMacroElements>;
+        cache: &mut NativePropProjectionCache,
+    ) -> Option<Vec<ResolvedNativeProp>>;
 
-    #[allow(clippy::too_many_arguments)]
     fn resolve_imported_macro_surface(
         &self,
         owner_canonical: &str,
@@ -349,8 +350,7 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
         exported_name: &str,
         tracked_deps: &mut BTreeSet<String>,
         resolution_deps: &mut BTreeSet<String>,
-        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        visiting: &mut FxHashSet<(String, String)>,
+        cache: &mut NativePropProjectionCache,
     ) -> Option<ResolvedImportedMacroSurface>
     where
         Self: Sized,
@@ -358,18 +358,17 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
         let dep_canonical =
             self.resolve_type_dependency_canonical(owner_canonical, import_source)?;
         let declaration = self.resolve_type_declaration(dep_canonical.as_str(), exported_name);
-        let resolution = self.resolve_macro_elements(
+        let native_props = self.resolve_native_props(
             owner_canonical,
             import_source,
             exported_name,
             tracked_deps,
             resolution_deps,
             cache,
-            visiting,
         )?;
         Some(ResolvedImportedMacroSurface {
             declaration,
-            resolution,
+            native_props,
         })
     }
 
@@ -379,8 +378,6 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
         span: verter_span::Span,
         expanded: bool,
         tracked_deps: &mut BTreeSet<String>,
-        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        visiting: &mut FxHashSet<(String, String)>,
     ) -> Option<ResolvedJsdocBlock>;
 
     /// Whether `canonical_id` is package-backed per the workspace's

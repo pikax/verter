@@ -17632,30 +17632,15 @@ mod single_resolution_engine_guards {
             "crates/verter_session/src/resolver_core/shallow_file_state.rs",
             10,
         ),
-        // The `ResolvedMacroElements` carrier (elements + keep-all
-        // native_props from ONE shared-dispatch surface resolution): its
-        // `elements` field names the legacy DTO type, and the retained
-        // display renderer imports the engine module path — pass-through
-        // DTO naming, zero engine resolution. `native_props` rows are built
-        // directly from `TypeInfoSurfaceMember`s (no parser DTO
-        // round-trip).
-        (
-            "crates/verter_session/src/resolver_core/surface_projector.rs",
-            2,
-        ),
         // The imported-macro-type element projection: a THIN normalize of
         // shared-engine macro-surface results INTO the legacy compile-facing
         // DTO shape (`shared_resolve(type) + normalise`) — a pass-through
         // construction of already-resolved data for the parser consumer, NOT a
         // new resolution through the doomed OXC engine (it performs zero
         // `type_surface` resolution; it only names the DTO types it builds).
-        // Covers BOTH sanctioned positions on this bridge (emits + props,
-        // macro-argument AND per-name routes) plus the QueryResult-style
-        // `NamedTypeElementsOutcome` carrier the component-meta
-        // macro-elements rail consumes (value / recursive / genuine-miss —
-        // one added mention of the same boundary DTO, zero added
-        // resolution); the whole file deletes with the same legacy-DTO
-        // consolidation.
+        // Covers both sanctioned compile positions (emits + props,
+        // macro-argument and per-name routes). Component-meta consumes no
+        // parser DTO from this module.
         //
         // 45 -> 48: the alias-tolerant defineEmits gate
         // (`bare_named_type_arg`) plus the node-domain payload-form
@@ -17781,20 +17766,12 @@ mod single_resolution_engine_guards {
             "crates/verter_session/src/resolver_core/external_type_body.rs",
             10,
         ),
-        (
-            "crates/verter_session/src/resolver_core/surface_projector.rs",
-            2,
-        ),
         // The imported-macro-type element projection: constructs the legacy
         // `ResolvedElements` DTO FROM shared-engine macro-surface results (a
         // pass-through of already-resolved data for the compile parser, like
         // the `vue_bridge.rs` sidecar above) — NOT a new resolution engine.
-        // Covers BOTH sanctioned positions on this bridge (emits + props,
-        // macro-argument AND per-name routes) plus the QueryResult-style
-        // `NamedTypeElementsOutcome::Resolved` carrier arm the
-        // component-meta macro-elements rail consumes (one added mention of
-        // the same boundary DTO, zero added resolution); the whole file
-        // deletes with the same legacy-DTO consolidation.
+        // Covers both sanctioned compile positions (emits + props,
+        // macro-argument and per-name routes); component-meta is independent.
         (
             "crates/verter_session/src/typeinfo/framework_surface/vue_exec/imported_elements.rs",
             10,

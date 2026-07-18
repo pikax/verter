@@ -10,14 +10,6 @@ use verter_workspace::ResolveRequestKind;
 #[derive(Debug, Clone, Default)]
 pub struct ExternalTypeBodyCache {
     resolved: FxHashMap<(String, String), Option<ResolvedElements>>,
-    /// Per-request memo for the component-meta MACRO-ELEMENTS rail
-    /// (`resolve_component_meta_macro_elements_target_with_view`): the
-    /// dispatch-resolved elements PLUS the keep-all `native_props` rows
-    /// projected from the same surface resolution. A DEDICATED slot family
-    /// (not `resolved`): the compile-facing loaded-files rail's entries
-    /// carry no native rows, so the two rails' values are not
-    /// interchangeable.
-    macro_elements: FxHashMap<(String, String), Option<super::ResolvedMacroElements>>,
     source_analysis:
         FxHashMap<(String, verter_semantic::analysis::Hash16), AnalyzedExternalTypeSource>,
 }
@@ -41,25 +33,6 @@ impl ExternalTypeBodyCache {
         value: Option<ResolvedElements>,
     ) -> Option<Option<ResolvedElements>> {
         self.resolved.insert(key, value)
-    }
-
-    pub fn macro_elements(
-        &self,
-        key: &(String, String),
-    ) -> Option<&Option<super::ResolvedMacroElements>> {
-        self.macro_elements.get(key)
-    }
-
-    pub fn insert_macro_elements(
-        &mut self,
-        key: (String, String),
-        value: Option<super::ResolvedMacroElements>,
-    ) -> Option<Option<super::ResolvedMacroElements>> {
-        self.macro_elements.insert(key, value)
-    }
-
-    pub fn macro_elements_len(&self) -> usize {
-        self.macro_elements.len()
     }
 
     pub fn source_analysis_len(&self) -> usize {

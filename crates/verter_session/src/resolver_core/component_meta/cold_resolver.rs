@@ -34,8 +34,7 @@ where
     let mut resolved_type_registry = Vec::new();
     let mut resolved_type_registry_meta = Vec::new();
     let mut seen_registry_names = FxHashSet::default();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
-    let mut visiting = FxHashSet::default();
+    let mut native_props_cache = super::NativePropProjectionCache::default();
     let mut tracked_deps = BTreeSet::new();
 
     let eval_outputs = if expanded {
@@ -171,8 +170,7 @@ where
                 dep_exported_name.as_ref(),
                 &mut tracked_deps,
                 &mut resolution_deps,
-                &mut cache,
-                &mut visiting,
+                &mut native_props_cache,
             )
         } else {
             None
@@ -192,8 +190,6 @@ where
                 declaration.span,
                 expanded,
                 &mut tracked_deps,
-                &mut cache,
-                &mut visiting,
             )
         };
 
@@ -235,21 +231,8 @@ where
             continue;
         }
 
-        let imported_elements = imported_surface
-            .take()
-            .map(|surface| surface.resolution)
-            .or_else(|| {
-                host.resolve_macro_elements(
-                    owner_canonical,
-                    &dep.import_source,
-                    dep_exported_name.as_ref(),
-                    &mut tracked_deps,
-                    &mut resolution_deps,
-                    &mut cache,
-                    &mut visiting,
-                )
-            });
-        if let Some(resolution) = imported_elements {
+        let imported_native_props = imported_surface.take().map(|surface| surface.native_props);
+        if let Some(native_props) = imported_native_props {
             // The native-only surface (`native_props`) rides the SAME
             // dispatch resolution that produced the elements payload:
             // keep-all rows built directly from the one-level
@@ -312,12 +295,12 @@ where
                     import_source: dep.import_source.clone(),
                     surface_is_authoritative: imported_surface_is_authoritative,
                     declaration,
-                    native_props: resolution.native_props,
+                    native_props,
                     jsdoc,
                 });
             }
         } else {
-            // graph-native fallback. When `imported_elements`
+            // graph-native fallback. When `imported_native_props`
             // is `None` the macro has no resolvable surface; emit empty
             // surfaces and proceed. The previous source-text reparse
             // path (read source then call the source-typed projector)
@@ -529,8 +512,6 @@ where
                             declaration.span,
                             true,
                             &mut tracked_deps,
-                            &mut cache,
-                            &mut visiting,
                         )
                     };
                     resolved_macros.push(ResolvedMacroMeta {

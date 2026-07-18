@@ -112,8 +112,7 @@ mod normalize_slots;
 // through the flat `vue_exec::props_from_typeinfo_surface` path.
 pub(crate) use imported_elements::{
     imported_emits_resolved_elements, imported_named_props_resolved_elements,
-    imported_props_resolved_elements, named_type_elements_outcome, NamedTypeElementsOutcome,
-    NativeProjection,
+    imported_props_resolved_elements,
 };
 pub(crate) use normalize::{
     emits_from_typeinfo_surface, exposed_from_typeinfo_surface, index_signatures_from_surface,

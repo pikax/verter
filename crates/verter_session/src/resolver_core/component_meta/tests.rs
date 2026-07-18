@@ -2,8 +2,7 @@ use super::*;
 use crate::resolver_core::declaration_metadata::ResolvedExportTarget;
 use std::collections::BTreeMap;
 use verter_parser::utils::oxc::script::type_surface::{
-    ResolvedCallPayloadForm, ResolvedElements, ResolvedMemberVisibility,
-    ResolvedNamedCallSignature, ResolvedProp, RuntimeType,
+    ResolvedElements, ResolvedMemberVisibility, ResolvedProp, RuntimeType,
 };
 use verter_semantic::analysis::type_eval::DeclarationId;
 use verter_semantic::analysis::types::{
@@ -135,25 +134,18 @@ impl ComponentMetaResolverHost for TestHost {
         self.owner_local_roots_with_surface.contains(root_name)
     }
 
-    fn resolve_macro_elements(
+    fn resolve_native_props(
         &self,
         _owner_canonical: &str,
         import_source: &str,
         exported_name: &str,
         _tracked_deps: &mut BTreeSet<String>,
         _resolution_deps: &mut BTreeSet<String>,
-        _cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        _visiting: &mut FxHashSet<(String, String)>,
-    ) -> Option<crate::resolver_core::ResolvedMacroElements> {
+        _cache: &mut NativePropProjectionCache,
+    ) -> Option<Vec<ResolvedNativeProp>> {
         self.external_macro_elements
             .get(&(import_source.to_string(), exported_name.to_string()))
-            .cloned()
-            .map(|elements| crate::resolver_core::ResolvedMacroElements {
-                elements,
-                // The TestHost fixtures exercise dep gating / suppression /
-                // registry seeding; none of them assert `native_props`.
-                native_props: Vec::new(),
-            })
+            .map(|_| Vec::new())
     }
 
     fn resolve_jsdoc_block(
@@ -162,8 +154,6 @@ impl ComponentMetaResolverHost for TestHost {
         _span: Span,
         _expanded: bool,
         _tracked_deps: &mut BTreeSet<String>,
-        _cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        _visiting: &mut FxHashSet<(String, String)>,
     ) -> Option<ResolvedJsdocBlock> {
         None
     }
@@ -264,16 +254,15 @@ impl ComponentMetaResolverHost for CombinedSurfaceTestHost {
         self.eval_outputs.clone()
     }
 
-    fn resolve_macro_elements(
+    fn resolve_native_props(
         &self,
         _owner_canonical: &str,
         _import_source: &str,
         _exported_name: &str,
         _tracked_deps: &mut BTreeSet<String>,
         _resolution_deps: &mut BTreeSet<String>,
-        _cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        _visiting: &mut FxHashSet<(String, String)>,
-    ) -> Option<crate::resolver_core::ResolvedMacroElements> {
+        _cache: &mut NativePropProjectionCache,
+    ) -> Option<Vec<ResolvedNativeProp>> {
         panic!(
             "resolve_component_meta_parts should not separately ask for imported macro elements"
         );
@@ -286,8 +275,7 @@ impl ComponentMetaResolverHost for CombinedSurfaceTestHost {
         exported_name: &str,
         _tracked_deps: &mut BTreeSet<String>,
         _resolution_deps: &mut BTreeSet<String>,
-        _cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        _visiting: &mut FxHashSet<(String, String)>,
+        _cache: &mut NativePropProjectionCache,
     ) -> Option<ResolvedImportedMacroSurface> {
         self.imported_surface_calls
             .set(self.imported_surface_calls.get() + 1);
@@ -301,50 +289,13 @@ impl ComponentMetaResolverHost for CombinedSurfaceTestHost {
                 kind: crate::resolver_core::ResolvedDeclarationKind::Interface,
                 text: Some("export interface Props { label: string }".to_string()),
             },
-            resolution: crate::resolver_core::ResolvedMacroElements {
-                elements: ResolvedElements {
-                    props: vec![ResolvedProp {
-                        span: Span::new(0, 29),
-                        key: Span::new(24, 29),
-                        key_name: Some("label".to_string()),
-                        optional: false,
-                        types: vec![RuntimeType::String],
-                        visibility: ResolvedMemberVisibility::Public,
-                        type_span: Some(Span::new(31, 37)),
-                        type_text: Some("string".to_string()),
-                        map_local: false,
-                        span_is_absolute: true,
-                        declared_in_macro_type_arg: false,
-                    }],
-                    call_signatures: vec![ResolvedNamedCallSignature {
-                        span: Span::new(0, 24),
-                        name: "save".to_string(),
-                        name_span: None,
-                        signature: ResolvedCallPayloadForm::Tuple {
-                            tuple_text: "[value: string]".to_string(),
-                        },
-                        map_local: false,
-                        span_is_absolute: true,
-                    }],
-                    ..ResolvedElements::default()
-                },
-                // The keep-all native rows carried alongside the elements.
-                // DELIBERATELY DIFFERENT from the `elements` carrier (which
-                // holds only the public `label` prop): the mock carries a
-                // PRIVATE `secret` row that `elements` does not contain, so
-                // the combined-surface test discriminates the SOURCING — a
-                // regression that re-derived `native_props` from the
-                // elements DTO would surface `label`/Public instead of
-                // `secret`/Private and FAIL the assertions in
-                // `resolve_component_meta_parts_prefers_combined_imported_macro_surface`.
-                native_props: vec![crate::resolver_core::ResolvedNativeProp {
-                    name: "secret".to_string(),
-                    is_optional: true,
-                    type_annotation: Some("boolean".to_string()),
-                    visibility: verter_type_expr::MemberVisibility::Private,
-                    span: Span::default(),
-                }],
-            },
+            native_props: vec![crate::resolver_core::ResolvedNativeProp {
+                name: "secret".to_string(),
+                is_optional: true,
+                type_annotation: Some("boolean".to_string()),
+                visibility: verter_type_expr::MemberVisibility::Private,
+                span: Span::default(),
+            }],
         })
     }
 
@@ -354,8 +305,6 @@ impl ComponentMetaResolverHost for CombinedSurfaceTestHost {
         _span: Span,
         _expanded: bool,
         _tracked_deps: &mut BTreeSet<String>,
-        _cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        _visiting: &mut FxHashSet<(String, String)>,
     ) -> Option<ResolvedJsdocBlock> {
         None
     }
@@ -446,7 +395,7 @@ fn resolve_component_meta_parts_prefers_combined_imported_macro_surface() {
     assert_eq!(resolved.resolved_macros.len(), 1);
     // The combined imported-macro surface feeds `native_props` (the
     // class-member visibility carrier) DIRECTLY from the resolution payload
-    // (`ResolvedMacroElements.native_props`) — the cold resolver plumbs the
+    // (`ResolvedImportedMacroSurface.native_props`) — the cold resolver plumbs the
     // CARRIED rows through without re-projecting them from the elements
     // DTO. The mock's two carriers deliberately DIVERGE (`elements` holds
     // only the public `label` prop; `native_props` holds only the private

@@ -12461,20 +12461,14 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     ),
     ("macro_output_expansion.rs", "expand_slot_binding_output"),
     ("typeinfo/raise.rs", "project_node_to_type_expr_json_bytes"),
+    ("typeinfo/raise.rs", "render_node_display_with_ctx"),
     ("vue_exec/mod.rs", "raise_member_value"),
-    // The imported-macro combined DTO builder (the imported-macro analogue of
-    // `props_from_typeinfo_surface`): mints each member value ONCE via the
-    // registered `raise_member_value` mint, renders it for display, and stamps
-    // BOTH published row families from the same pass — the `ResolvedProp`
-    // rows and the keep-all `ResolvedNativeProp` rows (via the
-    // `ResolvedNativeProp::from_surface_member` constructor — publication,
-    // not a decide). The runtime-constructor classification decides on the
-    // member's NODE (`runtime_types_for_node`), never the minted value.
-    // (`props_elements_from_surface` is its thin `.elements` adapter for the
-    // compile-facing per-name route and no longer mints.)
+    // The legacy imported-props DTO builder mints each member value for
+    // display publication only. Component-meta native rows use the separate
+    // registered renderer above and never consume this runtime DTO.
     (
         "vue_exec/imported_elements.rs",
-        "macro_elements_from_surface",
+        "resolved_elements_from_surface",
     ),
     // The imported-emits DTO builder (the imported-macro analogue of
     // `emits_from_typeinfo_surface` + `property_style_emit_fields` in one

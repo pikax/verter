@@ -150,10 +150,53 @@ impl VerterHost {
             &mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
         >,
     ) -> Option<TypeInfoSurface> {
+        let surface = self.project_shallow_surface_graph_only(
+            ctx,
+            dispatch,
+            base,
+            path,
+            context,
+            walker_diagnostics,
+        )?;
+
+        // Enrich each member with its leading-JSDoc spans, sliced from the
+        // member's DECLARATION file's cache-owned RAW source
+        // (`IndexedReady.raw_source`). Member/signature spans are SFC-absolute
+        // (the eval source is position-preserving), so the JSDoc anchor offset
+        // and the slice source share the raw-file coordinate system. `build` is
+        // a pure graph projection that holds no source, so this source-touching
+        // step lives at the host layer. An inherited member's JSDoc is read from
+        // its origin (heritage base) file via the member's `declaration_origin`
+        // — see `TypeInfoSurface::with_member_jsdoc_spans`. The carrier-file
+        // raw source is read through the SAME `ctx` the surface was projected
+        // under, so an overlay session reads its overlay raw source.
+        Some(surface.with_member_jsdoc_spans(|canonical| {
+            ctx.ensure_indexed_ready_serve(canonical)
+                .map(|serve| Arc::clone(&serve.indexed.raw_source))
+        }))
+    }
+
+    /// Project `base` to a pure graph-backed one-level surface.
+    ///
+    /// This is the ownership boundary shared by compile-oriented TypeInfo
+    /// projection and component-meta's native visibility projection. It runs
+    /// exactly one path-precise `Shallow` demand and performs no source reads,
+    /// JSDoc hydration, display rendering, or member-body expansion.
+    pub(crate) fn project_shallow_surface_graph_only(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        dispatch: &ProjectSemanticDispatch<'_>,
+        base: SemanticNodeId,
+        path: Arc<[PathSegment]>,
+        context: ProjectionReductionContext,
+        walker_diagnostics: Option<
+            &mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
+        >,
+    ) -> Option<TypeInfoSurface> {
         debug_assert_eq!(
             context.mode,
             ProjectionMode::Shallow,
-            "project_shallow_surface_from_base synthesises a one-level surface; mode must be Shallow"
+            "project_shallow_surface_graph_only synthesises a one-level surface; mode must be Shallow"
         );
         // Path-precise `Shallow` projection synthesises the one-level surface
         // (call / construct / index signatures + merged members) without
@@ -184,25 +227,9 @@ impl VerterHost {
         };
 
         let graph = ctx.project_type_store().semantic_graph();
-        let surface = match graph.node_data(terminal).as_deref() {
-            Some(SemanticNodeData::Object(view)) => TypeInfoSurface::build(graph, view),
-            _ => return None,
-        };
-
-        // Enrich each member with its leading-JSDoc spans, sliced from the
-        // member's DECLARATION file's cache-owned RAW source
-        // (`IndexedReady.raw_source`). Member/signature spans are SFC-absolute
-        // (the eval source is position-preserving), so the JSDoc anchor offset
-        // and the slice source share the raw-file coordinate system. `build` is
-        // a pure graph projection that holds no source, so this source-touching
-        // step lives at the host layer. An inherited member's JSDoc is read from
-        // its origin (heritage base) file via the member's `declaration_origin`
-        // — see `TypeInfoSurface::with_member_jsdoc_spans`. The carrier-file
-        // raw source is read through the SAME `ctx` the surface was projected
-        // under, so an overlay session reads its overlay raw source.
-        Some(surface.with_member_jsdoc_spans(|canonical| {
-            ctx.ensure_indexed_ready_serve(canonical)
-                .map(|serve| Arc::clone(&serve.indexed.raw_source))
-        }))
+        match graph.node_data(terminal).as_deref() {
+            Some(SemanticNodeData::Object(view)) => Some(TypeInfoSurface::build(graph, view)),
+            _ => None,
+        }
     }
 }

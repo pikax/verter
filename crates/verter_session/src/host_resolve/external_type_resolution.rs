@@ -6,10 +6,10 @@
 //! driver, depth/step gates, host-cache lookup, route materialisation, and
 //! post-publish cache writes) plus the component-meta macro hooks that
 //! build on it:
-//! - `resolve_component_meta_macro_elements_target_with_view`
+//! - `resolve_component_meta_native_props_target_with_view`
 //! - `build_imported_macro_declaration_from_target`
 //! - `resolve_component_meta_macro_surface_with_view`
-//! - `resolve_component_meta_macro_elements_with_view`
+//! - `resolve_component_meta_native_props_with_view`
 //!
 //! Each `_with_view` helper has a base wrapper (`#[cfg(test)]`-gated) that
 //! passes `view = None`; production paths reach the view-aware variant via
@@ -373,12 +373,10 @@ impl VerterHost {
     /// resolved-type cache slot and the dep-source reads observe the active
     /// session overlay.
     ///
-    /// The resolved payload is the [`crate::resolver_core::ResolvedMacroElements`]
-    /// bundle — the legacy elements DTO PLUS the keep-all `native_props`
-    /// rows projected from the SAME dispatch surface resolution — memoized
-    /// per request in the cache's DEDICATED macro-elements slot family.
+    /// The resolved payload is the component-meta-owned keep-all native row
+    /// set, memoized only in the request-local native projection cache.
     #[allow(clippy::too_many_arguments)]
-    fn resolve_component_meta_macro_elements_target_with_view(
+    fn resolve_component_meta_native_props_target_with_view(
         &self,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         owner_canonical: &str,
@@ -386,13 +384,13 @@ impl VerterHost {
         type_name: &str,
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
-        cache: &mut ExternalTypeCache,
+        cache: &mut crate::resolver_core::component_meta::NativePropProjectionCache,
         view: Option<&dyn crate::session_view::SessionView>,
     ) -> Option<(
         String,
         String,
         String,
-        crate::resolver_core::ResolvedMacroElements,
+        Vec<crate::resolver_core::ResolvedNativeProp>,
     )> {
         let dep_canonical = self.resolve_loaded_dependency_canonical(
             owner_canonical,
@@ -404,7 +402,7 @@ impl VerterHost {
         resolution_deps.insert(dep_canonical.clone());
 
         let cache_key = (dep_canonical.clone(), type_name.to_string());
-        if let Some(cached) = cache.macro_elements(&cache_key).cloned() {
+        if let Some(cached) = cache.get(&cache_key).cloned() {
             let resolution = cached?;
             // Re-query the project-global `ImportedRootDb` for the target
             // identity. It collapses concurrent cold requests internally, so
@@ -424,8 +422,8 @@ impl VerterHost {
         resolution_deps.insert(seed_canonical.clone());
 
         let seed_target_key = (seed_canonical.clone(), seed_type_name.clone());
-        if let Some(cached) = cache.macro_elements(&seed_target_key).cloned() {
-            cache.insert_macro_elements(cache_key, cached.clone());
+        if let Some(cached) = cache.get(&seed_target_key).cloned() {
+            cache.insert(cache_key, cached.clone());
             let resolution = cached?;
             return Some((dep_canonical, seed_canonical, seed_type_name, resolution));
         }
@@ -459,7 +457,7 @@ impl VerterHost {
                     .resolver_cycle_detections
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-            cache.insert_macro_elements(cache_key, None);
+            cache.insert(cache_key, None);
             return None;
         };
 
@@ -467,8 +465,8 @@ impl VerterHost {
         resolution_deps.insert(effective_dep_canonical.clone());
 
         let final_target_key = (effective_dep_canonical.clone(), effective_type_name.clone());
-        if let Some(cached) = cache.macro_elements(&final_target_key).cloned() {
-            cache.insert_macro_elements(cache_key, cached.clone());
+        if let Some(cached) = cache.get(&final_target_key).cloned() {
+            cache.insert(cache_key, cached.clone());
             let resolution = cached?;
             return Some((
                 dep_canonical,
@@ -500,27 +498,21 @@ impl VerterHost {
         // trackers pin that). `None` means a genuine unresolved
         // route/declaration; a transient recursion back-edge returns
         // un-cached.
-        let outcome = crate::typeinfo::framework_surface::vue_exec::named_type_elements_outcome(
+        let outcome = crate::resolver_core::component_meta::named_native_props_outcome(
             ctx,
             effective_dep_canonical.as_str(),
             effective_type_name.as_str(),
-            // This rail's consumer (the component-meta `ResolvedMacroMeta`)
-            // publishes the keep-all `native_props` rows.
-            crate::typeinfo::framework_surface::vue_exec::NativeProjection::Include,
-            // The component-meta rail surfaces unresolved arms through the
-            // expansion-diagnostics projection, not this elements DTO.
-            &mut Vec::new(),
         );
-        use crate::typeinfo::framework_surface::vue_exec::NamedTypeElementsOutcome;
+        use crate::resolver_core::component_meta::ResolvedNativePropsOutcome;
         let resolved = match outcome {
-            NamedTypeElementsOutcome::Resolved(resolution) => Some(resolution),
+            ResolvedNativePropsOutcome::Resolved(resolution) => Some(resolution),
             // Transient back-edge — never a cacheable negative.
-            NamedTypeElementsOutcome::Recursive => return None,
-            NamedTypeElementsOutcome::Miss => None,
+            ResolvedNativePropsOutcome::Recursive => return None,
+            ResolvedNativePropsOutcome::Miss => None,
         };
 
-        cache.insert_macro_elements(cache_key, resolved.clone());
-        cache.insert_macro_elements(final_target_key, resolved.clone());
+        cache.insert(cache_key, resolved.clone());
+        cache.insert(final_target_key, resolved.clone());
         resolved.map(|resolution| {
             (
                 dep_canonical,
@@ -604,7 +596,7 @@ impl VerterHost {
         type_name: &str,
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
-        cache: &mut ExternalTypeCache,
+        cache: &mut crate::resolver_core::component_meta::NativePropProjectionCache,
     ) -> Option<crate::resolver_core::ResolvedImportedMacroSurface> {
         crate::resolver_core::with_bare_host_ctx_for_test(self, |ctx| {
             self.resolve_component_meta_macro_surface_with_view(
@@ -633,23 +625,23 @@ impl VerterHost {
         type_name: &str,
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
-        cache: &mut ExternalTypeCache,
+        cache: &mut crate::resolver_core::component_meta::NativePropProjectionCache,
         view: Option<&dyn crate::session_view::SessionView>,
     ) -> Option<crate::resolver_core::ResolvedImportedMacroSurface> {
         component_meta_trace_custom!(
-            "resolve_component_meta_macro_elements",
+            "resolve_component_meta_native_props",
             format!(
                 "owner={} import={} type={} store_view={} cache_entries={}",
                 owner_canonical,
                 import_source,
                 type_name,
                 false,
-                cache.macro_elements_len(),
+                cache.len(),
             ),
         );
 
         let (dep_canonical, effective_dep_canonical, effective_type_name, resolution) = self
-            .resolve_component_meta_macro_elements_target_with_view(
+            .resolve_component_meta_native_props_target_with_view(
                 ctx,
                 owner_canonical,
                 import_source,
@@ -667,23 +659,23 @@ impl VerterHost {
                 effective_dep_canonical.as_str(),
                 effective_type_name.as_str(),
             ),
-            resolution,
+            native_props: resolution,
         })
     }
 
     /// Base wrapper that fixes `view = None`. Test-only.
     #[cfg(test)]
-    pub(crate) fn resolve_component_meta_macro_elements(
+    pub(crate) fn resolve_component_meta_native_props(
         &self,
         owner_canonical: &str,
         import_source: &str,
         type_name: &str,
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
-        cache: &mut ExternalTypeCache,
-    ) -> Option<crate::resolver_core::ResolvedMacroElements> {
+        cache: &mut crate::resolver_core::component_meta::NativePropProjectionCache,
+    ) -> Option<Vec<crate::resolver_core::ResolvedNativeProp>> {
         crate::resolver_core::with_bare_host_ctx_for_test(self, |ctx| {
-            self.resolve_component_meta_macro_elements_with_view(
+            self.resolve_component_meta_native_props_with_view(
                 ctx,
                 owner_canonical,
                 import_source,
@@ -696,12 +688,12 @@ impl VerterHost {
         })
     }
 
-    /// View-aware variant of [`Self::resolve_component_meta_macro_elements`].
+    /// View-aware variant of [`Self::resolve_component_meta_native_props`].
     ///
     /// Threads `view` into the macro-target resolver so cross-file macro type
     /// resolution observes the session overlay.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn resolve_component_meta_macro_elements_with_view(
+    pub(crate) fn resolve_component_meta_native_props_with_view(
         &self,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         owner_canonical: &str,
@@ -709,10 +701,10 @@ impl VerterHost {
         type_name: &str,
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
-        cache: &mut ExternalTypeCache,
+        cache: &mut crate::resolver_core::component_meta::NativePropProjectionCache,
         view: Option<&dyn crate::session_view::SessionView>,
-    ) -> Option<crate::resolver_core::ResolvedMacroElements> {
-        self.resolve_component_meta_macro_elements_target_with_view(
+    ) -> Option<Vec<crate::resolver_core::ResolvedNativeProp>> {
+        self.resolve_component_meta_native_props_target_with_view(
             ctx,
             owner_canonical,
             import_source,

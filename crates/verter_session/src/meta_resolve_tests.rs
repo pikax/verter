@@ -1804,24 +1804,17 @@ defineProps<C>()
 
 /// The EMPTY-member projection through the REAL rail: a call-signature-only
 /// imported interface projects a one-level surface with ZERO members (and a
-/// non-empty call-signature set), so the combined macro-elements projection
-/// (`macro_elements_from_surface`) runs its member loop over an empty set —
-/// `native_props` must come out EMPTY (no synthetic floor rows) while the
-/// resolution itself SUCCEEDS.
+/// non-empty call-signature set). The component-meta-owned native projector
+/// must return resolved-empty (no synthetic floor rows), not a miss.
 ///
 /// The state-level facts alone (macro entry present + `native_props` empty +
 /// emit published) CANNOT discriminate a genuine empty projection from a
 /// projection MISS: the cold resolver's fallback arm synthesizes the same
-/// macro entry with `native_props: Vec::new()` when the macro-elements
+/// macro entry with `native_props: Vec::new()` when the native projection
 /// resolution returns `None`, and the emit surfaces through the independent
 /// `vue_macro_dtos` path. The discriminator is the direct drive of the SAME
-/// macro-elements rail the cold resolver consumes
-/// (`resolve_component_meta_macro_elements` →
-/// `named_type_elements_outcome(NativeProjection::Include)`): it must return
-/// `Some` (a miss returns `None` and FAILS), with `has_call_signature` set
-/// (stamped only by the surface projection `macro_elements_from_surface`;
-/// the memberless root-classified fallback stamps `false`) — proving the
-/// projection genuinely RAN before its `native_props` emptiness is asserted.
+/// native rail the cold resolver consumes: it must return `Some([])`; a miss
+/// returns `None` and fails the test.
 #[test]
 fn native_props_empty_for_call_signature_only_imported_type() {
     let project = make_project();
@@ -1878,18 +1871,15 @@ defineEmits<Events>()
     // `native_props`, and the emit rides the independent `vue_macro_dtos`
     // path). Drive the SAME macro-elements rail the cold resolver consumes
     // and require the projection to have RESOLVED: a miss returns `None`
-    // and fails the expect; a memberless ROOT-CLASSIFIED (non-surface)
-    // resolution stamps `has_call_signature = false` and fails the
-    // call-signature assert. Only the genuine one-level surface projection
-    // (`macro_elements_from_surface` under `NativeProjection::Include`)
-    // produces `Some` + `has_call_signature = true` — whose member loop
-    // over the empty member set is what must yield zero native rows.
+    // and fails the expect. The object surface is authoritative even though
+    // its member loop is empty because it contains only a call signature.
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut elements_cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut elements_cache =
+        crate::resolver_core::component_meta::NativePropProjectionCache::default();
     let resolution = project
         .host()
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/App.vue",
             "./events",
             "Events",
@@ -1903,17 +1893,10 @@ defineEmits<Events>()
              cold resolver's empty fallback arm",
         );
     assert!(
-        resolution.elements.has_call_signature,
-        "the resolved elements must carry the call signature, proving the \
-         one-level surface projection ran (the memberless root-classified \
-         fallback stamps has_call_signature = false)"
-    );
-    assert!(
-        resolution.native_props.is_empty(),
+        resolution.is_empty(),
         "the RESOLVED projection's member loop over the empty member set \
          must produce ZERO native_props rows, got: {:?}",
         resolution
-            .native_props
             .iter()
             .map(|prop| prop.name.as_str())
             .collect::<Vec<_>>()

@@ -2749,8 +2749,8 @@ defineProps<DynamicProps>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
-    let first = host.resolve_component_meta_macro_elements(
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
+    let first = host.resolve_component_meta_native_props(
         "/src/Consumer.vue",
         "./types",
         "DynamicProps",
@@ -2771,9 +2771,9 @@ defineProps<DynamicProps>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
     let second = host
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/src/Consumer.vue",
             "./types",
             "DynamicProps",
@@ -2785,17 +2785,13 @@ defineProps<DynamicProps>()
 
     assert!(
         second
-            .elements
-            .props
             .iter()
-            .filter_map(|prop| prop.key_name.as_deref())
+            .map(|prop| prop.name.as_str())
             .any(|name| name == "added"),
         "resolved props should come from the updated dependency: {:?}",
         second
-            .elements
-            .props
             .iter()
-            .filter_map(|prop| prop.key_name.clone())
+            .map(|prop| prop.name.clone())
             .collect::<Vec<_>>()
     );
 }
@@ -2830,9 +2826,9 @@ defineProps<Props>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
     let first = host
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/src/Consumer.vue",
             "./types",
             "Props",
@@ -2842,13 +2838,9 @@ defineProps<Props>()
         )
         .expect("Props should resolve on the first request");
     assert!(
-        first
-            .elements
-            .props
-            .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("label")),
+        first.iter().any(|prop| prop.name == "label"),
         "first resolution should surface the `label` member, got: {:?}",
-        first.elements.props
+        first
     );
 
     // The retired `ResolvedTypeCacheDb` hit counter has no successor on the
@@ -2858,9 +2850,9 @@ defineProps<Props>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
     let second = host
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/src/Consumer.vue",
             "./types",
             "Props",
@@ -2870,13 +2862,9 @@ defineProps<Props>()
         )
         .expect("Props should resolve on the second request");
     assert!(
-        second
-            .elements
-            .props
-            .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("label")),
+        second.iter().any(|prop| prop.name == "label"),
         "second resolution should surface the `label` member, got: {:?}",
-        second.elements.props
+        second
     );
 
     let warm_after = host.project_type_store().imported_roots().warm_hit_count();
@@ -3263,9 +3251,9 @@ defineProps<Props>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
     let first = host
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/src/Consumer.vue",
             "./barrel",
             "Props",
@@ -3275,13 +3263,9 @@ defineProps<Props>()
         )
         .expect("Props should resolve on the first request");
     assert!(
-        first
-            .elements
-            .props
-            .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("label")),
+        first.iter().any(|prop| prop.name == "label"),
         "the barrel-routed resolution should surface the `label` member, got: {:?}",
-        first.elements.props
+        first
     );
 
     // The barrel hop's imported-root proof is host-owned and fact-validated:
@@ -3291,9 +3275,9 @@ defineProps<Props>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
     let second = host
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/src/Consumer.vue",
             "./barrel",
             "Props",
@@ -3303,13 +3287,9 @@ defineProps<Props>()
         )
         .expect("Props should resolve on the second request");
     assert!(
-        second
-            .elements
-            .props
-            .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("label")),
+        second.iter().any(|prop| prop.name == "label"),
         "the repeat barrel-routed resolution should surface the `label` member, got: {:?}",
-        second.elements.props
+        second
     );
 
     let warm_after = host.project_type_store().imported_roots().warm_hit_count();
@@ -3441,9 +3421,9 @@ defineProps<FirstProps>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
     let first = host
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/src/Consumer.vue",
             "./barrel_a",
             "FirstProps",
@@ -3454,19 +3434,17 @@ defineProps<FirstProps>()
         .expect("FirstProps should resolve");
     assert!(
         first
-            .elements
-            .props
             .iter()
-            .filter_map(|prop| prop.key_name.as_deref())
+            .map(|prop| prop.name.as_str())
             .any(|name| name == "first"),
         "FirstProps should resolve through the nested barrel chain"
     );
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
     let second = host
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/src/Consumer.vue",
             "./barrel_a",
             "SecondProps",
@@ -3478,10 +3456,8 @@ defineProps<FirstProps>()
 
     assert!(
         second
-            .elements
-            .props
             .iter()
-            .filter_map(|prop| prop.key_name.as_deref())
+            .map(|prop| prop.name.as_str())
             .any(|name| name == "second"),
         "SecondProps should still resolve through the nested barrel chain"
     );
@@ -3723,9 +3699,9 @@ export interface ButtonProps {
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
     let resolved = host
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/src/Consumer.vue",
             "./types",
             "ButtonProps",
@@ -3735,13 +3711,9 @@ export interface ButtonProps {
         )
         .expect("ButtonProps should resolve through the barrel");
     assert!(
-        resolved
-            .elements
-            .props
-            .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("label")),
+        resolved.iter().any(|prop| prop.name == "label"),
         "the barrel-scanned Vue child should surface the `label` member, got: {:?}",
-        resolved.elements.props
+        resolved
     );
 
     let whole_hash = host
@@ -3896,10 +3868,10 @@ defineProps<ButtonProps>()
     let _view = host.resolver_store_view_read().into_owned_view();
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
 
     let link_props = host
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/workspace/components/Button.vue",
             "../types",
             "LinkProps",
@@ -3909,26 +3881,18 @@ defineProps<ButtonProps>()
         )
         .expect("LinkProps should resolve through the cyclic barrel");
     assert!(
-        link_props
-            .elements
-            .props
-            .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("as")),
+        link_props.iter().any(|prop| prop.name == "as"),
         "LinkProps should keep inherited props through the cyclic barrel, got: {:?}",
-        link_props.elements.props
+        link_props
     );
     assert!(
-        link_props
-            .elements
-            .props
-            .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("type")),
+        link_props.iter().any(|prop| prop.name == "type"),
         "LinkProps should keep button attribute props through the cyclic barrel, got: {:?}",
-        link_props.elements.props
+        link_props
     );
 
     let use_icons = host
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/workspace/components/Button.vue",
             "../composables/useComponentIcons",
             "UseComponentIconsProps",
@@ -3938,22 +3902,14 @@ defineProps<ButtonProps>()
         )
         .expect("UseComponentIconsProps should resolve through the cyclic barrel");
     assert!(
-        use_icons
-            .elements
-            .props
-            .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("icon")),
+        use_icons.iter().any(|prop| prop.name == "icon"),
         "UseComponentIconsProps should keep imported IconProps members, got: {:?}",
-        use_icons.elements.props
+        use_icons
     );
     assert!(
-        use_icons
-            .elements
-            .props
-            .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("avatar")),
+        use_icons.iter().any(|prop| prop.name == "avatar"),
         "UseComponentIconsProps should keep imported AvatarProps members, got: {:?}",
-        use_icons.elements.props
+        use_icons
     );
 }
 

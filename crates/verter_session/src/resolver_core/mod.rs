@@ -97,6 +97,7 @@ pub(crate) use component_meta_query_engine::{
 // `node_contains_semantic_miss_with_dispatch` /
 // `node_root_is_unmaterialized_sentinel_with_dispatch`); the raised-shape suite
 // imports them through these re-exports.
+pub use component_meta::ResolvedNativeProp;
 #[cfg(test)]
 pub(crate) use component_meta_query_engine::{
     type_expr_contains_semantic_miss, type_expr_root_is_unmaterialized_sentinel,
@@ -155,7 +156,6 @@ pub use shallow_file_state::{
     ShallowFileState, ShallowImportResolver, ShallowTypeSymbol, ShallowTypeView,
     ShallowValueSymbol, WildcardReexport,
 };
-pub use surface_projector::{ResolvedMacroElements, ResolvedNativeProp};
 
 /// Lane-identity token for singleflight / stability-request
 /// deduplication.

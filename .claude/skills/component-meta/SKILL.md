@@ -135,7 +135,7 @@ The native component-meta / typeinfo type resolver — analyzer (`verter_semanti
   - `AnalyzedSlotField.return_expr: Option<TypeExpr>` (raw text on `return_type`)
   - `ResolvedLocalType.type_expr` MUST be populated whenever `expanded` is non-empty.
   - `AnalyzedMacro.parsed_type_argument` is populated via `lower_ts_type(first, source)` directly on the OXC AST node, not via source slice + `parse_type_annotation`.
-- `ResolvedNativeProp.type_annotation` (the keep-all `native_props` rows on `ResolvedMacroElements`) is a display-only passthrough rendered once from the member's raised typed value; consumers do not parse it back.
+- `ResolvedNativeProp.type_annotation` is a display-only passthrough rendered once by the component-meta-owned native projector from the member node; consumers do not parse it back. Component-meta never consumes the legacy `ResolvedElements` runtime DTO.
 
 **Consumer contract** — every downstream stage walks the typed form:
 
@@ -260,13 +260,12 @@ The NAPI/WASM/LSP wire boundary consumes the session-owned, fully-materialized
   `verter_type_expr::MemberVisibility`, carried VERBATIM from the
   shared-dispatch `TypeInfoSurfaceMember` (the keep-all rows are built by
   `ResolvedNativeProp::from_surface_member` in
-  `resolver_core/surface_projector.rs`, invoked from the projection terminal
-  `macro_elements_from_surface` in
-  `typeinfo/framework_surface/vue_exec/imported_elements.rs` — under
-  `NativeProjection::Include`; the compile-facing elements-only routes pass
-  `Skip` and build no native rows — from the SAME one-level surface
-  resolution that produces the legacy elements DTO — the
-  `ResolvedMacroElements` carrier — never from a parser DTO round-trip;
+  `resolver_core/component_meta/native_props.rs` after exactly one graph-only
+  empty-path Shallow surface demand). The request-local
+  `NativePropProjectionCache` is independent from `ExternalTypeBodyCache`;
+  resolved-empty is distinct from `Miss`, and `Recursive` is never admitted.
+  The legacy compile-facing `ResolvedElements` projection is independent and
+  never feeds this native surface;
   `span` is always `Span::default()`: the FFI/proto row carries no
   declaration-file id, so a declaration-site byte offset would be unanchored
   for a cross-file inherited member).

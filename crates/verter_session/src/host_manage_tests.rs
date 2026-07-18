@@ -8212,14 +8212,14 @@ export interface ChipProps {
     ws.reset_reads();
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
 
     // The replacement semantic query for the retired frontier element
     // payload: the component-meta macro-elements rail resolves the routed
     // root's declaration carrier through the ONE shared dispatch and
     // projects its one-level Shallow surface (member values stay carriers).
     let resolved = host
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/src/App.vue",
             "./useComponentIcons",
             "UseComponentIconsProps",
@@ -8230,22 +8230,16 @@ export interface ChipProps {
         .expect("UseComponentIconsProps should resolve");
 
     assert!(
-        resolved
-            .elements
-            .props
-            .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("icon")),
+        resolved.iter().any(|prop| prop.name == "icon"),
         "Icon-backed props should still resolve through structural indexed access, got {:?}",
-        resolved.elements.props
+        resolved
     );
     assert!(
         resolved
-            .elements
-            .props
             .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("avatar")),
+            .any(|prop| prop.name == "avatar"),
         "leaf imported prop aliases should remain present without resolving the companion body, got {:?}",
-        resolved.elements.props
+        resolved
     );
     assert!(
         ws.read_count("/src/Avatar.vue") <= 1,
@@ -10262,10 +10256,10 @@ export interface UnusedProps {
     let _view = host.resolver_store_view_read().into_owned_view();
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
 
     ws.reset_reads();
-    let resolved = host.resolve_component_meta_macro_elements(
+    let resolved = host.resolve_component_meta_native_props(
         "/src/Consumer.vue",
         "./types",
         "ButtonProps",
@@ -10307,8 +10301,7 @@ export interface UnusedProps {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn resolve_component_meta_macro_elements_skips_unrelated_wildcard_siblings_when_root_stem_matches()
-{
+fn resolve_component_meta_native_props_skips_unrelated_wildcard_siblings_when_root_stem_matches() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/Consumer.vue",
@@ -10394,10 +10387,10 @@ export interface UnusedProps {
     let _view = host.resolver_store_view_read().into_owned_view();
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
 
     ws.reset_reads();
-    let resolved = host.resolve_component_meta_macro_elements(
+    let resolved = host.resolve_component_meta_native_props(
         "/src/Consumer.vue",
         "./types",
         "ModalProps",
@@ -10450,7 +10443,7 @@ export interface UnusedProps {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn resolve_component_meta_macro_elements_keeps_leaf_object_prop_imports_symbolic() {
+fn resolve_component_meta_native_props_keeps_leaf_object_prop_imports_symbolic() {
     // The leaf imported object prop (`avatar?: AvatarProps`) is published as
     // a shallow reference carrier: resolving it builds the versioned root
     // identity through AT MOST ONE canonical cold shallow materialization of
@@ -10548,10 +10541,10 @@ export interface IconProps {
     let _view = host.resolver_store_view_read().into_owned_view();
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
 
     ws.reset_reads();
-    let resolved = host.resolve_component_meta_macro_elements(
+    let resolved = host.resolve_component_meta_native_props(
         "/src/Consumer.vue",
         "./types",
         "Props",
@@ -10566,22 +10559,16 @@ export interface IconProps {
     );
     // The resolved surface publishes BOTH members: the leaf imported object
     // prop stays a shallow carrier but is still a published row.
-    let elements = &resolved.as_ref().unwrap().elements;
+    let native_props = resolved.as_ref().unwrap();
     assert!(
-        elements
-            .props
-            .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("avatar")),
+        native_props.iter().any(|prop| prop.name == "avatar"),
         "the leaf imported object prop publishes its row, got {:?}",
-        elements.props,
+        native_props,
     );
     assert!(
-        elements
-            .props
-            .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("icon")),
+        native_props.iter().any(|prop| prop.name == "icon"),
         "the indexed-access member publishes its row, got {:?}",
-        elements.props,
+        native_props,
     );
     // At most ONE canonical cold shallow materialization of the leaf import:
     // the versioned root identity needs Avatar's canonical shallow inventory
@@ -10619,8 +10606,8 @@ export interface IconProps {
     // import — warm identities re-serve from the canonical caches.
     let mut tracked_deps_warm = std::collections::BTreeSet::new();
     let mut resolution_deps_warm = std::collections::BTreeSet::new();
-    let mut cache_warm = crate::resolver_core::ExternalTypeBodyCache::default();
-    let resolved_warm = host.resolve_component_meta_macro_elements(
+    let mut cache_warm = crate::resolver_core::component_meta::NativePropProjectionCache::default();
+    let resolved_warm = host.resolve_component_meta_native_props(
         "/src/Consumer.vue",
         "./types",
         "Props",
@@ -10646,7 +10633,7 @@ export interface IconProps {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn resolve_component_meta_macro_elements_cached_lookup_tracks_routed_target_dependencies() {
+fn resolve_component_meta_native_props_cached_lookup_tracks_routed_target_dependencies() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/Consumer.vue",
@@ -10693,11 +10680,11 @@ export interface ButtonProps {
     );
 
     let _view = host.resolver_store_view_read().into_owned_view();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
 
     let mut tracked_deps_first = std::collections::BTreeSet::new();
     let mut resolution_deps_first = std::collections::BTreeSet::new();
-    let resolved_first = host.resolve_component_meta_macro_elements(
+    let resolved_first = host.resolve_component_meta_native_props(
         "/src/Consumer.vue",
         "./types",
         "ButtonProps",
@@ -10721,7 +10708,7 @@ export interface ButtonProps {
 
     let mut tracked_deps_second = std::collections::BTreeSet::new();
     let mut resolution_deps_second = std::collections::BTreeSet::new();
-    let resolved_second = host.resolve_component_meta_macro_elements(
+    let resolved_second = host.resolve_component_meta_native_props(
         "/src/Consumer.vue",
         "./types",
         "ButtonProps",
@@ -10746,7 +10733,7 @@ export interface ButtonProps {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn resolve_component_meta_macro_elements_tracks_routed_package_targets_across_requests() {
+fn resolve_component_meta_native_props_tracks_routed_package_targets_across_requests() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/workspace/src/Consumer.vue",
@@ -10806,8 +10793,9 @@ const emit = defineEmits<PackageEmits>()
 
     let mut tracked_deps_first = std::collections::BTreeSet::new();
     let mut resolution_deps_first = std::collections::BTreeSet::new();
-    let mut cache_first = crate::resolver_core::ExternalTypeBodyCache::default();
-    let resolved_first = host.resolve_component_meta_macro_elements(
+    let mut cache_first =
+        crate::resolver_core::component_meta::NativePropProjectionCache::default();
+    let resolved_first = host.resolve_component_meta_native_props(
         "/workspace/src/Consumer.vue",
         "./types",
         "PackageEmits",
@@ -10830,8 +10818,9 @@ const emit = defineEmits<PackageEmits>()
 
     let mut tracked_deps_second = std::collections::BTreeSet::new();
     let mut resolution_deps_second = std::collections::BTreeSet::new();
-    let mut cache_second = crate::resolver_core::ExternalTypeBodyCache::default();
-    let resolved_second = host.resolve_component_meta_macro_elements(
+    let mut cache_second =
+        crate::resolver_core::component_meta::NativePropProjectionCache::default();
+    let resolved_second = host.resolve_component_meta_native_props(
         "/workspace/src/Consumer.vue",
         "./types",
         "PackageEmits",
@@ -10867,7 +10856,7 @@ const emit = defineEmits<PackageEmits>()
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn resolve_component_meta_macro_elements_skip_imported_declaration_builds() {
+fn resolve_component_meta_native_props_skip_imported_declaration_builds() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/Consumer.vue",
@@ -10914,12 +10903,12 @@ export interface ButtonProps {
     );
 
     let _view = host.resolver_store_view_read().into_owned_view();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
 
     host.provenance().reset();
-    let resolved_elements = host.resolve_component_meta_macro_elements(
+    let resolved_elements = host.resolve_component_meta_native_props(
         "/src/Consumer.vue",
         "./types",
         "ButtonProps",
@@ -10961,7 +10950,7 @@ export interface ButtonProps {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn resolve_component_meta_macro_elements_materializes_active_package_target_once() {
+fn resolve_component_meta_native_props_materializes_active_package_target_once() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/workspace/src/Consumer.vue",
@@ -11019,9 +11008,9 @@ const emit = defineEmits<PackageEmits>()
     let _view = host.resolver_store_view_read().into_owned_view();
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
 
-    let resolved = host.resolve_component_meta_macro_elements(
+    let resolved = host.resolve_component_meta_native_props(
         "/workspace/src/Consumer.vue",
         "./types",
         "PackageEmits",
@@ -11053,8 +11042,8 @@ const emit = defineEmits<PackageEmits>()
     host.provenance().reset();
     let mut tracked_deps2 = std::collections::BTreeSet::new();
     let mut resolution_deps2 = std::collections::BTreeSet::new();
-    let mut cache2 = crate::resolver_core::ExternalTypeBodyCache::default();
-    let re_resolved = host.resolve_component_meta_macro_elements(
+    let mut cache2 = crate::resolver_core::component_meta::NativePropProjectionCache::default();
+    let re_resolved = host.resolve_component_meta_native_props(
         "/workspace/src/Consumer.vue",
         "./types",
         "PackageEmits",
@@ -11134,7 +11123,7 @@ const emit = defineEmits<PackageEmits>()
     let _view = host.resolver_store_view_read().into_owned_view();
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
 
     let resolved = host.resolve_component_meta_macro_surface(
         "/workspace/src/Consumer.vue",
@@ -11154,7 +11143,7 @@ const emit = defineEmits<PackageEmits>()
     host.provenance().reset();
     let mut tracked_deps2 = std::collections::BTreeSet::new();
     let mut resolution_deps2 = std::collections::BTreeSet::new();
-    let mut cache2 = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache2 = crate::resolver_core::component_meta::NativePropProjectionCache::default();
     let re_resolved = host.resolve_component_meta_macro_surface(
         "/workspace/src/Consumer.vue",
         "./types",

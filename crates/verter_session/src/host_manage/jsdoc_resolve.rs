@@ -468,23 +468,21 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         self.owner_local_macro_root_surface_presence(owner_canonical, root_name, macro_kind)
     }
 
-    fn resolve_macro_elements(
+    fn resolve_native_props(
         &self,
         owner_canonical: &str,
         import_source: &str,
         exported_name: &str,
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
-        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        visiting: &mut rustc_hash::FxHashSet<(String, String)>,
-    ) -> Option<crate::resolver_core::ResolvedMacroElements> {
-        let _ = visiting;
+        cache: &mut crate::resolver_core::component_meta::NativePropProjectionCache,
+    ) -> Option<Vec<crate::resolver_core::ResolvedNativeProp>> {
         // Route through the view-aware variant so the resolved-type cache
         // slot, dep-source reads, and the route-frontier closure observe
         // the active session overlay (when one is present). Base
         // (non-session) compute paths surface `view = None` and the
         // helper collapses to the historical behaviour.
-        self.host.resolve_component_meta_macro_elements_with_view(
+        self.host.resolve_component_meta_native_props_with_view(
             self.ctx,
             owner_canonical,
             import_source,
@@ -503,10 +501,8 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         exported_name: &str,
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
-        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        visiting: &mut rustc_hash::FxHashSet<(String, String)>,
+        cache: &mut crate::resolver_core::component_meta::NativePropProjectionCache,
     ) -> Option<crate::resolver_core::ResolvedImportedMacroSurface> {
-        let _ = visiting;
         self.host.resolve_component_meta_macro_surface_with_view(
             self.ctx,
             owner_canonical,
@@ -525,8 +521,6 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         span: verter_span::Span,
         expanded: bool,
         tracked_deps: &mut std::collections::BTreeSet<String>,
-        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        visiting: &mut rustc_hash::FxHashSet<(String, String)>,
     ) -> Option<ResolvedJsdocBlock> {
         resolve_jsdoc_block(
             self.host,
@@ -539,9 +533,6 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
                 ProjectionMode::Identity
             },
             tracked_deps,
-            cache,
-            visiting,
-            verter_workspace::ResolveRequestKind::TypeImport,
         )
     }
 
@@ -739,7 +730,6 @@ pub(crate) fn read_full_source(
     Some(serve.indexed.raw_source.to_string())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_jsdoc_block(
     host: &VerterHost,
     ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
@@ -747,9 +737,6 @@ pub(crate) fn resolve_jsdoc_block(
     span: verter_span::Span,
     mode: ProjectionMode,
     tracked_deps: &mut std::collections::BTreeSet<String>,
-    cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-    visiting: &mut rustc_hash::FxHashSet<(String, String)>,
-    kind: verter_workspace::ResolveRequestKind,
 ) -> Option<ResolvedJsdocBlock> {
     if span.start == 0 && span.end == 0 {
         return None;
@@ -766,33 +753,17 @@ pub(crate) fn resolve_jsdoc_block(
         description,
         tags: tags
             .into_iter()
-            .map(|tag| {
-                map_jsdoc_tag(
-                    host,
-                    ctx,
-                    canonical_source,
-                    mode,
-                    tracked_deps,
-                    cache,
-                    visiting,
-                    kind,
-                    tag,
-                )
-            })
+            .map(|tag| map_jsdoc_tag(host, ctx, canonical_source, mode, tracked_deps, tag))
             .collect(),
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn map_jsdoc_tag(
     host: &VerterHost,
     ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
     canonical_source: &str,
     mode: ProjectionMode,
     tracked_deps: &mut std::collections::BTreeSet<String>,
-    _cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-    _visiting: &mut rustc_hash::FxHashSet<(String, String)>,
-    _kind: verter_workspace::ResolveRequestKind,
     tag: verter_semantic::analysis::types::JsdocTag,
 ) -> ResolvedJsdocTag {
     let (text, raw_type, subject_name) = parse_jsdoc_tag_payload(tag.name.as_str(), tag.text);

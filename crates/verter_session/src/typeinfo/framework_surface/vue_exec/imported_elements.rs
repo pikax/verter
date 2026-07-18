@@ -28,8 +28,7 @@ use super::{raise_member_value, TypeinfoVueSurfaceOutputCap, UnresolvedSurfaceAr
 use crate::meta_resolve::callable_view::CallableNodeView;
 use crate::project_semantic_dispatch::node_data_for;
 use crate::project_semantic_dispatch::output_materialization::OutputProjector;
-use crate::resolver_core::surface_projector::{render_type_expr_display, ResolvedMacroElements};
-use crate::resolver_core::ResolvedNativeProp;
+use crate::resolver_core::surface_projector::render_type_expr_display;
 use crate::semantic_query::{
     FunctionParam, ProjectionMode, ProjectionReductionContext, SemanticNodeData,
 };
@@ -324,8 +323,7 @@ fn bare_named_type_arg(
 /// DTO shape:
 ///
 /// - every surface member (public AND non-public — class-backed props keep
-///   their visibility; the one keep-all projection core runs elements-only
-///   here, [`NativeProjection::Skip`]) contributes a [`ResolvedProp`] row
+///   their visibility) contributes a [`ResolvedProp`] row
 ///   with its rendered display text and the node-domain runtime-constructor
 ///   classification;
 /// - the object surface stamps `root_runtime_types: [Object]` (the compile
@@ -379,7 +377,7 @@ pub(crate) fn imported_props_resolved_elements(
         // non-object — trusting `Object` here would silence the compile
         // object-like diagnostic.
         if !surface.members.is_empty() || !surface.call_signatures.is_empty() {
-            return Some(props_elements_from_surface(ctx, &dispatch, surface));
+            return Some(resolved_elements_from_surface(ctx, &dispatch, surface));
         }
     }
 
@@ -443,66 +441,22 @@ pub(crate) fn imported_named_props_resolved_elements(
     )
 }
 
-/// Whether the combined projection also builds the keep-all `native_props`
-/// rows. The compile-facing `.elements` routes pass [`Skip`] — they consume
-/// only the legacy elements DTO, so building native rows there would be pure
-/// per-member allocation waste (a discarded second vector plus name /
-/// display-text clones); the component-meta macro-elements rail passes
-/// [`Include`]. The elements value is byte-identical under both.
-///
-/// [`Skip`]: NativeProjection::Skip
-/// [`Include`]: NativeProjection::Include
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NativeProjection {
-    /// Elements-only caller: leave `native_props` empty (no allocation).
-    Skip,
-    /// Build the keep-all `native_props` rows alongside the elements.
-    Include,
-}
-
-/// QueryResult-style outcome of the `(canonical, name)` elements projection —
-/// the dispatch-owned terminal the component-meta macro-elements rail
-/// consumes. Distinguishes a resolved VALUE from a transient RECURSIVE
-/// back-edge (which the caller must NOT negative-cache) and from a GENUINE
-/// unresolved route/declaration miss.
-pub(crate) enum NamedTypeElementsOutcome {
-    /// The root resolved through the shared dispatch and projected (or
-    /// root-classified) into the macro-elements payload: the legacy elements
-    /// value PLUS — under [`NativeProjection::Include`] — the keep-all
-    /// `native_props` rows built directly from the same surface resolution
-    /// (empty under [`NativeProjection::Skip`]).
-    Resolved(ResolvedMacroElements),
-    /// The declaration is on an active resolution chain (a dispatch
-    /// recursion back-edge) and produced no projectable surface — an honest
-    /// TRANSIENT non-result; never a cacheable negative.
-    Recursive,
-    /// Genuine unresolved route/declaration (or an undecidable root).
-    Miss,
-}
-
 /// The `(canonical, name)` → macro-elements projection core shared by the
-/// per-name imported-props route and the component-meta macro-elements rail
-/// (whose route target is already resolved when it reaches this projection):
+/// per-name imported-props route:
 /// `ResolveDecl` the declaration carrier through the ONE shared dispatch,
 /// request its EMPTY-PATH one-level `Shallow` surface, and run the thin
-/// combined normalize ([`macro_elements_from_surface`] — the legacy
-/// props-row projection plus, under [`NativeProjection::Include`], the
-/// keep-all `native_props` rows, one pass over the same surface; member
-/// values stay semantic carriers — no recursive member-value
-/// materialization). The compile-facing elements-only adapter passes
-/// [`NativeProjection::Skip`]. The RESOLVED-non-object vs UNRESOLVED
-/// distinction applies to the memberless outcome.
+/// normalize into the legacy props-row projection. Member values stay
+/// semantic carriers; component-meta native projection is owned elsewhere.
 ///
 /// `unresolved_arms` receives the surface projection's unresolvable
 /// SURFACE-COMPOSITION arm facts (name-sorted, deduplicated); callers that
 /// don't consume them pass a throwaway vec.
-pub(crate) fn named_type_elements_outcome(
+fn named_type_resolved_elements(
     ctx: &dyn crate::resolver_core::ResolverContext,
     root_canonical: &str,
     root_name: &str,
-    native: NativeProjection,
     unresolved_arms: &mut Vec<UnresolvedSurfaceArm>,
-) -> NamedTypeElementsOutcome {
+) -> Option<ResolvedElements> {
     let dispatch = ctx.dispatch();
     let host = ctx.host_for_fact_tracer_install();
 
@@ -519,10 +473,10 @@ pub(crate) fn named_type_elements_outcome(
         },
     ));
     crate::meta_resolve::emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
-    let (base, recursive) = match read.value {
-        crate::semantic_query::QueryResult::Value(id) => (id, false),
-        crate::semantic_query::QueryResult::Recursive(id) => (id, true),
-        crate::semantic_query::QueryResult::Error(_) => return NamedTypeElementsOutcome::Miss,
+    let base = match read.value {
+        crate::semantic_query::QueryResult::Value(id)
+        | crate::semantic_query::QueryResult::Recursive(id) => id,
+        crate::semantic_query::QueryResult::Error(_) => return None,
     };
 
     // One-level surface through the SAME shared synthesiser the macro-surface
@@ -547,97 +501,27 @@ pub(crate) fn named_type_elements_outcome(
             &walker_diagnostics,
         ));
         if !surface.members.is_empty() || !surface.call_signatures.is_empty() {
-            return NamedTypeElementsOutcome::Resolved(macro_elements_from_surface(
-                ctx, &dispatch, &surface, native,
-            ));
+            return Some(resolved_elements_from_surface(ctx, &dispatch, &surface));
         }
     }
 
-    match classified_root_elements(&dispatch, base) {
-        Some(elements) => NamedTypeElementsOutcome::Resolved(ResolvedMacroElements {
-            elements,
-            // A memberless root-classified outcome projects no member
-            // surface — no native rows.
-            native_props: Vec::new(),
-        }),
-        None if recursive => NamedTypeElementsOutcome::Recursive,
-        None => NamedTypeElementsOutcome::Miss,
-    }
+    classified_root_elements(&dispatch, base)
 }
 
-/// Compile-facing `Option` adapter over [`named_type_elements_outcome`] for
-/// the per-name imported-props route (whose legacy contract folds both the
-/// transient recursive back-edge and the genuine miss into the unresolved
-/// outcome, and consumes only the legacy elements value — so the native
-/// rows are never built here, [`NativeProjection::Skip`]).
-fn named_type_resolved_elements(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    root_canonical: &str,
-    root_name: &str,
-    unresolved_arms: &mut Vec<UnresolvedSurfaceArm>,
-) -> Option<ResolvedElements> {
-    match named_type_elements_outcome(
-        ctx,
-        root_canonical,
-        root_name,
-        NativeProjection::Skip,
-        unresolved_arms,
-    ) {
-        NamedTypeElementsOutcome::Resolved(resolution) => Some(resolution.elements),
-        NamedTypeElementsOutcome::Recursive | NamedTypeElementsOutcome::Miss => None,
-    }
-}
-
-/// Thin props-row adapter over [`macro_elements_from_surface`] for the
-/// compile-facing per-name route's terminal, which consumes only the legacy
-/// elements value — so the native rows are never built here
-/// ([`NativeProjection::Skip`]).
-fn props_elements_from_surface(
+/// Project a one-level surface into the legacy compile-facing elements DTO.
+/// Each rendered
+/// display text feeds ONLY the published rows (a publication, never a
+/// decision); the runtime-constructor classification decides on the
+/// member's NODE (`runtime_types_for_node`), never the minted value.
+fn resolved_elements_from_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     surface: &crate::typeinfo::surface::TypeInfoSurface,
 ) -> ResolvedElements {
-    macro_elements_from_surface(ctx, dispatch, surface, NativeProjection::Skip).elements
-}
-
-/// Combined keep-all projection of a one-level surface into the
-/// macro-elements payload ([`ResolvedMacroElements`]) — the SINGLE
-/// projection core for both consumers: the legacy props rows AND (under
-/// [`NativeProjection::Include`]) the `native_props` rows, built in ONE
-/// pass over the members so each member's value is raised + rendered
-/// exactly once and BOTH projections are guaranteed to read the SAME
-/// surface resolution. Every member (public AND non-public — class-backed
-/// members keep their visibility) contributes a props row with its rendered
-/// display text and node-domain runtime-constructor classification; the
-/// object surface stamps `root_runtime_types: [Object]`. The native rows
-/// are built DIRECTLY from the surface members via the
-/// [`ResolvedNativeProp::from_surface_member`] constructor (visibility
-/// carried verbatim, no `.is_public()` filter) — no `ResolvedElements`
-/// round-trip; an elements-only caller passes [`NativeProjection::Skip`]
-/// and no native row (or display-text clone) is built at all. Each rendered
-/// display text feeds ONLY the published rows (a publication, never a
-/// decision); the runtime-constructor classification decides on the
-/// member's NODE (`runtime_types_for_node`), never the minted value.
-fn macro_elements_from_surface(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
-    surface: &crate::typeinfo::surface::TypeInfoSurface,
-    native: NativeProjection,
-) -> ResolvedMacroElements {
     let mut props: Vec<ResolvedProp> = Vec::with_capacity(surface.members.len());
-    let mut native_props: Vec<ResolvedNativeProp> = match native {
-        NativeProjection::Skip => Vec::new(),
-        NativeProjection::Include => Vec::with_capacity(surface.members.len()),
-    };
     for member in surface.members.iter() {
         let raised = raise_member_value(ctx, member);
         let type_text = raised.as_ref().and_then(render_type_expr_display);
-        if native == NativeProjection::Include {
-            native_props.push(ResolvedNativeProp::from_surface_member(
-                member,
-                type_text.clone(),
-            ));
-        }
         props.push(ResolvedProp {
             span: verter_span::Span::default(),
             key: verter_span::Span::default(),
@@ -652,16 +536,13 @@ fn macro_elements_from_surface(
             declared_in_macro_type_arg: member.declared_in_macro_type_arg,
         });
     }
-    ResolvedMacroElements {
-        elements: ResolvedElements {
-            props,
-            has_call_signature: !surface.call_signatures.is_empty(),
-            call_signatures: Vec::new(),
-            // The name resolved and projected an object-like one-level
-            // surface through the shared engine.
-            root_runtime_types: vec![RuntimeType::Object],
-        },
-        native_props,
+    ResolvedElements {
+        props,
+        has_call_signature: !surface.call_signatures.is_empty(),
+        call_signatures: Vec::new(),
+        // The name resolved and projected an object-like one-level
+        // surface through the shared engine.
+        root_runtime_types: vec![RuntimeType::Object],
     }
 }
 
