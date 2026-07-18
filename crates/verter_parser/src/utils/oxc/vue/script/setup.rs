@@ -26,8 +26,8 @@ use super::usage::{
 };
 use crate::common::Span;
 use crate::utils::oxc::script::type_surface::{
-    infer_runtime_type, resolve_type_elements_with_ctx_ref, BlockedTypeSurface, ResolvedElements,
-    RuntimeType, TypeResolutionContext,
+    infer_runtime_type, resolve_type_elements_with_ctx_ref, ResolvedElements, RuntimeType,
+    TypeResolutionContext,
 };
 
 /// Context for setup script parsing
@@ -656,7 +656,7 @@ pub fn parse_macro_call<'a>(
     let type_params = call
         .type_arguments
         .as_ref()
-        .map(|tp| extract_type_params(tp, ctx, type_ctx, macro_resolution_surface(kind)));
+        .map(|tp| extract_type_params(tp, ctx, type_ctx, kind));
 
     match kind {
         VueMacroKind::DefineProps => {
@@ -746,7 +746,7 @@ pub fn parse_macro_call<'a>(
                                         tp,
                                         ctx,
                                         type_ctx,
-                                        Some(BlockedTypeSurface::DefineProps),
+                                        VueMacroKind::DefineProps,
                                     )
                                 });
                                 return Some((Some(Span::from(inner.span)), inner_type_params));
@@ -781,19 +781,17 @@ pub fn parse_macro_call<'a>(
 
 /// The resolution surface a Vue macro's first type argument feeds.
 ///
-/// Drives props/emits discrimination in the shared type-surface resolver
-/// (`TypeResolutionContext::is_props_surface`): a tuple-shaped member on a
-/// props surface stays a prop instead of being reclassified as the emit
-/// shorthand. Macros with no props/emits surface resolve unqualified.
-fn macro_resolution_surface(kind: VueMacroKind) -> Option<BlockedTypeSurface> {
-    match kind {
-        VueMacroKind::DefineProps | VueMacroKind::WithDefaults | VueMacroKind::DefineModel => {
-            Some(BlockedTypeSurface::DefineProps)
-        }
-        VueMacroKind::DefineEmits => Some(BlockedTypeSurface::DefineEmits),
-        VueMacroKind::DefineSlots => Some(BlockedTypeSurface::DefineSlots),
-        VueMacroKind::DefineExpose | VueMacroKind::DefineOptions => None,
-    }
+/// Whether a macro's first type argument feeds a PROPS surface
+/// (`defineProps` / `withDefaults` / `defineModel`). On a props surface a
+/// tuple-shaped member value stays a prop instead of being reclassified as
+/// the emit shorthand; every other macro resolves unqualified. The surface
+/// enum itself stays encapsulated in the resolver
+/// (`TypeResolutionContext::as_props_surface`).
+fn macro_feeds_props_surface(kind: VueMacroKind) -> bool {
+    matches!(
+        kind,
+        VueMacroKind::DefineProps | VueMacroKind::WithDefaults | VueMacroKind::DefineModel
+    )
 }
 
 /// Extract type parameters from a TSTypeParameterInstantiation.
@@ -801,13 +799,13 @@ fn macro_resolution_surface(kind: VueMacroKind) -> Option<BlockedTypeSurface> {
 /// Uses the `TypeResolutionContext` to resolve type references (interfaces, type aliases)
 /// declared in the same SFC. Unresolvable external types produce empty results.
 ///
-/// `surface` records which macro consumes the resolved type so the resolver
-/// can discriminate props vs emits (see [`macro_resolution_surface`]).
+/// `kind` selects the resolution surface so the resolver can discriminate
+/// props vs emits (see [`macro_feeds_props_surface`]).
 fn extract_type_params<'a>(
     tp: &'a TSTypeParameterInstantiation<'a>,
     ctx: &ScriptParseContext<'a>,
     type_ctx: &TypeResolutionContext<'a, 'a>,
-    surface: Option<BlockedTypeSurface>,
+    kind: VueMacroKind,
 ) -> MacroTypeParams {
     let full_span = tp.span;
     let offset = ctx.content_offset;
@@ -833,18 +831,16 @@ fn extract_type_params<'a>(
     // macro T's own body, so members reached through it get
     // `declared_in_macro_type_arg = true` (subject to the heritage
     // flip semantics inside the resolver).
+    // On a props macro, resolve through a props-surface view so tuple-shaped
+    // member values are not misclassified as emits; other macros resolve on
+    // the base context. The surface view is a per-macro clone owned here.
+    let props_surface_ctx = macro_feeds_props_surface(kind).then(|| type_ctx.as_props_surface());
+    let resolve_ctx = props_surface_ctx.as_ref().unwrap_or(type_ctx);
     let resolved = tp
         .params
         .first()
-        .map(|ts_type| match surface {
-            Some(surface) => {
-                // Resolve on the macro's surface so props vs emits
-                // discrimination applies. The clone is once per macro.
-                let mut surface_ctx = type_ctx.clone();
-                surface_ctx.current_surface = Some(surface);
-                resolve_type_elements_with_ctx_ref(ts_type, ctx.content_offset, &surface_ctx, true)
-            }
-            None => resolve_type_elements_with_ctx_ref(ts_type, ctx.content_offset, type_ctx, true),
+        .map(|ts_type| {
+            resolve_type_elements_with_ctx_ref(ts_type, ctx.content_offset, resolve_ctx, true)
         })
         .unwrap_or_default();
 

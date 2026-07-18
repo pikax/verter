@@ -773,6 +773,19 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
         )
     }
 
+    /// Return a clone of this context marked as a **props** resolution
+    /// surface, so a tuple-shaped or indexed-access-to-tuple member VALUE
+    /// stays a prop instead of being reclassified as the emit shorthand
+    /// (see [`Self::is_props_surface`]). Callers resolving a `defineProps` /
+    /// `withDefaults` / `defineModel` macro type argument resolve through
+    /// this view; the surface enum stays encapsulated in the resolver.
+    #[must_use]
+    pub fn as_props_surface(&self) -> Self {
+        let mut ctx = self.clone();
+        ctx.current_surface = Some(BlockedTypeSurface::DefineProps);
+        ctx
+    }
+
     /// Look up a type alias by comparing spans against source bytes
     pub fn find_type_alias(
         &self,
