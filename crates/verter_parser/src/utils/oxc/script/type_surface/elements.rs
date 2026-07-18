@@ -14,9 +14,10 @@ use oxc_span::GetSpan;
 use crate::common::Span;
 
 use super::{
-    get_type_reference_name, infer_runtime_type, resolve_type_elements_with_ctx_ref,
-    ResolvedCallPayloadForm, ResolvedElements, ResolvedMemberVisibility,
-    ResolvedNamedCallSignature, ResolvedProp, RuntimeType, TypeResolutionContext,
+    get_type_reference_name, infer_runtime_type, instantiate_type_params_ctx,
+    resolve_type_elements_with_ctx_ref, ResolvedCallPayloadForm, ResolvedElements,
+    ResolvedMemberVisibility, ResolvedNamedCallSignature, ResolvedProp, RuntimeType,
+    TypeResolutionContext,
 };
 
 /// Context-aware runtime type inference.
@@ -285,8 +286,125 @@ fn ctx_indexed_member_tuple_text<'ctx, 'a: 'ctx>(
             visited.pop();
             result
         }
+        // Instantiated generic: `BoxEmits<string>['save']`. Bind the type
+        // arguments and render the target member's tuple with the parameter
+        // substitution applied, so the emit payload is `[value: string]`
+        // rather than the unsubstituted `[value: T]`.
+        TSType::TSTypeReference(type_ref) => {
+            let name = get_type_reference_name(&type_ref.type_name);
+            if visited.contains(&name) {
+                return None;
+            }
+            visited.push(name.clone());
+            let type_args = type_ref.type_arguments.as_deref();
+            let result = if let Some((members, _, _, decl_params)) =
+                ctx.find_interface(name.as_bytes())
+            {
+                let child = instantiate_type_params_ctx(ctx, decl_params, type_args);
+                member_value_tuple_substituted(members, key, &child)
+            } else if let Some((aliased, decl_params)) = ctx.find_type_alias(name.as_bytes()) {
+                let child = instantiate_type_params_ctx(ctx, decl_params, type_args);
+                match aliased {
+                    TSType::TSTypeLiteral(lit) => {
+                        member_value_tuple_substituted(&lit.members, key, &child)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            visited.pop();
+            result
+        }
         _ => None,
     }
+}
+
+/// Find `key` among property signatures and render its tuple VALUE with the
+/// current instantiation's type-parameter substitution applied (see
+/// [`render_tuple_substituted`]). Used for the instantiated-generic
+/// indexed-access emit path (`BoxEmits<string>['save']`).
+fn member_value_tuple_substituted<'ctx, 'a: 'ctx>(
+    members: &[TSSignature<'a>],
+    key: &str,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+) -> Option<String> {
+    members.iter().find_map(|member| {
+        let TSSignature::TSPropertySignature(prop) = member else {
+            return None;
+        };
+        if get_property_key_name(&prop.key).as_deref() != Some(key) {
+            return None;
+        }
+        let ann = prop.type_annotation.as_ref()?;
+        let tuple = peel_to_tuple(&ann.type_annotation)?;
+        render_tuple_substituted(tuple, ctx)
+    })
+}
+
+/// Render a tuple's source text with bound type parameters substituted for
+/// their instantiation arguments (`[value: T]` under `T = string` becomes
+/// `[value: string]`). Typed-IR driven: each element is walked structurally
+/// and only a bound type-parameter reference is replaced with the bound
+/// type's own source text.
+fn render_tuple_substituted<'ctx, 'a: 'ctx>(
+    tuple: &TSTupleType<'a>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+) -> Option<String> {
+    let mut parts = Vec::with_capacity(tuple.element_types.len());
+    for element in &tuple.element_types {
+        parts.push(render_tuple_element_substituted(element, ctx)?);
+    }
+    Some(format!("[{}]", parts.join(", ")))
+}
+
+fn render_tuple_element_substituted<'ctx, 'a: 'ctx>(
+    element: &TSTupleElement<'a>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+) -> Option<String> {
+    match element {
+        TSTupleElement::TSNamedTupleMember(named) => {
+            let ty = named.element_type.as_ts_type()?;
+            let optional = if named.optional { "?" } else { "" };
+            Some(format!(
+                "{}{}: {}",
+                named.label.name.as_str(),
+                optional,
+                render_type_substituted(ty, ctx)?
+            ))
+        }
+        TSTupleElement::TSOptionalType(optional) => {
+            Some(format!("{}?", render_type_substituted(&optional.type_annotation, ctx)?))
+        }
+        TSTupleElement::TSRestType(rest) => {
+            Some(format!("...{}", render_type_substituted(&rest.type_annotation, ctx)?))
+        }
+        _ => render_type_substituted(element.as_ts_type()?, ctx),
+    }
+}
+
+/// Render a type's source text, substituting a bound type-parameter
+/// reference for the bound type's own source text. Non-parameter types
+/// (and generic references) keep their verbatim source slice.
+fn render_type_substituted<'ctx, 'a: 'ctx>(
+    ty: &TSType<'a>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+) -> Option<String> {
+    if let TSType::TSTypeReference(type_ref) = ty {
+        if type_ref.type_arguments.is_none() {
+            let name = get_type_reference_name(&type_ref.type_name);
+            let name_bytes = name.as_bytes();
+            if ctx.find_type_alias(name_bytes).is_none()
+                && ctx.find_interface(name_bytes).is_none()
+                && ctx.find_class(name_bytes).is_none()
+            {
+                if let Some(bound) = ctx.find_type_param(name_bytes) {
+                    return slice_source_span(ctx.source, bound.span().start, bound.span().end);
+                }
+            }
+        }
+    }
+    slice_source_span(ctx.source, ty.span().start, ty.span().end)
 }
 
 /// Find `key` among property signatures and resolve its value to a tuple's

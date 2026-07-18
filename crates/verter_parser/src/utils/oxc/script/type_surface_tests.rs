@@ -4900,3 +4900,84 @@ fn array_type_member_stays_prop_not_emit() {
         "an array type must not be reclassified as an emit"
     );
 }
+
+// =========================================================================
+// Instantiated-generic indexed-access emit: `BoxEmits<string>['save']` must
+// resolve as an emit whose payload has the instantiation substituted
+// (`[value: string]`), not the unsubstituted `[value: T]`. Typed-IR driven.
+// =========================================================================
+
+fn emit_tuple_text<'a>(resolved: &'a ResolvedElements, name: &str) -> &'a str {
+    let sig = resolved
+        .call_signatures
+        .iter()
+        .find(|c| c.name == name)
+        .unwrap_or_else(|| panic!("expected emit `{name}`, call_sigs: {:?}",
+            resolved.call_signatures.iter().map(|c| c.name.as_str()).collect::<Vec<_>>()));
+    match &sig.signature {
+        ResolvedCallPayloadForm::Tuple { tuple_text } => tuple_text.as_str(),
+        other => panic!("expected tuple payload for `{name}`, got {:?}", other),
+    }
+}
+
+#[test]
+fn instantiated_generic_indexed_access_emit_substitutes_interface() {
+    let (resolved, _) = resolve_with_ctx(
+        "interface BoxEmits<T> { save: [value: T] }\ninterface Emits { onSave: BoxEmits<string>['save'] }\ntype Test = Emits;",
+    );
+    let text = emit_tuple_text(&resolved, "onSave");
+    assert_eq!(
+        text, "[value: string]",
+        "the instantiation `BoxEmits<string>` must substitute T into the emit payload"
+    );
+    assert!(
+        !text.contains(": T"),
+        "the emit payload must not carry the unsubstituted type parameter, got {text:?}"
+    );
+    assert!(
+        !resolved
+            .props
+            .iter()
+            .any(|p| p.key_name.as_deref() == Some("onSave")),
+        "onSave must be an emit, not a prop"
+    );
+}
+
+#[test]
+fn instantiated_generic_indexed_access_emit_substitutes_alias() {
+    let (resolved, _) = resolve_with_ctx(
+        "type BoxEmits<T> = { save: [value: T] }\ninterface Emits { onSave: BoxEmits<number>['save'] }\ntype Test = Emits;",
+    );
+    assert_eq!(emit_tuple_text(&resolved, "onSave"), "[value: number]");
+}
+
+#[test]
+fn instantiated_generic_indexed_access_emit_substitutes_multi_param() {
+    let (resolved, _) = resolve_with_ctx(
+        "interface BoxEmits<K, V> { change: [key: K, value: V] }\ninterface Emits { onChange: BoxEmits<string, number>['change'] }\ntype Test = Emits;",
+    );
+    assert_eq!(
+        emit_tuple_text(&resolved, "onChange"),
+        "[key: string, value: number]"
+    );
+}
+
+#[test]
+fn instantiated_generic_indexed_access_non_tuple_member_stays_prop() {
+    // Negative guard: an instantiated indexed access to a NON-tuple member
+    // is not an emit — it stays a prop.
+    let (resolved, _) = resolve_with_ctx(
+        "interface BoxEmits<T> { current: T }\ninterface Props { value: BoxEmits<string>['current'] }\ntype Test = Props;",
+    );
+    assert!(
+        resolved
+            .props
+            .iter()
+            .any(|p| p.key_name.as_deref() == Some("value")),
+        "an indexed access to a non-tuple member stays a prop"
+    );
+    assert!(
+        !resolved.call_signatures.iter().any(|c| c.name == "value"),
+        "a non-tuple indexed access must not become an emit"
+    );
+}
