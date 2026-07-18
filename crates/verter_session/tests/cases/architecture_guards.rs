@@ -6036,13 +6036,6 @@ mod foundations_guards {
             // Pending B-C5 split, this file is exempt.
             "crates/verter_session/src/host_manage/prepared_decl.rs",
             "crates/verter_compiler/src/compile/template_data.rs",
-            // 1506 lines after the empty-SFC shell + SSR script-flag work.
-            // `codex/release-clean` edits the SAME `compile_inner` region;
-            // splitting this file BEFORE that merge would manufacture
-            // guaranteed semantic conflicts. Split it as the first follow-up
-            // AFTER the release-clean integration lands, then remove this
-            // exemption.
-            "crates/verter_compiler/src/compile/mod.rs",
             // The canonical HTML5 named-character-reference table (~2231 entries),
             // auto-generated from the pinned official svelte `entities.js` by
             // `scripts/generate-svelte-entities.mjs` and byte-pinned by the
@@ -17540,10 +17533,17 @@ mod single_resolution_engine_guards {
     // explicit module path (`utils::oxc::script::type_surface::…`) — no
     // vue-glob re-export spelling (`utils::oxc::vue::{ResolvedElements, …}`)
     // exists to hide engine-symbol imports from the imported-symbol counter,
-    // so compiler consumers (`compile/mod.rs`, `tsc/script.rs`, …) are fully
-    // counted.
+    // so compiler consumers (`compile/macro_type_diagnostics.rs`,
+    // `tsc/script.rs`, …) are fully counted.
     const TYPE_SURFACE_PATH_FILE_ALLOWLIST: &[(&str, usize)] = &[
-        ("crates/verter_compiler/src/compile/mod.rs", 2),
+        // The imported-macro-type validation diagnostics (split out of
+        // `compile/mod.rs` at the tscperf merge): names `RuntimeType` to
+        // classify a resolved props root — a pass-through read of the
+        // prepared macro surface, NOT a new engine path.
+        (
+            "crates/verter_compiler/src/compile/macro_type_diagnostics.rs",
+            2,
+        ),
         ("crates/verter_compiler/src/compile/types.rs", 1),
         // The Vue carrier's PRIVATE runtime-compile extras sidecar
         // (`VueRuntimeCompileExtras.external_types`, typed via the
