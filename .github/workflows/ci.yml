@@ -740,6 +740,54 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  endurance-lsp:
+    name: Endurance/soak harness (all provider routes)
+    needs: [detect-changes, build-vscode-e2e]
+    if: needs.detect-changes.outputs.editor_lsp == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Download editor integration binaries
+        uses: actions/download-artifact@v7
+        with:
+          name: vscode-e2e-native
+          path: target/debug
+      - name: Make editor integration binaries executable
+        run: chmod +x target/debug/verter-lsp target/debug/verter-relay-shim
+      - name: Download provider integration builds
+        uses: actions/download-artifact@v7
+        with:
+          name: vscode-e2e-build
+          path: packages
+      - name: Build endurance harness packages
+        run: pnpm --filter "@verter/dx-harness..." build
+      # CI-runnable subset (bounded per route): build-from-scratch, heavy-update,
+      # hover/definition storm, soak, and the synthetic scale lane. Long-soak and
+      # external-corpus lanes stay env-gated out of CI.
+      - name: Run endurance subset on all three provider routes
+        env:
+          VERTER_ENDURANCE_RECEIPT: ${{ runner.temp }}/verter-endurance
+        run: |
+          set -e
+          for route in tsserver tsgo shared-tsgo; do
+            echo "=== endurance route: ${route} ==="
+            VERTER_ENDURANCE_PROVIDER="${route}" pnpm --filter @verter/dx-harness test:endurance
+          done
+      - name: Upload endurance attestation receipts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: endurance-lsp-receipts
+          path: ${{ runner.temp }}/verter-endurance/
+          if-no-files-found: error
+          retention-days: 7
+
   vscode-e2e:
     name: VS Code E2E (${{ matrix.fixture }} / ${{ matrix.type_provider }})
     needs: [detect-changes, build-vscode-e2e]
