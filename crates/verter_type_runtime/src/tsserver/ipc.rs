@@ -121,8 +121,13 @@ const HANG_THRESHOLD: u32 = 3;
 /// Minimum interval between `reloadProjects` membership-recovery sends. A cold
 /// "Could not find source file" retry loop calls the recovery on every iteration;
 /// without a cooldown a storm of concurrent cold queries fires a `reloadProjects`
-/// (a full all-projects rebuild) per retry per query.
-const MEMBERSHIP_RECOVERY_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(300);
+/// per retry per query. The cooldown is sized to the cost of the operation: a
+/// `reloadProjects` is a FULL all-projects rebuild (seconds) that itself drops
+/// sibling companions' membership transiently — so each reload breeds the next
+/// cold-miss wave. Capping the rate to roughly one rebuild's duration breaks that
+/// self-reinforcing cycle: a single in-flight rebuild re-admits EVERY companion in
+/// the publish store, so further reloads while one is settling are pure churn.
+const MEMBERSHIP_RECOVERY_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(2000);
 
 impl TsserverTransport {
     /// Send a tsserver request and wait for the response.
