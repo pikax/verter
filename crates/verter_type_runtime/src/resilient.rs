@@ -615,74 +615,88 @@ where
 
         // Only this monitor is live at a time (the next one is spawned only after
         // a successful go-live), so the restart counter has a single accessor and
-        // needs no lock.
-        let attempt = state.restart_count.fetch_add(1, Ordering::Relaxed) + 1;
+        // needs no lock. Retry a FAILED respawn within this restart sequence: a
+        // transient spawn failure (resource pressure, a still-releasing port/pipe)
+        // must not leave the provider dead for the rest of the session. Retries
+        // share the SAME restart budget (`max_restarts`) and backoff schedule as
+        // crash events, so a persistently failing backend still fails closed —
+        // bounded, never a hot respawn loop.
+        loop {
+            let attempt = state.restart_count.fetch_add(1, Ordering::Relaxed) + 1;
 
-        if attempt > state.max_restarts {
-            tracing::error!(
-                "{} restart limit reached ({}) - staying in verter-only mode",
+            if attempt > state.max_restarts {
+                tracing::error!(
+                    "{} restart limit reached ({}) - staying in verter-only mode",
+                    state.backend.log_name(),
+                    state.max_restarts
+                );
+                state.notifier.notify(
+                    NotifySeverity::Error,
+                    format!(
+                        "TypeScript server ({}) crashed {} times. Running in verter-only mode for the rest of this session.",
+                        state.backend.user_label(),
+                        state.max_restarts
+                    ),
+                );
+                return;
+            }
+
+            let delay_secs = (1u64 << (attempt - 1)).min(4);
+            tracing::info!(
+                "{} restart attempt {attempt}/{} after {delay_secs}s",
                 state.backend.log_name(),
                 state.max_restarts
             );
-            state.notifier.notify(
-                NotifySeverity::Error,
-                format!(
-                    "TypeScript server ({}) crashed {} times. Running in verter-only mode for the rest of this session.",
-                    state.backend.user_label(),
-                    state.max_restarts
-                ),
-            );
-            return;
-        }
+            tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
 
-        let delay_secs = (1u64 << (attempt - 1)).min(4);
-        tracing::info!(
-            "{} restart attempt {attempt}/{} after {delay_secs}s",
-            state.backend.log_name(),
-            state.max_restarts
-        );
-        tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+            let new_crash_notify = Arc::new(Notify::new());
+            match state.backend.spawn(Arc::clone(&new_crash_notify)).await {
+                Ok(provider) => {
+                    let provider = Arc::new(provider);
 
-        let new_crash_notify = Arc::new(Notify::new());
-        match state.backend.spawn(Arc::clone(&new_crash_notify)).await {
-            Ok(provider) => {
-                let provider = Arc::new(provider);
+                    // Replay + install atomically through the actor: the fresh provider
+                    // is not made live until the current desired-state set (file set,
+                    // path configs, folders, AND carrier registrations) has been
+                    // replayed into it.
+                    let (live, live_rx) = oneshot::channel();
+                    if state
+                        .commands
+                        .send(Command::GoLive {
+                            provider,
+                            ack: live,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                    let _ = live_rx.await;
 
-                // Replay + install atomically through the actor: the fresh provider
-                // is not made live until the current desired-state set (file set,
-                // path configs, folders, AND carrier registrations) has been
-                // replayed into it.
-                let (live, live_rx) = oneshot::channel();
-                if state
-                    .commands
-                    .send(Command::GoLive {
-                        provider,
-                        ack: live,
-                    })
-                    .is_err()
-                {
+                    tracing::info!(
+                        "{} restarted successfully (attempt {attempt})",
+                        state.backend.log_name()
+                    );
+                    state.notifier.notify(
+                        NotifySeverity::Info,
+                        "TypeScript server restarted successfully.".to_string(),
+                    );
+
+                    state.restart_count.store(0, Ordering::Relaxed);
+                    spawn_crash_monitor(state, new_crash_notify);
                     return;
                 }
-                let _ = live_rx.await;
-
-                tracing::info!(
-                    "{} restarted successfully (attempt {attempt})",
-                    state.backend.log_name()
-                );
-                state.notifier.notify(
-                    NotifySeverity::Info,
-                    "TypeScript server restarted successfully.".to_string(),
-                );
-
-                state.restart_count.store(0, Ordering::Relaxed);
-                spawn_crash_monitor(state, new_crash_notify);
-            }
-            Err(err) => {
-                tracing::error!("Failed to restart {}: {}", state.backend.log_name(), err);
-                state.notifier.notify(
-                    NotifySeverity::Error,
-                    format!("Failed to restart TypeScript server: {err}"),
-                );
+                Err(err) => {
+                    tracing::error!(
+                        "Failed to restart {} (attempt {attempt}): {}",
+                        state.backend.log_name(),
+                        err
+                    );
+                    state.notifier.notify(
+                        NotifySeverity::Error,
+                        format!("Failed to restart TypeScript server: {err}"),
+                    );
+                    // Loop: retry against the SAME budget + backoff rather than
+                    // leaving the provider permanently dead on a transient failure.
+                }
             }
         }
     });

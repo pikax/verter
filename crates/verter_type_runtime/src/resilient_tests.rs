@@ -19,6 +19,7 @@
 //!   hanging).
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, Notify, Semaphore};
@@ -808,4 +809,152 @@ fn resilient_does_not_reintroduce_snapshot_then_swap() {
             "single-writer actor structure missing from resilient.rs: `{required}`"
         );
     }
+}
+
+// ── respawn-failure recovery (D2) ─────────────────────────────────────
+
+/// Backend whose `spawn` fails a configurable number of times before succeeding,
+/// recording every attempt. Drives the respawn-retry path deterministically —
+/// only the crash monitor calls `spawn`, so the load/store counter needs no CAS.
+struct FlakyBackend {
+    replacement: MockProvider,
+    failures_before_success: Arc<AtomicUsize>,
+    spawn_attempts: Arc<AtomicUsize>,
+}
+
+impl ResilientBackend<MockProvider> for FlakyBackend {
+    fn log_name(&self) -> &'static str {
+        "flaky-provider"
+    }
+
+    fn user_label(&self) -> &'static str {
+        "flaky"
+    }
+
+    fn restarting_error(&self) -> &'static str {
+        "flaky provider is restarting"
+    }
+
+    fn spawn<'a>(
+        &'a self,
+        _crash_notify: Arc<Notify>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<MockProvider, TypeProviderError>> + Send + 'a>,
+    > {
+        self.spawn_attempts.fetch_add(1, Ordering::Relaxed);
+        let provider = self.replacement.clone();
+        let remaining = self.failures_before_success.load(Ordering::Relaxed);
+        if remaining > 0 {
+            self.failures_before_success
+                .store(remaining - 1, Ordering::Relaxed);
+            Box::pin(async { Err(TypeProviderError::new("spawn failed (test)")) })
+        } else {
+            Box::pin(async move { Ok(provider) })
+        }
+    }
+}
+
+fn make_flaky(
+    initial: MockProvider,
+    replacement: MockProvider,
+    failures_before_success: usize,
+) -> (
+    ResilientProvider<MockProvider, FlakyBackend>,
+    Arc<Notify>,
+    Arc<AtomicUsize>,
+) {
+    let crash_notify = Arc::new(Notify::new());
+    let spawn_attempts = Arc::new(AtomicUsize::new(0));
+    let provider = ResilientProvider::new(
+        initial,
+        Arc::clone(&crash_notify),
+        FlakyBackend {
+            replacement,
+            failures_before_success: Arc::new(AtomicUsize::new(failures_before_success)),
+            spawn_attempts: Arc::clone(&spawn_attempts),
+        },
+        Arc::new(TracingNotifier),
+        3,
+    );
+    (provider, crash_notify, spawn_attempts)
+}
+
+/// Spin (virtual-clock) until `check` holds. Sleep-based so the paused clock
+/// advances through the monitor's backoff sleeps; the bound is a failsafe.
+async fn spin_until(provider: &ResilientProvider<MockProvider, FlakyBackend>, up: bool) -> bool {
+    for _ in 0..50_000 {
+        let answered = provider.get_hover("/probe.vue.tsx", 0).await.is_ok();
+        if answered == up {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    false
+}
+
+/// D2: a TRANSIENT respawn failure must NOT leave the provider dead for the rest
+/// of the session — the crash monitor retries within the same restart budget and
+/// the provider recovers, so the next query answers.
+#[tokio::test(start_paused = true)]
+async fn failed_respawn_retries_within_budget_and_recovers() {
+    let initial = MockProvider::new("tsserver");
+    let replacement = MockProvider::new("tsserver");
+    // Fail the first two respawns; the third succeeds (within max_restarts = 3).
+    let (provider, crash_notify, spawn_attempts) = make_flaky(initial, replacement, 2);
+
+    provider
+        .open_file("/project/src/App.vue.tsx", "const a = 1;")
+        .await
+        .unwrap();
+
+    crash_notify.notify_one();
+    assert!(
+        spin_until(&provider, false).await,
+        "the live cell must be cleared after a crash"
+    );
+    assert!(
+        spin_until(&provider, true).await,
+        "a transient respawn failure must be retried — the provider must recover"
+    );
+    assert_eq!(
+        spawn_attempts.load(Ordering::Relaxed),
+        3,
+        "two failed respawns + one successful respawn"
+    );
+}
+
+/// D2 bound: a PERSISTENTLY failing respawn exhausts the shared restart budget
+/// and fails closed (verter-only), never a hot unbounded respawn loop.
+#[tokio::test(start_paused = true)]
+async fn persistently_failing_respawn_exhausts_budget_and_stays_down() {
+    let initial = MockProvider::new("tsserver");
+    let replacement = MockProvider::new("tsserver");
+    let (provider, crash_notify, spawn_attempts) =
+        make_flaky(initial, replacement, usize::MAX >> 1);
+
+    crash_notify.notify_one();
+    assert!(
+        spin_until(&provider, false).await,
+        "the live cell must be cleared after a crash"
+    );
+    // Let the monitor run through every budgeted attempt (backoff under the
+    // paused clock), then confirm it gave up: the provider stays down and no
+    // further spawn attempts are made.
+    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    let attempts_after_budget = spawn_attempts.load(Ordering::Relaxed);
+    assert!(
+        provider.get_hover("/probe.vue.tsx", 0).await.is_err(),
+        "a persistently failing backend stays down (fails closed) after the budget"
+    );
+    assert_eq!(
+        attempts_after_budget, 3,
+        "exactly max_restarts spawn attempts — the give-up is bounded, not a loop"
+    );
+    // No further attempts accumulate once the budget is exhausted.
+    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    assert_eq!(
+        spawn_attempts.load(Ordering::Relaxed),
+        attempts_after_budget,
+        "no further respawn attempts after the budget is exhausted"
+    );
 }
