@@ -4003,6 +4003,149 @@ async fn completion_resolves_barrel_reexport_props_via_index_file() {
     drop(service);
 }
 
+/// D1: a DIRECT `.vue` import's prop completion must return the child's typed
+/// props (never an empty / word-fallback list) once the document is synced. The
+/// direct `resolve_component` path ensures the child is loaded on demand
+/// (`ensure_loaded`), matching the barrel branch — so even an open+edit+completion
+/// race that reaches completion before the dependency walker has warmed the child
+/// still resolves its props.
+#[tokio::test]
+async fn completion_resolves_direct_import_props_for_cold_child() {
+    let child_source =
+        "<script setup lang=\"ts\">\ndefineProps<{ label: string; zIndex?: number }>()\n</script>\n";
+    let parent_source = "<script setup lang=\"ts\">\nimport DirectComp from './DirectComp.vue'\n</script>\n<template>\n  <DirectComp  />\n</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/DirectComp.vue", "vue", child_source),
+        ("src/App.vue", "vue", parent_source),
+    ])
+    .await;
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+
+    // Cursor at `<DirectComp |/>` — attribute (prop-name) position.
+    let cursor_pos = parent_source.find("<DirectComp ").unwrap() + "<DirectComp ".len();
+    let line_index = LineIndex::new_utf16(parent_source);
+    let position = line_index.offset_to_position(cursor_pos as u32).unwrap();
+
+    let labels = completion_labels(
+        server
+            .completion(completion_params(&app_uri, position, None))
+            .await
+            .expect("completion request should succeed"),
+    );
+
+    // Positive: the direct-imported child's props must be offered (typed, never a
+    // word-fallback empty list).
+    assert!(
+        labels.contains(&"label".to_string()),
+        "direct-imported component should offer 'label' prop, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"z-index".to_string()),
+        "direct-imported component should offer 'z-index' prop (kebab-case), got: {labels:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// D1 (open+edit+completion race): a completion that arrives BEFORE the did_open
+/// notification has registered the document must HOLD for the in-flight open and
+/// then answer typed — never return `Ok(None)`, which the editor renders as a
+/// document-text (word) fallback. tower-lsp runs did_open and completion
+/// concurrently, so this race is reachable under load.
+///
+/// RED pre-fix: with no hold, a completion on a not-yet-registered document
+/// returned `Ok(None)` immediately (word fallback). GREEN post-fix: the handler
+/// waits (bounded) for the open to land and answers the child's typed props.
+#[tokio::test]
+async fn completion_holds_for_in_flight_open_and_answers_typed() {
+    let child_source =
+        "<script setup lang=\"ts\">\ndefineProps<{ label: string; zIndex?: number }>()\n</script>\n";
+    let parent_source = "<script setup lang=\"ts\">\nimport DirectComp from './DirectComp.vue'\n</script>\n<template>\n  <DirectComp  />\n</template>\n";
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace dir");
+    std::fs::write(workspace.join("tsconfig.json"), "{}").expect("write tsconfig");
+    std::fs::create_dir_all(workspace.join("src")).expect("src dir");
+    std::fs::write(workspace.join("src/DirectComp.vue"), child_source).expect("write child");
+    std::fs::write(workspace.join("src/App.vue"), parent_source).expect("write parent");
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let vfs_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let drain_handle = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let workspace_id = crate::test_utils::canonical_test_path(&workspace);
+    let server = service.inner();
+    host.configure_projects(vec![crate::project_resolver::IdeProjectConfig::new(
+        workspace_id.clone(),
+        workspace_id.clone(),
+        Some(format!("{workspace_id}/tsconfig.json")),
+    )]);
+    install_test_resolver_for_root(
+        server,
+        &workspace_id,
+        Some(&format!("{workspace_id}/tsconfig.json")),
+    );
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    // The document is NOT open yet — the completion races the did_open.
+    let cursor_pos = parent_source.find("<DirectComp ").unwrap() + "<DirectComp ".len();
+    let line_index = LineIndex::new_utf16(parent_source);
+    let position = line_index.offset_to_position(cursor_pos as u32).unwrap();
+
+    let completion_fut = server.completion(completion_params(&app_uri, position, None));
+    let open_fut = async {
+        // The did_open lands shortly AFTER the completion starts (the race).
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        let _ = server.documents.did_open(&TextDocumentItem {
+            uri: app_uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: parent_source.to_string(),
+        });
+    };
+    let (completion_result, ()) = futures_util::future::join(completion_fut, open_fut).await;
+
+    let labels = completion_labels(completion_result.expect("completion request should succeed"));
+    assert!(
+        labels.contains(&"label".to_string()),
+        "the held completion must answer the child's typed 'label' prop, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"z-index".to_string()),
+        "the held completion must answer the child's typed 'z-index' prop, got: {labels:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
 #[tokio::test]
 async fn goto_definition_component_event_name_skips_type_provider_virtual_fallback() {
     let child_source = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ custom: [payload: string] }>()\n</script>\n";

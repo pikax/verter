@@ -430,6 +430,31 @@ pub(super) async fn handle_completion(
         }
     }
 
+    // D1 (open+edit+completion race): tower-lsp runs the did_open notification and
+    // a completion request concurrently, so a completion can arrive BEFORE the
+    // document is registered in `documents`. Returning `Ok(None)` here is what the
+    // editor renders as a document-text (word) fallback — the exact D1 defect.
+    // Hold briefly for the in-flight open to land (bounded; a real editor only
+    // sends completion for a document it is opening) instead of falling open into
+    // silence. Once the document registers, the normal path answers typed.
+    if server.documents.get(uri).is_none() {
+        // ~300ms total, re-checking supersession so a newer keystroke abandons the wait.
+        for wait_ms in [20u64, 20, 40, 60, 80, 80] {
+            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+            if server.documents.get(uri).is_some() {
+                break;
+            }
+            if server
+                .completion_generation
+                .load(std::sync::atomic::Ordering::Relaxed)
+                != completion_gen + 1
+            {
+                tracing::debug!("completion: superseded while awaiting document open");
+                return Ok(None);
+            }
+        }
+    }
+
     let completion_ssr_context = {
         let canonical_id = server.documents.get_canonical_id(uri);
         canonical_id
@@ -450,6 +475,14 @@ pub(super) async fn handle_completion(
                                        comp_name: Option<&str>|
              -> Option<verter_session::FileAnalysisSnapshot> {
                 if crate::server::is_default_export_component_carrier(resolved) {
+                    // A direct `.vue` import resolves the component file itself. Ensure
+                    // it is loaded/compiled so its prop/event/slot analysis is
+                    // available — the cold-open race where the child is not yet in the
+                    // host cache would otherwise leave component-prop completions
+                    // empty (D1: the editor then falls back to word suggestions).
+                    if server.documents.host().get_analysis(resolved).is_none() {
+                        server.documents.host().ensure_loaded(resolved);
+                    }
                     return server.documents.host().get_analysis(resolved);
                 }
                 // Ensure the barrel file is loaded so we can inspect its exports
