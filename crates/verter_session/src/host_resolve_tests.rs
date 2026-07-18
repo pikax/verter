@@ -890,15 +890,22 @@ withDefaults(defineProps<LabelProps>(), DEFAULT_LABEL_PROPS)
         "must not use _ctx.as for defineProps binding, got:\n{}",
         response.code
     );
-    // Runtime defaults must apply: either mergeDefaults(..., DEFAULT_LABEL_PROPS)
-    // or an inline `default: 'label'` / default from the variable.
+    // Variable defaults compile to the EXACT official shape:
+    // `_mergeDefaults(<typed props>, DEFAULT_LABEL_PROPS)` — pin it (an
+    // OR-chain over alternative shapes cannot catch a broken emission).
     assert!(
-        response.code.contains("_mergeDefaults")
-            || response.code.contains("mergeDefaults")
-            || response.code.contains("default: 'label'")
-            || response.code.contains("default: \"label\"")
-            || (response.code.contains("DEFAULT_LABEL_PROPS") && response.code.contains("default")),
-        "props must merge DEFAULT_LABEL_PROPS so as defaults to 'label'. Got:\n{}",
+        response.code.contains("_mergeDefaults("),
+        "variable defaults must compile through _mergeDefaults. Got:\n{}",
+        response.code
+    );
+    assert!(
+        response.code.contains("DEFAULT_LABEL_PROPS)"),
+        "the defaults VARIABLE must be the mergeDefaults argument. Got:\n{}",
+        response.code
+    );
+    assert!(
+        response.code.contains("mergeDefaults as _mergeDefaults"),
+        "the mergeDefaults runtime import must be emitted. Got:\n{}",
         response.code
     );
 }
@@ -984,13 +991,15 @@ withDefaults(defineProps<LabelProps>(), DEFAULT_LABEL_PROPS)
         "must not use _ctx.as, got:\n{}",
         response.code
     );
+    // Pin the exact variable-defaults shape (see the sibling test).
     assert!(
-        response.code.contains("_mergeDefaults")
-            || response.code.contains("mergeDefaults")
-            || response.code.contains("default: 'label'")
-            || response.code.contains("default: \"label\"")
-            || (response.code.contains("DEFAULT_LABEL_PROPS") && response.code.contains("default")),
-        "props must merge DEFAULT_LABEL_PROPS. Got:\n{}",
+        response.code.contains("_mergeDefaults(") && response.code.contains("DEFAULT_LABEL_PROPS)"),
+        "props must merge DEFAULT_LABEL_PROPS via _mergeDefaults. Got:\n{}",
+        response.code
+    );
+    assert!(
+        response.code.contains("mergeDefaults as _mergeDefaults"),
+        "the mergeDefaults runtime import must be emitted. Got:\n{}",
         response.code
     );
 }

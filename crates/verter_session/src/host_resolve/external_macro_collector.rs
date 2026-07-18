@@ -3,6 +3,29 @@
 //! [`crate::resolver_core::collect_external_macro_types`] to drive the
 //! per-macro-type-dep loop without exposing the concrete host type to the
 //! resolver core.
+//!
+//! ## Export-surface probe ownership (facts-only adjudication)
+//!
+//! The transitive export-surface probe in this module
+//! (`export_surface_verdict` / `follow_export_route`) is a
+//! DIAGNOSTICS-ONLY severity adjudicator, not a resolver: it decides
+//! whether an unresolved macro-surface arm is PROVABLY absent (fatal) or
+//! merely unknowable (silent). Its contract:
+//!
+//! - it consumes ONLY host-indexed facts (`IndexedReady` import/export
+//!   signatures reached through `ensure_indexed_ready_serve` +
+//!   `resolve_loaded_dependency_canonical`) — never a parser re-walk, never
+//!   the type engine (guard
+//!   `export_probe_consumes_indexed_facts_only`);
+//! - it FAILS OPEN: package-backed targets, cycles, depth cap, and any gap
+//!   in the fact surface adjudicate `Unknowable` (silent), never fatal;
+//! - KNOWN GAP: names contributed only through ambient module augmentation
+//!   (`declare module './x'`) are not modeled by raw export signatures, so
+//!   an augmentation-only name can adjudicate `Absent` (false fatal). The
+//!   durable fix is consolidating this probe onto the augmentation-aware
+//!   `EffectiveExportSet` (the shared export-surface authority) instead of
+//!   raw `export_signatures`; until then this module owns that gap and the
+//!   probe must not grow further private export-surface semantics.
 
 use super::frontier_helpers::ExternalTypeCache;
 use crate::session_view::SessionView;

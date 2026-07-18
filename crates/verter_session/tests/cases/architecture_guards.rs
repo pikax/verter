@@ -14749,6 +14749,37 @@ mod typed_ir_resolver_guards {
     }
 
     // -----------------------------------------------------------------------
+    // Guard 4c: the export-surface probe in
+    // `host_resolve/external_macro_collector.rs` is a diagnostics-only
+    // adjudicator over HOST-INDEXED facts. It must never grow a parser
+    // re-walk (OXC parse of dependency sources) or call the semantic
+    // dispatch — that would make it a second resolver beside the shared
+    // engine. See the module docs ("Export-surface probe ownership").
+    // -----------------------------------------------------------------------
+    #[test]
+    fn export_probe_consumes_indexed_facts_only() {
+        let src = fs::read_to_string(
+            super::workspace_root()
+                .join("crates/verter_session/src/host_resolve/external_macro_collector.rs"),
+        )
+        .expect("read external_macro_collector.rs");
+        for needle in [
+            "Parser::new",
+            "oxc_parser::",
+            "parse_program",
+            "ProjectSemanticDispatch",
+            "resolve_hot_handle",
+            "execute_cooperative",
+        ] {
+            assert!(
+                !src.contains(needle),
+                "external_macro_collector.rs must adjudicate from indexed facts only; \
+                 found forbidden `{needle}` (a parser re-walk / second resolver path)"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Guard 5: role inference from identifier name suffix.
     // `name.ends_with("Props" | "Emits" | "Events" | "Slots" | "Model")`
     // (and `*_name` / `identifier` / `*_identifier` / `ident` /

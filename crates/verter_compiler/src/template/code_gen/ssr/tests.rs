@@ -541,6 +541,10 @@ fn ssr_component() {
 
 // ══════════════════════════════════════════════════════════════════
 // Script SSR flags (non-inline: attached ssrRender, plain setup return)
+//
+// Verter's SSR shape (4-param ssrRender, all-`_ctx.` routing, no
+// `__isScriptSetup`) is a RATIFIED INTERIM DIVERGENCE from official
+// non-inline output — see docs/arch/ssr-noninline-shape-divergence.md.
 // ══════════════════════════════════════════════════════════════════
 
 /// Non-inline SSR must NOT set `__ssrInlineRender` (that flag means setup

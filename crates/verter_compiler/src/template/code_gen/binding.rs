@@ -20,11 +20,15 @@ pub struct BindingResolver<'alloc> {
     bindings: FxHashMap<&'alloc str, BindingType>,
     is_inline: bool,
     is_vapor: bool,
-    /// SSR mode: non-inline `ssrRender(_ctx, _push, _parent, _attrs)` has no
-    /// `$setup`/`$props`/`$data`/`$options` parameters. Setup state, props,
-    /// data, and options are reached through the instance proxy as `_ctx.*`
-    /// (matching Vue's non-inline `@vue/compiler-ssr` output). Free `$setup`
-    /// references in that signature are a runtime `ReferenceError`.
+    /// SSR mode: Verter's non-inline `ssrRender(_ctx, _push, _parent, _attrs)`
+    /// has no `$setup`/`$props`/`$data`/`$options` parameters. Setup state,
+    /// props, data, and options are reached through the instance proxy as
+    /// `_ctx.*`. This is a RATIFIED INTERIM DIVERGENCE from official
+    /// non-inline `@vue/compiler-ssr` output (8-param signature, `$setup.*`
+    /// routing, `__isScriptSetup` marker) — see
+    /// `docs/arch/ssr-noninline-shape-divergence.md` for the runtime
+    /// evidence and compatibility consequences. Free `$setup` references in
+    /// this signature are a runtime `ReferenceError`.
     is_ssr: bool,
     /// TSX mode: props use `__props.`, known bindings are bare, unresolved use
     /// `___VERTER___instance.` for instance property access. No `.value` suffix.
