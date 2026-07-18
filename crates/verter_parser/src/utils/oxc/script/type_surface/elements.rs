@@ -19,6 +19,66 @@ use super::{
     ResolvedNamedCallSignature, ResolvedProp, RuntimeType, TypeResolutionContext,
 };
 
+/// Context-aware runtime type inference.
+///
+/// Behaves like [`infer_runtime_type`] except that a bare reference to a
+/// generic type parameter bound in the current instantiation
+/// (`ctx.type_param_bindings`) resolves to the bound type's runtime type:
+/// `Foo<string>` makes a member `value: T` a `String`, and `T extends
+/// number` makes it a `Number`. A type-parameter DEFAULT is never bound
+/// (see [`super::choose_type_param_bound`]), so an un-instantiated
+/// defaulted parameter stays `Unknown` — Vue does not lower a type-param
+/// default to a runtime prop constructor.
+///
+/// Only a genuine bound type parameter is substituted: a reference whose
+/// name resolves to a local alias / interface / class keeps its ordinary
+/// resolution, and generic references (`T<...>`) are left untouched.
+pub(super) fn infer_runtime_type_with_ctx<'ctx, 'a: 'ctx>(
+    node: &TSType<'a>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+) -> Vec<RuntimeType> {
+    let mut visited = Vec::new();
+    infer_runtime_type_with_ctx_inner(node, ctx, &mut visited)
+}
+
+fn infer_runtime_type_with_ctx_inner<'ctx, 'a: 'ctx>(
+    node: &TSType<'a>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+    visited: &mut Vec<String>,
+) -> Vec<RuntimeType> {
+    // Peel parentheses so `(T)` substitutes like `T`.
+    let mut inner = node;
+    while let TSType::TSParenthesizedType(paren) = inner {
+        inner = &paren.type_annotation;
+    }
+
+    if let TSType::TSTypeReference(type_ref) = inner {
+        if type_ref.type_arguments.is_none() {
+            let name = get_type_reference_name(&type_ref.type_name);
+            let name_bytes = name.as_bytes();
+            // Never shadow a local named type of the same spelling.
+            if ctx.find_type_alias(name_bytes).is_none()
+                && ctx.find_interface(name_bytes).is_none()
+                && ctx.find_class(name_bytes).is_none()
+            {
+                if visited.contains(&name) {
+                    // Cyclic binding (`T -> U -> T`): stop substituting and
+                    // fall back to the context-free inference.
+                    return infer_runtime_type(node);
+                }
+                if let Some(bound) = ctx.find_type_param(name_bytes) {
+                    visited.push(name);
+                    let resolved = infer_runtime_type_with_ctx_inner(bound, ctx, visited);
+                    visited.pop();
+                    return resolved;
+                }
+            }
+        }
+    }
+
+    infer_runtime_type(node)
+}
+
 /// Resolve members from a type literal's members array.
 pub(super) fn resolve_type_literal_members(
     members: &[TSSignature],
@@ -70,7 +130,7 @@ pub(super) fn resolve_type_literal_members_with_ctx<'ctx, 'a: 'ctx>(
                 {
                     result.call_signatures.push(emit);
                 } else if let Some(resolved) =
-                    resolve_property_signature(prop, base_offset, source, from_root_body)
+                    resolve_property_signature(prop, base_offset, source, from_root_body, ctx)
                 {
                     result.props.push(resolved);
                 }
@@ -273,7 +333,7 @@ pub(super) fn resolve_mapped_type_with_ctx<'ctx, 'a: 'ctx>(
     let types = mapped
         .type_annotation
         .as_ref()
-        .map(|ann| infer_runtime_type(ann))
+        .map(|ann| infer_runtime_type_with_ctx(ann, ctx))
         .unwrap_or_else(|| vec![RuntimeType::Unknown]);
     let optional_override = mapped_optional_override(mapped.optional);
 
@@ -588,11 +648,12 @@ pub(super) fn has_immediate_vue_ignore_comment(source: &[u8], start: u32) -> boo
 /// `from_root_body` is stamped onto the produced `ResolvedProp` as the
 /// `declared_in_macro_type_arg` fact. See [`resolve_type_literal_members`]
 /// for the propagation contract.
-pub(super) fn resolve_property_signature(
-    prop: &TSPropertySignature,
+pub(super) fn resolve_property_signature<'ctx, 'a: 'ctx>(
+    prop: &TSPropertySignature<'a>,
     base_offset: u32,
     source: &[u8],
     from_root_body: bool,
+    ctx: Option<&TypeResolutionContext<'ctx, 'a>>,
 ) -> Option<ResolvedProp> {
     let key = get_property_key_span(&prop.key, base_offset)?;
     let optional = prop.optional;
@@ -600,7 +661,10 @@ pub(super) fn resolve_property_signature(
     let types = prop
         .type_annotation
         .as_ref()
-        .map(|ann| infer_runtime_type(&ann.type_annotation))
+        .map(|ann| match ctx {
+            Some(ctx) => infer_runtime_type_with_ctx(&ann.type_annotation, ctx),
+            None => infer_runtime_type(&ann.type_annotation),
+        })
         .unwrap_or_else(|| vec![RuntimeType::Unknown]);
 
     // Full span from the property signature, adjusted by base_offset

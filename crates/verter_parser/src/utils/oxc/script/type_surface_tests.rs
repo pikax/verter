@@ -4531,3 +4531,177 @@ fn alias_to_companion_emits_via_named_local() {
             .collect::<Vec<_>>()
     );
 }
+
+// =========================================================================
+// Generic type-parameter runtime prop-type resolution
+//
+// A member whose type is a generic type parameter must resolve its runtime
+// prop type through the parameter's binding: an explicit instantiation
+// argument (`Foo<string>`) or the declared `extends` constraint
+// (`T extends number`). A type-parameter DEFAULT (`T = boolean`) is never a
+// runtime bound — it must NOT leak a `Boolean` prop constructor.
+// =========================================================================
+
+#[test]
+fn type_param_explicit_arg_resolves_member_runtime_type() {
+    let (resolved, diagnostics) = resolve_with_ctx(
+        "interface Foo<T> { value: T }\ntype Test = Foo<string>;",
+    );
+    let value = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("value"))
+        .expect("value prop should resolve");
+    assert_eq!(
+        format_runtime_types(&value.types),
+        "String",
+        "explicit `Foo<string>` must resolve member `value: T` to String, got {:?}",
+        value.types
+    );
+    assert!(
+        !value.types.contains(&RuntimeType::Unknown),
+        "explicit generic argument must not leave the member Unknown"
+    );
+    assert!(diagnostics.is_empty());
+}
+
+#[test]
+fn type_param_explicit_arg_resolves_member_runtime_type_ref_path() {
+    let (resolved, _) = resolve_with_ctx_ref(
+        "interface Foo<T> { value: T }\ntype Test = Foo<number>;",
+    );
+    let value = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("value"))
+        .expect("value prop should resolve");
+    assert_eq!(
+        format_runtime_types(&value.types),
+        "Number",
+        "explicit `Foo<number>` (ref path) must resolve `value: T` to Number, got {:?}",
+        value.types
+    );
+}
+
+#[test]
+fn type_param_constraint_resolves_member_runtime_type() {
+    // A generic referenced without an explicit argument falls back to the
+    // declared `extends` constraint for its runtime prop type.
+    let (resolved, _) = resolve_with_ctx(
+        "interface Foo<T extends string> { value: T }\ntype Test = Foo;",
+    );
+    let value = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("value"))
+        .expect("value prop should resolve");
+    assert_eq!(
+        format_runtime_types(&value.types),
+        "String",
+        "`T extends string` must resolve `value: T` to String, got {:?}",
+        value.types
+    );
+}
+
+#[test]
+fn type_param_default_does_not_leak_boolean_runtime_type() {
+    // A type-parameter DEFAULT is not a runtime constructor: `trueValue: T`
+    // (T defaulting to boolean) must stay `null`, while a directly-declared
+    // `boolean` member stays `Boolean`.
+    let (resolved, _) = resolve_with_ctx(
+        "interface Foo<T = boolean> { trueValue?: T; rounded?: boolean }\ntype Test = Foo;",
+    );
+    let true_value = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("trueValue"))
+        .expect("trueValue prop should resolve");
+    assert_eq!(
+        format_runtime_types(&true_value.types),
+        "null",
+        "type-param default `T = boolean` must NOT leak a Boolean runtime type, got {:?}",
+        true_value.types
+    );
+    assert!(
+        !true_value.types.contains(&RuntimeType::Boolean),
+        "defaulted generic member must not become a Boolean prop"
+    );
+    let rounded = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("rounded"))
+        .expect("rounded prop should resolve");
+    assert_eq!(
+        format_runtime_types(&rounded.types),
+        "Boolean",
+        "directly-declared boolean member stays Boolean, got {:?}",
+        rounded.types
+    );
+}
+
+#[test]
+fn type_param_constraint_default_prefers_constraint_runtime_type() {
+    // With both a constraint and a default, the constraint is the runtime
+    // bound (the default is ignored), so `value: T` resolves to Number.
+    let (resolved, _) = resolve_with_ctx(
+        "interface Foo<T extends number = 3> { value: T }\ntype Test = Foo;",
+    );
+    let value = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("value"))
+        .expect("value prop should resolve");
+    assert_eq!(
+        format_runtime_types(&value.types),
+        "Number",
+        "constraint `extends number` is the runtime bound even with a default, got {:?}",
+        value.types
+    );
+}
+
+#[test]
+fn type_param_heritage_generic_resolves_member_runtime_type() {
+    // reka-ui heritage pattern: `interface Child extends Base<string>`.
+    // The production resolution path (immutable `_ref`, the one the Vue
+    // macro pipeline uses) instantiates the heritage type argument, so the
+    // inherited `value: T` resolves to String.
+    let (resolved, _) = resolve_with_ctx_ref(
+        "interface Base<T> { value: T }\ninterface Child extends Base<string> { count: number }\ntype Test = Child;",
+    );
+    let value = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("value"))
+        .expect("inherited generic member should resolve");
+    assert_eq!(
+        format_runtime_types(&value.types),
+        "String",
+        "heritage `extends Base<string>` must resolve inherited `value: T` to String, got {:?}",
+        value.types
+    );
+    assert!(resolved
+        .props
+        .iter()
+        .any(|p| p.key_name.as_deref() == Some("count")));
+}
+
+#[test]
+fn type_param_transitive_binding_resolves_member_runtime_type() {
+    // Nested instantiation through heritage on the production `_ref` path:
+    // `Outer<string>` binds `T = string`, forwarded into `Inner<T>` so the
+    // inherited `value: U` resolves to String.
+    let (resolved, _) = resolve_with_ctx_ref(
+        "interface Inner<U> { value: U }\ninterface Outer<T> extends Inner<T> { count: number }\ntype Test = Outer<string>;",
+    );
+    let value = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("value"))
+        .expect("inherited generic member should resolve");
+    assert_eq!(
+        format_runtime_types(&value.types),
+        "String",
+        "transitive generic binding must resolve inherited `value: U` to String, got {:?}",
+        value.types
+    );
+}
