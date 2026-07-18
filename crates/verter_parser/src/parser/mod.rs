@@ -1307,11 +1307,25 @@ impl Syntax {
                                     .with_span(Span::new(prop_start, prop_name_end)),
                             );
                         } else {
-                            // Validate v-model value is a member expression
+                            // Validate v-model value is a member expression.
+                            // The raw slice may carry HTML entities
+                            // (`foo as Record&lt;string, any&gt;`) — official
+                            // decodes attribute values BEFORE expression
+                            // parsing, so validate the decoded text.
                             let val_s = p.value_start.unwrap() as usize;
                             let val_e = p.value_end.unwrap() as usize;
-                            let val = ctx.input[val_s..val_e].trim();
-                            if !is_member_expression(val) {
+                            let raw = ctx.input[val_s..val_e].trim();
+                            let valid = if raw.contains('&') {
+                                let mut decoded = String::with_capacity(raw.len());
+                                crate::common::html_entities::decode_html_entities_into(
+                                    &mut decoded,
+                                    raw,
+                                );
+                                is_member_expression(decoded.trim())
+                            } else {
+                                is_member_expression(raw)
+                            };
+                            if !valid {
                                 self.diagnostics.push(
                                     Diagnostic::error(
                                         "syntax",

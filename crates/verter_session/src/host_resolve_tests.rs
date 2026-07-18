@@ -6563,3 +6563,33 @@ const emit = defineEmits<A>()
         "local alias of local emits must produce runtime emits array, got:\n{code}"
     );
 }
+
+/// `</script><template>` with NO whitespace between the tags: the raw
+/// scanner's close match is a COMPLETE tag, so no after-byte boundary rule
+/// may apply — requiring one silently dropped the block's span and lost
+/// macros whenever the raw scan was authoritative.
+#[test]
+fn extract_vue_script_content_handles_adjacent_close_and_template() {
+    let source = "<script lang=\"ts\">\nexport interface ItemProps { value?: string }\n</script><script setup lang=\"ts\">\nconst props = defineProps<ItemProps>()\n</script><template><div /></template>";
+
+    let parsed = verter_compiler::compile::parse_sfc(source, None, None);
+    let with_cache = crate::host_resolve::extract_vue_script_content(source, Some(&parsed))
+        .expect("cached extraction should succeed");
+    let without_cache = crate::host_resolve::extract_vue_script_content(source, None)
+        .expect("non-cached extraction should succeed");
+
+    for (label, content) in [("cached", &with_cache), ("raw-scan", &without_cache)] {
+        assert!(
+            content.contains("defineProps"),
+            "{label}: setup must include defineProps with adjacent close tags, got:\n{content}"
+        );
+        assert!(
+            content.contains("ItemProps"),
+            "{label}: companion interface must survive adjacent close tags, got:\n{content}"
+        );
+        assert!(
+            !content.contains("<template>"),
+            "{label}: template markup must not leak into script content, got:\n{content}"
+        );
+    }
+}

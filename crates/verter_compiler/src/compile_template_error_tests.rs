@@ -904,3 +904,23 @@ fn no_error_x_v_if_same_key_on_valid() {
     let result = compile_sfc(src);
     assert_no_error(&result, "XVIfSameKey");
 }
+
+/// Entity-encoded v-model expressions (`&lt;` / `&gt;` / `&amp;&amp;` in
+/// attribute values) must validate against the DECODED text — official
+/// decodes attribute values before expression parsing. A generic `as`-cast
+/// written with encoded angle brackets is valid.
+#[test]
+fn no_error_x_v_model_malformed_expression_on_entity_encoded_cast() {
+    let src = r#"<template><input v-model="foo as Record&lt;string, any&gt;"></template>"#;
+    let result = compile_sfc(src);
+    assert_no_error(&result, "XVModelMalformedExpression");
+}
+
+/// Decoding does not weaken rejection: an encoded BINARY expression
+/// (`a &amp;&amp; b` → `a && b`) still fails validation.
+#[test]
+fn error_x_v_model_malformed_expression_on_entity_encoded_binary() {
+    let src = r#"<template><input v-model="a &amp;&amp; b"></template>"#;
+    let result = compile_sfc(src);
+    assert_has_error(&result, "XVModelMalformedExpression");
+}

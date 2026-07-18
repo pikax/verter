@@ -259,19 +259,17 @@ fn find_script_close_outside_js_context(bytes: &[u8], from: usize) -> Option<usi
                     i += 1;
                     continue;
                 }
-                // Potential </script> (case-insensitive tag boundary).
+                // Potential </script> (case-insensitive). The needle already
+                // ENDS in `>` — the match is a complete close tag, so no
+                // after-byte boundary check applies (an after-byte rule
+                // belongs to a `<script`-PREFIX needle; requiring one here
+                // silently dropped spans for the adjacent
+                // `</script><template>` spelling).
                 if b == b'<'
                     && i + CLOSE.len() <= bytes.len()
                     && bytes[i..i + CLOSE.len()].eq_ignore_ascii_case(CLOSE)
                 {
-                    let after = i + CLOSE.len();
-                    // `</script>` or `</script ` / newline — same boundary
-                    // rules as `find_ascii_tag`.
-                    if after >= bytes.len()
-                        || matches!(bytes[after], b'>' | b' ' | b'\t' | b'\n' | b'\r' | b'/')
-                    {
-                        return Some(i);
-                    }
+                    return Some(i);
                 }
                 i += 1;
             }
