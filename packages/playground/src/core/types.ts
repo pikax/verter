@@ -223,6 +223,11 @@ export interface AnalysisMacroTypeDep {
   typeName: string;
   importSource: string;
   macroKind: string;
+  /**
+   * Structural position tier: `"surface"` misses are errors, `"member"`
+   * misses degrade the member's runtime type to `null` and warn.
+   */
+  usage: "surface" | "member";
 }
 
 export interface AnalysisStyleBlock {

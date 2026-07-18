@@ -62,7 +62,8 @@
     "profile:hotpath:full:alloc": "VERTER_PROFILE_FULL=1 cargo run -p verter_bench --example profile_ast --release --features=hotpath-alloc",
     "prepare": "husky",
     "proto:gen": "buf generate && oxfmt packages/proto/src/gen",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "compare:vue-behavior": "node scripts/vue-behavior-compare/run.mjs"
   },
   "dependencies": {
     "@vue/compiler-core": "^3.5.34",

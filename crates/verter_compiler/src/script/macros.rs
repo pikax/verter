@@ -13,7 +13,9 @@ use rustc_hash::FxHashMap;
 use super::prepared::PreparedCompanion;
 use crate::template::code_gen::binding::BindingType;
 use crate::template::code_gen::types::CodeGenOutput;
-use crate::utils::oxc::script::type_surface::format_runtime_types;
+use crate::utils::oxc::script::type_surface::{
+    format_runtime_types, format_runtime_types_with_default,
+};
 use crate::utils::oxc::vue::{ScriptItem, ScriptMacro};
 
 use super::ScriptContext;
@@ -206,6 +208,12 @@ pub(super) fn process_macro_item<'a>(
                         if !prop.optional {
                             props_obj.push_str(", required: true");
                         }
+                        // Optional props (Boolean included) emit NO default,
+                        // matching official plugin-vue: the runtime resolves
+                        // an absent optional Boolean to `false` via the
+                        // boolean cast. An explicit `default: undefined`
+                        // would make `props.x === false` fail for unset
+                        // props — an observable divergence.
                         props_obj.push_str(" },\n");
                     }
                     props_obj.push('}');
@@ -244,13 +252,22 @@ pub(super) fn process_macro_item<'a>(
                 state.emits_section = Some(arr_text.to_string());
             }
 
-            // Type-based defineEmits: extract emit event names from resolved type
+            // Type-based defineEmits: emit event names come EXCLUSIVELY from
+            // resolved call signatures (call-signature form and named-tuple
+            // property form, both classified as emits during resolution —
+            // including alias / indexed-access forwarding). A surface that
+            // resolved to plain PROPS only is NOT an emits declaration:
+            // inventing `emits: [...]` from prop key names would silently
+            // convert a mis-routed props-shaped type into runtime emit
+            // filtering. Fail closed instead (no emits section).
             if let Some(tp) = type_params {
                 if !tp.resolved.call_signatures.is_empty() {
-                    let mut emit_names: Vec<String> = Vec::new();
-                    for emit in &tp.resolved.call_signatures {
-                        emit_names.push(format!("\"{}\"", emit.name));
-                    }
+                    let emit_names: Vec<String> = tp
+                        .resolved
+                        .call_signatures
+                        .iter()
+                        .map(|emit| format!("\"{}\"", emit.name))
+                        .collect();
                     state.emits_section = Some(format!("[{}]", emit_names.join(", ")));
                 }
             }
@@ -342,6 +359,8 @@ pub(super) fn process_macro_item<'a>(
             if let Some(tp) = define_props_type_params {
                 if !tp.resolved.props.is_empty() {
                     let mut props_obj = String::from("{\n");
+                    let mut emitted_names: rustc_hash::FxHashSet<String> =
+                        rustc_hash::FxHashSet::default();
                     for prop in &tp.resolved.props {
                         // Use pre-resolved key_name for external types (where spans
                         // reference a different source), span extraction for intra-file.
@@ -357,12 +376,7 @@ pub(super) fn process_macro_item<'a>(
                         };
                         ctx.bindings
                             .insert(ctx.alloc.alloc_str(name), BindingType::Props);
-
-                        let type_str = format_runtime_types(&prop.types);
-                        props_obj.push_str("    ");
-                        props_obj.push_str(name);
-                        props_obj.push_str(": { type: ");
-                        props_obj.push_str(&type_str);
+                        emitted_names.insert(name.to_string());
 
                         // Check if this prop has a default in the defaults object.
                         // defaults spans are OXC-local (0-based within content_str).
@@ -374,6 +388,16 @@ pub(super) fn process_macro_item<'a>(
                                 .map(|vs| section_text(vs.start, vs.end, content_str, stripped))
                         });
 
+                        // Official parity: a declared default keeps Function
+                        // alive in an otherwise-unresolvable union (function
+                        // default value vs factory distinction).
+                        let type_str =
+                            format_runtime_types_with_default(&prop.types, default_value.is_some());
+                        props_obj.push_str("    ");
+                        props_obj.push_str(name);
+                        props_obj.push_str(": { type: ");
+                        props_obj.push_str(&type_str);
+
                         if let Some(val) = default_value {
                             props_obj.push_str(", default: ");
                             if default_prop.is_some_and(|p| p.is_method) {
@@ -384,10 +408,76 @@ pub(super) fn process_macro_item<'a>(
                         } else if !prop.optional {
                             props_obj.push_str(", required: true");
                         }
+                        // Optional props with no declared default emit NO
+                        // default entry — official plugin-vue shape; the
+                        // runtime boolean-casts absent optional Booleans to
+                        // `false`.
                         props_obj.push_str(" },\n");
                     }
+                    // Defaults for keys NOT present on the resolved type surface
+                    // must still become runtime prop declarations. This covers
+                    // heritage/base props that failed to expand (e.g.
+                    // `withDefaults(defineProps<CellProps>(), { as: 'td' })`
+                    // when PrimitiveProps was not hydrated) — without them
+                    // `$props.as` / `_ctx.as` is undefined and table cells
+                    // render as divs (reka-ui Calendar focus regression).
+                    if let Some(d) = defaults.as_ref() {
+                        for prop in &d.properties {
+                            if emitted_names.contains(prop.name) {
+                                continue;
+                            }
+                            ctx.bindings
+                                .insert(ctx.alloc.alloc_str(prop.name), BindingType::Props);
+                            emitted_names.insert(prop.name.to_string());
+                            let val = prop
+                                .value_span
+                                .map(|vs| section_text(vs.start, vs.end, content_str, stripped))
+                                .unwrap_or("undefined");
+                            props_obj.push_str("    ");
+                            props_obj.push_str(prop.name);
+                            props_obj.push_str(": { default: ");
+                            if prop.is_method {
+                                push_method_as_arrow(&mut props_obj, val);
+                            } else {
+                                props_obj.push_str(val);
+                            }
+                            props_obj.push_str(" },\n");
+                        }
+                    }
                     props_obj.push('}');
-                    state.props_section = Some(props_obj);
+                    // Spreads: `withDefaults(defineProps<T>(), { ...Defaults })`
+                    // — a defaults object containing ANY spread is not
+                    // statically analyzable. Pass the WHOLE second-argument
+                    // expression through Vue's 2-arity
+                    // `_mergeDefaults(base, defaults)` (official shape):
+                    // runtime object-spread evaluation preserves the user's
+                    // key precedence, and non-identifier spreads ride along.
+                    if defaults.as_ref().is_some_and(|d| d.has_spread) {
+                        if let Some(arg_span) = defaults_arg_span {
+                            let defaults_src =
+                                section_text(arg_span.start, arg_span.end, content_str, stripped);
+                            ctx.imports.push("_mergeDefaults");
+                            props_obj = format!("_mergeDefaults({}, {})", props_obj, defaults_src);
+                        }
+                    }
+                    // When defaults is a *variable* (not an object literal),
+                    // wrap with Vue's `mergeDefaults(base, VAR)` so runtime
+                    // defaults (e.g. DEFAULT_LABEL_PROPS.as = 'label') apply
+                    // to the resolved type props. Object-literal defaults are
+                    // already inlined above.
+                    if defaults.is_none() {
+                        if let Some(arg_span) = defaults_arg_span {
+                            let defaults_src =
+                                section_text(arg_span.start, arg_span.end, content_str, stripped);
+                            ctx.imports.push("_mergeDefaults");
+                            state.props_section =
+                                Some(format!("_mergeDefaults({}, {})", props_obj, defaults_src));
+                        } else {
+                            state.props_section = Some(props_obj);
+                        }
+                    } else {
+                        state.props_section = Some(props_obj);
+                    }
                 } else if defaults.is_some() || defaults_arg_span.is_some() {
                     // Unresolvable type reference (e.g., `defineProps<ImportedType>()`)
                     // with defaults present. Vue's `mergeDefaults({}, defaults)` does NOT
@@ -403,6 +493,12 @@ pub(super) fn process_macro_item<'a>(
                         // Object literal: build inline prop declarations from parsed keys
                         let mut props_obj = String::from("{\n");
                         for (i, prop) in d.properties.iter().enumerate() {
+                            // Register each default key as a Props binding so
+                            // template bare identifiers (`as`) resolve to
+                            // `$props.as` rather than `_ctx.as` (undefined when
+                            // setup returns {}).
+                            ctx.bindings
+                                .insert(ctx.alloc.alloc_str(prop.name), BindingType::Props);
                             let val = prop
                                 .value_span
                                 .map(|vs| section_text(vs.start, vs.end, content_str, stripped))
@@ -424,7 +520,13 @@ pub(super) fn process_macro_item<'a>(
                         props_obj.push('}');
                         state.props_section = Some(props_obj);
                     } else if let Some(arg_span) = defaults_arg_span {
-                        // Variable reference: convert at runtime using IIFE
+                        // Variable reference: convert at runtime using IIFE.
+                        // Prop names are not known statically; template bare
+                        // ids still need a Props binding for any keys the
+                        // host already resolved, and for pure compile-time
+                        // we leave bindings empty (host-backed compile should
+                        // resolve the type and take the non-empty props path
+                        // above).
                         let defaults_src =
                             section_text(arg_span.start, arg_span.end, content_str, stripped);
                         state.props_section = Some(format!(
@@ -455,11 +557,14 @@ pub(super) fn process_macro_item<'a>(
 /// 2. Extracts the object's inner content as component-level options (like
 ///    `defineOptions`)
 /// 3. Collects non-type import binding names for template resolution
+/// 4. Collects local runtime declarations (`const`/`let`/`function`/`class`) so
+///    template expressions like `isNumber(modelValue)` (reka-ui ProgressRoot)
+///    resolve via `$setup` instead of missing `_ctx.isNumber`
 ///
 /// The companion was parsed once when the prepared script was built, and its
 /// type declarations were already folded into the setup parse, so this reads the
-/// prepared parse facts rather than re-parsing. Returns the companion import
-/// names.
+/// prepared parse facts rather than re-parsing. Returns companion binding names
+/// (imports + local declarations) that setup should expose.
 pub(super) fn process_companion_script(
     prepared: &PreparedCompanion<'_>,
     source: &str,
@@ -469,8 +574,8 @@ pub(super) fn process_companion_script(
     let content_start = prepared.content_start();
     let parse_result = prepared.parse_result();
 
-    // Collect non-type import binding names for template resolution
-    let mut companion_import_names = Vec::new();
+    // Collect non-type import binding names + local runtime declarations.
+    let mut companion_binding_names = Vec::new();
 
     for item in &parse_result.items {
         match item {
@@ -479,9 +584,17 @@ pub(super) fn process_companion_script(
                 if !imp.is_type_only {
                     for binding in &imp.bindings {
                         if !binding.is_type_only {
-                            companion_import_names.push(binding.name.to_string());
+                            companion_binding_names.push(binding.name.to_string());
                         }
                     }
+                }
+            }
+            ScriptItem::Declaration(decl) => {
+                // Top-level companion locals (const isNumber = …, function f(){})
+                // are in module scope and must be re-exported from setup for
+                // template access — same as companion imports.
+                if let Some(name) = decl.name {
+                    companion_binding_names.push(name.to_string());
                 }
             }
             ScriptItem::DefaultExport(de) => {
@@ -510,5 +623,5 @@ pub(super) fn process_companion_script(
         }
     }
 
-    companion_import_names
+    companion_binding_names
 }

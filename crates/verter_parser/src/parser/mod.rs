@@ -33,7 +33,10 @@ use smallvec::SmallVec;
 #[cfg(test)]
 mod mod_tests;
 
+mod member_expr;
 pub mod types;
+
+use member_expr::is_member_expression;
 
 /// Minimal bookkeeping for an open element on the nesting stack.
 ///
@@ -1304,11 +1307,25 @@ impl Syntax {
                                     .with_span(Span::new(prop_start, prop_name_end)),
                             );
                         } else {
-                            // Validate v-model value is a member expression
+                            // Validate v-model value is a member expression.
+                            // The raw slice may carry HTML entities
+                            // (`foo as Record&lt;string, any&gt;`) — official
+                            // decodes attribute values BEFORE expression
+                            // parsing, so validate the decoded text.
                             let val_s = p.value_start.unwrap() as usize;
                             let val_e = p.value_end.unwrap() as usize;
-                            let val = ctx.input[val_s..val_e].trim();
-                            if !is_member_expression(val) {
+                            let raw = ctx.input[val_s..val_e].trim();
+                            let valid = if raw.contains('&') {
+                                let mut decoded = String::with_capacity(raw.len());
+                                crate::common::html_entities::decode_html_entities_into(
+                                    &mut decoded,
+                                    raw,
+                                );
+                                is_member_expression(decoded.trim())
+                            } else {
+                                is_member_expression(raw)
+                            };
+                            if !valid {
                                 self.diagnostics.push(
                                     Diagnostic::error(
                                         "syntax",
@@ -1690,84 +1707,6 @@ fn has_v_for_separator(expr: &str) -> bool {
         }
     }
     false
-}
-
-/// Strip a trailing TypeScript `as Type` cast from an expression.
-/// e.g. `expanded as string[]` → `expanded`, `form.value as Record<string, any>` → `form.value`.
-/// Returns the original string if no `as` cast is found.
-fn strip_ts_as_suffix(expr: &str) -> &str {
-    // Find the last ` as ` with word boundary: preceded by identifier char, followed by type.
-    // Walk backwards to find the outermost `as` that isn't inside brackets.
-    if let Some(pos) = expr.rfind(" as ") {
-        let before = expr[..pos].trim();
-        if !before.is_empty() {
-            return before;
-        }
-    }
-    expr
-}
-
-/// Check if a string is a valid JavaScript member expression (for v-model).
-/// Valid: identifiers, member access (a.b), bracket access (a[b]), optional chaining (a?.b).
-/// Invalid: binary expressions (a + b), function calls (a()), assignments (a = b).
-fn is_member_expression(expr: &str) -> bool {
-    let trimmed = expr.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    // Strip TypeScript `as Type` suffix: `expanded as string[]` → `expanded`
-    let trimmed = strip_ts_as_suffix(trimmed);
-    // Simple heuristic: a member expression consists of identifiers, dots, brackets, and optional chaining
-    // It should NOT contain operators like +, -, *, /, =, !, <, >, &, |, ^, ?, :, ,
-    // (except ? in ?. optional chaining)
-    // It should NOT contain parentheses that indicate function calls
-    let bytes = trimmed.as_bytes();
-    let mut bracket_depth = 0i32;
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            // Valid identifier characters
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'$' => {}
-            // Dot access (including optional chaining ?.)
-            b'.' => {}
-            b'?' if i + 1 < bytes.len() && bytes[i + 1] == b'.' => {
-                i += 1; // skip the dot
-            }
-            // Bracket access
-            b'[' => bracket_depth += 1,
-            b']' => {
-                bracket_depth -= 1;
-                if bracket_depth < 0 {
-                    return false;
-                }
-            }
-            // Quoted strings inside brackets
-            b'"' | b'\'' | b'`' => {
-                if bracket_depth > 0 {
-                    let quote = bytes[i];
-                    i += 1;
-                    while i < bytes.len() && bytes[i] != quote {
-                        if bytes[i] == b'\\' {
-                            i += 1;
-                        }
-                        i += 1;
-                    }
-                } else {
-                    return false;
-                }
-            }
-            // Whitespace is only allowed inside brackets
-            b' ' | b'\t' | b'\n' | b'\r' => {
-                if bracket_depth == 0 {
-                    return false;
-                }
-            }
-            // Everything else is invalid for a member expression
-            _ => return false,
-        }
-        i += 1;
-    }
-    bracket_depth == 0
 }
 
 // utilities

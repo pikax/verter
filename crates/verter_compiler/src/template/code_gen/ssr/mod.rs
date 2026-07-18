@@ -42,6 +42,20 @@ use super::vdom::element::resolve_expr;
 use super::vdom::props::{camelize, format_event_handler_key_into, needs_quoted_key};
 use super::{TemplateCodeGen, TemplateCodeGenOptions};
 
+/// Source-order placeholders spliced into the root `attrs_obj` while the
+/// class/style merge value is still unknown, then replaced post-build.
+/// NUL-delimited so they are UNFORGEABLE from template content: resolved
+/// user expressions are verbatim source text, and a raw NUL byte cannot
+/// survive SFC parsing into an attribute expression — an ASCII sentinel
+/// (`__STYLE_PLACEHOLDER__`) could be forged by a user string literal and
+/// silently corrupted by the post-build replace.
+const CLASS_PLACEHOLDER: &str = "\u{0}VERTER_CLASS\u{0}";
+const STYLE_PLACEHOLDER: &str = "\u{0}VERTER_STYLE\u{0}";
+/// [`STYLE_PLACEHOLDER`] preceded by the `, ` separator (drop-arm cleanup).
+const STYLE_PLACEHOLDER_AFTER_COMMA: &str = ", \u{0}VERTER_STYLE\u{0}";
+/// [`STYLE_PLACEHOLDER`] followed by the `, ` separator (drop-arm cleanup).
+const STYLE_PLACEHOLDER_BEFORE_COMMA: &str = "\u{0}VERTER_STYLE\u{0}, ";
+
 /// What each element pushed onto `elem_ctx` means for `leave_element`.
 #[derive(Debug, Clone, PartialEq)]
 enum ElemCtx {
@@ -262,10 +276,20 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
         let directive_name = prop_name.strip_prefix("v-")?;
         let binding_name = directive_to_camel(directive_name);
 
-        // Resolve directive reference: setup binding or _resolveDirective()
+        // Resolve directive reference: setup binding or _resolveDirective().
+        // Non-inline SSR reaches setup directives through the instance proxy
+        // (`_ctx.vFocus`); free `$setup[...]` would ReferenceError in ssrRender.
         let directive_ref = if let Some(bt) = self.resolver.get(&binding_name) {
             if bt.is_setup() {
-                format!("$setup[\"{}\"]", binding_name)
+                let prefix = self.resolver.resolve_prefix(&binding_name);
+                if prefix == "$setup." {
+                    format!("$setup[\"{}\"]", binding_name)
+                } else if prefix.is_empty() {
+                    binding_name
+                } else {
+                    // `_ctx.` / other proxy prefixes: keep valid identifier form
+                    format!("{}{}", prefix, binding_name)
+                }
             } else {
                 self.resolve_directive_global(directive_name, out)
             }
@@ -344,6 +368,14 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
     /// Whether we're currently at root depth (the element is a direct child of `<template>`).
     fn is_root(&self) -> bool {
         self.depth == 0 && !self.is_multi_root && self.in_component_slots == 0
+    }
+
+    /// Whether `_cssVars` injects here. CSS v-bind custom properties are a
+    /// DIFFERENT axis than `_attrs` fallthrough: official `ssrInjectCssVars`
+    /// injects on EVERY root-level node — each multi-root sibling and each
+    /// root v-if branch — while fallthrough attrs stay single-root-only.
+    fn is_css_vars_root(&self) -> bool {
+        self.depth == 0 && self.in_component_slots == 0
     }
 
     // ── Push management ────────────────────────────────────────
@@ -1857,7 +1889,13 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                 if child_el.tag_type == TagType::Template {
                     if let Some(ref v_slot) = child_el.v_slot {
                         // Extract slot name from arg (including modifiers for dot-notation names)
-                        let slot_name = Self::build_slot_name(v_slot, source);
+                        let child_oxc = match self.oxc_ast.data.get(child_id.0) {
+                            Some(crate::template::oxc::types::OxcNodeData::Element(e)) => {
+                                Some(e.as_ref())
+                            }
+                            _ => None,
+                        };
+                        let slot_name = self.build_slot_name(v_slot, source, child_oxc);
 
                         // Extract slot params from value
                         let params =
@@ -2315,17 +2353,17 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
         let mut v_bind_spread_expr = String::new();
         let mut directive_calls: Vec<String> = Vec::new();
 
-        // Pre-scan for v-bind spread and v-show so that static class/style processing
-        // knows upfront whether to use the mergeProps path (source order matters).
+        // Pre-scan for v-bind spread so that static class/style processing
+        // knows upfront whether to use the mergeProps path (source order
+        // matters). Style parts no longer need a v-show pre-scan: static +
+        // dynamic + v-show styles ALWAYS fold into the single merged
+        // emission.
         let mut has_v_bind_spread = false;
-        let mut has_v_show_prescan = false;
         for p in el.props.iter() {
             if p.is_directive {
                 let pn = &source[p.start as usize..p.name_end as usize];
                 if pn == "v-bind" && p.arg_start.is_none() {
                     has_v_bind_spread = true;
-                } else if pn == "v-show" {
-                    has_v_show_prescan = true;
                 }
             }
         }
@@ -2347,9 +2385,12 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
         let mut dynamic_class_resolved: Option<String> = None;
         let mut dynamic_class_prop_idx: Option<usize> = None;
 
-        // Style merge tracking: when v-show coexists with :style or static style,
-        // they are merged into a single `_ssrRenderStyle([...])` array call.
+        // Style merge tracking: static style, `:style`, and v-show display
+        // always merge into ONE `_ssrRenderStyle(...)` attribute per element
+        // (official merges style parts for EVERY element — emitting two
+        // `style=` attributes silently drops one, first-wins in browsers).
         let mut dynamic_style_resolved: Option<String> = None;
+        let mut dynamic_style_prop_idx: Option<usize> = None;
         let mut static_style_value: Option<String> = None;
         let mut static_style_prop_idx: Option<usize> = None;
 
@@ -2506,17 +2547,14 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                                     has_dynamic_attrs = true;
                                     continue;
                                 } else if attr_name == "style" {
-                                    if has_v_show_prescan {
-                                        // Save for merge with v-show
-                                        dynamic_style_resolved = Some(resolved);
-                                        has_dynamic_attrs = true;
-                                        continue;
-                                    }
-                                    out.add_ssr_import(SsrHelper::RenderStyle);
-                                    inline_parts.push((
-                                        i,
-                                        format!(" style=\"${{_ssrRenderStyle({})}}\"", resolved),
-                                    ));
+                                    // ALWAYS defer to the single merged
+                                    // _ssrRenderStyle emission (static +
+                                    // dynamic + v-show fold into one
+                                    // attribute).
+                                    dynamic_style_resolved = Some(resolved);
+                                    dynamic_style_prop_idx = Some(i);
+                                    has_dynamic_attrs = true;
+                                    continue;
                                 } else if is_boolean_html_attr(attr_name) {
                                     out.add_ssr_import(SsrHelper::IncludeBooleanAttr);
                                     inline_parts.push((
@@ -2540,17 +2578,30 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                                 continue;
                             }
 
-                            // Track dynamic class for root-path merge
+                            // Track dynamic class/style for root-path merge
                             if attr_name == "class" {
                                 dynamic_class_resolved = Some(resolved);
                                 dynamic_class_prop_idx = Some(i);
                                 has_dynamic_attrs = true;
                                 // Insert placeholder for source-order preservation
-                                if !attrs_obj.contains("__CLASS_PLACEHOLDER__") {
+                                if !attrs_obj.contains(CLASS_PLACEHOLDER) {
                                     if !attrs_obj.is_empty() {
                                         attrs_obj.push_str(", ");
                                     }
-                                    attrs_obj.push_str("__CLASS_PLACEHOLDER__");
+                                    attrs_obj.push_str(CLASS_PLACEHOLDER);
+                                }
+                            } else if attr_name == "style" {
+                                // Defer to static+dynamic style merge (array form,
+                                // source order). Emitting a second `style:` key would
+                                // drop the static style (last-wins).
+                                dynamic_style_resolved = Some(resolved);
+                                dynamic_style_prop_idx = Some(i);
+                                has_dynamic_attrs = true;
+                                if !attrs_obj.contains(STYLE_PLACEHOLDER) {
+                                    if !attrs_obj.is_empty() {
+                                        attrs_obj.push_str(", ");
+                                    }
+                                    attrs_obj.push_str(STYLE_PLACEHOLDER);
                                 }
                             } else {
                                 if !attrs_obj.is_empty() {
@@ -2584,11 +2635,11 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                                     has_dynamic_attrs = true;
                                     continue;
                                 } else if attr_name == "style" {
-                                    out.add_ssr_import(SsrHelper::RenderStyle);
-                                    inline_parts.push((
-                                        i,
-                                        format!(" style=\"${{_ssrRenderStyle({})}}\"", resolved),
-                                    ));
+                                    // Defer to the single merged style emission.
+                                    dynamic_style_resolved = Some(resolved);
+                                    dynamic_style_prop_idx = Some(i);
+                                    has_dynamic_attrs = true;
+                                    continue;
                                 } else if is_boolean_html_attr(attr_name) {
                                     out.add_ssr_import(SsrHelper::IncludeBooleanAttr);
                                     inline_parts.push((
@@ -2617,11 +2668,11 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                                 dynamic_class_resolved = Some(resolved);
                                 dynamic_class_prop_idx = Some(i);
                                 has_dynamic_attrs = true;
-                                if !attrs_obj.contains("__CLASS_PLACEHOLDER__") {
+                                if !attrs_obj.contains(CLASS_PLACEHOLDER) {
                                     if !attrs_obj.is_empty() {
                                         attrs_obj.push_str(", ");
                                     }
-                                    attrs_obj.push_str("__CLASS_PLACEHOLDER__");
+                                    attrs_obj.push_str(CLASS_PLACEHOLDER);
                                 }
                             } else {
                                 if !attrs_obj.is_empty() {
@@ -2667,11 +2718,24 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                         if !attrs_obj.is_empty() {
                             attrs_obj.push_str(", ");
                         }
-                        attrs_obj.push_str("__CLASS_PLACEHOLDER__");
+                        attrs_obj.push_str(CLASS_PLACEHOLDER);
                         continue;
                     }
                     // For inline path: let it continue to attrs_obj (harmless, attrs_obj
                     // isn't used when inline path returns early).
+                }
+
+                // Track static style for potential merge with :style on root path
+                if attr_name == "style" && (is_root || has_v_bind_spread || has_custom_directives) {
+                    static_style_value = Some(css_to_js_object(value));
+                    static_style_prop_idx = Some(i);
+                    if !attrs_obj.contains(STYLE_PLACEHOLDER) {
+                        if !attrs_obj.is_empty() {
+                            attrs_obj.push_str(", ");
+                        }
+                        attrs_obj.push_str(STYLE_PLACEHOLDER);
+                    }
+                    continue;
                 }
 
                 if !attrs_obj.is_empty() {
@@ -2725,8 +2789,8 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                         escape_js_string(static_cls),
                         dyn_expr,
                     );
-                    if attrs_obj.contains("__CLASS_PLACEHOLDER__") {
-                        attrs_obj = attrs_obj.replace("__CLASS_PLACEHOLDER__", &class_entry);
+                    if attrs_obj.contains(CLASS_PLACEHOLDER) {
+                        attrs_obj = attrs_obj.replace(CLASS_PLACEHOLDER, &class_entry);
                     } else {
                         if !attrs_obj.is_empty() {
                             attrs_obj.push_str(", ");
@@ -2749,8 +2813,8 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                 } else {
                     // Root/attrs_obj path: dynamic class only
                     let class_entry = format!("class: {}", dyn_expr);
-                    if attrs_obj.contains("__CLASS_PLACEHOLDER__") {
-                        attrs_obj = attrs_obj.replace("__CLASS_PLACEHOLDER__", &class_entry);
+                    if attrs_obj.contains(CLASS_PLACEHOLDER) {
+                        attrs_obj = attrs_obj.replace(CLASS_PLACEHOLDER, &class_entry);
                     } else {
                         if !attrs_obj.is_empty() {
                             attrs_obj.push_str(", ");
@@ -2764,8 +2828,8 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                 if is_root || has_v_bind_spread || has_custom_directives {
                     // Root/mergeProps path: put static class into attrs_obj
                     let class_entry = format!("class: \"{}\"", escape_js_string(static_cls));
-                    if attrs_obj.contains("__CLASS_PLACEHOLDER__") {
-                        attrs_obj = attrs_obj.replace("__CLASS_PLACEHOLDER__", &class_entry);
+                    if attrs_obj.contains(CLASS_PLACEHOLDER) {
+                        attrs_obj = attrs_obj.replace(CLASS_PLACEHOLDER, &class_entry);
                     } else {
                         if !attrs_obj.is_empty() {
                             attrs_obj.push_str(", ");
@@ -2777,6 +2841,66 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                 // in the source-order loop (it wasn't skipped from props).
             }
             (None, None) => {}
+        }
+
+        // Merge static + dynamic style into a single expression for the root /
+        // mergeProps path (mirrors class merge). Official form, SOURCE order:
+        //   style: [{ "margin": "1px" }, _ctx.sty]
+        match (&dynamic_style_resolved, &static_style_value) {
+            (Some(dyn_expr), Some(stat_obj))
+                if is_root || has_v_bind_spread || has_custom_directives =>
+            {
+                // Authoring order decides the array order (official merges
+                // attribute parts in source order).
+                let static_first = static_style_prop_idx.unwrap_or(usize::MAX)
+                    <= dynamic_style_prop_idx.unwrap_or(usize::MAX);
+                let style_entry = if static_first {
+                    format!("style: [{}, {}]", stat_obj, dyn_expr)
+                } else {
+                    format!("style: [{}, {}]", dyn_expr, stat_obj)
+                };
+                if attrs_obj.contains(STYLE_PLACEHOLDER) {
+                    attrs_obj = attrs_obj.replace(STYLE_PLACEHOLDER, &style_entry);
+                } else {
+                    if !attrs_obj.is_empty() {
+                        attrs_obj.push_str(", ");
+                    }
+                    attrs_obj.push_str(&style_entry);
+                }
+                has_dynamic_attrs = true;
+            }
+            (Some(dyn_expr), None) if is_root || has_v_bind_spread || has_custom_directives => {
+                let style_entry = format!("style: {}", dyn_expr);
+                if attrs_obj.contains(STYLE_PLACEHOLDER) {
+                    attrs_obj = attrs_obj.replace(STYLE_PLACEHOLDER, &style_entry);
+                } else {
+                    if !attrs_obj.is_empty() {
+                        attrs_obj.push_str(", ");
+                    }
+                    attrs_obj.push_str(&style_entry);
+                }
+                has_dynamic_attrs = true;
+            }
+            (None, Some(stat_obj)) if is_root || has_v_bind_spread || has_custom_directives => {
+                let style_entry = format!("style: {}", stat_obj);
+                if attrs_obj.contains(STYLE_PLACEHOLDER) {
+                    attrs_obj = attrs_obj.replace(STYLE_PLACEHOLDER, &style_entry);
+                } else {
+                    if !attrs_obj.is_empty() {
+                        attrs_obj.push_str(", ");
+                    }
+                    attrs_obj.push_str(&style_entry);
+                }
+            }
+            _ => {
+                // Drop any unresolved placeholder rather than emit invalid JS.
+                if attrs_obj.contains(STYLE_PLACEHOLDER) {
+                    attrs_obj = attrs_obj
+                        .replace(STYLE_PLACEHOLDER_AFTER_COMMA, "")
+                        .replace(STYLE_PLACEHOLDER_BEFORE_COMMA, "")
+                        .replace(STYLE_PLACEHOLDER, "");
+                }
+            }
         }
 
         // Handle v-model attrs injection
@@ -2930,12 +3054,17 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
             String::new()
         };
 
-        // For nested elements using inline mode (has inline_parts or v-show, and no v-bind spread).
-        // When directive_calls are present, skip inline mode and use the _mergeProps path instead.
+        // For nested elements using inline mode (has inline_parts, deferred
+        // merged style, or v-show, and no v-bind spread). When
+        // directive_calls are present, skip inline mode and use the
+        // _mergeProps path instead.
         if !is_root
             && !has_v_bind_spread
             && directive_calls.is_empty()
-            && (!inline_parts.is_empty() || has_v_show)
+            && (!inline_parts.is_empty()
+                || has_v_show
+                || dynamic_style_resolved.is_some()
+                || (self.is_css_vars_root() && !self.options.ssr_css_vars.is_empty()))
         {
             // Build attrs in source order: interleave static and dynamic parts
             let mut dynamic_map: std::collections::HashMap<usize, &str> =
@@ -2962,17 +3091,11 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                     if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
                         let value = &source[vs as usize..ve as usize];
                         if name == "style" {
-                            if has_v_show_prescan {
-                                // Will be merged into a combined _ssrRenderStyle call
-                                static_style_value = Some(css_to_js_object(value));
-                                static_style_prop_idx = Some(i);
-                                continue;
-                            }
-                            out.add_ssr_import(SsrHelper::RenderStyle);
-                            result.push_str(&format!(
-                                " style=\"${{_ssrRenderStyle({})}}\"",
-                                css_to_js_object(value)
-                            ));
+                            // ALWAYS merged into the single combined
+                            // _ssrRenderStyle emission below.
+                            static_style_value = Some(css_to_js_object(value));
+                            static_style_prop_idx = Some(i);
+                            continue;
                         } else {
                             // Vue trims class attribute values (trailing whitespace)
                             let emit_value = if name == "class" {
@@ -3001,20 +3124,41 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
             } else {
                 None
             };
+            // Root-level elements of a MULTI-ROOT template (is_root=false,
+            // css-vars-root=true) carry the CSS v-bind custom properties as
+            // a style part — official injects on every root-level node.
+            let css_vars_style = (self.is_css_vars_root() && !self.options.ssr_css_vars.is_empty())
+                .then(|| "_cssVars.style".to_string());
             let has_any_style = dynamic_style_resolved.is_some()
                 || static_style_value.is_some()
-                || v_show_style.is_some();
+                || v_show_style.is_some()
+                || css_vars_style.is_some();
             if has_any_style {
                 out.add_ssr_import(SsrHelper::RenderStyle);
-                let mut style_parts: Vec<String> = Vec::new();
+                // SOURCE order between static style and :style (official
+                // merges attribute parts in authoring order); the v-show
+                // display entry always comes last.
+                let mut ordered: Vec<(usize, String)> = Vec::new();
                 if let Some(ref dyn_style) = dynamic_style_resolved {
-                    style_parts.push(dyn_style.clone());
+                    ordered.push((
+                        dynamic_style_prop_idx.unwrap_or(usize::MAX),
+                        dyn_style.clone(),
+                    ));
                 }
                 if let Some(ref stat_style) = static_style_value {
-                    style_parts.push(stat_style.clone());
+                    ordered.push((
+                        static_style_prop_idx.unwrap_or(usize::MAX),
+                        stat_style.clone(),
+                    ));
                 }
+                ordered.sort_by_key(|(idx, _)| *idx);
+                let mut style_parts: Vec<String> =
+                    ordered.into_iter().map(|(_, part)| part).collect();
                 if let Some(vshow) = v_show_style {
                     style_parts.push(vshow);
+                }
+                if let Some(css_vars) = css_vars_style {
+                    style_parts.push(css_vars);
                 }
                 if style_parts.len() == 1 {
                     result.push_str(&format!(
@@ -3062,7 +3206,11 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
         }
 
         if is_root
-            && (has_v_show || !parts.is_empty() || has_v_bind_spread || !directive_calls.is_empty())
+            && (has_v_show
+                || !parts.is_empty()
+                || has_v_bind_spread
+                || !directive_calls.is_empty()
+                || !self.options.ssr_css_vars.is_empty())
         {
             parts.push("_attrs".to_string());
         }
@@ -3077,6 +3225,13 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
         // Custom directive props
         for dir_call in &directive_calls {
             parts.push(dir_call.clone());
+        }
+
+        // Merge SSR CSS v-bind custom properties onto every ROOT-LEVEL
+        // element — official injects on each multi-root sibling and each
+        // root branch, not only the single-root case.
+        if self.is_css_vars_root() && !self.options.ssr_css_vars.is_empty() {
+            parts.push("_cssVars".to_string());
         }
 
         // v-model on root input: use _temp0 pattern for _ssrGetDynamicModelProps.
@@ -3294,13 +3449,40 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
         false
     }
 
-    /// Build a slot name from a `v-slot` directive prop.
-    /// Dot-notation is already included in `arg_end` (parser merges modifiers).
-    /// `#header.id` → `"header.id"`, `#default` → `default`.
-    fn build_slot_name(v_slot: &NodeProp, source: &str) -> String {
+    /// Build a slot object key from a `v-slot` directive prop.
+    ///
+    /// - Static: `#header` / `#header.id` → `header` / `"header.id"`
+    /// - Dynamic: `#[name]` → `[_ctx.name]` (computed property key). Emitting the
+    ///   brackets as a quoted string (`"[name]"`) makes a literal slot named
+    ///   `"[name]"` instead of reading the binding — drop-in SSR fails.
+    ///
+    /// The dynamic name resolves through the OXC-parsed expression
+    /// (`OxcParsedVSlot::dynamic_name`) so compound expressions
+    /// (`#[foo.bar]`) resolve their root binding instead of passing through
+    /// raw (a free identifier → ReferenceError), and template-scope locals
+    /// (`#[name]` under `v-for="name in tabs"`) stay bare instead of
+    /// mis-prefixing as `_ctx.name`.
+    fn build_slot_name(
+        &self,
+        v_slot: &NodeProp,
+        source: &str,
+        oxc_el: Option<&OxcParsedElement<'alloc>>,
+    ) -> String {
         if let (Some(as_), Some(ae)) = (v_slot.arg_start, v_slot.arg_end) {
             let raw = &source[as_ as usize..ae as usize];
-            if needs_quoted_key(raw) {
+            if v_slot.is_dynamic == Some(true) {
+                let trimmed = raw.trim();
+                let (inner, inner_offset) = if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                    (&trimmed[1..trimmed.len() - 1], as_ + 1)
+                } else {
+                    (trimmed, as_)
+                };
+                let oxc_name = oxc_el
+                    .and_then(|e| e.v_slot.as_ref())
+                    .and_then(|vs| vs.dynamic_name.as_ref());
+                let resolved = self.resolve_expr(inner, inner_offset, oxc_name);
+                format!("[{}]", resolved)
+            } else if needs_quoted_key(raw) {
                 format!("\"{}\"", raw)
             } else {
                 raw.to_string()
@@ -3970,6 +4152,19 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
         if self.temp_var_needed {
             self.buf.push_str("let _temp0\n");
         }
+        // SSR CSS v-bind(): inject `_cssVars` so root attrs carry the CSS custom
+        // properties. Client uses `_useCssVars`; SSR must put values in HTML.
+        if !self.options.ssr_css_vars.is_empty() {
+            self.buf.push_str("const _cssVars = { style: {\n");
+            for (i, (var_name, expr)) in self.options.ssr_css_vars.iter().enumerate() {
+                if i > 0 {
+                    self.buf.push_str(",\n");
+                }
+                let resolved = self.resolver.resolve_simple_expr(expr);
+                let _ = write!(self.buf, "  \"{}\": ({})", var_name, resolved);
+            }
+            self.buf.push_str("\n} }\n");
+        }
         let fn_sig = self.buf.clone();
 
         let (close_start, close_end) = match root.tag_close.as_ref() {
@@ -4522,8 +4717,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                                 if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
                                     tg_tag = source[vs as usize..ve as usize].to_string();
                                 }
-                            } else if prop_name == "name"
-                                || prop_name == "appear"
+                            } else if prop_name == "appear"
                                 || prop_name == "css"
                                 || prop_name == "duration"
                                 || prop_name == "mode"
@@ -4542,7 +4736,14 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                                 || prop_name == "leaveToClass"
                                 || prop_name == "leave-to-class"
                             {
-                                // TransitionGroup-specific props — skip in HTML
+                                // TransitionGroup transition-only props — skip in HTML
+                            } else if prop_name == "name" {
+                                // Official @vue/compiler-ssr forwards `name` onto the
+                                // host tag (e.g. `<ul name="list">`).
+                                if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                                    let value = &source[vs as usize..ve as usize];
+                                    tg_attrs.push(format!(" name=\"{}\"", escape_js_string(value)));
+                                }
                             } else if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end)
                             {
                                 let value = &source[vs as usize..ve as usize];
@@ -4889,18 +5090,22 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                     if prop_name.starts_with(':')
                         || (prop_name == "v-bind" && prop.arg_start.is_some())
                     {
-                        if let (Some(as_), Some(ae), Some(vs), Some(ve)) = (
-                            prop.arg_start,
-                            prop.arg_end,
-                            prop.value_start,
-                            prop.value_end,
-                        ) {
+                        if let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) {
                             let attr = &source[as_ as usize..ae as usize];
-                            // :key is passed through on components (unlike HTML elements)
-                            let expr = &source[vs as usize..ve as usize];
-                            let oxc_prop = oxc.and_then(|o| find_oxc_prop(o, i));
-                            let oxc_expr = oxc_prop.and_then(|p| p.exp.as_ref());
-                            let resolved = self.resolve_expr(expr, vs, oxc_expr);
+                            // :key is passed through on components (unlike HTML elements).
+                            // Vue 3.4+ same-name shorthand: `:cards` (no value) ≡
+                            // `:cards="cards"`. Camelize for binding lookup so
+                            // `:heading-value` resolves to `headingValue`.
+                            let resolved =
+                                if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                                    let expr = &source[vs as usize..ve as usize];
+                                    let oxc_prop = oxc.and_then(|o| find_oxc_prop(o, i));
+                                    let oxc_expr = oxc_prop.and_then(|p| p.exp.as_ref());
+                                    self.resolve_expr(expr, vs, oxc_expr)
+                                } else {
+                                    let camelized = camelize(attr);
+                                    self.resolver.resolve_simple_expr(&camelized)
+                                };
                             props_parts.push(format!(
                                 "{}: {}",
                                 html_attr_to_js_key(attr),
@@ -5041,6 +5246,22 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                 format!("{{ {} }}", props_parts.join(", "))
             };
 
+            // CSS v-bind custom properties reach ROOT-LEVEL components as a
+            // merged prop (official `ssrInjectCssVars` injects on every
+            // root-level node, components included — without this the
+            // emitted `const _cssVars` is dead and the custom properties
+            // never reach the HTML).
+            let props_expr = if self.is_css_vars_root() && !self.options.ssr_css_vars.is_empty() {
+                if props_expr == "null" {
+                    "_cssVars".to_string()
+                } else {
+                    out.add_vdom_import(VdomHelper::MergeProps);
+                    format!("_mergeProps({}, _cssVars)", props_expr)
+                }
+            } else {
+                props_expr
+            };
+
             let has_children = self.has_effective_children(el, source);
 
             if !has_children {
@@ -5160,7 +5381,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
             }
 
             let slot_name = if let Some(ref v_slot) = el.v_slot {
-                Self::build_slot_name(v_slot, source)
+                self.build_slot_name(v_slot, source, oxc)
             } else {
                 "default".to_string()
             };
@@ -5934,9 +6155,10 @@ fn find_oxc_prop<'a, 'alloc>(
 
 // ======================== Utility functions ========================
 
-/// Convert `$setup.Foo` to `$setup["Foo"]` for SSR component references.
-/// Vue's SSR compiler uses bracket notation for $setup component references.
-/// Non-$setup references (e.g. `_ctx.Foo`, `_component_Foo`) pass through unchanged.
+/// Convert `$setup.Foo` to `$setup["Foo"]` for legacy client-style setup
+/// component references. Non-inline SSR uses `_ctx.Foo` (no `$setup` param in
+/// `ssrRender`), which passes through unchanged — bracket form is only needed
+/// for the free `$setup` namespace that appears in VDOM-style signatures.
 fn setup_dot_to_bracket(s: &str) -> String {
     if let Some(name) = s.strip_prefix("$setup.") {
         format!("$setup[\"{}\"]", name)

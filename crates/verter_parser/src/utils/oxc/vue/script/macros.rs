@@ -35,6 +35,12 @@ pub struct MacroObjectArg<'a> {
     pub span: Span,
     /// Property spans (name spans only)
     pub properties: Vec<MacroProperty<'a>>,
+    /// Whether the object contains ANY spread (`...expr`, identifier or
+    /// not). A withDefaults defaults object with a spread is not
+    /// statically analyzable — the WHOLE object expression passes through
+    /// `_mergeDefaults` at runtime (official plugin-vue shape), which
+    /// preserves the user's key precedence via JS spread evaluation.
+    pub has_spread: bool,
 }
 
 /// A property in a macro object argument.

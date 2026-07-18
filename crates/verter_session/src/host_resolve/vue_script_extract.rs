@@ -192,9 +192,11 @@ fn script_content_spans_from_source(source: &str) -> Option<Vec<(u32, u32)>> {
         }
 
         let content_start = tag_end.saturating_add(1);
-        let boundary = find_next_known_root_block(bytes, content_start).unwrap_or(bytes.len());
-        let Some(close_start) = find_last_ascii_tag(bytes, SCRIPT_CLOSE, content_start, boundary)
-        else {
+        // Close tag must be found with JS-aware scanning: a comment or string
+        // containing `` `<style scoped>` `` / `"</script>"` must NOT truncate
+        // the script block (reka-ui RadioGroupItem, and the existing
+        // `</script>`-in-string case).
+        let Some(close_start) = find_script_close_outside_js_context(bytes, content_start) else {
             cursor = content_start;
             continue;
         };
@@ -207,6 +209,123 @@ fn script_content_spans_from_source(source: &str) -> Option<Vec<(u32, u32)>> {
 
     spans.sort_by_key(|(start, _)| *start);
     (!spans.is_empty()).then_some(spans)
+}
+
+/// Find the first `</script>` after `from` that is not inside a JS string,
+/// template literal, or line/block comment.
+///
+/// A naive scan that stops at the next SFC root tag (`<style` / `<template`)
+/// false-positives on comments like `` // `<style scoped>` keeps working ``,
+/// truncating the setup block and dropping every `defineProps` macro.
+fn find_script_close_outside_js_context(bytes: &[u8], from: usize) -> Option<usize> {
+    const CLOSE: &[u8] = b"</script>";
+    if from >= bytes.len() {
+        return None;
+    }
+
+    let mut i = from;
+    // 0 = code, 1 = line comment, 2 = block comment, 3 = ', 4 = ", 5 = `
+    let mut state: u8 = 0;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        match state {
+            0 => {
+                // Line comment
+                if b == b'/' && bytes.get(i + 1) == Some(&b'/') {
+                    state = 1;
+                    i += 2;
+                    continue;
+                }
+                // Block comment
+                if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
+                    state = 2;
+                    i += 2;
+                    continue;
+                }
+                // Quotes
+                if b == b'\'' {
+                    state = 3;
+                    i += 1;
+                    continue;
+                }
+                if b == b'"' {
+                    state = 4;
+                    i += 1;
+                    continue;
+                }
+                if b == b'`' {
+                    state = 5;
+                    i += 1;
+                    continue;
+                }
+                // Potential </script> (case-insensitive). The needle already
+                // ENDS in `>` — the match is a complete close tag, so no
+                // after-byte boundary check applies (an after-byte rule
+                // belongs to a `<script`-PREFIX needle; requiring one here
+                // silently dropped spans for the adjacent
+                // `</script><template>` spelling).
+                if b == b'<'
+                    && i + CLOSE.len() <= bytes.len()
+                    && bytes[i..i + CLOSE.len()].eq_ignore_ascii_case(CLOSE)
+                {
+                    return Some(i);
+                }
+                i += 1;
+            }
+            1 => {
+                // Line comment ends at newline
+                if b == b'\n' || b == b'\r' {
+                    state = 0;
+                }
+                i += 1;
+            }
+            2 => {
+                // Block comment ends at */
+                if b == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                    state = 0;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            3 => {
+                // Single-quoted string (no multi-line escape handling beyond \')
+                if b == b'\\' {
+                    i = (i + 2).min(bytes.len());
+                    continue;
+                }
+                if b == b'\'' {
+                    state = 0;
+                }
+                i += 1;
+            }
+            4 => {
+                if b == b'\\' {
+                    i = (i + 2).min(bytes.len());
+                    continue;
+                }
+                if b == b'"' {
+                    state = 0;
+                }
+                i += 1;
+            }
+            5 => {
+                // Template literal: ignore ${} nesting for close-tag search;
+                // only unescaped ` ends the template.
+                if b == b'\\' {
+                    i = (i + 2).min(bytes.len());
+                    continue;
+                }
+                if b == b'`' {
+                    state = 0;
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 /// Build a same-length, position-preserving script-only source.
@@ -304,24 +423,6 @@ fn find_ascii_tag(bytes: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     None
 }
 
-fn find_last_ascii_tag(bytes: &[u8], needle: &[u8], from: usize, to: usize) -> Option<usize> {
-    if needle.is_empty() || from >= to || bytes.len() < needle.len() {
-        return None;
-    }
-
-    let search_end = to.min(bytes.len());
-    let mut last = None;
-    let mut cursor = from;
-    while let Some(idx) = find_ascii_tag(bytes, needle, cursor) {
-        if idx >= search_end {
-            break;
-        }
-        last = Some(idx);
-        cursor = idx.saturating_add(needle.len());
-    }
-    last
-}
-
 fn find_tag_end(bytes: &[u8], open_start: usize) -> Option<usize> {
     let mut idx = open_start.saturating_add(1);
     let mut quote = None;
@@ -357,17 +458,6 @@ fn is_self_closing_tag(bytes: &[u8], tag_end: usize) -> bool {
     }
 
     false
-}
-
-fn find_next_known_root_block(bytes: &[u8], from: usize) -> Option<usize> {
-    [
-        b"<script".as_slice(),
-        b"<template".as_slice(),
-        b"<style".as_slice(),
-    ]
-    .into_iter()
-    .filter_map(|needle| find_ascii_tag(bytes, needle, from))
-    .min()
 }
 
 fn string_from_span(source: &str, span: Option<verter_compiler::common::Span>) -> Option<String> {

@@ -8,12 +8,12 @@
 use rustc_hash::FxHashMap;
 
 use crate::ast::types::{AstNodeKind, ElementNode, TagType};
-use crate::template::oxc::types::OxcParsedElement;
+use crate::template::oxc::types::{ExpressionFlag, OxcParsedElement};
 use crate::types::NodeId;
 
 use super::super::shared::helpers::{self, VdomHelper};
 use super::super::types::{ChildKind, ChildRecord, CodeGenOutput, ConditionChainRole};
-use super::{children, component, directives, element, VdomCodeGen};
+use super::{children, component, directives, element, props, VdomCodeGen};
 
 /// Check if a string is a valid JS identifier (can be used as a bare property name).
 fn is_valid_js_ident(s: &str) -> bool {
@@ -152,9 +152,14 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         element::resolve_whitespace(&mut children, out, false);
         element::strip_interstitial_condition_nodes(&mut children, out, false);
 
-        // Build slot outlet props object (excluding `name`/`:name`).
-        // Collects `:prop="expr"` and shorthand `:prop` bindings.
+        // Build slot outlet props (named + bare `v-bind` spreads).
         let slot_props = self.build_slot_outlet_props(el, oxc_el, source);
+        if slot_props
+            .as_deref()
+            .is_some_and(|s| s.contains("_mergeProps("))
+        {
+            out.add_vdom_import(VdomHelper::MergeProps);
+        }
 
         let mut buf = std::mem::take(&mut self.buf);
         buf.clear();
@@ -177,7 +182,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             buf.push(')');
             out.overwrite(el.tag_open.start, tag_end, &buf);
         } else if children.is_empty() {
-            // Props but no fallback: _renderSlot(_ctx.$slots, "name", { props })
+            // Props but no fallback: _renderSlot(_ctx.$slots, "name", propsExpr)
             buf.push_str(", ");
             buf.push_str(&slot_props.unwrap());
             buf.push(')');
@@ -185,7 +190,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         } else {
             // Has fallback: split into open/close overwrites so children
             // remain in place with their own overwrites.
-            // Open: _renderSlot(_ctx.$slots, "name", { props }, () => [
+            // Open: _renderSlot(_ctx.$slots, "name", propsExpr, () => [
             buf.push_str(", ");
             buf.push_str(slot_props.as_deref().unwrap_or("{}"));
             buf.push_str(", () => [");
@@ -230,8 +235,15 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         }
     }
 
-    /// Build the slot outlet props object string.
-    /// Collects `:prop="expr"` and shorthand `:prop` bindings, excluding `name`/`:name`.
+    /// Build the slot outlet props expression for `_renderSlot(..., props)`.
+    ///
+    /// Collects:
+    /// - `:prop="expr"` / shorthand `:prop` → object literal members
+    /// - bare `v-bind="expr"` spreads (reka-ui AlertDialogRoot:
+    ///   `<slot v-bind="slotProps" />` → third arg is the resolved expr)
+    ///
+    /// When both spreads and named props exist, wraps with `_mergeProps` so
+    /// named keys win over the spread (official Vue order).
     /// Returns `None` if no slot props are present.
     fn build_slot_outlet_props(
         &self,
@@ -239,8 +251,9 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         oxc_el: Option<&OxcParsedElement<'alloc>>,
         source: &str,
     ) -> Option<String> {
-        let mut props_buf = String::new();
-        let mut count = 0;
+        let mut named_buf = String::new();
+        let mut named_count = 0;
+        let mut spreads: Vec<String> = Vec::new();
 
         for (prop_idx, prop) in el.props.iter().enumerate() {
             if !prop.is_directive {
@@ -250,28 +263,28 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     continue;
                 }
                 // Other static attributes become slot props
-                if count > 0 {
-                    props_buf.push_str(", ");
+                if named_count > 0 {
+                    named_buf.push_str(", ");
                 }
                 if super::props::needs_quoted_key(name) {
-                    props_buf.push('"');
-                    helpers::escape_js_string_into(&mut props_buf, name);
-                    props_buf.push('"');
+                    named_buf.push('"');
+                    helpers::escape_js_string_into(&mut named_buf, name);
+                    named_buf.push('"');
                 } else {
-                    props_buf.push_str(name);
+                    named_buf.push_str(name);
                 }
-                props_buf.push_str(": ");
+                named_buf.push_str(": ");
                 if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
-                    props_buf.push('"');
+                    named_buf.push('"');
                     helpers::escape_js_string_into(
-                        &mut props_buf,
+                        &mut named_buf,
                         &source[vs as usize..ve as usize],
                     );
-                    props_buf.push('"');
+                    named_buf.push('"');
                 } else {
-                    props_buf.push_str("\"\"");
+                    named_buf.push_str("\"\"");
                 }
-                count += 1;
+                named_count += 1;
                 continue;
             }
 
@@ -287,20 +300,20 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     continue;
                 }
 
-                if count > 0 {
-                    props_buf.push_str(", ");
+                if named_count > 0 {
+                    named_buf.push_str(", ");
                 }
 
                 // Emit key
                 let key = super::props::camelize(arg);
                 if super::props::needs_quoted_key(&key) {
-                    props_buf.push('"');
-                    helpers::escape_js_string_into(&mut props_buf, &key);
-                    props_buf.push('"');
+                    named_buf.push('"');
+                    helpers::escape_js_string_into(&mut named_buf, &key);
+                    named_buf.push('"');
                 } else {
-                    props_buf.push_str(&key);
+                    named_buf.push_str(&key);
                 }
-                props_buf.push_str(": ");
+                named_buf.push_str(": ");
 
                 // Emit value
                 if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
@@ -313,21 +326,56 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                         &self.resolver,
                         self.options.force_js,
                     );
-                    props_buf.push_str(&resolved);
+                    named_buf.push_str(&resolved);
                 } else {
                     // Same-name shorthand: `:item` → `item: resolvedBinding`
                     let resolved = self.resolver.resolve_simple_expr(&key);
-                    props_buf.push_str(&resolved);
+                    named_buf.push_str(&resolved);
                 }
-                count += 1;
+                named_count += 1;
+            } else if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                // Bare `v-bind="expr"` spread — pass the object through as
+                // the slot props (or merge with named props below).
+                let raw = &source[vs as usize..ve as usize];
+                let oxc_exp = super::super::vapor::find_prop_oxc_exp(oxc_el, prop_idx);
+                let resolved =
+                    element::resolve_expr(raw, vs, oxc_exp, &self.resolver, self.options.force_js);
+                spreads.push(resolved);
             }
         }
 
-        if count > 0 {
-            Some(format!("{{ {} }}", props_buf))
-        } else {
-            None
+        if spreads.is_empty() && named_count == 0 {
+            return None;
         }
+
+        if spreads.is_empty() {
+            return Some(format!("{{ {} }}", named_buf));
+        }
+
+        if named_count == 0 && spreads.len() == 1 {
+            // Sole spread: `_renderSlot(..., slotProps)`
+            return Some(spreads.into_iter().next().unwrap());
+        }
+
+        // Multiple spreads and/or named props → `_mergeProps(...)`.
+        // Named object last so explicit keys override the spread.
+        let mut out = String::from("_mergeProps(");
+        for (i, s) in spreads.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(s);
+        }
+        if named_count > 0 {
+            if !spreads.is_empty() {
+                out.push_str(", ");
+            }
+            out.push_str("{ ");
+            out.push_str(&named_buf);
+            out.push_str(" }");
+        }
+        out.push(')');
+        Some(out)
     }
 
     /// Process a `<template v-slot:name>` element within a component.
@@ -450,8 +498,10 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
     /// ```js
     /// _createVNode(Comp, null, { header: _withCtx(() => [...]), _: 1 })
     /// ```
+    #[allow(clippy::too_many_arguments)] // walker-context threading (id for hasScopeRef)
     pub(super) fn leave_component_with_slots(
         &mut self,
+        id: NodeId,
         el: &ElementNode,
         oxc: Option<&OxcParsedElement<'alloc>>,
         el_children: &[NodeId],
@@ -567,15 +617,18 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             out.add_vdom_import(VdomHelper::OpenBlock);
         }
 
-        buf.push_str(comp_helper.name());
-        buf.push('(');
-        buf.push_str(&resolved);
-
         // Props
-        let dynamic_props = if has_props {
-            buf.push_str(", ");
+        // `uses_full_props_spread` tracks the single v-bind object-spread path
+        // (`_normalizeProps(_guardReactiveProps(expr))`) which official Vue
+        // always tags with FULL_PROPS (16) so fallthrough attrs re-diff.
+        // Also collect v-show / custom directives for `_withDirectives` wrapping
+        // (components with slots used to drop them — AvatarImage regression).
+        let mut props_buf = String::new();
+        let (dynamic_props, uses_full_props_spread, native_vmodel, directive_entries) = if has_props
+        {
+            props_buf.push_str(", ");
             let props_result = element::build_props_object_into(
-                &mut buf,
+                &mut props_buf,
                 el,
                 source,
                 &self.resolver,
@@ -607,13 +660,31 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             if props_result.uses_to_handlers {
                 out.add_vdom_import(VdomHelper::ToHandlers);
             }
-            props_result.dynamic_props
+            let full_props_spread =
+                props_result.uses_normalize_props && props_result.uses_guard_reactive_props;
+            (
+                props_result.dynamic_props,
+                full_props_spread,
+                props_result.native_vmodel,
+                props_result.directive_entries,
+            )
         } else {
             if has_children {
-                buf.push_str(", null");
+                props_buf.push_str(", null");
             }
-            Vec::new()
+            (Vec::new(), false, None, Vec::new())
         };
+
+        let has_directives_wrap = native_vmodel.is_some() || !directive_entries.is_empty();
+        if has_directives_wrap {
+            buf.push_str("_withDirectives(");
+            out.add_vdom_import(VdomHelper::WithDirectives);
+        }
+
+        buf.push_str(comp_helper.name());
+        buf.push('(');
+        buf.push_str(&resolved);
+        buf.push_str(&props_buf);
 
         if has_children {
             if any_dynamic {
@@ -682,20 +753,43 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             .map(|tc| tc.end)
             .unwrap_or(el.tag_open.end);
 
+        // Patch flags for the component call itself (props/attrs).
+        // MUST include FULL_PROPS for v-bind spreads even when `dynamic_props`
+        // is empty — the spread path uses `_normalizeProps(_guardReactiveProps(...))`
+        // with no per-key dynamicProps list. Omitting FULL_PROPS freezes initial
+        // fallthrough attrs (e.g. class) across setProps / $attrs updates
+        // (oku Label dynamic class regression).
+        let expr_flag = oxc
+            .map(|o| o.expression_flag)
+            .unwrap_or(ExpressionFlag::empty());
+        let mut props_patch_flag =
+            props::compute_patch_flags(el.prop_flag, expr_flag, el.children_mode);
+        if !dynamic_props.is_empty() {
+            props_patch_flag |= helpers::PATCH_PROPS;
+        } else {
+            // Same as element.rs: empty dynamic_props clears PATCH_PROPS only.
+            // FULL_PROPS from spreads is preserved.
+            props_patch_flag &= !helpers::PATCH_PROPS;
+        }
+        // Bare object-spread emission (`_normalizeProps(_guardReactiveProps(...))`)
+        // always needs FULL_PROPS, matching official Vue — even when `dynamic_props`
+        // is empty and regardless of whether `prop_flag` retained the spread bit.
+        if uses_full_props_spread || el.prop_flag.has_spread() || el.has_spread() {
+            props_patch_flag |= helpers::PATCH_FULL_PROPS;
+        }
+
         buf.clear();
         if has_children && any_dynamic {
             // Dynamic: close the _createSlots array and component call
             buf.push_str("])");
-            // Emit DYNAMIC_SLOTS patch flag (1024)
+            // Emit DYNAMIC_SLOTS plus any props patch flags (incl. FULL_PROPS).
+            // Strip TEXT — component children are slots, not element text.
             buf.push_str(", ");
-            let mut flag = helpers::PATCH_DYNAMIC_SLOTS;
-            if !dynamic_props.is_empty() {
-                flag |= helpers::PATCH_PROPS;
-            }
+            let flag = helpers::PATCH_DYNAMIC_SLOTS | (props_patch_flag & !helpers::PATCH_TEXT);
             let flag_str =
                 helpers::format_patch_flag(flag, self.options.is_production, |s| out.alloc_str(s));
             buf.push_str(flag_str);
-            if !dynamic_props.is_empty() {
+            if (props_patch_flag & helpers::PATCH_PROPS) != 0 && !dynamic_props.is_empty() {
                 buf.push_str(", ");
                 let props_ref = element::format_dynamic_props_ref(
                     &dynamic_props,
@@ -705,40 +799,27 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             }
             buf.push(')');
         } else if has_children {
-            // Static: close the slot object.
-            // Use FORWARDED (3) when any slot body contains a <slot> outlet,
-            // otherwise STABLE (1).
-            let forwarded = self.has_forwarded_slots(el_children);
-            if forwarded {
-                if self.options.is_production {
-                    buf.push_str(", _: 3}");
-                } else {
-                    buf.push_str(", _: 3 /* FORWARDED */}");
-                }
-            } else if self.options.is_production {
-                buf.push_str(", _: 1}");
-            } else {
-                buf.push_str(", _: 1 /* STABLE */}");
-            }
-            // Add PatchFlags for components with dynamic props
-            if !dynamic_props.is_empty() {
-                buf.push_str(", ");
-                let flag_str = helpers::format_patch_flag(
-                    helpers::PATCH_PROPS,
-                    self.options.is_production,
-                    |s| out.alloc_str(s),
-                );
-                buf.push_str(flag_str);
-                buf.push_str(", ");
-                let props_ref = element::format_dynamic_props_ref(
-                    &dynamic_props,
-                    Some(&mut self.hoisted_constants),
-                );
-                buf.push_str(&props_ref);
-            }
+            // Static named/default slots object: DYNAMIC iff the slot
+            // subtree references an OUTER template-scope variable
+            // (official-parity `hasScopeRef`); forwarded `<slot>` → see
+            // helper.
+            let slots_dynamic = self.component_slots_reference_outer_scope(id, oxc, source);
+            self.emit_named_slots_object_close(
+                &mut buf,
+                out,
+                el_children,
+                props_patch_flag,
+                &dynamic_props,
+                slots_dynamic,
+            );
             buf.push(')');
         } else {
             buf.push(')');
+        }
+        // Close `_withDirectives(...)` for v-show / custom dirs on components
+        // with children (named/default slots).
+        if has_directives_wrap {
+            element::emit_with_directives_close(&mut buf, &native_vmodel, &directive_entries, out);
         }
         // Close the outer (_openBlock(), ...) wrapper for block root components
         if needs_block_wrapper {
@@ -978,8 +1059,10 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
 
     /// Process a component element with implicit default slot (non-slot children).
     /// Wraps children in `{ default: _withCtx(() => [...]), _: 1 }`.
+    #[allow(clippy::too_many_arguments)] // walker-context threading (id for hasScopeRef)
     pub(super) fn leave_component_with_default_slot(
         &mut self,
+        id: NodeId,
         el: &ElementNode,
         oxc: Option<&OxcParsedElement<'alloc>>,
         el_children: &[NodeId],
@@ -1047,14 +1130,12 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             out.add_vdom_import(VdomHelper::OpenBlock);
         }
 
-        buf.push_str(comp_helper.name());
-        buf.push('(');
-        buf.push_str(&resolved);
-
-        let dynamic_props = if has_props {
-            buf.push_str(", ");
+        let mut props_buf = String::new();
+        let (dynamic_props, uses_full_props_spread, native_vmodel, directive_entries) = if has_props
+        {
+            props_buf.push_str(", ");
             let props_result = element::build_props_object_into(
-                &mut buf,
+                &mut props_buf,
                 el,
                 source,
                 &self.resolver,
@@ -1086,13 +1167,47 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             if props_result.uses_to_handlers {
                 out.add_vdom_import(VdomHelper::ToHandlers);
             }
-            props_result.dynamic_props
+            let full_props_spread =
+                props_result.uses_normalize_props && props_result.uses_guard_reactive_props;
+            (
+                props_result.dynamic_props,
+                full_props_spread,
+                props_result.native_vmodel,
+                props_result.directive_entries,
+            )
         } else {
             if has_children {
-                buf.push_str(", null");
+                props_buf.push_str(", null");
             }
-            Vec::new()
+            (Vec::new(), false, None, Vec::new())
         };
+
+        let has_directives_wrap = native_vmodel.is_some() || !directive_entries.is_empty();
+        if has_directives_wrap {
+            buf.push_str("_withDirectives(");
+            out.add_vdom_import(VdomHelper::WithDirectives);
+        }
+
+        buf.push_str(comp_helper.name());
+        buf.push('(');
+        buf.push_str(&resolved);
+        buf.push_str(&props_buf);
+
+        // Same FULL_PROPS rule as leave_component_with_slots — implicit default
+        // slot path is what Label.vue and most component-with-children use.
+        let expr_flag = oxc
+            .map(|o| o.expression_flag)
+            .unwrap_or(ExpressionFlag::empty());
+        let mut props_patch_flag =
+            props::compute_patch_flags(el.prop_flag, expr_flag, el.children_mode);
+        if !dynamic_props.is_empty() {
+            props_patch_flag |= helpers::PATCH_PROPS;
+        } else {
+            props_patch_flag &= !helpers::PATCH_PROPS;
+        }
+        if uses_full_props_spread || el.prop_flag.has_spread() || el.has_spread() {
+            props_patch_flag |= helpers::PATCH_FULL_PROPS;
+        }
 
         let tag_end = el
             .tag_close
@@ -1104,7 +1219,31 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             // All children were whitespace -- no meaningful content.
             // Overwrite the entire element [open_start, close_end) with the
             // component call (avoids leaving raw `</Component>` in output).
+            if props_patch_flag != 0 {
+                buf.push_str(", null, ");
+                let flag_str =
+                    helpers::format_patch_flag(props_patch_flag, self.options.is_production, |s| {
+                        out.alloc_str(s)
+                    });
+                buf.push_str(flag_str);
+                if (props_patch_flag & helpers::PATCH_PROPS) != 0 && !dynamic_props.is_empty() {
+                    buf.push_str(", ");
+                    let props_ref = element::format_dynamic_props_ref(
+                        &dynamic_props,
+                        Some(&mut self.hoisted_constants),
+                    );
+                    buf.push_str(&props_ref);
+                }
+            }
             buf.push(')');
+            if has_directives_wrap {
+                element::emit_with_directives_close(
+                    &mut buf,
+                    &native_vmodel,
+                    &directive_entries,
+                    out,
+                );
+            }
             if needs_block_wrapper {
                 buf.push(')');
             }
@@ -1163,35 +1302,24 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         self.emit_slot_children_with_cache(&children, out, source, el_children);
 
         buf.clear();
-        // Use FORWARDED (3) when any child contains a <slot> outlet.
-        let forwarded = self.has_forwarded_slots(el_children);
-        if forwarded {
-            if self.options.is_production {
-                buf.push_str("]), _: 3}");
-            } else {
-                buf.push_str("]), _: 3 /* FORWARDED */}");
-            }
-        } else if self.options.is_production {
-            buf.push_str("]), _: 1}");
-        } else {
-            buf.push_str("]), _: 1 /* STABLE */}");
-        }
-        // Add PatchFlags for components with dynamic props
-        if !dynamic_props.is_empty() {
-            buf.push_str(", ");
-            let flag_str =
-                helpers::format_patch_flag(helpers::PATCH_PROPS, self.options.is_production, |s| {
-                    out.alloc_str(s)
-                });
-            buf.push_str(flag_str);
-            buf.push_str(", ");
-            let props_ref = element::format_dynamic_props_ref(
-                &dynamic_props,
-                Some(&mut self.hoisted_constants),
-            );
-            buf.push_str(&props_ref);
-        }
+        // DYNAMIC iff the slot subtree references an OUTER template-scope
+        // variable (official-parity `hasScopeRef`); forwarded → FORWARDED;
+        // else STABLE. TEXT is stripped (slots are not element text children).
+        let slots_dynamic = self.component_slots_reference_outer_scope(id, oxc, source);
+        self.emit_component_slot_close(
+            &mut buf,
+            out,
+            el_children,
+            props_patch_flag,
+            &dynamic_props,
+            slots_dynamic,
+        );
         buf.push(')');
+        // Close `_withDirectives(...)` for v-show / custom dirs on components
+        // with an implicit default slot (AvatarImage, etc.).
+        if has_directives_wrap {
+            element::emit_with_directives_close(&mut buf, &native_vmodel, &directive_entries, out);
+        }
         // Close the outer (_openBlock(), ...) wrapper for block root components
         if needs_block_wrapper {
             buf.push(')');
@@ -1207,6 +1335,277 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             let suffix = directives::format_scope_close(&scope_close, self.options.is_production);
             if !suffix.is_empty() {
                 out.prepend_static(tag_end, suffix);
+            }
+        }
+    }
+
+    /// Official-parity `hasScopeRef`: a component's static-format slots are
+    /// `_: 2 /* DYNAMIC */` iff the slot subtree references a template-scope
+    /// variable bound OUTSIDE the slot boundary — an enclosing `v-for` alias
+    /// (including the component's OWN `v-for`) or an enclosing component's
+    /// slot parameters. The component's OWN `v-slot` params do NOT count:
+    /// a STABLE slot re-renders through the child's own effect, which
+    /// re-invokes the slot function with fresh args (`v-slot="{ grid }"` at
+    /// top level is STABLE in official output).
+    ///
+    /// Matches official build-mode (`prefixIdentifiers`) semantics, which
+    /// REPLACE the coarse in-v-for/in-v-slot scope counters: a component
+    /// inside `v-for` whose slot content is scope-independent stays STABLE.
+    /// Like official, the check is name-based (shadowing below the boundary
+    /// still counts as a reference — the safe, over-marking direction).
+    fn component_slots_reference_outer_scope(
+        &self,
+        id: NodeId,
+        oxc: Option<&OxcParsedElement<'alloc>>,
+        source: &str,
+    ) -> bool {
+        let outer = self.outer_scope_names(id, oxc, source);
+        if outer.is_empty() {
+            return false;
+        }
+        let el_children = match &self.ast.nodes[id.0].kind {
+            AstNodeKind::Element(el) => el
+                .content
+                .as_ref()
+                .map(|c| c.children.as_slice())
+                .unwrap_or(&[]),
+            _ => return false,
+        };
+        self.subtree_references_scope_names(el_children, &outer)
+    }
+
+    /// Template-scope variable names active at `id` from OUTER scopes:
+    /// every enclosing `v-for` alias / `v-slot` param plus the element's
+    /// own `v-for` aliases — but NOT its own `v-slot` params.
+    ///
+    /// `provided_locals` on the element's OXC parse already carries
+    /// inherited + own locals (own pushed LAST, v-for before v-slot), so
+    /// own slot params are removed by last-occurrence; an element without
+    /// scoping directives inherits the nearest ancestor's set.
+    fn outer_scope_names(
+        &self,
+        id: NodeId,
+        oxc: Option<&OxcParsedElement<'alloc>>,
+        source: &str,
+    ) -> Vec<String> {
+        // The element's own locals row, if it has scoping directives.
+        if let Some(oxc_el) = oxc {
+            if let Some(locals) = &oxc_el.provided_locals {
+                let mut names: Vec<String> = locals.iter().map(|s| s.to_string()).collect();
+                if let Some(v_slot) = &oxc_el.v_slot {
+                    for span in &v_slot.parsed.locals {
+                        let name = span.slice(source);
+                        if let Some(pos) = names.iter().rposition(|n| n == name) {
+                            names.remove(pos);
+                        }
+                    }
+                }
+                return names;
+            }
+        }
+        // No own scoping directives: nearest ancestor's provided locals.
+        let mut current = self.ast.nodes[id.0].parent;
+        while let Some(pid) = current {
+            if let Some(crate::template::oxc::types::OxcNodeData::Element(ancestor)) =
+                self.oxc_ast.data.get(pid.0)
+            {
+                if let Some(locals) = &ancestor.provided_locals {
+                    return locals.iter().map(|s| s.to_string()).collect();
+                }
+            }
+            current = self.ast.nodes[pid.0].parent;
+        }
+        Vec::new()
+    }
+
+    /// True when any expression under `children` references one of `names`.
+    /// Scans interpolations, prop values/args, v-if conditions, v-for
+    /// iterables, and v-slot default-value expressions, recursing through
+    /// the subtree. Name-based like official `hasScopeRef` — descendant
+    /// shadowing is deliberately not subtracted.
+    fn subtree_references_scope_names(&self, children: &[NodeId], names: &[String]) -> bool {
+        let name_hit = |n: &str| names.iter().any(|outer| outer == n);
+        for &child_id in children {
+            match self.oxc_ast.data.get(child_id.0) {
+                Some(crate::template::oxc::types::OxcNodeData::Interpolation(expr)) => {
+                    if let Some(bindings) = &expr.bindings {
+                        if bindings
+                            .bindings
+                            .iter()
+                            .any(|b| b.ignore && name_hit(b.name))
+                        {
+                            return true;
+                        }
+                    }
+                }
+                Some(crate::template::oxc::types::OxcNodeData::Element(oxc_el)) => {
+                    let expr_hits =
+                        |expr: &crate::template::oxc::types::OxcParsedExpression<'alloc>| {
+                            expr.bindings.as_ref().is_some_and(|bindings| {
+                                bindings
+                                    .bindings
+                                    .iter()
+                                    .any(|b| b.ignore && name_hit(b.name))
+                            })
+                        };
+                    if oxc_el.condition.as_ref().is_some_and(expr_hits) {
+                        return true;
+                    }
+                    for prop in &oxc_el.props {
+                        if prop.exp.as_ref().is_some_and(expr_hits)
+                            || prop.arg.as_ref().is_some_and(expr_hits)
+                        {
+                            return true;
+                        }
+                    }
+                    // v-for iterables / v-slot defaults record their
+                    // template-scope references in the dedicated
+                    // scope-local name set (their `references` and
+                    // liveness sets both EXCLUDE scope locals).
+                    if let Some(v_for) = &oxc_el.v_for {
+                        if v_for
+                            .parsed
+                            .scope_local_reference_names
+                            .iter()
+                            .any(|n| name_hit(n))
+                        {
+                            return true;
+                        }
+                    }
+                    if let Some(v_slot) = &oxc_el.v_slot {
+                        if v_slot
+                            .parsed
+                            .scope_local_reference_names
+                            .iter()
+                            .any(|n| name_hit(n))
+                        {
+                            return true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            // Recurse into element children.
+            if let AstNodeKind::Element(child_el) = &self.ast.nodes[child_id.0].kind {
+                if let Some(content) = &child_el.content {
+                    if self.subtree_references_scope_names(&content.children, names) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Emit the slot-flag / patch-flag tail for a component with children.
+    ///
+    /// - Slot subtree references an OUTER template-scope variable
+    ///   (official-parity `hasScopeRef`) → `_: 2 /* DYNAMIC */` +
+    ///   `DYNAMIC_SLOTS` (and props flags)
+    /// - Forwarded `<slot>` → `_: 3 /* FORWARDED */`
+    /// - Otherwise → `_: 1 /* STABLE */`
+    ///
+    /// Component patch flags never include `TEXT` (children are slots, not
+    /// element text nodes).
+    fn emit_component_slot_close(
+        &mut self,
+        buf: &mut String,
+        out: &mut CodeGenOutput<'_>,
+        el_children: &[NodeId],
+        mut props_patch_flag: u32,
+        dynamic_props: &[String],
+        slots_dynamic: bool,
+    ) {
+        // TEXT applies to element children only; strip for components.
+        props_patch_flag &= !helpers::PATCH_TEXT;
+
+        let forwarded = !slots_dynamic && self.has_forwarded_slots(el_children);
+
+        if slots_dynamic {
+            if self.options.is_production {
+                buf.push_str("]), _: 2}");
+            } else {
+                buf.push_str("]), _: 2 /* DYNAMIC */}");
+            }
+            props_patch_flag |= helpers::PATCH_DYNAMIC_SLOTS;
+        } else if forwarded {
+            if self.options.is_production {
+                buf.push_str("]), _: 3}");
+            } else {
+                buf.push_str("]), _: 3 /* FORWARDED */}");
+            }
+        } else if self.options.is_production {
+            buf.push_str("]), _: 1}");
+        } else {
+            buf.push_str("]), _: 1 /* STABLE */}");
+        }
+
+        if props_patch_flag != 0 {
+            buf.push_str(", ");
+            let flag_str =
+                helpers::format_patch_flag(props_patch_flag, self.options.is_production, |s| {
+                    out.alloc_str(s)
+                });
+            buf.push_str(flag_str);
+            if (props_patch_flag & helpers::PATCH_PROPS) != 0 && !dynamic_props.is_empty() {
+                buf.push_str(", ");
+                let props_ref = element::format_dynamic_props_ref(
+                    dynamic_props,
+                    Some(&mut self.hoisted_constants),
+                );
+                buf.push_str(&props_ref);
+            }
+        }
+    }
+
+    /// Variant of [`emit_component_slot_close`] for the named-slots object path
+    /// where the slots object is closed with `, _: N}` rather than `]), _: N}`.
+    fn emit_named_slots_object_close(
+        &mut self,
+        buf: &mut String,
+        out: &mut CodeGenOutput<'_>,
+        el_children: &[NodeId],
+        mut props_patch_flag: u32,
+        dynamic_props: &[String],
+        slots_dynamic: bool,
+    ) {
+        props_patch_flag &= !helpers::PATCH_TEXT;
+
+        let forwarded = !slots_dynamic && self.has_forwarded_slots(el_children);
+
+        if slots_dynamic {
+            if self.options.is_production {
+                buf.push_str(", _: 2}");
+            } else {
+                buf.push_str(", _: 2 /* DYNAMIC */}");
+            }
+            props_patch_flag |= helpers::PATCH_DYNAMIC_SLOTS;
+        } else if forwarded {
+            if self.options.is_production {
+                buf.push_str(", _: 3}");
+            } else {
+                buf.push_str(", _: 3 /* FORWARDED */}");
+            }
+        } else if self.options.is_production {
+            buf.push_str(", _: 1}");
+        } else {
+            buf.push_str(", _: 1 /* STABLE */}");
+        }
+
+        if props_patch_flag != 0 {
+            buf.push_str(", ");
+            let flag_str =
+                helpers::format_patch_flag(props_patch_flag, self.options.is_production, |s| {
+                    out.alloc_str(s)
+                });
+            buf.push_str(flag_str);
+            if (props_patch_flag & helpers::PATCH_PROPS) != 0 && !dynamic_props.is_empty() {
+                buf.push_str(", ");
+                let props_ref = element::format_dynamic_props_ref(
+                    dynamic_props,
+                    Some(&mut self.hoisted_constants),
+                );
+                buf.push_str(&props_ref);
             }
         }
     }

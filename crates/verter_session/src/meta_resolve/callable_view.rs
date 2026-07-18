@@ -606,6 +606,7 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 first_param,
                 Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
                 ProjectionReductionContext::published(ProjectionMode::Shallow),
+                None,
             )
     }
 

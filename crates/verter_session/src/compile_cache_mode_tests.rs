@@ -107,6 +107,7 @@ fn make_macro_type_dep(name: &str) -> MacroTypeDep {
         macro_kind: AnalyzedMacroKind::DefineProps,
         macro_index: 0,
         macro_span: Span::new(0, 0),
+        usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
     }
 }
 

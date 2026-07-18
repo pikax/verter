@@ -2636,11 +2636,18 @@ const GLOBAL_AUGMENTATION_TAG: &str = "$global";
 /// - `ExternalSpecifier(s)` → match `fact.specifier == s` AND the
 ///   specifier is NOT relative, NOT a wildcard, NOT the global tag.
 /// - `ResolvedRelativeCanonical(canon)` → match relative specifiers
-///   (start with `./` or `../`) whose `resolve_relative_canonical`
-///   resolves equal to `canon`.
+///   (the full TS `pathIsRelative` class via
+///   [`verter_workspace::resolver::is_relative_specifier`]) whose
+///   `resolve_relative_canonical` resolves equal to `canon`.
 /// - `WildcardAmbient(pattern)` → match `fact.specifier == pattern`
 ///   AND the specifier contains a wildcard `*`.
 /// - `GlobalAugmentation` → match `fact.specifier == "$global"`.
+///
+/// Relative classification MUST be the shared resolver predicate, not
+/// a `./`/`../` prefix check: a `declare module '..'` fact is the
+/// parent-directory index module, and treating it as a bare external
+/// named `..` would match location-independently against any `'..'`
+/// import target regardless of the directories involved.
 pub(crate) fn augmenter_matches_target<R>(
     fact: &ModuleAugmentationFact,
     target_key: &AugmentationTargetKey,
@@ -2650,17 +2657,18 @@ pub(crate) fn augmenter_matches_target<R>(
 where
     R: Fn(&str, &str) -> Option<Arc<str>>,
 {
+    use verter_workspace::resolver::is_relative_specifier;
     let specifier: &str = fact.specifier.as_ref();
     match &target_key.target {
         AugmentationTargetKind::ExternalSpecifier(target_spec) => {
             // Bare external: not relative, not wildcard, not global.
-            let is_relative = specifier.starts_with("./") || specifier.starts_with("../");
+            let is_relative = is_relative_specifier(specifier);
             let is_wildcard = specifier.contains('*');
             let is_global = specifier == GLOBAL_AUGMENTATION_TAG;
             !is_relative && !is_wildcard && !is_global && specifier == target_spec.as_ref()
         }
         AugmentationTargetKind::ResolvedRelativeCanonical(target_canon) => {
-            if !(specifier.starts_with("./") || specifier.starts_with("../")) {
+            if !is_relative_specifier(specifier) {
                 return false;
             }
             match resolve_relative_canonical(augmenter_canonical, specifier) {
@@ -2698,7 +2706,12 @@ fn augmenter_fact_could_contribute(
     target_key: &AugmentationTargetKey,
 ) -> bool {
     let specifier: &str = fact.specifier.as_ref();
-    let is_relative = specifier.starts_with("./") || specifier.starts_with("../");
+    // Same relative class as `augmenter_matches_target` — the exact
+    // matcher and this conservative invalidation variant must agree on
+    // which facts are relative, or a `declare module '..'` fact would
+    // be exact-matched as relative but never invalidate relative-target
+    // entries.
+    let is_relative = verter_workspace::resolver::is_relative_specifier(specifier);
     match &target_key.target {
         AugmentationTargetKind::ExternalSpecifier(target_spec) => {
             let is_wildcard = specifier.contains('*');

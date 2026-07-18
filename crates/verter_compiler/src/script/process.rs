@@ -325,7 +325,6 @@ pub fn process_script_setup<'alloc>(
         macro_state.props_section.as_deref(),
         macro_state.emits_section.as_deref(),
         macro_state.options_section.as_deref(),
-        options.ssr,
     );
 
     // Overwrite open tag with wrapper
@@ -427,9 +426,8 @@ pub fn process_script_only<'alloc>(
     if options.is_vapor {
         close_text.push_str("__sfc__.__vapor = true;\n");
     }
-    if options.ssr {
-        close_text.push_str("__sfc__.__ssrInlineRender = true;\n");
-    }
+    // Non-inline SSR attaches `ssrRender` separately (not returned from setup),
+    // so do not claim `__ssrInlineRender`.
     if options.has_scoped_style && !options.scope_id.is_empty() {
         close_text.push_str("__sfc__.__scopeId = \"");
         close_text.push_str(options.scope_id);
@@ -462,9 +460,7 @@ fn emit_minimal_component(
     if options.is_vapor {
         s.push_str("__sfc__.__vapor = true;\n");
     }
-    if options.ssr {
-        s.push_str("__sfc__.__ssrInlineRender = true;\n");
-    }
+    // Non-inline SSR attaches `ssrRender` separately — no `__ssrInlineRender`.
     if options.has_scoped_style && !options.scope_id.is_empty() {
         s.push_str("__sfc__.__scopeId = \"");
         s.push_str(options.scope_id);
@@ -501,7 +497,6 @@ fn build_setup_wrapper_start(
     props_section: Option<&str>,
     emits_section: Option<&str>,
     options_section: Option<&str>,
-    ssr: bool,
 ) -> String {
     let mut s = String::with_capacity(256);
     s.push_str("const __sfc__ = /*@__PURE__*/_defineComponent({\n");
@@ -517,10 +512,6 @@ fn build_setup_wrapper_start(
         s.push_str("  __name: '");
         s.push_str(component_name);
         s.push_str("',\n");
-    }
-
-    if ssr {
-        s.push_str("  __ssrInlineRender: true,\n");
     }
 
     // Props section
@@ -581,19 +572,29 @@ fn build_setup_wrapper_end(
 ) -> String {
     let mut s = String::with_capacity(128);
     if let Some(ret) = returned {
-        // Match Vue's official compiler: assign returned bindings to a variable,
-        // mark it with __isScriptSetup so @vue/test-utils (and other tools) can
-        // identify script-setup components and apply stubs to setup-returned refs.
+        // Client (non-SSR): match Vue's official compiler — assign returned
+        // bindings and mark with `__isScriptSetup` so @vue/test-utils can
+        // identify script-setup components.
+        //
+        // SSR non-inline path: setup returns bindings and `ssrRender` is
+        // attached separately, reading them via the instance proxy (`_ctx.*`).
+        // Vue does NOT expose `__isScriptSetup` return keys on that proxy for
+        // ssrRender, so emitting the marker here makes every `_ctx.n` /
+        // `_ctx.Child` access miss (empty interpolations / missing children).
+        // Official plugin-vue avoids this by true-inline SSR (setup returns the
+        // render function). Until Verter does that, SSR must return a plain
+        // object without the marker.
         s.push_str("\nconst __returned__ = ");
         s.push_str(ret);
-        s.push_str(";\nObject.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });\nreturn __returned__;\n");
+        if ssr {
+            s.push_str(";\nreturn __returned__;\n");
+        } else {
+            s.push_str(";\nObject.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });\nreturn __returned__;\n");
+        }
     }
     s.push_str("\n}});\n");
     if is_vapor {
         s.push_str("__sfc__.__vapor = true;\n");
-    }
-    if ssr {
-        s.push_str("__sfc__.__ssrInlineRender = true;\n");
     }
     if let Some(id) = scope_id {
         s.push_str("__sfc__.__scopeId = \"");

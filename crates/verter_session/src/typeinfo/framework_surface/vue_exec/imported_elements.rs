@@ -24,7 +24,7 @@ use verter_parser::utils::oxc::script::type_surface::{
 };
 use verter_semantic::analysis::AnalyzedMacroKind;
 
-use super::{raise_member_value, TypeinfoVueSurfaceOutputCap};
+use super::{raise_member_value, TypeinfoVueSurfaceOutputCap, UnresolvedSurfaceArm};
 use crate::meta_resolve::callable_view::CallableNodeView;
 use crate::project_semantic_dispatch::node_data_for;
 use crate::project_semantic_dispatch::output_materialization::OutputProjector;
@@ -65,17 +65,27 @@ use crate::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
 /// `None` when the type argument is not the bare `type_name` reference or the
 /// macro surface does not resolve — the caller keeps the legacy unresolved
 /// outcome.
+///
+/// `unresolved_arms` receives the resolved surface's unresolvable
+/// SURFACE-COMPOSITION arm facts (see
+/// [`VueMacroSurface::unresolved_surface_arms`]) so the compile-facing
+/// collector can tier import-backed misses.
 pub(crate) fn imported_emits_resolved_elements(
     ctx: &dyn crate::resolver_core::ResolverContext,
     owner_canonical: &str,
     macro_index: usize,
     type_name: &str,
+    unresolved_arms: &mut Vec<UnresolvedSurfaceArm>,
 ) -> Option<ResolvedElements> {
     let dispatch = ctx.dispatch();
 
-    // By-name representability gate (node-domain): the macro type arg must be
-    // the bare `type_name` reference, with NO type arguments.
-    bare_named_ref_type_arg(ctx, owner_canonical, macro_index, type_name)?;
+    // Representability gate (node-domain): the macro type arg must be a bare
+    // named reference with NO type arguments. The name may be a LOCAL ALIAS
+    // of `type_name` (e.g. `type A = RootEmits; defineEmits<A>()` with dep
+    // RootEmits) — the shared macro-surface authority expands aliases, so
+    // we must NOT require the type arg's spelling to equal `type_name`.
+    bare_named_type_arg(ctx, owner_canonical, macro_index)?;
+    let _ = type_name; // map key / tracking only (used by caller)
 
     // Resolve the macro surface through the shared macro-surface authority.
     let indexed = ctx
@@ -92,6 +102,7 @@ pub(crate) fn imported_emits_resolved_elements(
             level: TypeInfoQueryLevel::FullMetadata,
         },
     )?;
+    unresolved_arms.extend(macro_surface.unresolved_surface_arms.iter().cloned());
     let surface = &macro_surface.surface;
 
     // Node-domain demand identity — `Navigate` carrier-resolves aliased
@@ -163,19 +174,79 @@ pub(crate) fn imported_emits_resolved_elements(
             }
             continue;
         }
-        // Inline tuple member value → the named-tuple shorthand emit. The
-        // tuple-ness decision is NODE-domain; the display is the member's
-        // already-rendered value text (`[id: number]`).
-        if matches!(
-            node_data_for(dispatch.ctx, member.value).as_deref(),
+        // Named-tuple shorthand emit (`escapeKeydown: [event: KeyboardEvent]`).
+        // Accept a direct `Tuple` node on the member value OR a
+        // Navigate-expanded terminal Tuple (indexed access / alias chains
+        // like `DismissableLayerEmits['escapeKeydown']` used by
+        // oku-primitives / reka-ui under `Omit<SharedEmits, …>`).
+        //
+        // EVERY classification here is NODE-domain (`SemanticNodeData`) —
+        // never a raised/materialized `TypeExpr` and never display text.
+        // This function is a sanctioned TERMINAL one-shot sink on the hot
+        // path: materialized values may only BE output (the rendered
+        // display), never feed a decision (output-projector residual rule).
+        let raw_data = node_data_for(dispatch.ctx, member.value);
+        let raw_is_tuple = matches!(raw_data.as_deref(), Some(SemanticNodeData::Tuple { .. }));
+        let navigated = dispatch.resolve_hot_handle_with_context(
+            crate::semantic_query::HotTypeRef::new(member.value),
+            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+        );
+        let navigated_data = node_data_for(dispatch.ctx, navigated);
+        let navigated_is_tuple = matches!(
+            navigated_data.as_deref(),
             Some(SemanticNodeData::Tuple { .. })
-        ) {
-            if let Some(tuple_text) = type_text {
+        );
+        // Indexed-access property values (`LayerEmits['escapeKeydown']`) are
+        // the oku-primitives / reka-ui named-tuple emit pattern. They must
+        // count as emit signatures even when Navigate has not yet collapsed
+        // them to a concrete `Tuple` node (payload may degrade to unknown).
+        let is_indexed_access = matches!(
+            raw_data.as_deref(),
+            Some(SemanticNodeData::IndexedAccess { .. })
+        ) || matches!(
+            navigated_data.as_deref(),
+            Some(SemanticNodeData::IndexedAccess { .. })
+        );
+        if raw_is_tuple || navigated_is_tuple {
+            let tuple_text = type_text.clone().or_else(|| {
+                let cap = TypeinfoVueSurfaceOutputCap::new(&dispatch);
+                cap.materialize_output_type_expr(navigated)
+                    .map(|r| r.into_type_expr(&cap))
+                    .and_then(|expr| render_type_expr_display(&expr))
+            });
+            if let Some(tuple_text) = tuple_text {
                 call_signatures.push(named_signature_row(
                     member.name.as_ref(),
                     ResolvedCallPayloadForm::Tuple { tuple_text },
                 ));
+            } else {
+                call_signatures.push(named_signature_row(
+                    member.name.as_ref(),
+                    ResolvedCallPayloadForm::Call {
+                        params_text: "...args: unknown[]".to_string(),
+                    },
+                ));
             }
+        } else if is_indexed_access {
+            // Named-tuple emit via an indexed access whose hop did NOT
+            // collapse to a concrete Tuple node in the typed domain (raw,
+            // Navigate, and raise all non-Tuple — the earlier branch owns
+            // every collapsed case). Keep the event name and DEGRADE the
+            // payload from structured presence only: display text never
+            // decides the payload FORM (Typed-IR-Only), and the hot path
+            // never materializes-then-branches (output-projector residual
+            // rule — `imported_emits_resolved_elements` is a sanctioned
+            // TERMINAL sink, so a materialized value may only BE output,
+            // never feed a decision).
+            let signature = match type_text.clone() {
+                Some(tt) => ResolvedCallPayloadForm::Call {
+                    params_text: format!("payload: {tt}"),
+                },
+                None => ResolvedCallPayloadForm::Call {
+                    params_text: "...args: unknown[]".to_string(),
+                },
+            };
+            call_signatures.push(named_signature_row(member.name.as_ref(), signature));
         }
     }
 
@@ -201,6 +272,30 @@ fn bare_named_ref_type_arg(
     macro_index: usize,
     type_name: &str,
 ) -> Option<crate::semantic_query::HotTypeRef> {
+    let type_arg = bare_named_type_arg(ctx, owner_canonical, macro_index)?;
+    let dispatch = ctx.dispatch();
+    let matches_name = node_data_for(dispatch.ctx, type_arg.node())
+        .as_deref()
+        .is_some_and(|data| {
+            if let Some((name, _scope)) = data.bare_ref_head() {
+                return name.as_ref() == type_name;
+            }
+            if let SemanticNodeData::DeclRef { identity } = data {
+                return identity.decl_name.as_ref() == type_name;
+            }
+            false
+        });
+    matches_name.then_some(type_arg)
+}
+
+/// Like [`bare_named_ref_type_arg`] but accepts ANY bare named type argument
+/// (including local aliases of an imported type). Used for defineEmits when
+/// the macro dep is the imported name but the type arg is a local alias.
+fn bare_named_type_arg(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    owner_canonical: &str,
+    macro_index: usize,
+) -> Option<crate::semantic_query::HotTypeRef> {
     let dispatch = ctx.dispatch();
     let type_arg = crate::structural_carrier_producer::macro_type_arg_hot_ref(
         ctx,
@@ -210,13 +305,10 @@ fn bare_named_ref_type_arg(
     let is_bare_named_ref = node_data_for(dispatch.ctx, type_arg.node())
         .as_deref()
         .is_some_and(|data| {
-            if let Some((name, _scope)) = data.bare_ref_head() {
-                return name.as_ref() == type_name && data.carrier_type_args().is_empty();
+            if let Some((_name, _scope)) = data.bare_ref_head() {
+                return data.carrier_type_args().is_empty();
             }
-            if let SemanticNodeData::DeclRef { identity } = data {
-                return identity.decl_name.as_ref() == type_name;
-            }
-            false
+            matches!(data, SemanticNodeData::DeclRef { .. })
         });
     is_bare_named_ref.then_some(type_arg)
 }
@@ -245,11 +337,17 @@ fn bare_named_ref_type_arg(
 ///   "could not be resolved";
 /// - an UNRESOLVED type argument (missing file / missing symbol / undecidable
 ///   carrier) returns `None` — the caller keeps the legacy unresolved outcome.
+///
+/// `unresolved_arms` receives the resolved surface's unresolvable
+/// SURFACE-COMPOSITION arm facts (see
+/// [`VueMacroSurface::unresolved_surface_arms`]) so the compile-facing
+/// collector can tier import-backed misses.
 pub(crate) fn imported_props_resolved_elements(
     ctx: &dyn crate::resolver_core::ResolverContext,
     owner_canonical: &str,
     macro_index: usize,
     type_name: &str,
+    unresolved_arms: &mut Vec<UnresolvedSurfaceArm>,
 ) -> Option<ResolvedElements> {
     let dispatch = ctx.dispatch();
 
@@ -271,6 +369,7 @@ pub(crate) fn imported_props_resolved_elements(
         },
     );
     if let Some(macro_surface) = &macro_surface {
+        unresolved_arms.extend(macro_surface.unresolved_surface_arms.iter().cloned());
         let surface = &macro_surface.surface;
         // A MEMBERLESS projected surface is ambiguous: the macro-object
         // synthesis can produce an empty object for a NON-object alias
@@ -316,11 +415,15 @@ pub(crate) fn imported_props_resolved_elements(
 ///
 /// The same RESOLVED-non-object vs UNRESOLVED distinction as the
 /// macro-argument route applies to the memberless outcome.
+///
+/// `unresolved_arms` receives the resolved surface's unresolvable
+/// SURFACE-COMPOSITION arm facts, exactly as on the macro-argument route.
 pub(crate) fn imported_named_props_resolved_elements(
     ctx: &dyn crate::resolver_core::ResolverContext,
     owner_canonical: &str,
     import_source: &str,
     type_name: &str,
+    unresolved_arms: &mut Vec<UnresolvedSurfaceArm>,
 ) -> Option<ResolvedElements> {
     let host = ctx.host_for_fact_tracer_install();
 
@@ -332,7 +435,12 @@ pub(crate) fn imported_named_props_resolved_elements(
     let (root_canonical, root_name) =
         ctx.resolve_imported_type_root(dep_canonical.as_str(), type_name);
 
-    named_type_resolved_elements(ctx, root_canonical.as_str(), root_name.as_str())
+    named_type_resolved_elements(
+        ctx,
+        root_canonical.as_str(),
+        root_name.as_str(),
+        unresolved_arms,
+    )
 }
 
 /// Whether the combined projection also builds the keep-all `native_props`
@@ -384,11 +492,16 @@ pub(crate) enum NamedTypeElementsOutcome {
 /// materialization). The compile-facing elements-only adapter passes
 /// [`NativeProjection::Skip`]. The RESOLVED-non-object vs UNRESOLVED
 /// distinction applies to the memberless outcome.
+///
+/// `unresolved_arms` receives the surface projection's unresolvable
+/// SURFACE-COMPOSITION arm facts (name-sorted, deduplicated); callers that
+/// don't consume them pass a throwaway vec.
 pub(crate) fn named_type_elements_outcome(
     ctx: &dyn crate::resolver_core::ResolverContext,
     root_canonical: &str,
     root_name: &str,
     native: NativeProjection,
+    unresolved_arms: &mut Vec<UnresolvedSurfaceArm>,
 ) -> NamedTypeElementsOutcome {
     let dispatch = ctx.dispatch();
     let host = ctx.host_for_fact_tracer_install();
@@ -416,7 +529,9 @@ pub(crate) fn named_type_elements_outcome(
     // authority uses. The `MacroTypeArgOwnBody` provenance stamps the
     // declaration's own-body members `declared_in_macro_type_arg = true` and
     // heritage-reached members `false` — the parser's per-name companion fold
-    // consumes those per-prop facts as-is.
+    // consumes those per-prop facts as-is. The walker's side-band diagnostics
+    // carry any unresolvable SURFACE-COMPOSITION arm the synthesis dropped.
+    let mut walker_diagnostics = Vec::new();
     if let Some(surface) = host.project_shallow_surface_from_base(
         ctx,
         &dispatch,
@@ -426,7 +541,11 @@ pub(crate) fn named_type_elements_outcome(
             ProjectionMode::Shallow,
             crate::semantic_query::SurfaceProvenanceContext::MacroTypeArgOwnBody,
         ),
+        Some(&mut walker_diagnostics),
     ) {
+        unresolved_arms.extend(super::unresolved_surface_arms_from_diags(
+            &walker_diagnostics,
+        ));
         if !surface.members.is_empty() || !surface.call_signatures.is_empty() {
             return NamedTypeElementsOutcome::Resolved(macro_elements_from_surface(
                 ctx, &dispatch, &surface, native,
@@ -455,8 +574,15 @@ fn named_type_resolved_elements(
     ctx: &dyn crate::resolver_core::ResolverContext,
     root_canonical: &str,
     root_name: &str,
+    unresolved_arms: &mut Vec<UnresolvedSurfaceArm>,
 ) -> Option<ResolvedElements> {
-    match named_type_elements_outcome(ctx, root_canonical, root_name, NativeProjection::Skip) {
+    match named_type_elements_outcome(
+        ctx,
+        root_canonical,
+        root_name,
+        NativeProjection::Skip,
+        unresolved_arms,
+    ) {
         NamedTypeElementsOutcome::Resolved(resolution) => Some(resolution.elements),
         NamedTypeElementsOutcome::Recursive | NamedTypeElementsOutcome::Miss => None,
     }

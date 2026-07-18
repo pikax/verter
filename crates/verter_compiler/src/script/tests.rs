@@ -1483,6 +1483,100 @@ fn make_external_types(
     map
 }
 
+/// `withDefaults(defineProps<T>(), { as: 'td' })` must declare `as` even when
+/// `T` only partially expands (heritage props missing). Otherwise `_ctx.as`
+/// is undefined and table cells render as `div` (reka-ui Calendar).
+#[test]
+fn with_defaults_emits_keys_missing_from_partial_type_surface() {
+    let alloc = Allocator::default();
+    // Simulate partial type resolution: only `date` on the interface, but
+    // withDefaults still supplies `as: 'td'`.
+    let content = r#"
+interface CellProps {
+  date: string
+}
+const props = withDefaults(defineProps<CellProps>(), { as: 'td' })
+"#;
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
+
+    let _result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Test",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(
+        output.contains("date:"),
+        "resolved type prop `date` must be present. output:\n{output}"
+    );
+    assert!(
+        output.contains("as:") && output.contains("'td'"),
+        "withDefaults key `as: 'td'` must be a runtime prop even if absent from type surface. output:\n{output}"
+    );
+}
+
+/// Local interface members whose type is an indexed access (`Foo['bar']`)
+/// must still appear in the runtime props object (type may degrade to
+/// `null`). Dropping them breaks `toRefs(props).missingProp.value` at
+/// setup (reka-ui MenuContentImpl trapFocus / disableOutsidePointerEvents).
+#[test]
+fn local_indexed_access_props_still_emitted_in_runtime_props() {
+    let alloc = Allocator::default();
+    let content = r#"
+interface Cap { foo: boolean }
+interface PrivateProps {
+  disableOutsidePointerEvents?: Cap['foo']
+  disableOutsideScroll?: boolean
+  trapFocus?: Cap['foo']
+}
+interface ImplProps extends PrivateProps {
+  loop?: boolean
+}
+const props = withDefaults(defineProps<ImplProps>(), {})
+const { trapFocus, disableOutsidePointerEvents, loop } = toRefs(props)
+"#;
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
+
+    let result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Test",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    for name in [
+        "disableOutsidePointerEvents",
+        "disableOutsideScroll",
+        "trapFocus",
+        "loop",
+    ] {
+        assert!(
+            result.bindings.contains_key(name) || output.contains(&format!("{name}:")),
+            "runtime props must include {name:?}. bindings={:?}\noutput:\n{output}",
+            result.bindings.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            output.contains(&format!("{name}:")),
+            "runtime props object must declare {name:?}. output:\n{output}"
+        );
+    }
+}
+
 #[test]
 fn external_type_defineprops_generates_runtime_props() {
     let alloc = Allocator::default();
@@ -2226,5 +2320,290 @@ fn define_props_array_dynamic_element_names_nothing() {
         !result.bindings.contains_key("dynamicName"),
         "a dynamic identifier element must not be treated as a prop name. bindings: {:?}",
         result.bindings.keys().collect::<Vec<_>>()
+    );
+}
+
+/// External property-form emits (`{ 'update:open': [boolean] }`) must produce
+/// a runtime `emits: [...]` array. AlertDialogRoot re-exports DialogRootEmits
+/// and useEmitAsProps reads `vm.type.emits` — empty array → silent open toggle.
+#[test]
+fn external_type_defineemits_property_form_generates_emits_array() {
+    let alloc = Allocator::default();
+    let external_types = make_external_types(
+        "DialogRootEmits",
+        "export type DialogRootEmits = { 'update:open': [value: boolean] }",
+    );
+    // Sanity: external resolution itself yields call signatures
+    let resolved = external_types.get("DialogRootEmits").unwrap();
+    assert!(
+        !resolved.call_signatures.is_empty(),
+        "resolve_external_type must classify property-form emits as call_signatures, got props={:?} calls={:?}",
+        resolved.props.iter().map(|p| p.key_name.as_deref()).collect::<Vec<_>>(),
+        resolved.call_signatures.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+    );
+
+    let content = r#"
+import type { DialogRootEmits } from './dialog'
+type AlertDialogEmits = DialogRootEmits
+const emit = defineEmits<AlertDialogEmits>()
+"#;
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
+
+    let _result = gen_script_with_external(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Test",
+            ..Default::default()
+        },
+        Some(&external_types),
+    );
+
+    let output = ct.build_string();
+    assert!(
+        output.contains("emits:") && output.contains("update:open"),
+        "defineEmits of external property-form emits must emit runtime emits array, got:\n{output}"
+    );
+}
+
+// ── Optional Boolean props: official parity (no `default: undefined`) ──
+
+/// Official plugin-vue emits `{ type: Boolean }` for an optional Boolean
+/// prop with NO default; the runtime resolves an absent optional Boolean
+/// to `false` (boolean cast). An explicit `default: undefined` diverges
+/// observably (`props.x === false` fails for unset props).
+#[test]
+fn optional_boolean_prop_emits_no_default_type_based() {
+    let alloc = Allocator::default();
+    let content = "\nconst props = defineProps<{ disabled?: boolean, label?: string }>()\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let _result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "BoolTest",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(
+        output.contains("disabled: { type: Boolean }"),
+        "optional Boolean prop must emit the bare official shape, got:\n{output}"
+    );
+    assert!(
+        !output.contains("default: undefined"),
+        "no prop may carry `default: undefined` (official emits no default), got:\n{output}"
+    );
+    assert!(
+        output.contains("label: { type: String }"),
+        "optional non-Boolean prop keeps its bare shape, got:\n{output}"
+    );
+}
+
+/// Same official shape on the withDefaults path when the Boolean prop has
+/// no declared default: no `default: undefined`, and declared defaults for
+/// OTHER props still emit.
+#[test]
+fn optional_boolean_prop_emits_no_default_with_defaults_path() {
+    let alloc = Allocator::default();
+    let content = "\nconst props = withDefaults(defineProps<{ disabled?: boolean, color?: string }>(), { color: 'red' })\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let _result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "BoolTest",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(
+        output.contains("disabled: { type: Boolean }"),
+        "optional Boolean without a declared default must stay bare, got:\n{output}"
+    );
+    assert!(
+        !output.contains("default: undefined"),
+        "withDefaults path must not invent `default: undefined`, got:\n{output}"
+    );
+    assert!(
+        output.contains("default: 'red'"),
+        "declared defaults must still emit, got:\n{output}"
+    );
+}
+
+// ── `_mergeDefaults` emission must carry its runtime import ──
+
+/// `withDefaults(defineProps<T>(), { ...SPREAD })` compiles to
+/// `_mergeDefaults(...)`; the vue import list must carry
+/// `_mergeDefaults` or the output throws ReferenceError at runtime.
+#[test]
+fn merge_defaults_spread_pushes_runtime_import() {
+    let alloc = Allocator::default();
+    let content =
+        "\nconst props = withDefaults(defineProps<{ a?: string }>(), { ...SHARED_DEFAULTS })\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "MergeTest",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(
+        output.contains("_mergeDefaults("),
+        "spread defaults must compile through _mergeDefaults, got:\n{output}"
+    );
+    assert!(
+        result.imports.contains(&"_mergeDefaults"),
+        "emitting _mergeDefaults REQUIRES the runtime import, got imports: {:?}",
+        result.imports
+    );
+}
+
+/// Variable (non-literal) defaults wrap with `_mergeDefaults(base, VAR)`
+/// and must also carry the import.
+#[test]
+fn merge_defaults_variable_pushes_runtime_import() {
+    let alloc = Allocator::default();
+    let content = "\nconst props = withDefaults(defineProps<{ a?: string }>(), DEFAULTS)\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "MergeTest",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(
+        output.contains("_mergeDefaults("),
+        "variable defaults must compile through _mergeDefaults, got:\n{output}"
+    );
+    assert!(
+        result.imports.contains(&"_mergeDefaults"),
+        "emitting _mergeDefaults REQUIRES the runtime import, got imports: {:?}",
+        result.imports
+    );
+}
+
+/// Negative: a plain typed defineProps never pulls the mergeDefaults
+/// import.
+#[test]
+fn plain_define_props_has_no_merge_defaults_import() {
+    let alloc = Allocator::default();
+    let content = "\nconst props = defineProps<{ a?: string }>()\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "PlainTest",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(!output.contains("_mergeDefaults("));
+    assert!(
+        !result.imports.contains(&"_mergeDefaults"),
+        "plain defineProps must not import mergeDefaults, got imports: {:?}",
+        result.imports
+    );
+}
+
+/// A props-shaped type surface routed into `defineEmits` must NOT invent an
+/// `emits: [...]` array from prop key names — emit names come exclusively
+/// from resolved call signatures (fail-closed negative for the deleted
+/// props→emits recovery fallback).
+#[test]
+fn define_emits_props_only_surface_does_not_invent_emits() {
+    let alloc = Allocator::default();
+    let content = "\nconst emit = defineEmits<{ title: string, count: number }>()\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let _result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "EmitsTest",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(
+        !output.contains("emits: [\"title\""),
+        "prop key names must never become emit names, got:\n{output}"
+    );
+    assert!(
+        !output.contains("\"count\""),
+        "props-only surface must not produce any emits entries, got:\n{output}"
+    );
+}
+
+/// The legitimate named-tuple property form keeps producing emits.
+#[test]
+fn define_emits_named_tuple_property_form_still_produces_emits() {
+    let alloc = Allocator::default();
+    let content = "\nconst emit = defineEmits<{ change: [id: number], close: [] }>()\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let _result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "EmitsTest",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(
+        output.contains("emits: [\"change\", \"close\"]"),
+        "named-tuple emits must produce the emits array, got:\n{output}"
     );
 }

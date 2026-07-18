@@ -72,6 +72,13 @@ export interface HostCompileProfile {
   filename?: string;
   isProduction?: boolean;
   ssr?: boolean;
+  /**
+   * SSR asset-collection module id registered on `ssrContext.modules`.
+   * Vite's ssr-manifest keys are ROOT-RELATIVE — pass
+   * `normalizePath(relative(root, filename))`; absent falls back to the
+   * canonical id.
+   */
+  ssrModuleId?: string;
   hmrStrategy?: "none" | "vite" | "webpack";
   componentId?: string;
   delimiters?: [string, string];

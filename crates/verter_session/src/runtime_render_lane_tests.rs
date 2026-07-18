@@ -123,6 +123,7 @@ fn render_profile(
         types_module_name: None,
         delimiters: None,
         custom_elements: None,
+        ssr_module_id: None,
     }
 }
 
@@ -1215,6 +1216,91 @@ fn runtime_render_upper_drive_input_single_hop_relative_import_control() {
     assert!(
         render.code.contains("relalpha"),
         "the relative-imported prop name must appear in render Main:\n{}",
+        render.code
+    );
+}
+
+/// Render-lane CONTRACT pin: a MEMBER-position missing macro type
+/// (`defineProps<{ foo: Missing }>()`) compiles with a WARNING and the
+/// member's runtime type degrades to `null`. (The lane softens every
+/// missing-dep diagnostic, so this guards the lane contract; the
+/// DISCRIMINATING tier test is the HostBacked
+/// `member_position_missing_macro_type_warns_and_degrades_on_host_lane`.)
+#[test]
+fn runtime_render_member_position_missing_macro_type_warns_and_degrades_to_null() {
+    let host = new_host();
+    let src = "<script setup lang=\"ts\">\nimport type { Missing } from './nope'\ndefineProps<{ foo: Missing }>()\n</script>\n<template><div>{{ foo }}</div></template>\n";
+
+    let render = render_with_profile(
+        &host,
+        "/proj/MemberMiss.vue",
+        src,
+        simple_render_profile(),
+        None,
+    );
+    assert!(
+        render.errors.is_empty(),
+        "member-position miss must not abort the render lane: {:?}",
+        render.errors
+    );
+    let warning = render
+        .diagnostics
+        .iter()
+        .find(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP")
+        .expect("member-position miss surfaces a HOST_MISSING_MACRO_TYPE_DEP diagnostic");
+    assert_eq!(
+        warning.severity,
+        crate::HostSeverity::Warning,
+        "member-position miss is a warning, never fatal"
+    );
+    // The member's runtime type degrades to `null` — the prop still exists.
+    assert!(
+        render.code.contains("foo: { type: null, required: true }"),
+        "member with unresolvable type must degrade to `type: null`:\n{}",
+        render.code
+    );
+}
+
+/// Structural tiering on the render lane: a NESTED missing macro type
+/// (`defineProps<{ foo: { test: Missing } }>()`) is never collected as a dep
+/// — the compile is clean (no diagnostic at all) and the member keeps its
+/// syntactically-derived `Object` constructor.
+#[test]
+fn runtime_render_nested_missing_macro_type_is_silent() {
+    let host = new_host();
+    let src = "<script setup lang=\"ts\">\nimport type { Missing } from './nope'\ndefineProps<{ foo: { test: Missing } }>()\n</script>\n<template><div>{{ foo }}</div></template>\n";
+
+    let render = render_with_profile(
+        &host,
+        "/proj/NestedMiss.vue",
+        src,
+        simple_render_profile(),
+        None,
+    );
+    assert!(
+        render.errors.is_empty(),
+        "nested miss must compile cleanly: {:?}",
+        render.errors
+    );
+    assert!(
+        !render
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP"
+                || d.code == "XUnresolvedImportedMacroType"),
+        "a nested reference is not needed for runtime codegen — no missing-dep \
+         diagnostic may surface; diagnostics: {:?}",
+        render
+            .diagnostics
+            .iter()
+            .map(|d| format!("{:?}:{} {}", d.severity, d.code, d.message))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        render
+            .code
+            .contains("foo: { type: Object, required: true }"),
+        "the member keeps its syntactic Object constructor:\n{}",
         render.code
     );
 }

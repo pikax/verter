@@ -92,6 +92,36 @@ fn setup_ref_standalone_prefix_is_setup() {
     assert_eq!(resolver.resolve_prefix("count"), "$setup.");
 }
 
+/// Non-inline SSR `ssrRender(_ctx, _push, _parent, _attrs)` has no `$setup`
+/// parameter — setup bindings must go through the instance proxy as `_ctx.`.
+#[test]
+fn setup_ref_ssr_non_inline_prefix_is_ctx() {
+    let mut resolver = make_resolver(&[("count", BindingType::SetupRef)], false);
+    resolver.set_ssr(true);
+    assert_eq!(resolver.resolve_prefix("count"), "_ctx.");
+    assert_eq!(resolver.resolve_suffix("count"), "");
+    assert_eq!(resolver.resolve_simple_expr("count"), "_ctx.count");
+}
+
+/// SSR props also reach through `_ctx.` (not free `$props`).
+#[test]
+fn props_ssr_non_inline_prefix_is_ctx() {
+    let mut resolver = make_resolver(&[("msg", BindingType::Props)], false);
+    resolver.set_ssr(true);
+    assert_eq!(resolver.resolve_prefix("msg"), "_ctx.");
+    assert_eq!(resolver.resolve_simple_expr("msg"), "_ctx.msg");
+}
+
+/// Inline SSR still closes over setup locals (bare + `.value` for refs).
+#[test]
+fn setup_ref_ssr_inline_keeps_bare_value_access() {
+    let mut resolver = make_resolver(&[("count", BindingType::SetupRef)], true);
+    resolver.set_ssr(true);
+    assert_eq!(resolver.resolve_prefix("count"), "");
+    assert_eq!(resolver.resolve_suffix("count"), ".value");
+    assert_eq!(resolver.resolve_simple_expr("count"), "count.value");
+}
+
 #[test]
 fn props_inline_prefix_is_dunder_props() {
     let resolver = make_resolver(&[("msg", BindingType::Props)], true);

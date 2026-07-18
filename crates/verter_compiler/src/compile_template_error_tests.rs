@@ -611,6 +611,94 @@ fn no_error_x_v_model_malformed_expression_on_ident() {
     assert_no_error(&result, "XVModelMalformedExpression");
 }
 
+/// Every v-model expression form the official Vue compiler accepts
+/// (its expression parse + `unwrapTSNode` → Member/OptionalMember/
+/// Identifier) must compile without `XVModelMalformedExpression` — on both
+/// native elements and components. TS casts are the headline case:
+/// `v-model="(myValue as string)"`.
+#[test]
+fn no_error_x_v_model_malformed_expression_on_official_valid_forms() {
+    let valid = [
+        "myValue",
+        "obj.a",
+        "obj.a.b",
+        "obj.arr[0]",
+        "obj.arr[idx]",
+        "obj['a']",
+        "obj.arr[idx + 1]",
+        "(myValue)",
+        "(myValue as string)",
+        "myValue as string",
+        "(obj.a as any)",
+        "obj.a as unknown as string",
+        "(myValue as unknown) as string",
+        "form.value as Record<string, any>",
+        "myValue!",
+        "obj!.a",
+        "(obj.a!)",
+        "(myValue satisfies string)",
+        "myValue satisfies string",
+        "((myValue as string))",
+        "(obj.arr as string[])[0]",
+        "(obj.a as MyObj).b",
+        "obj\n    .a",
+        "obj . a",
+        "obj?.a",
+    ];
+    for expr in valid {
+        let escaped = expr.replace('"', "&quot;");
+        for src in [
+            format!(r#"<template><input v-model="{escaped}"></template>"#),
+            format!(r#"<template><MyComp v-model="{escaped}" /></template>"#),
+        ] {
+            let result = compile_sfc(&src);
+            assert!(
+                !result
+                    .errors
+                    .iter()
+                    .any(|e| e.code == "XVModelMalformedExpression"),
+                "expected NO XVModelMalformedExpression for v-model={expr:?} in {src}; got: {:?}",
+                result.errors.iter().map(|e| &e.code).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+/// Forms the official Vue compiler rejects with
+/// `X_V_MODEL_MALFORMED_EXPRESSION` must keep erroring — including numeric
+/// literals, which a naive character-class check would let through.
+#[test]
+fn error_x_v_model_malformed_expression_on_official_invalid_forms() {
+    let invalid = [
+        "a + b",
+        "fn()",
+        "obj.method()",
+        "123",
+        "a ? b : c",
+        "a = b",
+        "a, b",
+        "(a, b)",
+        "a as",
+        "(myValue as string",
+        "void 0",
+        "undefined",
+        "this",
+        "!foo",
+    ];
+    for expr in invalid {
+        let src = format!(r#"<template><input v-model="{expr}"></template>"#);
+        let result = compile_sfc(&src);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == "XVModelMalformedExpression"),
+            "expected XVModelMalformedExpression for v-model={expr:?}; got: {:?}",
+            result.errors.iter().map(|e| &e.code).collect::<Vec<_>>()
+        );
+    }
+}
+
 // ════════════════════════════════════════════════════════════════════
 // Group 5: Duplicate Directives (already emitted as warning)
 // ════════════════════════════════════════════════════════════════════
@@ -815,4 +903,24 @@ fn no_error_x_v_if_same_key_on_valid() {
     let src = r#"<template><div v-if="a" :key="1">a</div><div v-else :key="2">b</div></template>"#;
     let result = compile_sfc(src);
     assert_no_error(&result, "XVIfSameKey");
+}
+
+/// Entity-encoded v-model expressions (`&lt;` / `&gt;` / `&amp;&amp;` in
+/// attribute values) must validate against the DECODED text — official
+/// decodes attribute values before expression parsing. A generic `as`-cast
+/// written with encoded angle brackets is valid.
+#[test]
+fn no_error_x_v_model_malformed_expression_on_entity_encoded_cast() {
+    let src = r#"<template><input v-model="foo as Record&lt;string, any&gt;"></template>"#;
+    let result = compile_sfc(src);
+    assert_no_error(&result, "XVModelMalformedExpression");
+}
+
+/// Decoding does not weaken rejection: an encoded BINARY expression
+/// (`a &amp;&amp; b` → `a && b`) still fails validation.
+#[test]
+fn error_x_v_model_malformed_expression_on_entity_encoded_binary() {
+    let src = r#"<template><input v-model="a &amp;&amp; b"></template>"#;
+    let result = compile_sfc(src);
+    assert_has_error(&result, "XVModelMalformedExpression");
 }

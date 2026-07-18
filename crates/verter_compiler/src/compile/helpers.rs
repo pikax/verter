@@ -10,6 +10,46 @@ use crate::parser::types::ParsedSfc;
 
 use super::types::{CompileDiagnostic, CompileDiagnosticSeverity};
 
+/// Synthetic script block for a completely EMPTY SFC — one with no script,
+/// no template, no styles, and no custom blocks (e.g. a freshly created
+/// file). Such a file is a valid Vue component: an EMPTY one. The emitted
+/// shell (`defineComponent({ __name })` + `export default`) keeps the file
+/// exporting a component with an empty public surface ($props: {}, no
+/// slots) instead of producing no runtime output at all — which the host
+/// would surface as a missing virtual node. Returns `None` when the SFC has
+/// any block (the caller's other branches own those shapes).
+///
+/// Both interpolated strings are emitted JS-escaped in double-quoted
+/// literals (a filename stem may contain quotes or backslashes).
+pub(super) fn empty_sfc_script_block(
+    parsed: &ParsedSfc,
+    custom_blocks: &[super::types::VerterCustomBlock],
+    component_name: &str,
+    runtime_module: &str,
+    duration_ms: f64,
+) -> Option<super::types::VerterScriptBlock> {
+    use crate::template::code_gen::shared::helpers::escape_js_string_into;
+    if parsed.template_ast().is_some()
+        || !parsed.style_nodes().is_empty()
+        || !custom_blocks.is_empty()
+    {
+        return None;
+    }
+    let mut code = String::with_capacity(160 + runtime_module.len());
+    code.push_str("import { defineComponent as _defineComponent } from \"");
+    escape_js_string_into(&mut code, runtime_module);
+    code.push_str("\";\nconst __sfc__ = /*@__PURE__*/_defineComponent({\n  __name: \"");
+    escape_js_string_into(&mut code, component_name);
+    code.push_str("\",\n});\nexport default __sfc__;\n");
+    Some(super::types::VerterScriptBlock {
+        code,
+        duration_ms,
+        source_map: String::new(),
+        setup: false,
+        attrs: Vec::new(),
+    })
+}
+
 /// Remove inter-block gaps from the code transform.
 ///
 /// SFC source may contain content between root-level blocks (e.g., HTML comments,
@@ -20,6 +60,13 @@ pub(crate) fn remove_inter_block_gaps(
     ranges: &[(u32, u32)],
 ) {
     if ranges.is_empty() {
+        // A block-less SFC (empty / whitespace-only / comments-only): the
+        // entire input is one inter-block gap. Remove it all so stray
+        // top-level content (e.g. HTML comments) never leaks into generated
+        // module output.
+        if input_len > 0 {
+            code_transform.remove(0, input_len);
+        }
         return;
     }
 

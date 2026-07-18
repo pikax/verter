@@ -92,6 +92,16 @@ pub struct VSlotWithBindings<'a> {
     ///
     /// Feeds ONLY the liveness usage union, never runtime codegen.
     pub liveness_reference_names: Vec<String>,
+
+    /// Free-reference NAMES from the slot's default-value expressions that
+    /// resolve to TEMPLATE-SCOPE locals (this slot's own params or an
+    /// enclosing v-for/v-slot scope's locals passed via `ignored`).
+    /// Complements [`references`] / [`liveness_reference_names`], which
+    /// both EXCLUDE scope locals. Consumed by the official-parity
+    /// `hasScopeRef` slot-flag decision.
+    ///
+    /// [`references`]: Self::references
+    pub scope_local_reference_names: Vec<String>,
 }
 
 impl<'a> VSlotWithBindings<'a> {
@@ -130,7 +140,7 @@ fn extract_slot_bindings_internal(
     input: &str,
     file_offset: u32,
     ignored_extra: &[&str],
-) -> (Vec<Span>, Vec<Span>, Vec<String>) {
+) -> (Vec<Span>, Vec<Span>, Vec<String>, Vec<String>) {
     let mut locals = Vec::new();
     let mut references_set = FxHashSet::default();
     // LIVENESS reference NAMES, collected by the complete `Visit` walker over BOTH
@@ -211,13 +221,24 @@ fn extract_slot_bindings_internal(
     let references: Vec<Span> = references_set.into_iter().collect();
     // The complete `Visit`/type-reference walkers have no `ignored` parameter
     // (they suppress only lexically-shadowed names); the slot's own param locals
-    // are declared outside the default expressions, so exclude them here by name.
-    let liveness_reference_names: Vec<String> = liveness_names
-        .into_iter()
-        .filter(|name| !ignored.contains(name.as_bytes()))
-        .map(|name| name.to_string())
-        .collect();
-    (locals, references, liveness_reference_names)
+    // are declared outside the default expressions, so partition here by name:
+    // non-ignored names feed liveness, ignored (template-scope) names feed the
+    // scope-local reference set for the slot-flag `hasScopeRef` decision.
+    let mut liveness_reference_names: Vec<String> = Vec::new();
+    let mut scope_local_reference_names: Vec<String> = Vec::new();
+    for name in liveness_names {
+        if ignored.contains(name.as_bytes()) {
+            scope_local_reference_names.push(name.to_string());
+        } else {
+            liveness_reference_names.push(name.to_string());
+        }
+    }
+    (
+        locals,
+        references,
+        liveness_reference_names,
+        scope_local_reference_names,
+    )
 }
 
 /// Parse a Vue v-slot expression from a span within a larger source string.
@@ -391,19 +412,21 @@ pub fn parse_vslot_with_bindings_sliced<'a>(
         adjust_diagnostics_spans(errors, offset);
     }
 
-    let (locals, references, liveness_reference_names) = if result.errors.is_some() {
-        (Vec::new(), Vec::new(), Vec::new())
-    } else if let Some(params) = &result.params {
-        extract_slot_bindings_internal(params, input, offset, ignored)
-    } else {
-        (Vec::new(), Vec::new(), Vec::new())
-    };
+    let (locals, references, liveness_reference_names, scope_local_reference_names) =
+        if result.errors.is_some() {
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        } else if let Some(params) = &result.params {
+            extract_slot_bindings_internal(params, input, offset, ignored)
+        } else {
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        };
 
     VSlotWithBindings {
         result,
         locals,
         references,
         liveness_reference_names,
+        scope_local_reference_names,
     }
 }
 

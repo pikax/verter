@@ -770,7 +770,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// choke point (so nested `execute_read`-only sub-dispatches are captured
     /// there); these intent counters stay on the consumer entry. No-op when
     /// no `RequestContext` is installed on the calling thread.
-    fn record_dispatch_intent_counters(&self, key: &SemanticQueryKey) {
+    pub(crate) fn record_dispatch_intent_counters(&self, key: &SemanticQueryKey) {
         let Some(ctx) = crate::request_context::current_request_context() else {
             return;
         };

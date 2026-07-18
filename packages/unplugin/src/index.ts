@@ -1,6 +1,7 @@
 import type { UnpluginFactory } from "unplugin";
 import { createUnplugin } from "unplugin";
 import { existsSync, statSync } from "node:fs";
+import { relative } from "node:path";
 import type { ResolvedConfig } from "vite";
 import type {
   VerterPluginOptions,
@@ -20,11 +21,12 @@ import {
   loadHost,
   getWorkspace,
   generateComponentId,
+  peekHost,
   processStyle,
   resetHost,
 } from "./core/compiler";
 import { collectResolvableModuleReferenceSpecifiers } from "./core/dependency-resolution";
-import { hydrateMacroTypeDeps } from "./core/macro-type-hydration";
+import { evictHydratedPath, hydrateMacroTypeDeps } from "./core/macro-type-hydration";
 import { parseVueRequest } from "./core/utils";
 import { preprocessBlock } from "./core/preprocessor";
 import { replaceImportMetaSsr, stripComponents } from "./core/ssr-transforms";
@@ -119,6 +121,7 @@ function renderMainRuntime(
         filename: profile.filename,
         isProduction: profile.isProduction ?? false,
         ssr: profile.ssr ?? false,
+        ssrModuleId: profile.ssrModuleId,
         forceJs: profile.forceJs ?? false,
         forceVapor: profile.forceVapor ?? false,
         sourceMap: profile.sourceMap ?? false,
@@ -161,6 +164,18 @@ function renderMainRuntime(
 /** Normalize Windows backslashes to forward slashes for the workspace API. */
 function normalizePath(p: string): string {
   return p.replace(/\\/g, "/");
+}
+
+/**
+ * The module id registered on `ssrContext.modules` for Vite SSR asset
+ * collection. Vite's ssr-manifest keys are ROOT-RELATIVE — the same
+ * `normalizePath(relative(root, filename))` shape `@vitejs/plugin-vue`
+ * registers. Without a known root the id is omitted (the host falls back
+ * to the canonical id).
+ */
+function ssrModuleIdFor(ssr: boolean, root: string, filename: string): string | undefined {
+  if (!ssr || !root) return undefined;
+  return normalizePath(relative(root, filename));
 }
 
 async function readTextFileThroughWorkspaceOrDisk(pathname: string): Promise<string | null> {
@@ -604,6 +619,7 @@ function createFrameworkFactory(
           const profile: HostCompileProfile = {
             filename,
             ssr,
+            ssrModuleId: ssrModuleIdFor(ssr, projectRoot, filename),
             isProduction: isProd,
             componentId,
             hmrStrategy:
@@ -852,6 +868,7 @@ function createFrameworkFactory(
         const profile: HostCompileProfile = {
           filename,
           ssr,
+          ssrModuleId: ssrModuleIdFor(ssr, projectRoot, filename),
           isProduction: isProd,
           componentId,
           hmrStrategy: (isProd ? "none" : hmrStrategy) as HostCompileProfile["hmrStrategy"],
@@ -979,31 +996,78 @@ function createFrameworkFactory(
           });
 
           const scriptRequest = `${filename}?vue&type=script&lang.${mainLang}`;
-          // Build style imports. Prefer the compiler-parsed cache (accurate lang, scoped flag);
-          // fall back to a simple regex scan of the raw SFC source when compiler-sfc is absent.
+          // Build style imports. Prefer the compiler-parsed cache (accurate lang,
+          // scoped, module flags); fall back to a simple regex scan of the raw
+          // SFC source when compiler-sfc is absent.
+          //
+          // CSS modules match @vitejs/plugin-vue:
+          //   import styleN from "…?vue&type=style&index=N&lang.module.css"
+          //   const cssModules = { "$style": styleN }
+          //   export default _export_sfc(_sfc_main, [["__cssModules", cssModules]])
+          // Vite's CSS pipeline treats `lang.module.*` as CSS modules and
+          // default-exports the class-name map; Vue's instance proxy reads
+          // `$style` from `type.__cssModules`.
           const cachedStyles = styleBlockCache.get(filename);
-          const styleEntries: Array<{ lang: string }> =
-            cachedStyles ??
+          const styleEntries: Array<{ lang: string; module: boolean | string }> =
+            cachedStyles?.map((s) => ({ lang: s.lang, module: s.module })) ??
             (() => {
-              const entries: Array<{ lang: string }> = [];
+              const entries: Array<{ lang: string; module: boolean | string }> = [];
               const re = /<style\b([^>]*)>/gi;
               let m;
               while ((m = re.exec(code)) !== null) {
-                const langMatch = /\blang\s*=\s*["']([^"']+)["']/.exec(m[1]);
-                entries.push({ lang: langMatch?.[1] ?? "css" });
+                const attrs = m[1];
+                const langMatch = /\blang\s*=\s*["']([^"']+)["']/.exec(attrs);
+                let module: boolean | string = false;
+                const moduleNamed = /\bmodule\s*=\s*["']([^"']+)["']/.exec(attrs);
+                if (moduleNamed) {
+                  module = moduleNamed[1];
+                } else if (/\bmodule\b/.test(attrs)) {
+                  module = true;
+                }
+                entries.push({ lang: langMatch?.[1] ?? "css", module });
               }
               return entries;
             })();
-          const styleImports = styleEntries.map(
-            (entry, i) =>
-              `import "${filename}?vue&type=style&index=${i}&lang.${entry.lang ?? "css"}"`,
-          );
-          const mainModule = [
-            `import _sfc_main from "${scriptRequest}"`,
-            ...styleImports,
-            `export * from "${scriptRequest}"`,
-            `export default _sfc_main`,
-          ].join("\n");
+
+          const styleLines: string[] = [];
+          const cssModulesMap: Record<string, string> = {};
+          for (let i = 0; i < styleEntries.length; i++) {
+            const entry = styleEntries[i];
+            const lang = entry.lang || "css";
+            const baseRequest = `${filename}?vue&type=style&index=${i}&lang.${lang}`;
+            if (entry.module) {
+              // plugin-vue: rewrite `lang.css` → `lang.module.css` so Vite's
+              // CSS-modules pipeline returns a class map as the default export.
+              const moduleRequest = baseRequest.replace(/\.([A-Za-z0-9]+)$/, ".module.$1");
+              const styleVar = `style${i}`;
+              const exposedName = typeof entry.module === "string" ? entry.module : "$style";
+              styleLines.push(`import ${styleVar} from ${JSON.stringify(moduleRequest)}`);
+              cssModulesMap[exposedName] = styleVar;
+            } else {
+              styleLines.push(`import ${JSON.stringify(baseRequest)}`);
+            }
+          }
+
+          const hasCssModules = Object.keys(cssModulesMap).length > 0;
+          const mainLines = [
+            `import _sfc_main from ${JSON.stringify(scriptRequest)}`,
+            ...styleLines,
+          ];
+          if (hasCssModules) {
+            mainLines.push(`import _export_sfc from ${JSON.stringify(EXPORT_HELPER_ID)}`);
+            const mappingBody = Object.entries(cssModulesMap)
+              .map(([key, value]) => `  ${JSON.stringify(key)}: ${value}`)
+              .join(",\n");
+            mainLines.push(`const cssModules = {\n${mappingBody}\n}`);
+            mainLines.push(`export * from ${JSON.stringify(scriptRequest)}`);
+            mainLines.push(
+              `export default /*@__PURE__*/_export_sfc(_sfc_main, [["__cssModules", cssModules]])`,
+            );
+          } else {
+            mainLines.push(`export * from ${JSON.stringify(scriptRequest)}`);
+            mainLines.push(`export default _sfc_main`);
+          }
+          const mainModule = mainLines.join("\n");
 
           return {
             code: mainModule,
@@ -1046,6 +1110,13 @@ function createFrameworkFactory(
       },
 
       watchChange(id) {
+        // A changed dependency file (type .d.ts/.ts, hydrated .vue dep)
+        // must re-hydrate on next demand — evict from the per-host
+        // hydration memo without lazily creating a host.
+        const existing = peekHost();
+        if (existing) {
+          evictHydratedPath(existing, id);
+        }
         if (filter(id)) {
           const host = loadHost();
           host.remove(id);
@@ -1078,6 +1149,13 @@ function createFrameworkFactory(
         },
 
         handleHotUpdate({ file, server, modules }) {
+          {
+            // Changed hydrated dependency files re-hydrate on next demand.
+            const existing = peekHost();
+            if (existing) {
+              evictHydratedPath(existing, file);
+            }
+          }
           if (!filter(file)) return;
 
           const host = loadHost();

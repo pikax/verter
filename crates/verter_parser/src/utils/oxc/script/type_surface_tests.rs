@@ -397,13 +397,49 @@ fn test_format_runtime_types_multiple() {
 }
 
 #[test]
-fn test_format_runtime_types_filters_unknown() {
-    // Unknown types should be filtered out
+fn test_format_runtime_types_unknown_union_matches_official() {
+    // Official @vue/compiler-sfc rule: an unresolvable union member forces
+    // `null` (accept anything, skip validation) UNLESS Boolean is present
+    // (the boolean cast needs the declared constructor) or a default
+    // exists alongside Function (a function default value must not be
+    // treated as a factory).
     assert_eq!(
         format_runtime_types(&[RuntimeType::String, RuntimeType::Unknown]),
-        "String"
+        "null",
+        "string | Unresolved must skip validation like official, not warn as String"
     );
     assert_eq!(format_runtime_types(&[RuntimeType::Unknown]), "null");
+    assert_eq!(
+        format_runtime_types(&[RuntimeType::Boolean, RuntimeType::Unknown]),
+        "Boolean"
+    );
+    assert_eq!(
+        format_runtime_types(&[
+            RuntimeType::String,
+            RuntimeType::Boolean,
+            RuntimeType::Unknown
+        ]),
+        "[String, Boolean]"
+    );
+    // Function survives Unknown only WITH a default present.
+    assert_eq!(
+        format_runtime_types_with_default(&[RuntimeType::Function, RuntimeType::Unknown], true),
+        "Function"
+    );
+    assert_eq!(
+        format_runtime_types_with_default(&[RuntimeType::Function, RuntimeType::Unknown], false),
+        "null"
+    );
+    // The unresolved-DateValue shape: Unknown + Array + null → null.
+    assert_eq!(
+        format_runtime_types(&[RuntimeType::Unknown, RuntimeType::Array, RuntimeType::Null]),
+        "null"
+    );
+    // No unknown member → the concrete list is untouched.
+    assert_eq!(
+        format_runtime_types(&[RuntimeType::String, RuntimeType::Number]),
+        "[String, Number]"
+    );
 }
 
 #[test]
@@ -2122,6 +2158,198 @@ fn resolve_external_only_imports_returns_none() {
         resolve_external_type("Props", dep, &alloc).is_none(),
         "File with only imports and no matching type should return None"
     );
+}
+
+#[test]
+fn indexed_access_emit_property_types_resolve_to_call_signatures() {
+    let source = r#"
+type LayerEmits = {
+  escapeKeydown: [event: KeyboardEvent]
+  pointerdownOutside: [event: PointerEvent]
+}
+type Test = {
+  escapeKeydown: LayerEmits['escapeKeydown']
+  pointerdownOutside: LayerEmits['pointerdownOutside']
+}
+"#;
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    assert!(diagnostics.is_empty(), "No diagnostics: {diagnostics:?}");
+    assert_eq!(
+        resolved.call_signatures.len(),
+        2,
+        "indexed-access property types should become emit signatures, got: {:?}",
+        resolved
+            .call_signatures
+            .iter()
+            .map(|e| &e.name)
+            .collect::<Vec<_>>()
+    );
+    // The payload must be the TUPLE form carrying the target tuple's text —
+    // never a degraded call form — and the members must NOT double as props.
+    for sig in &resolved.call_signatures {
+        match &sig.signature {
+            ResolvedCallPayloadForm::Tuple { tuple_text } => {
+                assert!(
+                    tuple_text.starts_with('[') && tuple_text.contains("event:"),
+                    "tuple payload must carry the target tuple text, got {tuple_text:?}"
+                );
+            }
+            other => panic!("expected Tuple payload form, got {other:?}"),
+        }
+    }
+    assert!(
+        resolved.props.is_empty(),
+        "emit-shorthand members must not also surface as props: {:?}",
+        resolved
+            .props
+            .iter()
+            .map(|p| p.key_name.as_deref())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Indexed access whose OBJECT is an interface (not a type alias).
+#[test]
+fn indexed_access_emit_via_interface_object_resolves_to_call_signature() {
+    let source = r#"
+interface LayerEmits {
+  escapeKeydown: [event: KeyboardEvent]
+}
+type Test = {
+  escapeKeydown: LayerEmits['escapeKeydown']
+}
+"#;
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    assert!(diagnostics.is_empty(), "No diagnostics: {diagnostics:?}");
+    assert_eq!(resolved.call_signatures.len(), 1);
+    assert_eq!(resolved.call_signatures[0].name, "escapeKeydown");
+    match &resolved.call_signatures[0].signature {
+        ResolvedCallPayloadForm::Tuple { tuple_text } => {
+            assert_eq!(tuple_text, "[event: KeyboardEvent]");
+        }
+        other => panic!("expected Tuple payload form, got {other:?}"),
+    }
+}
+
+/// Indexed access whose object reference goes through an alias chain.
+#[test]
+fn indexed_access_emit_through_alias_chain_resolves() {
+    let source = r#"
+type LayerEmits = {
+  escapeKeydown: [event: KeyboardEvent]
+}
+type Renamed = LayerEmits
+type Test = {
+  escapeKeydown: Renamed['escapeKeydown']
+}
+"#;
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    assert!(diagnostics.is_empty(), "No diagnostics: {diagnostics:?}");
+    assert_eq!(resolved.call_signatures.len(), 1);
+}
+
+/// Indexed-access member whose target member is NOT a tuple stays a prop.
+#[test]
+fn indexed_access_non_tuple_member_stays_prop() {
+    let source = r#"
+type Obj = { name: string }
+type Test = { name: Obj['name'] }
+"#;
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    assert!(diagnostics.is_empty(), "No diagnostics: {diagnostics:?}");
+    assert!(
+        resolved.call_signatures.is_empty(),
+        "non-tuple indexed access must NOT become an emit: {:?}",
+        resolved
+            .call_signatures
+            .iter()
+            .map(|e| &e.name)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(resolved.props.len(), 1);
+    assert_eq!(resolved.props[0].key_name.as_deref(), Some("name"));
+}
+
+/// Indexed access into an unresolvable object name stays a prop.
+#[test]
+fn indexed_access_unresolvable_object_stays_prop() {
+    let source = "type Test = { foo: Missing['foo'] }\n";
+    let (resolved, _diagnostics) = resolve_with_ctx(source);
+    assert!(resolved.call_signatures.is_empty());
+    assert_eq!(resolved.props.len(), 1);
+}
+
+/// Non-string-literal index (a reference) is out of scope and stays a prop.
+#[test]
+fn indexed_access_non_literal_index_stays_prop() {
+    let source = r#"
+type K = 'a'
+type Obj = { a: [x: number] }
+type Test = { a: Obj[K] }
+"#;
+    let (resolved, _diagnostics) = resolve_with_ctx(source);
+    assert!(
+        resolved.call_signatures.is_empty(),
+        "reference-typed index is out of scope for the emit shorthand"
+    );
+    assert_eq!(resolved.props.len(), 1);
+}
+
+/// A cyclic alias chain behind the indexed access terminates as a prop.
+#[test]
+fn indexed_access_alias_cycle_terminates_as_prop() {
+    let source = r#"
+type A = B
+type B = A
+type Test = { foo: A['foo'] }
+"#;
+    let (resolved, _diagnostics) = resolve_with_ctx(source);
+    assert!(resolved.call_signatures.is_empty());
+    assert_eq!(resolved.props.len(), 1);
+}
+
+/// Interface OWN members take the same ctx-aware emit path (the
+/// `build_interface_resolution_plan` / `resolve_interface_with_extends_*`
+/// call sites).
+#[test]
+fn interface_member_indexed_access_emit_resolves() {
+    let source = r#"
+type LayerEmits = {
+  escapeKeydown: [event: KeyboardEvent]
+}
+interface TestShape {
+  escapeKeydown: LayerEmits['escapeKeydown']
+}
+type Test = TestShape
+"#;
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    assert!(diagnostics.is_empty(), "No diagnostics: {diagnostics:?}");
+    assert_eq!(
+        resolved.call_signatures.len(),
+        1,
+        "interface own-member indexed access must resolve to an emit, got props {:?}",
+        resolved
+            .props
+            .iter()
+            .map(|p| p.key_name.as_deref())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A direct tuple member is unaffected by ctx availability (same behavior
+/// as the source-only path).
+#[test]
+fn direct_tuple_member_with_ctx_still_resolves_as_emit() {
+    let source = "type Test = { change: [id: number] }\n";
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    assert!(diagnostics.is_empty());
+    assert_eq!(resolved.call_signatures.len(), 1);
+    match &resolved.call_signatures[0].signature {
+        ResolvedCallPayloadForm::Tuple { tuple_text } => {
+            assert_eq!(tuple_text, "[id: number]");
+        }
+        other => panic!("expected Tuple payload form, got {other:?}"),
+    }
 }
 
 // --- Utility type resolution (Omit, Pick, Partial, Required, Readonly) ---
@@ -3962,4 +4190,344 @@ type Test = Props;
     }
     assert!(emit_map_local);
     assert!(!emit_span_is_absolute);
+}
+
+// ═══════════════════════════════════════════════════════════
+// Local re-export / empty-body interface extends (radix Separator)
+// ═══════════════════════════════════════════════════════════
+
+/// Empty-body local interface that re-exports a companion base surface.
+#[test]
+fn empty_body_interface_extends_companion_inherits_all_members() {
+    let source = r#"interface Local extends Base {}
+type Test = Local;"#;
+    let mut companions = FxHashMap::default();
+    let mut base = ResolvedElements::default();
+    for (name, ty) in [
+        ("orientation", RuntimeType::String),
+        ("decorative", RuntimeType::Boolean),
+        ("asChild", RuntimeType::Boolean),
+        ("as", RuntimeType::String),
+    ] {
+        base.props.push(ResolvedProp {
+            span: Span { start: 0, end: 0 },
+            key: Span { start: 0, end: 0 },
+            key_name: Some(name.to_string()),
+            optional: true,
+            types: vec![ty],
+            visibility: ResolvedMemberVisibility::Public,
+            type_span: None,
+            type_text: None,
+            map_local: true,
+            span_is_absolute: false,
+            declared_in_macro_type_arg: false,
+        });
+    }
+    companions.insert("Base".to_string(), base);
+    let (resolved, diagnostics) = resolve_with_ctx_and_companions(source, companions);
+    assert!(diagnostics.is_empty(), "diags: {diagnostics:?}");
+    assert_eq!(
+        resolved.props.len(),
+        4,
+        "empty-body Local extends Base must inherit all 4 members, got {:?}",
+        resolved
+            .props
+            .iter()
+            .filter_map(|p| p.key_name.as_deref())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Empty-body interface extends a local interface that itself extends another.
+#[test]
+fn empty_body_interface_extends_local_chain() {
+    let (resolved, diagnostics) = resolve_with_ctx(
+        r#"interface PrimitiveProps { asChild?: boolean; as?: string }
+interface BaseSeparatorProps extends PrimitiveProps {
+  orientation?: string
+  decorative?: boolean
+}
+interface SeparatorProps extends BaseSeparatorProps {}
+type Test = SeparatorProps;"#,
+    );
+    assert!(diagnostics.is_empty(), "diags: {diagnostics:?}");
+    assert_eq!(
+        resolved.props.len(),
+        4,
+        "SeparatorProps must expand full heritage, got {:?}",
+        resolved
+            .props
+            .iter()
+            .filter_map(|p| p.key_name.as_deref())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// type alias re-export of an interface surface.
+#[test]
+fn type_alias_equals_interface_with_extends() {
+    let (resolved, diagnostics) = resolve_with_ctx(
+        r#"interface Base { foo: string; bar: number }
+type Props = Base;
+type Test = Props;"#,
+    );
+    assert!(diagnostics.is_empty());
+    assert_eq!(resolved.props.len(), 2);
+}
+
+/// Empty-body interface extends type alias of object type.
+#[test]
+fn empty_body_interface_extends_type_alias_object() {
+    let (resolved, diagnostics) = resolve_with_ctx(
+        r#"type Base = { foo: string; bar?: number }
+interface Props extends Base {}
+type Test = Props;"#,
+    );
+    assert!(diagnostics.is_empty(), "diags: {diagnostics:?}");
+    assert_eq!(
+        resolved.props.len(),
+        2,
+        "Props extends type alias object must have 2 members"
+    );
+}
+
+/// Intersection of empty-body extends and local members.
+#[test]
+fn empty_body_extends_plus_intersection() {
+    let (resolved, diagnostics) = resolve_with_ctx(
+        r#"interface Base { a: string }
+interface Mid extends Base {}
+type Test = Mid & { b: number };"#,
+    );
+    assert!(diagnostics.is_empty());
+    assert_eq!(resolved.props.len(), 2);
+}
+
+/// Multiple empty re-exports in a chain.
+#[test]
+fn empty_body_extends_chain_of_three() {
+    let (resolved, diagnostics) = resolve_with_ctx(
+        r#"interface A { a: string }
+interface B extends A {}
+interface C extends B {}
+interface D extends C {}
+type Test = D;"#,
+    );
+    assert!(diagnostics.is_empty());
+    assert_eq!(resolved.props.len(), 1);
+    assert_eq!(resolved.props[0].key_name.as_deref(), Some("a"));
+}
+
+/// Empty-body extends multiple bases (multi-extends).
+#[test]
+fn empty_body_extends_multiple_bases() {
+    let (resolved, diagnostics) = resolve_with_ctx(
+        r#"interface A { a: string }
+interface B { b: number }
+interface C extends A, B {}
+type Test = C;"#,
+    );
+    assert!(diagnostics.is_empty(), "diags: {diagnostics:?}");
+    assert_eq!(
+        resolved.props.len(),
+        2,
+        "multi-extends must inherit both members, got {:?}",
+        resolved
+            .props
+            .iter()
+            .filter_map(|p| p.key_name.as_deref())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Empty-body interface extends intersection type alias.
+#[test]
+fn empty_body_extends_intersection_type_alias() {
+    let (resolved, diagnostics) = resolve_with_ctx(
+        r#"type Left = { a: string }
+type Right = { b: number }
+type Mid = Left & Right
+interface Props extends Mid {}
+type Test = Props;"#,
+    );
+    assert!(diagnostics.is_empty(), "diags: {diagnostics:?}");
+    assert_eq!(
+        resolved.props.len(),
+        2,
+        "extends intersection alias must have 2 members, got {:?}",
+        resolved
+            .props
+            .iter()
+            .filter_map(|p| p.key_name.as_deref())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Non-empty local interface + empty re-export layer.
+#[test]
+fn non_empty_interface_plus_empty_reexport_layer() {
+    let (resolved, diagnostics) = resolve_with_ctx(
+        r#"interface Base { base: string }
+interface Mid extends Base { mid: number }
+interface Props extends Mid {}
+type Test = Props;"#,
+    );
+    assert!(diagnostics.is_empty(), "diags: {diagnostics:?}");
+    assert_eq!(
+        resolved.props.len(),
+        2,
+        "must keep own + heritage, got {:?}",
+        resolved
+            .props
+            .iter()
+            .filter_map(|p| p.key_name.as_deref())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Type alias of empty-body interface extends chain.
+#[test]
+fn type_alias_of_empty_body_extends() {
+    let (resolved, diagnostics) = resolve_with_ctx(
+        r#"interface Base { x: boolean; y: string }
+interface Empty extends Base {}
+type Props = Empty;
+type Test = Props;"#,
+    );
+    assert!(diagnostics.is_empty(), "diags: {diagnostics:?}");
+    assert_eq!(resolved.props.len(), 2);
+}
+
+/// External companion empty-body re-export of multi-member surface.
+#[test]
+fn empty_body_extends_external_companion_multi_member() {
+    let source = r#"interface Local extends External {}
+type Test = Local;"#;
+    let mut companions = FxHashMap::default();
+    let mut external = ResolvedElements::default();
+    for (name, ty) in [
+        ("one", RuntimeType::String),
+        ("two", RuntimeType::Number),
+        ("three", RuntimeType::Boolean),
+    ] {
+        external.props.push(ResolvedProp {
+            span: Span { start: 0, end: 0 },
+            key: Span { start: 0, end: 0 },
+            key_name: Some(name.to_string()),
+            optional: true,
+            types: vec![ty],
+            visibility: ResolvedMemberVisibility::Public,
+            type_span: None,
+            type_text: None,
+            map_local: true,
+            span_is_absolute: false,
+            declared_in_macro_type_arg: false,
+        });
+    }
+    companions.insert("External".to_string(), external);
+    let (resolved, diagnostics) = resolve_with_ctx_and_companions(source, companions);
+    assert!(diagnostics.is_empty(), "diags: {diagnostics:?}");
+    assert_eq!(resolved.props.len(), 3);
+}
+
+/// Generic interface empty extends of non-generic base members only.
+#[test]
+fn empty_body_extends_preserves_optional_flags() {
+    let (resolved, diagnostics) = resolve_with_ctx(
+        r#"interface Base {
+  required: string
+  optional?: number
+}
+interface Props extends Base {}
+type Test = Props;"#,
+    );
+    assert!(diagnostics.is_empty(), "diags: {diagnostics:?}");
+    assert_eq!(resolved.props.len(), 2);
+    let required = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("required"))
+        .expect("required");
+    let optional = resolved
+        .props
+        .iter()
+        .find(|p| p.key_name.as_deref() == Some("optional"))
+        .expect("optional");
+    assert!(!required.optional, "required must stay required");
+    assert!(optional.optional, "optional must stay optional");
+}
+
+#[test]
+fn companion_type_alias_to_external_emits_keeps_call_signatures() {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+    let alloc = Allocator::default();
+    let external = resolve_external_type(
+        "RootEmits",
+        "export type RootEmits = { 'update:open': [value: boolean] }",
+        &alloc,
+    )
+    .expect("external");
+    assert!(
+        !external.call_signatures.is_empty(),
+        "external must have call_signatures"
+    );
+    let mut ext = rustc_hash::FxHashMap::default();
+    ext.insert("RootEmits".to_string(), external);
+
+    let source = "export type AlertEmits = RootEmits\n";
+    let ret = Parser::new(&alloc, source, SourceType::ts()).parse();
+    let program = alloc.alloc(ret.program);
+    let types = extract_companion_types_with_externals(program, source.as_bytes(), 0, Some(&ext));
+    let alert = types.get("AlertEmits").expect("AlertEmits");
+    assert!(
+        !alert.call_signatures.is_empty(),
+        "companion alias to external emits must keep call_signatures, got props={:?} calls={:?}",
+        alert
+            .props
+            .iter()
+            .map(|p| p.key_name.as_deref())
+            .collect::<Vec<_>>(),
+        alert
+            .call_signatures
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn alias_to_companion_emits_via_named_local() {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+    let alloc = Allocator::default();
+    let mut companion = rustc_hash::FxHashMap::default();
+    let external = resolve_external_type(
+        "RootEmits",
+        "export type RootEmits = { 'update:open': [value: boolean] }",
+        &alloc,
+    )
+    .unwrap();
+    assert!(!external.call_signatures.is_empty());
+    companion.insert("RootEmits".to_string(), external);
+
+    let source = "type A = RootEmits\n";
+    let ret = Parser::new(&alloc, source, SourceType::ts()).parse();
+    let program = alloc.alloc(ret.program);
+    let mut ctx = build_type_context(program, source.as_bytes(), 0);
+    ctx.extend_companion_types(&companion);
+    let mut guard = vec![];
+    let resolved = resolve_named_local_type_with_ctx_ref("A", None, 0, &ctx, true, &mut guard)
+        .expect("A should resolve");
+    assert!(
+        !resolved.call_signatures.is_empty(),
+        "alias A = RootEmits must get call_signatures from companion, got {:?}",
+        resolved
+            .call_signatures
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>()
+    );
 }

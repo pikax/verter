@@ -8,6 +8,8 @@ mod module_augmentation_body_rekey;
 mod session_meta_store_view_regression;
 #[path = "g_session/session_overlay_augmentation_isolation.rs"]
 mod session_overlay_augmentation_isolation;
+#[path = "g_session/session_overlay_parent_index_import.rs"]
+mod session_overlay_parent_index_import;
 #[path = "g_session/session_view_dep_overlay_invalidates_warm.rs"]
 mod session_view_dep_overlay_invalidates_warm;
 #[path = "g_session/session_view_isolation.rs"]

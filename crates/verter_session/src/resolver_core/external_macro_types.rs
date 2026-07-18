@@ -10,6 +10,12 @@ pub struct ExternalMacroTypeDiagnostic {
     pub code: String,
     pub message: String,
     pub span: Option<Span>,
+    /// Structural tier of the failure (see
+    /// [`verter_semantic::analysis::types::MacroTypeDepUsage`]): a SURFACE
+    /// dependency miss is an error (the macro's runtime surface cannot be
+    /// enumerated); a MEMBER dependency miss is a warning (the member's
+    /// runtime type degrades to `null`).
+    pub severity: crate::HostSeverity,
 }
 
 #[derive(Debug, Clone)]
@@ -22,6 +28,13 @@ pub struct ExternalMacroTypeCollection {
 pub trait ExternalMacroTypeCollectorHost {
     type Error;
 
+    /// Resolve one macro type dep to its legacy elements. `diagnostics` is
+    /// the side-band sink for diagnostics a SUCCESSFUL resolve carries — a
+    /// dep type that resolves but whose surface references an unresolvable
+    /// import-backed arm reports the miss here without failing the resolve.
+    /// Span-less sink entries are anchored to the dep's owning import
+    /// statement by [`collect_external_macro_types`]; `Err` keeps its
+    /// existing [`Self::map_external_macro_type_error`] channel.
     #[allow(clippy::too_many_arguments)]
     fn resolve_external_macro_type(
         &self,
@@ -32,6 +45,7 @@ pub trait ExternalMacroTypeCollectorHost {
         cache: &mut crate::resolver_core::ExternalTypeBodyCache,
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
         profile_hash: Option<u64>,
+        diagnostics: &mut Vec<ExternalMacroTypeDiagnostic>,
     ) -> Result<Option<ResolvedElements>, Self::Error>;
 
     fn map_external_macro_type_error(
@@ -41,6 +55,26 @@ pub trait ExternalMacroTypeCollectorHost {
         import_span: Option<Span>,
         error: &Self::Error,
     ) -> ExternalMacroTypeDiagnostic;
+}
+
+/// Span of the import statement that OWNS a dep's binding: the import whose
+/// bindings contain the dep's type name wins over a mere source match, so two
+/// separate imports from the same module anchor to the right statement.
+fn owning_import_span(script_imports: &[AnalyzedImport], dep: &MacroTypeDep) -> Option<Span> {
+    let same_source = || {
+        script_imports
+            .iter()
+            .filter(|i| i.source == dep.import_source)
+    };
+    same_source()
+        .find(|import| {
+            import
+                .bindings
+                .iter()
+                .any(|binding| binding.name == dep.type_name)
+        })
+        .or_else(|| same_source().next())
+        .map(|import| import.span)
 }
 
 pub fn collect_external_macro_types<H: ExternalMacroTypeCollectorHost>(
@@ -58,6 +92,7 @@ pub fn collect_external_macro_types<H: ExternalMacroTypeCollectorHost>(
 
     for dep in macro_type_deps {
         let mut resolution_deps = BTreeSet::new();
+        let mut dep_diagnostics = Vec::new();
         match host.resolve_external_macro_type(
             owner_canonical,
             dep,
@@ -66,22 +101,33 @@ pub fn collect_external_macro_types<H: ExternalMacroTypeCollectorHost>(
             &mut cache,
             &mut visiting,
             profile_hash,
+            &mut dep_diagnostics,
         ) {
             Ok(Some(elements)) => {
                 resolved.insert(dep.type_name.clone(), elements);
             }
             Ok(None) => {}
             Err(error) => {
-                let import_span = script_imports
-                    .iter()
-                    .find(|import| import.source == dep.import_source)
-                    .map(|import| import.span);
+                let import_span = owning_import_span(script_imports, dep);
                 diagnostics.push(host.map_external_macro_type_error(
                     owner_canonical,
                     dep,
                     import_span,
                     &error,
                 ));
+            }
+        }
+        // Side-band diagnostics from a resolve that did not `Err` (a resolved
+        // dep whose surface references an unresolvable import-backed arm).
+        // Span-less entries anchor to the dep's owning import statement —
+        // the same anchor the `Err` channel uses.
+        if !dep_diagnostics.is_empty() {
+            let import_span = owning_import_span(script_imports, dep);
+            for mut diag in dep_diagnostics {
+                if diag.span.is_none() {
+                    diag.span = import_span;
+                }
+                diagnostics.push(diag);
             }
         }
     }
@@ -106,6 +152,9 @@ mod tests {
     #[derive(Default)]
     struct TestHost {
         results: BTreeMap<String, Result<Option<ResolvedElements>, String>>,
+        /// Per-type side-band diagnostics pushed into the resolve sink even
+        /// when the resolve itself succeeds.
+        sink_diagnostics: BTreeMap<String, Vec<ExternalMacroTypeDiagnostic>>,
     }
 
     impl ExternalMacroTypeCollectorHost for TestHost {
@@ -120,7 +169,11 @@ mod tests {
             _cache: &mut crate::resolver_core::ExternalTypeBodyCache,
             _visiting: &mut rustc_hash::FxHashSet<(String, String)>,
             _profile_hash: Option<u64>,
+            diagnostics: &mut Vec<ExternalMacroTypeDiagnostic>,
         ) -> Result<Option<ResolvedElements>, Self::Error> {
+            if let Some(sink) = self.sink_diagnostics.get(&dep.type_name) {
+                diagnostics.extend(sink.iter().cloned());
+            }
             self.results
                 .get(&dep.type_name)
                 .cloned()
@@ -138,6 +191,7 @@ mod tests {
                 code: format!("ERR_{}", dep.type_name),
                 message: error.clone(),
                 span: import_span,
+                severity: crate::HostSeverity::Error,
             }
         }
     }
@@ -166,6 +220,7 @@ mod tests {
                 type_name: "Props".to_string(),
                 macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind::DefineProps,
                 macro_span: Span::new(1, 10),
+                usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
             },
             MacroTypeDep {
                 macro_index: 1,
@@ -173,6 +228,7 @@ mod tests {
                 type_name: "Bad".to_string(),
                 macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind::DefineProps,
                 macro_span: Span::new(11, 20),
+                usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
             },
         ];
         let imports = vec![
@@ -201,5 +257,58 @@ mod tests {
         assert_eq!(collected.diagnostics.len(), 1);
         assert_eq!(collected.diagnostics[0].code, "ERR_Bad");
         assert_eq!(collected.diagnostics[0].span, Some(Span::new(11, 20)));
+    }
+
+    #[test]
+    fn collect_external_macro_types_routes_successful_resolve_sink_diagnostics() {
+        let mut host = TestHost::default();
+        host.results
+            .insert("Props".to_string(), Ok(Some(empty_elements())));
+        host.sink_diagnostics.insert(
+            "Props".to_string(),
+            vec![ExternalMacroTypeDiagnostic {
+                code: "HOST_MISSING_MACRO_TYPE_DEP".to_string(),
+                message: "surface arm miss".to_string(),
+                span: None,
+                severity: crate::HostSeverity::Error,
+            }],
+        );
+
+        let deps = vec![MacroTypeDep {
+            macro_index: 0,
+            import_source: "./types".to_string(),
+            type_name: "Props".to_string(),
+            macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind::DefineProps,
+            macro_span: Span::new(1, 10),
+            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
+        }];
+        let imports = vec![AnalyzedImport {
+            source: "./types".to_string(),
+            is_type_only: true,
+            bindings: Vec::new(),
+            span: Span::new(1, 10),
+            resolved_canonical_id: None,
+        }];
+
+        let collected = collect_external_macro_types(&host, "/src/Comp.vue", &deps, &imports, None);
+
+        // The resolve SUCCEEDED — the elements land in `resolved` — while the
+        // sink diagnostic still reaches the collection, anchored to the dep's
+        // owning import statement.
+        assert!(collected
+            .resolved
+            .as_ref()
+            .is_some_and(|resolved| resolved.contains_key("Props")));
+        assert_eq!(collected.diagnostics.len(), 1);
+        assert_eq!(collected.diagnostics[0].code, "HOST_MISSING_MACRO_TYPE_DEP");
+        assert_eq!(
+            collected.diagnostics[0].severity,
+            crate::HostSeverity::Error
+        );
+        assert_eq!(
+            collected.diagnostics[0].span,
+            Some(Span::new(1, 10)),
+            "span-less sink diagnostics anchor to the dep's owning import"
+        );
     }
 }

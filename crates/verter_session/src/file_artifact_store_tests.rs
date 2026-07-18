@@ -877,6 +877,16 @@ fn noop_legacy_replace_never_exposes_absent_current_key_under_race() {
 /// two augmenters with the same canonical + `parse_stable_hash` produce the
 /// same augmenter-set fingerprint.
 fn synth_relative_augmenter_artifacts(parse_stable_hash: Hash16) -> Arc<FileArtifacts> {
+    synth_augmenter_artifacts_for_specifier("./dep", parse_stable_hash)
+}
+
+/// Specifier-parameterized core of [`synth_relative_augmenter_artifacts`]:
+/// artifacts whose single augmentation fact declares `module "<specifier>"`.
+/// Reused by the relative-class classification tests (`'..'`, `'.\theme'`).
+fn synth_augmenter_artifacts_for_specifier(
+    specifier: &str,
+    parse_stable_hash: Hash16,
+) -> Arc<FileArtifacts> {
     use super::{FileFacts, ModuleAugmentationFact, ParsedEdges};
     use verter_semantic::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
 
@@ -886,7 +896,7 @@ fn synth_relative_augmenter_artifacts(parse_stable_hash: Hash16) -> Arc<FileArti
         parsed_edges: Arc::new(ParsedEdges::empty()),
         parse_stable_hash,
         augmentations: Arc::new(vec![ModuleAugmentationFact {
-            specifier: InternedSpecifier::from("./dep"),
+            specifier: InternedSpecifier::from(specifier),
             augmented_name: InternedName::from("Augmented"),
             space: SymbolSpace::Type,
             augmented_member_shape_fingerprint: [0u8; 16],
@@ -902,6 +912,152 @@ fn relative_dep_target_key() -> AugmentationTargetKey {
         population: crate::file_artifact_store::AugmentationPopulation::Base,
         target: AugmentationTargetKind::ResolvedRelativeCanonical(Arc::from("/dep")),
     }
+}
+
+/// Target key builder for the relative-class classification tests below.
+fn target_key_for(target: AugmentationTargetKind) -> AugmentationTargetKey {
+    AugmentationTargetKey {
+        project_identity: ProjectIdentity([7u8; 16]),
+        resolve_env_hash: [1u8; 16],
+        lib_env_hash: [2u8; 16],
+        population: crate::file_artifact_store::AugmentationPopulation::Base,
+        target,
+    }
+}
+
+#[test]
+fn bare_dot_dot_augmentation_fact_classifies_relative_not_external() {
+    // A `declare module '..'` fact from an augmenter in a subdirectory is
+    // in the TS `pathIsRelative` class: it augments the PARENT DIRECTORY
+    // INDEX module, resolved against the augmenter's own canonical — it
+    // is NOT a bare external module named `..`. The classification gate
+    // inside `augmenter_matches_target` (BOTH arms) must be the shared
+    // resolver predicate (`is_relative_specifier`), not a `./`/`../`
+    // prefix check.
+    let store = FileArtifactStore::new();
+    store.insert_artifacts(
+        FileArtifactKey::base(Arc::from("/src/pkg/aug.ts"), [9u8; 16]),
+        synth_augmenter_artifacts_for_specifier("..", [0x33u8; 16]),
+    );
+
+    // Relative-target arm: the cold scan must classify the fact relative
+    // and resolve it against the augmenter's own directory.
+    let relative_key = target_key_for(AugmentationTargetKind::ResolvedRelativeCanonical(
+        Arc::from("/src/index.ts"),
+    ));
+    let set = store.ensure_augmentation_index_populated(
+        &relative_key,
+        |augmenter, specifier| {
+            assert_eq!(augmenter, "/src/pkg/aug.ts");
+            (specifier == "..").then(|| Arc::<str>::from("/src/index.ts"))
+        },
+        None,
+    );
+    assert_eq!(
+        set.entries.len(),
+        1,
+        "a `declare module '..'` fact MUST be discovered for the RESOLVED \
+         parent-index relative target — a narrower `./`/`../` prefix check \
+         drops it from the augmenter set"
+    );
+
+    // External arm: the SAME fact must NOT masquerade as an external
+    // module named `..` (that would match location-independently against
+    // any bare-'..' import target regardless of the directories involved).
+    let external_key = target_key_for(AugmentationTargetKind::ExternalSpecifier(
+        super::InternedSpecifier::from(".."),
+    ));
+    let set = store.ensure_augmentation_index_populated(&external_key, |_, _| None, None);
+    assert_eq!(
+        set.entries.len(),
+        0,
+        "a `declare module '..'` fact is in the relative class and MUST NOT \
+         match a location-independent ExternalSpecifier(\"..\") target"
+    );
+}
+
+#[test]
+fn backslash_relative_augmentation_fact_classifies_relative_not_external() {
+    // `declare module '.\theme'` — the same `pathIsRelative` class (the
+    // TS regex's `[\\/]` covers both separators).
+    let store = FileArtifactStore::new();
+    store.insert_artifacts(
+        FileArtifactKey::base(Arc::from("/src/aug.ts"), [9u8; 16]),
+        synth_augmenter_artifacts_for_specifier(".\\theme", [0x44u8; 16]),
+    );
+
+    let relative_key = target_key_for(AugmentationTargetKind::ResolvedRelativeCanonical(
+        Arc::from("/src/theme.ts"),
+    ));
+    let set = store.ensure_augmentation_index_populated(
+        &relative_key,
+        |augmenter, specifier| {
+            assert_eq!(augmenter, "/src/aug.ts");
+            (specifier == ".\\theme").then(|| Arc::<str>::from("/src/theme.ts"))
+        },
+        None,
+    );
+    assert_eq!(
+        set.entries.len(),
+        1,
+        "a backslash-relative `declare module '.\\theme'` fact MUST be \
+         discovered for its resolved relative target"
+    );
+
+    let external_key = target_key_for(AugmentationTargetKind::ExternalSpecifier(
+        super::InternedSpecifier::from(".\\theme"),
+    ));
+    let set = store.ensure_augmentation_index_populated(&external_key, |_, _| None, None);
+    assert_eq!(
+        set.entries.len(),
+        0,
+        "a backslash-relative fact MUST NOT masquerade as an external module"
+    );
+}
+
+#[test]
+fn bare_dot_dot_fact_conservatively_invalidates_relative_target_entries() {
+    // The resolver-free invalidation variant
+    // (`augmenter_fact_could_contribute`) must agree with the exact
+    // matcher on the relative CLASS: a `declare module '..'` fact
+    // conservatively invalidates EVERY relative-target entry. With a
+    // narrower `./`/`../` prefix check the fact classifies external,
+    // relative-target entries survive the augmenter's change, and the
+    // next probe warm-hits a stale augmenter set.
+    use smallvec::smallvec;
+
+    use super::{AugmenterEntry, AugmenterSet, ModuleAugmentationFact};
+    use verter_semantic::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+
+    let store = FileArtifactStore::new();
+    let key = relative_dep_target_key();
+    store.populate_augmenter_set(
+        key.clone(),
+        Arc::new(AugmenterSet {
+            entries: smallvec![AugmenterEntry {
+                artifact_key: FileArtifactKey::base(Arc::from("/src/pkg/aug.ts"), [9u8; 16]),
+                parse_stable_hash: [3u8; 16],
+            }],
+            fingerprint: [4u8; 16],
+        }),
+    );
+
+    let fact = ModuleAugmentationFact {
+        specifier: InternedSpecifier::from(".."),
+        augmented_name: InternedName::from("Augmented"),
+        space: SymbolSpace::Type,
+        augmented_member_shape_fingerprint: [0u8; 16],
+    };
+    let removed = store.invalidate_augmentation_index_for_augmenter(std::slice::from_ref(&fact));
+    assert_eq!(
+        removed, 1,
+        "a bare-'..' declare-module fact is in the relative class and MUST \
+         conservatively invalidate relative-target entries"
+    );
+    assert!(
+        store.get_augmenter_set(&key).is_none(),
+        "the relative-target entry MUST be dropped after the invalidation"
+    );
 }
 
 #[test]

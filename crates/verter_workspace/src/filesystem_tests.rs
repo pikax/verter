@@ -904,3 +904,114 @@ fn delete_dir_all_records_subtree_content_transition() {
         "a canonical outside the deleted subtree is untouched",
     );
 }
+
+/// Shared body for the monorepo package-`paths` regression: an importer
+/// under a package carrying `paths: { "@/*": ["./src/*"] }` must resolve
+/// `@/types` → that package's `src/types.ts` via ProjectGraph discovery,
+/// and a sibling package that only extends the root must NOT claim the
+/// importer as a member.
+///
+/// Regression: an exclude-only root tsconfig used to synthesize
+/// monorepo-wide `include` that package leafs inherited, so the wrong
+/// package owned the file and `@/*` mapped to the wrong `src/*`.
+pub(super) fn assert_monorepo_package_paths_resolve(
+    monorepo_root: &std::path::Path,
+    importer_rel: &str,
+    expected_rel: &str,
+    sibling_pkg_rel: &str,
+) {
+    assert!(
+        monorepo_root.is_dir(),
+        "monorepo fixture root must exist: {monorepo_root:?}"
+    );
+    // Normalize through the workspace's own canonical form (drive-case +
+    // separator handling) so expected/actual compare in one coordinate
+    // system on every platform — std `canonicalize()` yields `\\?\`-prefixed
+    // paths on Windows that never byte-match resolver output.
+    let root_str =
+        verter_span::path::canonicalize_path(&monorepo_root.to_string_lossy()).replace('\\', "/");
+    let importer = format!("{root_str}/{importer_rel}");
+    let expected = format!("{root_str}/{expected_rel}");
+    assert!(
+        std::path::Path::new(&expected).is_file(),
+        "precondition: {expected} must exist"
+    );
+
+    let ws = FilesystemWorkspace::new(FilesystemOptions {
+        roots: vec![root_str.clone()],
+        ..Default::default()
+    });
+    let graph = ProjectGraph::from_workspace_roots(
+        &ws,
+        std::slice::from_ref(&root_str),
+        &crate::vite_config::ViteConfigOptions::default(),
+    );
+    ws.set_project_graph(graph.graph);
+
+    // Sibling package that only extends the root must not own the importer.
+    let sibling_ts = format!("{root_str}/{sibling_pkg_rel}/tsconfig.json");
+    let sibling_mem = crate::snapshot_builder::configured_membership_from_raw(
+        &format!("{root_str}/{sibling_pkg_rel}"),
+        &crate::config::load_project_membership(&ws, &sibling_ts),
+        &Default::default(),
+    );
+    assert!(
+        !sibling_mem.contains(&crate::CanonicalPath::new(&importer)),
+        "sibling package must not claim another package's sources after leaf-local default include"
+    );
+
+    let result = ws.resolve_import(
+        &importer,
+        "@/types",
+        ResolutionContext {
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::TypeImport,
+        },
+    );
+    let resolved = result.expect("@/types must resolve under package tsconfig paths");
+    let got = resolved.source_id.replace('\\', "/");
+    assert_eq!(
+        got, expected,
+        "package-level @/* paths must map @/types to the owning package's src/types.ts"
+    );
+}
+
+/// Hermetic monorepo package-`paths` regression over the vendored fixture
+/// (`tests/fixtures/pkg-paths`): exclude-only root tsconfig, one package
+/// with `paths: { "@/*": ["./src/*"] }`, one sibling package that only
+/// extends the root.
+#[test]
+fn monorepo_package_tsconfig_paths_resolve_at_types() {
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("pkg-paths");
+    assert_monorepo_package_paths_resolve(
+        &fixture,
+        "packages/icons/src/components/Icon.vue",
+        "packages/icons/src/types.ts",
+        "packages/hl",
+    );
+}
+
+#[test]
+fn package_tsconfig_membership_does_not_claim_sibling_package_files() {
+    use crate::resolver::{IdeProjectCompilerOptions, ProjectMembership};
+    use crate::snapshot_builder::configured_membership_from_raw;
+    use crate::CanonicalPath;
+
+    let root = "/repo/packages/code-highlight";
+    // MatchAll (no files/include) → defaults under THIS root only
+    let mem = configured_membership_from_raw(
+        root,
+        &ProjectMembership::MatchAll,
+        &IdeProjectCompilerOptions::default(),
+    );
+    let sibling = CanonicalPath::new("/repo/packages/icons/src/Icon.vue");
+    let own = CanonicalPath::new("/repo/packages/code-highlight/src/x.ts");
+    assert!(mem.contains(&own), "own package file must be a member");
+    assert!(
+        !mem.contains(&sibling),
+        "sibling package file must NOT be claimed by code-highlight membership"
+    );
+}

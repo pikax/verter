@@ -58,6 +58,115 @@ fn define_props_runtime() {
 }
 
 #[test]
+fn macro_type_dep_usage_direct_arg_is_surface() {
+    let result =
+        analyze("import type { MyProps } from './types';\nconst props = defineProps<MyProps>();");
+    assert_eq!(result.macro_type_deps.len(), 1);
+    assert_eq!(result.macro_type_deps[0].type_name, "MyProps");
+    assert_eq!(result.macro_type_deps[0].usage, MacroTypeDepUsage::Surface);
+}
+
+/// Structural tiering of macro type deps: SURFACE positions (argument root,
+/// intersection arms, local `extends` heritage, alias-chain hops) vs MEMBER
+/// positions (top-level member annotations) vs NESTED positions (never
+/// collected — runtime codegen does not need them).
+#[test]
+fn macro_type_dep_usage_tiers_by_structural_position() {
+    let code = r#"
+import type { HeritageParent, AliasArm, AliasMemberVal, MemberVal, NestedVal } from './types';
+interface WithParent extends HeritageParent { own?: string }
+type Arm = AliasArm & { viaAlias: AliasMemberVal }
+const props = defineProps<WithParent & Arm & {
+  m: MemberVal,
+  deep: { inner: NestedVal },
+  list: NestedVal[],
+}>();
+"#;
+    let result = analyze(code);
+    let usage = |name: &str| {
+        result
+            .macro_type_deps
+            .iter()
+            .find(|d| d.type_name == name)
+            .map(|d| d.usage)
+    };
+    // Local names never become deps (only imports match).
+    assert_eq!(usage("WithParent"), None, "local interface is not a dep");
+    assert_eq!(usage("Arm"), None, "local alias is not a dep");
+    // Surface tier: heritage of a surface-reached local interface, and the
+    // alias-chain intersection arm.
+    assert_eq!(usage("HeritageParent"), Some(MacroTypeDepUsage::Surface));
+    assert_eq!(usage("AliasArm"), Some(MacroTypeDepUsage::Surface));
+    // Member tier: top-level member annotations — including through the
+    // local alias's literal arm.
+    assert_eq!(usage("MemberVal"), Some(MacroTypeDepUsage::Member));
+    assert_eq!(usage("AliasMemberVal"), Some(MacroTypeDepUsage::Member));
+    // Nested tier: never collected (object-literal member's inner type,
+    // array element).
+    assert_eq!(usage("NestedVal"), None, "nested refs are not deps");
+}
+
+#[test]
+fn macro_type_dep_usage_generic_args_surface_at_root_nested_in_members() {
+    let code = r#"
+import type { Inner, Deep } from './types';
+const props = defineProps<Partial<Inner> & { list: Array<Deep> }>();
+"#;
+    let result = analyze(code);
+    let usage = |name: &str| {
+        result
+            .macro_type_deps
+            .iter()
+            .find(|d| d.type_name == name)
+            .map(|d| d.usage)
+    };
+    // A generic instantiation's argument in a surface position can shape the
+    // surface (utility pass-throughs) — conservative SURFACE.
+    assert_eq!(usage("Inner"), Some(MacroTypeDepUsage::Surface));
+    // A member annotation's type arguments are nested — the constructor
+    // derives from the head (`Array`).
+    assert_eq!(usage("Deep"), None);
+}
+
+#[test]
+fn macro_type_dep_usage_emits_tuple_payloads_are_nested() {
+    let code = r#"
+import type { PayloadT, MemberT, EmitsT } from './types';
+const emit = defineEmits<{ change: [id: PayloadT], pick: MemberT }>();
+const emit2 = defineEmits<EmitsT>();
+"#;
+    let result = analyze(code);
+    let deps_named = |name: &str| {
+        result
+            .macro_type_deps
+            .iter()
+            .filter(|d| d.type_name == name)
+            .map(|d| d.usage)
+            .collect::<Vec<_>>()
+    };
+    // Tuple payload element types are nested: runtime emits codegen only
+    // needs the event NAMES.
+    assert_eq!(deps_named("PayloadT"), Vec::<MacroTypeDepUsage>::new());
+    // A member-root reference stays a (warnable) member dep.
+    assert_eq!(deps_named("MemberT"), vec![MacroTypeDepUsage::Member]);
+    // The direct type argument stays a surface dep.
+    assert_eq!(deps_named("EmitsT"), vec![MacroTypeDepUsage::Surface]);
+}
+
+#[test]
+fn macro_type_dep_usage_member_local_alias_chain_stays_member() {
+    let code = r#"
+import type { Behind } from './types';
+type Chain = Behind;
+const props = defineProps<{ foo: Chain }>();
+"#;
+    let result = analyze(code);
+    assert_eq!(result.macro_type_deps.len(), 1);
+    assert_eq!(result.macro_type_deps[0].type_name, "Behind");
+    assert_eq!(result.macro_type_deps[0].usage, MacroTypeDepUsage::Member);
+}
+
+#[test]
 fn literal_binding() {
     let result = analyze("const x = 42;");
     assert_eq!(result.bindings.len(), 1);

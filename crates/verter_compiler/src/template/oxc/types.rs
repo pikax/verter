@@ -184,6 +184,11 @@ pub struct OxcParsedVSlot<'alloc> {
     /// Parsed v-slot expression with extracted locals and references.
     #[allow(dead_code)] // Populated for codegen consumers
     pub parsed: VSlotWithBindings<'alloc>,
+    /// Parsed DYNAMIC slot-name expression (`#[name]` / `v-slot:[expr]`).
+    /// Parsed in the scope OUTSIDE the slot (enclosing v-for aliases apply;
+    /// the slot's own params do not — the name computes before they bind).
+    /// `None` for static slot names.
+    pub dynamic_name: Option<OxcParsedExpression<'alloc>>,
 }
 
 // ======================== Parsed element ========================
