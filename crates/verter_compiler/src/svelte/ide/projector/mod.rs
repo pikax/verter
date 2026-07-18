@@ -1248,8 +1248,16 @@ impl TemplateProjector<'_, '_> {
             SvelteDirectiveKind::Class => {
                 // `class:active={cond}` → keep as a checkable boolean attribute
                 // by rewriting to `data-class-active={cond}` (SUPPORTED legacy
-                // coverage — the condition expression stays void-checked).
-                self.rewrite_class_directive_to_data(attr, dir);
+                // coverage — the condition expression stays void-checked). The
+                // VALUELESS shorthand `class:active` (≡ `class:active={active}`)
+                // instead projects the implied `active` binding MAPPED, so
+                // hover/definition on the identifier resolves to its script
+                // declaration.
+                if dir.value.is_none() && is_valid_binding_identifier(&dir.local) {
+                    self.rewrite_class_directive_shorthand(attr, dir);
+                } else {
+                    self.rewrite_class_directive_to_data(attr, dir);
+                }
             }
             SvelteDirectiveKind::Style => {
                 // `style:color={c}` / `style:color|important` (F1) — SUPPORTED.
@@ -1263,9 +1271,10 @@ impl TemplateProjector<'_, '_> {
             }
             SvelteDirectiveKind::Use => {
                 // `use:action` (+ parameter) — SUPPORTED (basic action parameter
-                // checking). Strip from the JSX position but void-check the
-                // parameter so its type errors / hover survive.
-                self.strip_directive_void_checking_value(attr, dir);
+                // checking). The action local is a real script identifier
+                // (actions are functions), so it stays MAPPED for
+                // hover/definition; the parameter keeps its own void-check.
+                self.rewrite_use_directive(attr, dir);
             }
             SvelteDirectiveKind::Transition
             | SvelteDirectiveKind::In
@@ -1299,25 +1308,53 @@ impl TemplateProjector<'_, '_> {
         }
     }
 
-    /// Strip an out-of-scope directive from the JSX attribute position while
-    /// VOID-CHECKING its value expression — the value stays mapped + checkable
-    /// so inner type errors and hover survive, but contributes NO prop:
-    /// `{...(__verter_void(EXPR), {})}`. A directive with no expression value
-    /// (or a static/quoted value) is removed outright (no type surface).
-    fn strip_directive_void_checking_value(
+    /// Overwrite the directive tail AFTER the local name (any `|modifier`
+    /// suffix / `=…` tail up to the attribute end) with `content`, or APPEND
+    /// `content` when the local itself ends the attribute (`overwrite` no-ops
+    /// on an empty range, so the suffix must ride the mapped local's end).
+    fn overwrite_directive_tail(&mut self, local_end: u32, attr_end: u32, content: &str) {
+        if local_end >= attr_end {
+            self.ct.append_left(local_end, content);
+        } else {
+            self.ct.overwrite(local_end, attr_end, content);
+        }
+    }
+
+    /// Project a `use:action` directive.
+    ///
+    /// `use:foo={p}` → `{...(__verter_void(foo), __verter_void(p), {})}` and a
+    /// valueless `use:foo` → `{...(__verter_void(foo), {})}`. The directive is
+    /// stripped from the JSX position, but the action local keeps its AUTHORED
+    /// BYTES (mapped) inside a void-check — it is a real script identifier
+    /// (actions are functions), so an unknown action name is a type error
+    /// (matching svelte-check) and hover/definition on it resolves to the
+    /// script declaration. The parameter expression stays mapped + void-checked
+    /// as before. A non-identifier local emits no surface (removed outright).
+    fn rewrite_use_directive(
         &mut self,
         attr: &SvelteAttribute,
         dir: &crate::svelte::parser::SvelteDirective,
     ) {
+        if !is_valid_binding_identifier(&dir.local) {
+            remove_span(self.ct, attr.span);
+            return;
+        }
+        // The local directly follows the `use:` prefix in the attribute span.
+        let local_start = attr.span.start + "use:".len() as u32;
+        let local_end = local_start + dir.local.len() as u32;
         if let Some(SvelteAttributeValue::Expression(expr)) = dir.value {
             // F11: a store-sub in the void-checked value (`use:action={$store}`).
             self.rewrite_store_subs_in(expr);
             self.ct
-                .overwrite(attr.span.start, expr.start, "{...(__verter_void(");
+                .overwrite(attr.span.start, local_start, "{...(__verter_void(");
+            self.ct
+                .overwrite(local_end, expr.start, "), __verter_void(");
             self.ct.overwrite(expr.end, attr.span.end, "), {})}");
             return;
         }
-        remove_span(self.ct, attr.span);
+        self.ct
+            .overwrite(attr.span.start, local_start, "{...(__verter_void(");
+        self.overwrite_directive_tail(local_end, attr.span.end, "), {})}");
     }
 
     /// Project a `style:` directive (F1).
@@ -1349,13 +1386,16 @@ impl TemplateProjector<'_, '_> {
         }
         // Shorthand `style:color` (no `={…}`): project the implied `color`
         // binding when it is a valid identifier so its type errors / hover
-        // survive — `{...(__verter_void(color), {})}`.
+        // survive — `{...(__verter_void(color), {})}`. The local keeps its
+        // AUTHORED BYTES (mapped) so hover/definition on the identifier
+        // resolves to the script declaration. Any `|modifier` suffix rides the
+        // trailing overwrite (presentational).
         if is_valid_binding_identifier(&dir.local) {
-            self.ct.overwrite(
-                attr.span.start,
-                attr.span.end,
-                &format!("{{...(__verter_void({}), {{}})}}", dir.local),
-            );
+            let local_start = attr.span.start + "style:".len() as u32;
+            let local_end = local_start + dir.local.len() as u32;
+            self.ct
+                .overwrite(attr.span.start, local_start, "{...(__verter_void(");
+            self.overwrite_directive_tail(local_end, attr.span.end, "), {})}");
             return;
         }
         remove_span(self.ct, attr.span);
@@ -1633,6 +1673,26 @@ impl TemplateProjector<'_, '_> {
             &format!("{{...(__verter_event({}, \"{}\", ", el.name, dir.local),
         );
         self.ct.overwrite(expr.end, attr.span.end, "), {})}");
+    }
+
+    /// Project a VALUELESS `class:` shorthand (`class:active` ≡
+    /// `class:active={active}`) to the implied binding void-check —
+    /// `{...(__verter_void(active), {})}`. The local is BOTH the class name and
+    /// the implied condition binding identifier; keeping its AUTHORED BYTES
+    /// mapped lets hover/definition on the shorthand resolve to the script
+    /// declaration, and an unknown shorthand name is a type error (matching
+    /// svelte-check). Only called for a valid-identifier local; the valued form
+    /// and non-identifier locals keep the `data-class-*` rewrite.
+    fn rewrite_class_directive_shorthand(
+        &mut self,
+        attr: &SvelteAttribute,
+        dir: &crate::svelte::parser::SvelteDirective,
+    ) {
+        let local_start = attr.span.start + "class:".len() as u32;
+        let local_end = local_start + dir.local.len() as u32;
+        self.ct
+            .overwrite(attr.span.start, local_start, "{...(__verter_void(");
+        self.overwrite_directive_tail(local_end, attr.span.end, "), {})}");
     }
 
     /// Rewrite a `class:` directive to a `data-class-*` attribute keeping the
