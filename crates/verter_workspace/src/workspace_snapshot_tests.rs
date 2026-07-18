@@ -7,17 +7,25 @@ use rustc_hash::FxHashSet;
 
 // ── Helpers ──
 
-fn configured_project(
+/// A configured project with an explicit `include` glob (rooted at `root`).
+///
+/// Lets a test model a configured project whose ownership is genuinely
+/// NARROWER than its root — e.g. two non-overlapping tsconfigs, or a file no
+/// configured project owns. The materialized set is a walk-time POSITIVE cache
+/// only, so ownership of a file absent from it is decided by this `include`
+/// (via `ConfiguredMembership::contains`'s spec fall-through), NOT by the set.
+fn configured_project_with_include(
     id: u32,
     root: &str,
     tsconfig: &str,
+    include: &str,
     file_paths: &[&str],
 ) -> OwnershipProject {
     let root_cp = CanonicalPath::new(root);
     let spec = StaticMembershipSpec {
         files: Vec::new(),
         include: vec![CompiledGlob::new(NormalizedGlob::from_root_and_pattern(
-            &root_cp, "**/*",
+            &root_cp, include,
         ))],
         exclude: vec![CompiledGlob::new(NormalizedGlob::from_root_and_pattern(
             &root_cp,
@@ -45,6 +53,17 @@ fn configured_project(
             workspace_aliases: Vec::new(),
         },
     }
+}
+
+/// A configured project claiming everything under `root` (match-all `**/*`
+/// include), minus `node_modules`.
+fn configured_project(
+    id: u32,
+    root: &str,
+    tsconfig: &str,
+    file_paths: &[&str],
+) -> OwnershipProject {
+    configured_project_with_include(id, root, tsconfig, "**/*", file_paths)
 }
 
 fn fallback_project(id: u32, root: &str) -> OwnershipProject {
@@ -97,17 +116,26 @@ fn configured_owner_for_materialized_file() {
 
 #[test]
 fn fallback_claims_when_no_configured_owner() {
+    // The configured project's include is NARROWER than its root (only
+    // `src/**/*`), so a file OUTSIDE that include is genuinely not a configured
+    // member — regardless of the materialized set — and the fallback
+    // (root-containment) is its only owner. (A match-all `**/*` configured
+    // project would legitimately OWN any non-excluded file under its root, even
+    // one absent from the walk-time materialized set, so it is the wrong
+    // fixture for a "no configured owner" scenario.)
     let snap = snapshot_with(vec![
-        configured_project(
+        configured_project_with_include(
             0,
             "d:/project",
             "d:/project/tsconfig.json",
+            "src/**/*",
             &["d:/project/src/main.ts"],
         ),
         fallback_project(1, "d:/project"),
     ]);
 
-    // File NOT in configured project's materialized set
+    // `scripts/build.ts` is under the project root but OUTSIDE the configured
+    // `src/**/*` include → no configured project owns it → fallback claims.
     let owners = snap.owners_for_file("d:/project/scripts/build.ts");
     assert_eq!(owners.len(), 1);
     assert_eq!(owners[0], ProjectId(1), "fallback should claim");
@@ -158,17 +186,24 @@ fn fallback_does_not_claim_when_configured_owns() {
 
 #[test]
 fn non_overlapping_tsconfigs_unique_owner() {
+    // Genuinely non-overlapping: disjoint includes (`src/**/*` vs `tests/**/*`),
+    // NOT two match-all `**/*` projects made to look disjoint by disjoint
+    // materialized sets. Two `**/*` includes at the same root DO overlap, so a
+    // spec-matching file absent from one project's walk-time set would still be
+    // owned by it via the spec fall-through.
     let snap = snapshot_with(vec![
-        configured_project(
+        configured_project_with_include(
             0,
             "d:/project",
             "d:/project/tsconfig.app.json",
+            "src/**/*",
             &["d:/project/src/main.ts", "d:/project/src/app.vue"],
         ),
-        configured_project(
+        configured_project_with_include(
             1,
             "d:/project",
             "d:/project/tsconfig.vitest.json",
+            "tests/**/*",
             &["d:/project/tests/foo.spec.ts"],
         ),
         fallback_project(2, "d:/project"),
@@ -230,11 +265,16 @@ fn unique_configured_resolution() {
 
 #[test]
 fn no_configured_resolution_for_fallback_only() {
+    // Narrow configured include (`src/**/*`): `scripts/build.ts` is genuinely
+    // not a configured member, so there is no configured resolution — even
+    // though it is absent from the walk-time materialized set (which alone
+    // never decides non-membership).
     let snap = snapshot_with(vec![
-        configured_project(
+        configured_project_with_include(
             0,
             "d:/project",
             "d:/project/tsconfig.json",
+            "src/**/*",
             &["d:/project/src/main.ts"],
         ),
         fallback_project(1, "d:/project"),
@@ -832,12 +872,16 @@ fn new_snapshot_starts_with_a_fresh_memo() {
 
     // Same path, different snapshot, different membership: the memo is
     // snapshot-owned, so snapshot B answers from ITS OWN state, never A's.
+    // B's configured project has a NARROWER include (`sub/**/*`) that does not
+    // cover `path`, so `path` is genuinely unowned by configured in B and the
+    // fallback claims it — a different answer than A, which is the point.
     let snap_b = snapshot_with(vec![
-        configured_project(
+        configured_project_with_include(
             0,
             "d:/proj",
             "d:/proj/tsconfig.json",
-            &["d:/proj/src/other.ts"],
+            "sub/**/*",
+            &["d:/proj/sub/other.ts"],
         ),
         fallback_project(1, "d:/proj"),
     ]);
