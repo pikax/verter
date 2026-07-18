@@ -274,8 +274,8 @@ impl FrameworkScriptFactStore {
 /// `ProjectTypeStore`. Both stores are fact-validated — the candidate store is
 /// content-addressed and [`FrameworkScriptFactStore::publish_if_cacheable`]
 /// admits only `Cacheable` results (ReturnOnly on overflow) — so the logic is
-/// correct today, but the pair is a temporary off-`ProjectTypeStore` cache to be
-/// consolidated onto `ProjectTypeStore` at block U10.
+/// correct today, but the pair is a temporary off-`ProjectTypeStore` cache still
+/// to be consolidated onto `ProjectTypeStore`.
 #[derive(Debug, Default)]
 pub struct FrameworkScriptCaches {
     /// The content-addressed candidate store.
