@@ -2148,6 +2148,172 @@ type Test = {
             .map(|e| &e.name)
             .collect::<Vec<_>>()
     );
+    // The payload must be the TUPLE form carrying the target tuple's text —
+    // never a degraded call form — and the members must NOT double as props.
+    for sig in &resolved.call_signatures {
+        match &sig.signature {
+            ResolvedCallPayloadForm::Tuple { tuple_text } => {
+                assert!(
+                    tuple_text.starts_with('[') && tuple_text.contains("event:"),
+                    "tuple payload must carry the target tuple text, got {tuple_text:?}"
+                );
+            }
+            other => panic!("expected Tuple payload form, got {other:?}"),
+        }
+    }
+    assert!(
+        resolved.props.is_empty(),
+        "emit-shorthand members must not also surface as props: {:?}",
+        resolved
+            .props
+            .iter()
+            .map(|p| p.key_name.as_deref())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Indexed access whose OBJECT is an interface (not a type alias).
+#[test]
+fn indexed_access_emit_via_interface_object_resolves_to_call_signature() {
+    let source = r#"
+interface LayerEmits {
+  escapeKeydown: [event: KeyboardEvent]
+}
+type Test = {
+  escapeKeydown: LayerEmits['escapeKeydown']
+}
+"#;
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    assert!(diagnostics.is_empty(), "No diagnostics: {diagnostics:?}");
+    assert_eq!(resolved.call_signatures.len(), 1);
+    assert_eq!(resolved.call_signatures[0].name, "escapeKeydown");
+    match &resolved.call_signatures[0].signature {
+        ResolvedCallPayloadForm::Tuple { tuple_text } => {
+            assert_eq!(tuple_text, "[event: KeyboardEvent]");
+        }
+        other => panic!("expected Tuple payload form, got {other:?}"),
+    }
+}
+
+/// Indexed access whose object reference goes through an alias chain.
+#[test]
+fn indexed_access_emit_through_alias_chain_resolves() {
+    let source = r#"
+type LayerEmits = {
+  escapeKeydown: [event: KeyboardEvent]
+}
+type Renamed = LayerEmits
+type Test = {
+  escapeKeydown: Renamed['escapeKeydown']
+}
+"#;
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    assert!(diagnostics.is_empty(), "No diagnostics: {diagnostics:?}");
+    assert_eq!(resolved.call_signatures.len(), 1);
+}
+
+/// Indexed-access member whose target member is NOT a tuple stays a prop.
+#[test]
+fn indexed_access_non_tuple_member_stays_prop() {
+    let source = r#"
+type Obj = { name: string }
+type Test = { name: Obj['name'] }
+"#;
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    assert!(diagnostics.is_empty(), "No diagnostics: {diagnostics:?}");
+    assert!(
+        resolved.call_signatures.is_empty(),
+        "non-tuple indexed access must NOT become an emit: {:?}",
+        resolved
+            .call_signatures
+            .iter()
+            .map(|e| &e.name)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(resolved.props.len(), 1);
+    assert_eq!(resolved.props[0].key_name.as_deref(), Some("name"));
+}
+
+/// Indexed access into an unresolvable object name stays a prop.
+#[test]
+fn indexed_access_unresolvable_object_stays_prop() {
+    let source = "type Test = { foo: Missing['foo'] }\n";
+    let (resolved, _diagnostics) = resolve_with_ctx(source);
+    assert!(resolved.call_signatures.is_empty());
+    assert_eq!(resolved.props.len(), 1);
+}
+
+/// Non-string-literal index (a reference) is out of scope and stays a prop.
+#[test]
+fn indexed_access_non_literal_index_stays_prop() {
+    let source = r#"
+type K = 'a'
+type Obj = { a: [x: number] }
+type Test = { a: Obj[K] }
+"#;
+    let (resolved, _diagnostics) = resolve_with_ctx(source);
+    assert!(
+        resolved.call_signatures.is_empty(),
+        "reference-typed index is out of scope for the emit shorthand"
+    );
+    assert_eq!(resolved.props.len(), 1);
+}
+
+/// A cyclic alias chain behind the indexed access terminates as a prop.
+#[test]
+fn indexed_access_alias_cycle_terminates_as_prop() {
+    let source = r#"
+type A = B
+type B = A
+type Test = { foo: A['foo'] }
+"#;
+    let (resolved, _diagnostics) = resolve_with_ctx(source);
+    assert!(resolved.call_signatures.is_empty());
+    assert_eq!(resolved.props.len(), 1);
+}
+
+/// Interface OWN members take the same ctx-aware emit path (the
+/// `build_interface_resolution_plan` / `resolve_interface_with_extends_*`
+/// call sites).
+#[test]
+fn interface_member_indexed_access_emit_resolves() {
+    let source = r#"
+type LayerEmits = {
+  escapeKeydown: [event: KeyboardEvent]
+}
+interface TestShape {
+  escapeKeydown: LayerEmits['escapeKeydown']
+}
+type Test = TestShape
+"#;
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    assert!(diagnostics.is_empty(), "No diagnostics: {diagnostics:?}");
+    assert_eq!(
+        resolved.call_signatures.len(),
+        1,
+        "interface own-member indexed access must resolve to an emit, got props {:?}",
+        resolved
+            .props
+            .iter()
+            .map(|p| p.key_name.as_deref())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A direct tuple member is unaffected by ctx availability (same behavior
+/// as the source-only path).
+#[test]
+fn direct_tuple_member_with_ctx_still_resolves_as_emit() {
+    let source = "type Test = { change: [id: number] }\n";
+    let (resolved, diagnostics) = resolve_with_ctx(source);
+    assert!(diagnostics.is_empty());
+    assert_eq!(resolved.call_signatures.len(), 1);
+    match &resolved.call_signatures[0].signature {
+        ResolvedCallPayloadForm::Tuple { tuple_text } => {
+            assert_eq!(tuple_text, "[id: number]");
+        }
+        other => panic!("expected Tuple payload form, got {other:?}"),
+    }
 }
 
 // --- Utility type resolution (Omit, Pick, Partial, Required, Readonly) ---
