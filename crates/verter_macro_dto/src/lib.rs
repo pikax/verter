@@ -1,301 +1,337 @@
-//! Dependency-neutral, span-free macro-codegen DTO vocabulary.
+//! Dependency-neutral Vue macro handoff contracts.
 //!
-//! These types are the owned semantic hand-off between the ONE shared
-//! type-resolution engine (which produces a resolved macro surface) and the
-//! SFC macro codegen paths (which consume it). The crate sits BELOW both
-//! sides of that boundary: its production dependencies are exactly the two
-//! structural marker crates, so a resolution-side producer and
-//! `verter_compiler` can both name these types without either reaching the
-//! other's dependency graph.
+//! Runtime generation and TSC/IDE generation are intentionally separate
+//! demands. Runtime consumers receive only names, optionality, broad runtime
+//! constructors, `skip_check`, and content-free anchors. TSC consumers receive
+//! terminal splice text which must never be reparsed for semantic decisions.
 //!
-//! # What the vocabulary carries — and what it deliberately does not
-//!
-//! Semantic-codegen data ONLY, per SFC, indexed per authored macro
-//! occurrence:
-//!
-//! - WHICH macro surface an entry describes and WHERE it was authored
-//!   ([`MacroCodegenEntry`]);
-//! - WHETHER resolution produced a usable surface — the three-state
-//!   [`MacroCodegenOutcome`] taxonomy, in which a resolved-but-EMPTY surface
-//!   ([`MacroCodegenOutcome::Complete`] with no members/events) is a
-//!   DIFFERENT fact from an unresolved or partial one;
-//! - the per-member semantic facts codegen needs: prop name, the single
-//!   positive `optional` fact, runtime constructor classification
-//!   ([`RuntimeCtorKind`]); emit name and structured payload form
-//!   ([`MacroEmitPayload`]);
-//! - a CONTENT-FREE syntax anchor ([`MacroSyntaxAnchor`]) that lets a
-//!   consumer re-associate a member/event with its authored position in the
-//!   current SFC (e.g. to select a syntax span for source maps) WITHOUT this
-//!   crate storing any byte offset.
-//!
-//! Excluded by design: spans and byte ranges (every aggregate is
-//! `NoStoredSpan`); symbolic typed IR (every aggregate is `NoTypeExpr`);
-//! parser/session/compiler AST types; display/rendered text that duplicates
-//! a structured field; duplicated positive/negative fact pairs (requiredness
-//! is the single positive `optional`); and compiler-local SYNTAX facts
-//! (`withDefaults` default expressions, raw type-argument text, runtime
-//! object/array macro arguments, native class-member surfaces, import
-//! reconstruction, local source-map spans), which stay owned by
-//! `verter_compiler` / the session.
-//!
-//! # Marker enforcement
-//!
-//! Every public aggregate derives BOTH `verter_no_typeexpr::NoTypeExpr` and
-//! `verter_no_storedspan::NoStoredSpan`, so a field owning a transitive
-//! `TypeExpr` or `verter_span::Span` fails to compile
-//! (`tests/cases/marker_witnesses.rs`). The dependency-neutral closure is
-//! pinned by the resolve-graph firewall guard in
-//! `tests/cases/dependency_closure_guard.rs`.
+//! Every public carrier is structurally proven free of both `TypeExpr` and
+//! stored byte spans. This crate has no parser, semantic-engine, session, or
+//! compiler dependency.
 
 #![forbid(unsafe_code)]
 
 use verter_no_storedspan::NoStoredSpan;
 use verter_no_typeexpr::NoTypeExpr;
 
-/// The per-SFC top-level carrier: one [`MacroCodegenEntry`] per authored
-/// macro occurrence the resolution engine produced an outcome for, in
-/// authored source order.
-///
-/// An SFC without any resolvable macro surface is the `Default` (no
-/// entries) — absence of a macro is the absence of its entry, never a
-/// synthesized `Unresolved` row.
+/// Runtime-only semantic handoff for one SFC.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, NoTypeExpr, NoStoredSpan)]
-pub struct ResolvedMacroCodegenBundle {
-    /// Per-macro outcomes, in authored source order.
-    pub entries: Vec<MacroCodegenEntry>,
+pub struct MacroRuntimeBundle {
+    /// Effective macro outcomes in authored macro order.
+    pub entries: Vec<MacroRuntimeEntry>,
 }
 
-/// One resolved macro occurrence: WHICH macro it is ([`MacroCodegenKind`]),
-/// WHERE it was authored (`macro_index`), and WHAT resolution produced
-/// ([`MacroCodegenOutcome`]).
+/// Runtime outcome for one effective macro identity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
-pub struct MacroCodegenEntry {
-    /// Stable authored identity of this macro occurrence in the SFC: the
-    /// source-order index of the macro call among the SFC's macro calls.
-    /// Content-free — an identity for re-associating the entry with the
-    /// authored syntax, never a byte offset.
+pub struct MacroRuntimeEntry {
+    /// Content-free source-order identity of the effective macro call.
     pub macro_index: u32,
-    /// Which macro surface this entry describes. Authoritative even when the
-    /// outcome carries no surface (`Partial` / `Unresolved`).
-    pub kind: MacroCodegenKind,
-    /// What resolution produced for this occurrence.
-    pub outcome: MacroCodegenOutcome,
+    /// Authoritative result or typed failure.
+    pub outcome: MacroRuntimeOutcome,
 }
 
-/// The macro surface family a [`MacroCodegenEntry`] describes.
+/// Runtime projection outcome. Resolved-empty is represented by
+/// `Complete` with an empty payload and is never collapsed into a failure.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum MacroRuntimeOutcome {
+    /// Complete, authoritative runtime shape.
+    Complete(MacroRuntimeShape),
+    /// Traversal stopped before an authoritative answer existed.
+    Partial(MacroFailure<MacroPartialReason>),
+    /// The semantic subject could not be resolved.
+    Unresolved(MacroFailure<UnresolvedReason>),
+    /// The semantic subject is intentionally outside the supported contract.
+    Unsupported(MacroFailure<UnsupportedReason>),
+}
+
+/// Closed runtime macro vocabulary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum MacroRuntimeShape {
+    /// `defineProps`, including the effective props half of `withDefaults`.
+    Props(PropsRuntimeShape),
+    /// Runtime `defineEmits`; payload types are deliberately absent.
+    Emits(Vec<RuntimeEmit>),
+    /// `defineModel`, including its synthesized update event and modifier prop.
+    Model(ModelRuntimeShape),
+}
+
+/// Complete props runtime shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub struct PropsRuntimeShape {
+    /// Root validity remains explicit so resolved-empty object surfaces are
+    /// distinct from complete primitive roots.
+    pub root_shape: RuntimeRootShape,
+    /// Syntax-owned default composition associated with this effective props
+    /// identity. Expressions themselves remain compiler-owned.
+    pub defaults: PropsDefaultsAssociation,
+    /// Top-level props in deterministic declaration order.
+    pub props: Vec<RuntimeProp>,
+}
+
+/// Shape of the resolved macro root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
-pub enum MacroCodegenKind {
-    /// A `defineProps` surface (including the props half of `withDefaults`).
-    Props,
-    /// A `defineEmits` surface.
-    Emits,
-}
-
-/// The three-state resolution outcome for one macro occurrence.
-///
-/// The states are semantically DISTINCT and none may be coerced into
-/// another:
-///
-/// - [`Complete`](Self::Complete) — resolution finished and the surface is
-///   authoritative. A `Complete` surface with ZERO members/events means the
-///   macro's type genuinely has an empty surface (resolved-empty); it is NOT
-///   an unresolved or unavailable surface.
-/// - [`Partial`](Self::Partial) — resolution ended early (e.g. a budget or
-///   fence); whatever was gathered is NOT carried, because a partial surface
-///   must never be consumed as an authoritative one.
-/// - [`Unresolved`](Self::Unresolved) — the macro's type could not be
-///   resolved at all (e.g. the type argument resolved to nothing).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
-pub enum MacroCodegenOutcome {
-    /// Resolution finished; `surface` is the authoritative macro surface.
-    /// An empty surface here is the resolved-empty fact, distinct from
-    /// `Unresolved`.
-    Complete(MacroCodegenSurface),
-    /// Resolution ended early and produced no authoritative surface.
-    /// `reason` is diagnostic display text only — consumers must not branch
-    /// semantics on it.
-    Partial {
-        /// Human-readable diagnostic for WHY resolution ended early.
-        reason: String,
-    },
-    /// The macro's type could not be resolved. `reason` is diagnostic
-    /// display text only — consumers must not branch semantics on it.
-    Unresolved {
-        /// Human-readable diagnostic for WHY the type did not resolve.
-        reason: String,
-    },
-}
-
-/// The per-kind resolved surface carried by
-/// [`MacroCodegenOutcome::Complete`]. The arm agrees with the owning
-/// entry's [`MacroCodegenKind`]; the producer keeps the two consistent.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
-pub enum MacroCodegenSurface {
-    /// A resolved `defineProps` surface.
-    Props(MacroPropsCodegenSurface),
-    /// A resolved `defineEmits` surface.
-    Emits(MacroEmitsCodegenSurface),
-}
-
-/// The resolved `defineProps` surface: the root-shape fact plus the member
-/// list. `members` may be empty while the surface is still `Complete` —
-/// an object-like props type with no members is resolved-empty, not
-/// unresolved.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
-pub struct MacroPropsCodegenSurface {
-    /// Whether the props root type is object-like. Drives the object-like
-    /// validity check without re-deriving it from members (an empty
-    /// object-like root is valid; a non-object root is not).
-    pub root_shape: MacroRootShape,
-    /// Resolved props, in declaration order.
-    pub members: Vec<MacroPropCodegen>,
-}
-
-/// Shape classification of the `defineProps` root type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
-pub enum MacroRootShape {
-    /// The root type is object-like (an object/interface-shaped surface —
-    /// including an EMPTY one).
+pub enum RuntimeRootShape {
+    /// Object-like top-level surface, including a resolved-empty surface.
     ObjectLike,
-    /// The root type is not an object-like surface (e.g. a primitive or a
-    /// bare unresolvable non-object expression).
+    /// Complete resolution proved a non-object macro root.
     NonObject,
 }
 
-/// One resolved prop on the `defineProps` surface.
-///
-/// Requiredness is the SINGLE positive fact `optional` — there is
-/// deliberately no redundant `required` twin; consumers derive `!optional`
-/// where they need the positive form.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
-pub struct MacroPropCodegen {
-    /// Prop name (the resolved member key).
-    pub name: String,
-    /// Whether the prop is optional (`?`). The single requiredness fact.
-    pub optional: bool,
-    /// Runtime constructor kinds inferred for this prop's type, in order.
-    /// Rendered by the runtime path as the `{ type: ... }` value.
-    pub runtime_ctors: Vec<RuntimeCtorKind>,
-    /// Content-free anchor back to this member's authored position.
-    pub anchor: MacroSyntaxAnchor,
-}
-
-/// The resolved `defineEmits` surface. `events` may be empty while the
-/// surface is still `Complete` (resolved-empty).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
-pub struct MacroEmitsCodegenSurface {
-    /// Resolved emit events, in declaration order.
-    pub events: Vec<MacroEmitCodegen>,
-}
-
-/// One resolved emit event on the `defineEmits` surface.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
-pub struct MacroEmitCodegen {
-    /// Event name.
-    pub name: String,
-    /// Structured payload form. The ONLY payload carrier — there is
-    /// deliberately no duplicated flat rendered-text sibling.
-    pub payload: MacroEmitPayload,
-    /// Content-free anchor back to this event's authored position.
-    pub anchor: MacroSyntaxAnchor,
-}
-
-/// The structured payload form of one `defineEmits` event.
-///
-/// The form distinction (call-signature params vs shorthand tuple) is a
-/// structured fact the consumer must read from the variant, never re-derive
-/// by scanning text. The inner text is the payload's rendered content —
-/// codegen splice text, not a semantic field to re-parse.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
-pub enum MacroEmitPayload {
-    /// No payload beyond the event name.
+/// Association between one effective props result and `withDefaults` syntax.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum PropsDefaultsAssociation {
+    /// Plain `defineProps`.
     None,
-    /// Call-signature payload — the parameter list after the leading
-    /// event-name parameter (`(e: 'change', id: number): void` →
-    /// `id: number`).
-    Call {
-        /// Rendered parameter-list text (codegen splice text only).
-        params_text: String,
-    },
-    /// Shorthand tuple payload, including the surrounding `[...]`
-    /// (`{ change: [id: number] }` → `[id: number]`).
-    Tuple {
-        /// Rendered tuple text (codegen splice text only).
-        tuple_text: String,
+    /// The compiler merges defaults from this authored `withDefaults` call.
+    WithDefaults {
+        /// Content-free source-order identity of the outer defaults call.
+        defaults_macro_index: u32,
     },
 }
 
-/// Runtime constructor kind inferred for a macro prop's type — a 1:1 mirror
-/// of the parser's `RuntimeType`
-/// (`verter_parser::utils::oxc::script::type_surface::RuntimeType`, produced
-/// by the `type_surface/infer.rs` inference path): every variant that path
-/// can emit has exactly one counterpart here.
-///
-/// The runtime path turns these into the JS constructor value of a runtime
-/// prop declaration (`{ type: String }`, `{ type: [String, Number] }`).
-/// `BuiltIn(name)` carries the constructor identifier for recognised
-/// built-in classes (e.g. `Date`, `Map`, `Set`). `Unknown` is the
-/// un-inferable case; a consumer rendering the runtime value filters it out
-/// (yielding `null`).
+/// One runtime prop row.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
-pub enum RuntimeCtorKind {
-    /// `String` constructor (`RuntimeType::String`).
+pub struct RuntimeProp {
+    /// Public runtime prop name.
+    pub name: String,
+    /// The single requiredness fact. Consumers derive required as `!optional`.
+    pub optional: bool,
+    /// Ordered, deterministically deduplicated broad runtime constructors.
+    pub constructors: OrderedRuntimeConstructors,
+    /// Vue's Unknown-plus-Boolean/Function validation escape.
+    pub skip_check: bool,
+    /// Content-free provenance used to associate diagnostics/source maps.
+    pub anchor: MacroAnchor,
+}
+
+/// One runtime emit name. Runtime-only compilation never carries payload text.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub struct RuntimeEmit {
+    /// Public event name.
+    pub name: String,
+    /// Content-free provenance.
+    pub anchor: MacroAnchor,
+}
+
+/// Complete `defineModel` runtime shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub struct ModelRuntimeShape {
+    /// Runtime model prop, classified exactly like a normal prop.
+    pub prop: RuntimeProp,
+    /// Synthesized `update:<name>` event.
+    pub update_event: RuntimeEmit,
+    /// Synthesized `<name>Modifiers`/`modelModifiers` prop.
+    pub modifiers_prop: RuntimeProp,
+}
+
+/// Closed broad runtime-constructor taxonomy in Vue-compatible terminal order.
+///
+/// `Null` and `Unknown` are semantic classifications with no JavaScript
+/// constructor. BigInt is intentionally absent: pinned Vue 3.5.34 emits no
+/// runtime BigInt constructor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum RuntimeConstructor {
     String,
-    /// `Number` constructor (`RuntimeType::Number`).
     Number,
-    /// `Boolean` constructor (`RuntimeType::Boolean`).
     Boolean,
-    /// `Object` constructor (`RuntimeType::Object`).
-    Object,
-    /// `Array` constructor (`RuntimeType::Array`).
-    Array,
-    /// `Function` constructor (`RuntimeType::Function`).
-    Function,
-    /// `Symbol` constructor (`RuntimeType::Symbol`).
     Symbol,
-    /// `null` literal type (`RuntimeType::Null`).
     Null,
-    /// Recognised built-in class constructor, e.g. `Date` / `Map` / `Set`
-    /// (`RuntimeType::BuiltIn(String)`). Carries the constructor name.
-    BuiltIn(String),
-    /// Type that could not be reduced to a runtime constructor
-    /// (`RuntimeType::Unknown`). Rendered as `null` / filtered by consumers.
+    Array,
+    Function,
+    Date,
+    Map,
+    Set,
+    Promise,
+    Error,
+    Object,
     Unknown,
 }
 
-impl RuntimeCtorKind {
-    /// The JavaScript constructor identifier for this kind, matching
-    /// `RuntimeType::as_str`. `Null` and `Unknown` both render as `null`.
-    pub fn as_constructor(&self) -> &str {
+impl RuntimeConstructor {
+    /// JavaScript constructor identifier, or `None` for `Null`/`Unknown`.
+    #[must_use]
+    pub const fn as_constructor(self) -> Option<&'static str> {
         match self {
-            RuntimeCtorKind::String => "String",
-            RuntimeCtorKind::Number => "Number",
-            RuntimeCtorKind::Boolean => "Boolean",
-            RuntimeCtorKind::Object => "Object",
-            RuntimeCtorKind::Array => "Array",
-            RuntimeCtorKind::Function => "Function",
-            RuntimeCtorKind::Symbol => "Symbol",
-            RuntimeCtorKind::BuiltIn(name) => name,
-            RuntimeCtorKind::Null => "null",
-            RuntimeCtorKind::Unknown => "null",
+            Self::String => Some("String"),
+            Self::Number => Some("Number"),
+            Self::Boolean => Some("Boolean"),
+            Self::Symbol => Some("Symbol"),
+            Self::Null => None,
+            Self::Array => Some("Array"),
+            Self::Function => Some("Function"),
+            Self::Date => Some("Date"),
+            Self::Map => Some("Map"),
+            Self::Set => Some("Set"),
+            Self::Promise => Some("Promise"),
+            Self::Error => Some("Error"),
+            Self::Object => Some("Object"),
+            Self::Unknown => None,
         }
     }
 }
 
-/// A CONTENT-FREE anchor onto the current SFC's authored syntax.
-///
-/// It is NOT a span and NOT source text: it carries only the authored macro
-/// occurrence identity plus the member/event ordinal within that macro's
-/// authored surface, so a consumer holding the current SFC's parse can
-/// select the corresponding syntax span (e.g. for source maps) itself. No
-/// byte offsets ever live here — the aggregate is `NoStoredSpan` like every
-/// other type in this crate.
+/// Ordered runtime constructors with stable first-occurrence deduplication.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, NoTypeExpr, NoStoredSpan)]
+pub struct OrderedRuntimeConstructors(Vec<RuntimeConstructor>);
+
+impl OrderedRuntimeConstructors {
+    /// Construct from classifier order, retaining the first occurrence of each
+    /// closed constructor kind.
+    #[must_use]
+    pub fn from_ordered(values: impl IntoIterator<Item = RuntimeConstructor>) -> Self {
+        let mut constructors = Vec::new();
+        for value in values {
+            if !constructors.contains(&value) {
+                constructors.push(value);
+            }
+        }
+        Self(constructors)
+    }
+
+    /// Ordered constructor view.
+    #[must_use]
+    pub fn as_slice(&self) -> &[RuntimeConstructor] {
+        &self.0
+    }
+
+    /// Whether the complete classification produced no runtime constructors.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// Optional authored member ordinal. Its optionality is structural: inherited,
+/// mapped, merged, or synthesized rows need not fabricate an authored ordinal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
-pub struct MacroSyntaxAnchor {
-    /// The authored macro occurrence this element belongs to — the same
-    /// identity space as [`MacroCodegenEntry::macro_index`].
+pub struct AuthoredMemberOrdinal(u32);
+
+impl AuthoredMemberOrdinal {
+    #[must_use]
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// Honest content-free anchor for an authored, type-argument, or synthesized row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum MacroAnchor {
+    /// Authored member/event. Ordinal is absent when the row was inherited,
+    /// mapped, or merged and has no direct member in the macro argument.
+    Authored {
+        macro_index: u32,
+        member_ordinal: Option<AuthoredMemberOrdinal>,
+    },
+    /// Fallback to the macro type-argument as a whole.
+    MacroArgument { macro_index: u32 },
+    /// Row synthesized by macro semantics rather than authored syntax.
+    Synthesized {
+        macro_index: u32,
+        row: SynthesizedRowKind,
+    },
+}
+
+/// Closed synthesized-row vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum SynthesizedRowKind {
+    ModelProp,
+    ModelUpdateEvent,
+    ModelModifiersProp,
+}
+
+/// Typed failure plus optional display-only diagnostic text.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub struct MacroFailure<R> {
+    pub reason: R,
+    /// Human-readable diagnostics only. Consumers must not branch semantics on
+    /// this text.
+    pub diagnostic: Option<String>,
+}
+
+impl<R> MacroFailure<R> {
+    #[must_use]
+    pub fn new(reason: R, diagnostic: Option<String>) -> Self {
+        Self { reason, diagnostic }
+    }
+}
+
+/// Structural incompleteness reasons. Such results are never authoritative or
+/// warm-admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum MacroPartialReason {
+    BudgetExceeded,
+    Cancelled,
+    SupersededGeneration,
+    UnstableState,
+    Recursion,
+    IncompleteTraversal,
+}
+
+/// Reasons no semantic macro subject could be established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum UnresolvedReason {
+    MissingTypeArgument,
+    MissingDeclaration,
+    AmbiguousReference,
+    MissingDependency,
+    NonObjectRoot,
+}
+
+/// Closed unsupported-result reasons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum UnsupportedReason {
+    MacroKind,
+    SemanticConstruct,
+}
+
+/// TSC/IDE-only semantic handoff. Runtime-only targets do not construct it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, NoTypeExpr, NoStoredSpan)]
+pub struct MacroTscBundle {
+    pub entries: Vec<MacroTscEntry>,
+}
+
+/// TSC result for one effective macro identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub struct MacroTscEntry {
     pub macro_index: u32,
-    /// Source-order position of the member/event within that macro's
-    /// authored surface.
-    pub ordinal: u32,
+    pub outcome: MacroTscOutcome,
+}
+
+/// TSC projection outcome, kept independent from runtime completeness.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum MacroTscOutcome {
+    Complete(MacroTscProjection),
+    Partial(MacroFailure<MacroPartialReason>),
+    Unresolved(MacroFailure<UnresolvedReason>),
+    Unsupported(MacroFailure<UnsupportedReason>),
+}
+
+/// Closed TSC macro projection vocabulary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum MacroTscProjection {
+    Props { splice: TscSpliceText },
+    Emits { splice: TscSpliceText },
+    Model { splice: TscSpliceText },
+}
+
+/// Terminal codegen text. It is an output-only splice and must never be
+/// reparsed for semantic decisions.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub struct TscSpliceText(String);
+
+impl TscSpliceText {
+    #[must_use]
+    pub fn new(text: impl Into<String>) -> Self {
+        Self(text.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
