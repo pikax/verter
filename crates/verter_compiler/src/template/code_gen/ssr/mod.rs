@@ -1867,7 +1867,13 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                 if child_el.tag_type == TagType::Template {
                     if let Some(ref v_slot) = child_el.v_slot {
                         // Extract slot name from arg (including modifiers for dot-notation names)
-                        let slot_name = self.build_slot_name(v_slot, source);
+                        let child_oxc = match self.oxc_ast.data.get(child_id.0) {
+                            Some(crate::template::oxc::types::OxcNodeData::Element(e)) => {
+                                Some(e.as_ref())
+                            }
+                            _ => None,
+                        };
+                        let slot_name = self.build_slot_name(v_slot, source, child_oxc);
 
                         // Extract slot params from value
                         let params =
@@ -3396,17 +3402,32 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
     /// - Dynamic: `#[name]` → `[_ctx.name]` (computed property key). Emitting the
     ///   brackets as a quoted string (`"[name]"`) makes a literal slot named
     ///   `"[name]"` instead of reading the binding — drop-in SSR fails.
-    fn build_slot_name(&self, v_slot: &NodeProp, source: &str) -> String {
+    ///
+    /// The dynamic name resolves through the OXC-parsed expression
+    /// (`OxcParsedVSlot::dynamic_name`) so compound expressions
+    /// (`#[foo.bar]`) resolve their root binding instead of passing through
+    /// raw (a free identifier → ReferenceError), and template-scope locals
+    /// (`#[name]` under `v-for="name in tabs"`) stay bare instead of
+    /// mis-prefixing as `_ctx.name`.
+    fn build_slot_name(
+        &self,
+        v_slot: &NodeProp,
+        source: &str,
+        oxc_el: Option<&OxcParsedElement<'alloc>>,
+    ) -> String {
         if let (Some(as_), Some(ae)) = (v_slot.arg_start, v_slot.arg_end) {
             let raw = &source[as_ as usize..ae as usize];
             if v_slot.is_dynamic == Some(true) {
                 let trimmed = raw.trim();
-                let inner = if trimmed.starts_with('[') && trimmed.ends_with(']') {
-                    &trimmed[1..trimmed.len() - 1]
+                let (inner, inner_offset) = if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                    (&trimmed[1..trimmed.len() - 1], as_ + 1)
                 } else {
-                    trimmed
+                    (trimmed, as_)
                 };
-                let resolved = self.resolver.resolve_simple_expr(inner);
+                let oxc_name = oxc_el
+                    .and_then(|e| e.v_slot.as_ref())
+                    .and_then(|vs| vs.dynamic_name.as_ref());
+                let resolved = self.resolve_expr(inner, inner_offset, oxc_name);
                 format!("[{}]", resolved)
             } else if needs_quoted_key(raw) {
                 format!("\"{}\"", raw)
@@ -5291,7 +5312,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
             }
 
             let slot_name = if let Some(ref v_slot) = el.v_slot {
-                self.build_slot_name(v_slot, source)
+                self.build_slot_name(v_slot, source, oxc)
             } else {
                 "default".to_string()
             };

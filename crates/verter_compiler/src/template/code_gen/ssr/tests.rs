@@ -8704,3 +8704,51 @@ const color = ref('green')
         "css var expression must reference the binding, got:\n{code}"
     );
 }
+
+/// Dynamic slot name with a COMPOUND expression (`#[tab.key]`): the root
+/// binding must resolve (`_ctx.tab.key`), never pass through as a free
+/// identifier (ReferenceError in non-inline ssrRender).
+#[test]
+fn ssr_dynamic_slot_name_compound_expression_resolves_root() {
+    let code = gen_ssr_template(
+        r#"<script setup>
+import Child from './Child.vue'
+const tab = { key: 'header' }
+</script>
+<template><Child><template #[tab.key]>content</template></Child></template>"#,
+    );
+    assert!(
+        code.contains("[_ctx.tab.key]"),
+        "compound dynamic slot name must resolve its root binding, got:\n{code}"
+    );
+    assert!(
+        !code.contains("[tab.key]:") && !code.contains("[tab.key] "),
+        "compound dynamic slot name must not pass through unresolved, got:\n{code}"
+    );
+}
+
+/// Dynamic slot name referencing a v-for ALIAS stays bare (the alias is in
+/// scope inside the renderList callback; `_ctx.name` would read undefined
+/// and key the slot \"undefined\").
+#[test]
+fn ssr_dynamic_slot_name_vfor_alias_stays_bare() {
+    let code = gen_ssr_template(
+        r#"<script setup>
+import Child from './Child.vue'
+const tabs = ['a', 'b']
+</script>
+<template>
+  <Child>
+    <template v-for="name in tabs" #[name]>content</template>
+  </Child>
+</template>"#,
+    );
+    assert!(
+        !code.contains("[_ctx.name]"),
+        "v-for alias in dynamic slot name must NOT be _ctx-prefixed, got:\n{code}"
+    );
+    assert!(
+        code.contains("[name]"),
+        "v-for alias must stay bare in the computed slot key, got:\n{code}"
+    );
+}

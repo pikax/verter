@@ -194,6 +194,36 @@ fn parse_element<'alloc>(
                 (Some(vs), Some(ve)) => Some(Span::new(vs, ve)),
                 _ => None,
             };
+            // Dynamic slot NAME (`#[expr]`): parse the inner expression in
+            // the scope OUTSIDE the slot — enclosing v-for aliases apply
+            // (already in active locals), the slot's own params do NOT (the
+            // name computes before they bind), so this parse runs BEFORE
+            // the params push locals below.
+            let dynamic_name = if prop.is_dynamic == Some(true) {
+                match (prop.arg_start, prop.arg_end) {
+                    (Some(as_), Some(ae)) if ae > as_ => {
+                        let raw = &input[as_ as usize..ae as usize];
+                        let (start, end) = if raw.starts_with('[') && raw.ends_with(']') {
+                            (as_ + 1, ae - 1)
+                        } else {
+                            (as_, ae)
+                        };
+                        (end > start).then(|| {
+                            parse_expression(
+                                Span::new(start, end),
+                                input,
+                                alloc,
+                                source_type,
+                                active_locals!(),
+                                ide_completion,
+                            )
+                        })
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
             let parsed = parse_vslot_with_bindings_sliced(
                 alloc,
                 slot_span,
@@ -206,7 +236,10 @@ fn parse_element<'alloc>(
             for local_span in &parsed.locals {
                 locals.push(local_span.slice(input));
             }
-            Some(OxcParsedVSlot { parsed })
+            Some(OxcParsedVSlot {
+                parsed,
+                dynamic_name,
+            })
         }
         None => None,
     };
