@@ -627,6 +627,28 @@ impl VerterHost {
                     self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
                 }
             }
+            // Cache-state is a no-op, but the *result* is still a full
+            // description of the live parse: bundlers re-resolve external
+            // `<style src>` / `<template src>` / `<script src>` on every
+            // transform. Returning empty vectors here drops those requests
+            // on a warm re-upsert and compile fails with HOST_MISSING_EXTERNAL
+            // (zyronon-douyin switches.vue + switches.less).
+            let import_specifiers = parse
+                .script_analysis
+                .imports
+                .iter()
+                .map(|imp| crate::types::ScriptImportInfo {
+                    is_type_only: imp.is_type_only,
+                    bindings: imp.bindings.iter().map(|b| b.name.clone()).collect(),
+                    source: imp.source.clone(),
+                })
+                .collect();
+            let module_references = parse
+                .script_analysis
+                .module_references
+                .iter()
+                .map(crate::types::ScriptModuleReference::from)
+                .collect();
             return Ok(HostUpdateResult {
                 canonical_id,
                 changed: false,
@@ -638,11 +660,11 @@ impl VerterHost {
                 changed_lsp_ids: Vec::new(),
                 removed_lsp_ids: Vec::new(),
                 diagnostics: DiagnosticsSnapshot::default(),
-                external_source_requests: Vec::new(),
-                import_specifiers: Vec::new(),
-                module_references: Vec::new(),
-                preprocessor_requests: Vec::new(),
-                export_signatures: Vec::new(),
+                external_source_requests: parse.external_requests.clone(),
+                import_specifiers,
+                module_references,
+                preprocessor_requests: parse.preprocessor_requests.clone(),
+                export_signatures: parse.export_signatures.clone(),
                 parse_duration_ms,
             });
         }

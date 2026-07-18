@@ -2518,6 +2518,73 @@ fn ensure_indexed_ready_populates_external_type_analysis_for_non_sfc() {
     );
 }
 
+/// Warm re-upsert (unchanged content) must still surface external `src`
+/// block requests. Bundler transforms re-resolve them every time; empty
+/// warm requests cause HOST_MISSING_EXTERNAL when the dep was never loaded
+/// on a prior pass (zyronon-douyin `<style src="./switches.less">`).
+#[test]
+fn warm_upsert_still_returns_external_style_src_requests() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    let src = r#"<template><div class="x"/></template>
+<script>export default { name: 'Switches' }</script>
+<style src="./switches.less" lang="less"></style>
+"#;
+    let first = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/workspace/src/switches.vue".to_string(),
+            source: Arc::from(src),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    assert_eq!(
+        first.external_source_requests.len(),
+        1,
+        "cold upsert must report the style src request"
+    );
+    assert_eq!(
+        first.external_source_requests[0].specifier,
+        "./switches.less"
+    );
+
+    let second = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/workspace/src/switches.vue".to_string(),
+            source: Arc::from(src),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    assert!(
+        !second.changed,
+        "byte-identical re-upsert should be unchanged"
+    );
+    assert_eq!(
+        second.external_source_requests.len(),
+        1,
+        "warm upsert must still report external style src requests"
+    );
+    assert_eq!(
+        second.external_source_requests[0].specifier,
+        "./switches.less"
+    );
+    assert_eq!(
+        second.external_source_requests[0].resolved_canonical_id,
+        first.external_source_requests[0].resolved_canonical_id
+    );
+}
+
 #[test]
 fn resolve_dep_source_reuses_cached_source_without_loading_dependency_into_host_state() {
     let ws = Arc::new(CountingWorkspace::new());
