@@ -66,7 +66,7 @@ export const CLIENT_FRAMEWORKS: readonly ClientFramework[] = [
     clientLanguageIds: ["svelte"],
     triggerLanguageIds: ["svelte"],
     virtualFileSuffixes: {
-      ide: [".tsx"],
+      ide: [".jsx", ".tsx"],
       importSurface: [".verter.ts"],
       testingApi: null,
       sidecars: [],
