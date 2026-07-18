@@ -3368,6 +3368,41 @@ const tag = ref('div')
 }
 
 #[test]
+fn component_is_valueless_shorthand_resolves_dynamic() {
+    // Vue 3.4 same-name shorthand: `<component :is />` == `<component :is="is" />`.
+    // Must resolve via _resolveDynamicComponent(<is binding>), NOT degrade into an
+    // ordinary component literally named "component" carrying `is` as a prop.
+    let code = compile_and_validate_template(
+        r#"<script setup>
+const is = 'div'
+</script>
+<template>
+  <component :is />
+</template>"#,
+    );
+    assert!(
+        code.contains("_resolveDynamicComponent($setup.is)")
+            || code.contains("_resolveDynamicComponent(_ctx.is)"),
+        "value-less :is must resolve the same-name shorthand binding via _resolveDynamicComponent.\nOutput:\n{}",
+        code
+    );
+    // NEGATIVE: must NOT become an ordinary component named "component".
+    assert!(
+        !code.contains("_resolveComponent(\"component\")"),
+        "value-less :is must NOT degrade into ordinary component \"component\".\nOutput:\n{}",
+        code
+    );
+    // NEGATIVE: `is` must NOT leak into the props object or dynamicProps array.
+    assert!(
+        !code.contains("[\"is\"]")
+            && !code.contains("is: $setup.is")
+            && !code.contains("is:$setup.is"),
+        ":is must be consumed by dynamic-component resolution, not emitted as a prop.\nOutput:\n{}",
+        code
+    );
+}
+
+#[test]
 fn component_is_self_closing_with_props() {
     // <component :is> with extra props but no children
     let code = compile_and_validate_template(
