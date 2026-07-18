@@ -100,7 +100,9 @@ use wrapper::{
     should_infer_function_types, to_pascal_case, PREFIX,
 };
 
-pub use type_constructs::{VERTER_TYPES_AMBIENT_MODULE, VERTER_TYPES_STANDALONE_DTS};
+pub use type_constructs::{
+    VERTER_TYPES_AMBIENT_MODULE, VERTER_TYPES_STANDALONE_DTS, VUE_JSX_RUNTIME_AUGMENTATION,
+};
 
 #[cfg(test)]
 use comp_emit::resolve_all_prop_refs_in_expr;

@@ -75,6 +75,7 @@ pub mod tsc;
 // Re-export the @verter/types declarations for the LSP and verter-tsc
 pub use ide::script::VERTER_TYPES_AMBIENT_MODULE;
 pub use ide::script::VERTER_TYPES_STANDALONE_DTS;
+pub use ide::script::VUE_JSX_RUNTIME_AUGMENTATION;
 
 #[cfg(test)]
 mod compile_ported_tests;

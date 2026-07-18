@@ -355,9 +355,12 @@ fn slash(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
 }
 
-/// The three ambient `.d.ts` shim carriers `(virtual path, content)`, rooted at
+/// The four ambient `.d.ts` shim carriers `(virtual path, content)`, rooted at
 /// virtual in-project paths under `base`.
 fn ambient_shim_carriers(base: &Path) -> Vec<(String, String)> {
+    let mut vue_jsx_runtime_augment = String::from("import \"vue/jsx-runtime\";\n");
+    vue_jsx_runtime_augment.push_str(verter_compiler::VUE_JSX_RUNTIME_AUGMENTATION);
+    vue_jsx_runtime_augment.push_str("\nexport {};\n");
     vec![
         (
             slash(&base.join("vue-shims.d.ts")),
@@ -370,6 +373,10 @@ fn ambient_shim_carriers(base: &Path) -> Vec<(String, String)> {
         (
             slash(&base.join("__verter_types.d.ts")),
             verter_compiler::VERTER_TYPES_AMBIENT_MODULE.to_string(),
+        ),
+        (
+            slash(&base.join("vue-jsx-runtime-augment.d.ts")),
+            vue_jsx_runtime_augment,
         ),
     ]
 }

@@ -134,12 +134,6 @@ declare module "@verter/types" {
   export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, children: ReturnType<T> extends infer R ? R extends readonly [any, ...any[]] ? R : R extends Array<infer E> ? U extends Array<infer UE> ? [UE] extends [never] ? U : E extends string | number | boolean | symbol | bigint | null | undefined ? E extends UE ? U : never : UE extends E ? IsExactlyEqual<UE, E> extends true ? U : never : never : never : never : ReturnType<T>): any;
   export declare function checkRequiredSlots<T>(slots: T, provided: { [K in keyof T as undefined extends T[K] ? never : K]: true }): void;
 }
-
-declare module "vue/jsx-runtime" {
-  namespace JSX {
-    interface ElementChildrenAttribute {}
-  }
-}
 "#;
 
 /// Standalone `@verter/types` type declarations as a `.d.ts` file.
@@ -185,6 +179,20 @@ declare module "vue/jsx-runtime" {
   }
 }
 "#;
+
+/// Module augmentation that prevents a foreign ambient JSX namespace from
+/// supplying React-style element children to Vue IDE carriers.
+///
+/// Keep this separate from [`VERTER_TYPES_AMBIENT_MODULE`]. That declaration is
+/// served as a script-style shim by `verter-tsc`; embedding this block there
+/// would define a replacement `vue/jsx-runtime` module instead of augmenting
+/// Vue's real external module, erasing its `IntrinsicElements`. The external-
+/// module [`VERTER_TYPES_STANDALONE_DTS`] safely retains the augmentation.
+pub const VUE_JSX_RUNTIME_AUGMENTATION: &str = r#"declare module "vue/jsx-runtime" {
+  namespace JSX {
+    interface ElementChildrenAttribute {}
+  }
+}"#;
 
 /// Collect Vue built-in component names used in the template AST.
 ///
@@ -407,6 +415,8 @@ pub(super) fn emit_type_constructs(
     // Append ambient module declaration (TS mode only — declare module is TS syntax)
     if options.embed_ambient_types && !options.is_jsx {
         buf.push_str(VERTER_TYPES_AMBIENT_MODULE);
+        buf.push('\n');
+        buf.push_str(VUE_JSX_RUNTIME_AUGMENTATION);
     }
 }
 
