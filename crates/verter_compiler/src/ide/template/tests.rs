@@ -732,6 +732,31 @@ fn interpolation_with_props() {
     );
 }
 
+// ── v-memo dependency mapping (F23) ───
+
+/// F23: the `v-memo="[deps]"` dependency expression must be mapped INTO the IDE
+/// surface so its identifiers type-check / hover / navigate, rather than being
+/// dropped. Emitted as `data-v-memo={[deps]}` with each identifier 1:1 mapped.
+#[test]
+fn v_memo_dependency_expression_is_mapped_into_ide_surface() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><div v-memo="[count]">{{ count }}</div></template>"#,
+        &[("count", BindingType::SetupRef)],
+    );
+    // The dependency expression reaches the surface (identifiers navigable).
+    assert!(
+        result.contains("data-v-memo={[") && result.contains("count"),
+        "v-memo dep must be emitted into the IDE surface, got:\n{}",
+        result
+    );
+    // NEGATIVE: the raw v-memo directive must not survive verbatim.
+    assert!(
+        !result.contains("v-memo=\"[count]\""),
+        "raw v-memo directive must not survive in the IDE surface, got:\n{}",
+        result
+    );
+}
+
 // ── Structural directive removal (v-if, v-for, v-slot) ───
 
 #[test]

@@ -289,7 +289,27 @@ pub fn process_element_props<'alloc>(
             _ => {
                 // Custom directive — collect for v-directive emission (TS mode only).
                 // Skip built-ins that are handled elsewhere.
-                if matches!(dir_name, "show" | "model" | "cloak" | "memo" | "pre" | "is") {
+                if dir_name == "memo" {
+                    // Map the `v-memo="[deps]"` dependency expression INTO the IDE
+                    // surface (as `data-v-memo={[deps]}`, a valid data attribute)
+                    // so its identifiers type-check, hover, and navigate — instead
+                    // of dropping it. Each identifier stays 1:1 mapped to source.
+                    if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                        emit_in_place_jsx_value(
+                            prop,
+                            oxc_prop,
+                            source,
+                            out,
+                            resolver,
+                            vs,
+                            ve,
+                            "data-v-memo={",
+                            "}",
+                        );
+                    } else {
+                        remove_prop(prop, source, out);
+                    }
+                } else if matches!(dir_name, "show" | "model" | "cloak" | "pre" | "is") {
                     remove_prop(prop, source, out);
                 } else if is_jsx {
                     // JSX mode: strip custom directives (no TS-only v-directive support)
