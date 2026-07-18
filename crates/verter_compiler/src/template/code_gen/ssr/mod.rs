@@ -2363,9 +2363,12 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
         let mut dynamic_class_resolved: Option<String> = None;
         let mut dynamic_class_prop_idx: Option<usize> = None;
 
-        // Style merge tracking: when v-show coexists with :style or static style,
-        // they are merged into a single `_ssrRenderStyle([...])` array call.
+        // Style merge tracking: static style, `:style`, and v-show display
+        // always merge into ONE `_ssrRenderStyle(...)` attribute per element
+        // (official merges style parts for EVERY element — emitting two
+        // `style=` attributes silently drops one, first-wins in browsers).
         let mut dynamic_style_resolved: Option<String> = None;
+        let mut dynamic_style_prop_idx: Option<usize> = None;
         let mut static_style_value: Option<String> = None;
         let mut static_style_prop_idx: Option<usize> = None;
 
@@ -2522,17 +2525,14 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                                     has_dynamic_attrs = true;
                                     continue;
                                 } else if attr_name == "style" {
-                                    if has_v_show_prescan {
-                                        // Save for merge with v-show
-                                        dynamic_style_resolved = Some(resolved);
-                                        has_dynamic_attrs = true;
-                                        continue;
-                                    }
-                                    out.add_ssr_import(SsrHelper::RenderStyle);
-                                    inline_parts.push((
-                                        i,
-                                        format!(" style=\"${{_ssrRenderStyle({})}}\"", resolved),
-                                    ));
+                                    // ALWAYS defer to the single merged
+                                    // _ssrRenderStyle emission (static +
+                                    // dynamic + v-show fold into one
+                                    // attribute).
+                                    dynamic_style_resolved = Some(resolved);
+                                    dynamic_style_prop_idx = Some(i);
+                                    has_dynamic_attrs = true;
+                                    continue;
                                 } else if is_boolean_html_attr(attr_name) {
                                     out.add_ssr_import(SsrHelper::IncludeBooleanAttr);
                                     inline_parts.push((
@@ -2569,10 +2569,11 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                                     attrs_obj.push_str("__CLASS_PLACEHOLDER__");
                                 }
                             } else if attr_name == "style" {
-                                // Defer to static+dynamic style merge (array form).
-                                // Emitting a second `style:` key would drop the static
-                                // style (last-wins) — official uses `style: [static, dyn]`.
+                                // Defer to static+dynamic style merge (array form,
+                                // source order). Emitting a second `style:` key would
+                                // drop the static style (last-wins).
                                 dynamic_style_resolved = Some(resolved);
+                                dynamic_style_prop_idx = Some(i);
                                 has_dynamic_attrs = true;
                                 if !attrs_obj.contains("__STYLE_PLACEHOLDER__") {
                                     if !attrs_obj.is_empty() {
@@ -2612,11 +2613,11 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                                     has_dynamic_attrs = true;
                                     continue;
                                 } else if attr_name == "style" {
-                                    out.add_ssr_import(SsrHelper::RenderStyle);
-                                    inline_parts.push((
-                                        i,
-                                        format!(" style=\"${{_ssrRenderStyle({})}}\"", resolved),
-                                    ));
+                                    // Defer to the single merged style emission.
+                                    dynamic_style_resolved = Some(resolved);
+                                    dynamic_style_prop_idx = Some(i);
+                                    has_dynamic_attrs = true;
+                                    continue;
                                 } else if is_boolean_html_attr(attr_name) {
                                     out.add_ssr_import(SsrHelper::IncludeBooleanAttr);
                                     inline_parts.push((
@@ -2821,13 +2822,21 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
         }
 
         // Merge static + dynamic style into a single expression for the root /
-        // mergeProps path (mirrors class merge). Official form:
+        // mergeProps path (mirrors class merge). Official form, SOURCE order:
         //   style: [{ "margin": "1px" }, _ctx.sty]
         match (&dynamic_style_resolved, &static_style_value) {
             (Some(dyn_expr), Some(stat_obj))
                 if is_root || has_v_bind_spread || has_custom_directives =>
             {
-                let style_entry = format!("style: [{}, {}]", stat_obj, dyn_expr);
+                // Authoring order decides the array order (official merges
+                // attribute parts in source order).
+                let static_first = static_style_prop_idx.unwrap_or(usize::MAX)
+                    <= dynamic_style_prop_idx.unwrap_or(usize::MAX);
+                let style_entry = if static_first {
+                    format!("style: [{}, {}]", stat_obj, dyn_expr)
+                } else {
+                    format!("style: [{}, {}]", dyn_expr, stat_obj)
+                };
                 if attrs_obj.contains("__STYLE_PLACEHOLDER__") {
                     attrs_obj = attrs_obj.replace("__STYLE_PLACEHOLDER__", &style_entry);
                 } else {
@@ -3023,12 +3032,14 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
             String::new()
         };
 
-        // For nested elements using inline mode (has inline_parts or v-show, and no v-bind spread).
-        // When directive_calls are present, skip inline mode and use the _mergeProps path instead.
+        // For nested elements using inline mode (has inline_parts, deferred
+        // merged style, or v-show, and no v-bind spread). When
+        // directive_calls are present, skip inline mode and use the
+        // _mergeProps path instead.
         if !is_root
             && !has_v_bind_spread
             && directive_calls.is_empty()
-            && (!inline_parts.is_empty() || has_v_show)
+            && (!inline_parts.is_empty() || has_v_show || dynamic_style_resolved.is_some())
         {
             // Build attrs in source order: interleave static and dynamic parts
             let mut dynamic_map: std::collections::HashMap<usize, &str> =
@@ -3055,17 +3066,11 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                     if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
                         let value = &source[vs as usize..ve as usize];
                         if name == "style" {
-                            if has_v_show_prescan {
-                                // Will be merged into a combined _ssrRenderStyle call
-                                static_style_value = Some(css_to_js_object(value));
-                                static_style_prop_idx = Some(i);
-                                continue;
-                            }
-                            out.add_ssr_import(SsrHelper::RenderStyle);
-                            result.push_str(&format!(
-                                " style=\"${{_ssrRenderStyle({})}}\"",
-                                css_to_js_object(value)
-                            ));
+                            // ALWAYS merged into the single combined
+                            // _ssrRenderStyle emission below.
+                            static_style_value = Some(css_to_js_object(value));
+                            static_style_prop_idx = Some(i);
+                            continue;
                         } else {
                             // Vue trims class attribute values (trailing whitespace)
                             let emit_value = if name == "class" {
@@ -3099,13 +3104,25 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                 || v_show_style.is_some();
             if has_any_style {
                 out.add_ssr_import(SsrHelper::RenderStyle);
-                let mut style_parts: Vec<String> = Vec::new();
+                // SOURCE order between static style and :style (official
+                // merges attribute parts in authoring order); the v-show
+                // display entry always comes last.
+                let mut ordered: Vec<(usize, String)> = Vec::new();
                 if let Some(ref dyn_style) = dynamic_style_resolved {
-                    style_parts.push(dyn_style.clone());
+                    ordered.push((
+                        dynamic_style_prop_idx.unwrap_or(usize::MAX),
+                        dyn_style.clone(),
+                    ));
                 }
                 if let Some(ref stat_style) = static_style_value {
-                    style_parts.push(stat_style.clone());
+                    ordered.push((
+                        static_style_prop_idx.unwrap_or(usize::MAX),
+                        stat_style.clone(),
+                    ));
                 }
+                ordered.sort_by_key(|(idx, _)| *idx);
+                let mut style_parts: Vec<String> =
+                    ordered.into_iter().map(|(_, part)| part).collect();
                 if let Some(vshow) = v_show_style {
                     style_parts.push(vshow);
                 }

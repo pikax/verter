@@ -8752,3 +8752,55 @@ const tabs = ['a', 'b']
         "v-for alias must stay bare in the computed slot key, got:\n{code}"
     );
 }
+
+/// NON-ROOT static + dynamic style must merge into ONE `style` attribute —
+/// official merges style parts for every element; two `style=` attributes
+/// silently drop one (first wins in browsers).
+#[test]
+fn ssr_nested_static_plus_dynamic_style_merges_single_attribute() {
+    let code = gen_ssr_template(
+        r#"<script setup>
+const x = { color: 'blue' }
+</script>
+<template><div><span style="color:red" :style="x">t</span></div></template>"#,
+    );
+    let style_count = code.matches(" style=").count();
+    assert_eq!(
+        style_count, 1,
+        "static + dynamic style must merge into exactly ONE style attribute, got:\n{code}"
+    );
+    assert!(
+        code.contains("_ssrRenderStyle(["),
+        "merged style must render the array form, got:\n{code}"
+    );
+    // SOURCE order: static first (it appears first in the template).
+    let merged_start = code.find("_ssrRenderStyle([").expect("merged style");
+    let merged = &code[merged_start..];
+    let static_pos = merged.find("color").expect("static style part");
+    let dyn_pos = merged.find("_ctx.x").expect("dynamic style part");
+    assert!(
+        static_pos < dyn_pos,
+        "authoring order: static style precedes :style, got:\n{code}"
+    );
+}
+
+/// Reversed authoring order (`:style` before static) keeps source order in
+/// the merged array.
+#[test]
+fn ssr_nested_dynamic_then_static_style_keeps_source_order() {
+    let code = gen_ssr_template(
+        r#"<script setup>
+const x = { color: 'blue' }
+</script>
+<template><div><span :style="x" style="color:red">t</span></div></template>"#,
+    );
+    assert_eq!(code.matches(" style=").count(), 1);
+    let merged_start = code.find("_ssrRenderStyle([").expect("merged style");
+    let merged = &code[merged_start..];
+    let dyn_pos = merged.find("_ctx.x").expect("dynamic style part");
+    let static_pos = merged.find("color").expect("static style part");
+    assert!(
+        dyn_pos < static_pos,
+        ":style authored first must come first in the merged array, got:\n{code}"
+    );
+}
