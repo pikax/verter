@@ -3571,6 +3571,23 @@ fn get_export_span_vue_default() {
     );
 }
 
+/// @ai-generated - an EMPTY .vue still carries a default export anchored at file start
+#[test]
+fn get_export_span_vue_default_empty_sfc() {
+    let host = make_host();
+    // A completely empty SFC compiles to the synthetic empty-component shell;
+    // its default export has no authored token either, so the same honest
+    // file-start anchor must hold (navigation terminates at the component).
+    upsert_vue(&host, "Empty.vue", "");
+
+    let span = host.get_export_span("Empty.vue", "default");
+    assert_eq!(
+        span,
+        Some((0, 0)),
+        "default export of an empty .vue should anchor at file start (0, 0)"
+    );
+}
+
 /// @ai-generated - resolve_import public method works
 #[test]
 fn resolve_import_public_method() {
