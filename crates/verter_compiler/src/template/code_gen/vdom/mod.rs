@@ -629,8 +629,45 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             // It is emitted by the parent's separator logic (build_child_records
             // stores it in ChildRecord.condition_prefix) to ensure correct
             // ordering relative to comma separators.
-            self.scope_closes.push(Some(close));
-            self.v_for_prefixes.push(None);
+
+            // Both structural directives on ONE element (`v-else v-for`,
+            // reka-ui VisuallyHiddenInput): the condition stays OUTER
+            // (official v-if-over-v-for priority) and the branch value is
+            // the `_renderList` fragment — without it, loop aliases in the
+            // branch are free identifiers (ReferenceError at runtime).
+            if let Some(v_for) = &element.v_for {
+                let is_keyed = element.props.iter().any(|p| {
+                    if !p.is_directive {
+                        return false;
+                    }
+                    if let (Some(as_), Some(ae)) = (p.arg_start, p.arg_end) {
+                        &source[as_ as usize..ae as usize] == "key"
+                    } else {
+                        false
+                    }
+                });
+                let (prefix, _for_close, iterable_src) =
+                    directives::build_for_prefix(v_for, source, is_keyed, oxc, &self.resolver);
+                let condition = match close {
+                    ScopeClose::IfTernary => {
+                        crate::template::code_gen::types::ConditionBranchClose::IfTernary
+                    }
+                    ScopeClose::ElseIfTernary => {
+                        crate::template::code_gen::types::ConditionBranchClose::ElseIfTernary
+                    }
+                    _ => crate::template::code_gen::types::ConditionBranchClose::Else,
+                };
+                let combined = ScopeClose::ForInCondition {
+                    is_keyed,
+                    condition,
+                };
+                directives::collect_scope_imports(&combined, out);
+                self.v_for_prefixes.push(Some((prefix, iterable_src)));
+                self.scope_closes.push(Some(combined));
+            } else {
+                self.scope_closes.push(Some(close));
+                self.v_for_prefixes.push(None);
+            }
         } else if let Some(v_for) = &element.v_for {
             // Check if element has a :key prop
             let is_keyed = element.props.iter().any(|p| {

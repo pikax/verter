@@ -678,9 +678,29 @@ pub enum ScopeClose {
     Else,
     /// Close a v-for renderList.
     For { is_keyed: bool },
+    /// Close a v-for renderList nested INSIDE a v-if/v-else-if/v-else
+    /// branch — both structural directives on ONE element. The condition
+    /// stays OUTER (official v-if-over-v-for priority) and the branch
+    /// value is the renderList fragment, so the fragment close is
+    /// followed immediately by the branch's ternary close.
+    ForInCondition {
+        is_keyed: bool,
+        condition: ConditionBranchClose,
+    },
     /// Close a v-slot wrapper.
     #[allow(dead_code)]
     SlotWrapper,
+}
+
+/// The condition half of [`ScopeClose::ForInCondition`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConditionBranchClose {
+    /// End of chain without an else: ` : _createCommentVNode("v-if", true)`.
+    IfTernary,
+    /// A continuation follows: ` : `.
+    ElseIfTernary,
+    /// Terminal v-else branch: nothing after the fragment close.
+    Else,
 }
 
 // ======================== Vapor-specific types ========================

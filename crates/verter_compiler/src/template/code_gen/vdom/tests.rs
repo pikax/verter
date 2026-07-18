@@ -2076,3 +2076,37 @@ const attrs = {}
         "component v-bind + static child must emit FULL_PROPS, got:\n{code}"
     );
 }
+
+/// Both structural directives on ONE element with `v-if` (no chain): the
+/// condition stays OUTER, the true branch is the `_renderList` fragment,
+/// and the false branch is the v-if comment.
+#[test]
+fn v_for_with_v_if_on_same_element_keeps_condition_outer() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <div v-if="cond" v-for="p in items" :key="p.id">{{ p.x }}</div>
+</template>
+<script setup>
+const cond = true
+const items = [{ id: 1, x: 'a' }]
+</script>"#,
+    );
+    assert!(
+        code.contains("_renderList"),
+        "v-for beside v-if must emit _renderList, got:\n{code}"
+    );
+    let cond_pos = code.find("$setup.cond").expect("condition present");
+    let list_pos = code.find("_renderList").expect("renderList present");
+    assert!(
+        cond_pos < list_pos,
+        "condition must be OUTER (official v-if priority), got:\n{code}"
+    );
+    assert!(
+        code.contains("_createCommentVNode(\"v-if\", true)"),
+        "chain-terminal v-if needs the comment false branch, got:\n{code}"
+    );
+    assert!(
+        code.contains("KEYED_FRAGMENT"),
+        ":key on the loop element makes the fragment keyed, got:\n{code}"
+    );
+}
