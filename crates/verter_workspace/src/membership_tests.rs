@@ -185,9 +185,12 @@ fn configured_membership_contains() {
 
     assert!(membership.contains(&CanonicalPath::new("d:/project/src/main.ts")));
     assert!(membership.contains(&CanonicalPath::new("d:/project/src/app.vue")));
+    // A spec-EXCLUDED path is not contained even on a materialized-set miss:
+    // the fall-through consults `spec.matches`, which still applies the
+    // default `node_modules/**` exclude.
     assert!(
-        !membership.contains(&CanonicalPath::new("d:/project/src/other.ts")),
-        "non-materialized file should not be contained"
+        !membership.contains(&CanonicalPath::new("d:/project/node_modules/vue/index.ts")),
+        "an excluded path must not be contained on a fall-through miss"
     );
 }
 
@@ -347,10 +350,22 @@ fn fallback_invalid_exclude_glob_never_excludes() {
     );
 }
 
+/// REGRESSION: a NON-EMPTY materialized set does not make a set-miss terminal.
+///
+/// The materialized set is a walk-time POSITIVE cache, not a negative ownership
+/// authority. A file that matches the project's spec but was created AFTER the
+/// snapshot walk (so it is absent from the materialized set) must still be
+/// owned via the `spec.matches` fall-through — otherwise it fails closed to
+/// `NoProject` and is never synced to the type provider.
+///
+/// This test is DISCRIMINATING: the POSITIVE assertion is RED on the old
+/// terminal-false behavior (`!is_empty()` ⇒ exact-set containment only) and
+/// GREEN on the fall-through fix.
 #[test]
-fn configured_membership_prefers_materialized_when_populated() {
+fn configured_membership_set_miss_falls_through_to_spec_not_terminal_false() {
     let spec = StaticMembershipSpec::with_typescript_defaults(&root());
 
+    // Non-empty materialized set (>= 1 file present at build time).
     let mut materialized = FxHashSet::default();
     materialized.insert(CanonicalPath::new("d:/project/src/main.ts"));
 
@@ -359,13 +374,28 @@ fn configured_membership_prefers_materialized_when_populated() {
         materialized_files: materialized,
     };
 
-    // Materialized file is found
-    assert!(membership.contains(&CanonicalPath::new("d:/project/src/main.ts")));
-
-    // Non-materialized file is NOT found (even though spec.matches would say yes)
+    // Fast POSITIVE path: an exact materialized hit is owned.
     assert!(
-        !membership.contains(&CanonicalPath::new("d:/project/src/other.ts")),
-        "should use materialized set, not spec fallback"
+        membership.contains(&CanonicalPath::new("d:/project/src/main.ts")),
+        "a materialized file must be owned (fast positive path)"
+    );
+
+    // POSITIVE (the fix — RED on old behavior): a spec-matching sibling that is
+    // NOT in the materialized set (e.g. created after the walk) is still owned
+    // via the `spec.matches` fall-through.
+    assert!(
+        membership.contains(&CanonicalPath::new("d:/project/src/other.ts")),
+        "a spec-matching file absent from a NON-EMPTY materialized set must \
+         still be owned via the spec fall-through (not fail closed)"
+    );
+
+    // NEGATIVE (exclusions preserved): an excluded path that glob-shape-matches
+    // the include (`**/*`) but is under the default `node_modules/**` exclude,
+    // and is likewise absent from the materialized set, must NOT be owned. The
+    // fall-through must not over-include an excluded file.
+    assert!(
+        !membership.contains(&CanonicalPath::new("d:/project/node_modules/vue/index.ts")),
+        "an excluded path must stay excluded on the fall-through — no over-inclusion"
     );
 }
 

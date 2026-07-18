@@ -219,36 +219,41 @@ impl ConfiguredMembership {
 
     /// Check if a file is a member of this configured project.
     ///
-    /// One of two ownership authorities is selected by whether a finite
-    /// materialized set exists — and the selection is deterministic per
-    /// membership, so it is NOT a divergence source:
+    /// `materialized_files` is a WALK-TIME POSITIVE CACHE, not a negative
+    /// ownership authority. It records the spec-matching files that existed
+    /// when the snapshot was built (`materialize_from_spec`), so an exact hit
+    /// is the fast, precise "yes". A MISS is NOT terminal: it falls through to
+    /// `spec.matches` (the compiled `files`/`include`/`exclude` globs), which
+    /// is the ownership authority. This is what lets a file CREATED AFTER the
+    /// snapshot walk — absent from the materialized set but matching the
+    /// project's globs — still resolve to its owning configured project
+    /// instead of failing closed to `NoProject`.
     ///
-    /// - When `materialized_files` is populated (the disk-backed snapshot
-    ///   build walked the project root — see `materialize_from_spec`),
-    ///   membership is EXACT set containment: the precise, fast authority for
-    ///   every file present at walk time.
-    /// - When `materialized_files` is empty, membership is decided by
-    ///   `spec.matches` (the compiled `files`/`include`/`exclude` globs). This
-    ///   is the permanent authority for a spec-defined match-all membership
-    ///   ([`Self::match_all_under_root`], whose member domain is unbounded) and
-    ///   the only available authority in a filesystem-less environment (WASM,
-    ///   in-memory workspace) where there is nothing to walk.
+    /// The fall-through cannot over-include. `materialize_from_spec` inserts
+    /// exactly the entries `spec.matches` accepts: its directory prune uses
+    /// the same `spec.exclude` set, its per-file filter is the identity, and
+    /// the walk applies no `.gitignore` / dotfile / extension filtering of its
+    /// own — so `spec.matches` IS the walk's effective membership predicate.
+    /// An excluded path (`node_modules/**`, an explicit `exclude` glob) or an
+    /// unsupported extension is therefore rejected on the fall-through exactly
+    /// as it was skipped by the walk.
     ///
-    /// The two authorities agree by construction on every on-disk file: the
-    /// walk inserts exactly the entries `spec.matches` accepts, so the exact
-    /// set is the glob's restriction to files present at build. A single
-    /// immutable snapshot fixes `materialized_files` once, so the selected
-    /// authority is stable for the life of that snapshot and repeated
-    /// ownership queries for the same file never observe different results.
+    /// An empty `materialized_files` — a filesystem-less environment (WASM,
+    /// in-memory workspace) or a spec-defined match-all membership like
+    /// [`Self::match_all_under_root`] — simply never hits the positive cache
+    /// and routes straight to `spec.matches`. The fast-positive / spec-authority
+    /// split needs no `is_empty` discriminator, which dissolves the old
+    /// "walked-empty vs filesystem-less" conflation: both route to the one
+    /// correct authority.
     pub fn contains(&self, file_path: &CanonicalPath) -> bool {
-        if !self.materialized_files.is_empty() {
-            self.materialized_files.contains(file_path)
-        } else {
-            // No finite materialized set (spec-defined match-all, or a
-            // filesystem-less environment): the compiled globs are the
-            // authority.
-            self.spec.matches(file_path)
+        // Fast POSITIVE path: an exact hit on the walk-time materialized set.
+        if self.materialized_files.contains(file_path) {
+            return true;
         }
+        // MISS (incl. a file created after the walk, or an empty set): the
+        // compiled `files`/`include`/`exclude` spec is the ownership authority.
+        // It never over-includes — the walk's effective filter IS `spec.matches`.
+        self.spec.matches(file_path)
     }
 }
 
