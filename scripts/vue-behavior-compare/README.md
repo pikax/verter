@@ -52,8 +52,9 @@ pnpm run compare:vue-behavior -- --projects reka-ui --limit 200
 1. **`verter_err` with `XUnresolvedImportedMacroType`**  
    Isolated `VerterHost` compile without installed package deps / project graph.
    Official `compileScript` often *skips* unresolved type args; Verter HostBacked
-   treats them as hard errors. Prefer `pnpm run compare:vize-fixtures -- --install-deps`
-   for host-mode *compile health*, not AST goldens.
+   treats them as hard errors. Install fixture deps first
+   (`node scripts/vize-fixture-compare/install-all-fixture-deps.mjs`) when
+   judging host-mode *compile health*, not AST goldens.
 
 2. **`mismatch` with nearly identical samples**  
    Residual cosmetic AST shape (hoist array vs single node, empty scope-id arg).
@@ -67,5 +68,5 @@ pnpm run compare:vue-behavior -- --projects reka-ui --limit 200
 ## Related
 
 - `scripts/ssr-baseline/` — older SSR-only code compare
-- `scripts/vize-fixture-compare/` — structural compile health vs Vize catalog (not output goldens)
+- `scripts/vize-fixture-compare/` — fixture dependency mass-install helper for the OSS fixture checkouts
 - Drop-in unplugin SSR proof — runtime `renderToString` equality
