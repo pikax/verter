@@ -867,6 +867,152 @@ fn class_directive_projects_to_a_data_attribute() {
     assert!(code.contains("{isActive}"), "value present: {code}");
 }
 
+/// Assert the output token found at `out_needle` (searched from the render
+/// body) maps back byte-exactly to the authored source token at `src_offset`
+/// through the projection source map (chunk-granular, within-chunk delta).
+#[cfg(test)]
+fn assert_maps_byte_exact(source: &str, src_offset: u32, out_needle: &str) {
+    use oxc_sourcemap::SourceMap;
+
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("Comp.svelte"), false);
+    assert!(
+        !projection.source_map.is_empty(),
+        "the projection emits a source map"
+    );
+    let (src_line, src_col) = byte_offset_to_line_col(source, src_offset);
+    let render_start = projection
+        .code
+        .find("function __verter_render()")
+        .expect("render fn present");
+    let out_off = (render_start
+        + projection.code[render_start..]
+            .find(out_needle)
+            .unwrap_or_else(|| panic!("`{out_needle}` in render body: {}", projection.code)))
+        as u32;
+    let (out_line, out_col) = byte_offset_to_line_col(&projection.code, out_off);
+    let map = SourceMap::from_json_string(&projection.source_map).expect("decode map");
+    let token = map
+        .get_tokens()
+        .filter(|t| t.get_dst_line() == out_line && t.get_dst_col() <= out_col)
+        .max_by_key(|t| t.get_dst_col())
+        .expect("a token covering the output identifier");
+    assert_eq!(
+        token.get_src_line(),
+        src_line,
+        "the output token maps to the original source line"
+    );
+    let delta = out_col - token.get_dst_col();
+    assert_eq!(
+        token.get_src_col() + delta,
+        src_col,
+        "the output `{out_needle}` maps back byte-accurately to the authored source \
+         (token src {}:{} + dst delta {delta} = expected src col {src_col})",
+        token.get_src_line(),
+        token.get_src_col()
+    );
+}
+
+#[test]
+fn use_action_name_stays_mapped_for_navigation() {
+    // `use:foo={p}` — the action local is a real script identifier: it must be
+    // void-checked (unknown action = type error) AND keep its authored bytes so
+    // hover/definition resolves to the script declaration.
+    let source = "<script lang=\"ts\">function foo(n: HTMLElement, p: string) { void n; void p }</script>\n<div use:foo={p}>x</div>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("Comp.svelte"), false);
+    let body = render_body(&projection.code);
+    assert!(
+        !body.contains("use:foo"),
+        "no use: residue: {}",
+        projection.code
+    );
+    assert!(
+        body.contains("__verter_void(foo), __verter_void(p)"),
+        "action + parameter void-checked: {}",
+        projection.code
+    );
+    let src_off = (source.find("use:foo").expect("use:foo in source") + "use:".len()) as u32;
+    assert_maps_byte_exact(source, src_off, "foo");
+}
+
+#[test]
+fn valueless_use_action_name_stays_mapped_for_navigation() {
+    // Valueless `use:foo` — the action alone is void-checked, mapped.
+    let source = "<script lang=\"ts\">function foo(n: HTMLElement) { void n }</script>\n<div use:foo>x</div>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("Comp.svelte"), false);
+    let body = render_body(&projection.code);
+    assert!(
+        !body.contains("use:foo"),
+        "no use: residue: {}",
+        projection.code
+    );
+    assert!(
+        body.contains("__verter_void(foo)"),
+        "action void-checked: {}",
+        projection.code
+    );
+    let src_off = (source.find("use:foo").expect("use:foo in source") + "use:".len()) as u32;
+    assert_maps_byte_exact(source, src_off, "foo");
+}
+
+#[test]
+fn class_shorthand_projects_the_implied_binding_mapped() {
+    // Valueless `class:active` ≡ `class:active={active}` — the local doubles as
+    // the condition binding: project it MAPPED (hover/definition reach the
+    // script declaration), mirroring the `style:` shorthand.
+    let source = "<script lang=\"ts\">let active = true;</script>\n<div class:active>x</div>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("Comp.svelte"), false);
+    let body = render_body(&projection.code);
+    assert!(
+        !body.contains("class:active") && !body.contains("data-class-active"),
+        "no class:/data-class residue for the shorthand: {}",
+        projection.code
+    );
+    assert!(
+        body.contains("__verter_void(active)"),
+        "implied binding void-checked: {}",
+        projection.code
+    );
+    let src_off =
+        (source.find("class:active").expect("class:active in source") + "class:".len()) as u32;
+    assert_maps_byte_exact(source, src_off, "active");
+}
+
+#[test]
+fn valued_class_directive_name_has_no_binding_surface() {
+    // `class:active={cond}` — the local is a CLASS NAME here (no declaration to
+    // navigate to); only the condition keeps a mapped binding surface.
+    let code = project("<div class:active={isActive}>x</div>");
+    assert!(
+        code.contains("data-class-active={isActive}"),
+        "valued form keeps the data-class rewrite: {code}"
+    );
+    assert!(
+        !code.contains("__verter_void(active)"),
+        "the class name is not a binding reference: {code}"
+    );
+}
+
+#[test]
+fn style_shorthand_keeps_the_implied_binding_mapped() {
+    // `style:color` shorthand — same output text as before, but the implied
+    // `color` binding now keeps its authored bytes (mapped for navigation).
+    let source = "<script lang=\"ts\">let color = 'red';</script>\n<div style:color>x</div>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("Comp.svelte"), false);
+    assert!(
+        projection.code.contains("__verter_void(color)"),
+        "implied binding void-checked: {}",
+        projection.code
+    );
+    let src_off =
+        (source.find("style:color").expect("style:color in source") + "style:".len()) as u32;
+    assert_maps_byte_exact(source, src_off, "color");
+}
+
 #[test]
 fn html_tag_projects_to_a_string_checkable_position() {
     let code = project("<div>{@html markup}</div>");
