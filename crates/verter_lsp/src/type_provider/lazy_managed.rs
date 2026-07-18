@@ -63,15 +63,29 @@ struct DesiredState {
 
 /// A managed tsgo provider whose process is not created until a fallback query.
 ///
-/// The creation result is memoized, including failure, so one failed demand cannot
-/// create a process retry storm. A new LSP session constructs a fresh instance and may
-/// try again. Lifecycle calls made before activation update only [`DesiredState`].
+/// A successful activation is memoized for the session. A FAILED activation is
+/// NOT latched: it is retried after [`ACTIVATION_RETRY_COOLDOWN`] so a transient
+/// spawn/replay failure recovers (the next fallback query answers) instead of
+/// leaving the provider dead for the session — while the cooldown still prevents
+/// a hot respawn storm. A new LSP session constructs a fresh instance regardless.
+/// Lifecycle calls made before activation update only [`DesiredState`].
 pub struct LazyManagedTypeProvider {
     factory: Arc<Factory>,
-    provider: OnceCell<Result<Arc<dyn TypeProvider>, TypeProviderError>>,
+    provider: OnceCell<Arc<dyn TypeProvider>>,
     activation: AsyncMutex<()>,
     desired: Mutex<DesiredState>,
+    /// The last failed activation (when + error message). Consulted under the
+    /// activation mutex: a failure newer than [`ACTIVATION_RETRY_COOLDOWN`] is
+    /// returned WITHOUT re-running the factory (storm protection); an older one
+    /// is retried. Cleared on a successful activation.
+    last_activation_failure: Mutex<Option<(std::time::Instant, String)>>,
 }
+
+/// Minimum interval between managed-fallback activation attempts after a failure.
+/// Bounds the respawn rate so a persistently failing backend cannot hot-loop,
+/// while still letting a transient failure recover on a later query.
+pub(crate) const ACTIVATION_RETRY_COOLDOWN: std::time::Duration =
+    std::time::Duration::from_millis(250);
 
 impl LazyManagedTypeProvider {
     #[must_use]
@@ -85,20 +99,30 @@ impl LazyManagedTypeProvider {
             provider: OnceCell::new(),
             activation: AsyncMutex::new(()),
             desired: Mutex::new(DesiredState::default()),
+            last_activation_failure: Mutex::new(None),
         }
     }
 
     fn current(&self) -> Option<Arc<dyn TypeProvider>> {
-        self.provider
-            .get()
-            .and_then(|result| result.as_ref().ok())
-            .cloned()
+        self.provider.get().cloned()
     }
 
     async fn activate(&self) -> Result<Arc<dyn TypeProvider>, TypeProviderError> {
         let _activation = self.activation.lock().await;
-        if let Some(result) = self.provider.get() {
-            return result.clone();
+        if let Some(provider) = self.provider.get() {
+            return Ok(provider.clone());
+        }
+        // Storm protection: a failure within the cooldown returns the cached error
+        // WITHOUT re-running the factory; an older failure is retried below.
+        {
+            let last = self.last_activation_failure.lock().unwrap();
+            if let Some((at, message)) = &*last {
+                if at.elapsed() < ACTIVATION_RETRY_COOLDOWN {
+                    return Err(TypeProviderError::new(format!(
+                        "managed fallback activation failed (retry pending): {message}"
+                    )));
+                }
+            }
         }
 
         let result = match (self.factory)().await {
@@ -116,8 +140,18 @@ impl LazyManagedTypeProvider {
             },
             Err(error) => Err(error),
         };
-        let _ = self.provider.set(result.clone());
-        result
+        match result {
+            Ok(provider) => {
+                *self.last_activation_failure.lock().unwrap() = None;
+                let _ = self.provider.set(provider.clone());
+                Ok(provider)
+            }
+            Err(error) => {
+                *self.last_activation_failure.lock().unwrap() =
+                    Some((std::time::Instant::now(), error.message.clone()));
+                Err(error)
+            }
+        }
     }
 
     async fn replay(&self, provider: &Arc<dyn TypeProvider>) -> Result<(), TypeProviderError> {

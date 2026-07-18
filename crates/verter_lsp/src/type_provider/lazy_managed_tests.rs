@@ -116,18 +116,32 @@ async fn concurrent_first_queries_singleflight_the_managed_factory() {
     assert_eq!(spawn_count.load(Ordering::SeqCst), 1);
 }
 
+/// D2: a transient activation failure is NOT latched for the session. Within the
+/// cooldown the cached error is returned WITHOUT re-running the factory (storm
+/// protection); after the cooldown the factory is retried and the provider
+/// recovers, so the next fallback query answers.
 #[tokio::test]
-async fn failed_activation_is_memoized_and_shutdown_never_retries_or_spawns() {
+async fn failed_activation_retries_after_cooldown_and_recovers() {
     let attempts = Arc::new(AtomicUsize::new(0));
+    let fail = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let managed = Arc::new(MockTypeProvider::new());
     let provider = LazyManagedTypeProvider::new({
         let attempts = Arc::clone(&attempts);
+        let fail = Arc::clone(&fail);
+        let managed = Arc::clone(&managed);
         move || {
             let attempts = Arc::clone(&attempts);
+            let fail = Arc::clone(&fail);
+            let managed = Arc::clone(&managed);
             async move {
                 attempts.fetch_add(1, Ordering::SeqCst);
-                Err(verter_type_runtime::protocol::TypeProviderError::new(
-                    "managed tsgo unavailable",
-                ))
+                if fail.load(Ordering::SeqCst) {
+                    Err(verter_type_runtime::protocol::TypeProviderError::new(
+                        "managed tsgo unavailable",
+                    ))
+                } else {
+                    Ok(managed as Arc<dyn TypeProvider>)
+                }
             }
         }
     });
@@ -136,12 +150,30 @@ async fn failed_activation_is_memoized_and_shutdown_never_retries_or_spawns() {
         .open_file("/w/App.vue.tsx", "export {};")
         .await
         .unwrap();
+    // First activation fails (attempt 1).
     assert!(provider.get_hover("/w/App.vue.tsx", 0).await.is_err());
+    // Immediate retry: cached error, NO new factory run (storm protection).
     assert!(provider.get_hover("/w/App.vue.tsx", 0).await.is_err());
-    provider.shutdown().await.unwrap();
     assert_eq!(
         attempts.load(Ordering::SeqCst),
         1,
-        "one failed fallback activation is memoized for the LSP session"
+        "a failure within the cooldown is returned without re-running the factory"
     );
+
+    // After the cooldown the factory is retried; now it succeeds.
+    fail.store(false, Ordering::SeqCst);
+    tokio::time::sleep(std::time::Duration::from_millis(
+        super::lazy_managed::ACTIVATION_RETRY_COOLDOWN.as_millis() as u64 + 80,
+    ))
+    .await;
+    provider
+        .get_hover("/w/App.vue.tsx", 0)
+        .await
+        .expect("a transient activation failure must recover after the cooldown");
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        2,
+        "the factory is retried exactly once after the cooldown"
+    );
+    provider.shutdown().await.unwrap();
 }
