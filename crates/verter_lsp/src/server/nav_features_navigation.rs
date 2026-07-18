@@ -22,6 +22,7 @@ use crate::type_provider::merge;
 
 use super::child_prop_rename::{ChildPropDeclarationProof, ChildPropRenameClass};
 use super::handler_guard::{block_in_place_if_available, HandlerGuard};
+use super::server_utils::location_from_span;
 use super::VerterLanguageServer;
 
 pub(super) async fn handle_goto_definition(
@@ -568,6 +569,28 @@ pub(super) async fn handle_references(
         Some(locations)
     })();
 
+    // Cross-file child-prop DECLARATION injection (provider-agnostic): a
+    // `<Child prop=…>` usage references the child's `defineProps` declaration,
+    // but providers do not reliably enumerate it across the synthesized API
+    // surface (the definition merge maps `{carrier}.verter.ts` locations
+    // fail-closed). Verter resolves the declaration itself — the SAME shared
+    // usage resolution the goto-definition props branch and the rename
+    // classification consume, so the surfaces cannot drift. Honors the LSP
+    // `includeDeclaration` contract: the declaration leg is injected only
+    // when the caller asked for declarations.
+    let child_prop_declaration = if include_declaration {
+        (|| {
+            let resolved = match server.resolve_child_prop_usage_at_cursor(uri, position) {
+                super::child_prop_rename::ChildPropUsageClass::Resolved(resolved) => resolved,
+                super::child_prop_rename::ChildPropUsageClass::NotChildProp => return None,
+            };
+            let decl_span = server.resolve_child_macro_prop_declaration(&resolved)?;
+            location_from_span(&resolved.child.uri, &resolved.child.line_index, decl_span)
+        })()
+    } else {
+        None
+    };
+
     tracing::debug!(
         "references: verter found {}",
         verter_result.as_ref().map_or(0, |v| v.len())
@@ -600,7 +623,10 @@ pub(super) async fn handle_references(
                                 "references: dropping provider locations — captured surface \
                                  no longer valid"
                             );
-                            return Ok(verter_result);
+                            return Ok(inject_child_prop_declaration(
+                                verter_result,
+                                child_prop_declaration,
+                            ));
                         }
                         tracing::debug!(
                             "references: type provider returned {} locations",
@@ -609,23 +635,26 @@ pub(super) async fn handle_references(
                         let carrier_source_exists =
                             |p: &str| server.documents.host().get_source(p).is_some();
                         let negotiated_encoding = server.position_encoding.read().clone();
-                        return Ok(merge::merge_references(
-                            verter_result,
-                            type_refs,
-                            &ctx.tsx_path,
-                            &ctx.tsx_line_index,
-                            &ctx.mapper,
-                            &ctx.carrier_line_index,
-                            Some(&|ide_path: &str| {
-                                server.foreign_ide_context(&foreign_ide_set, ide_path)
-                            }),
-                            &carrier_source_exists,
-                            negotiated_encoding,
-                            &|p: &str| {
-                                block_in_place_if_available(|| {
-                                    server.documents.host().workspace_read().read_file(p)
-                                })
-                            },
+                        return Ok(inject_child_prop_declaration(
+                            merge::merge_references(
+                                verter_result,
+                                type_refs,
+                                &ctx.tsx_path,
+                                &ctx.tsx_line_index,
+                                &ctx.mapper,
+                                &ctx.carrier_line_index,
+                                Some(&|ide_path: &str| {
+                                    server.foreign_ide_context(&foreign_ide_set, ide_path)
+                                }),
+                                &carrier_source_exists,
+                                negotiated_encoding,
+                                &|p: &str| {
+                                    block_in_place_if_available(|| {
+                                        server.documents.host().workspace_read().read_file(p)
+                                    })
+                                },
+                            ),
+                            child_prop_declaration,
                         ));
                     }
                     Err(e) => {
@@ -643,7 +672,37 @@ pub(super) async fn handle_references(
         }
     }
 
-    Ok(verter_result)
+    Ok(inject_child_prop_declaration(
+        verter_result,
+        child_prop_declaration,
+    ))
+}
+
+/// Append the resolved child-prop declaration to a references result when it
+/// is not already present (deduped by canonical path + exact range), honoring
+/// the caller's `includeDeclaration` choice (the caller computes `declaration`
+/// only when declarations were requested).
+fn inject_child_prop_declaration(
+    result: Option<Vec<Location>>,
+    declaration: Option<Location>,
+) -> Option<Vec<Location>> {
+    let Some(declaration) = declaration else {
+        return result;
+    };
+    let mut locations = result.unwrap_or_default();
+    let decl_path = uri_to_canonical_id(&declaration.uri);
+    let present = locations.iter().any(|loc| {
+        verter_span::path::fs_paths_equal(&uri_to_canonical_id(&loc.uri), &decl_path)
+            && loc.range == declaration.range
+    });
+    if !present {
+        locations.push(declaration);
+    }
+    if locations.is_empty() {
+        None
+    } else {
+        Some(locations)
+    }
 }
 
 pub(super) async fn handle_prepare_rename(
@@ -831,6 +890,7 @@ pub(super) async fn handle_rename(
                             // synthesizes.
                             if let ChildPropRenameClass::Confirmed(target) = &rename_class {
                                 if let ChildPropDeclarationProof::Known {
+                                    uri: child_decl_uri,
                                     inline_decl_span: Some(inline_decl_span),
                                     ..
                                 } = &target.declaration
@@ -838,11 +898,26 @@ pub(super) async fn handle_rename(
                                     if let Some(snapshot) = query_snapshot
                                         .snapshot_for(&target.usage.child_carrier_api_path)
                                     {
+                                        // The API surface spells the DECLARED prop
+                                        // name verbatim; a kebab-case usage
+                                        // (`:my-prop` → `myProp`) must key the
+                                        // synthesis on the declared name sliced from
+                                        // the child source, or the byte-equality
+                                        // tripwire fails closed for every
+                                        // case-mapped rename.
+                                        let declared_name = server
+                                            .declared_prop_name_at_inline_span(
+                                                child_decl_uri,
+                                                *inline_decl_span,
+                                            )
+                                            .unwrap_or_else(|| {
+                                                target.usage.parent_prop_name.clone()
+                                            });
                                         if let Some((start, end)) =
                                             crate::provider_surface_store::locate_prop_decl_range_in_carrier_api(
                                                 snapshot,
                                                 *inline_decl_span,
-                                                &target.usage.parent_prop_name,
+                                                &declared_name,
                                             )
                                         {
                                             inject_synthesized_carrier_rename_location(
@@ -902,6 +977,27 @@ pub(super) async fn handle_rename(
                                     })
                                 },
                             );
+                            // INITIATING-USAGE LEG SYNTHESIS (provider-agnostic,
+                            // same doctrine as the child-declaration leg): the
+                            // provider's own usage edit maps back through the
+                            // case-mapped tsx token (kebab `my-prop` → camel
+                            // `myProp`) and lands a PREFIX of the authored
+                            // kebab name — a corrupt edit the completeness gate
+                            // rightly rejects. Verter owns the exact authored
+                            // usage span, so it re-anchors the initiating usage
+                            // edit itself. For exact-case names this rewrites
+                            // the provider's correct edit with the identical
+                            // range — a deterministic no-op.
+                            if let ChildPropRenameClass::Confirmed(target) = &rename_class {
+                                if let Some(usage_range) = target.expected_parent_usage_range {
+                                    synthesize_parent_usage_rename_edit(
+                                        &mut result,
+                                        &target.usage.parent_uri,
+                                        usage_range,
+                                        new_name,
+                                    );
+                                }
+                            }
                         }
                         // Post-await validation failed (STRICT for rename: a corrupt
                         // edit is worse than no edit): drop the WHOLE provider edit
@@ -942,6 +1038,52 @@ pub(super) async fn handle_rename(
             edit
         }),
     )
+}
+
+/// Upsert the EXACT authored parent-usage rename edit for a confirmed
+/// `<Child prop=…>` rename. The provider's own usage leg maps back through the
+/// case-mapped tsx token (kebab `my-prop` → camel `myProp`) and lands a PREFIX
+/// of the authored name — a corrupt edit the completeness gate rightly
+/// rejects. Verter owns the authored usage span, so the initiating-usage edit
+/// is Verter-synthesized exactly like the child-declaration leg: prune any
+/// merged edit in the parent that OVERLAPS the authored usage range (the
+/// mis-ranged provider leg), then insert the exact `(range, new_name)` edit.
+/// Other edits in the parent (additional usages, the shorthand parent binding)
+/// are untouched — their ranges do not overlap the initiating usage.
+fn synthesize_parent_usage_rename_edit(
+    result: &mut Option<WorkspaceEdit>,
+    parent_uri: &Uri,
+    usage_range: Range,
+    new_name: &str,
+) {
+    let edit = result.get_or_insert_with(|| WorkspaceEdit {
+        changes: Some(Default::default()),
+        ..Default::default()
+    });
+    let changes = edit.changes.get_or_insert_with(Default::default);
+    // The merge keys its mapped edits by its OWN uri form (provider paths are
+    // lowercased on construction); the initiating document uri may differ in
+    // case. Match the existing entry by canonical path equality so the
+    // mis-ranged provider leg is actually pruned (the completeness gate
+    // matches the same way).
+    let expected_path = uri_to_canonical_id(parent_uri);
+    let key = changes
+        .keys()
+        .find(|k| verter_span::path::fs_paths_equal(&uri_to_canonical_id(k), &expected_path))
+        .cloned()
+        .unwrap_or_else(|| parent_uri.clone());
+    let edits = changes.entry(key).or_default();
+    let overlaps = |range: &Range| {
+        (range.start.line, range.start.character)
+            < (usage_range.end.line, usage_range.end.character)
+            && (usage_range.start.line, usage_range.start.character)
+                < (range.end.line, range.end.character)
+    };
+    edits.retain(|e| !overlaps(&e.range));
+    edits.push(TextEdit {
+        range: usage_range,
+        new_text: new_name.to_string(),
+    });
 }
 
 /// Inject Verter's SYNTHESIZED child-declaration carrier rename location into the

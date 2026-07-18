@@ -307,6 +307,31 @@ impl VerterLanguageServer {
         .map(|(_, span, ())| span)
     }
 
+    /// Slice the DECLARED prop name from the child source at `inline_decl_span`
+    /// (the inline macro-field span covers exactly the prop name). The carrier
+    /// API writes the declared name verbatim, so the rename synthesis must key
+    /// on it — a kebab-case usage name (`my-prop` vs `myProp`) would trip the
+    /// byte-equality guard and fail closed. Returns `None` when the child
+    /// source (open OR host-tracked) or span is unavailable; the caller falls
+    /// back to the usage name, which is correct for exact-case renames.
+    pub(super) fn declared_prop_name_at_inline_span(
+        &self,
+        uri: &Uri,
+        inline_decl_span: verter_span::Span,
+    ) -> Option<String> {
+        let source = self
+            .documents
+            .get(uri)
+            .map(|doc| doc.source.clone())
+            .or_else(|| {
+                let canonical = uri_to_canonical_id(uri);
+                self.documents.host().get_source(&canonical)
+            })?;
+        source
+            .get(inline_decl_span.start as usize..inline_decl_span.end as usize)
+            .map(str::to_string)
+    }
+
     /// Classify a rename position with respect to the cross-file `<Child prop=…>`
     /// rename — a 2-state [`ChildPropRenameClass`], NOT a lossy `Option`, so the
     /// caller distinguishes "not a child prop" from "a CONFIRMED child prop" (the
