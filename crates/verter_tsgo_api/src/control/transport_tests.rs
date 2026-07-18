@@ -721,13 +721,19 @@ async fn drop_does_not_remove_preexisting_vr_ctl_directory() {
 
     // An owned-safe grandparent, then a PRE-EXISTING `vr-ctl-…` subdir a user might have created,
     // at the exact private 0o700 mode the bind validates (so it is REUSED, not recreated).
-    let control_dir = std::env::temp_dir().join(format!("vr-preexist-{}", unique_disamb()));
+    // Keep the complete endpoint below the production 100-byte Unix socket
+    // budget even on macOS, whose per-user temp root is already long.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let control_dir = std::env::temp_dir().join(format!("vp-{nanos:x}"));
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(&control_dir)
         .expect("create the owned-safe control dir");
-    let subdir = control_dir.join("vr-ctl-preexisting");
+    let subdir = control_dir.join("vr-ctl-p");
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(&subdir)
