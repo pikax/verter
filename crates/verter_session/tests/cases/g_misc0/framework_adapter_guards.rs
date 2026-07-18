@@ -284,10 +284,10 @@ fn extract_struct(src: &str, name: &str) -> String {
 #[test]
 fn script_fact_providers_zero_cost_on_miss() {
     let src = read_src("crates/verter_semantic/src/analysis/framework_facts/mod.rs");
-    // The work-doing dispatcher is `capture_script_candidates_with_module_region`
-    // (the plain `capture_script_candidates` is a thin `None`-region wrapper over
-    // it). The short-circuit lives in the work-doing function.
-    let capture = extract_fn_body(&src, "capture_script_candidates_with_module_region");
+    // The context-aware dispatcher is the work-doing implementation; the plain
+    // and module-region entries are thin wrappers over it. Keep the short-circuit
+    // at this deepest shared entry so every caller retains the zero-work path.
+    let capture = extract_fn_body(&src, "capture_script_candidates_with_context");
 
     // The dispatcher MUST short-circuit on an empty active-provider set
     // with a default (empty) candidate set BEFORE any per-provider work —

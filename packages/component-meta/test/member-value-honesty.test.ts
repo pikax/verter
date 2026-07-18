@@ -67,6 +67,6 @@ describe("member value honesty (native)", () => {
     });
     // The compat display surface renders the same real structure.
     const compat = meta.props.find((prop) => prop.name === "config");
-    expect(compat?.type).toBe("{ nested: number; }");
+    expect(compat?.type).toBe("{ nested: number }");
   });
 });
