@@ -389,6 +389,52 @@ fn gen_vdom_template(source: &str) -> String {
     tpl.code.clone()
 }
 
+/// F5 regression guard: a lone `<li v-if v-for>` (no v-else) must still emit
+/// the ternary FALSE edge. Dropping it (grok's `let _ = close`) produces an
+/// unterminated `cond ? (...)` — a syntax error at runtime.
+#[test]
+fn v_if_v_for_lone_element_emits_balanced_ternary_false_edge() {
+    let code = gen_vdom_template(
+        r#"<template><ul><li v-if="ok" v-for="x in xs">{{x}}</li></ul></template>
+<script setup>const ok = 1; const xs = [];</script>"#,
+    );
+    // TRUE branch: the v-if-over-v-for fragment.
+    assert!(
+        code.contains("? (_openBlock(true), _createElementBlock(_Fragment"),
+        "v-if+v-for must open its true branch as a fragment block.\n{code}"
+    );
+    // FALSE branch: the ternary must be terminated with a comment vnode.
+    assert!(
+        code.contains(": _createCommentVNode(\"v-if\", true)"),
+        "lone v-if+v-for must terminate the ternary with a comment false-edge.\n{code}"
+    );
+    // NEGATIVE: the fragment close must be followed by ` : ` (the else edge),
+    // never immediately by the enclosing array/paren close (unterminated ternary).
+    assert!(
+        !code.contains("UNKEYED_FRAGMENT */))]") && !code.contains("UNKEYED_FRAGMENT */)))\n}"),
+        "v-if+v-for ternary must not be unterminated.\n{code}"
+    );
+}
+
+/// F19 regression guard: two genuine element roots with a leading comment are a
+/// plain STABLE_FRAGMENT (64). DEV_ROOT_FRAGMENT (2112 = 2048|64) must NOT be
+/// over-triggered — it applies only when comments surround a SINGLE logical root.
+#[test]
+fn multi_root_fragment_with_comment_stays_stable_not_dev_root() {
+    let code = gen_vdom_template(
+        r#"<template><!--c--><div>a</div><span>b</span></template><script setup></script>"#,
+    );
+    assert!(
+        code.contains("64 /* STABLE_FRAGMENT */"),
+        "multi-root fragment with a comment must be plain STABLE_FRAGMENT (64).\n{code}"
+    );
+    // NEGATIVE: must not over-trigger DEV_ROOT_FRAGMENT.
+    assert!(
+        !code.contains("2112") && !code.contains("2048"),
+        "two element roots must NOT flag DEV_ROOT_FRAGMENT.\n{code}"
+    );
+}
+
 #[test]
 fn block_tree_single_root_element_uses_create_element_block() {
     let code = gen_vdom_template("<template><div>hello</div></template>");
