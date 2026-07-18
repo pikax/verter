@@ -444,6 +444,36 @@ pub(crate) fn resolve_v_memo_deps<'a>(
     None
 }
 
+/// Resolve the `:key` / `v-bind:key` expression of a `v-for` item, used by
+/// v-memo's per-item `_cached.key === KEY` short-circuit. Returns `None` when
+/// the element has no keyed binding.
+pub(crate) fn resolve_v_for_key<'a>(
+    el: &ElementNode,
+    source: &str,
+    oxc_el: Option<&OxcParsedElement<'a>>,
+    resolver: &BindingResolver<'a>,
+    force_js: bool,
+) -> Option<String> {
+    for (i, prop) in el.props.iter().enumerate() {
+        if !prop.is_directive {
+            continue;
+        }
+        if let (Some(as_), Some(ae), Some(vs), Some(ve)) = (
+            prop.arg_start,
+            prop.arg_end,
+            prop.value_start,
+            prop.value_end,
+        ) {
+            if &source[as_ as usize..ae as usize] == "key" {
+                let value = &source[vs as usize..ve as usize];
+                let oxc_exp = find_prop_oxc_exp(oxc_el, i);
+                return Some(resolve_expr(value, vs, oxc_exp, resolver, force_js));
+            }
+        }
+    }
+    None
+}
+
 /// since template attribute values may contain HTML-encoded characters from
 /// preprocessor plugins (markdown, docs blocks, etc.).
 pub(crate) fn resolve_expr(

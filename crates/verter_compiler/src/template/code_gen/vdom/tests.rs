@@ -725,6 +725,47 @@ const cls = 'x'
     );
 }
 
+/// F7: v-memo INSIDE v-for uses per-item cache topology — the `_renderList`
+/// callback receives a 4th `_cached` param, compares the item key, uses
+/// `_isMemoSame`, stores `_item.memo`, and passes `_cache, N` to `_renderList`.
+/// It must NOT collapse to a single global `_withMemo([deps], ...)` wrap.
+#[test]
+fn v_memo_in_v_for_emits_per_item_cache() {
+    let code = gen_vdom_template(
+        r#"<template><div v-for="i in list" :key="i" v-memo="[i]">{{ i }}</div></template>
+<script setup>const list = [];</script>"#,
+    );
+    assert!(
+        code.contains("_cached) => {"),
+        "renderList callback must receive the _cached param.\n{code}"
+    );
+    assert!(
+        code.contains("const _memo = ([i])"),
+        "must compute _memo from the (loop-local) deps.\n{code}"
+    );
+    assert!(
+        code.contains("_isMemoSame(_cached, _memo)"),
+        "must short-circuit via _isMemoSame.\n{code}"
+    );
+    assert!(
+        code.contains("_cached.key === i"),
+        "must compare the item key.\n{code}"
+    );
+    assert!(
+        code.contains("_item.memo = _memo"),
+        "must stamp _item.memo.\n{code}"
+    );
+    assert!(
+        code.contains(", _cache, "),
+        "renderList must receive the _cache slot.\n{code}"
+    );
+    // NEGATIVE: per-item cache, NOT a single global _withMemo wrap.
+    assert!(
+        !code.contains("_withMemo([i], () =>"),
+        "v-for + v-memo must use per-item cache, not a _withMemo wrap.\n{code}"
+    );
+}
+
 #[test]
 fn block_tree_single_root_element_uses_create_element_block() {
     let code = gen_vdom_template("<template><div>hello</div></template>");

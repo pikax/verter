@@ -72,6 +72,7 @@ pub const CREATE_SLOT: &str = "_createSlot";
 pub const CREATE_COMPONENT: &str = "_createComponent";
 pub const VAPOR_TO_DISPLAY_STRING: &str = "_toDisplayString";
 pub const WITH_MEMO: &str = "_withMemo";
+pub const IS_MEMO_SAME: &str = "_isMemoSame";
 pub const APPLY_V_SHOW: &str = "_applyVShow";
 pub const APPLY_TEXT_MODEL: &str = "_applyTextModel";
 pub const APPLY_CHECKBOX_MODEL: &str = "_applyCheckboxModel";
@@ -141,6 +142,7 @@ pub enum VdomHelper {
     GuardReactiveProps = 1 << 31,
     ToHandlers = 1 << 32,
     WithMemo = 1 << 33,
+    IsMemoSame = 1 << 34,
 }
 
 impl VdomHelper {
@@ -182,12 +184,13 @@ impl VdomHelper {
             Self::GuardReactiveProps => GUARD_REACTIVE_PROPS,
             Self::ToHandlers => TO_HANDLERS,
             Self::WithMemo => WITH_MEMO,
+            Self::IsMemoSame => IS_MEMO_SAME,
         }
     }
 }
 
 /// Ordered lookup table for `VdomHelperFlags::to_imports()`.
-const ALL_VDOM: [VdomHelper; 34] = [
+const ALL_VDOM: [VdomHelper; 35] = [
     VdomHelper::CreateElementVNode,
     VdomHelper::CreateElementBlock,
     VdomHelper::CreateVNode,
@@ -222,6 +225,7 @@ const ALL_VDOM: [VdomHelper; 34] = [
     VdomHelper::GuardReactiveProps,
     VdomHelper::ToHandlers,
     VdomHelper::WithMemo,
+    VdomHelper::IsMemoSame,
 ];
 
 /// Bitflag set of VDOM runtime helpers. Wraps a `u64` with O(1) add/has.

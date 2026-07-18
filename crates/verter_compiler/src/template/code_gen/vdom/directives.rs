@@ -72,6 +72,7 @@ pub fn build_for_prefix<'alloc>(
     oxc: Option<&OxcParsedElement<'alloc>>,
     resolver: &BindingResolver<'alloc>,
     branch_key: Option<u32>,
+    memo: Option<(&str, &str)>,
 ) -> (String, ScopeClose, Option<u32>) {
     let full_expr = extract_directive_value(v_for, source);
 
@@ -119,7 +120,19 @@ pub fn build_for_prefix<'alloc>(
     prefix.push_str(&resolved_iterable);
     prefix.push_str(", (");
     prefix.push_str(params);
-    prefix.push_str(") => {return ");
+    if let Some((deps, key)) = memo {
+        // v-memo inside v-for: per-item memoization. `_renderList` receives a
+        // `_cache` + index; the callback gets a 4th `_cached` param (the prior
+        // item at this index) and short-circuits when the memo deps are
+        // unchanged. Matches official Vue's `_isMemoSame` topology.
+        prefix.push_str(", __, ___, _cached) => {\nconst _memo = (");
+        prefix.push_str(deps);
+        prefix.push_str(")\nif (_cached && _cached.key === ");
+        prefix.push_str(key);
+        prefix.push_str(" && _isMemoSame(_cached, _memo)) return _cached\nconst _item = ");
+    } else {
+        prefix.push_str(") => {return ");
+    }
 
     (prefix, ScopeClose::For { is_keyed }, iterable_source_start)
 }
@@ -466,7 +479,7 @@ mod tests {
         let prop = make_directive_prop(Some(7), Some(21));
         let source = "v-for=\"item in items\"";
         let (prefix, close, iterable_src) =
-            build_for_prefix(&prop, source, false, None, &resolver, None);
+            build_for_prefix(&prop, source, false, None, &resolver, None, None);
 
         assert!(prefix
             .starts_with("(_openBlock(true), _createElementBlock(_Fragment, null, _renderList("));
@@ -483,7 +496,7 @@ mod tests {
         let resolver = make_empty_resolver();
         let prop = make_directive_prop(Some(7), Some(21));
         let source = "v-for=\"item in items\"";
-        let (_, close, _) = build_for_prefix(&prop, source, true, None, &resolver, None);
+        let (_, close, _) = build_for_prefix(&prop, source, true, None, &resolver, None, None);
         assert!(matches!(close, ScopeClose::For { is_keyed: true }));
     }
 
@@ -493,7 +506,7 @@ mod tests {
         let prop = make_directive_prop(Some(7), Some(29));
         let source = "v-for=\"(item, index) in items\"";
         let (prefix, _, iterable_src) =
-            build_for_prefix(&prop, source, false, None, &resolver, None);
+            build_for_prefix(&prop, source, false, None, &resolver, None, None);
 
         assert!(prefix.contains("items, (item, index)"));
         // "(item, index) in items" — iterable "items" starts at offset 7 + 22 = 29

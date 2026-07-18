@@ -136,6 +136,11 @@ pub struct VdomCodeGen<'ast, 'alloc> {
     /// Emitted as `const _component_x = _resolveComponent("x")` at the top
     /// of the render function body. Insertion-ordered.
     resolved_components: Vec<(String, String)>,
+    /// Per-item v-memo close suffix for a `v-for` + `v-memo` element, keyed by
+    /// AST node index. Built in `enter_element` (where the v-for prefix and memo
+    /// index are computed) and applied in `leave_element` in place of the normal
+    /// `_renderList` fragment close.
+    memo_for_suffixes: FxHashMap<usize, String>,
 }
 
 impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
@@ -173,6 +178,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             cache_index: 0,
             in_slot_context_stack: Vec::new(),
             resolved_components: Vec::new(),
+            memo_for_suffixes: FxHashMap::default(),
         }
     }
 
@@ -720,6 +726,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                     oxc,
                     &self.resolver,
                     branch_key,
+                    None,
                 );
                 let condition = match close {
                     ScopeClose::IfTernary => {
@@ -753,8 +760,68 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                     false
                 }
             });
-            let (prefix, close, iterable_src) =
-                directives::build_for_prefix(v_for, source, is_keyed, oxc, &self.resolver, None);
+            // v-memo inside v-for → per-item memoization topology (official Vue:
+            // `_renderList(src, (i, __, ___, _cached) => { const _memo = deps;
+            // if (_cached && _cached.key === KEY && _isMemoSame(...)) return
+            // _cached; const _item = <vnode>; _item.memo = _memo; return _item },
+            // _cache, N)`), NOT a single global `_cache[N]`.
+            let memo_deps = element::resolve_v_memo_deps(
+                element,
+                source,
+                oxc,
+                &self.resolver,
+                self.options.force_js,
+            );
+            let (prefix, close, iterable_src) = if let Some(deps) = &memo_deps {
+                let key_expr = element::resolve_v_for_key(
+                    element,
+                    source,
+                    oxc,
+                    &self.resolver,
+                    self.options.force_js,
+                )
+                .unwrap_or_else(|| "undefined".to_string());
+                let memo_idx = self.cache_index;
+                self.cache_index += 1;
+                let (prefix, close, iterable_src) = directives::build_for_prefix(
+                    v_for,
+                    source,
+                    is_keyed,
+                    oxc,
+                    &self.resolver,
+                    None,
+                    Some((deps, &key_expr)),
+                );
+                // Memo close replaces the normal `_renderList` fragment close.
+                let flag = if is_keyed {
+                    if self.options.is_production {
+                        "128"
+                    } else {
+                        "128 /* KEYED_FRAGMENT */"
+                    }
+                } else if self.options.is_production {
+                    "256"
+                } else {
+                    "256 /* UNKEYED_FRAGMENT */"
+                };
+                let suffix = format!(
+                    "\n_item.memo = _memo\nreturn _item\n}}, _cache, {memo_idx}), {flag}))"
+                );
+                self.memo_for_suffixes.insert(id.0, suffix);
+                out.add_vdom_import(VdomHelper::IsMemoSame);
+                out.add_vdom_import(VdomHelper::WithMemo);
+                (prefix, close, iterable_src)
+            } else {
+                directives::build_for_prefix(
+                    v_for,
+                    source,
+                    is_keyed,
+                    oxc,
+                    &self.resolver,
+                    None,
+                    None,
+                )
+            };
             directives::collect_scope_imports(&close, out);
             // NOTE: v-for prefix is NOT prepended here. It is stored and
             // included in the open tag overwrite by process_element_leave.
@@ -1054,8 +1121,13 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
         buf.clear();
         self.buf = buf;
 
-        // Emit scope close suffix for structural directives
-        if let Some(scope_close) = self.scope_closes.pop().flatten() {
+        // Emit scope close suffix for structural directives. A v-for + v-memo
+        // element uses its per-item memo close instead of the normal
+        // `_renderList` fragment close.
+        let scope_close = self.scope_closes.pop().flatten();
+        if let Some(memo_suffix) = self.memo_for_suffixes.remove(&_id.0) {
+            out.prepend_alloc(record.end, &memo_suffix);
+        } else if let Some(scope_close) = scope_close {
             let suffix = directives::format_scope_close(&scope_close, self.options.is_production);
             if !suffix.is_empty() {
                 out.prepend_static(record.end, suffix);
