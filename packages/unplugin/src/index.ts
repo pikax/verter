@@ -407,16 +407,22 @@ function createFilter(
 }
 
 /** Detect if a project uses Nuxt by checking for nuxt.config.* or .nuxt/ directory. */
-function detectNuxt(root: string): boolean {
+async function detectNuxt(root: string): Promise<boolean> {
   const ws = getWorkspace();
   const normalizedRoot = normalizePath(root);
   const configFiles = ["nuxt.config.ts", "nuxt.config.js", "nuxt.config.mts", "nuxt.config.mjs"];
   for (const f of configFiles) {
     const path = `${normalizedRoot}/${f}`;
-    if (ws ? ws.fileExists(path) : existsSync(path)) return true;
+    // Workspace FS is async (libuv thread pool); a non-awaited Promise is
+    // always truthy and would spuriously report every project as Nuxt.
+    if (ws ? await ws.fileExists(path) : existsSync(path)) return true;
   }
   const nuxtDir = `${normalizedRoot}/.nuxt`;
-  if (ws ? ws.isDir(nuxtDir) : existsSync(nuxtDir) && statSync(nuxtDir).isDirectory()) return true;
+  if (ws) {
+    if (await ws.isDir(nuxtDir)) return true;
+  } else if (existsSync(nuxtDir) && statSync(nuxtDir).isDirectory()) {
+    return true;
+  }
   return false;
 }
 
@@ -1130,10 +1136,10 @@ function createFrameworkFactory(
 
       // Vite-specific hooks
       vite: {
-        configResolved(resolvedConfig) {
+        async configResolved(resolvedConfig) {
           viteConfig = resolvedConfig;
           projectRoot = resolvedConfig.root;
-          isNuxt = detectNuxt(projectRoot);
+          isNuxt = await detectNuxt(projectRoot);
           // Resolve vue/compiler-sfc from the project root for compileStyleAsync().
           // This handles scoping + CSS v-bind() rewriting after Vite preprocesses styles.
           if (!compiler && frameworkSelection !== "sveltejs") {
