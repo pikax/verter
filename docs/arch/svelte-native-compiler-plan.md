@@ -1,5 +1,13 @@
 # Native Svelte Compiler — Program Plan (source `.svelte` → JS importing `svelte/internal/client`)
 
+> **Status — forward-looking plan, not current capability.** This is a program plan: its blocks,
+> acceptance criteria, and "conformance/hydration gates are green" sequencing conditions describe
+> TARGET end-states, not what ships today. As of the release-clean tree, Svelte **client**
+> compilation is **experimental** (usable for the in-scope covered fixtures), and **SSR and hydration
+> are post-merge follow-ups that are not shipped** — the compiler fails closed on unsupported and
+> server surfaces. The authority for current shipped scope is
+> [`release-state.md`](./release-state.md), not this plan.
+
 Verter gains a NATIVE Svelte 5 RUNTIME compiler over the existing shared carrier substrate — never
 a parallel pipeline, never a runtime of its own. **A compiler converts a `.svelte` source file into
 a `.js` module — nothing more. The runtime IS Svelte.** The emitted module imports the real Svelte
