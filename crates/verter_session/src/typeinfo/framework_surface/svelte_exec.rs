@@ -37,8 +37,8 @@ use crate::meta_resolve::callable_view::{CallableNodeView, PositionalParamNode};
 use crate::project_semantic_dispatch::output_materialization::OutputProjector;
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
-    PartialReasonSet, ProjectionMode, ProjectionReductionContext, QueryResult, ScopeId,
-    ValueRootKey,
+    DisplayNeeds, PartialReasonSet, ProjectionMode, ProjectionReductionContext, QueryResult,
+    ScopeId, SemanticQueryValue, ValueRootKey,
 };
 use crate::typeinfo::framework_surface::resolved_surface_access::ResolvedSurfaceAccess;
 use crate::typeinfo::framework_surface::results::{
@@ -1217,7 +1217,6 @@ fn resolve_instance_exports(
         return ResolvedOutcome::Missing;
     }
     let dispatch = ctx.dispatch();
-    let cap = TypeinfoSvelteSurfaceOutputCap::new(&dispatch);
     let members = facts
         .instance_exports
         .iter()
@@ -1237,27 +1236,33 @@ fn resolve_instance_exports(
             };
             let (value, type_annotation, type_references) =
                 node.map_or((None, None, Vec::new()), |node| {
-                    let materialized = cap.materialize_reduced_output_type_expr(
-                        node,
-                        ProjectionReductionContext::published(ProjectionMode::Expanded),
-                    );
-                    if materialized.result_is_partial() {
+                    let context =
+                        ProjectionReductionContext::published(ProjectionMode::Expanded);
+                    let reduced = dispatch.reduce_output_node_with_context(node, context);
+                    if reduced.result_is_partial() {
                         crate::request_context::mark_request_result_partial();
                     }
-                    let raised = materialized.into_type_expr(&cap);
-                    let shallow = NamedTypeMemberOutput::classify_shallow(&raised);
-                    match verter_type_expr::render_type_expr_display(&raised) {
-                        Ok(rendered) => (
-                            Some(shallow),
-                            Some(rendered.text),
-                            rendered
-                                .referenced_type_names
-                                .into_iter()
-                                .map(|name| name.to_string())
-                                .collect(),
-                        ),
-                        Err(_) => (Some(shallow), None, Vec::new()),
-                    }
+                    let shallow = crate::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
+                        &dispatch,
+                        reduced.node_id(),
+                    )
+                    .map(NamedTypeMemberOutput::from_raised_shallow)
+                    .unwrap_or(NamedTypeMemberOutput::Opaque);
+                    let type_annotation = crate::semantic_query::display::display(
+                        ctx.project_type_store().semantic_graph(),
+                        &SemanticQueryValue::TypeNode(reduced.node_id()),
+                        DisplayNeeds::empty(),
+                    )
+                    .into();
+                    let mut reference_names = rustc_hash::FxHashSet::default();
+                    crate::resolver_core::component_meta_registry::collect_node_ref_names(
+                        ctx,
+                        reduced.node_id(),
+                        &mut reference_names,
+                    );
+                    let mut type_references: Vec<_> = reference_names.into_iter().collect();
+                    type_references.sort();
+                    (Some(shallow), Some(type_annotation), type_references)
                 });
 
             NamedTypeMember {
