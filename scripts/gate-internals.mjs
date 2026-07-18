@@ -213,6 +213,25 @@ export function pnpmInstallCommand(
   return { cmd: pnpmPath, args: ["install", "--frozen-lockfile"] };
 }
 
+// Canonical, content-addressed Vue macro oracle verification. The gate owns
+// these launch descriptions so tests can prove the live gate and the package
+// scripts execute byte-identical Node entry points without a shell or PATH
+// lookup. `nodePath` is `process.execPath` in production.
+export function vueMacroOracleGateCommands(nodePath) {
+  return [
+    {
+      name: "gen:vue-macro-oracle:check",
+      cmd: nodePath,
+      args: ["scripts/gen-vue-macro-runtime-oracle.mjs", "--check"],
+    },
+    {
+      name: "test:vue-macro-oracle",
+      cmd: nodePath,
+      args: ["--test", "scripts/vue-macro-runtime-oracle/oracle.test.mjs"],
+    },
+  ];
+}
+
 // Resolve the Windows command processor to a VERIFIED ABSOLUTE executable, or null when none is available.
 // Reads `ComSpec` then `SystemRoot` CASE-INSENSITIVELY (Windows folds env-var names case-insensitively, so
 // the gate must find the value under ANY casing the way the OS would). A candidate is accepted ONLY when it

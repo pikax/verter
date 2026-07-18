@@ -2,6 +2,22 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { extractRuntimeShape, generateOracle, oracleDiff } from "./oracle-lib.mjs";
+import { vueMacroOracleGateCommands } from "../gate-internals.mjs";
+
+test("the canonical gate owns both Vue macro oracle verification steps", () => {
+  assert.deepEqual(vueMacroOracleGateCommands("/absolute/node"), [
+    {
+      name: "gen:vue-macro-oracle:check",
+      cmd: "/absolute/node",
+      args: ["scripts/gen-vue-macro-runtime-oracle.mjs", "--check"],
+    },
+    {
+      name: "test:vue-macro-oracle",
+      cmd: "/absolute/node",
+      args: ["--test", "scripts/vue-macro-runtime-oracle/oracle.test.mjs"],
+    },
+  ]);
+});
 
 test("extractRuntimeShape is formatting-insensitive but preserves runtime semantics", () => {
   const compact = `export default defineComponent({props:{value:{type:[Boolean,String],required:true,skipCheck:true}},emits:["change"]})`;
