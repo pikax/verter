@@ -20,6 +20,7 @@ use oxc_allocator::Allocator;
 use super::client::UnsupportedSvelteRuntimeSurface;
 use super::client_allowlist::SupportedHtmlElement;
 use super::client_codegen_helpers::op_target_node;
+use super::client_plan_support::OpDedup;
 use super::client_shapes::{ClientBindShape, ClientDynamicAttrShape, ClientEventHandlerShape};
 use super::client_surface::ClassifiedClientSurface;
 use super::events::{validate_event_modifiers, EventModifierError};
@@ -35,9 +36,8 @@ use verter_span::Span;
 // keep importing the vocabulary as `super::client_plan::<Type>`.
 pub(super) use super::client_plan_block_types::ClientBlock;
 pub(super) use super::client_plan_types::{
-    AttrValue, ClientAttr, ClientBindTarget, ClientNode, ClientNodeId, ClientRuntimeOp,
-    ClientScriptItem, ElementLifecycleOp, EventEmit, EventEmitTarget, EventMode,
-    PlannedInterpolation, RegionOps,
+    ClientAttr, ClientBindTarget, ClientNode, ClientNodeId, ClientRuntimeOp, ClientScriptItem,
+    ElementLifecycleOp, EventEmit, EventEmitTarget, EventMode, PlannedInterpolation, RegionOps,
 };
 
 /// The narrow client module plan — the SOLE emitter input.
@@ -393,39 +393,6 @@ pub(super) struct SupportedClientIr<'a> {
     /// `compile_client` threads into `plan_static_templates` — one source, so
     /// the injection sites cannot disagree.
     pub(super) css_scope: Option<super::css::types::CssScopeFacts>,
-}
-
-impl<'a> ClientModulePlan<'a> {
-    /// The reactive ops owned by a specific template-scope region (empty when the region
-    /// has no ops). The emitter reads this per region so a block body's effect is built
-    /// from the body's ops, never the root's.
-    pub(super) fn ops_in(&self, scope: super::ir::TemplateScopeId) -> &[ClientRuntimeOp] {
-        self.region_ops
-            .iter()
-            .find(|r| r.scope_id == scope)
-            .map_or(&[], |r| r.ops.as_slice())
-    }
-
-    /// Every reactive op across all regions, in region-then-source order. Used by the
-    /// by-unique-target lookups (a node lives in one region, so a flat scan resolves it).
-    pub(super) fn all_ops(&self) -> impl Iterator<Item = &ClientRuntimeOp> {
-        self.region_ops.iter().flat_map(|r| r.ops.iter())
-    }
-}
-
-/// The per-element first-op dedup state threaded through `project_scope_op` (one
-/// coalesced `$.set_class` / `$.set_style` / `$.set_attribute` / `$.attribute_effect`
-/// per element). Global across regions — an element lives in exactly one region.
-#[derive(Default)]
-struct OpDedup {
-    /// Targets whose coalesced `$.set_class` has been emitted.
-    class_done: rustc_hash::FxHashSet<NodeId>,
-    /// Targets whose coalesced `$.set_style` has been emitted.
-    style_done: rustc_hash::FxHashSet<NodeId>,
-    /// `(target, attr-name)` pairs whose whole plain-attribute value has been emitted.
-    plain_attr_done: rustc_hash::FxHashSet<(NodeId, String)>,
-    /// Spread elements whose `$.attribute_effect` fold has been emitted.
-    spread_attrs_done: rustc_hash::FxHashSet<NodeId>,
 }
 
 impl<'a> SupportedClientIr<'a> {
@@ -1491,49 +1458,5 @@ impl<'a> SupportedClientIr<'a> {
             &self.ir.analysis.scopes,
             &self.declared_roots,
         ))
-    }
-
-    /// Build the `bind:group` DYNAMIC/mixed value ([`GroupDynamicValue`]) for each recorded
-    /// group-input node — the structured value (via the shared [`attr_value_for`](Self::attr_value_for))
-    /// plus its reactivity (`has_state || has_call`, the official `RegularElement.js` rule). A
-    /// node whose `value` attr is not an emittable dynamic/mixed value fails closed (the
-    /// classifier only records a node that carried one, so the `?` is defensive).
-    ///
-    /// [`GroupDynamicValue`]: super::client_plan_types::GroupDynamicValue
-    fn collect_group_dynamic_values(
-        &self,
-        nodes: &[NodeId],
-    ) -> Result<
-        Vec<(NodeId, super::client_plan_types::GroupDynamicValue)>,
-        UnsupportedSvelteRuntimeSurface,
-    > {
-        let mut out = Vec::with_capacity(nodes.len());
-        for &node in nodes {
-            let IrNode::Element(el) = self.ir.node(node) else {
-                continue;
-            };
-            let (value, has_state) = self.attr_value_for(
-                el,
-                "value",
-                super::client_legacy_value::AuthoredValueSurface::AttributeValue,
-            )?;
-            let reactive = has_state || value.has_call();
-            // The outer `?? ''` group-value coercion is gated on DEFINEDNESS (official
-            // `evaluated.is_defined`), NOT single-vs-mixed: a provably-defined SINGLE value
-            // omits it. Reuse the SAME `mixed_chunk_nullish_wrap` definedness analysis the
-            // mixed-attribute parts run (no new analysis path) — meaningful only for a single
-            // value (a mixed value is already a string and never carries the outer coercion).
-            let single_value_defined = matches!(value, AttrValue::Single { .. })
-                && self.group_value_single_is_defined(el)?;
-            out.push((
-                node,
-                super::client_plan_types::GroupDynamicValue {
-                    value,
-                    reactive,
-                    single_value_defined,
-                },
-            ));
-        }
-        Ok(out)
     }
 }

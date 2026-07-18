@@ -1955,7 +1955,9 @@ const AUTHORED_POSITION_SURFACE_BINDINGS: &[(&str, &str, &str, &str, usize)] = &
     ("client_component_plan.rs", "project_spread_arg", "prepare_template_value", "ComponentSpreadOperand", 1),
     ("client_component_plan.rs", "render_dynamic_callee", "prepare_template_value", "RenderCallee", 1),
     ("client_legacy_value.rs", "prepare_template_value", "policy", "forwarded(surface)", 1),
-    ("client_plan.rs", "collect_group_dynamic_values", "attr_value_for", "AttributeValue", 1),
+    // File ownership moved under the production-size split; the function,
+    // authored-value callee, required surface, and call count are unchanged.
+    ("client_plan_group_value.rs", "collect_group_dynamic_values", "attr_value_for", "AttributeValue", 1),
     ("client_plan.rs", "project_scope_op", "prepare_template_value", "AnimationParams", 1),
     ("client_plan.rs", "project_scope_op", "prepare_template_value", "AttachPayload", 1),
     ("client_plan.rs", "build_interpolation_plans", "prepare_template_value", "ReactiveText", 1),
