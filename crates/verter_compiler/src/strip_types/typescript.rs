@@ -113,6 +113,30 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
         self.remove(start, ta.span.end);
     }
 
+    /// Remove `[start, span_end)` plus any trailing whitespace and a single `;`.
+    /// Used to delete a whole statement (TS overload / declare signature) that
+    /// would otherwise leave a dangling terminator.
+    fn remove_with_trailing_semi(&mut self, start: u32, span_end: u32) {
+        let bytes = self.source.as_bytes();
+        let mut end = span_end as usize;
+        while end < bytes.len() && (bytes[end] == b' ' || bytes[end] == b'\t') {
+            end += 1;
+        }
+        let end = if end < bytes.len() && bytes[end] == b';' {
+            (end + 1) as u32
+        } else {
+            span_end
+        };
+        self.remove(start, end);
+    }
+
+    /// Remove a body-less function declaration — a TypeScript overload signature
+    /// or an ambient `declare function` — including any trailing `;`. A bare
+    /// `function f(args)` header (or a lone `declare function f()`) is invalid JS.
+    fn remove_bodyless_function_decl(&mut self, func: &Function) {
+        self.remove_with_trailing_semi(func.span.start, func.span.end);
+    }
+
     // =========================================================================
     // Program & Statement visitors
     // =========================================================================
@@ -208,7 +232,13 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
                 self.visit_statement(&l.body);
             }
             Statement::FunctionDeclaration(func) => {
-                self.visit_function(func);
+                if func.body.is_none() {
+                    // TS overload signature or ambient `declare function` — no
+                    // body. A bare `function f(args)` header is invalid JS.
+                    self.remove_bodyless_function_decl(func);
+                } else {
+                    self.visit_function(func);
+                }
             }
             Statement::ClassDeclaration(class) => {
                 self.visit_class(class);
@@ -275,7 +305,11 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
                 self.visit_variable_declaration(var_decl);
             }
             Declaration::FunctionDeclaration(func) => {
-                self.visit_function(func);
+                if func.body.is_none() {
+                    self.remove_bodyless_function_decl(func);
+                } else {
+                    self.visit_function(func);
+                }
             }
             Declaration::ClassDeclaration(class) => {
                 self.visit_class(class);
@@ -703,8 +737,18 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
                     self.remove(param_start, pattern_start);
                 }
             }
-            // Type annotation is on FormalParameter, not BindingPattern
-            if let Some(ta) = &param.type_annotation {
+            // Optional `?` marker (TypeScript-only). Handled independently of
+            // the type annotation — comment/whitespace-aware — so `(a?)`,
+            // `(a /*c*/?)`, and `(a?: T)` all lower to valid JS. When an
+            // annotation is present, strip only its `: Type` part (the `?` is
+            // removed here) to avoid an overlapping double-remove.
+            if param.optional {
+                self.strip_optional_marker_after(param.pattern.span().end);
+                if let Some(ta) = &param.type_annotation {
+                    self.remove(ta.span.start, ta.span.end);
+                }
+            } else if let Some(ta) = &param.type_annotation {
+                // Type annotation is on FormalParameter, not BindingPattern
                 self.remove_type_annotation(ta);
             }
             self.visit_binding_pattern(&param.pattern);
@@ -714,6 +758,41 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
                 self.remove_type_annotation(ta);
             }
             self.visit_binding_pattern(&rest.rest.argument);
+        }
+    }
+
+    /// Remove the TypeScript optional `?` that follows a formal-parameter binding
+    /// pattern, skipping intervening whitespace AND comments (block `/* */` and
+    /// line `//`). Fail-closed: if the next non-trivia byte is not `?`, leave the
+    /// source unchanged rather than risk corrupting valid JS.
+    fn strip_optional_marker_after(&mut self, pattern_end: u32) {
+        let bytes = self.source.as_bytes();
+        let mut i = pattern_end as usize;
+        loop {
+            if i >= bytes.len() {
+                return;
+            }
+            match bytes[i] {
+                b' ' | b'\t' | b'\r' | b'\n' => i += 1,
+                b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                    i += 2;
+                    while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                        i += 1;
+                    }
+                    i += 2;
+                }
+                b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                    i += 2;
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                }
+                b'?' => {
+                    self.remove(i as u32, (i + 1) as u32);
+                    return;
+                }
+                _ => return,
+            }
         }
     }
 
@@ -967,6 +1046,17 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
         if export.export_kind.is_type() {
             self.remove(export.span.start, export.span.end);
             return;
+        }
+
+        // Body-less exported function = TS overload / ambient declare signature.
+        // Remove the whole `export … function f(): T;` (incl. the `export`
+        // keyword and trailing `;`) — stripping only the inner function span
+        // leaves a dangling `export ;`.
+        if let Some(Declaration::FunctionDeclaration(func)) = &export.declaration {
+            if func.body.is_none() {
+                self.remove_with_trailing_semi(export.span.start, export.span.end);
+                return;
+            }
         }
 
         if !export.specifiers.is_empty() {
