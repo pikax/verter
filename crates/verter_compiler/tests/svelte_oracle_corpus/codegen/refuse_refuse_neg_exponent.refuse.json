@@ -4,5 +4,5 @@
   "backend": "client",
   "oracleVersion": "5.56.3",
   "officialRejected": true,
-  "officialErrorSummary": "Exponent must be positive"
+  "officialErrorSummary": "BigInt exponent must be positive"
 }

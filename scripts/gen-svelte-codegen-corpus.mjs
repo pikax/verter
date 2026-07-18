@@ -85,6 +85,17 @@ const CORPUS_ROOT = join(REPO_ROOT, "crates/verter_compiler/tests/svelte_oracle_
 // normalized module + topology + the `axis` tags.
 const CODEGEN_DIR = join(CORPUS_ROOT, "codegen");
 
+function stableOfficialErrorSummary(slug, error) {
+  const summary = String(error).split("\n")[0].trim();
+  if (
+    slug === "refuse_refuse_neg_exponent" &&
+    /^(?:Exponent|undefined) must be positive$/.test(summary)
+  ) {
+    return "BigInt exponent must be positive";
+  }
+  return summary;
+}
+
 // ---------------------------------------------------------------------------
 // Reactivity axis — the subject binding's reactive kind.
 //
@@ -1639,9 +1650,11 @@ function buildCorpus(compiler) {
       backend: "client",
       oracleVersion: SVELTE_ORACLE_VERSION,
       officialRejected: true,
-      // The official error's first line (a deterministic-enough tail; the Rust gate pins
-      // Verter's own diagnostic CODE, not this text).
-      officialErrorSummary: String(officialError).split("\n")[0].trim(),
+      // Pin a stable first-line summary. V8 has used both "Exponent" and "undefined"
+      // for the negative-BigInt-exponent subject across supported Node releases; keep
+      // that engine wording out of the oracle artifact while preserving unexpected
+      // rejection reasons verbatim. The Rust gate pins Verter's own diagnostic code.
+      officialErrorSummary: stableOfficialErrorSummary(slug, officialError),
     };
     files.set(join(CODEGEN_DIR, `${slug}.svelte`), source);
     files.set(join(CODEGEN_DIR, `${slug}.refuse.json`), `${JSON.stringify(record, null, 2)}\n`);
