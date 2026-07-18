@@ -100,14 +100,14 @@ pub trait ErasedFrameworkSurfaceStore: Send + Sync {
 /// [`Self::get_with_view`] then publish via [`Self::insert`], so two concurrent
 /// cold callers for the SAME key both materialize and the last writer wins (the
 /// values are content-equivalent, so this is safe; see [`Self::insert`]). True
-/// singleflight is a follow-up when this store is consolidated onto
-/// `ProjectTypeStore` (block U10). Hands out immutable `Arc` values.
+/// singleflight is a follow-up for when this store is consolidated onto
+/// `ProjectTypeStore`. Hands out immutable `Arc` values.
 ///
 /// PROVISIONAL: this store lives on the framework registry row, OUTSIDE the
 /// single `ProjectTypeStore`. It is fact-validated (content-addressed admission
 /// gated at the call sites), so it is correct today, but it is a temporary
-/// off-`ProjectTypeStore` cache to be consolidated onto `ProjectTypeStore` at
-/// block U10 (which also adds true in-flight singleflight).
+/// off-`ProjectTypeStore` cache still to be consolidated onto `ProjectTypeStore`
+/// (which also adds true in-flight singleflight).
 #[derive(Debug)]
 pub struct FrameworkSurfaceStore<K, B>
 where
