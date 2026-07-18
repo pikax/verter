@@ -1,0 +1,426 @@
+{
+  "schemaVersion": 1,
+  "provenance": {
+    "generatedBy": "scripts/gen-vue-macro-runtime-oracle.mjs",
+    "compiler": "@vue/compiler-sfc",
+    "version": "3.5.34",
+    "fixtureSha256": "60d192ab8b8a6434c8504554b2844b6e155016137cc9bbb9ae84195025df2197",
+    "compileOptions": {
+      "isProd": false,
+      "inlineTemplate": false
+    }
+  },
+  "cases": [
+    {
+      "id": "primitive-and-bigint-props",
+      "axes": [
+        "props",
+        "primitive",
+        "literal",
+        "bigint"
+      ],
+      "sourceSha256": "659e7917f9be0c018c830586d15b3ce444b707d0c5e6ee030a6ffef322294834",
+      "runtime": {
+        "props": [
+          {
+            "name": "text",
+            "constructors": [
+              "String"
+            ],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "count",
+            "constructors": [
+              "Number"
+            ],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "enabled",
+            "constructors": [
+              "Boolean"
+            ],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "token",
+            "constructors": [
+              "Symbol"
+            ],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "nothing",
+            "constructors": [],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "literal",
+            "constructors": [
+              "String"
+            ],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "huge",
+            "constructors": [],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          }
+        ],
+        "emits": []
+      }
+    },
+    {
+      "id": "ordered-unions-and-skip-check",
+      "axes": [
+        "props",
+        "union-order",
+        "dedup",
+        "unknown",
+        "skip-check"
+      ],
+      "sourceSha256": "d950e00659221785ab7f3da6acf334d1e0d2d7f8e350262be559b6841a4a40a4",
+      "runtime": {
+        "props": [
+          {
+            "name": "ordered",
+            "constructors": [
+              "String",
+              "Boolean"
+            ],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "booleanUnknown",
+            "constructors": [
+              "Boolean"
+            ],
+            "required": true,
+            "skipCheck": true,
+            "default": null
+          },
+          {
+            "name": "functionUnknown",
+            "constructors": [
+              "Function"
+            ],
+            "required": true,
+            "skipCheck": true,
+            "default": null
+          },
+          {
+            "name": "numberUnknown",
+            "constructors": [],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          }
+        ],
+        "emits": []
+      }
+    },
+    {
+      "id": "containers-callables-and-nominals",
+      "axes": [
+        "props",
+        "array",
+        "tuple",
+        "callable",
+        "nominal",
+        "structural-object"
+      ],
+      "sourceSha256": "b249cafe2d529d9e7e1263e75d7bb9c47046593ac55c2ea2d34221ec980d833b",
+      "runtime": {
+        "props": [
+          {
+            "name": "array",
+            "constructors": [
+              "Array"
+            ],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "tuple",
+            "constructors": [
+              "Array"
+            ],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "callable",
+            "constructors": [
+              "Function"
+            ],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "date",
+            "constructors": [
+              "Date"
+            ],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "map",
+            "constructors": [
+              "Map"
+            ],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "set",
+            "constructors": [
+              "Set"
+            ],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "promise",
+            "constructors": [
+              "Promise"
+            ],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "error",
+            "constructors": [
+              "Error"
+            ],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "userClass",
+            "constructors": [
+              "Object"
+            ],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "userObject",
+            "constructors": [
+              "Object"
+            ],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          }
+        ],
+        "emits": []
+      }
+    },
+    {
+      "id": "with-defaults",
+      "axes": [
+        "props",
+        "with-defaults",
+        "optional"
+      ],
+      "sourceSha256": "a924a3de3c1e40021f0e49c371f0af6af200c5db2cb9478442ec7aaaef498db6",
+      "runtime": {
+        "props": [
+          {
+            "name": "label",
+            "constructors": [
+              "String"
+            ],
+            "required": false,
+            "skipCheck": false,
+            "default": "'fallback'"
+          },
+          {
+            "name": "count",
+            "constructors": [
+              "Number"
+            ],
+            "required": false,
+            "skipCheck": false,
+            "default": null
+          }
+        ],
+        "emits": []
+      }
+    },
+    {
+      "id": "emits-call-signature",
+      "axes": [
+        "emits",
+        "call-signature"
+      ],
+      "sourceSha256": "4e8ad52a3d101d6684131e1244b0285334e90b75fc74babb2a3cc0f039e37130",
+      "runtime": {
+        "props": [],
+        "emits": [
+          "change",
+          "close"
+        ]
+      }
+    },
+    {
+      "id": "emits-property-syntax",
+      "axes": [
+        "emits",
+        "property-tuple"
+      ],
+      "sourceSha256": "5e5345a80d5993c44c636c2aa81d3a64661558003f1cd6971dd3710017436f39",
+      "runtime": {
+        "props": [],
+        "emits": [
+          "save",
+          "reset"
+        ]
+      }
+    },
+    {
+      "id": "define-model-default-and-named",
+      "axes": [
+        "model",
+        "prop",
+        "update-event",
+        "modifiers"
+      ],
+      "sourceSha256": "fe8620a66872f964e0e43cbeed53038d0acc43d7ad5dab0c0ae104e04d35539a",
+      "runtime": {
+        "props": [
+          {
+            "name": "modelValue",
+            "constructors": [
+              "String"
+            ],
+            "required": null,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "modelModifiers",
+            "constructors": [],
+            "required": null,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "count",
+            "constructors": [
+              "Number"
+            ],
+            "required": null,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "countModifiers",
+            "constructors": [],
+            "required": null,
+            "skipCheck": false,
+            "default": null
+          }
+        ],
+        "emits": [
+          "update:modelValue",
+          "update:count"
+        ]
+      }
+    },
+    {
+      "id": "vue-ignore",
+      "axes": [
+        "props",
+        "vue-ignore",
+        "heritage"
+      ],
+      "sourceSha256": "24f9340be5c2d784acda01c6f4e107c4439fb454b1111a45a5a42a7642c27970",
+      "runtime": {
+        "props": [
+          {
+            "name": "own",
+            "constructors": [
+              "Number"
+            ],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          }
+        ],
+        "emits": []
+      }
+    },
+    {
+      "id": "imported-utility-and-indexed",
+      "axes": [
+        "props",
+        "import",
+        "generic",
+        "utility",
+        "indexed-access",
+        "structural-object"
+      ],
+      "sourceSha256": "39e2d78833d885336a69381269b96fe418002eff520389046db58cb5ac8f539d",
+      "runtime": {
+        "props": [
+          {
+            "name": "count",
+            "constructors": [
+              "Number"
+            ],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "options",
+            "constructors": [
+              "Object"
+            ],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "selected",
+            "constructors": [
+              "Object"
+            ],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          }
+        ],
+        "emits": []
+      }
+    }
+  ]
+}
