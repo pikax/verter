@@ -4832,6 +4832,218 @@ async fn contract_directive_v_for_expression_navigates_to_script_binding() {
 }
 
 #[tokio::test]
+async fn contract_directive_v_show_expression_navigates_to_script_binding() {
+    let source = "<script setup lang=\"ts\">\nconst showPanel = true\n</script>\n<template>\n  <div v-show=\"showPanel\">x</div>\n</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server(&[("src/App.vue", "vue", source)]).await;
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &app_uri, "v-show=\"showPanel\"", 8);
+
+    let response = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await
+        .expect("goto definition should succeed")
+        .expect("v-show expression identifier should resolve");
+    let locations = definition_locations(response);
+    let target = locations
+        .iter()
+        .find(|loc| loc.uri == app_uri)
+        .expect("definition should stay in the same file");
+
+    assert_eq!(
+        target.range.start.line,
+        line_for_snippet(source, "const showPanel"),
+        "v-show showPanel must land on the script declaration"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn contract_dynamic_bind_arg_navigates_to_script_binding() {
+    // Dynamic-arg form: the `key` in `:[key]="val"` is a computed attribute
+    // NAME expression — it must navigate to its script declaration (the value
+    // `val` follows the ordinary directive-expression path).
+    let source = "<script setup lang=\"ts\">\nconst key = 'title'\nconst val = 'a'\n</script>\n<template>\n  <div :[key]=\"val\" />\n</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server(&[("src/App.vue", "vue", source)]).await;
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &app_uri, ":[key]=\"val\"", 2);
+
+    let response = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await
+        .expect("goto definition should succeed")
+        .expect("dynamic-arg identifier should resolve");
+    let locations = definition_locations(response);
+    let target = locations
+        .iter()
+        .find(|loc| loc.uri == app_uri)
+        .expect("definition should stay in the same file");
+
+    assert_eq!(
+        target.range.start.line,
+        line_for_snippet(source, "const key"),
+        ":[key] must land on the script key declaration"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn contract_unknown_prop_name_produces_no_definition() {
+    // Negative control guarding the deleted file-start fallback in
+    // component_resolve.rs: a prop attribute with NO matching child declaration
+    // must fail closed — no link, no 0:0 mis-mapped affordance. Reintroducing
+    // the fallback fails this test.
+    let child_source = "<script setup lang=\"ts\">\ndefineProps<{ title: string }>()\n</script>\n";
+    let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nconst v = 'x'\n</script>\n<template>\n  <MyComp :nope=\"v\" />\n</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/MyComp.vue", "vue", child_source),
+        ("src/App.vue", "vue", parent_source),
+    ])
+    .await;
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &app_uri, ":nope=", 1);
+
+    let response = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await
+        .expect("goto definition should succeed");
+    assert!(
+        response.is_none(),
+        "unknown prop must fail closed with no link, got {response:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn contract_longhand_kebab_v_on_event_navigates_to_camel_emit() {
+    // Combined kebab × longhand: `v-on:my-event` → camel `myEvent`.
+    let child_source = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ myEvent: [v: string] }>()\n</script>\n";
+    let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nfunction onMyEvent(v: string) { void v }\n</script>\n<template>\n  <MyComp v-on:my-event=\"onMyEvent\" />\n</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/MyComp.vue", "vue", child_source),
+        ("src/App.vue", "vue", parent_source),
+    ])
+    .await;
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &app_uri, "v-on:my-event=", 5);
+
+    let response = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await
+        .expect("goto definition should succeed")
+        .expect("longhand kebab event should resolve");
+    let locations = definition_locations(response);
+    let target = locations
+        .iter()
+        .find(|loc| loc.uri == child_uri)
+        .expect("definition should point to child");
+
+    assert_eq!(
+        target.range.start.line,
+        line_for_snippet(child_source, "myEvent: [v: string]"),
+        "v-on:my-event must land on camel myEvent emit"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn contract_longhand_kebab_v_bind_prop_navigates_to_camel_define_props() {
+    // Combined kebab × longhand: `v-bind:my-prop` → camel `myProp`.
+    let child_source = "<script setup lang=\"ts\">\ndefineProps<{ myProp: string }>()\n</script>\n";
+    let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nconst v = 'x'\n</script>\n<template>\n  <MyComp v-bind:my-prop=\"v\" />\n</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/MyComp.vue", "vue", child_source),
+        ("src/App.vue", "vue", parent_source),
+    ])
+    .await;
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &app_uri, "v-bind:my-prop=", 7);
+
+    let response = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await
+        .expect("goto definition should succeed")
+        .expect("longhand kebab prop should resolve");
+    let locations = definition_locations(response);
+    let target = locations
+        .iter()
+        .find(|loc| loc.uri == child_uri)
+        .expect("definition should point to child");
+
+    assert_eq!(
+        target.range.start.line,
+        line_for_snippet(child_source, "myProp: string"),
+        "v-bind:my-prop must land on camel myProp declaration"
+    );
+    assert_ne!(
+        (target.range.start.line, target.range.start.character),
+        (0, 0),
+        "must not fall back to file-start"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn contract_longhand_kebab_v_slot_navigates_to_camel_define_slots() {
+    // Combined kebab × longhand: `v-slot:my-slot` → camel `mySlot`.
+    let child_source = "<script setup lang=\"ts\">\ndefineSlots<{ mySlot(props: { title: string }): any }>()\n</script>\n<template>\n  <slot name=\"mySlot\" />\n</template>\n";
+    let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\n</script>\n<template>\n  <MyComp>\n    <template v-slot:my-slot=\"{ title }\">\n      {{ title }}\n    </template>\n  </MyComp>\n</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/MyComp.vue", "vue", child_source),
+        ("src/App.vue", "vue", parent_source),
+    ])
+    .await;
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &app_uri, "v-slot:my-slot=", 7);
+
+    let response = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await
+        .expect("goto definition should succeed")
+        .expect("longhand kebab slot should resolve");
+    let locations = definition_locations(response);
+    let target = locations
+        .iter()
+        .find(|loc| loc.uri == child_uri)
+        .expect("definition should point to child");
+
+    assert_eq!(
+        target.range.start.line,
+        line_for_snippet(child_source, "mySlot(props:"),
+        "v-slot:my-slot must land on camel mySlot declaration"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
 async fn contract_kebab_prop_rename_classifies_cross_file_usage() {
     // Spot check: kebab template usage is discoverable as a rename of the
     // camelCase child declaration (script + template span the same binding).
