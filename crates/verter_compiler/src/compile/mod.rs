@@ -568,7 +568,11 @@ fn compile_inner(
         // programs instead of re-parsing here.
         if verter_options.force_js {
             if let Some(setup) = prepared_script.setup() {
-                crate::strip_types::typescript::strip_typescript_types(
+                // `generate_script` owns setup imports (type-only removal,
+                // value/mixed reconstruction + hoist), so the body strip skips
+                // import declarations — editing an import twice corrupts the
+                // transform and no-ops later body strips.
+                crate::strip_types::typescript::strip_typescript_body_types(
                     setup.program(),
                     &mut ct,
                     setup.content_start(),
@@ -576,6 +580,8 @@ fn compile_inner(
                 );
             }
             if let Some(companion) = prepared_script.companion() {
+                // The Options-API companion is emitted at module scope with its
+                // imports in place, so the full strip owns its imports too.
                 crate::strip_types::typescript::strip_typescript_types(
                     companion.program(),
                     &mut ct,

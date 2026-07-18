@@ -203,6 +203,110 @@ mod tests {
         );
     }
 
+    /// TS overload signatures (no body) must be removed entirely. Leaving them
+    /// as `function scrollTo(x, y)` without a body is a JS parse error
+    /// (element-plus scrollbar.vue).
+    #[test]
+    fn test_strip_function_overload_signatures() {
+        let input = "\
+function scrollTo(xCord: number, yCord?: number): void
+function scrollTo(options: ScrollToOptions): void
+function scrollTo(arg1: unknown, arg2?: number) {
+  wrap.scrollTo(arg1, arg2)
+}
+";
+        let result = strip(input);
+        assert!(
+            !result.contains("function scrollTo(xCord")
+                && !result.contains("function scrollTo(options"),
+            "overload signatures must be removed, got:\n{result}"
+        );
+        assert!(
+            result.contains("function scrollTo(arg1, arg2)")
+                && result.contains("wrap.scrollTo(arg1, arg2)"),
+            "implementation must remain, got:\n{result}"
+        );
+        assert!(
+            result.contains('{') && result.contains('}'),
+            "implementation body must remain, got:\n{result}"
+        );
+    }
+
+    /// An EXPORTED overload signature must also remove the `export` keyword and
+    /// the trailing `;` — leaving `export ;` is invalid JS.
+    #[test]
+    fn test_strip_exported_overload_signature() {
+        let result = strip(
+            "export function f(): void;\nexport function f(a: string): void;\nexport function f(a?: string) { return a }\n",
+        );
+        assert!(
+            !result.contains("export function f();") && !result.contains(": void"),
+            "exported overload signatures must be removed cleanly, got:\n{result}"
+        );
+        assert!(
+            !result.contains("export ;") && !result.contains("export  ;"),
+            "no dangling export, got:\n{result}"
+        );
+        assert!(
+            result.contains("export function f(a) { return a }"),
+            "the exported implementation must remain, got:\n{result}"
+        );
+    }
+
+    /// An ambient `declare function` must be removed entirely (keyword +
+    /// signature + trailing `;`) — it has no runtime body.
+    #[test]
+    fn test_strip_declare_function() {
+        let result = strip("declare function f(a: number): void;\nconst x = 1;\n");
+        assert!(
+            !result.contains("declare") && !result.contains("function f"),
+            "declare function must be removed, got:\n{result}"
+        );
+        assert!(
+            result.contains("const x = 1;"),
+            "surrounding runtime code must remain, got:\n{result}"
+        );
+    }
+
+    /// Optional parameter markers (`name?`) are TypeScript-only and must be
+    /// stripped. Leaving `oldPropString?` is a JS parse error (element-plus form.vue).
+    #[test]
+    fn test_strip_optional_parameter_marker() {
+        let result = strip(
+            "const removeField = (field: Field, oldPropString?: string) => {\n  return field\n}\n",
+        );
+        assert!(
+            !result.contains("oldPropString?"),
+            "optional `?` must be stripped, got:\n{result}"
+        );
+        assert!(
+            result.contains("oldPropString") && result.contains("=>"),
+            "param name must remain, got:\n{result}"
+        );
+    }
+
+    /// An optional parameter marker with NO type annotation (and one preceded by
+    /// a comment) must still be stripped — `(a?)` / `(a /*c*/?)` are invalid JS.
+    #[test]
+    fn test_strip_optional_marker_without_annotation_and_with_comment() {
+        let bare = strip("const g = (a?) => a;\n");
+        assert!(
+            !bare.contains("a?"),
+            "bare optional `?` must strip, got:\n{bare}"
+        );
+        assert!(bare.contains("(a)"), "param must remain, got:\n{bare}");
+
+        let commented = strip("const h = (a /*c*/?) => a;\n");
+        assert!(
+            !commented.contains('?'),
+            "optional `?` after a comment must strip, got:\n{commented}"
+        );
+        assert!(
+            commented.contains("/*c*/"),
+            "the comment must be preserved, got:\n{commented}"
+        );
+    }
+
     #[test]
     fn test_class_with_ts_features() {
         let result = strip(

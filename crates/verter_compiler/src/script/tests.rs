@@ -74,7 +74,32 @@ fn gen_script_with_external<'a>(
         alloc,
         external_types,
     );
-    generate_script(script, script_setup, &prepared, source, ct, alloc, options)
+    let result = generate_script(script, script_setup, &prepared, source, ct, alloc, options);
+
+    // Mirror the production compile pipeline: under force_js the whole-program
+    // body strip runs AFTER generate_script (compile/mod.rs), owning all TS
+    // removal (annotations, casts, generics, type-only imports, type decls).
+    // Running it here keeps these unit tests faithful to real output.
+    if !options.keep_ts_types {
+        if let Some(setup) = prepared.setup() {
+            crate::strip_types::typescript::strip_typescript_body_types(
+                setup.program(),
+                ct,
+                setup.content_start(),
+                setup.content_str(),
+            );
+        }
+        if let Some(companion) = prepared.companion() {
+            crate::strip_types::typescript::strip_typescript_types(
+                companion.program(),
+                ct,
+                companion.content_start(),
+                companion.content_str(),
+            );
+        }
+    }
+
+    result
 }
 
 // ── Test 1: No script blocks ──────────────────────────────────
@@ -2605,5 +2630,218 @@ fn define_emits_named_tuple_property_form_still_produces_emits() {
     assert!(
         output.contains("emits: [\"change\", \"close\"]"),
         "named-tuple emits must produce the emits array, got:\n{output}"
+    );
+}
+
+/// force_js import reconstruction must preserve renamed named imports
+/// (`import { FixedSizeList as ElFixedSizeList }`). Dropping the export name
+/// makes rollup look for a non-existent `ElFixedSizeList` export (element-plus).
+#[test]
+fn force_js_preserves_named_import_alias() {
+    use crate::compile::{compile, CodegenOptions, VerterCompileOptions};
+    use oxc_allocator::Allocator;
+
+    let input = r#"
+<script setup lang="ts">
+import { FixedSizeList as ElFixedSizeList } from './virtual-list'
+const List = ElFixedSizeList
+</script>
+<template><component :is="List" /></template>
+"#;
+    let allocator = Allocator::new();
+    let options = CodegenOptions::new().with_filename("Transfer.vue");
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    let result = compile(input, &options, &verter_opts, &allocator);
+    let code = result
+        .script
+        .as_ref()
+        .map(|s| s.code.as_str())
+        .unwrap_or("");
+    assert!(
+        code.contains("FixedSizeList as ElFixedSizeList"),
+        "must preserve export alias FixedSizeList as ElFixedSizeList, got:\n{code}"
+    );
+    assert!(
+        !code.contains("{ ElFixedSizeList }") && !code.contains("{ElFixedSizeList}"),
+        "must not rewrite to bare ElFixedSizeList import, got:\n{code}"
+    );
+}
+
+/// Options-API `<script lang="ts">` (no setup) is not rewritten by
+/// process_script_only — force_js must still strip `import type` (element-plus
+/// focus-trap.vue under rollup).
+#[test]
+fn force_js_options_api_strips_import_type() {
+    use crate::compile::{compile, CodegenOptions, VerterCompileOptions};
+    use oxc_allocator::Allocator;
+
+    let input = r#"
+<script lang="ts">
+import { defineComponent, ref } from 'vue'
+import type { PropType } from 'vue'
+export default defineComponent({
+  props: { el: Object as PropType<HTMLElement> },
+  setup() { return { x: ref(1) } },
+})
+</script>
+<template><div /></template>
+"#;
+    let allocator = Allocator::new();
+    let options = CodegenOptions::new().with_filename("Focus.vue");
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    let result = compile(input, &options, &verter_opts, &allocator);
+    let code = result
+        .script
+        .as_ref()
+        .map(|s| s.code.as_str())
+        .unwrap_or("");
+    assert!(
+        !code.contains("import type"),
+        "import type must be stripped under force_js options API, got:\n{code}"
+    );
+    assert!(
+        code.contains("defineComponent") && code.contains("from 'vue'"),
+        "value imports must remain, got:\n{code}"
+    );
+}
+
+/// force_js must not leave ghost import fragments inside setup after
+/// reconstructing value-only imports (element-plus radio.vue:
+/// `import { type RadioProps, radioEmits, … }` → leftover
+/// `radioEmits, … } from './radio'` mid-setup).
+#[test]
+fn force_js_mixed_type_value_import_has_no_ghost_body_fragment() {
+    use crate::compile::{compile, CodegenOptions, VerterCompileOptions};
+    use oxc_allocator::Allocator;
+
+    let input = r#"
+<script setup lang="ts">
+import { type RadioProps, radioEmits, radioPropsDefaults } from './radio'
+const props = withDefaults(defineProps<RadioProps>(), radioPropsDefaults)
+const emit = defineEmits(radioEmits)
+</script>
+<template><div /></template>
+"#;
+    let allocator = Allocator::new();
+    let options = CodegenOptions::new().with_filename("Radio.vue");
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    let result = compile(input, &options, &verter_opts, &allocator);
+    let code = result
+        .script
+        .as_ref()
+        .map(|s| s.code.as_str())
+        .unwrap_or("");
+    assert!(
+        result.errors.is_empty(),
+        "compile should succeed, errors={:?}\n{code}",
+        result.errors
+    );
+    assert!(
+        code.contains("import { radioEmits, radioPropsDefaults } from './radio'")
+            || code.contains("import { radioEmits, radioPropsDefaults } from \"./radio\""),
+        "value-only import must be kept, got:\n{code}"
+    );
+    // Ghost fragment from double strip: specifier list without `import {`
+    // appearing mid-setup after the real import was already hoisted.
+    assert!(
+        !code.contains("\nradioEmits, radioPropsDefaults } from"),
+        "must not leave ghost import remnant inside setup, got:\n{code}"
+    );
+    let from_count =
+        code.matches("from './radio'").count() + code.matches("from \"./radio\"").count();
+    assert_eq!(
+        from_count, 1,
+        "exactly one import from './radio', got {from_count} in:\n{code}"
+    );
+}
+
+/// Prop keys that are not bare JS identifiers (e.g. `onUpdate:visible`) must
+/// be quoted in the runtime props object. element-plus tooltip emits this
+/// shape from `UseTooltipProps`; unquoted keys are a PARSE_ERROR under
+/// rolldown/esbuild.
+#[test]
+fn runtime_props_quote_colon_keys_like_on_update_visible() {
+    let alloc = Allocator::default();
+    let content = r#"
+interface Props {
+  visible?: boolean
+  'onUpdate:visible'?: (value: boolean) => void
+}
+const props = withDefaults(defineProps<Props>(), {
+  visible: false,
+})
+"#;
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
+    let _ = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Test",
+            ..Default::default()
+        },
+    );
+    let output = ct.build_string();
+    assert!(
+        output.contains(r#""onUpdate:visible""#) || output.contains(r#"'onUpdate:visible'"#),
+        "colon prop keys must be quoted in runtime props, got:\n{output}"
+    );
+    // Bare unquoted form is a syntax error in the generated module.
+    assert!(
+        !output.contains("onUpdate:visible: {"),
+        "must not emit unquoted onUpdate:visible: key, got:\n{output}"
+    );
+}
+
+/// `withDefaults(defineProps<T>(), { ...Defaults })` must pass the full
+/// defaults expression to `_mergeDefaults` (reka-ui PopperContent).
+#[test]
+fn with_defaults_object_spread_uses_merge_defaults_full_expr() {
+    let alloc = Allocator::default();
+    let content = r#"
+export const Defaults = { as: 'button', disabled: false }
+interface Props { as?: string; disabled?: boolean; value?: string }
+const props = withDefaults(defineProps<Props>(), {
+  ...Defaults,
+  value: 'on',
+})
+"#;
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
+    let _ = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Test",
+            ..Default::default()
+        },
+    );
+    let output = ct.build_string();
+    assert!(
+        output.contains("_mergeDefaults"),
+        "spread defaults must use _mergeDefaults, got:\n{output}"
+    );
+    assert!(
+        output.contains("...Defaults") || output.contains("Defaults"),
+        "full defaults expression must retain Defaults, got:\n{output}"
+    );
+    assert!(
+        output.contains("value:") && output.contains("'on'"),
+        "inline default keys must remain in the typed props or defaults expr, got:\n{output}"
     );
 }

@@ -120,11 +120,16 @@ pub fn process_script_setup<'alloc>(
                 let abs_end = content_start + imp.span.end;
 
                 if !options.keep_ts_types && imp.is_type_only {
-                    // Type-only import — strip entirely when not keeping TS types
+                    // Type-only import — strip entirely. process.rs is the SOLE
+                    // owner of setup imports (the force_js body strip skips
+                    // import declarations), so this is a single overwrite with
+                    // no same-range double from the body strip.
                     ctx.out.overwrite(abs_start, abs_end, "");
                 } else if !options.keep_ts_types {
                     // force_js mode: reconstruct import keeping only specifiers
-                    // that have runtime usage (in script body or template)
+                    // that have runtime usage (in script body or template). The
+                    // body strip skips imports, so this reconstruct is the only
+                    // edit on the span — no nested-overwrite corruption.
                     let kept = filter_import_specifiers(
                         imp,
                         runtime_text.as_deref(),
@@ -143,17 +148,19 @@ pub fn process_script_setup<'alloc>(
                 }
             }
             ScriptItem::TypeDeclaration(td) => {
-                let abs_start = content_start + td.span.start;
-                let abs_end = content_start + td.span.end;
                 if options.keep_ts_types {
                     // Hoist to file top
+                    let abs_start = content_start + td.span.start;
+                    let abs_end = content_start + td.span.end;
                     let td_text = &ctx.source[abs_start as usize..abs_end as usize];
                     ctx.out.overwrite(abs_start, abs_end, "");
                     ctx.out.prepend_alloc(hoist_pos, &format!("{}\n", td_text));
-                } else {
-                    // Strip the type declaration
-                    ctx.out.overwrite(abs_start, abs_end, "");
                 }
+                // force_js: the whole-program body strip is the SINGLE owner of
+                // type-declaration removal — interfaces/type aliases are removed
+                // and enums lower to their runtime IIFE there. Blanking the same
+                // span here too would double-overwrite it and corrupt the
+                // CodeTransform (see the type-only-import note above).
             }
             ScriptItem::Macro(mac) => {
                 process_macro_item(
@@ -171,19 +178,29 @@ pub fn process_script_setup<'alloc>(
                 if let Some(arg_span) = &async_item.arg_span {
                     let abs_start = content_start + async_item.span.start;
                     let abs_arg_start = content_start + arg_span.start;
-                    let abs_end = content_start + async_item.span.end;
-                    let arg_text = &ctx.source[abs_arg_start as usize..abs_end as usize];
+                    let abs_arg_end = content_start + arg_span.end;
 
-                    // Replace `await <arg>` with a parenthesised comma-expression:
+                    // Wrap `await <arg>` in a parenthesised comma-expression:
                     // (([__temp,__restore] = _withAsyncContext(() => <arg>)),
                     //   __temp = await __temp, __restore(), __temp)
                     // The outer parens are critical — without them a `const x = ...`
                     // initializer would break at the first comma.
-                    let replacement = format!(
-                        "(([__temp,__restore] = _withAsyncContext(() => {})), __temp = await __temp, __restore(), __temp)",
-                        arg_text
+                    //
+                    // The argument region is left ORIGINAL (only the surrounding
+                    // wrapper is overwritten) so the force_js body strip removes
+                    // its TypeScript (e.g. `await load<Result>()` → the
+                    // `<Result>` type arg). Embedding a raw slice would place the
+                    // type args inside an Overwritten chunk the strip cannot
+                    // reach (nested-overwrite no-op).
+                    ctx.out.overwrite(
+                        abs_start,
+                        abs_arg_start,
+                        "(([__temp,__restore] = _withAsyncContext(() => ",
                     );
-                    ctx.out.overwrite(abs_start, abs_end, &replacement);
+                    ctx.out.prepend_alloc(
+                        abs_arg_end,
+                        ")), __temp = await __temp, __restore(), __temp)",
+                    );
                 }
             }
             _ => {}
@@ -688,15 +705,6 @@ fn is_identifier_used_in_text(ident: &str, text: &str) -> bool {
     false
 }
 
-/// Type-strip the setup `program` into a fresh JavaScript string, without
-/// re-parsing the content.
-fn strip_program_to_string(program: &Program, content_str: &str) -> String {
-    let alloc = Allocator::new();
-    let mut ct = CodeTransform::new(content_str, &alloc);
-    crate::strip_types::typescript::strip_typescript_types(program, &mut ct, 0, content_str);
-    ct.build_string()
-}
-
 /// Compute type-stripped script content with import lines blanked out.
 ///
 /// Used to determine which import specifiers have runtime references (appear in
@@ -704,21 +712,29 @@ fn strip_program_to_string(program: &Program, content_str: &str) -> String {
 /// Strips from the already-parsed setup `program` rather than re-parsing the
 /// content. The blanked string is a throwaway used only for identifier-presence
 /// scanning — it is never emitted, so it carries no source map.
+///
+/// Import ranges MUST be blanked on the original content *before* type stripping
+/// mutates lengths. Blanking after strip reuses original spans on a shorter
+/// string and overwrites the wrong body bytes (dropping real runtime uses of
+/// `ref` / similar, which then get elided as "type-only" and leave the setup
+/// body with unstripped TypeScript).
 fn compute_runtime_text(program: &Program, content_str: &str, items: &[ScriptItem]) -> String {
-    // Blank out import statement regions so specifier names in the import line
-    // itself don't cause false positives.
-    let mut result = strip_program_to_string(program, content_str);
+    let alloc = Allocator::new();
+    let mut ct = CodeTransform::new(content_str, &alloc);
+    // Blank import statement regions first (original spans, pre-length-shift)
+    // so specifier names on the import line itself don't false-positive.
     for item in items {
         if let ScriptItem::Import(imp) = item {
-            let start = imp.span.start as usize;
-            let end = imp.span.end as usize;
-            if end <= result.len() {
-                // Replace with spaces to preserve byte positions
-                result.replace_range(start..end, &" ".repeat(end - start));
+            let len = (imp.span.end - imp.span.start) as usize;
+            if len > 0 {
+                // Spaces preserve approximate layout for the throwaway scanner.
+                ct.overwrite(imp.span.start, imp.span.end, &" ".repeat(len));
             }
         }
     }
-    result
+    // Then strip TypeScript using the original program spans.
+    crate::strip_types::typescript::strip_typescript_types(program, &mut ct, 0, content_str);
+    ct.build_string()
 }
 
 /// Filter import specifiers, keeping only those with runtime usage.
@@ -733,14 +749,15 @@ fn filter_import_specifiers(
 ) -> Option<String> {
     let mut default_name: Option<&str> = None;
     let mut namespace_name: Option<&str> = None;
-    let mut named: Vec<&str> = Vec::new();
+    // Named: (imported_export_name, local_name, imported_is_string_literal)
+    let mut named: Vec<(&str, &str, bool)> = Vec::new();
 
     for b in &imp.bindings {
         if b.is_type_only {
             continue;
         }
 
-        // Check if specifier is used at runtime
+        // Check if specifier is used at runtime (local binding name)
         let is_runtime_used = is_specifier_runtime_used(b.name, runtime_text, template_used_vars);
 
         if !is_runtime_used {
@@ -750,7 +767,13 @@ fn filter_import_specifiers(
         match b.import_kind {
             Some(ImportSpecifierKind::Default) => default_name = Some(b.name),
             Some(ImportSpecifierKind::Namespace) => namespace_name = Some(b.name),
-            Some(ImportSpecifierKind::Named) | None => named.push(b.name),
+            Some(ImportSpecifierKind::Named) | None => {
+                // Preserve `import { FixedSizeList as ElFixedSizeList }` — using
+                // only the local name rewrites the export to `ElFixedSizeList`,
+                // which does not exist on the module (element-plus virtual-list).
+                let imported = b.imported.unwrap_or(b.name);
+                named.push((imported, b.name, b.imported_is_string_literal));
+            }
         }
     }
 
@@ -775,11 +798,21 @@ fn filter_import_specifiers(
         }
         if !named.is_empty() {
             s.push_str("{ ");
-            for (i, name) in named.iter().enumerate() {
+            for (i, (imported, local, is_str_lit)) in named.iter().enumerate() {
                 if i > 0 {
                     s.push_str(", ");
                 }
-                s.push_str(name);
+                if *is_str_lit {
+                    s.push('"');
+                    s.push_str(imported);
+                    s.push('"');
+                } else {
+                    s.push_str(imported);
+                }
+                if *imported != *local || *is_str_lit {
+                    s.push_str(" as ");
+                    s.push_str(local);
+                }
             }
             s.push_str(" }");
         }
@@ -878,15 +911,21 @@ fn collect_call_section<'a>(
         }
         "withDefaults" => {
             if let Some(arg) = call.arguments.get(1).and_then(|a| a.as_expression()) {
-                match arg {
-                    Expression::ObjectExpression(obj) => {
-                        for prop in &obj.properties {
-                            if let ObjectPropertyKind::ObjectProperty(p) = prop {
-                                strip_section(&p.value, content_str, alloc, sections);
-                            }
+                // Cache the FULL defaults expression stripped. The spread path
+                // (`{ ...Defaults, k: v }`) and the variable path both emit the
+                // whole second argument verbatim into `_mergeDefaults(base, …)`,
+                // and a spread object's own values (`make<number>(0)`) are
+                // TypeScript that would otherwise leak into the JS output.
+                strip_section(arg, content_str, alloc, sections);
+                // Also cache each object-literal property value individually —
+                // the resolved-type props path reads per-key defaults by their
+                // value span (object-literal, non-spread case).
+                if let Expression::ObjectExpression(obj) = arg {
+                    for prop in &obj.properties {
+                        if let ObjectPropertyKind::ObjectProperty(p) = prop {
+                            strip_section(&p.value, content_str, alloc, sections);
                         }
                     }
-                    other => strip_section(other, content_str, alloc, sections),
                 }
             }
         }

@@ -13,12 +13,31 @@ use rustc_hash::FxHashMap;
 use super::prepared::PreparedCompanion;
 use crate::template::code_gen::binding::BindingType;
 use crate::template::code_gen::types::CodeGenOutput;
+use crate::template::code_gen::vdom::props::needs_quoted_key;
 use crate::utils::oxc::script::type_surface::{
     format_runtime_types, format_runtime_types_with_default,
 };
 use crate::utils::oxc::vue::{ScriptItem, ScriptMacro};
 
 use super::ScriptContext;
+
+/// Emit a runtime props object key, quoting when the name is not a bare JS
+/// identifier (e.g. `onUpdate:visible`, `aria-label`). Unquoted colon keys
+/// are a parse error in the generated module (element-plus tooltip, etc.).
+fn push_runtime_prop_key(buf: &mut String, name: &str) {
+    if needs_quoted_key(name) {
+        buf.push('"');
+        for c in name.chars() {
+            if c == '\\' || c == '"' {
+                buf.push('\\');
+            }
+            buf.push(c);
+        }
+        buf.push('"');
+    } else {
+        buf.push_str(name);
+    }
+}
 
 /// Force-js-stripped text for a macro-argument expression, keyed by its
 /// content-local `(start, end)` span. Built once per setup parse (see
@@ -202,7 +221,7 @@ pub(super) fn process_macro_item<'a>(
                         // Build runtime prop definition
                         let type_str = format_runtime_types(&prop.types);
                         props_obj.push_str("    ");
-                        props_obj.push_str(name);
+                        push_runtime_prop_key(&mut props_obj, name);
                         props_obj.push_str(": { type: ");
                         props_obj.push_str(&type_str);
                         if !prop.optional {
@@ -394,7 +413,7 @@ pub(super) fn process_macro_item<'a>(
                         let type_str =
                             format_runtime_types_with_default(&prop.types, default_value.is_some());
                         props_obj.push_str("    ");
-                        props_obj.push_str(name);
+                        push_runtime_prop_key(&mut props_obj, name);
                         props_obj.push_str(": { type: ");
                         props_obj.push_str(&type_str);
 
@@ -434,7 +453,7 @@ pub(super) fn process_macro_item<'a>(
                                 .map(|vs| section_text(vs.start, vs.end, content_str, stripped))
                                 .unwrap_or("undefined");
                             props_obj.push_str("    ");
-                            props_obj.push_str(prop.name);
+                            push_runtime_prop_key(&mut props_obj, prop.name);
                             props_obj.push_str(": { default: ");
                             if prop.is_method {
                                 push_method_as_arrow(&mut props_obj, val);
@@ -504,7 +523,7 @@ pub(super) fn process_macro_item<'a>(
                                 .map(|vs| section_text(vs.start, vs.end, content_str, stripped))
                                 .unwrap_or("undefined");
                             props_obj.push_str("    ");
-                            props_obj.push_str(prop.name);
+                            push_runtime_prop_key(&mut props_obj, prop.name);
                             props_obj.push_str(": { default: ");
                             if prop.is_method {
                                 push_method_as_arrow(&mut props_obj, val);
