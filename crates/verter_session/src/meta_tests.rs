@@ -21553,13 +21553,6 @@ import Child from './Child.vue'
     );
 }
 
-// ── Fix 2: eval-path host cache reuse within single resolve_component_meta ──
-
-#[test]
-fn eval_path_reuses_cached_eval_inputs_within_single_resolve() {
-    // Test body removed — cached_eval_inputs no longer exists.
-}
-
 #[test]
 fn root_spread_with_cross_file_type_still_resolves_after_eval_caching() {
     // Regression test for Fix 3: when cached eval inputs are threaded through
@@ -21621,11 +21614,172 @@ defineProps<WidgetProps>()
     );
 }
 
-// ── Fix 4: full eval source set for utility heritage and fallthrough ─────────
+// ── Component-meta result caching roots BOTH the macro type dependency and
+//    the runtime root-spread dependency in the cached fact signature, and a
+//    content edit to EITHER dependency rejects the cached result as stale. ──
 
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn cached_eval_inputs_track_macro_and_runtime_dependencies() {
-    // Test body removed — cached_eval_inputs no longer exists.
+    use crate::resolver_core::FactVersionRef;
+    use crate::types::ProjectionMode;
+
+    let project = make_project();
+    // Macro type dependency: `defineProps<WidgetProps>` imported from types.ts.
+    project
+        .upsert_base(
+            "/src/types.ts",
+            "export interface WidgetProps { enabled: boolean }",
+        )
+        .unwrap();
+    // Runtime dependency: the root `v-bind` spread object from utils.ts.
+    project
+        .upsert_base(
+            "/src/utils.ts",
+            "export const rootAttrs = { id: 'root', onClick: () => {} }",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Widget.vue",
+            r#"<script setup lang="ts">
+import type { WidgetProps } from './types'
+import { rootAttrs } from './utils'
+defineProps<WidgetProps>()
+</script>
+<template><div v-bind="rootAttrs">content</div></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/Widget.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/src/types.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./utils".to_string(),
+                resolved_canonical_id: Some("/src/utils.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    // Cold compute populates the fact-only `cached_resolved_meta` sidecar and
+    // records its dependency fact signature.
+    let meta = get_meta(&project, "/src/Widget.vue");
+    assert!(
+        meta.props.iter().any(|p| p.name == "enabled"),
+        "fixture must publish the macro-declared `enabled` prop, got: {:?}",
+        meta.props
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !meta.accepted_props.iter().any(|p| p.name == "id"),
+        "the root spread key 'id' must be consumed from utils.ts, proving the \
+         runtime spread dependency was actually resolved at compute time"
+    );
+
+    let host = project.host();
+    // The cold compute must leave the sidecar warm.
+    assert!(
+        host.try_get_cached_resolved_meta("/src/Widget.vue", ProjectionMode::Expanded)
+            .is_some(),
+        "cold compute must leave the component-meta result sidecar warm"
+    );
+
+    // The cached fact signature must root BOTH dependencies.
+    let cached = {
+        let entry = host
+            .derived_raw_cache()
+            .get("/src/Widget.vue")
+            .expect("derived-raw entry must exist after a cold component-meta compute");
+        entry
+            .cached_resolved_meta
+            .iter()
+            .find(|((mode, _view_fp), _)| *mode == ProjectionMode::Expanded)
+            .map(|(_, cached)| cached.clone())
+            .expect("cached_resolved_meta must hold an Expanded slot after cold compute")
+    };
+    let roots_file = |canonical: &str| {
+        cached.fact_versions.iter().any(|fact| {
+            matches!(
+                fact,
+                FactVersionRef::FileWholeHash { canonical_id, .. }
+                    if canonical_id == canonical
+            )
+        })
+    };
+    assert!(
+        roots_file("/src/types.ts"),
+        "cached fact signature MUST root the macro type dependency \
+         /src/types.ts — got {:?}",
+        cached.fact_versions
+    );
+    assert!(
+        roots_file("/src/utils.ts"),
+        "cached fact signature MUST root the runtime root-spread dependency \
+         /src/utils.ts — got {:?}",
+        cached.fact_versions
+    );
+
+    // Mutating the MACRO dependency rejects the cached result as stale.
+    project
+        .upsert_base(
+            "/src/types.ts",
+            "export interface WidgetProps { enabled: boolean; extra: string }",
+        )
+        .unwrap();
+    assert!(
+        host.try_get_cached_resolved_meta("/src/Widget.vue", ProjectionMode::Expanded)
+            .is_none(),
+        "a content edit to the macro dependency /src/types.ts MUST reject the \
+         cached component-meta result — the rooted FileWholeHash fact no longer \
+         matches the live view"
+    );
+    // Recompute reflects the edit (a stale warm hit would return 1 prop).
+    let after_types = get_meta(&project, "/src/Widget.vue");
+    assert!(
+        after_types.props.iter().any(|p| p.name == "extra"),
+        "recompute after the macro-dep edit must surface the new `extra` prop, \
+         got: {:?}",
+        after_types
+            .props
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // Mutating the RUNTIME dependency likewise rejects the cached result.
+    project
+        .upsert_base(
+            "/src/utils.ts",
+            "export const rootAttrs = { title: 'root' }",
+        )
+        .unwrap();
+    assert!(
+        host.try_get_cached_resolved_meta("/src/Widget.vue", ProjectionMode::Expanded)
+            .is_none(),
+        "a content edit to the runtime root-spread dependency /src/utils.ts MUST \
+         reject the cached component-meta result"
+    );
+    // Recompute reflects the new spread: 'id' is no longer consumed and now
+    // surfaces as an inherited intrinsic attr on the accepted surface.
+    let after_utils = get_meta(&project, "/src/Widget.vue");
+    assert!(
+        after_utils.accepted_props.iter().any(|p| p.name == "id"),
+        "after the runtime-dep edit removed 'id' from the spread, 'id' must no \
+         longer be consumed and must reappear on the accepted surface, got: {:?}",
+        after_utils
+            .accepted_props
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -25915,7 +26069,7 @@ defineEmits<SharedEmits>()
 ///
 /// | Retired oracle case | Surviving cover |
 /// |---|---|
-/// | `component_meta_payload_cross_file_props` | `getcomponentmeta_decomposes_through_dispatch_primitives` (`tests/cases/g_misc2/phase5_decomposition_tests.rs` — cross-file member PRIMITIVE types + emits) jointly with `dispatch_macro_surface_matches_former_expander_output_on_real_fixture` (this file — member set + authored OPTIONALITY + emit set) |
+/// | `component_meta_payload_cross_file_props` | `getcomponentmeta_decomposes_through_dispatch_primitives` (`tests/cases/g_misc2/per_macro_projector_decomposition_tests.rs` — cross-file member PRIMITIVE types + emits) jointly with `dispatch_macro_surface_matches_former_expander_output_on_real_fixture` (this file — member set + authored OPTIONALITY + emit set) |
 /// | `fallthrough_single_native_root` | `single_native_root_inherits_intrinsic_surface` (this file — accepted declared prop + `FallthroughSurface::Branches` off a single native root) |
 /// | `macro_own_body_provenance_intersection` | `cross_file_omit_then_reintroduce_own_body_members_carry_declared_true` (`tests/cases/g_misc2/r21_c5_cross_file_provenance.rs` — the own-body arm publishes `declared_in_macro_type_arg == true` while the imported-reached member publishes `false`) |
 /// | `heritage_shadowing_own_body_wins` | `interface_heritage_duplicate_shadows` (`src/typeinfo/typeinfo_tests/shallow_surface_facts.rs` — own-body `dup: string` shadows the inherited `dup: number`, never an intersection; non-colliding inherited members survive) |
