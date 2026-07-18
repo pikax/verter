@@ -15950,7 +15950,9 @@ export { type Foo as Baz }
 #[test]
 fn force_js_local_empty_interface_extends_external_expands_props() {
     use rustc_hash::FxHashMap;
-    use verter_parser::utils::oxc::script::type_surface::{resolve_external_type, ResolvedElements};
+    use verter_parser::utils::oxc::script::type_surface::{
+        resolve_external_type, ResolvedElements,
+    };
 
     let alloc = Allocator::new();
     let base_src = r#"
@@ -15995,10 +15997,22 @@ const props = withDefaults(defineProps<SeparatorProps>(), {
     let result = compile(source, &options, &verter_opts, &alloc);
     let script = result.script.as_ref().expect("script");
     let code = &script.code;
-    assert!(code.contains("asChild"), "must emit asChild heritage prop: {code}");
-    assert!(code.contains("orientation"), "must emit orientation: {code}");
+    assert!(
+        code.contains("asChild"),
+        "must emit asChild heritage prop: {code}"
+    );
+    assert!(
+        code.contains("orientation"),
+        "must emit orientation: {code}"
+    );
     assert!(code.contains("decorative"), "must emit decorative: {code}");
-    assert!(!code.contains("interface SeparatorProps"), "interface must go: {code}");
+    assert!(
+        !code.contains("interface SeparatorProps"),
+        "interface must go: {code}"
+    );
     assert!(!code.contains("import type"), "import type must go: {code}");
-    assert!(!code.contains("defineProps<"), "defineProps type arg must go: {code}");
+    assert!(
+        !code.contains("defineProps<"),
+        "defineProps type arg must go: {code}"
+    );
 }
