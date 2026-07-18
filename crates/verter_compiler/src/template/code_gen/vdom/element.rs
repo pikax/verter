@@ -416,6 +416,64 @@ fn contains_assignment_operator(s: &str) -> bool {
 /// to simple identifier resolution.
 ///
 /// Decodes HTML entities in the expression value first (e.g., `&quot;` → `"`),
+/// Extract and resolve the `v-memo="[deps]"` dependency expression on an
+/// element, returning the resolved deps array text (e.g. `[$setup.x]`).
+///
+/// Returns `None` when the element has no `v-memo` directive with a value.
+/// Identifiers inside the array are resolved through the binding resolver, so
+/// the emitted deps carry the correct `$setup.` / `$props.` / `_ctx.` prefixes.
+pub(crate) fn resolve_v_memo_deps<'a>(
+    el: &ElementNode,
+    source: &str,
+    oxc_el: Option<&OxcParsedElement<'a>>,
+    resolver: &BindingResolver<'a>,
+    force_js: bool,
+) -> Option<String> {
+    for (i, prop) in el.props.iter().enumerate() {
+        if !prop.is_directive {
+            continue;
+        }
+        if &source[prop.start as usize..prop.name_end as usize] != "v-memo" {
+            continue;
+        }
+        let (vs, ve) = (prop.value_start?, prop.value_end?);
+        let value = &source[vs as usize..ve as usize];
+        let oxc_exp = find_prop_oxc_exp(oxc_el, i);
+        return Some(resolve_expr(value, vs, oxc_exp, resolver, force_js));
+    }
+    None
+}
+
+/// Resolve the `:key` / `v-bind:key` expression of a `v-for` item, used by
+/// v-memo's per-item `_cached.key === KEY` short-circuit. Returns `None` when
+/// the element has no keyed binding.
+pub(crate) fn resolve_v_for_key<'a>(
+    el: &ElementNode,
+    source: &str,
+    oxc_el: Option<&OxcParsedElement<'a>>,
+    resolver: &BindingResolver<'a>,
+    force_js: bool,
+) -> Option<String> {
+    for (i, prop) in el.props.iter().enumerate() {
+        if !prop.is_directive {
+            continue;
+        }
+        if let (Some(as_), Some(ae), Some(vs), Some(ve)) = (
+            prop.arg_start,
+            prop.arg_end,
+            prop.value_start,
+            prop.value_end,
+        ) {
+            if &source[as_ as usize..ae as usize] == "key" {
+                let value = &source[vs as usize..ve as usize];
+                let oxc_exp = find_prop_oxc_exp(oxc_el, i);
+                return Some(resolve_expr(value, vs, oxc_exp, resolver, force_js));
+            }
+        }
+    }
+    None
+}
+
 /// since template attribute values may contain HTML-encoded characters from
 /// preprocessor plugins (markdown, docs blocks, etc.).
 pub(crate) fn resolve_expr(
@@ -1985,6 +2043,40 @@ pub(crate) fn emit_with_directives_close<'alloc>(
     buf.push_str("])");
 }
 
+/// Inject a synthetic vnode `key: N` as the FIRST property of a props object
+/// already written into `buf` starting at byte `props_start`.
+///
+/// Official Vue injects the `v-if`/`v-else` branch key ahead of user props.
+/// Handles a plain `{ … }` object (including the empty `{  }` case) and a
+/// `_mergeProps(…)` wrapper (the key becomes the first merge argument, matching
+/// `_mergeProps({ key: 0 }, _ctx.spread)`).
+///
+/// Operates on the pre-`CodeTransform` assembly buffer, so string edits here do
+/// not desync any source map.
+pub(crate) fn inject_branch_key(buf: &mut String, props_start: usize, key: u32) {
+    let obj = &buf[props_start..];
+    let is_merge = obj.starts_with("_mergeProps(");
+    let has_leading_space = obj.starts_with("{ ");
+    let inner_empty = obj
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .trim()
+        .is_empty();
+    let key_prop = format!("key: {key}");
+
+    if is_merge {
+        let ins = props_start + "_mergeProps(".len();
+        buf.insert_str(ins, &format!("{{ {key_prop} }}, "));
+    } else if inner_empty {
+        buf.truncate(props_start);
+        buf.push_str(&format!("{{ {key_prop} }}"));
+    } else if has_leading_space {
+        buf.insert_str(props_start + 2, &format!("{key_prop}, "));
+    } else {
+        buf.insert_str(props_start + 1, &format!(" {key_prop}, "));
+    }
+}
+
 /// Process the leave phase of a VDOM element node.
 ///
 /// 1. Resolves whitespace in children
@@ -1995,6 +2087,10 @@ pub(crate) fn emit_with_directives_close<'alloc>(
 /// `is_block_root` indicates this element is at a block-tree root position
 /// (template single root, v-if branch, or v-for item). Block roots use
 /// `_createElementBlock`/`_createBlock` and get `(_openBlock(), ...)` wrapping.
+///
+/// `injected_key` is the synthetic `v-if` branch key (`Some(n)` on a
+/// conditional-branch root without an explicit `:key`), injected ahead of user
+/// props so ternary arms patch as distinct nodes.
 #[allow(clippy::too_many_arguments)]
 pub fn process_element_leave<'alloc>(
     element: &ElementNode,
@@ -2008,6 +2104,8 @@ pub fn process_element_leave<'alloc>(
     v_for_prefix: Option<&str>,
     ast: &TemplateAst,
     is_block_root: bool,
+    force_open_block: bool,
+    injected_key: Option<u32>,
     mut hoisted_constants: Option<&mut Vec<String>>,
     cache_index: Option<usize>,
     resolved_components: Option<&mut Vec<(String, String)>>,
@@ -2034,6 +2132,12 @@ pub fn process_element_leave<'alloc>(
         .unwrap_or(ExpressionFlag::empty());
     let mut patch_flag =
         props::compute_patch_flags(element.prop_flag, expr_flag, element.children_mode);
+
+    // KeepAlive carries DYNAMIC_SLOTS (1024) in official Vue output so the
+    // runtime force-updates its cached slot content.
+    if helpers::is_keep_alive(tag_name) {
+        patch_flag |= helpers::PATCH_DYNAMIC_SLOTS;
+    }
 
     // Cached static elements use -1 (CACHED) patch flag, bypassing all diffing.
     // `cache_index` = individual element caching (adds wrapper + flag).
@@ -2106,8 +2210,10 @@ pub fn process_element_leave<'alloc>(
     // Block root elements (v-for items, v-if branches) need their own block scope
     // so that dynamic children are tracked in dynamicChildren and patched correctly.
     // Template root: wrapping is handled by leave_template, not here.
-    let needs_block_wrapper =
-        is_block_root && (element.v_for.is_some() || element.v_condition.is_some());
+    // `force_open_block` covers built-ins (Teleport/KeepAlive) that must open a
+    // block at any nesting even without a structural directive.
+    let needs_block_wrapper = force_open_block
+        || (is_block_root && (element.v_for.is_some() || element.v_condition.is_some()));
     if needs_block_wrapper {
         buf.push_str("(_openBlock(), ");
         out.add_vdom_import(VdomHelper::OpenBlock);
@@ -2169,6 +2275,7 @@ pub fn process_element_leave<'alloc>(
         // - not already cached (redundant)
         let can_hoist_props = options.hoist_static
             && !has_cached_patchflag
+            && injected_key.is_none()
             && !element.tag_type.is_component()
             && props_result.dynamic_props.is_empty()
             && !props_result.has_vnode_key
@@ -2194,6 +2301,10 @@ pub fn process_element_leave<'alloc>(
                     buf.push_str(&format!("_hoisted_{idx}"));
                 }
             }
+        } else if let Some(k) = injected_key {
+            // v-if branch root with user props: inject `key: N` as the first
+            // property. Hoisting is disabled above for this element.
+            inject_branch_key(buf, props_start, k);
         }
         if props_result.uses_merge {
             out.add_vdom_import(VdomHelper::MergeProps);
@@ -2224,6 +2335,13 @@ pub fn process_element_leave<'alloc>(
             props_result.native_vmodel,
             props_result.directive_entries,
         )
+    } else if let Some(k) = injected_key {
+        // v-if branch root with no user props: the branch key IS the props
+        // object — `_createElementBlock("p", { key: 0 }, …)`.
+        buf.push_str(", { key: ");
+        buf.push_str(&k.to_string());
+        buf.push_str(" }");
+        (Vec::new(), None, Vec::new())
     } else {
         if has_children || patch_flag != 0 {
             // Need null placeholder for props when there are children or patch flags

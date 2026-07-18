@@ -136,6 +136,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         el: &ElementNode,
         source: &'alloc str,
         out: &mut CodeGenOutput<'alloc>,
+        injected_key: Option<u32>,
     ) {
         let el_children = el
             .content
@@ -161,7 +162,17 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         if let Some((v_for_prefix, _iterable_src)) = self.v_for_prefixes.pop().flatten() {
             prefix.push_str(&v_for_prefix);
         }
-        prefix.push_str("(_openBlock(), _createElementBlock(_Fragment, null, [\n");
+        // `<template v-if>` branch identity: official Vue injects `{ key: N }` on
+        // the Fragment so it patches distinctly against sibling ternary arms.
+        // (When v-for also applies, the key rides the outer `_renderList`
+        // Fragment built in enter_element, so `injected_key` is `None` here.)
+        if let Some(k) = injected_key {
+            prefix.push_str("(_openBlock(), _createElementBlock(_Fragment, { key: ");
+            prefix.push_str(&k.to_string());
+            prefix.push_str(" }, [\n");
+        } else {
+            prefix.push_str("(_openBlock(), _createElementBlock(_Fragment, null, [\n");
+        }
         out.overwrite(el.tag_open.start, el.tag_open.end, &prefix);
 
         // Add child separators for array mode

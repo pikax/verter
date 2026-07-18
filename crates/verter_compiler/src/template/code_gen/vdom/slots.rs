@@ -508,6 +508,8 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         source: &'alloc str,
         out: &mut CodeGenOutput<'alloc>,
         is_block_root: bool,
+        force_open_block: bool,
+        injected_key: Option<u32>,
     ) {
         // Check for <component :is="expr"> -> _resolveDynamicComponent
         let dynamic_is = component::resolve_dynamic_component(
@@ -611,7 +613,8 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         }
 
         // Block root wrapping for v-for/v-if
-        let needs_block_wrapper = is_block_root && (el.v_for.is_some() || el.v_condition.is_some());
+        let needs_block_wrapper =
+            force_open_block || (is_block_root && (el.v_for.is_some() || el.v_condition.is_some()));
         if needs_block_wrapper {
             buf.push_str("(_openBlock(), ");
             out.add_vdom_import(VdomHelper::OpenBlock);
@@ -627,6 +630,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         let (dynamic_props, uses_full_props_spread, native_vmodel, directive_entries) = if has_props
         {
             props_buf.push_str(", ");
+            let props_start = props_buf.len();
             let props_result = element::build_props_object_into(
                 &mut props_buf,
                 el,
@@ -636,6 +640,11 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                 skip_prop,
                 self.options.force_js,
             );
+            // v-if branch root (component) with user props: inject `key: N` as
+            // the first property (unless the user authored an explicit :key).
+            if let Some(k) = injected_key {
+                element::inject_branch_key(&mut props_buf, props_start, k);
+            }
             if props_result.uses_merge {
                 out.add_vdom_import(VdomHelper::MergeProps);
             }
@@ -668,6 +677,13 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                 props_result.native_vmodel,
                 props_result.directive_entries,
             )
+        } else if let Some(k) = injected_key {
+            // v-if branch root (component) with no user props: the branch key is
+            // the props object.
+            props_buf.push_str(", { key: ");
+            props_buf.push_str(&k.to_string());
+            props_buf.push_str(" }");
+            (Vec::new(), false, None, Vec::new())
         } else {
             if has_children {
                 props_buf.push_str(", null");
@@ -1069,6 +1085,8 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         source: &'alloc str,
         out: &mut CodeGenOutput<'alloc>,
         is_block_root: bool,
+        force_open_block: bool,
+        injected_key: Option<u32>,
     ) {
         // Check for <component :is="expr"> -> _resolveDynamicComponent
         let dynamic_is = component::resolve_dynamic_component(
@@ -1124,7 +1142,8 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         }
 
         // Block root wrapping for v-for/v-if
-        let needs_block_wrapper = is_block_root && (el.v_for.is_some() || el.v_condition.is_some());
+        let needs_block_wrapper =
+            force_open_block || (is_block_root && (el.v_for.is_some() || el.v_condition.is_some()));
         if needs_block_wrapper {
             buf.push_str("(_openBlock(), ");
             out.add_vdom_import(VdomHelper::OpenBlock);
@@ -1134,6 +1153,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         let (dynamic_props, uses_full_props_spread, native_vmodel, directive_entries) = if has_props
         {
             props_buf.push_str(", ");
+            let props_start = props_buf.len();
             let props_result = element::build_props_object_into(
                 &mut props_buf,
                 el,
@@ -1143,6 +1163,11 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                 skip_prop,
                 self.options.force_js,
             );
+            // v-if branch root (component) with user props: inject `key: N` as
+            // the first property (unless the user authored an explicit :key).
+            if let Some(k) = injected_key {
+                element::inject_branch_key(&mut props_buf, props_start, k);
+            }
             if props_result.uses_merge {
                 out.add_vdom_import(VdomHelper::MergeProps);
             }
@@ -1175,6 +1200,13 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                 props_result.native_vmodel,
                 props_result.directive_entries,
             )
+        } else if let Some(k) = injected_key {
+            // v-if branch root (component) with no user props: the branch key is
+            // the props object.
+            props_buf.push_str(", { key: ");
+            props_buf.push_str(&k.to_string());
+            props_buf.push_str(" }");
+            (Vec::new(), false, None, Vec::new())
         } else {
             if has_children {
                 props_buf.push_str(", null");

@@ -3368,6 +3368,41 @@ const tag = ref('div')
 }
 
 #[test]
+fn component_is_valueless_shorthand_resolves_dynamic() {
+    // Vue 3.4 same-name shorthand: `<component :is />` == `<component :is="is" />`.
+    // Must resolve via _resolveDynamicComponent(<is binding>), NOT degrade into an
+    // ordinary component literally named "component" carrying `is` as a prop.
+    let code = compile_and_validate_template(
+        r#"<script setup>
+const is = 'div'
+</script>
+<template>
+  <component :is />
+</template>"#,
+    );
+    assert!(
+        code.contains("_resolveDynamicComponent($setup.is)")
+            || code.contains("_resolveDynamicComponent(_ctx.is)"),
+        "value-less :is must resolve the same-name shorthand binding via _resolveDynamicComponent.\nOutput:\n{}",
+        code
+    );
+    // NEGATIVE: must NOT become an ordinary component named "component".
+    assert!(
+        !code.contains("_resolveComponent(\"component\")"),
+        "value-less :is must NOT degrade into ordinary component \"component\".\nOutput:\n{}",
+        code
+    );
+    // NEGATIVE: `is` must NOT leak into the props object or dynamicProps array.
+    assert!(
+        !code.contains("[\"is\"]")
+            && !code.contains("is: $setup.is")
+            && !code.contains("is:$setup.is"),
+        ":is must be consumed by dynamic-component resolution, not emitted as a prop.\nOutput:\n{}",
+        code
+    );
+}
+
+#[test]
 fn component_is_self_closing_with_props() {
     // <component :is> with extra props but no children
     let code = compile_and_validate_template(
@@ -9730,6 +9765,67 @@ import Comp from './Comp.vue'
         code.contains("_KeepAlive"),
         "KeepAlive must be imported and used as _KeepAlive, got:\n{}",
         code
+    );
+}
+
+/// F17: a NESTED `<Teleport>` must force block topology `(_openBlock(),
+/// _createBlock(_Teleport, …, [array]))` at any depth, with RAW array children
+/// — never a plain `_createVNode` and never a component slot object.
+#[test]
+fn teleport_nested_forces_block_and_array_children() {
+    let code = compile_and_validate_template(
+        r#"<template><div><Teleport to="body"><span>x</span></Teleport></div></template>"#,
+    );
+    assert!(
+        code.contains("_createBlock(_Teleport"),
+        "nested Teleport must use _createBlock (block topology).\n{code}"
+    );
+    assert!(
+        code.contains("(_openBlock(), _createBlock(_Teleport"),
+        "nested Teleport must open its own block.\n{code}"
+    );
+    // NEGATIVE: never a non-block _createVNode.
+    assert!(
+        !code.contains("_createVNode(_Teleport"),
+        "nested Teleport must NOT be a non-block _createVNode.\n{code}"
+    );
+    // Raw array children, NOT a component slot object.
+    assert!(
+        !code.contains("default: _withCtx") && !code.contains("{default:"),
+        "Teleport children must be a raw VNode array, not a slot object.\n{code}"
+    );
+    assert!(
+        code.contains("}, ["),
+        "Teleport children must open as an array literal after props.\n{code}"
+    );
+}
+
+/// F17: a NESTED `<KeepAlive>` must force block topology, raw array children,
+/// and carry the `1024 /* DYNAMIC_SLOTS */` patch flag (official Vue).
+#[test]
+fn keepalive_nested_forces_block_array_and_dynamic_slots() {
+    let code = compile_and_validate_template(
+        r#"<script setup>
+import Comp from './Comp.vue'
+</script>
+<template><div><KeepAlive><Comp/></KeepAlive></div></template>"#,
+    );
+    assert!(
+        code.contains("(_openBlock(), _createBlock(_KeepAlive"),
+        "nested KeepAlive must force block topology.\n{code}"
+    );
+    assert!(
+        code.contains("1024 /* DYNAMIC_SLOTS */"),
+        "KeepAlive must carry the DYNAMIC_SLOTS (1024) patch flag.\n{code}"
+    );
+    // NEGATIVE: never a non-block _createVNode, never a slot object.
+    assert!(
+        !code.contains("_createVNode(_KeepAlive"),
+        "nested KeepAlive must NOT be a non-block _createVNode.\n{code}"
+    );
+    assert!(
+        !code.contains("default: _withCtx") && !code.contains("{default:"),
+        "KeepAlive children must be a raw VNode array, not a slot object.\n{code}"
     );
 }
 
