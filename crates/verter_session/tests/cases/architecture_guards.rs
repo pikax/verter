@@ -14701,6 +14701,54 @@ mod typed_ir_resolver_guards {
     }
 
     // -----------------------------------------------------------------------
+    // Guard 4b: display-text payload-form sniffing inside the typeinfo
+    // pipeline. `starts_with('[')` on a rendered type display decided
+    // Tuple-vs-Call emit payload form in
+    // `typeinfo/framework_surface/vue_exec/imported_elements.rs` — the
+    // exact "shape sniffing on display text" class Typed-IR-Only
+    // forbids, and one the `Pick<`-prefix needles above were too narrow
+    // to catch. Payload-form classification must come from
+    // `SemanticNodeData` / `TypeExpr` node shape; display strings are
+    // minted FROM typed values for output only.
+    // -----------------------------------------------------------------------
+    const TYPEINFO_DISPLAY_SNIFF_ALLOWLIST: &[(&str, u32, &str)] = &[];
+
+    fn scan_typeinfo_display_sniff() -> Vec<(String, u32, String)> {
+        let needles: &[&str] = &[r#"starts_with('[')"#, r#"starts_with("[")"#];
+        let files = collect_production_rs_files();
+        let mut out: Vec<(String, u32, String)> = Vec::new();
+        for (path, rel) in &files {
+            if !rel.starts_with("crates/verter_session/src/typeinfo/") {
+                continue;
+            }
+            let src = match fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let stripped = preprocess(&src);
+            for (idx, line) in stripped.split('\n').enumerate() {
+                let line_no = (idx + 1) as u32;
+                for needle in needles {
+                    if line.contains(needle) {
+                        out.push((rel.clone(), line_no, (*needle).to_string()));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn no_display_text_payload_sniff_in_typeinfo() {
+        let actual = scan_typeinfo_display_sniff();
+        assert_exact_allowlist_match(
+            "no_display_text_payload_sniff_in_typeinfo",
+            &actual,
+            TYPEINFO_DISPLAY_SNIFF_ALLOWLIST,
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Guard 5: role inference from identifier name suffix.
     // `name.ends_with("Props" | "Emits" | "Events" | "Slots" | "Model")`
     // (and `*_name` / `identifier` / `*_identifier` / `ident` /

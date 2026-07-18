@@ -230,18 +230,41 @@ pub(crate) fn imported_emits_resolved_elements(
                 ));
             }
         } else if is_indexed_access {
-            // Named-tuple emit via indexed access: keep the event name, payload
-            // degrades when the hop is not yet a concrete tuple.
-            let signature = match type_text.as_deref() {
-                Some(tt) if tt.trim_start().starts_with('[') => ResolvedCallPayloadForm::Tuple {
-                    tuple_text: tt.to_string(),
-                },
-                Some(tt) => ResolvedCallPayloadForm::Call {
-                    params_text: format!("payload: {tt}"),
-                },
-                None => ResolvedCallPayloadForm::Call {
-                    params_text: "...args: unknown[]".to_string(),
-                },
+            // Named-tuple emit via indexed access: keep the event name. The
+            // payload FORM (Tuple vs Call) is a TYPED-IR decision:
+            // materialize the navigated hop and match on the node shape —
+            // never on rendered display text (Typed-IR-Only). Display
+            // strings are minted FROM the typed value for output only.
+            // Payload degrades when the hop is not yet a concrete tuple.
+            let cap = TypeinfoVueSurfaceOutputCap::new(&dispatch);
+            let materialized = cap
+                .materialize_output_type_expr(navigated)
+                .map(|r| r.into_type_expr(&cap));
+            let degraded = || ResolvedCallPayloadForm::Call {
+                params_text: "...args: unknown[]".to_string(),
+            };
+            let signature = match materialized {
+                Some(expr @ TypeExpr::Tuple { .. }) => {
+                    // Render the TUPLE value itself (bracketed form); the
+                    // raised member display is not tuple-shaped here or the
+                    // earlier tuple branch would have taken it.
+                    match render_type_expr_display(&expr) {
+                        Some(tuple_text) => ResolvedCallPayloadForm::Tuple { tuple_text },
+                        None => degraded(),
+                    }
+                }
+                Some(expr) => {
+                    match type_text
+                        .clone()
+                        .or_else(|| render_type_expr_display(&expr))
+                    {
+                        Some(tt) => ResolvedCallPayloadForm::Call {
+                            params_text: format!("payload: {tt}"),
+                        },
+                        None => degraded(),
+                    }
+                }
+                None => degraded(),
             };
             call_signatures.push(named_signature_row(member.name.as_ref(), signature));
         }
