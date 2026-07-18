@@ -5281,6 +5281,647 @@ async fn contract_kebab_prop_references_include_child_declaration() {
 }
 
 // =========================================================================
+// Svelte template-attribute navigation: TypeProvider + source-map path
+// =========================================================================
+//
+// Svelte markup tokens resolve through the carrier IDE projection
+// (`.svelte.tsx` / `.svelte.jsx`): the mock provider stands in for tsgo,
+// seeded at the exact tsx offset the request computes, and the assertion
+// proves the round trip maps range-exactly back onto the authored `.svelte`
+// span. Tokens the projector strips or synthesizes (component `on:` event
+// names, valued `class:`/`style:` names, the `bind:this` keyword) carry no
+// resolvable symbol — native resolution must not fabricate a target and the
+// provider has no declaration for them: fail closed, no link.
+
+/// Seed the mock provider so a definition query at the `query` needle maps to
+/// the SAME-FILE authored `target` span, then assert goto_definition returns
+/// that span range-exactly. Both the query and target tsx offsets are computed
+/// through the pinned carrier mapper, so the test proves routing + round-trip
+/// mapping integrity (the real tsgo answer shape is covered by the
+// real-provider carrier suites).
+async fn assert_svelte_same_file_definition(
+    server: &VerterLanguageServer,
+    provider: &MockTypeProvider,
+    uri: &Uri,
+    query: (&str, usize),
+    target: &str,
+) {
+    let position = find_document_position(server, uri, query.0, query.1);
+    let ctx = synced_type_provider_context(server, uri);
+    let query_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .unwrap_or_else(|| {
+        let content = server
+            .documents
+            .provider_surfaces()
+            .current_snapshot(&ctx.tsx_path)
+            .map(|s| s.provider_content.clone())
+            .unwrap_or_default();
+        panic!("query token must stay mapped into the IDE surface\n{content}")
+    });
+    let target_range = range_for_authored_snippet(server, uri, target);
+    let target_start = merge::carrier_position_to_tsx_offset_validated(
+        &target_range.start,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("target token must stay mapped into the IDE surface");
+    provider.set_definitions(
+        &ctx.tsx_path,
+        query_offset,
+        vec![TypeLocation {
+            path: ctx.tsx_path.clone(),
+            start: target_start,
+            end: target_start + target.len() as u32,
+        }],
+    );
+
+    let response = server
+        .goto_definition(goto_definition_params(uri, position))
+        .await
+        .expect("goto definition should succeed")
+        .expect("a mapped svelte token should resolve");
+    let locations = definition_locations(response);
+    let hit = locations
+        .iter()
+        .find(|loc| loc.uri == *uri)
+        .unwrap_or_else(|| panic!("definition should stay in the same file: {locations:?}"));
+    assert_eq!(
+        hit.range, target_range,
+        "definition must land range-exact on the authored `{target}`"
+    );
+}
+
+/// Seed the mock provider so a definition query at the `query` needle in the
+/// parent answers with the child's IDE surface at the mapped prop token (the
+/// shape a real tsgo returns — the definition merge maps `.verter.ts` API
+/// locations fail-closed by design, foreign IDE surfaces through the pinned
+/// generation), then assert goto_definition maps range-exactly onto the
+/// authored child prop declaration in the `.svelte` source.
+async fn assert_svelte_child_prop_definition(
+    server: &VerterLanguageServer,
+    provider: &MockTypeProvider,
+    workspace_id: &str,
+    app_uri: &Uri,
+    query: (&str, usize),
+    child_rel_path: &str,
+    child_target: &str,
+) {
+    let position = find_document_position(server, app_uri, query.0, query.1);
+    let child_uri = workspace_uri(workspace_id, child_rel_path);
+    // Sync BOTH IDE surfaces through the test seam (the same surfaces the
+    // request pins): the parent's for the query offset, the child's for the
+    // foreign-surface target token.
+    server.sync_ide_to_provider(app_uri).await;
+    server.sync_ide_to_provider(&child_uri).await;
+    let ctx = synced_type_provider_context(server, app_uri);
+    let query_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("query token must stay mapped into the IDE surface");
+    let child_ide_path = server
+        .active_ide_path_for_uri(&child_uri)
+        .expect("child IDE path is live");
+    let child_snapshot = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&child_ide_path)
+        .expect("child CarrierIde surface recorded");
+    let child_target_range = range_for_authored_snippet(server, &child_uri, child_target);
+    let child_ctx = synced_type_provider_context(server, &child_uri);
+    let child_target_start = merge::carrier_position_to_tsx_offset_validated(
+        &child_target_range.start,
+        &child_ctx.carrier_line_index,
+        &child_ctx.mapper,
+        &child_ctx.tsx_line_index,
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "child target `{child_target}` must stay mapped into the child IDE surface:\n{}",
+            child_snapshot.provider_content
+        )
+    });
+    provider.set_definitions(
+        &ctx.tsx_path,
+        query_offset,
+        vec![TypeLocation {
+            path: child_ide_path.clone(),
+            start: child_target_start,
+            end: child_target_start + child_target.len() as u32,
+        }],
+    );
+
+    let response = server
+        .goto_definition(goto_definition_params(app_uri, position))
+        .await
+        .expect("goto definition should succeed")
+        .expect("a mapped svelte component prop should resolve");
+    let locations = definition_locations(response);
+    let hit = locations
+        .iter()
+        .find(|loc| loc.uri == child_uri)
+        .unwrap_or_else(|| panic!("definition should point to the child: {locations:?}"));
+    assert_eq!(
+        hit.range, child_target_range,
+        "definition must land range-exact on the authored child `{child_target}`"
+    );
+}
+
+/// A stripped/synthesized svelte token has no symbol a provider could resolve:
+/// native resolution must not fabricate a target (the Vue file-start-fallback
+/// class of bug) and the provider (unseeded mock) answers nothing, so
+/// goto_definition fails closed — no link, no mis-mapped affordance.
+async fn assert_svelte_token_fails_closed(
+    server: &VerterLanguageServer,
+    uri: &Uri,
+    query: (&str, usize),
+) {
+    let position = find_document_position(server, uri, query.0, query.1);
+    // Force the provider context to exist (the request path builds it anyway);
+    // nothing is seeded, so any answer is a native fabrication.
+    let _ctx = synced_type_provider_context(server, uri);
+    let response = server
+        .goto_definition(goto_definition_params(uri, position))
+        .await
+        .expect("goto definition should succeed");
+    assert!(
+        response.is_none(),
+        "an unmapped/synthetic token must fail closed with no link, got {response:?}"
+    );
+}
+
+async fn make_svelte_definition_server(
+    files: &[(&str, &str)],
+) -> (
+    tempfile::TempDir,
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    tokio::task::JoinHandle<()>,
+    Arc<MockTypeProvider>,
+    String,
+) {
+    let owned: Vec<(&str, &str, &str)> = files
+        .iter()
+        .map(|(path, source)| (*path, "svelte", *source))
+        .collect();
+    make_definition_test_server(&owned).await
+}
+
+const SVELTE_TS_SNIPPET_SOURCE: &str = "<script lang=\"ts\">\n  let item = 'x';\n</script>\n{#snippet rowSnippet(thing: string)}\n  <li>{thing}</li>\n{/snippet}\n<ul>{@render rowSnippet(item)}</ul>\n";
+const SVELTE_JS_SNIPPET_SOURCE: &str = "<script>\n  let item = 'x';\n</script>\n{#snippet rowSnippet(thing)}\n  <li>{thing}</li>\n{/snippet}\n<ul>{@render rowSnippet(item)}</ul>\n";
+
+#[tokio::test]
+async fn svelte_render_call_name_navigates_to_snippet_name_range_exact() {
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_svelte_definition_server(&[("src/App.svelte", SVELTE_TS_SNIPPET_SOURCE)]).await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_same_file_definition(
+        service.inner(),
+        &provider,
+        &app_uri,
+        ("@render rowSnippet", 8),
+        "rowSnippet",
+    )
+    .await;
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_js_render_call_name_navigates_to_snippet_name_range_exact() {
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_svelte_definition_server(&[("src/App.svelte", SVELTE_JS_SNIPPET_SOURCE)]).await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_same_file_definition(
+        service.inner(),
+        &provider,
+        &app_uri,
+        ("@render rowSnippet", 8),
+        "rowSnippet",
+    )
+    .await;
+    drain_handle.abort();
+    drop(service);
+}
+
+const SVELTE_TS_ON_SOURCE: &str = "<script lang=\"ts\">\n  function handlePick(e: MouseEvent) { void e }\n</script>\n<button on:click={handlePick}>x</button>\n";
+const SVELTE_JS_ON_SOURCE: &str = "<script>\n  function handlePick(e) { void e }\n</script>\n<button on:click={handlePick}>x</button>\n";
+
+#[tokio::test]
+async fn svelte_legacy_on_directive_handler_navigates_to_script_binding() {
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_svelte_definition_server(&[("src/App.svelte", SVELTE_TS_ON_SOURCE)]).await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_same_file_definition(
+        service.inner(),
+        &provider,
+        &app_uri,
+        ("on:click={handlePick}", 10),
+        "handlePick",
+    )
+    .await;
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_js_legacy_on_directive_handler_navigates_to_script_binding() {
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_svelte_definition_server(&[("src/App.svelte", SVELTE_JS_ON_SOURCE)]).await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_same_file_definition(
+        service.inner(),
+        &provider,
+        &app_uri,
+        ("on:click={handlePick}", 10),
+        "handlePick",
+    )
+    .await;
+    drain_handle.abort();
+    drop(service);
+}
+
+const SVELTE_TS_BIND_THIS_SOURCE: &str = "<script lang=\"ts\">\n  let boxEl: HTMLElement | undefined = $state();\n</script>\n<div bind:this={boxEl}>x</div>\n";
+const SVELTE_JS_BIND_THIS_SOURCE: &str =
+    "<script>\n  let boxEl = $state();\n</script>\n<div bind:this={boxEl}>x</div>\n";
+
+#[tokio::test]
+async fn svelte_bind_this_value_navigates_to_script_binding() {
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_svelte_definition_server(&[("src/App.svelte", SVELTE_TS_BIND_THIS_SOURCE)]).await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_same_file_definition(
+        service.inner(),
+        &provider,
+        &app_uri,
+        ("bind:this={boxEl}", 11),
+        "boxEl",
+    )
+    .await;
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_js_bind_this_value_navigates_to_script_binding() {
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_svelte_definition_server(&[("src/App.svelte", SVELTE_JS_BIND_THIS_SOURCE)]).await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_same_file_definition(
+        service.inner(),
+        &provider,
+        &app_uri,
+        ("bind:this={boxEl}", 11),
+        "boxEl",
+    )
+    .await;
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_bind_this_token_produces_no_definition() {
+    // The `this` keyword has no declaration — fail closed, never a mis-mapped
+    // link (the bound local keeps its own mapped surface).
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_svelte_definition_server(&[("src/App.svelte", SVELTE_TS_BIND_THIS_SOURCE)]).await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_token_fails_closed(service.inner(), &app_uri, ("bind:this={boxEl}", 5)).await;
+    drain_handle.abort();
+    drop(service);
+}
+
+const SVELTE_TS_USE_SOURCE: &str = "<script lang=\"ts\">\n  function tooltipAction(node: HTMLElement, label: string) { void node; void label }\n</script>\n<div use:tooltipAction={'hint'}>x</div>\n";
+const SVELTE_JS_USE_SOURCE: &str = "<script>\n  function tooltipAction(node, label) { void node; void label }\n</script>\n<div use:tooltipAction={'hint'}>x</div>\n";
+
+#[tokio::test]
+async fn svelte_use_action_name_navigates_to_script_binding() {
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_svelte_definition_server(&[("src/App.svelte", SVELTE_TS_USE_SOURCE)]).await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_same_file_definition(
+        service.inner(),
+        &provider,
+        &app_uri,
+        ("use:tooltipAction={'hint'}", 4),
+        "tooltipAction",
+    )
+    .await;
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_js_use_action_name_navigates_to_script_binding() {
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_svelte_definition_server(&[("src/App.svelte", SVELTE_JS_USE_SOURCE)]).await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_same_file_definition(
+        service.inner(),
+        &provider,
+        &app_uri,
+        ("use:tooltipAction={'hint'}", 4),
+        "tooltipAction",
+    )
+    .await;
+    drain_handle.abort();
+    drop(service);
+}
+
+const SVELTE_TS_CLASS_SOURCE: &str =
+    "<script lang=\"ts\">\n  let isActive = true;\n</script>\n<div class:isActive>x</div>\n";
+const SVELTE_JS_CLASS_SOURCE: &str =
+    "<script>\n  let isActive = true;\n</script>\n<div class:isActive>x</div>\n";
+
+#[tokio::test]
+async fn svelte_class_shorthand_identifier_navigates_to_script_binding() {
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_svelte_definition_server(&[("src/App.svelte", SVELTE_TS_CLASS_SOURCE)]).await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_same_file_definition(
+        service.inner(),
+        &provider,
+        &app_uri,
+        ("class:isActive", 6),
+        "isActive",
+    )
+    .await;
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_js_class_shorthand_identifier_navigates_to_script_binding() {
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_svelte_definition_server(&[("src/App.svelte", SVELTE_JS_CLASS_SOURCE)]).await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_same_file_definition(
+        service.inner(),
+        &provider,
+        &app_uri,
+        ("class:isActive", 6),
+        "isActive",
+    )
+    .await;
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_valued_class_name_produces_no_definition() {
+    // A valued `class:name={cond}` name is a CSS class name, not a binding —
+    // no declaration exists for the token, so it must fail closed (the
+    // `data-class-*` rewrite keeps only the condition mapped).
+    let source = "<script lang=\"ts\">\n  let isActive = true;\n</script>\n<div class:isActive={isActive}>x</div>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_svelte_definition_server(&[("src/App.svelte", source)]).await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_token_fails_closed(service.inner(), &app_uri, ("class:isActive={", 6)).await;
+    drain_handle.abort();
+    drop(service);
+}
+
+const SVELTE_TS_STYLE_SOURCE: &str =
+    "<script lang=\"ts\">\n  let accentColor = 'red';\n</script>\n<div style:accentColor>x</div>\n";
+const SVELTE_JS_STYLE_SOURCE: &str =
+    "<script>\n  let accentColor = 'red';\n</script>\n<div style:accentColor>x</div>\n";
+
+#[tokio::test]
+async fn svelte_style_shorthand_identifier_navigates_to_script_binding() {
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_svelte_definition_server(&[("src/App.svelte", SVELTE_TS_STYLE_SOURCE)]).await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_same_file_definition(
+        service.inner(),
+        &provider,
+        &app_uri,
+        ("style:accentColor", 6),
+        "accentColor",
+    )
+    .await;
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_js_style_shorthand_identifier_navigates_to_script_binding() {
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_svelte_definition_server(&[("src/App.svelte", SVELTE_JS_STYLE_SOURCE)]).await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_same_file_definition(
+        service.inner(),
+        &provider,
+        &app_uri,
+        ("style:accentColor", 6),
+        "accentColor",
+    )
+    .await;
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_valued_style_name_produces_no_definition() {
+    // A valued `style:name={value}` name is a CSS property, not a binding — no
+    // declaration exists for the token, so it must fail closed (the value
+    // keeps its own mapped void-check).
+    let source = "<script lang=\"ts\">\n  let accentColor = 'red';\n</script>\n<div style:accentColor={accentColor}>x</div>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_svelte_definition_server(&[("src/App.svelte", source)]).await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_token_fails_closed(service.inner(), &app_uri, ("style:accentColor={", 6)).await;
+    drain_handle.abort();
+    drop(service);
+}
+
+const SVELTE_TS_CHILD_SOURCE: &str = "<script lang=\"ts\">\n  let { title, onclick }: { title: string; onclick?: (e: MouseEvent) => void } = $props();\n</script>\n<h1>{title}</h1>\n";
+const SVELTE_JS_CHILD_SOURCE: &str =
+    "<script>\n  let { title, onclick } = $props();\n</script>\n<h1>{title}</h1>\n";
+
+const SVELTE_TS_PARENT_PROP_SOURCE: &str = "<script lang=\"ts\">\n  import Child from './Child.svelte';\n  let t = 'x';\n</script>\n<Child title={t} />\n";
+const SVELTE_JS_PARENT_PROP_SOURCE: &str = "<script>\n  import Child from './Child.svelte';\n  let t = 'x';\n</script>\n<Child title={t} />\n";
+
+const SVELTE_TS_PARENT_BIND_SOURCE: &str = "<script lang=\"ts\">\n  import Child from './Child.svelte';\n  let t = $state('x');\n</script>\n<Child bind:title={t} />\n";
+const SVELTE_JS_PARENT_BIND_SOURCE: &str = "<script>\n  import Child from './Child.svelte';\n  let t = $state('x');\n</script>\n<Child bind:title={t} />\n";
+
+const SVELTE_TS_PARENT_ONEVENT_SOURCE: &str = "<script lang=\"ts\">\n  import Child from './Child.svelte';\n  function handlePick(e: MouseEvent) { void e }\n</script>\n<Child onclick={handlePick} />\n";
+const SVELTE_JS_PARENT_ONEVENT_SOURCE: &str = "<script>\n  import Child from './Child.svelte';\n  function handlePick(e) { void e }\n</script>\n<Child onclick={handlePick} />\n";
+
+#[tokio::test]
+async fn svelte_component_prop_attribute_navigates_to_child_props_member() {
+    let (_temp, service, drain_handle, provider, workspace_id) = make_svelte_definition_server(&[
+        ("src/Child.svelte", SVELTE_TS_CHILD_SOURCE),
+        ("src/App.svelte", SVELTE_TS_PARENT_PROP_SOURCE),
+    ])
+    .await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_child_prop_definition(
+        service.inner(),
+        &provider,
+        &workspace_id,
+        &app_uri,
+        ("title={t}", 1),
+        "src/Child.svelte",
+        "title",
+    )
+    .await;
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_js_component_prop_attribute_navigates_to_child_props_member() {
+    let (_temp, service, drain_handle, provider, workspace_id) = make_svelte_definition_server(&[
+        ("src/Child.svelte", SVELTE_JS_CHILD_SOURCE),
+        ("src/App.svelte", SVELTE_JS_PARENT_PROP_SOURCE),
+    ])
+    .await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_child_prop_definition(
+        service.inner(),
+        &provider,
+        &workspace_id,
+        &app_uri,
+        ("title={t}", 1),
+        "src/Child.svelte",
+        "title",
+    )
+    .await;
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_component_bind_prop_name_navigates_to_child_props_member() {
+    let (_temp, service, drain_handle, provider, workspace_id) = make_svelte_definition_server(&[
+        ("src/Child.svelte", SVELTE_TS_CHILD_SOURCE),
+        ("src/App.svelte", SVELTE_TS_PARENT_BIND_SOURCE),
+    ])
+    .await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_child_prop_definition(
+        service.inner(),
+        &provider,
+        &workspace_id,
+        &app_uri,
+        ("bind:title={t}", 5),
+        "src/Child.svelte",
+        "title",
+    )
+    .await;
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_js_component_bind_prop_name_navigates_to_child_props_member() {
+    let (_temp, service, drain_handle, provider, workspace_id) = make_svelte_definition_server(&[
+        ("src/Child.svelte", SVELTE_JS_CHILD_SOURCE),
+        ("src/App.svelte", SVELTE_JS_PARENT_BIND_SOURCE),
+    ])
+    .await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_child_prop_definition(
+        service.inner(),
+        &provider,
+        &workspace_id,
+        &app_uri,
+        ("bind:title={t}", 5),
+        "src/Child.svelte",
+        "title",
+    )
+    .await;
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_component_legacy_onevent_prop_navigates_to_child_props_member() {
+    // The legacy `onevent` form on a component is a plain callback prop: its
+    // name navigates to the child's `$props` member.
+    let (_temp, service, drain_handle, provider, workspace_id) = make_svelte_definition_server(&[
+        ("src/Child.svelte", SVELTE_TS_CHILD_SOURCE),
+        ("src/App.svelte", SVELTE_TS_PARENT_ONEVENT_SOURCE),
+    ])
+    .await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_child_prop_definition(
+        service.inner(),
+        &provider,
+        &workspace_id,
+        &app_uri,
+        ("onclick={handlePick}", 2),
+        "src/Child.svelte",
+        "onclick",
+    )
+    .await;
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_js_component_legacy_onevent_prop_navigates_to_child_props_member() {
+    let (_temp, service, drain_handle, provider, workspace_id) = make_svelte_definition_server(&[
+        ("src/Child.svelte", SVELTE_JS_CHILD_SOURCE),
+        ("src/App.svelte", SVELTE_JS_PARENT_ONEVENT_SOURCE),
+    ])
+    .await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_child_prop_definition(
+        service.inner(),
+        &provider,
+        &workspace_id,
+        &app_uri,
+        ("onclick={handlePick}", 2),
+        "src/Child.svelte",
+        "onclick",
+    )
+    .await;
+    drain_handle.abort();
+    drop(service);
+}
+
+const SVELTE_TS_PARENT_ON_EVENT_SOURCE: &str = "<script lang=\"ts\">\n  import Child from './Child.svelte';\n  function handlePick(e: CustomEvent) { void e }\n</script>\n<Child on:pick={handlePick} />\n";
+const SVELTE_JS_PARENT_ON_EVENT_SOURCE: &str = "<script>\n  import Child from './Child.svelte';\n  function handlePick(e) { void e }\n</script>\n<Child on:pick={handlePick} />\n";
+
+#[tokio::test]
+async fn svelte_component_on_event_name_produces_no_definition() {
+    // A component `on:` event name is projected as a synthetic string literal
+    // inside `__verter_event(Child, "pick", h)` — no resolvable symbol and no
+    // authored declaration to map back to: native resolution must not
+    // fabricate a target and the provider has none either. Fail closed.
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_svelte_definition_server(&[
+        ("src/Child.svelte", SVELTE_TS_CHILD_SOURCE),
+        ("src/App.svelte", SVELTE_TS_PARENT_ON_EVENT_SOURCE),
+    ])
+    .await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_token_fails_closed(service.inner(), &app_uri, ("on:pick={", 3)).await;
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_js_component_on_event_name_produces_no_definition() {
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_svelte_definition_server(&[
+        ("src/Child.svelte", SVELTE_JS_CHILD_SOURCE),
+        ("src/App.svelte", SVELTE_JS_PARENT_ON_EVENT_SOURCE),
+    ])
+    .await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    assert_svelte_token_fails_closed(service.inner(), &app_uri, ("on:pick={", 3)).await;
+    drain_handle.abort();
+    drop(service);
+}
+
+// =========================================================================
 // Step 4: Barrel-file export symbol clicks → terminal target
 // =========================================================================
 
