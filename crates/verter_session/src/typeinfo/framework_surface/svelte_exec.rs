@@ -38,8 +38,9 @@ use crate::project_semantic_dispatch::output_materialization::OutputProjector;
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
     DisplayNeeds, PartialReasonSet, ProjectionMode, ProjectionReductionContext, QueryResult,
-    ScopeId, SemanticQueryValue, ValueRootKey,
+    ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryValue, ValueRootKey,
 };
+use crate::semantic_query_memo::SemanticGraphStore;
 use crate::typeinfo::framework_surface::resolved_surface_access::ResolvedSurfaceAccess;
 use crate::typeinfo::framework_surface::results::{
     EmitsSurface, MacroSurfaceDtos, ModelBinding, ModelSurface, PropsSurface, ResolvedEmitField,
@@ -1199,6 +1200,54 @@ pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_payload_t
     }
 }
 
+/// Follow the transparent `Alias` chain (bounded) to the node that actually
+/// renders. A non-`Alias` node (or an unresolved id) is returned as-is.
+fn follow_alias_chain(store: &SemanticGraphStore, mut id: SemanticNodeId) -> SemanticNodeId {
+    for _ in 0..16 {
+        match store.node_data(id).as_deref() {
+            Some(SemanticNodeData::Alias(target)) => id = *target,
+            _ => return id,
+        }
+    }
+    id
+}
+
+/// The display node used for an instance-export member's `type_annotation`
+/// sidecar. A FUNCTION-valued export reduces to a call-signature-ONLY object
+/// node, which the shared graph display renders in its guarded object COLON
+/// form (`{ (): void }`). An exported function member reads idiomatically as an
+/// arrow (`focus: () => void`) — exactly how a property whose value is a
+/// `Function` node renders (`u2_display_projection_guards`). Unwrap a pure
+/// call-signature-only object (no properties, no construct / index signatures,
+/// exactly one call signature resolving to a `Function`) to that lone
+/// `Function` node so the display sidecar renders the arrow form; every other
+/// shape is returned unchanged. This is a DISPLAY-ONLY choice — the shallow
+/// member vocabulary (`Self::value`) continues to classify the reduced node.
+fn instance_export_display_node(
+    store: &SemanticGraphStore,
+    node: SemanticNodeId,
+) -> SemanticNodeId {
+    let resolved = follow_alias_chain(store, node);
+    if let Some(SemanticNodeData::Object(surface)) = store.node_data(resolved).as_deref() {
+        if surface.members.is_empty()
+            && surface.construct_signatures.is_empty()
+            && surface.index_signatures.is_empty()
+            && !surface.has_index_signature
+            && surface.keyspace.is_none()
+            && surface.call_signatures.len() == 1
+        {
+            let sig = surface.call_signatures[0];
+            if matches!(
+                store.node_data(follow_alias_chain(store, sig)).as_deref(),
+                Some(SemanticNodeData::Function { .. })
+            ) {
+                return sig;
+            }
+        }
+    }
+    node
+}
+
 /// EXPOSE from the exported instance-script members. Each export is a named
 /// member of the public instance; the member type stays a shallow `Ref` to the
 /// exported binding (shallow-by-default — the consumer re-resolves on demand).
@@ -1248,16 +1297,24 @@ fn resolve_instance_exports(
                     )
                     .map(NamedTypeMemberOutput::from_raised_shallow)
                     .unwrap_or(NamedTypeMemberOutput::Opaque);
+                    let graph = ctx.project_type_store().semantic_graph();
+                    // A function-valued export reduces to a call-signature-only
+                    // object node; unwrap it to its `Function` node so the
+                    // display sidecar renders the idiomatic arrow form
+                    // (`focus: () => void`) rather than the guarded object colon
+                    // form (`{ (): void }`). Display-only: the shallow `value`
+                    // above still classifies the reduced node.
+                    let display_node = instance_export_display_node(graph, reduced.node_id());
                     let type_annotation = crate::semantic_query::display::display(
-                        ctx.project_type_store().semantic_graph(),
-                        &SemanticQueryValue::TypeNode(reduced.node_id()),
+                        graph,
+                        &SemanticQueryValue::TypeNode(display_node),
                         DisplayNeeds::empty(),
                     )
                     .into();
                     let mut reference_names = rustc_hash::FxHashSet::default();
                     crate::resolver_core::component_meta_registry::collect_node_ref_names(
                         ctx,
-                        reduced.node_id(),
+                        display_node,
                         &mut reference_names,
                     );
                     let mut type_references: Vec<_> = reference_names.into_iter().collect();
