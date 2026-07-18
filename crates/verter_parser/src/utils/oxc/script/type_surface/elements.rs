@@ -225,6 +225,11 @@ fn ctx_resolved_tuple_text<'ctx, 'a: 'ctx>(
         TSType::TSParenthesizedType(paren) => {
             ctx_resolved_tuple_text(&paren.type_annotation, ctx, visited)
         }
+        TSType::TSTypeOperatorType(op)
+            if matches!(op.operator, TSTypeOperatorOperator::Readonly) =>
+        {
+            ctx_resolved_tuple_text(&op.type_annotation, ctx, visited)
+        }
         TSType::TSTypeReference(type_ref) if type_ref.type_arguments.is_none() => {
             let name = get_type_reference_name(&type_ref.type_name);
             if visited.contains(&name) {
@@ -461,6 +466,24 @@ pub(super) fn resolve_mapped_string_literal_key(
     }
 }
 
+/// Peel transparent wrappers (parentheses and the `readonly` operator) to
+/// the underlying tuple, AST-shape driven. `readonly [ev: E]` and
+/// `([ev: E])` are the same emit payload as `[ev: E]`. Returns `None` for a
+/// non-tuple (an array type `string[]` is a regular array prop, never an
+/// emit).
+fn peel_to_tuple<'t, 'a>(ty: &'t TSType<'a>) -> Option<&'t TSTupleType<'a>> {
+    match ty {
+        TSType::TSTupleType(tuple) => Some(tuple),
+        TSType::TSParenthesizedType(paren) => peel_to_tuple(&paren.type_annotation),
+        TSType::TSTypeOperatorType(op)
+            if matches!(op.operator, TSTypeOperatorOperator::Readonly) =>
+        {
+            peel_to_tuple(&op.type_annotation)
+        }
+        _ => None,
+    }
+}
+
 /// Try to resolve a property signature as an emit (shorthand style).
 /// Shorthand style: `{ change: [id: number] }` or `{ update: [] }`
 pub(super) fn resolve_property_as_emit(
@@ -472,16 +495,13 @@ pub(super) fn resolve_property_as_emit(
     let name = get_property_key_name(&prop.key)?;
     let key_span = get_property_key_span(&prop.key, base_offset)?;
 
-    // Check if the type is a tuple type - this indicates emit shorthand
-    // Note: Only TSTupleType (e.g., `[id: number]`) is emit shorthand.
-    // TSArrayType (e.g., `string[]`) is a regular array prop type.
+    // Check if the type is a tuple type - this indicates emit shorthand.
+    // Only a tuple (`[id: number]`), possibly wrapped in `readonly` /
+    // parentheses, is emit shorthand; an array type (`string[]`) is a
+    // regular array prop. Detection is on the `TSType` node, never text.
     if let Some(ann) = &prop.type_annotation {
-        if let TSType::TSTupleType(_) = &ann.type_annotation {
-            let tuple_text = slice_source_span(
-                source,
-                ann.type_annotation.span().start,
-                ann.type_annotation.span().end,
-            )?;
+        if let Some(tuple) = peel_to_tuple(&ann.type_annotation) {
+            let tuple_text = slice_source_span(source, tuple.span.start, tuple.span.end)?;
             return Some(ResolvedNamedCallSignature {
                 span: Span {
                     start: prop.span.start + base_offset,

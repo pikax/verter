@@ -4824,3 +4824,79 @@ fn indexed_access_tuple_reclassifies_when_surface_unset() {
         "with no surface set the legacy reclassifying behavior is preserved"
     );
 }
+
+// =========================================================================
+// Emit-tuple detection is TSType-node driven, not text-driven: `readonly`
+// and parenthesized tuples are still the emit shorthand, and the payload
+// text is the inner tuple. An array type (`string[]`) is never an emit.
+// =========================================================================
+
+#[test]
+fn readonly_tuple_member_is_emit_shorthand() {
+    let (resolved, _) =
+        resolve_with_ctx("interface Emits { escapeKeydown: readonly [ev: string] }\ntype Test = Emits;");
+    let emit = resolved
+        .call_signatures
+        .iter()
+        .find(|c| c.name == "escapeKeydown")
+        .expect("`readonly [ev: string]` must be detected as an emit");
+    match &emit.signature {
+        ResolvedCallPayloadForm::Tuple { tuple_text } => assert_eq!(
+            tuple_text, "[ev: string]",
+            "emit payload text is the inner tuple, not the `readonly` wrapper"
+        ),
+        other => panic!("expected tuple payload, got {:?}", other),
+    }
+    assert!(
+        !resolved
+            .props
+            .iter()
+            .any(|p| p.key_name.as_deref() == Some("escapeKeydown")),
+        "the emit member must not also remain a prop"
+    );
+}
+
+#[test]
+fn parenthesized_tuple_member_is_emit_shorthand() {
+    let (resolved, _) =
+        resolve_with_ctx("interface Emits { wrapped: ([ev: number]) }\ntype Test = Emits;");
+    assert!(
+        resolved.call_signatures.iter().any(|c| c.name == "wrapped"),
+        "a parenthesized tuple `([ev: number])` must be detected as an emit, call_sigs={:?}",
+        resolved
+            .call_signatures
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn readonly_indexed_access_tuple_member_is_emit_shorthand() {
+    // The context path (indexed-access-to-tuple) also unwraps `readonly`.
+    let (resolved, _) = resolve_with_ctx(
+        "interface LayerEmits { close: readonly [ev: string] }\ninterface Emits { onClose: LayerEmits['close'] }\ntype Test = Emits;",
+    );
+    assert!(
+        resolved.call_signatures.iter().any(|c| c.name == "onClose"),
+        "indexed access to a `readonly` tuple must resolve as an emit"
+    );
+}
+
+#[test]
+fn array_type_member_stays_prop_not_emit() {
+    // Negative guard: an array type is NOT the emit tuple shorthand.
+    let (resolved, _) =
+        resolve_with_ctx("interface Emits { list: string[] }\ntype Test = Emits;");
+    assert!(
+        resolved
+            .props
+            .iter()
+            .any(|p| p.key_name.as_deref() == Some("list")),
+        "an array-typed member stays a prop"
+    );
+    assert!(
+        resolved.call_signatures.is_empty(),
+        "an array type must not be reclassified as an emit"
+    );
+}
