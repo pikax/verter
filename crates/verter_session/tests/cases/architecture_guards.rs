@@ -5258,28 +5258,54 @@ mod foundations_guards {
     // ── Guard 4 — external_corpus_paths_not_present_outside_gated_tests ──
 
     /// Predicate: scan a test file's source for path strings
-    /// referencing `.integration-tests/repos/...`. Returns `true`
-    /// when at least one such reference is found AND the file is
-    /// NOT gated behind a Cargo feature.
+    /// referencing an external corpus — `.integration-tests/repos/...`
+    /// or a sibling third-party checkout beside the repo (`../vize/...`).
+    /// Returns `true` when at least one such reference is found in CODE
+    /// (line comments are stripped: documenting a deleted third-party
+    /// coupling is not a dependency) AND the file carries NO
+    /// external-corpus feature gate — neither a file-level `#![cfg(...)]`
+    /// inner attribute nor an item-level
+    /// `#[cfg(feature = "external-corpus")]` marker. Item-level detection
+    /// is best-effort textual (a gated mod exempts the whole file); the
+    /// discriminating target is a file with a live corpus path and no
+    /// gate anywhere — the historical `../vize` evasion shape.
     pub fn test_file_has_ungated_external_corpus_path(src: &str) -> bool {
-        let has_path = src.contains(".integration-tests/repos/")
-            || src.contains(".integration-tests\\repos\\");
+        let has_path = src.lines().any(|line| {
+            let code = match line.find("//") {
+                Some(idx) => &line[..idx],
+                None => line,
+            };
+            code.contains(".integration-tests/repos/")
+                || code.contains(".integration-tests\\repos\\")
+                || code.contains("../vize")
+                || code.contains("..\\vize")
+                || code.contains("/vize/tests/")
+                || code.contains("\\vize\\tests\\")
+        });
         if !has_path {
             return false;
         }
         let gated = src.lines().any(|line| {
             let t = line.trim_start();
-            t.starts_with("#![cfg(feature =") || t.starts_with("#![cfg(any(feature =")
+            t.starts_with("#![cfg(feature =")
+                || t.starts_with("#![cfg(any(feature =")
+                || t.starts_with("#[cfg(feature = \"external-corpus\")]")
+                || t.starts_with("#[cfg(any(feature = \"external-corpus\"")
+                || t.starts_with("#[cfg(all(test, feature = \"external-corpus\"")
         });
         !gated
     }
 
-    /// Walk every test file under `crates/<crate>/tests/` (across all
-    /// crates) and return the set of files that violate the rule.
-    /// `architecture_guards.rs` is self-exempt: it MUST hold the
-    /// literal path string in the predicate body, and the
-    /// deliberate-violation test exercises the predicate
-    /// independently.
+    /// Walk every Rust source file under `crates/<crate>/tests/` AND
+    /// `crates/<crate>/src/` (across all crates) and return the set of
+    /// files that violate the rule. `src/` is scanned because inline
+    /// `#[cfg(test)]` unit-test files can reference external corpora
+    /// just as easily as integration-test targets can — the
+    /// `../vize` sibling-checkout spelling historically evaded this
+    /// guard from `src/filesystem_tests.rs`. `architecture_guards.rs`
+    /// is self-exempt: it MUST hold the literal path string in the
+    /// predicate body, and the deliberate-violation test exercises
+    /// the predicate independently.
     pub fn guard4_violations() -> Vec<String> {
         let crates_root = workspace_root().join("crates");
         let mut violations = Vec::new();
@@ -5292,11 +5318,13 @@ mod foundations_guards {
             if !path.is_dir() {
                 continue;
             }
-            let tests_dir = path.join("tests");
-            if !tests_dir.exists() {
-                continue;
+            let mut stack: Vec<std::path::PathBuf> = Vec::new();
+            for scan_dir in ["tests", "src"] {
+                let dir = path.join(scan_dir);
+                if dir.exists() {
+                    stack.push(dir);
+                }
             }
-            let mut stack = vec![tests_dir];
             while let Some(dir) = stack.pop() {
                 let read = match fs::read_dir(&dir) {
                     Ok(it) => it,
@@ -5377,6 +5405,46 @@ mod foundations_guards {
         assert!(
             !test_file_has_ungated_external_corpus_path(&local_only),
             "guard 4 must NOT flag tests that use vendored fixtures",
+        );
+
+        // Sibling-checkout spelling (`../<repo>` beside this repo) — the
+        // historical guard evasion. Construct at runtime per the pattern
+        // above.
+        let sibling = format!("..{}{}", "/", "vize");
+        let bad_sibling = format!(
+            "#[test]\nfn t() {{ let p = std::path::PathBuf::from(\"{}/tests/_fixtures/x\"); }}",
+            sibling
+        );
+        let gated_sibling = format!(
+            "#![cfg(feature = \"external-corpus\")]\n#[test]\nfn t() {{ let p = std::path::PathBuf::from(\"{}/tests/_fixtures/x\"); }}",
+            sibling
+        );
+        assert!(
+            test_file_has_ungated_external_corpus_path(&bad_sibling),
+            "guard 4 must flag ungated sibling-checkout references",
+        );
+        assert!(
+            !test_file_has_ungated_external_corpus_path(&gated_sibling),
+            "guard 4 must NOT flag sibling-checkout references inside a feature-gated file",
+        );
+
+        // Item-level gating (`#[cfg(feature = "external-corpus")] mod ...`)
+        // counts as gated; comment-only mentions are not dependencies.
+        let item_gated = format!(
+            "#[cfg(feature = \"external-corpus\")]\nmod external_corpus {{\n    const P: &str = \"{}nuxt-ui\";\n}}",
+            forbidden_segment
+        );
+        let comment_only = format!(
+            "// the old test read {}nuxt-ui and was deleted\nfn t() {{}}",
+            forbidden_segment
+        );
+        assert!(
+            !test_file_has_ungated_external_corpus_path(&item_gated),
+            "guard 4 must NOT flag references inside an item-gated external-corpus mod",
+        );
+        assert!(
+            !test_file_has_ungated_external_corpus_path(&comment_only),
+            "guard 4 must NOT flag comment-only mentions of corpus paths",
         );
     }
 

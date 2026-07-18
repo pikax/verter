@@ -905,55 +905,59 @@ fn delete_dir_all_records_subtree_content_transition() {
     );
 }
 
-/// Scalar monorepo layout: package-level `paths: { "@/*": ["./src/*"] }` on
-/// `packages/icons/tsconfig.json`. An importer under that package must resolve
-/// `@/types` → `packages/icons/src/types.ts` via ProjectGraph discovery.
+/// Shared body for the monorepo package-`paths` regression: an importer
+/// under a package carrying `paths: { "@/*": ["./src/*"] }` must resolve
+/// `@/types` → that package's `src/types.ts` via ProjectGraph discovery,
+/// and a sibling package that only extends the root must NOT claim the
+/// importer as a member.
 ///
-/// Regression: an exclude-only root tsconfig used to synthesize monorepo-wide
-/// `include` that package leafs inherited, so the wrong package owned the file
-/// and `@/*` mapped to the wrong `src/*`.
-#[test]
-fn monorepo_package_tsconfig_paths_resolve_at_types() {
-    // crates/verter_workspace → repo root → sibling vize checkout
-    let scalar = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("../vize/tests/_fixtures/_git/scalar");
-    let scalar = match scalar.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
-            eprintln!("skip: scalar fixture not checked out beside the repo");
-            return;
-        }
-    };
-    let scalar_str = scalar.to_string_lossy().replace('\\', "/");
-    let importer = format!("{scalar_str}/packages/icons/src/components/ScalarIconPersonSimple.vue");
-    let expected = format!("{scalar_str}/packages/icons/src/types.ts");
+/// Regression: an exclude-only root tsconfig used to synthesize
+/// monorepo-wide `include` that package leafs inherited, so the wrong
+/// package owned the file and `@/*` mapped to the wrong `src/*`.
+pub(super) fn assert_monorepo_package_paths_resolve(
+    monorepo_root: &std::path::Path,
+    importer_rel: &str,
+    expected_rel: &str,
+    sibling_pkg_rel: &str,
+) {
+    assert!(
+        monorepo_root.is_dir(),
+        "monorepo fixture root must exist: {monorepo_root:?}"
+    );
+    // Normalize through the workspace's own canonical form (drive-case +
+    // separator handling) so expected/actual compare in one coordinate
+    // system on every platform — std `canonicalize()` yields `\\?\`-prefixed
+    // paths on Windows that never byte-match resolver output.
+    let root_str =
+        verter_span::path::canonicalize_path(&monorepo_root.to_string_lossy()).replace('\\', "/");
+    let importer = format!("{root_str}/{importer_rel}");
+    let expected = format!("{root_str}/{expected_rel}");
     assert!(
         std::path::Path::new(&expected).is_file(),
         "precondition: {expected} must exist"
     );
 
     let ws = FilesystemWorkspace::new(FilesystemOptions {
-        roots: vec![scalar_str.clone()],
+        roots: vec![root_str.clone()],
         ..Default::default()
     });
     let graph = ProjectGraph::from_workspace_roots(
         &ws,
-        std::slice::from_ref(&scalar_str),
+        std::slice::from_ref(&root_str),
         &crate::vite_config::ViteConfigOptions::default(),
     );
     ws.set_project_graph(graph.graph);
 
-    // Sibling package that only extends the root for `paths` must not own icons.
-    let ch_ts = format!("{scalar_str}/packages/code-highlight/tsconfig.json");
-    let ch_mem = crate::snapshot_builder::configured_membership_from_raw(
-        &format!("{scalar_str}/packages/code-highlight"),
-        &crate::config::load_project_membership(&ws, &ch_ts),
+    // Sibling package that only extends the root must not own the importer.
+    let sibling_ts = format!("{root_str}/{sibling_pkg_rel}/tsconfig.json");
+    let sibling_mem = crate::snapshot_builder::configured_membership_from_raw(
+        &format!("{root_str}/{sibling_pkg_rel}"),
+        &crate::config::load_project_membership(&ws, &sibling_ts),
         &Default::default(),
     );
     assert!(
-        !ch_mem.contains(&crate::CanonicalPath::new(&importer)),
-        "code-highlight must not claim icons sources after leaf-local default include"
+        !sibling_mem.contains(&crate::CanonicalPath::new(&importer)),
+        "sibling package must not claim another package's sources after leaf-local default include"
     );
 
     let result = ws.resolve_import(
@@ -968,7 +972,25 @@ fn monorepo_package_tsconfig_paths_resolve_at_types() {
     let got = resolved.source_id.replace('\\', "/");
     assert_eq!(
         got, expected,
-        "package-level @/* paths must map @/types to icons/src/types.ts"
+        "package-level @/* paths must map @/types to the owning package's src/types.ts"
+    );
+}
+
+/// Hermetic monorepo package-`paths` regression over the vendored fixture
+/// (`tests/fixtures/pkg-paths`): exclude-only root tsconfig, one package
+/// with `paths: { "@/*": ["./src/*"] }`, one sibling package that only
+/// extends the root.
+#[test]
+fn monorepo_package_tsconfig_paths_resolve_at_types() {
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("pkg-paths");
+    assert_monorepo_package_paths_resolve(
+        &fixture,
+        "packages/icons/src/components/Icon.vue",
+        "packages/icons/src/types.ts",
+        "packages/hl",
     );
 }
 
