@@ -4981,3 +4981,51 @@ fn instantiated_generic_indexed_access_non_tuple_member_stays_prop() {
         "a non-tuple indexed access must not become an emit"
     );
 }
+
+// =========================================================================
+// Recursion safety: the indexed-access-to-tuple emit walk must terminate on
+// cyclic interface/alias references (`interface A{x:B['y']} B{y:A['x']}`).
+// The `visited` name guard in `ctx_indexed_member_tuple_text` /
+// `ctx_resolved_tuple_text` is load-bearing — removing it infinite-loops.
+// =========================================================================
+
+#[test]
+fn mutually_recursive_indexed_access_terminates() {
+    // Must not stack-overflow. Neither member resolves to a tuple, so both
+    // stay props.
+    let (resolved, _) = resolve_with_ctx(
+        "interface A { x: B['y'] }\ninterface B { y: A['x'] }\ntype Test = A;",
+    );
+    assert!(
+        resolved
+            .props
+            .iter()
+            .any(|p| p.key_name.as_deref() == Some("x")),
+        "cyclic indexed access terminates with the member as a prop"
+    );
+    assert!(resolved.call_signatures.is_empty());
+}
+
+#[test]
+fn self_referential_indexed_access_terminates() {
+    let (resolved, _) = resolve_with_ctx(
+        "interface Emits { close: Emits['close'] }\ntype Test = Emits;",
+    );
+    // Terminates; the self-referential member cannot resolve to a tuple.
+    assert!(resolved.call_signatures.is_empty());
+    assert!(
+        resolved
+            .props
+            .iter()
+            .any(|p| p.key_name.as_deref() == Some("close"))
+    );
+}
+
+#[test]
+fn recursive_alias_chain_indexed_access_terminates() {
+    let (resolved, _) = resolve_with_ctx(
+        "type A = B\ntype B = A\ninterface Emits { onX: A['x'] }\ntype Test = Emits;",
+    );
+    // Alias cycle must terminate; onX cannot resolve to a tuple.
+    assert!(resolved.call_signatures.is_empty());
+}
