@@ -148,10 +148,10 @@ interface HostBinding {
     compileProfile?: HostCompileProfile;
   }): HostVirtualFileResponse;
   listVirtualFiles(canonicalId: string): HostVirtualNodeKind[];
-  getAnalysis?(canonicalOrAlias: string): FileAnalysis | null;
-  getIde?(canonicalId: string, profile?: HostCompileProfile): HostIdeResponse | null;
+  getAnalysis(canonicalOrAlias: string): FileAnalysis | null;
+  getIde(canonicalId: string, profile?: HostCompileProfile): HostIdeResponse | null;
   getPublicApi?(canonicalId: string, mode?: "public" | "declaration"): HostIdeResponse | null;
-  lint?(canonicalOrAlias: string, config?: unknown): LintDiagnostic[];
+  lint(canonicalOrAlias: string, config?: unknown): LintDiagnostic[];
   getCodeActions?(canonicalOrAlias: string, offset: number): HostCodeAction[];
   getLintRuleMetadata?(): HostLintRuleMetadata[];
   getDocumentSymbols?(canonicalOrAlias: string): HostDocumentSymbol[];
@@ -690,44 +690,34 @@ function compileVueRenderAssembly(
   file.compiled.errors = formatDiagnostics(allDiagnostics);
   file.compiled.compilerDiagnostics = allDiagnostics;
 
-  // Retrieve analysis data if available (backward compat: older WASM may lack getAnalysis)
+  // Retrieve analysis data.
   let analysis: FileAnalysis | null = null;
-  if (typeof wasmHost!.getAnalysis === "function") {
-    try {
-      analysis = wasmHost!.getAnalysis(file.filename) ?? null;
-    } catch {
-      // Silently ignore - analysis is optional
-    }
+  try {
+    analysis = wasmHost!.getAnalysis(file.filename) ?? null;
+  } catch {
+    // Silently ignore - analysis is optional
   }
   file.compiled.analysis = analysis;
 
-  // Run linter (backward compat: older WASM may lack lint)
+  // Run linter.
   let lintMs: number | null = null;
-  if (typeof wasmHost!.lint === "function") {
-    try {
-      const t0 = performance.now();
-      file.compiled.lintDiagnostics =
-        wasmHost!.lint(file.filename, buildLintConfig(disabledRules)) ?? [];
-      lintMs = performance.now() - t0;
-    } catch {
-      file.compiled.lintDiagnostics = [];
-    }
-  } else {
+  try {
+    const t0 = performance.now();
+    file.compiled.lintDiagnostics =
+      wasmHost!.lint(file.filename, buildLintConfig(disabledRules)) ?? [];
+    lintMs = performance.now() - t0;
+  } catch {
     file.compiled.lintDiagnostics = [];
   }
 
-  // Retrieve TSX types output via dedicated API (backward compat: older WASM may lack getIde)
+  // Retrieve TSX types output via dedicated API.
   let tsxMs: number | null = null;
-  if (typeof wasmHost!.getIde === "function") {
-    try {
-      const t0 = performance.now();
-      const tsx = wasmHost!.getIde(file.filename, profile);
-      tsxMs = performance.now() - t0;
-      applyTsxOutput(file, tsx);
-    } catch {
-      applyTsxOutput(file, null);
-    }
-  } else {
+  try {
+    const t0 = performance.now();
+    const tsx = wasmHost!.getIde(file.filename, profile);
+    tsxMs = performance.now() - t0;
+    applyTsxOutput(file, tsx);
+  } catch {
     applyTsxOutput(file, null);
   }
 
