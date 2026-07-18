@@ -23,7 +23,6 @@ use verter_parser::utils::oxc::script::type_surface::{
     ResolvedNamedCallSignature, ResolvedProp, RuntimeType,
 };
 use verter_semantic::analysis::AnalyzedMacroKind;
-use verter_type_expr::TypeExpr;
 
 use super::{raise_member_value, TypeinfoVueSurfaceOutputCap, UnresolvedSurfaceArm};
 use crate::meta_resolve::callable_view::CallableNodeView;
@@ -176,17 +175,18 @@ pub(crate) fn imported_emits_resolved_elements(
             continue;
         }
         // Named-tuple shorthand emit (`escapeKeydown: [event: KeyboardEvent]`).
-        // Accept:
-        // - a direct `Tuple` node on the member value,
-        // - a Navigate-expanded terminal Tuple (indexed access / alias chains
-        //   like `DismissableLayerEmits['escapeKeydown']` used by
-        //   oku-primitives / reka-ui under `Omit<SharedEmits, …>`), OR
-        // - a raised TypeExpr::Tuple after materialize.
-        // The display is the already-rendered member value text.
-        let raw_is_tuple = matches!(
-            node_data_for(dispatch.ctx, member.value).as_deref(),
-            Some(SemanticNodeData::Tuple { .. })
-        );
+        // Accept a direct `Tuple` node on the member value OR a
+        // Navigate-expanded terminal Tuple (indexed access / alias chains
+        // like `DismissableLayerEmits['escapeKeydown']` used by
+        // oku-primitives / reka-ui under `Omit<SharedEmits, …>`).
+        //
+        // EVERY classification here is NODE-domain (`SemanticNodeData`) —
+        // never a raised/materialized `TypeExpr` and never display text.
+        // This function is a sanctioned TERMINAL one-shot sink on the hot
+        // path: materialized values may only BE output (the rendered
+        // display), never feed a decision (output-projector residual rule).
+        let raw_data = node_data_for(dispatch.ctx, member.value);
+        let raw_is_tuple = matches!(raw_data.as_deref(), Some(SemanticNodeData::Tuple { .. }));
         let navigated = dispatch.resolve_hot_handle_with_context(
             crate::semantic_query::HotTypeRef::new(member.value),
             ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
@@ -200,16 +200,14 @@ pub(crate) fn imported_emits_resolved_elements(
         // the oku-primitives / reka-ui named-tuple emit pattern. They must
         // count as emit signatures even when Navigate has not yet collapsed
         // them to a concrete `Tuple` node (payload may degrade to unknown).
-        let is_indexed_access =
-            matches!(
-                node_data_for(dispatch.ctx, member.value).as_deref(),
-                Some(SemanticNodeData::IndexedAccess { .. })
-            ) || matches!(
-                navigated_data.as_deref(),
-                Some(SemanticNodeData::IndexedAccess { .. })
-            ) || matches!(raised.as_ref(), Some(TypeExpr::IndexedAccess { .. }));
-        let raised_is_tuple = matches!(raised.as_ref(), Some(TypeExpr::Tuple { .. }));
-        if raw_is_tuple || navigated_is_tuple || raised_is_tuple {
+        let is_indexed_access = matches!(
+            raw_data.as_deref(),
+            Some(SemanticNodeData::IndexedAccess { .. })
+        ) || matches!(
+            navigated_data.as_deref(),
+            Some(SemanticNodeData::IndexedAccess { .. })
+        );
+        if raw_is_tuple || navigated_is_tuple {
             let tuple_text = type_text.clone().or_else(|| {
                 let cap = TypeinfoVueSurfaceOutputCap::new(&dispatch);
                 cap.materialize_output_type_expr(navigated)
@@ -230,41 +228,23 @@ pub(crate) fn imported_emits_resolved_elements(
                 ));
             }
         } else if is_indexed_access {
-            // Named-tuple emit via indexed access: keep the event name. The
-            // payload FORM (Tuple vs Call) is a TYPED-IR decision:
-            // materialize the navigated hop and match on the node shape —
-            // never on rendered display text (Typed-IR-Only). Display
-            // strings are minted FROM the typed value for output only.
-            // Payload degrades when the hop is not yet a concrete tuple.
-            let cap = TypeinfoVueSurfaceOutputCap::new(&dispatch);
-            let materialized = cap
-                .materialize_output_type_expr(navigated)
-                .map(|r| r.into_type_expr(&cap));
-            let degraded = || ResolvedCallPayloadForm::Call {
-                params_text: "...args: unknown[]".to_string(),
-            };
-            let signature = match materialized {
-                Some(expr @ TypeExpr::Tuple { .. }) => {
-                    // Render the TUPLE value itself (bracketed form); the
-                    // raised member display is not tuple-shaped here or the
-                    // earlier tuple branch would have taken it.
-                    match render_type_expr_display(&expr) {
-                        Some(tuple_text) => ResolvedCallPayloadForm::Tuple { tuple_text },
-                        None => degraded(),
-                    }
-                }
-                Some(expr) => {
-                    match type_text
-                        .clone()
-                        .or_else(|| render_type_expr_display(&expr))
-                    {
-                        Some(tt) => ResolvedCallPayloadForm::Call {
-                            params_text: format!("payload: {tt}"),
-                        },
-                        None => degraded(),
-                    }
-                }
-                None => degraded(),
+            // Named-tuple emit via an indexed access whose hop did NOT
+            // collapse to a concrete Tuple node in the typed domain (raw,
+            // Navigate, and raise all non-Tuple — the earlier branch owns
+            // every collapsed case). Keep the event name and DEGRADE the
+            // payload from structured presence only: display text never
+            // decides the payload FORM (Typed-IR-Only), and the hot path
+            // never materializes-then-branches (output-projector residual
+            // rule — `imported_emits_resolved_elements` is a sanctioned
+            // TERMINAL sink, so a materialized value may only BE output,
+            // never feed a decision).
+            let signature = match type_text.clone() {
+                Some(tt) => ResolvedCallPayloadForm::Call {
+                    params_text: format!("payload: {tt}"),
+                },
+                None => ResolvedCallPayloadForm::Call {
+                    params_text: "...args: unknown[]".to_string(),
+                },
             };
             call_signatures.push(named_signature_row(member.name.as_ref(), signature));
         }

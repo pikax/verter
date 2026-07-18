@@ -6036,6 +6036,13 @@ mod foundations_guards {
             // Pending B-C5 split, this file is exempt.
             "crates/verter_session/src/host_manage/prepared_decl.rs",
             "crates/verter_compiler/src/compile/template_data.rs",
+            // 1506 lines after the empty-SFC shell + SSR script-flag work.
+            // `codex/release-clean` edits the SAME `compile_inner` region;
+            // splitting this file BEFORE that merge would manufacture
+            // guaranteed semantic conflicts. Split it as the first follow-up
+            // AFTER the release-clean integration lands, then remove this
+            // exemption.
+            "crates/verter_compiler/src/compile/mod.rs",
             // The canonical HTML5 named-character-reference table (~2231 entries),
             // auto-generated from the pinned official svelte `entities.js` by
             // `scripts/generate-svelte-entities.mjs` and byte-pinned by the
@@ -17552,7 +17559,7 @@ mod single_resolution_engine_guards {
         // blocks parse once and thread their resolved companion/external
         // surfaces to every compile consumer — pass-through of
         // already-resolved data, NOT a new engine path.
-        ("crates/verter_compiler/src/script/prepared.rs", 10),
+        ("crates/verter_compiler/src/script/prepared.rs", 9),
         ("crates/verter_compiler/src/tsc/script.rs", 35),
         ("crates/verter_parser/src/utils/oxc/script/mod.rs", 1),
         (
@@ -17649,9 +17656,15 @@ mod single_resolution_engine_guards {
         // one added mention of the same boundary DTO, zero added
         // resolution); the whole file deletes with the same legacy-DTO
         // consolidation.
+        //
+        // 45 -> 49: the alias-tolerant defineEmits gate
+        // (`bare_named_type_arg`) plus the typed-IR payload-form
+        // classification both still ENCODE into this legacy DTO vocabulary
+        // (the file's output shape). Added mentions of the boundary DTO,
+        // zero added resolution.
         (
             "crates/verter_session/src/typeinfo/framework_surface/vue_exec/imported_elements.rs",
-            45,
+            49,
         ),
     ];
 
@@ -17707,7 +17720,11 @@ mod single_resolution_engine_guards {
         // parsed once and their resolved companion/external `ResolvedElements`
         // surfaces are threaded to every compile consumer through `PreparedScript`,
         // not re-resolved per consumer. Pass-through of already-resolved data.
-        ("crates/verter_compiler/src/script/prepared.rs", 7),
+        // 7 -> 8: the companion extraction now receives the host-resolved
+        // external map (extract_companion_types_with_externals wiring - the
+        // radix local-extends heritage fix). Pass-through of already-resolved
+        // data, not a new resolution site.
+        ("crates/verter_compiler/src/script/prepared.rs", 8),
         ("crates/verter_compiler/src/tsc/script.rs", 5),
         ("crates/verter_parser/src/utils/oxc/vue/script/macros.rs", 2),
         ("crates/verter_parser/src/utils/oxc/vue/script/mod.rs", 2),
@@ -17715,9 +17732,13 @@ mod single_resolution_engine_guards {
             "crates/verter_parser/src/utils/oxc/script/type_surface/decl.rs",
             27,
         ),
+        // 3 -> 4: the reconstructed resolve_type_literal_members_with_ctx
+        // (the review-mandated compile-break fix) carries one additional
+        // `&mut ResolvedElements` sink parameter. Parse-boundary lowering,
+        // not query-time resolution.
         (
             "crates/verter_parser/src/utils/oxc/script/type_surface/elements.rs",
-            3,
+            4,
         ),
         (
             "crates/verter_parser/src/utils/oxc/script/type_surface/external.rs",
@@ -17727,9 +17748,13 @@ mod single_resolution_engine_guards {
             "crates/verter_parser/src/utils/oxc/script/type_surface/infer.rs",
             5,
         ),
+        // 18 -> 21: extract_companion_types_with_externals (external-seeded
+        // companion extraction) + resolved_surface_is_empty, landed with the
+        // reka-ui alias/heritage work. Shrink direction still applies to the
+        // engine itself; these are threading sites for already-resolved data.
         (
             "crates/verter_parser/src/utils/oxc/script/type_surface/mod.rs",
-            18,
+            21,
         ),
         ("crates/verter_parser/src/utils/oxc/vue/script/setup.rs", 1),
         (
