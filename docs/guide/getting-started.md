@@ -61,6 +61,10 @@ For IDE support (completions, hover types, diagnostics, go-to-definition), insta
 3. Search for **Verter**
 4. Click **Install**
 
+::: warning Marketplace listing coming soon
+The Marketplace listing is not published yet. Until it is, build and run the extension from source using the steps below.
+:::
+
 Alternatively, build the extension from source:
 
 ```sh

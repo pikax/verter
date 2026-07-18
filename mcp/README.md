@@ -10,7 +10,7 @@ Verter exposes an MCP (Model Context Protocol) server for AI agents:
 
 ## Analysis & Diagnostics MCP (`verter-mcp`)
 
-A standalone binary exposing Verter's full Vue SFC analysis pipeline to AI agents. Provides 33 tools across file management, static analysis, diagnostics, compilation, cross-file intelligence, scoring, and refactoring.
+A standalone binary exposing Verter's full Vue SFC analysis pipeline to AI agents. Provides 49 tools across file management, analysis, diagnostics, compilation, cross-file intelligence, scoring, refactoring, routing, store analysis, and SSR readiness.
 
 ### Quick Start
 
@@ -66,7 +66,7 @@ Options:
 }
 ```
 
-### Tools (33 total)
+### Tools (49 total)
 
 #### Agent-First Summary Tools (start here)
 
@@ -93,6 +93,7 @@ Options:
 | `get_imports`        | Imports with Vue API classification                            |
 | `get_bindings`       | Bindings with ReactivityKind (Ref/Computed/Reactive/etc.)      |
 | `get_template_usage` | Components, binding refs, slots, template refs, event handlers |
+| `get_framework_surface` | Props/emits/slots/options/expose/model via the framework-surface executor |
 
 #### CSS
 
@@ -157,6 +158,40 @@ Options:
 | `generate_component_docs` | Auto-generated Markdown docs (props table, events, slots, usage) |
 | `explain_vue_api`         | Explain any Vue Composition API function                         |
 
+#### Routing
+
+| Tool                     | Description                                                            |
+| ------------------------ | --------------------------------------------------------------------- |
+| `get_route_tree`         | Full route tree (vue-router / Nuxt / unplugin-vue-router)             |
+| `get_route_for_component`| Which route(s) render a given `.vue` file                            |
+| `get_navigation_map`     | All `<RouterLink>` / `<NuxtLink>` navigation links                    |
+| `get_router_views`       | Where `<RouterView>` / `<NuxtPage>` containers are placed             |
+| `analyze_route_health`   | Missing components, dead routes, orphan views, duplicate paths/names |
+
+#### Store Analysis
+
+| Tool               | Description                                                        |
+| ------------------ | ----------------------------------------------------------------- |
+| `get_store_usage`  | Per-file store usages (imports, destructuring, `storeToRefs`)     |
+| `get_store_graph`  | Project-wide store dependency graph (components → stores)          |
+| `trace_store_flow` | Trace one store: definition, consumers, dependency chain          |
+
+#### SSR Readiness
+
+| Tool                 | Description                                                     |
+| -------------------- | --------------------------------------------------------------- |
+| `ssr_readiness`      | Score a component's SSR compatibility (0–100)                   |
+| `ssr_migration_plan` | Ordered list of changes needed for SSR safety                   |
+| `ssr_project_report` | Project-wide SSR readiness scores and critical-path blockers    |
+
+#### Baseline & Testing
+
+| Tool               | Description                                                            |
+| ------------------ | --------------------------------------------------------------------- |
+| `save_baseline`    | Save a diagnostics baseline; later lints report only NEW issues       |
+| `trace_event_flow` | Trace an event across the component graph (emitters ↔ listeners)      |
+| `get_test_impact`  | Given changed files, which test files to re-run (dependency graph)    |
+
 ### Recommended Agent Workflow
 
 1. **Start with `get_project_stats`** — understand the project at a glance
@@ -191,4 +226,4 @@ Point to the config file path, or set via `GH_AW_MCP_CONFIG` environment variabl
 
 ## Quick Verification
 
-If your agent can list MCP tools from `verter` (33 tools), setup is complete. A browser request to the HTTP endpoint may return `Not Acceptable` — this is normal for MCP protocol endpoints.
+If your agent can list MCP tools from `verter` (49 tools), setup is complete. A browser request to the HTTP endpoint may return `Not Acceptable` — this is normal for MCP protocol endpoints.

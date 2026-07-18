@@ -28,7 +28,7 @@ Alternatively, you can build from source (see [Building from Source](#building-f
 - **Vue API call annotations** -- inline annotations for lifecycle hooks, watchers, reactivity primitives, and provide/inject
 - **Semantic tokens** -- 23 token types and 10 modifiers for fine-grained syntax highlighting
 - **Analysis sidebar** -- virtual files, component tree, and analysis views (opt-in)
-- **MCP server** -- built-in MCP endpoint sharing LSP data, providing 36+ Vue analysis tools to AI agents
+- **MCP server** -- built-in MCP endpoint sharing LSP data, providing 49 Vue analysis tools to AI agents
 
 ## Commands
 

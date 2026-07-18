@@ -4,9 +4,9 @@
 Verter is pre-release software. APIs may change between releases — see the [API Stability](/api-stability) document.
 :::
 
-Verter includes a built-in diagnostic engine (`verter_diagnostics`) that provides **~164 lint rules** across **11 categories**. These rules run natively in Rust inside the LSP, providing instant diagnostics without external tooling. They analyze static analysis data from the compiler and do not require the full TypeScript type checker, so diagnostics are fast and available immediately as you type.
+Verter includes a built-in diagnostic engine (`verter_diagnostics`) that provides **~186 lint rules** across **12 categories**. These rules run natively in Rust inside the LSP, providing instant diagnostics without external tooling. They analyze static analysis data from the compiler and do not require the full TypeScript type checker, so diagnostics are fast and available immediately as you type.
 
-The diagnostic engine is separate from the template compiler. It depends on `verter_analysis` for import/export/binding data and template element information, but does not depend on `verter_compiler` or any codegen modules.
+The diagnostic engine is separate from the template compiler. It depends on `verter_semantic` for import/export/binding data and template element information, but does not depend on `verter_compiler` or any codegen modules.
 
 ## Configuration
 
@@ -19,7 +19,7 @@ See the [Configuration Reference](/configuration) for presets, per-rule override
 
 ## Rule Categories
 
-Verter organizes rules into 11 categories. For the complete list of all ~164 rules with severity and auto-fix information, see the [Lint Rules Reference](/lint-rules).
+Verter organizes rules into 12 categories. For the complete list of all ~186 rules with severity and auto-fix information, see the [Lint Rules Reference](/lint-rules).
 
 ### Vue Essential (~95 rules)
 
@@ -29,7 +29,7 @@ Error-preventing rules that catch invalid Vue syntax, common mistakes, and depre
 
 Code quality and consistency rules for readability and style. Includes `attribute-order`, `html-self-closing`, `v-bind-style`, `v-on-style`, `v-slot-style`, `multi-word-component-names`, `component-name-in-template-casing`, and more.
 
-### Script (~36 rules)
+### Script (~38 rules)
 
 Rules for `<script>` and `<script setup>` blocks, covering define macros (`define-macros-order`, `valid-define-props`, `valid-define-emits`), lifecycle hooks, watchers, computed properties, prop defaults, emit declarations, component API style, and more.
 
@@ -64,6 +64,10 @@ Vapor mode compatibility: `no-suspense`, `no-vue-lifecycle-events`, `no-inline-t
 ### Cross-File (3 rules)
 
 Rules that analyze patterns across multiple files (require the host to have compiled related files): `provide-inject-validation`, `deep-composable-tracking`, `no-duplicate-vue`.
+
+### SSR (10 rules)
+
+Server-side-rendering safety and best-practice rules for components that must render on the server: `no-browser-globals-in-setup`, `no-client-only-lifecycle-in-setup`, `no-dom-query-in-setup`, `no-template-ref-in-setup`, `no-side-effects-in-setup-for-ssr`, `no-css-var-manipulation-in-setup`, `no-nondeterministic-in-template`, `no-v-show-prefer-v-if`, `prefer-server-prefetch`, and `require-client-only-wrapper`.
 
 ## Comment Directives
 
@@ -115,7 +119,7 @@ You can suppress or adjust diagnostics inline using HTML comments with the `@ver
 
 ## Next Steps
 
-- [Lint Rules Reference](/lint-rules) -- Full list of all ~164 rules
+- [Lint Rules Reference](/lint-rules) -- Full list of all ~186 rules
 - [Configuration Reference](/configuration) -- Presets, per-rule overrides, `.verterrc.json`
 - [Migrating from ESLint](/migrating-from-eslint) -- Map `eslint-plugin-vue` rules to Verter
 - [Features](./features) -- Type safety features overview

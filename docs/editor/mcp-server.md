@@ -84,43 +84,64 @@ The standalone binary creates its own `VerterHost` and does not share data with 
 
 ## Available Tools
 
-The MCP server exposes 36+ tools organized by category:
+The MCP server exposes **49 tools** organized by category. A representative selection is shown below; see [mcp/README.md](https://github.com/pikax/verter/tree/main/mcp) for the complete reference.
 
-### Project Management
+### File Management
 
 - `scan_project` — Load all `.vue` files from a directory
 - `upsert_file` — Add or update a single file
+- `list_files` — List all loaded files
 
 ### Analysis
 
 - `analyze_file` — Full SFC analysis (imports, exports, bindings, macros)
-- `get_template_analysis` — Template-level analysis (elements, directives, slots)
-- `get_component_api` — Props, emits, slots, and exposed members
-- `get_binding_types` — Reactivity classification for all bindings
+- `get_component_api` — Props, emits, slots, models, and exposed members
+- `get_bindings` — Reactivity classification for all bindings
+- `get_imports` — Imports with Vue API classification
+- `get_template_usage` — Components, binding refs, slots, template refs, event handlers
+- `get_framework_surface` — Resolve props/emits/slots/expose through the framework-surface executor
 
 ### Diagnostics
 
 - `lint_file` — Run lint rules on a file
 - `lint_project` — Lint all loaded files
-- `get_fix_suggestions` — Get auto-fix suggestions for diagnostics
+- `get_quick_fixes` — Code actions available at a given offset
 
 ### Compilation
 
-- `compile_tsx` — Compile SFC to TSX (IDE output)
-- `compile_vdom` — Compile template to VDOM render function
-- `compile_vapor` — Compile template to Vapor render function
+- `compile_file` — Compile to JS/CSS (production, Vapor, source maps)
+- `generate_tsx` — Generate TSX output (IDE type-checking path)
+
+### CSS
+
+- `analyze_css` — Style blocks with selectors, classes, custom props, `v-bind`
+- `match_css_selector` — Per-element selector match results
+- `detect_css_bleed` — Cross-component CSS class bleed detection
 
 ### Cross-File Intelligence
 
-- `find_component_usage` — Find where a component is used across the project
-- `get_import_graph` — Dependency graph for loaded files
-- `get_type_deps` — Cross-file type dependencies for a component
-- `css_var_flow` — Track CSS variable definitions, `var()` references, template `:style` bindings, and script DOM API manipulations across all loaded files
+- `get_component_graph` — Component dependency graph
+- `validate_provide_inject` — Missing providers / unused provides across the project
+- `check_component_props` — Unknown props passed to child components
+- `find_orphan_components` — Components unreachable from entry points
 
-### Scoring & Quality
+### Type System
 
-- `score_file` — Quality score for a single file
-- `score_project` — Aggregate quality scores across the project
+- `get_component_types` — Inferred/declared types for props, emits, slots, bindings
+- `check_prop_types` — Type compatibility between parent values and child declarations
+- `get_type_errors` — Type-level diagnostics from the TSX codegen path
+
+### Scoring & Summaries
+
+- `get_component_summary` — Everything about a component in one call
+- `get_component_quality` — Quality score (0–100) with per-dimension breakdown
+- `get_project_stats` — Aggregate project scores, Vue API usage, and diagnostics health
+
+### Routing, Stores & SSR
+
+- `get_route_tree`, `get_route_for_component`, `analyze_route_health` — vue-router / Nuxt route analysis
+- `get_store_graph`, `trace_store_flow` — store (Pinia) dependency analysis
+- `ssr_readiness`, `ssr_migration_plan`, `ssr_project_report` — SSR safety scoring
 
 ## Recommended Workflow
 
@@ -129,4 +150,4 @@ For AI agents using the MCP server:
 1. **Start with `scan_project`** to load the workspace
 2. **Use `analyze_file`** to understand a component before modifying it
 3. **Use `lint_file`** after changes to catch issues
-4. **Use `find_component_usage`** before renaming or changing component APIs
+4. **Use `get_component_graph`** before renaming or changing component APIs
