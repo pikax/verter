@@ -905,6 +905,115 @@ import Child from './Child.vue'
   });
 });
 
+describe("dev-watch hydration invalidation", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = join(tmpdir(), `verter-hmr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    mkdirSync(tempDir, { recursive: true });
+    resetHost();
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+    resetHost();
+  });
+
+  function createPlugin() {
+    return unpluginFactory(undefined, {
+      framework: "rollup",
+      versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+    } as any) as any;
+  }
+
+  // Regression guard for the build-scoped hydration memo (F11): editing a
+  // NON-carrier type dependency (`types.ts`, never matched by `filter(id)`)
+  // must evict it from the per-host hydration memo so the next transform of a
+  // dependent SFC re-reads and re-upserts the fresh content. Without eviction
+  // — or with eviction gated behind the carrier `filter` — the SFC keeps
+  // compiling against the stale type until the server restarts.
+  it("re-hydrates a dependent SFC after a non-carrier type dep changes on watchChange", async () => {
+    const plugin = createPlugin();
+    const host = loadHost();
+    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
+    const typesFile = join(tempDir, "types.ts").replace(/\\/g, "/");
+
+    writeFileSync(typesFile, "export interface Props { a: string }\n");
+    const sfc = `<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div>{{ a }}</div></template>`;
+    const resolve = vi.fn(async (source: string) =>
+      source === "./types" ? { id: typesFile } : null,
+    );
+
+    const upsertSpy = vi.spyOn(host, "upsert");
+
+    // First transform hydrates the type dep with its original content.
+    await plugin.transform.call({ resolve }, sfc, filename);
+    expect(
+      upsertSpy.mock.calls.some(
+        ([req]) =>
+          req?.inputId === typesFile && (req?.source as string)?.includes("interface Props"),
+      ),
+    ).toBe(true);
+    // Sanity: the original content did NOT declare `b`.
+    expect(
+      upsertSpy.mock.calls.some(
+        ([req]) => req?.inputId === typesFile && (req?.source as string)?.includes("b: number"),
+      ),
+    ).toBe(false);
+
+    // Edit the non-carrier dep and notify the watcher.
+    writeFileSync(typesFile, "export interface Props { a: string; b: number }\n");
+    plugin.watchChange(typesFile);
+
+    // Second transform must re-read and re-upsert the FRESH type dep content.
+    await plugin.transform.call({ resolve }, sfc, filename);
+    expect(
+      upsertSpy.mock.calls.some(
+        ([req]) => req?.inputId === typesFile && (req?.source as string)?.includes("b: number"),
+      ),
+    ).toBe(true);
+  });
+
+  // The same invalidation must be reachable through the Vite handleHotUpdate
+  // hook, which likewise gates carrier handling behind `filter(file)` but must
+  // still evict non-carrier deps from the hydration memo.
+  it("re-hydrates a dependent SFC after a non-carrier type dep changes on handleHotUpdate", async () => {
+    const plugin = createPlugin();
+    const host = loadHost();
+    const filename = join(tempDir, "Card.vue").replace(/\\/g, "/");
+    const typesFile = join(tempDir, "card-types.ts").replace(/\\/g, "/");
+
+    writeFileSync(typesFile, "export interface CardProps { title: string }\n");
+    const sfc = `<script setup lang="ts">
+import type { CardProps } from './card-types'
+defineProps<CardProps>()
+</script>
+<template><div>{{ title }}</div></template>`;
+    const resolve = vi.fn(async (source: string) =>
+      source === "./card-types" ? { id: typesFile } : null,
+    );
+
+    const upsertSpy = vi.spyOn(host, "upsert");
+
+    await plugin.transform.call({ resolve }, sfc, filename);
+
+    writeFileSync(typesFile, "export interface CardProps { title: string; subtitle: string }\n");
+    plugin.vite.handleHotUpdate({ file: typesFile, server: { ws: { send() {} } }, modules: [] });
+
+    await plugin.transform.call({ resolve }, sfc, filename);
+    expect(
+      upsertSpy.mock.calls.some(
+        ([req]) =>
+          req?.inputId === typesFile && (req?.source as string)?.includes("subtitle: string"),
+      ),
+    ).toBe(true);
+  });
+});
+
 describe("custom block URL format", () => {
   function createPlugin() {
     return unpluginFactory(undefined, {

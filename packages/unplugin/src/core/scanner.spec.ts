@@ -8,6 +8,7 @@ import { mkdirSync, writeFileSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { scanCarrierFiles } from "./scanner";
+import { loadWorkspace, resetWorkspace } from "./compiler";
 
 function createTempDir(): string {
   const dir = join(
@@ -112,5 +113,46 @@ describe("scanCarrierFiles", () => {
     for (const key of keys) {
       expect(key).not.toContain("\\");
     }
+  });
+});
+
+// Regression guard for the async native Workspace FS: `Workspace.readDir` and
+// `Workspace.readFile` return Promises. When a workspace is loaded the scanner
+// MUST await them — a non-awaited `readDir` is a Promise (not iterable, the
+// walk throws) and a non-awaited `readFile` stores a Promise instead of the
+// file's string content. This exercises the workspace-backed branch that the
+// disk-fallback tests above never reach.
+describe("scanCarrierFiles through a loaded Workspace (async FS)", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+  });
+
+  afterEach(() => {
+    resetWorkspace();
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("awaits Workspace.readDir/readFile and returns files with string contents", async () => {
+    const rootContent = "<template><div>root</div></template>";
+    const nestedContent = "<template><button>nested</button></template>";
+    writeFileSync(join(tempDir, "App.vue"), rootContent);
+    mkdirSync(join(tempDir, "components"), { recursive: true });
+    writeFileSync(join(tempDir, "components", "Btn.vue"), nestedContent);
+
+    // Load a real native Workspace so the scanner takes its async FS branch.
+    loadWorkspace([tempDir]);
+
+    const files = await scanCarrierFiles(tempDir, (f) => f.endsWith(".vue"));
+
+    expect(files.size).toBe(2);
+    const appKey = [...files.keys()].find((k) => k.endsWith("/App.vue"));
+    const btnKey = [...files.keys()].find((k) => k.endsWith("/components/Btn.vue"));
+    expect(appKey).toBeDefined();
+    expect(btnKey).toBeDefined();
+    // Content must be the resolved string, not a pending Promise.
+    expect(files.get(appKey!)).toBe(rootContent);
+    expect(files.get(btnKey!)).toBe(nestedContent);
   });
 });

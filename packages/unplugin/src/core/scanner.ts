@@ -31,7 +31,8 @@ async function walkDir(
   const ws = getWorkspace();
   if (ws) {
     try {
-      entries = ws.readDir(normalizePath(dir));
+      // Workspace.readDir is async (libuv thread pool).
+      entries = await ws.readDir(normalizePath(dir));
     } catch {
       return;
     }
@@ -63,7 +64,8 @@ async function walkDir(
     if (!filter(absPath)) continue;
 
     try {
-      const content = ws ? ws.readFile(absPath) : await readFile(join(dir, name), "utf8");
+      // Workspace.readFile is async (libuv thread pool).
+      const content = ws ? await ws.readFile(absPath) : await readFile(join(dir, name), "utf8");
       if (content !== null) {
         result.set(absPath, content);
       }
