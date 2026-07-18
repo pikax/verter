@@ -1,6 +1,7 @@
 import type { UnpluginFactory } from "unplugin";
 import { createUnplugin } from "unplugin";
 import { existsSync, statSync } from "node:fs";
+import { relative } from "node:path";
 import type { ResolvedConfig } from "vite";
 import type {
   VerterPluginOptions,
@@ -120,6 +121,7 @@ function renderMainRuntime(
         filename: profile.filename,
         isProduction: profile.isProduction ?? false,
         ssr: profile.ssr ?? false,
+        ssrModuleId: profile.ssrModuleId,
         forceJs: profile.forceJs ?? false,
         forceVapor: profile.forceVapor ?? false,
         sourceMap: profile.sourceMap ?? false,
@@ -162,6 +164,18 @@ function renderMainRuntime(
 /** Normalize Windows backslashes to forward slashes for the workspace API. */
 function normalizePath(p: string): string {
   return p.replace(/\\/g, "/");
+}
+
+/**
+ * The module id registered on `ssrContext.modules` for Vite SSR asset
+ * collection. Vite's ssr-manifest keys are ROOT-RELATIVE — the same
+ * `normalizePath(relative(root, filename))` shape `@vitejs/plugin-vue`
+ * registers. Without a known root the id is omitted (the host falls back
+ * to the canonical id).
+ */
+function ssrModuleIdFor(ssr: boolean, root: string, filename: string): string | undefined {
+  if (!ssr || !root) return undefined;
+  return normalizePath(relative(root, filename));
 }
 
 async function readTextFileThroughWorkspaceOrDisk(pathname: string): Promise<string | null> {
@@ -605,6 +619,7 @@ function createFrameworkFactory(
           const profile: HostCompileProfile = {
             filename,
             ssr,
+            ssrModuleId: ssrModuleIdFor(ssr, projectRoot, filename),
             isProduction: isProd,
             componentId,
             hmrStrategy:
@@ -853,6 +868,7 @@ function createFrameworkFactory(
         const profile: HostCompileProfile = {
           filename,
           ssr,
+          ssrModuleId: ssrModuleIdFor(ssr, projectRoot, filename),
           isProduction: isProd,
           componentId,
           hmrStrategy: (isProd ? "none" : hmrStrategy) as HostCompileProfile["hmrStrategy"],

@@ -123,6 +123,7 @@ fn render_profile(
         types_module_name: None,
         delimiters: None,
         custom_elements: None,
+        ssr_module_id: None,
     }
 }
 

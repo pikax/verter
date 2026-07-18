@@ -179,8 +179,12 @@ pub(crate) fn assemble_vue_main_module(
     }
 
     // Vite SSR asset collection: register this module id on the request's
-    // `ssrContext.modules` set (same shape as @vitejs/plugin-vue). Without this,
-    // Vite cannot collect CSS/JS deps for the SSR render tree.
+    // `ssrContext.modules` set (same shape as @vitejs/plugin-vue). Without
+    // this, Vite cannot collect CSS/JS deps for the SSR render tree. The
+    // registered id must match the ssr-manifest KEY FORM — root-relative
+    // under Vite — so the bundler-supplied `ssr_module_id` wins; the
+    // canonical id is only a fallback for callers whose manifest keys are
+    // canonical.
     if profile.ssr {
         let runtime = profile.runtime_module_name.as_deref().unwrap_or("vue");
         let _ = writeln!(
@@ -191,10 +195,11 @@ pub(crate) fn assemble_vue_main_module(
         out.push_str("const _sfc_setup = _sfc_main.setup\n");
         out.push_str("_sfc_main.setup = (props, ctx) => {\n");
         out.push_str("  const ssrContext = __vite_useSSRContext()\n");
+        let registered_id = profile.ssr_module_id.as_deref().unwrap_or(canonical_id);
         let _ = writeln!(
             out,
             "  ;(ssrContext.modules || (ssrContext.modules = new Set())).add({:?})",
-            canonical_id
+            registered_id
         );
         out.push_str("  return _sfc_setup ? _sfc_setup(props, ctx) : undefined\n");
         out.push_str("}\n");
@@ -608,6 +613,62 @@ mod tests {
         // Negative: client HMR must not appear in SSR assembly
         assert!(!result.contains("import.meta.hot"));
         assert!(!result.contains("module.hot"));
+    }
+
+    /// The registered id must match the ssr-manifest KEY FORM. When the
+    /// bundler supplies a root-relative `ssr_module_id`, an ABSOLUTE
+    /// canonical id (the real transform-time shape) must NOT be the
+    /// registered id — Vite's manifest keys are root-relative, so
+    /// registering the absolute path makes every `renderPreloadLinks`
+    /// lookup miss.
+    #[test]
+    fn assemble_main_module_ssr_registers_bundler_supplied_module_id() {
+        let compiled = basic_compiled_result();
+        let profile = CompileProfile {
+            is_production: true,
+            ssr: true,
+            ssr_module_id: Some("src/Comp.vue".to_string()),
+            ..CompileProfile::default()
+        };
+        let meta = FileMeta {
+            has_script: true,
+            has_template: true,
+            ..FileMeta::default()
+        };
+        // Absolute canonical id — the shape real transforms pass.
+        let result =
+            assemble_vue_main_module("/home/user/app/src/Comp.vue", &compiled, &meta, &profile);
+        assert!(
+            result.contains(".add(\"src/Comp.vue\")"),
+            "must register the bundler-supplied root-relative id, got:\n{result}"
+        );
+        assert!(
+            !result.contains(".add(\"/home/user/app/src/Comp.vue\")"),
+            "must NOT register the absolute canonical id when a module id is supplied, got:\n{result}"
+        );
+    }
+
+    /// Without a bundler-supplied module id, the canonical id is the
+    /// fallback registration.
+    #[test]
+    fn assemble_main_module_ssr_falls_back_to_canonical_id() {
+        let compiled = basic_compiled_result();
+        let profile = CompileProfile {
+            is_production: true,
+            ssr: true,
+            ssr_module_id: None,
+            ..CompileProfile::default()
+        };
+        let meta = FileMeta {
+            has_script: true,
+            has_template: true,
+            ..FileMeta::default()
+        };
+        let result = assemble_vue_main_module("/abs/src/Comp.vue", &compiled, &meta, &profile);
+        assert!(
+            result.contains(".add(\"/abs/src/Comp.vue\")"),
+            "absent ssr_module_id must fall back to the canonical id, got:\n{result}"
+        );
     }
 
     /// Non-SSR assembly must NOT inject useSSRContext wrapping.

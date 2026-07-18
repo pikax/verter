@@ -198,6 +198,9 @@ pub struct CompileBatchRenderProfile {
     pub delimiters: Option<(String, String)>,
     /// Custom-element tag names (affect template codegen).
     pub custom_elements: Option<Vec<String>>,
+    /// SSR asset-collection module id (root-relative, supplied by the
+    /// bundler plugin). See [`crate::types::CompileProfile::ssr_module_id`].
+    pub ssr_module_id: Option<String>,
 }
 
 /// Caller-configurable batch options.
@@ -299,6 +302,7 @@ fn render_base_profile(rp: &CompileBatchRenderProfile) -> CompileProfile {
         types_module_name: rp.types_module_name.clone(),
         delimiters: rp.delimiters.clone(),
         custom_elements: rp.custom_elements.clone(),
+        ssr_module_id: rp.ssr_module_id.clone(),
         ..CompileProfile::default()
     };
     if let Some(name) = &rp.runtime_module_name {
