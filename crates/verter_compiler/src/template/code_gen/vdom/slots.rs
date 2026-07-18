@@ -508,6 +508,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         source: &'alloc str,
         out: &mut CodeGenOutput<'alloc>,
         is_block_root: bool,
+        force_open_block: bool,
         injected_key: Option<u32>,
     ) {
         // Check for <component :is="expr"> -> _resolveDynamicComponent
@@ -612,7 +613,8 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         }
 
         // Block root wrapping for v-for/v-if
-        let needs_block_wrapper = is_block_root && (el.v_for.is_some() || el.v_condition.is_some());
+        let needs_block_wrapper =
+            force_open_block || (is_block_root && (el.v_for.is_some() || el.v_condition.is_some()));
         if needs_block_wrapper {
             buf.push_str("(_openBlock(), ");
             out.add_vdom_import(VdomHelper::OpenBlock);
@@ -1083,6 +1085,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         source: &'alloc str,
         out: &mut CodeGenOutput<'alloc>,
         is_block_root: bool,
+        force_open_block: bool,
         injected_key: Option<u32>,
     ) {
         // Check for <component :is="expr"> -> _resolveDynamicComponent
@@ -1139,7 +1142,8 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         }
 
         // Block root wrapping for v-for/v-if
-        let needs_block_wrapper = is_block_root && (el.v_for.is_some() || el.v_condition.is_some());
+        let needs_block_wrapper =
+            force_open_block || (is_block_root && (el.v_for.is_some() || el.v_condition.is_some()));
         if needs_block_wrapper {
             buf.push_str("(_openBlock(), ");
             out.add_vdom_import(VdomHelper::OpenBlock);

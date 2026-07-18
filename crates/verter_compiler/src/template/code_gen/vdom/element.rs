@@ -416,6 +416,34 @@ fn contains_assignment_operator(s: &str) -> bool {
 /// to simple identifier resolution.
 ///
 /// Decodes HTML entities in the expression value first (e.g., `&quot;` → `"`),
+/// Extract and resolve the `v-memo="[deps]"` dependency expression on an
+/// element, returning the resolved deps array text (e.g. `[$setup.x]`).
+///
+/// Returns `None` when the element has no `v-memo` directive with a value.
+/// Identifiers inside the array are resolved through the binding resolver, so
+/// the emitted deps carry the correct `$setup.` / `$props.` / `_ctx.` prefixes.
+pub(crate) fn resolve_v_memo_deps<'a>(
+    el: &ElementNode,
+    source: &str,
+    oxc_el: Option<&OxcParsedElement<'a>>,
+    resolver: &BindingResolver<'a>,
+    force_js: bool,
+) -> Option<String> {
+    for (i, prop) in el.props.iter().enumerate() {
+        if !prop.is_directive {
+            continue;
+        }
+        if &source[prop.start as usize..prop.name_end as usize] != "v-memo" {
+            continue;
+        }
+        let (vs, ve) = (prop.value_start?, prop.value_end?);
+        let value = &source[vs as usize..ve as usize];
+        let oxc_exp = find_prop_oxc_exp(oxc_el, i);
+        return Some(resolve_expr(value, vs, oxc_exp, resolver, force_js));
+    }
+    None
+}
+
 /// since template attribute values may contain HTML-encoded characters from
 /// preprocessor plugins (markdown, docs blocks, etc.).
 pub(crate) fn resolve_expr(

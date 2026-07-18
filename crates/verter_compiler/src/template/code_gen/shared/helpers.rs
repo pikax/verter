@@ -140,6 +140,7 @@ pub enum VdomHelper {
     NormalizeProps = 1 << 30,
     GuardReactiveProps = 1 << 31,
     ToHandlers = 1 << 32,
+    WithMemo = 1 << 33,
 }
 
 impl VdomHelper {
@@ -180,12 +181,13 @@ impl VdomHelper {
             Self::NormalizeProps => NORMALIZE_PROPS,
             Self::GuardReactiveProps => GUARD_REACTIVE_PROPS,
             Self::ToHandlers => TO_HANDLERS,
+            Self::WithMemo => WITH_MEMO,
         }
     }
 }
 
 /// Ordered lookup table for `VdomHelperFlags::to_imports()`.
-const ALL_VDOM: [VdomHelper; 33] = [
+const ALL_VDOM: [VdomHelper; 34] = [
     VdomHelper::CreateElementVNode,
     VdomHelper::CreateElementBlock,
     VdomHelper::CreateVNode,
@@ -219,6 +221,7 @@ const ALL_VDOM: [VdomHelper; 33] = [
     VdomHelper::NormalizeProps,
     VdomHelper::GuardReactiveProps,
     VdomHelper::ToHandlers,
+    VdomHelper::WithMemo,
 ];
 
 /// Bitflag set of VDOM runtime helpers. Wraps a `u64` with O(1) add/has.

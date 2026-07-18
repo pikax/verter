@@ -624,6 +624,107 @@ const items = [{ name: 'a' }]
     );
 }
 
+/// F6: v-memo on a NESTED native element wraps the block vnode factory in
+/// `_withMemo([deps], () => (_openBlock(), _createElementBlock(...)), _cache, N)`.
+#[test]
+fn v_memo_native_element_emits_with_memo_block() {
+    let code = gen_vdom_template(
+        r#"<template><section><div v-memo="[x]">{{ x }}</div></section></template>
+<script setup>const x = 1;</script>"#,
+    );
+    assert!(
+        code.contains("_withMemo([$setup.x], () => "),
+        "native v-memo must wrap in _withMemo with resolved deps.\n{code}"
+    );
+    // Native element memo factory returns a BLOCK.
+    assert!(
+        code.contains("_withMemo([$setup.x], () => (_openBlock(), _createElementBlock(\"div\""),
+        "native v-memo factory must return a block.\n{code}"
+    );
+    assert!(
+        code.contains(", _cache, "),
+        "v-memo must pass the _cache slot.\n{code}"
+    );
+}
+
+/// F6: v-memo on a CHILDLESS component wraps `_createVNode` (no block) —
+/// `_withMemo([deps], () => _createVNode(Comp), _cache, N)`.
+#[test]
+fn v_memo_childless_component_emits_with_memo() {
+    let code = gen_vdom_template(
+        r#"<template><section><Comp v-memo="[x]"/></section></template>
+<script setup>import Comp from './Comp.vue'; const x = 1;</script>"#,
+    );
+    assert!(
+        code.contains("_withMemo([$setup.x], () => _createVNode($setup.Comp"),
+        "childless component v-memo must wrap a plain _createVNode.\n{code}"
+    );
+    assert!(
+        code.contains(", _cache, "),
+        "must pass _cache slot.\n{code}"
+    );
+    // NEGATIVE: a childless component memo must NOT force a block.
+    assert!(
+        !code.contains("() => (_openBlock(), _createBlock($setup.Comp"),
+        "nested childless component v-memo must not be block-forced.\n{code}"
+    );
+}
+
+/// F6: v-memo on a NAMED-slot component wraps the component vnode (with its slot
+/// object) in _withMemo.
+#[test]
+fn v_memo_named_slot_component_emits_with_memo() {
+    let code = gen_vdom_template(
+        r#"<template><section><Comp v-memo="[x]"><template #foo>hi</template></Comp></section></template>
+<script setup>import Comp from './Comp.vue'; const x = 1;</script>"#,
+    );
+    assert!(
+        code.contains("_withMemo([$setup.x], () => "),
+        "named-slot component v-memo must wrap in _withMemo.\n{code}"
+    );
+    assert!(
+        code.contains("foo: _withCtx("),
+        "the named slot must still be emitted inside the memo factory.\n{code}"
+    );
+    assert!(
+        code.contains(", _cache, "),
+        "must pass _cache slot.\n{code}"
+    );
+}
+
+/// F6 (ported from grok spec): v-memo on a ROOT component (with default slot)
+/// emits `return _withMemo([deps], () => (_openBlock(), _createBlock(...)), _cache, N)`
+/// — a single openBlock INSIDE the memo factory, never a double openBlock.
+#[test]
+fn v_memo_on_root_component_emits_with_memo() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <MyComp v-memo="[a, b]" :class="cls">
+    <slot />
+  </MyComp>
+</template>
+<script setup>
+import MyComp from './MyComp.vue'
+const a = 1
+const b = 2
+const cls = 'x'
+</script>"#,
+    );
+    assert!(
+        code.contains("_withMemo([$setup.a, $setup.b], () => "),
+        "root component v-memo must wrap with resolved deps.\n{code}"
+    );
+    assert!(
+        code.contains(", _cache, "),
+        "must pass _cache slot.\n{code}"
+    );
+    // Exactly ONE openBlock inside the memo factory — never a double openBlock.
+    assert!(
+        !code.contains("(_openBlock(), _withMemo"),
+        "root v-memo must not double-wrap openBlock outside the memo factory.\n{code}"
+    );
+}
+
 #[test]
 fn block_tree_single_root_element_uses_create_element_block() {
     let code = gen_vdom_template("<template><div>hello</div></template>");

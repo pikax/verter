@@ -139,6 +139,20 @@ pub struct VdomCodeGen<'ast, 'alloc> {
 }
 
 impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
+    /// True when the single logical root element carries a `v-memo` directive.
+    /// Used by leave_template to suppress the outer single-root `_openBlock()`
+    /// wrapper (a v-memo factory owns its own openBlock inside the memo closure).
+    fn root_element_has_v_memo(&self, root_children: &[NodeId], source: &str) -> bool {
+        for &cid in root_children {
+            if let AstNodeKind::Element(el) = &self.ast.nodes[cid.0].kind {
+                return el.props.iter().any(|p| {
+                    p.is_directive && &source[p.start as usize..p.name_end as usize] == "v-memo"
+                });
+            }
+        }
+        false
+    }
+
     pub fn new(
         ast: &'ast TemplateAst,
         oxc_ast: &'ast crate::template::oxc::types::OxcParsedAst<'alloc>,
@@ -514,6 +528,16 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                     }
 
                     out.overwrite(close_start, close_end, "\n}");
+                } else if self.root_element_has_v_memo(root_children, source) {
+                    // v-memo root: `_withMemo(..., () => (_openBlock(), …))`
+                    // owns its openBlock inside the memo factory (emitted by
+                    // leave_element), so leave_template must NOT add an outer
+                    // `(_openBlock(), …)` wrapper — just `return`.
+                    let mut prefix = String::with_capacity(full_prefix.len() + 8);
+                    prefix.push_str(&full_prefix);
+                    prefix.push_str("return ");
+                    out.overwrite(tag_open.start, child.start, &prefix);
+                    out.overwrite(close_start, close_end, "\n}");
                 } else {
                     // Single root — block root with _openBlock + _createElementBlock
                     out.add_vdom_import(VdomHelper::OpenBlock);
@@ -850,14 +874,49 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
         let raw_children_builtin = helpers::is_raw_children_builtin(tag_name);
         let is_root_child = self.ast.nodes[_id.0].parent.is_none();
         let is_single_template_root = is_root_child && self.single_root;
+
+        // v-memo: the element's vnode factory is wrapped in
+        // `_withMemo([deps], () => <vnode>, _cache, N)`. Native elements are
+        // block-forced (official Vue: the memoized factory returns a block);
+        // components keep their normal topology (a nested childless/default-slot
+        // component memo stays `_createVNode`). A v-memo block owns its openBlock
+        // INSIDE the factory, so the single-root openBlock is suppressed in
+        // leave_template for a v-memo root. (v-for + v-memo uses per-item cache
+        // topology and is not handled on this path.)
+        let memo_deps = if el.v_for.is_none() {
+            element::resolve_v_memo_deps(el, source, oxc, &self.resolver, self.options.force_js)
+        } else {
+            None
+        };
+        let native_memo = memo_deps.is_some() && !el.tag_type.is_component();
+
         let is_block_root = el.v_condition.is_some()
             || el.v_for.is_some()
             || is_single_template_root
-            || raw_children_builtin;
+            || raw_children_builtin
+            || native_memo;
         // Local `_openBlock()`: v-if/v-for branches always; a raw-children
         // built-in whenever it is NOT the sole single template root (the
-        // single-root open block is provided once by leave_template).
-        let force_open_block = raw_children_builtin && !is_single_template_root;
+        // single-root open block is provided once by leave_template); a v-memo
+        // block owns its own openBlock inside the memo factory.
+        let force_open_block = (raw_children_builtin && !is_single_template_root)
+            || (memo_deps.is_some() && is_block_root);
+
+        // Emit the `_withMemo([deps], () => ` prefix and `, _cache, N)` suffix
+        // around the whole vnode expression. Applied before dispatch so the
+        // leave path's overwrites compose inside the wrapper.
+        if let Some(deps) = &memo_deps {
+            let memo_idx = self.cache_index;
+            self.cache_index += 1;
+            let vnode_end = el
+                .tag_close
+                .as_ref()
+                .map(|tc| tc.end)
+                .unwrap_or(el.tag_open.end);
+            out.add_vdom_import(VdomHelper::WithMemo);
+            out.prepend_alloc(el.tag_open.start, &format!("_withMemo({deps}, () => "));
+            out.prepend_alloc(vnode_end, &format!(", _cache, {memo_idx})"));
+        }
 
         // Handle component with slot children: wrap in slot object instead of array.
         // Teleport/KeepAlive are excluded — they take raw array children below.
@@ -873,6 +932,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                 source,
                 out,
                 is_block_root,
+                force_open_block,
                 injected_key,
             );
             return;
@@ -889,6 +949,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                 source,
                 out,
                 is_block_root,
+                force_open_block,
                 injected_key,
             );
             return;

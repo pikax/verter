@@ -399,7 +399,14 @@ pub fn parse_template_expressions<'alloc>(
                 // Fast path: element with only static attributes (no directives,
                 // no v-if/v-for/v-slot/v-once). Skip OXC parsing entirely —
                 // no Box<OxcParsedElement> allocation needed.
-                if !el.needs_expression_parsing() {
+                //
+                // `v-memo="[deps]"` carries a dependency expression that must be
+                // resolved (binding-prefixed) at codegen — its directive sets no
+                // prop flag, so include it explicitly here.
+                let has_memo = el.props.iter().any(|p| {
+                    p.is_directive && &input[p.start as usize..p.name_end as usize] == "v-memo"
+                });
+                if !el.needs_expression_parsing() && !has_memo {
                     data.push(OxcNodeData::None);
                     continue;
                 }
