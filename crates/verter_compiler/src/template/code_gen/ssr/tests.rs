@@ -8804,3 +8804,59 @@ const x = { color: 'blue' }
         ":style authored first must come first in the merged array, got:\n{code}"
     );
 }
+
+/// A ROOT COMPONENT must receive `_cssVars` in its props — official
+/// `ssrInjectCssVars` injects on every root-level node, components
+/// included. Before the fix `const _cssVars` was emitted but never used
+/// (all custom properties lost).
+#[test]
+fn ssr_css_vbind_reaches_root_component_props() {
+    let code = gen_ssr_template(
+        r#"<script setup>
+import Child from './Child.vue'
+import { ref } from 'vue'
+const color = ref('green')
+</script>
+<template><Child /></template>
+<style scoped>
+.vb { color: v-bind(color) }
+</style>"#,
+    );
+    assert!(
+        code.contains("const _cssVars"),
+        "must define _cssVars, got:\n{code}"
+    );
+    assert!(
+        code.contains("_mergeProps(") && code.contains(", _cssVars)"),
+        "root component props must merge _cssVars, got:\n{code}"
+    );
+}
+
+/// MULTI-ROOT templates carry `_cssVars` on EACH root-level element
+/// (official injects per root node; `_attrs` fallthrough stays
+/// single-root-only and must NOT appear).
+#[test]
+fn ssr_css_vbind_reaches_each_multi_root_element() {
+    let code = gen_ssr_template(
+        r#"<script setup>
+import { ref } from 'vue'
+const color = ref('green')
+</script>
+<template>
+  <div class="a">one</div>
+  <div class="b">two</div>
+</template>
+<style scoped>
+.a { color: v-bind(color) }
+</style>"#,
+    );
+    let uses = code.matches("_cssVars.style").count();
+    assert!(
+        uses >= 2,
+        "each multi-root element must carry the css vars (expected 2 uses, got {uses}):\n{code}"
+    );
+    assert!(
+        !code.contains("_attrs)") || !code.contains("_mergeProps(_attrs"),
+        "multi-root must not gain _attrs fallthrough from css vars, got:\n{code}"
+    );
+}

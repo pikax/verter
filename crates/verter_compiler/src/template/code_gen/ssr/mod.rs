@@ -356,6 +356,14 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
         self.depth == 0 && !self.is_multi_root && self.in_component_slots == 0
     }
 
+    /// Whether `_cssVars` injects here. CSS v-bind custom properties are a
+    /// DIFFERENT axis than `_attrs` fallthrough: official `ssrInjectCssVars`
+    /// injects on EVERY root-level node — each multi-root sibling and each
+    /// root v-if branch — while fallthrough attrs stay single-root-only.
+    fn is_css_vars_root(&self) -> bool {
+        self.depth == 0 && self.in_component_slots == 0
+    }
+
     // ── Push management ────────────────────────────────────────
 
     /// Close the current `_push(\`...\`)` literal if one is open.
@@ -3039,7 +3047,10 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
         if !is_root
             && !has_v_bind_spread
             && directive_calls.is_empty()
-            && (!inline_parts.is_empty() || has_v_show || dynamic_style_resolved.is_some())
+            && (!inline_parts.is_empty()
+                || has_v_show
+                || dynamic_style_resolved.is_some()
+                || (self.is_css_vars_root() && !self.options.ssr_css_vars.is_empty()))
         {
             // Build attrs in source order: interleave static and dynamic parts
             let mut dynamic_map: std::collections::HashMap<usize, &str> =
@@ -3099,9 +3110,15 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
             } else {
                 None
             };
+            // Root-level elements of a MULTI-ROOT template (is_root=false,
+            // css-vars-root=true) carry the CSS v-bind custom properties as
+            // a style part — official injects on every root-level node.
+            let css_vars_style = (self.is_css_vars_root() && !self.options.ssr_css_vars.is_empty())
+                .then(|| "_cssVars.style".to_string());
             let has_any_style = dynamic_style_resolved.is_some()
                 || static_style_value.is_some()
-                || v_show_style.is_some();
+                || v_show_style.is_some()
+                || css_vars_style.is_some();
             if has_any_style {
                 out.add_ssr_import(SsrHelper::RenderStyle);
                 // SOURCE order between static style and :style (official
@@ -3125,6 +3142,9 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                     ordered.into_iter().map(|(_, part)| part).collect();
                 if let Some(vshow) = v_show_style {
                     style_parts.push(vshow);
+                }
+                if let Some(css_vars) = css_vars_style {
+                    style_parts.push(css_vars);
                 }
                 if style_parts.len() == 1 {
                     result.push_str(&format!(
@@ -3193,8 +3213,10 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
             parts.push(dir_call.clone());
         }
 
-        // Merge SSR CSS v-bind custom properties onto the root element.
-        if is_root && !self.options.ssr_css_vars.is_empty() {
+        // Merge SSR CSS v-bind custom properties onto every ROOT-LEVEL
+        // element — official injects on each multi-root sibling and each
+        // root branch, not only the single-root case.
+        if self.is_css_vars_root() && !self.options.ssr_css_vars.is_empty() {
             parts.push("_cssVars".to_string());
         }
 
@@ -5208,6 +5230,22 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for SsrCodeGen<'ast, 'alloc> {
                 "null".to_string()
             } else {
                 format!("{{ {} }}", props_parts.join(", "))
+            };
+
+            // CSS v-bind custom properties reach ROOT-LEVEL components as a
+            // merged prop (official `ssrInjectCssVars` injects on every
+            // root-level node, components included — without this the
+            // emitted `const _cssVars` is dead and the custom properties
+            // never reach the HTML).
+            let props_expr = if self.is_css_vars_root() && !self.options.ssr_css_vars.is_empty() {
+                if props_expr == "null" {
+                    "_cssVars".to_string()
+                } else {
+                    out.add_vdom_import(VdomHelper::MergeProps);
+                    format!("_mergeProps({}, _cssVars)", props_expr)
+                }
+            } else {
+                props_expr
             };
 
             let has_children = self.has_effective_children(el, source);
