@@ -74,7 +74,32 @@ fn gen_script_with_external<'a>(
         alloc,
         external_types,
     );
-    generate_script(script, script_setup, &prepared, source, ct, alloc, options)
+    let result = generate_script(script, script_setup, &prepared, source, ct, alloc, options);
+
+    // Mirror the production compile pipeline: under force_js the whole-program
+    // body strip runs AFTER generate_script (compile/mod.rs), owning all TS
+    // removal (annotations, casts, generics, type-only imports, type decls).
+    // Running it here keeps these unit tests faithful to real output.
+    if !options.keep_ts_types {
+        if let Some(setup) = prepared.setup() {
+            crate::strip_types::typescript::strip_typescript_body_types(
+                setup.program(),
+                ct,
+                setup.content_start(),
+                setup.content_str(),
+            );
+        }
+        if let Some(companion) = prepared.companion() {
+            crate::strip_types::typescript::strip_typescript_types(
+                companion.program(),
+                ct,
+                companion.content_start(),
+                companion.content_str(),
+            );
+        }
+    }
+
+    result
 }
 
 // ── Test 1: No script blocks ──────────────────────────────────

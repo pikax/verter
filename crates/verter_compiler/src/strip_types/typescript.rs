@@ -30,6 +30,30 @@ pub fn strip_typescript_types<'a>(
         code_transform,
         base_offset,
         source: script_source,
+        skip_imports: false,
+    };
+    stripper.visit_program(program);
+}
+
+/// Strip TypeScript from a program **without touching import declarations**.
+///
+/// The `<script setup>` force_js flow rewrites imports itself (type-only
+/// removal, value/mixed reconstruction + hoisting) in `generate_script`. This
+/// body strip therefore owns everything EXCEPT imports — annotations, casts,
+/// generics, type declarations (interfaces/type aliases lowered/removed, enums
+/// → runtime IIFE), and exports — so a setup import is edited exactly once and
+/// never double-overwritten (which corrupts the transform).
+pub fn strip_typescript_body_types<'a>(
+    program: &Program,
+    code_transform: &mut CodeTransform<'a>,
+    base_offset: u32,
+    script_source: &'a str,
+) {
+    let mut stripper = TypeStripper {
+        code_transform,
+        base_offset,
+        source: script_source,
+        skip_imports: true,
     };
     stripper.visit_program(program);
 }
@@ -55,6 +79,7 @@ pub fn strip_typescript_from_expression<'a>(
         code_transform,
         base_offset,
         source: expression_source,
+        skip_imports: false,
     };
     stripper.visit_expression(expression);
 }
@@ -73,6 +98,7 @@ pub fn strip_typescript_from_statement<'a>(
         code_transform,
         base_offset,
         source: script_source,
+        skip_imports: false,
     };
     stripper.visit_statement(statement);
 }
@@ -81,6 +107,9 @@ struct TypeStripper<'a, 'ct> {
     code_transform: &'ct mut CodeTransform<'a>,
     base_offset: u32,
     source: &'a str,
+    /// When true, leave import declarations untouched (the `<script setup>`
+    /// force_js flow owns imports; the body strip must not double-edit them).
+    skip_imports: bool,
 }
 
 impl<'a, 'ct> TypeStripper<'a, 'ct> {
@@ -993,6 +1022,9 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
     // =========================================================================
 
     fn visit_import_declaration(&mut self, import: &ImportDeclaration) {
+        if self.skip_imports {
+            return;
+        }
         if import.import_kind.is_type() {
             self.remove(import.span.start, import.span.end);
             return;
@@ -1057,6 +1089,18 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
                 self.remove_with_trailing_semi(export.span.start, export.span.end);
                 return;
             }
+        }
+
+        // `export enum` → drop the `export` keyword and lower to the runtime
+        // IIFE. A bare `export var E; …` inside a setup() wrapper is invalid JS,
+        // and Vue disallows `export` in <script setup>; the enum stays a
+        // module-local runtime value.
+        if let Some(Declaration::TSEnumDeclaration(ts_enum)) = &export.declaration {
+            if export.span.start < ts_enum.span.start {
+                self.remove(export.span.start, ts_enum.span.start);
+            }
+            self.convert_enum(ts_enum);
+            return;
         }
 
         if !export.specifiers.is_empty() {

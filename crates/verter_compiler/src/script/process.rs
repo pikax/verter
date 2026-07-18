@@ -120,11 +120,16 @@ pub fn process_script_setup<'alloc>(
                 let abs_end = content_start + imp.span.end;
 
                 if !options.keep_ts_types && imp.is_type_only {
-                    // Type-only import — strip entirely when not keeping TS types
+                    // Type-only import — strip entirely. process.rs is the SOLE
+                    // owner of setup imports (the force_js body strip skips
+                    // import declarations), so this is a single overwrite with
+                    // no same-range double from the body strip.
                     ctx.out.overwrite(abs_start, abs_end, "");
                 } else if !options.keep_ts_types {
                     // force_js mode: reconstruct import keeping only specifiers
-                    // that have runtime usage (in script body or template)
+                    // that have runtime usage (in script body or template). The
+                    // body strip skips imports, so this reconstruct is the only
+                    // edit on the span — no nested-overwrite corruption.
                     let kept = filter_import_specifiers(
                         imp,
                         runtime_text.as_deref(),
@@ -143,17 +148,19 @@ pub fn process_script_setup<'alloc>(
                 }
             }
             ScriptItem::TypeDeclaration(td) => {
-                let abs_start = content_start + td.span.start;
-                let abs_end = content_start + td.span.end;
                 if options.keep_ts_types {
                     // Hoist to file top
+                    let abs_start = content_start + td.span.start;
+                    let abs_end = content_start + td.span.end;
                     let td_text = &ctx.source[abs_start as usize..abs_end as usize];
                     ctx.out.overwrite(abs_start, abs_end, "");
                     ctx.out.prepend_alloc(hoist_pos, &format!("{}\n", td_text));
-                } else {
-                    // Strip the type declaration
-                    ctx.out.overwrite(abs_start, abs_end, "");
                 }
+                // force_js: the whole-program body strip is the SINGLE owner of
+                // type-declaration removal — interfaces/type aliases are removed
+                // and enums lower to their runtime IIFE there. Blanking the same
+                // span here too would double-overwrite it and corrupt the
+                // CodeTransform (see the type-only-import note above).
             }
             ScriptItem::Macro(mac) => {
                 process_macro_item(
@@ -171,19 +178,29 @@ pub fn process_script_setup<'alloc>(
                 if let Some(arg_span) = &async_item.arg_span {
                     let abs_start = content_start + async_item.span.start;
                     let abs_arg_start = content_start + arg_span.start;
-                    let abs_end = content_start + async_item.span.end;
-                    let arg_text = &ctx.source[abs_arg_start as usize..abs_end as usize];
+                    let abs_arg_end = content_start + arg_span.end;
 
-                    // Replace `await <arg>` with a parenthesised comma-expression:
+                    // Wrap `await <arg>` in a parenthesised comma-expression:
                     // (([__temp,__restore] = _withAsyncContext(() => <arg>)),
                     //   __temp = await __temp, __restore(), __temp)
                     // The outer parens are critical — without them a `const x = ...`
                     // initializer would break at the first comma.
-                    let replacement = format!(
-                        "(([__temp,__restore] = _withAsyncContext(() => {})), __temp = await __temp, __restore(), __temp)",
-                        arg_text
+                    //
+                    // The argument region is left ORIGINAL (only the surrounding
+                    // wrapper is overwritten) so the force_js body strip removes
+                    // its TypeScript (e.g. `await load<Result>()` → the
+                    // `<Result>` type arg). Embedding a raw slice would place the
+                    // type args inside an Overwritten chunk the strip cannot
+                    // reach (nested-overwrite no-op).
+                    ctx.out.overwrite(
+                        abs_start,
+                        abs_arg_start,
+                        "(([__temp,__restore] = _withAsyncContext(() => ",
                     );
-                    ctx.out.overwrite(abs_start, abs_end, &replacement);
+                    ctx.out.prepend_alloc(
+                        abs_arg_end,
+                        ")), __temp = await __temp, __restore(), __temp)",
+                    );
                 }
             }
             _ => {}

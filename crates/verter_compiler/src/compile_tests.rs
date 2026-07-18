@@ -15615,3 +15615,390 @@ const props = withDefaults(defineProps<Props>(), {
         "runtime call in defaults must remain, got:\n{code}"
     );
 }
+
+/// F3: a top-level `await` argument must have its TypeScript type arguments
+/// stripped under force_js. The async-context transform wraps the awaited
+/// expression; embedding the raw argument would place `<Result>` inside an
+/// Overwritten chunk the body strip cannot reach (nested-overwrite no-op).
+#[test]
+fn force_js_top_level_await_strips_type_args_from_argument() {
+    let result = compile_sfc(
+        r#"
+<script setup lang="ts">
+import type { Result } from './api'
+import { load } from './api'
+const x = await load<Result>()
+</script>
+<template><div>{{ x }}</div></template>
+"#,
+    );
+    let script = result.script.as_ref().expect("script");
+    let code = &script.code;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert!(
+        code.contains("_withAsyncContext"),
+        "top-level await must use _withAsyncContext, got:\n{code}"
+    );
+    assert!(
+        !code.contains("load<Result>") && !code.contains("<Result>"),
+        "type args on the awaited call must be stripped under force_js, got:\n{code}"
+    );
+    assert!(
+        code.contains("load()"),
+        "the awaited runtime call must remain, got:\n{code}"
+    );
+}
+
+#[test]
+fn force_js_strips_inline_ts_even_with_import_type() {
+    let result = compile_sfc(
+        r#"
+<script setup lang="ts">
+import { ref } from 'vue'
+import type { Ref } from 'vue'
+const count = ref<number>(0)
+const msg: string = 'hello'
+const x = (y as string)
+const z = y!
+const w = ({ a: 1 } satisfies { a: number })
+</script>
+<template><div>{{ count }} {{ msg }}</div></template>
+"#,
+    );
+    let script = result.script.as_ref().expect("script");
+    let code = &script.code;
+    assert!(!code.contains("import type"), "import type must go: {code}");
+    assert!(
+        !code.contains("ref<number>"),
+        "call type args must go: {code}"
+    );
+    assert!(
+        !code.contains(": string"),
+        "var annotations must go: {code}"
+    );
+    assert!(
+        !code.contains(" as string") && !code.contains("as string)"),
+        "as-casts must go: {code}"
+    );
+    assert!(!code.contains("satisfies"), "satisfies must go: {code}");
+    assert!(!code.contains("y!"), "non-null must go: {code}");
+    assert!(code.contains("ref(0)"), "runtime call remains: {code}");
+    assert!(
+        code.contains("const msg = 'hello'"),
+        "value remains: {code}"
+    );
+}
+
+/// Interface/type alias/enum handling under force_js. TIGHTENED (F1 guard): the
+/// enum must lower to its runtime IIFE, not merely leave `Color` behind via the
+/// incidental `Color.Red` reference — a dropped enum is a runtime ReferenceError.
+#[test]
+fn force_js_strips_declarations_and_emits_enum_runtime() {
+    let result = compile_sfc(
+        r#"
+<script setup lang="ts">
+interface Foo { a: string }
+type Bar = number | string
+enum Color { Red, Green }
+const c = Color.Red
+</script>
+<template><div>{{ c }}</div></template>
+"#,
+    );
+    let script = result.script.as_ref().expect("script");
+    let code = &script.code;
+    assert!(!code.contains("interface Foo"), "interface must go: {code}");
+    assert!(!code.contains("type Bar"), "type alias must go: {code}");
+    assert!(!code.contains("enum Color"), "enum keyword must go: {code}");
+    // Runtime IIFE shape — a fully-dropped enum passes a bare `contains("Color")`.
+    assert!(
+        code.contains("var Color;"),
+        "enum must emit runtime `var Color;`, got: {code}"
+    );
+    assert!(
+        code.contains("(function(Color)"),
+        "enum must emit runtime IIFE `(function(Color)`, got: {code}"
+    );
+    assert!(
+        code.contains("Color[Color[\"Red\"] = 0]"),
+        "enum members must be assigned in the IIFE, got: {code}"
+    );
+}
+
+/// F1 guard: an `export enum` under force_js must lower to its runtime IIFE and
+/// stay valid JS — never a bare `export var E; …` inside the setup() wrapper.
+#[test]
+fn force_js_exported_enum_emits_runtime_iife() {
+    let result = compile_sfc(
+        r#"
+<script setup lang="ts">
+export enum Color { Red, Green }
+const c = Color.Red
+</script>
+<template><div>{{ c }}</div></template>
+"#,
+    );
+    let script = result.script.as_ref().expect("script");
+    let code = &script.code;
+    assert!(!code.contains("enum Color"), "enum keyword must go: {code}");
+    assert!(
+        !code.contains("export var Color"),
+        "must not emit `export` inside the setup wrapper, got: {code}"
+    );
+    assert!(
+        code.contains("var Color;"),
+        "exported enum must emit runtime `var Color;`, got: {code}"
+    );
+    assert!(
+        code.contains("(function(Color)"),
+        "exported enum must emit runtime IIFE, got: {code}"
+    );
+    assert!(
+        code.contains("Color[Color[\"Red\"] = 0]"),
+        "exported enum members must be assigned, got: {code}"
+    );
+}
+
+/// Control: same body without import type still strips (baseline).
+#[test]
+fn force_js_strips_inline_ts_without_import_type() {
+    let result = compile_sfc(
+        r#"
+<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref<number>(0)
+const msg: string = 'hello'
+const x = (y as string)
+</script>
+<template><div>{{ count }} {{ msg }}</div></template>
+"#,
+    );
+    let script = result.script.as_ref().expect("script");
+    let code = &script.code;
+    assert!(!code.contains("ref<number>"), "got: {code}");
+    assert!(!code.contains(": string"), "got: {code}");
+    assert!(
+        !code.contains(" as string") && !code.contains("as string)"),
+        "got: {code}"
+    );
+}
+
+/// Mixed value+type import specifiers: keep value, strip type and body TS.
+#[test]
+fn force_js_strips_with_mixed_import_specifiers() {
+    let result = compile_sfc(
+        r#"
+<script setup lang="ts">
+import { ref, type Ref, computed } from 'vue'
+const count: Ref<number> = ref(0)
+const doubled = computed(() => count.value * 2)
+</script>
+<template><div>{{ doubled }}</div></template>
+"#,
+    );
+    let script = result.script.as_ref().expect("script");
+    let code = &script.code;
+    assert!(!code.contains("type Ref"), "type specifier must go: {code}");
+    assert!(!code.contains(": Ref"), "annotation must go: {code}");
+    assert!(!code.contains("<number>"), "generic must go: {code}");
+    assert!(code.contains("ref(0)"), "runtime remains: {code}");
+}
+
+/// Function param/return types and generics must strip.
+#[test]
+fn force_js_strips_function_and_generic_syntax() {
+    let result = compile_sfc(
+        r#"
+<script setup lang="ts">
+function id<T>(x: T): T { return x }
+const f = (a: string, b: number): boolean => true
+const g = useFoo<Bar>()
+</script>
+<template><div/></template>
+"#,
+    );
+    let script = result.script.as_ref().expect("script");
+    let code = &script.code;
+    assert!(!code.contains("<T>"), "type params must go: {code}");
+    assert!(!code.contains(": T"), "param types must go: {code}");
+    assert!(!code.contains(": string"), "param types must go: {code}");
+    assert!(!code.contains(": boolean"), "return types must go: {code}");
+    assert!(!code.contains("<Bar>"), "call type args must go: {code}");
+    assert!(code.contains("function id"), "fn remains: {code}");
+}
+
+#[test]
+fn force_js_strips_body_with_mixed_import_no_annotation_use() {
+    let result = compile_sfc(
+        r#"
+<script setup lang="ts">
+import { ref, type Ref, computed } from 'vue'
+const count = ref<number>(0)
+const msg: string = 'hello'
+</script>
+<template><div>{{ count }}</div></template>
+"#,
+    );
+    let script = result.script.as_ref().expect("script");
+    let code = &script.code;
+    assert!(!code.contains("type Ref"), "got: {code}");
+    assert!(!code.contains("ref<number>"), "got: {code}");
+    assert!(!code.contains(": string"), "got: {code}");
+}
+
+#[test]
+fn force_js_strips_ref_annotation_with_separate_type_import() {
+    let result = compile_sfc(
+        r#"
+<script setup lang="ts">
+import { ref } from 'vue'
+import type { Ref } from 'vue'
+const count: Ref<number> = ref(0)
+</script>
+<template><div>{{ count }}</div></template>
+"#,
+    );
+    let script = result.script.as_ref().expect("script");
+    let code = &script.code;
+    assert!(!code.contains("import type"), "got: {code}");
+    assert!(!code.contains(": Ref"), "got: {code}");
+    assert!(!code.contains("<number>"), "got: {code}");
+    assert!(code.contains("ref(0)"), "runtime ref must remain: {code}");
+}
+
+/// force_js: same-file empty interface chain + withDefaults still emits pure JS.
+#[test]
+fn force_js_same_file_empty_interface_extends_chain_is_pure_js() {
+    let result = compile_sfc(
+        r#"
+<script setup lang="ts">
+interface A { a?: string }
+interface B extends A { b?: number }
+interface C extends B {}
+const props = withDefaults(defineProps<C>(), { a: 'x' })
+const n = (1 as number)!
+</script>
+<template><div>{{ props.a }} {{ n }}</div></template>
+"#,
+    );
+    let script = result.script.as_ref().expect("script");
+    let code = &script.code;
+    assert!(code.contains("a:"), "must emit prop a, got: {code}");
+    assert!(code.contains("b:"), "must emit prop b, got: {code}");
+    assert!(!code.contains("interface "), "got: {code}");
+    assert!(!code.contains("as number"), "got: {code}");
+    assert!(!code.contains("defineProps<"), "got: {code}");
+}
+
+/// force_js: export type / type alias decls do not leak into runtime output.
+#[test]
+fn force_js_strips_export_type_and_type_alias() {
+    let result = compile_sfc(
+        r#"
+<script setup lang="ts">
+export type Payload = { id: number }
+type Local = string
+const id: Local = '1'
+const payload = { id: 1 } as Payload
+</script>
+<template><div>{{ id }}</div></template>
+"#,
+    );
+    let script = result.script.as_ref().expect("script");
+    let code = &script.code;
+    assert!(!code.contains("export type"), "got: {code}");
+    assert!(!code.contains("type Local"), "got: {code}");
+    assert!(!code.contains("as Payload"), "got: {code}");
+    assert!(!code.contains(": Local"), "got: {code}");
+    assert!(
+        code.contains("const id = '1'") || code.contains("const id='1'"),
+        "got: {code}"
+    );
+}
+
+/// F16 guard: type-only export specifiers in `<script setup>` are stripped under
+/// force_js. The setup body strip skips IMPORTS (generate_script owns them) but
+/// still owns exports, so `export type { … }` / `export { type … }` are removed
+/// and never leak an invalid `export` into the setup wrapper.
+#[test]
+fn force_js_strips_type_only_exports_in_setup() {
+    let result = compile_sfc(
+        r#"
+<script setup lang="ts">
+import { ref } from 'vue'
+type Foo = { a: number }
+const bar = ref(0)
+export type { Foo }
+export { type Foo as Baz }
+</script>
+<template><div>{{ bar }}</div></template>
+"#,
+    );
+    let script = result.script.as_ref().expect("script");
+    let code = &script.code;
+    assert!(!code.contains("export type"), "export type must go: {code}");
+    assert!(
+        !code.contains("type Foo as Baz") && !code.contains("export { type"),
+        "type-only export specifiers must go: {code}"
+    );
+    assert!(code.contains("ref(0)"), "runtime value remains: {code}");
+}
+
+/// Local empty-body interface extends an imported props surface supplied via
+/// external_types (radix Separator pattern). Runtime props must expand heritage,
+/// and force_js must still strip the dual-script TS.
+#[test]
+fn force_js_local_empty_interface_extends_external_expands_props() {
+    use rustc_hash::FxHashMap;
+    use verter_parser::utils::oxc::script::type_surface::{resolve_external_type, ResolvedElements};
+
+    let alloc = Allocator::new();
+    let base_src = r#"
+export interface PrimitiveProps { asChild?: boolean; as?: string }
+export interface BaseSeparatorProps extends PrimitiveProps {
+  orientation?: string
+  decorative?: boolean
+}
+"#;
+    let base_resolved = resolve_external_type("BaseSeparatorProps", base_src, &alloc)
+        .expect("BaseSeparatorProps resolves");
+    assert!(
+        base_resolved.props.len() >= 4,
+        "precondition: base has heritage members, got {}",
+        base_resolved.props.len()
+    );
+
+    let mut external_types: FxHashMap<String, ResolvedElements> = FxHashMap::default();
+    external_types.insert("BaseSeparatorProps".to_string(), base_resolved);
+
+    let source = r#"
+<script lang="ts">
+import type { BaseSeparatorProps } from './BaseSeparator.vue'
+export interface SeparatorProps extends BaseSeparatorProps {}
+</script>
+<script setup lang="ts">
+const props = withDefaults(defineProps<SeparatorProps>(), {
+  orientation: 'horizontal',
+})
+</script>
+<template><div /></template>
+"#;
+    let options = CodegenOptions {
+        filename: Some("Separator.vue".to_string()),
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        external_types: Some(external_types),
+        ..Default::default()
+    };
+    let result = compile(source, &options, &verter_opts, &alloc);
+    let script = result.script.as_ref().expect("script");
+    let code = &script.code;
+    assert!(code.contains("asChild"), "must emit asChild heritage prop: {code}");
+    assert!(code.contains("orientation"), "must emit orientation: {code}");
+    assert!(code.contains("decorative"), "must emit decorative: {code}");
+    assert!(!code.contains("interface SeparatorProps"), "interface must go: {code}");
+    assert!(!code.contains("import type"), "import type must go: {code}");
+    assert!(!code.contains("defineProps<"), "defineProps type arg must go: {code}");
+}
