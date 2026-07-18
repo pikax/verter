@@ -197,14 +197,16 @@ pub struct ConfiguredMembership {
 
 impl ConfiguredMembership {
     /// A membership that claims every file under `root` except the TypeScript
-    /// default excludes (`node_modules`, …), with no materialized set — the
-    /// static-spec bridge answer.
+    /// default excludes (`node_modules`, …). It carries no materialized set by
+    /// design — its member domain is unbounded, so the compiled
+    /// `with_typescript_defaults` spec is its permanent ownership authority
+    /// (see [`ConfiguredMembership::contains`]).
     ///
     /// This is the resolver-config default (a freshly-constructed
     /// [`IdeProjectConfig`](crate::resolver::IdeProjectConfig)) and the
     /// root-containment membership a fallback (tsconfig-less) config carries:
-    /// its `contains` reduces to "under root, not excluded", matching the old
-    /// `ProjectMembership::MatchAll` behaviour without a second glob engine.
+    /// its `contains` reduces to "under root, not excluded" through the one
+    /// shared glob engine — no second glob evaluator.
     ///
     /// [`IdeProjectConfig`]: crate::resolver::IdeProjectConfig
     #[must_use]
@@ -217,14 +219,34 @@ impl ConfiguredMembership {
 
     /// Check if a file is a member of this configured project.
     ///
-    /// If materialized files have been populated, uses exact set membership.
-    /// Otherwise falls back to static spec matching (bridge mode during
-    /// migration when filesystem walking hasn't been done yet).
+    /// One of two ownership authorities is selected by whether a finite
+    /// materialized set exists — and the selection is deterministic per
+    /// membership, so it is NOT a divergence source:
+    ///
+    /// - When `materialized_files` is populated (the disk-backed snapshot
+    ///   build walked the project root — see `materialize_from_spec`),
+    ///   membership is EXACT set containment: the precise, fast authority for
+    ///   every file present at walk time.
+    /// - When `materialized_files` is empty, membership is decided by
+    ///   `spec.matches` (the compiled `files`/`include`/`exclude` globs). This
+    ///   is the permanent authority for a spec-defined match-all membership
+    ///   ([`Self::match_all_under_root`], whose member domain is unbounded) and
+    ///   the only available authority in a filesystem-less environment (WASM,
+    ///   in-memory workspace) where there is nothing to walk.
+    ///
+    /// The two authorities agree by construction on every on-disk file: the
+    /// walk inserts exactly the entries `spec.matches` accepts, so the exact
+    /// set is the glob's restriction to files present at build. A single
+    /// immutable snapshot fixes `materialized_files` once, so the selected
+    /// authority is stable for the life of that snapshot and repeated
+    /// ownership queries for the same file never observe different results.
     pub fn contains(&self, file_path: &CanonicalPath) -> bool {
         if !self.materialized_files.is_empty() {
             self.materialized_files.contains(file_path)
         } else {
-            // Bridge: materialization not yet done, use static spec
+            // No finite materialized set (spec-defined match-all, or a
+            // filesystem-less environment): the compiled globs are the
+            // authority.
             self.spec.matches(file_path)
         }
     }
