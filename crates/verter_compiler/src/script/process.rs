@@ -688,15 +688,6 @@ fn is_identifier_used_in_text(ident: &str, text: &str) -> bool {
     false
 }
 
-/// Type-strip the setup `program` into a fresh JavaScript string, without
-/// re-parsing the content.
-fn strip_program_to_string(program: &Program, content_str: &str) -> String {
-    let alloc = Allocator::new();
-    let mut ct = CodeTransform::new(content_str, &alloc);
-    crate::strip_types::typescript::strip_typescript_types(program, &mut ct, 0, content_str);
-    ct.build_string()
-}
-
 /// Compute type-stripped script content with import lines blanked out.
 ///
 /// Used to determine which import specifiers have runtime references (appear in
@@ -704,21 +695,29 @@ fn strip_program_to_string(program: &Program, content_str: &str) -> String {
 /// Strips from the already-parsed setup `program` rather than re-parsing the
 /// content. The blanked string is a throwaway used only for identifier-presence
 /// scanning — it is never emitted, so it carries no source map.
+///
+/// Import ranges MUST be blanked on the original content *before* type stripping
+/// mutates lengths. Blanking after strip reuses original spans on a shorter
+/// string and overwrites the wrong body bytes (dropping real runtime uses of
+/// `ref` / similar, which then get elided as "type-only" and leave the setup
+/// body with unstripped TypeScript).
 fn compute_runtime_text(program: &Program, content_str: &str, items: &[ScriptItem]) -> String {
-    // Blank out import statement regions so specifier names in the import line
-    // itself don't cause false positives.
-    let mut result = strip_program_to_string(program, content_str);
+    let alloc = Allocator::new();
+    let mut ct = CodeTransform::new(content_str, &alloc);
+    // Blank import statement regions first (original spans, pre-length-shift)
+    // so specifier names on the import line itself don't false-positive.
     for item in items {
         if let ScriptItem::Import(imp) = item {
-            let start = imp.span.start as usize;
-            let end = imp.span.end as usize;
-            if end <= result.len() {
-                // Replace with spaces to preserve byte positions
-                result.replace_range(start..end, &" ".repeat(end - start));
+            let len = (imp.span.end - imp.span.start) as usize;
+            if len > 0 {
+                // Spaces preserve approximate layout for the throwaway scanner.
+                ct.overwrite(imp.span.start, imp.span.end, &" ".repeat(len));
             }
         }
     }
-    result
+    // Then strip TypeScript using the original program spans.
+    crate::strip_types::typescript::strip_typescript_types(program, &mut ct, 0, content_str);
+    ct.build_string()
 }
 
 /// Filter import specifiers, keeping only those with runtime usage.
@@ -733,14 +732,15 @@ fn filter_import_specifiers(
 ) -> Option<String> {
     let mut default_name: Option<&str> = None;
     let mut namespace_name: Option<&str> = None;
-    let mut named: Vec<&str> = Vec::new();
+    // Named: (imported_export_name, local_name, imported_is_string_literal)
+    let mut named: Vec<(&str, &str, bool)> = Vec::new();
 
     for b in &imp.bindings {
         if b.is_type_only {
             continue;
         }
 
-        // Check if specifier is used at runtime
+        // Check if specifier is used at runtime (local binding name)
         let is_runtime_used = is_specifier_runtime_used(b.name, runtime_text, template_used_vars);
 
         if !is_runtime_used {
@@ -750,7 +750,13 @@ fn filter_import_specifiers(
         match b.import_kind {
             Some(ImportSpecifierKind::Default) => default_name = Some(b.name),
             Some(ImportSpecifierKind::Namespace) => namespace_name = Some(b.name),
-            Some(ImportSpecifierKind::Named) | None => named.push(b.name),
+            Some(ImportSpecifierKind::Named) | None => {
+                // Preserve `import { FixedSizeList as ElFixedSizeList }` — using
+                // only the local name rewrites the export to `ElFixedSizeList`,
+                // which does not exist on the module (element-plus virtual-list).
+                let imported = b.imported.unwrap_or(b.name);
+                named.push((imported, b.name, b.imported_is_string_literal));
+            }
         }
     }
 
@@ -775,11 +781,21 @@ fn filter_import_specifiers(
         }
         if !named.is_empty() {
             s.push_str("{ ");
-            for (i, name) in named.iter().enumerate() {
+            for (i, (imported, local, is_str_lit)) in named.iter().enumerate() {
                 if i > 0 {
                     s.push_str(", ");
                 }
-                s.push_str(name);
+                if *is_str_lit {
+                    s.push('"');
+                    s.push_str(imported);
+                    s.push('"');
+                } else {
+                    s.push_str(imported);
+                }
+                if *imported != *local || *is_str_lit {
+                    s.push_str(" as ");
+                    s.push_str(local);
+                }
             }
             s.push_str(" }");
         }
