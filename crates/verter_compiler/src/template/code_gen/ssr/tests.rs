@@ -8864,3 +8864,28 @@ const color = ref('green')
         "multi-root must not gain _attrs fallthrough from css vars, got:\n{code}"
     );
 }
+
+/// User content that spells the OLD ASCII sentinel must never be corrupted
+/// by the post-build placeholder replace — the live sentinels are
+/// NUL-delimited and unforgeable from template content.
+#[test]
+fn ssr_user_literal_matching_old_placeholder_text_survives() {
+    let code = gen_ssr_template(
+        r#"<script setup>
+const cls = 'x'
+</script>
+<template><div :class="cls" :data-note="'__STYLE_PLACEHOLDER__'" style="color:red" :style="{ color: 'blue' }">t</div></template>"#,
+    );
+    assert!(
+        code.contains("__STYLE_PLACEHOLDER__"),
+        "the user's literal must survive verbatim, got:\n{code}"
+    );
+    assert!(
+        code.contains("_ssrRenderStyle") || code.contains("style:"),
+        "the real style merge must still emit, got:\n{code}"
+    );
+    assert!(
+        !code.contains('\u{0}'),
+        "no sentinel byte may leak into output, got:\n{code}"
+    );
+}

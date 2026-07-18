@@ -42,6 +42,20 @@ use super::vdom::element::resolve_expr;
 use super::vdom::props::{camelize, format_event_handler_key_into, needs_quoted_key};
 use super::{TemplateCodeGen, TemplateCodeGenOptions};
 
+/// Source-order placeholders spliced into the root `attrs_obj` while the
+/// class/style merge value is still unknown, then replaced post-build.
+/// NUL-delimited so they are UNFORGEABLE from template content: resolved
+/// user expressions are verbatim source text, and a raw NUL byte cannot
+/// survive SFC parsing into an attribute expression — an ASCII sentinel
+/// (`__STYLE_PLACEHOLDER__`) could be forged by a user string literal and
+/// silently corrupted by the post-build replace.
+const CLASS_PLACEHOLDER: &str = "\u{0}VERTER_CLASS\u{0}";
+const STYLE_PLACEHOLDER: &str = "\u{0}VERTER_STYLE\u{0}";
+/// [`STYLE_PLACEHOLDER`] preceded by the `, ` separator (drop-arm cleanup).
+const STYLE_PLACEHOLDER_AFTER_COMMA: &str = ", \u{0}VERTER_STYLE\u{0}";
+/// [`STYLE_PLACEHOLDER`] followed by the `, ` separator (drop-arm cleanup).
+const STYLE_PLACEHOLDER_BEFORE_COMMA: &str = "\u{0}VERTER_STYLE\u{0}, ";
+
 /// What each element pushed onto `elem_ctx` means for `leave_element`.
 #[derive(Debug, Clone, PartialEq)]
 enum ElemCtx {
@@ -2570,11 +2584,11 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                                 dynamic_class_prop_idx = Some(i);
                                 has_dynamic_attrs = true;
                                 // Insert placeholder for source-order preservation
-                                if !attrs_obj.contains("__CLASS_PLACEHOLDER__") {
+                                if !attrs_obj.contains(CLASS_PLACEHOLDER) {
                                     if !attrs_obj.is_empty() {
                                         attrs_obj.push_str(", ");
                                     }
-                                    attrs_obj.push_str("__CLASS_PLACEHOLDER__");
+                                    attrs_obj.push_str(CLASS_PLACEHOLDER);
                                 }
                             } else if attr_name == "style" {
                                 // Defer to static+dynamic style merge (array form,
@@ -2583,11 +2597,11 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                                 dynamic_style_resolved = Some(resolved);
                                 dynamic_style_prop_idx = Some(i);
                                 has_dynamic_attrs = true;
-                                if !attrs_obj.contains("__STYLE_PLACEHOLDER__") {
+                                if !attrs_obj.contains(STYLE_PLACEHOLDER) {
                                     if !attrs_obj.is_empty() {
                                         attrs_obj.push_str(", ");
                                     }
-                                    attrs_obj.push_str("__STYLE_PLACEHOLDER__");
+                                    attrs_obj.push_str(STYLE_PLACEHOLDER);
                                 }
                             } else {
                                 if !attrs_obj.is_empty() {
@@ -2654,11 +2668,11 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                                 dynamic_class_resolved = Some(resolved);
                                 dynamic_class_prop_idx = Some(i);
                                 has_dynamic_attrs = true;
-                                if !attrs_obj.contains("__CLASS_PLACEHOLDER__") {
+                                if !attrs_obj.contains(CLASS_PLACEHOLDER) {
                                     if !attrs_obj.is_empty() {
                                         attrs_obj.push_str(", ");
                                     }
-                                    attrs_obj.push_str("__CLASS_PLACEHOLDER__");
+                                    attrs_obj.push_str(CLASS_PLACEHOLDER);
                                 }
                             } else {
                                 if !attrs_obj.is_empty() {
@@ -2704,7 +2718,7 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                         if !attrs_obj.is_empty() {
                             attrs_obj.push_str(", ");
                         }
-                        attrs_obj.push_str("__CLASS_PLACEHOLDER__");
+                        attrs_obj.push_str(CLASS_PLACEHOLDER);
                         continue;
                     }
                     // For inline path: let it continue to attrs_obj (harmless, attrs_obj
@@ -2715,11 +2729,11 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                 if attr_name == "style" && (is_root || has_v_bind_spread || has_custom_directives) {
                     static_style_value = Some(css_to_js_object(value));
                     static_style_prop_idx = Some(i);
-                    if !attrs_obj.contains("__STYLE_PLACEHOLDER__") {
+                    if !attrs_obj.contains(STYLE_PLACEHOLDER) {
                         if !attrs_obj.is_empty() {
                             attrs_obj.push_str(", ");
                         }
-                        attrs_obj.push_str("__STYLE_PLACEHOLDER__");
+                        attrs_obj.push_str(STYLE_PLACEHOLDER);
                     }
                     continue;
                 }
@@ -2775,8 +2789,8 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                         escape_js_string(static_cls),
                         dyn_expr,
                     );
-                    if attrs_obj.contains("__CLASS_PLACEHOLDER__") {
-                        attrs_obj = attrs_obj.replace("__CLASS_PLACEHOLDER__", &class_entry);
+                    if attrs_obj.contains(CLASS_PLACEHOLDER) {
+                        attrs_obj = attrs_obj.replace(CLASS_PLACEHOLDER, &class_entry);
                     } else {
                         if !attrs_obj.is_empty() {
                             attrs_obj.push_str(", ");
@@ -2799,8 +2813,8 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                 } else {
                     // Root/attrs_obj path: dynamic class only
                     let class_entry = format!("class: {}", dyn_expr);
-                    if attrs_obj.contains("__CLASS_PLACEHOLDER__") {
-                        attrs_obj = attrs_obj.replace("__CLASS_PLACEHOLDER__", &class_entry);
+                    if attrs_obj.contains(CLASS_PLACEHOLDER) {
+                        attrs_obj = attrs_obj.replace(CLASS_PLACEHOLDER, &class_entry);
                     } else {
                         if !attrs_obj.is_empty() {
                             attrs_obj.push_str(", ");
@@ -2814,8 +2828,8 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                 if is_root || has_v_bind_spread || has_custom_directives {
                     // Root/mergeProps path: put static class into attrs_obj
                     let class_entry = format!("class: \"{}\"", escape_js_string(static_cls));
-                    if attrs_obj.contains("__CLASS_PLACEHOLDER__") {
-                        attrs_obj = attrs_obj.replace("__CLASS_PLACEHOLDER__", &class_entry);
+                    if attrs_obj.contains(CLASS_PLACEHOLDER) {
+                        attrs_obj = attrs_obj.replace(CLASS_PLACEHOLDER, &class_entry);
                     } else {
                         if !attrs_obj.is_empty() {
                             attrs_obj.push_str(", ");
@@ -2845,8 +2859,8 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                 } else {
                     format!("style: [{}, {}]", dyn_expr, stat_obj)
                 };
-                if attrs_obj.contains("__STYLE_PLACEHOLDER__") {
-                    attrs_obj = attrs_obj.replace("__STYLE_PLACEHOLDER__", &style_entry);
+                if attrs_obj.contains(STYLE_PLACEHOLDER) {
+                    attrs_obj = attrs_obj.replace(STYLE_PLACEHOLDER, &style_entry);
                 } else {
                     if !attrs_obj.is_empty() {
                         attrs_obj.push_str(", ");
@@ -2857,8 +2871,8 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
             }
             (Some(dyn_expr), None) if is_root || has_v_bind_spread || has_custom_directives => {
                 let style_entry = format!("style: {}", dyn_expr);
-                if attrs_obj.contains("__STYLE_PLACEHOLDER__") {
-                    attrs_obj = attrs_obj.replace("__STYLE_PLACEHOLDER__", &style_entry);
+                if attrs_obj.contains(STYLE_PLACEHOLDER) {
+                    attrs_obj = attrs_obj.replace(STYLE_PLACEHOLDER, &style_entry);
                 } else {
                     if !attrs_obj.is_empty() {
                         attrs_obj.push_str(", ");
@@ -2869,8 +2883,8 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
             }
             (None, Some(stat_obj)) if is_root || has_v_bind_spread || has_custom_directives => {
                 let style_entry = format!("style: {}", stat_obj);
-                if attrs_obj.contains("__STYLE_PLACEHOLDER__") {
-                    attrs_obj = attrs_obj.replace("__STYLE_PLACEHOLDER__", &style_entry);
+                if attrs_obj.contains(STYLE_PLACEHOLDER) {
+                    attrs_obj = attrs_obj.replace(STYLE_PLACEHOLDER, &style_entry);
                 } else {
                     if !attrs_obj.is_empty() {
                         attrs_obj.push_str(", ");
@@ -2880,11 +2894,11 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
             }
             _ => {
                 // Drop any unresolved placeholder rather than emit invalid JS.
-                if attrs_obj.contains("__STYLE_PLACEHOLDER__") {
+                if attrs_obj.contains(STYLE_PLACEHOLDER) {
                     attrs_obj = attrs_obj
-                        .replace(", __STYLE_PLACEHOLDER__", "")
-                        .replace("__STYLE_PLACEHOLDER__, ", "")
-                        .replace("__STYLE_PLACEHOLDER__", "");
+                        .replace(STYLE_PLACEHOLDER_AFTER_COMMA, "")
+                        .replace(STYLE_PLACEHOLDER_BEFORE_COMMA, "")
+                        .replace(STYLE_PLACEHOLDER, "");
                 }
             }
         }
