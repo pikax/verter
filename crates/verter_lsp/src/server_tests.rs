@@ -1718,6 +1718,41 @@ fn line_for_snippet(source: &str, needle: &str) -> u32 {
         .line
 }
 
+/// The authored range of `needle` in the open document (UTF-16 line index,
+/// encoding-consistent with the merge).
+fn range_for_authored_snippet(server: &VerterLanguageServer, uri: &Uri, needle: &str) -> Range {
+    let start = find_document_position(server, uri, needle, 0);
+    let end = find_document_position(server, uri, needle, needle.len());
+    Range { start, end }
+}
+
+/// Collect every (uri, range, new_text) triple from a `WorkspaceEdit`, across
+/// both the `changes` map and `document_changes` shapes.
+fn workspace_edit_triples(edit: &WorkspaceEdit) -> Vec<(Uri, Range, String)> {
+    let mut triples = Vec::new();
+    if let Some(changes) = &edit.changes {
+        for (uri, edits) in changes {
+            for e in edits {
+                triples.push((uri.clone(), e.range, e.new_text.clone()));
+            }
+        }
+    }
+    if let Some(DocumentChanges::Edits(doc_edits)) = &edit.document_changes {
+        for doc_edit in doc_edits {
+            for e in &doc_edit.edits {
+                if let tower_lsp_server::ls_types::OneOf::Left(text_edit) = e {
+                    triples.push((
+                        doc_edit.text_document.uri.clone(),
+                        text_edit.range,
+                        text_edit.new_text.clone(),
+                    ));
+                }
+            }
+        }
+    }
+    triples
+}
+
 fn goto_definition_params(uri: &Uri, position: Position) -> GotoDefinitionParams {
     GotoDefinitionParams {
         text_document_position_params: TextDocumentPositionParams {
@@ -5087,6 +5122,159 @@ async fn contract_kebab_prop_rename_classifies_cross_file_usage() {
             panic!("kebab usage must classify as Confirmed rename, got NotChildProp")
         }
     }
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn contract_kebab_prop_rename_executes_merged_edit_spanning_script_and_template() {
+    // EXECUTED rename (not classification): renaming the kebab `:my-prop`
+    // usage must produce a merged edit covering BOTH the parent template usage
+    // AND the child's camel `myProp` defineProps declaration — the
+    // child-declaration leg Verter synthesizes must key on the DECLARED name
+    // (the carrier API spells it verbatim), never the kebab usage alias.
+    let child_source = "<script setup lang=\"ts\">\ndefineProps<{ myProp: string }>()\n</script>\n";
+    let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nconst v = 'x'\n</script>\n<template>\n  <MyComp :my-prop=\"v\" />\n</template>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) = make_definition_test_server(&[
+        ("src/MyComp.vue", "vue", child_source),
+        ("src/App.vue", "vue", parent_source),
+    ])
+    .await;
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &app_uri, ":my-prop=", 1);
+
+    // Production sync: the child's `{carrier}.verter.ts` API surface must be
+    // live for the synthesis snapshot capture. Then seed the provider's OWN
+    // rename answer for the parent usage leg in the parent IDE surface (what
+    // tsserver returns; tsgo omits even this and the gate fails closed).
+    server.ensure_provider_synced(&app_uri).await;
+    let ctx = synced_type_provider_context(server, &app_uri);
+    let usage_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("usage position should map into TSX");
+    // A real provider answers over the PROVIDER-side token — the IDE surface
+    // spells the prop camelCase (`myProp`), not the authored kebab — so the
+    // seeded range covers exactly that token's extent.
+    provider.set_rename_locations(
+        &ctx.tsx_path,
+        usage_offset,
+        vec![crate::type_provider::protocol::RenameLocation {
+            path: ctx.tsx_path.clone(),
+            start: usage_offset,
+            end: usage_offset + "myProp".len() as u32,
+        }],
+    );
+
+    let edit = super::nav_features_navigation::handle_rename(
+        server,
+        RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: app_uri.clone(),
+                },
+                position,
+            },
+            new_name: "myPropRenamed".into(),
+            work_done_progress_params: Default::default(),
+        },
+    )
+    .await
+    .expect("rename request should succeed")
+    .expect("a confirmed kebab rename must return the merged edit, not fail closed");
+
+    let triples = workspace_edit_triples(&edit);
+    let expected_usage = range_for_authored_snippet(server, &app_uri, "my-prop");
+    let expected_decl = range_for_authored_snippet(server, &child_uri, "myProp");
+    let app_path = crate::documents::uri_to_canonical_id(&app_uri);
+    let child_path = crate::documents::uri_to_canonical_id(&child_uri);
+    assert!(
+        triples.iter().any(|(uri, range, new_text)| {
+            verter_span::path::fs_paths_equal(
+                &crate::documents::uri_to_canonical_id(uri),
+                &app_path,
+            ) && *range == expected_usage
+                && new_text == "myPropRenamed"
+        }),
+        "the parent template usage leg must be edited range-exact: {triples:?}"
+    );
+    assert!(
+        triples.iter().any(|(uri, range, new_text)| {
+            verter_span::path::fs_paths_equal(
+                &crate::documents::uri_to_canonical_id(uri),
+                &child_path,
+            ) && *range == expected_decl
+                && new_text == "myPropRenamed"
+        }),
+        "the child script declaration leg must be edited range-exact \
+         (synthesized from the DECLARED name, not the kebab alias): {triples:?}"
+    );
+    // The mis-ranged provider leg (a PREFIX of the authored kebab name) must
+    // be pruned — only the exact synthesized usage edit survives.
+    assert!(
+        triples
+            .iter()
+            .all(|(_, range, _)| *range == expected_usage || *range == expected_decl),
+        "no mis-ranged provider leg may survive the synthesis: {triples:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn contract_kebab_prop_references_include_child_declaration() {
+    // Find-references at the kebab usage must include the child's camel
+    // `defineProps` declaration even when the provider enumerates nothing —
+    // Verter injects the resolved declaration (the same shared resolution the
+    // goto-definition props branch and the rename classification consume).
+    let child_source = "<script setup lang=\"ts\">\ndefineProps<{ myProp: string }>()\n</script>\n";
+    let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nconst v = 'x'\n</script>\n<template>\n  <MyComp :my-prop=\"v\" />\n</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/MyComp.vue", "vue", child_source),
+        ("src/App.vue", "vue", parent_source),
+    ])
+    .await;
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &app_uri, ":my-prop=", 1);
+
+    let locations = super::nav_features_navigation::handle_references(
+        server,
+        ReferenceParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: app_uri.clone(),
+                },
+                position,
+            },
+            context: ReferenceContext {
+                include_declaration: true,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        },
+    )
+    .await
+    .expect("references request should succeed")
+    .expect("references must include the injected child declaration");
+
+    let expected_decl = range_for_authored_snippet(server, &child_uri, "myProp");
+    assert!(
+        locations
+            .iter()
+            .any(|loc| loc.uri == child_uri && loc.range == expected_decl),
+        "references must include the child declaration range-exact: {locations:?}"
+    );
 
     drain_handle.abort();
     drop(service);

@@ -242,6 +242,125 @@ real_provider_test!(
     }
 );
 
+// KEBAB × CAMEL cross-file rename + find-references, EXECUTED end-to-end.
+// The parent uses the kebab form (`:my-prop`) of the child's camelCase
+// declaration (`myProp`). Both legs must be correct at EXACT ranges:
+// the child declaration is Verter-synthesized from the DECLARED name (the
+// carrier API spells it verbatim — a kebab usage alias trips the
+// byte-equality guard), and the initiating parent usage is re-anchored from
+// the authored span (the provider's case-mapped range lands a PREFIX of the
+// kebab name). The references lane proves the same binding is discoverable
+// from the kebab usage across BOTH files (script + template).
+real_provider_test!(
+    rename_kebab_prop_usage_spans_script_and_template,
+    fixture = "single-project",
+    async fn run(session) {
+        let child = session
+            .open_virtual(
+                "src/KebabChild.vue",
+                "<script setup lang=\"ts\">\ndefineProps<{ myProp: string }>()\n</script>\n",
+            )
+            .await;
+        let parent = session
+            .open_virtual(
+                "src/KebabParent.vue",
+                "<script setup lang=\"ts\">\nimport KebabChild from './KebabChild.vue'\nconst v = 'x'\n</script>\n<template>\n  <KebabChild :my-prop=\"v\" />\n</template>\n",
+            )
+            .await;
+        let _warm = session
+            .wait_until_ready(&parent, ":my-prop=", 1, "my-prop")
+            .await;
+
+        // ── EXECUTED rename edit ──────────────────────────────────────────
+        let pos = session.find_position(&parent, ":my-prop=", 1);
+        let mut ws_edit = None;
+        for attempt in 0..12 {
+            let edits = session.rename_edits(&parent, pos, "myPropRenamed").await;
+            if let Some(edit) = edits {
+                let complete =
+                    edit_touches(&edit, &parent) && edit_touches(&edit, &child);
+                ws_edit = Some(edit);
+                if complete {
+                    break;
+                }
+            }
+            if attempt < 11 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+        let ws_edit =
+            ws_edit.expect("kebab cross-file rename must return edits, never fail closed");
+        assert!(
+            edit_touches(&ws_edit, &parent),
+            "kebab rename must edit the parent template usage: {ws_edit:?}"
+        );
+        assert!(
+            edit_touches(&ws_edit, &child),
+            "kebab rename must edit the child script declaration: {ws_edit:?}"
+        );
+        // APPLY: the parent template usage is renamed at its FULL authored
+        // span (a prefix edit would corrupt the attribute name). Virtual
+        // files are open documents (not on disk) — read the open source.
+        let doc_source = |uri: &tower_lsp_server::ls_types::Uri| {
+            session
+                .server()
+                .test_documents()
+                .get(uri)
+                .expect("virtual document is open")
+                .source
+                .clone()
+        };
+        let parent_after = apply_edits(&ws_edit, &parent, &doc_source(&parent));
+        assert!(
+            parent_after.contains(":myPropRenamed=\"v\""),
+            "parent template usage must become `:myPropRenamed=\"v\"`:\n{parent_after}"
+        );
+        assert!(
+            !parent_after.contains("my-prop"),
+            "no remnant of the kebab name may survive (a prefix edit corrupts):\n{parent_after}"
+        );
+        let child_after = apply_edits(&ws_edit, &child, &doc_source(&child));
+        assert!(
+            child_after.contains("myPropRenamed: string"),
+            "child defineProps must declare `myPropRenamed: string`:\n{child_after}"
+        );
+        assert!(
+            !child_after.contains("myProp: string"),
+            "the original `myProp` declaration must be renamed in place:\n{child_after}"
+        );
+
+        // ── Find-references spanning script + template ────────────────────
+        // From the kebab usage, references must discover BOTH the parent
+        // template usage (the provider's own leg) AND the child script
+        // declaration (Verter injects the resolved `defineProps` declaration
+        // — providers do not enumerate it across the synthesized API
+        // surface). The camelCase↔kebab-case mapping spans the two files.
+        let mut refs = Vec::new();
+        for attempt in 0..12 {
+            refs = session.references(&parent, pos).await;
+            let spans = refs.iter().any(|l| uris_identify_same_file(&l.uri, &parent))
+                && refs.iter().any(|l| uris_identify_same_file(&l.uri, &child));
+            if spans || attempt == 11 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        assert!(
+            refs.iter().any(|l| uris_identify_same_file(&l.uri, &parent)),
+            "references must include the parent template usage; got: {refs:?}"
+        );
+        let decl_ref = refs
+            .iter()
+            .find(|l| uris_identify_same_file(&l.uri, &child))
+            .expect("references must include the child script declaration");
+        assert_eq!(
+            (decl_ref.range.start.line, decl_ref.range.start.character),
+            (1, 14),
+            "the declaration reference must land on `myProp` exactly: {decl_ref:?}"
+        );
+    }
+);
+
 // FAIL-CLOSED GUARD — the provider-agnostic child-declaration SYNTHESIS must NEVER
 // fabricate a cross-file child edit for a rename that is NOT on a `<Child prop=…>`
 // usage. Renaming a LOCAL `<script setup>` binding (`doubled`, a computed) is a
