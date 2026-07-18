@@ -9768,6 +9768,67 @@ import Comp from './Comp.vue'
     );
 }
 
+/// F17: a NESTED `<Teleport>` must force block topology `(_openBlock(),
+/// _createBlock(_Teleport, …, [array]))` at any depth, with RAW array children
+/// — never a plain `_createVNode` and never a component slot object.
+#[test]
+fn teleport_nested_forces_block_and_array_children() {
+    let code = compile_and_validate_template(
+        r#"<template><div><Teleport to="body"><span>x</span></Teleport></div></template>"#,
+    );
+    assert!(
+        code.contains("_createBlock(_Teleport"),
+        "nested Teleport must use _createBlock (block topology).\n{code}"
+    );
+    assert!(
+        code.contains("(_openBlock(), _createBlock(_Teleport"),
+        "nested Teleport must open its own block.\n{code}"
+    );
+    // NEGATIVE: never a non-block _createVNode.
+    assert!(
+        !code.contains("_createVNode(_Teleport"),
+        "nested Teleport must NOT be a non-block _createVNode.\n{code}"
+    );
+    // Raw array children, NOT a component slot object.
+    assert!(
+        !code.contains("default: _withCtx") && !code.contains("{default:"),
+        "Teleport children must be a raw VNode array, not a slot object.\n{code}"
+    );
+    assert!(
+        code.contains("}, ["),
+        "Teleport children must open as an array literal after props.\n{code}"
+    );
+}
+
+/// F17: a NESTED `<KeepAlive>` must force block topology, raw array children,
+/// and carry the `1024 /* DYNAMIC_SLOTS */` patch flag (official Vue).
+#[test]
+fn keepalive_nested_forces_block_array_and_dynamic_slots() {
+    let code = compile_and_validate_template(
+        r#"<script setup>
+import Comp from './Comp.vue'
+</script>
+<template><div><KeepAlive><Comp/></KeepAlive></div></template>"#,
+    );
+    assert!(
+        code.contains("(_openBlock(), _createBlock(_KeepAlive"),
+        "nested KeepAlive must force block topology.\n{code}"
+    );
+    assert!(
+        code.contains("1024 /* DYNAMIC_SLOTS */"),
+        "KeepAlive must carry the DYNAMIC_SLOTS (1024) patch flag.\n{code}"
+    );
+    // NEGATIVE: never a non-block _createVNode, never a slot object.
+    assert!(
+        !code.contains("_createVNode(_KeepAlive"),
+        "nested KeepAlive must NOT be a non-block _createVNode.\n{code}"
+    );
+    assert!(
+        !code.contains("default: _withCtx") && !code.contains("{default:"),
+        "KeepAlive children must be a raw VNode array, not a slot object.\n{code}"
+    );
+}
+
 /// @ai-generated - Transition must be imported from "vue" and used directly.
 #[test]
 fn builtin_component_transition() {

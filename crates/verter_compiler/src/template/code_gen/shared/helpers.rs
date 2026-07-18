@@ -650,6 +650,28 @@ pub fn is_builtin_component(tag: &str) -> Option<(u8, &'static str)> {
     }
 }
 
+/// Built-ins whose children are RAW VNode arrays, not component slot objects.
+///
+/// Official Vue routes `Teleport` and `KeepAlive` children through the normal
+/// element children path (a VNode array), not the component-slot builder:
+/// ```js
+/// (_openBlock(), _createBlock(_Teleport, { to: "body" }, [ /* children */ ]))
+/// ```
+/// Slot-object children (`{ default: _withCtx(...), _: 3 }`) break these
+/// built-ins' dedicated runtime handling (e.g. VTU teleport stubs stringify a
+/// slot object as `[object Object]`). Suspense / Transition keep normal slots.
+#[inline]
+pub fn is_raw_children_builtin(tag: &str) -> bool {
+    matches!(tag, "Teleport" | "teleport" | "KeepAlive" | "keep-alive")
+}
+
+/// True for the `<KeepAlive>` built-in (PascalCase or kebab-case). KeepAlive
+/// carries the `DYNAMIC_SLOTS` (1024) patch flag in official Vue output.
+#[inline]
+pub fn is_keep_alive(tag: &str) -> bool {
+    matches!(tag, "KeepAlive" | "keep-alive")
+}
+
 // ======================== String case conversion ========================
 
 /// Convert a kebab-case or camelCase string to PascalCase.

@@ -2008,6 +2008,7 @@ pub fn process_element_leave<'alloc>(
     v_for_prefix: Option<&str>,
     ast: &TemplateAst,
     is_block_root: bool,
+    force_open_block: bool,
     mut hoisted_constants: Option<&mut Vec<String>>,
     cache_index: Option<usize>,
     resolved_components: Option<&mut Vec<(String, String)>>,
@@ -2034,6 +2035,12 @@ pub fn process_element_leave<'alloc>(
         .unwrap_or(ExpressionFlag::empty());
     let mut patch_flag =
         props::compute_patch_flags(element.prop_flag, expr_flag, element.children_mode);
+
+    // KeepAlive carries DYNAMIC_SLOTS (1024) in official Vue output so the
+    // runtime force-updates its cached slot content.
+    if helpers::is_keep_alive(tag_name) {
+        patch_flag |= helpers::PATCH_DYNAMIC_SLOTS;
+    }
 
     // Cached static elements use -1 (CACHED) patch flag, bypassing all diffing.
     // `cache_index` = individual element caching (adds wrapper + flag).
@@ -2106,8 +2113,10 @@ pub fn process_element_leave<'alloc>(
     // Block root elements (v-for items, v-if branches) need their own block scope
     // so that dynamic children are tracked in dynamicChildren and patched correctly.
     // Template root: wrapping is handled by leave_template, not here.
-    let needs_block_wrapper =
-        is_block_root && (element.v_for.is_some() || element.v_condition.is_some());
+    // `force_open_block` covers built-ins (Teleport/KeepAlive) that must open a
+    // block at any nesting even without a structural directive.
+    let needs_block_wrapper = force_open_block
+        || (is_block_root && (element.v_for.is_some() || element.v_condition.is_some()));
     if needs_block_wrapper {
         buf.push_str("(_openBlock(), ");
         out.add_vdom_import(VdomHelper::OpenBlock);

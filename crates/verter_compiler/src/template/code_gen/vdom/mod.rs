@@ -702,8 +702,12 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
 
         // Track slot context: components and <template v-slot> create slot
         // contexts where children should use grouped caching instead of
-        // individual _cache[N] wrapping.
-        let is_slot_parent = element.tag_type.is_component()
+        // individual _cache[N] wrapping. Teleport/KeepAlive take raw VNode-array
+        // children (not slot objects), so they stay OUT of slot context.
+        let tag_name =
+            &source[element.tag_open.start as usize + 1..element.tag_open.name_end as usize];
+        let is_slot_parent = (element.tag_type.is_component()
+            && !helpers::is_raw_children_builtin(tag_name))
             || (element.tag_type == TagType::Template && element.v_slot.is_some());
         self.in_slot_context_stack.push(is_slot_parent);
 
@@ -782,18 +786,36 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
         // Determine if this element is at a block-tree root position.
         // Block roots use _createElementBlock/_createBlock (with _openBlock())
         // instead of _createElementVNode/_createVNode.
+        //
+        // Teleport/KeepAlive are ALWAYS block roots — official Vue emits
+        // `(_openBlock(), _createBlock(_Teleport, …))` at ANY nesting depth,
+        // not just at a single-root/v-if/v-for position.
+        let tag_name = &source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
+        let raw_children_builtin = helpers::is_raw_children_builtin(tag_name);
         let is_root_child = self.ast.nodes[_id.0].parent.is_none();
-        let is_block_root =
-            el.v_condition.is_some() || el.v_for.is_some() || (is_root_child && self.single_root);
+        let is_single_template_root = is_root_child && self.single_root;
+        let is_block_root = el.v_condition.is_some()
+            || el.v_for.is_some()
+            || is_single_template_root
+            || raw_children_builtin;
+        // Local `_openBlock()`: v-if/v-for branches always; a raw-children
+        // built-in whenever it is NOT the sole single template root (the
+        // single-root open block is provided once by leave_template).
+        let force_open_block = raw_children_builtin && !is_single_template_root;
 
-        // Handle component with slot children: wrap in slot object instead of array
-        if el.tag_type.is_component() && self.has_slot_children(el_children) {
+        // Handle component with slot children: wrap in slot object instead of array.
+        // Teleport/KeepAlive are excluded — they take raw array children below.
+        if el.tag_type.is_component()
+            && !raw_children_builtin
+            && self.has_slot_children(el_children)
+        {
             self.leave_component_with_slots(_id, el, oxc, el_children, source, out, is_block_root);
             return;
         }
 
-        // Handle component with implicit default slot (non-slot children)
-        if el.tag_type.is_component() && !el_children.is_empty() {
+        // Handle component with implicit default slot (non-slot children).
+        // Teleport/KeepAlive fall through to the element path (raw array children).
+        if el.tag_type.is_component() && !raw_children_builtin && !el_children.is_empty() {
             self.leave_component_with_default_slot(
                 _id,
                 el,
@@ -895,6 +917,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             v_for_prefix.as_ref().map(|(s, _)| s.as_str()),
             self.ast,
             is_block_root,
+            force_open_block,
             Some(&mut self.hoisted_constants),
             cache_idx,
             Some(&mut self.resolved_components),
