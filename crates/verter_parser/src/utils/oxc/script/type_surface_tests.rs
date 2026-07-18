@@ -4705,3 +4705,122 @@ fn type_param_transitive_binding_resolves_member_runtime_type() {
         value.types
     );
 }
+
+// =========================================================================
+// Props-vs-emits surface discrimination for tuple-shaped member values
+//
+// A tuple / indexed-access-to-tuple member VALUE is the Vue emit shorthand
+// ONLY on an emits surface. On a props surface it is a genuine prop and
+// must NOT be reclassified into `call_signatures` (where the props consumer
+// would drop it). With no surface set, the legacy reclassifying behavior is
+// preserved.
+// =========================================================================
+
+/// Resolve `type Test = ...` on the immutable `_ref` path with an explicit
+/// resolution surface set on the context.
+fn resolve_with_surface(
+    source: &str,
+    surface: Option<BlockedTypeSurface>,
+) -> ResolvedElements {
+    let allocator = Allocator::default();
+    let source_type = SourceType::ts();
+    let parser = Parser::new(&allocator, source, source_type);
+    let result = parser.parse();
+    assert!(
+        result.errors.is_empty(),
+        "Source should parse without errors: {:?}",
+        result.errors
+    );
+    let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
+    ctx.current_surface = surface;
+    for stmt in &result.program.body {
+        if let Statement::TSTypeAliasDeclaration(alias) = stmt {
+            if alias.id.name.as_str() == "Test" {
+                return resolve_type_elements_with_ctx_ref(&alias.type_annotation, 0, &ctx, true);
+            }
+        }
+    }
+    panic!("No `type Test = ...` declaration found in source");
+}
+
+#[test]
+fn indexed_access_tuple_stays_prop_on_props_surface() {
+    let resolved = resolve_with_surface(
+        "interface LayerEmits { close: [] }\ninterface Props { onClose: LayerEmits['close'] }\ntype Test = Props;",
+        Some(BlockedTypeSurface::DefineProps),
+    );
+    assert!(
+        resolved
+            .props
+            .iter()
+            .any(|p| p.key_name.as_deref() == Some("onClose")),
+        "on a props surface `onClose: LayerEmits['close']` must stay a prop, props: {:?}",
+        resolved
+            .props
+            .iter()
+            .filter_map(|p| p.key_name.as_deref())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        resolved.call_signatures.is_empty(),
+        "props-surface member must NOT be reclassified as an emit, got call_signatures: {:?}",
+        resolved
+            .call_signatures
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn direct_tuple_stays_prop_on_props_surface() {
+    let resolved = resolve_with_surface(
+        "interface Props { tags: [string, number] }\ntype Test = Props;",
+        Some(BlockedTypeSurface::DefineProps),
+    );
+    assert!(
+        resolved
+            .props
+            .iter()
+            .any(|p| p.key_name.as_deref() == Some("tags")),
+        "a tuple-typed prop on a props surface stays a prop"
+    );
+    assert!(resolved.call_signatures.is_empty());
+}
+
+#[test]
+fn indexed_access_tuple_reclassifies_on_emits_surface() {
+    // Regression guard: the reka-ui emit-forwarding pattern must still
+    // reclassify on an emits surface.
+    let resolved = resolve_with_surface(
+        "interface LayerEmits { close: [] }\ninterface Emits { onClose: LayerEmits['close'] }\ntype Test = Emits;",
+        Some(BlockedTypeSurface::DefineEmits),
+    );
+    assert!(
+        resolved
+            .call_signatures
+            .iter()
+            .any(|c| c.name == "onClose"),
+        "on an emits surface the indexed-access-to-tuple member must become an emit"
+    );
+    assert!(
+        !resolved
+            .props
+            .iter()
+            .any(|p| p.key_name.as_deref() == Some("onClose")),
+        "the emit member must not also remain a prop"
+    );
+}
+
+#[test]
+fn indexed_access_tuple_reclassifies_when_surface_unset() {
+    // Legacy default (no surface): reclassification is preserved.
+    let resolved = resolve_with_surface(
+        "interface LayerEmits { close: [] }\ninterface Emits { onClose: LayerEmits['close'] }\ntype Test = Emits;",
+        None,
+    );
+    assert!(
+        resolved.call_signatures.iter().any(|c| c.name == "onClose"),
+        "with no surface set the legacy reclassifying behavior is preserved"
+    );
+}

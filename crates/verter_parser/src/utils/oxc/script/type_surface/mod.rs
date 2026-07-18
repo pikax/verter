@@ -758,6 +758,21 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
         })
     }
 
+    /// True when the current resolution surface is a props surface
+    /// (`defineProps` / root-props fallthrough).
+    ///
+    /// On a props surface a tuple-shaped or indexed-access-to-tuple member
+    /// VALUE (`onClose: LayerEmits['close']`, `tags: [string, number]`) is a
+    /// genuine PROP, not the emit shorthand — the tuple-as-emit
+    /// reclassification only applies when the type feeds an emits surface
+    /// (or when the surface is unknown, preserving the legacy default).
+    pub fn is_props_surface(&self) -> bool {
+        matches!(
+            self.current_surface,
+            Some(BlockedTypeSurface::DefineProps | BlockedTypeSurface::RootProps)
+        )
+    }
+
     /// Look up a type alias by comparing spans against source bytes
     pub fn find_type_alias(
         &self,

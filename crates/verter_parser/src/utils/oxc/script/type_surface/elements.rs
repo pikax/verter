@@ -118,16 +118,28 @@ pub(super) fn resolve_type_literal_members_with_ctx<'ctx, 'a: 'ctx>(
     from_root_body: bool,
     ctx: Option<&TypeResolutionContext<'ctx, 'a>>,
 ) {
+    // A tuple-shaped member VALUE (`change: [id: number]`) or an
+    // indexed-access-to-tuple member VALUE (`escapeKeydown:
+    // LayerEmits['escapeKeydown']`) is the Vue emit shorthand ONLY when the
+    // type feeds an emits surface. On a props surface the same member is a
+    // genuine prop, so the reclassification is suppressed (F22). When the
+    // surface is unknown (`ctx = None`, or no surface set) the legacy
+    // reclassifying behavior is preserved.
+    let reclassify_tuple_as_emit = !ctx.is_some_and(|ctx| ctx.is_props_surface());
+
     for member in members {
         match member {
             TSSignature::TSPropertySignature(prop) => {
-                // Check if this is a shorthand emit: { change: [id: number] }
-                // Properties with tuple/array type values are treated as emits
-                if let Some(emit) = resolve_property_as_emit(prop, base_offset, source) {
-                    result.call_signatures.push(emit);
-                } else if let Some(emit) =
-                    ctx.and_then(|ctx| resolve_property_as_emit_via_ctx(prop, base_offset, ctx))
-                {
+                let emit = if reclassify_tuple_as_emit {
+                    // Direct tuple shorthand (`change: [id: number]`) first,
+                    // then the local-context indexed-access-to-tuple form.
+                    resolve_property_as_emit(prop, base_offset, source).or_else(|| {
+                        ctx.and_then(|ctx| resolve_property_as_emit_via_ctx(prop, base_offset, ctx))
+                    })
+                } else {
+                    None
+                };
+                if let Some(emit) = emit {
                     result.call_signatures.push(emit);
                 } else if let Some(resolved) =
                     resolve_property_signature(prop, base_offset, source, from_root_body, ctx)

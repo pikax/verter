@@ -26,8 +26,8 @@ use super::usage::{
 };
 use crate::common::Span;
 use crate::utils::oxc::script::type_surface::{
-    infer_runtime_type, resolve_type_elements_with_ctx_ref, ResolvedElements, RuntimeType,
-    TypeResolutionContext,
+    infer_runtime_type, resolve_type_elements_with_ctx_ref, BlockedTypeSurface, ResolvedElements,
+    RuntimeType, TypeResolutionContext,
 };
 
 /// Context for setup script parsing
@@ -656,7 +656,7 @@ pub fn parse_macro_call<'a>(
     let type_params = call
         .type_arguments
         .as_ref()
-        .map(|tp| extract_type_params(tp, ctx, type_ctx));
+        .map(|tp| extract_type_params(tp, ctx, type_ctx, macro_resolution_surface(kind)));
 
     match kind {
         VueMacroKind::DefineProps => {
@@ -741,10 +741,15 @@ pub fn parse_macro_call<'a>(
                         // Verify it's defineProps
                         if let Expression::Identifier(id) = &inner.callee {
                             if id.name.as_bytes() == b"defineProps" {
-                                let inner_type_params = inner
-                                    .type_arguments
-                                    .as_ref()
-                                    .map(|tp| extract_type_params(tp, ctx, type_ctx));
+                                let inner_type_params =
+                                    inner.type_arguments.as_ref().map(|tp| {
+                                        extract_type_params(
+                                            tp,
+                                            ctx,
+                                            type_ctx,
+                                            Some(BlockedTypeSurface::DefineProps),
+                                        )
+                                    });
                                 return Some((Some(Span::from(inner.span)), inner_type_params));
                             }
                         }
@@ -775,14 +780,35 @@ pub fn parse_macro_call<'a>(
     }
 }
 
+/// The resolution surface a Vue macro's first type argument feeds.
+///
+/// Drives props/emits discrimination in the shared type-surface resolver
+/// (`TypeResolutionContext::is_props_surface`): a tuple-shaped member on a
+/// props surface stays a prop instead of being reclassified as the emit
+/// shorthand. Macros with no props/emits surface resolve unqualified.
+fn macro_resolution_surface(kind: VueMacroKind) -> Option<BlockedTypeSurface> {
+    match kind {
+        VueMacroKind::DefineProps | VueMacroKind::WithDefaults | VueMacroKind::DefineModel => {
+            Some(BlockedTypeSurface::DefineProps)
+        }
+        VueMacroKind::DefineEmits => Some(BlockedTypeSurface::DefineEmits),
+        VueMacroKind::DefineSlots => Some(BlockedTypeSurface::DefineSlots),
+        VueMacroKind::DefineExpose | VueMacroKind::DefineOptions => None,
+    }
+}
+
 /// Extract type parameters from a TSTypeParameterInstantiation.
 ///
 /// Uses the `TypeResolutionContext` to resolve type references (interfaces, type aliases)
 /// declared in the same SFC. Unresolvable external types produce empty results.
+///
+/// `surface` records which macro consumes the resolved type so the resolver
+/// can discriminate props vs emits (see [`macro_resolution_surface`]).
 fn extract_type_params<'a>(
     tp: &'a TSTypeParameterInstantiation<'a>,
     ctx: &ScriptParseContext<'a>,
     type_ctx: &TypeResolutionContext<'a, 'a>,
+    surface: Option<BlockedTypeSurface>,
 ) -> MacroTypeParams {
     let full_span = tp.span;
     let offset = ctx.content_offset;
@@ -811,8 +837,22 @@ fn extract_type_params<'a>(
     let resolved = tp
         .params
         .first()
-        .map(|ts_type| {
-            resolve_type_elements_with_ctx_ref(ts_type, ctx.content_offset, type_ctx, true)
+        .map(|ts_type| match surface {
+            Some(surface) => {
+                // Resolve on the macro's surface so props vs emits
+                // discrimination applies. The clone is once per macro.
+                let mut surface_ctx = type_ctx.clone();
+                surface_ctx.current_surface = Some(surface);
+                resolve_type_elements_with_ctx_ref(
+                    ts_type,
+                    ctx.content_offset,
+                    &surface_ctx,
+                    true,
+                )
+            }
+            None => {
+                resolve_type_elements_with_ctx_ref(ts_type, ctx.content_offset, type_ctx, true)
+            }
         })
         .unwrap_or_default();
 
