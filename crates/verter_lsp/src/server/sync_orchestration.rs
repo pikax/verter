@@ -890,6 +890,21 @@ impl VerterLanguageServer {
         // Touch MRU for snapshot drain ordering
         self.touch_mru(&canonical_id);
 
+        // Per-document singleflight: a hover/completion/definition storm on this
+        // document coalesces onto ONE in-flight repair instead of N concurrent
+        // foreground repairs (each a recompile + carrier gateway + provider sync)
+        // stampeding the provider. The guard serializes repairs per canonical id;
+        // the freshness re-check below lets a waiter whose trigger was already
+        // resolved by the in-flight repair return without re-repairing. Tokio's
+        // `Mutex` is fair (FIFO) and cancel-safe (a cancelled request drops out of
+        // the queue), so a storm cannot starve or wedge the repair path.
+        let repair_lock = self
+            .ide_sync_repair_locks
+            .entry(canonical_id.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _repair_guard = repair_lock.lock().await;
+
         let current_state = self.provider_sync_state_for_source(&canonical_id);
         let has_committed_state = current_state.is_some();
         let ide_already_synced = current_state
@@ -929,7 +944,7 @@ impl VerterLanguageServer {
             }
             _ => false,
         };
-        let needs_sync = self.needs_ide_sync.remove(&canonical_id).is_some();
+        let needs_sync = self.needs_ide_sync.contains(&canonical_id);
         // A committed provider state records path liveness, not source freshness.
         // The normal `did_change` path also marks `needs_ide_sync`, but recovery
         // must remain correct when the live registry advances independently (for
@@ -939,6 +954,10 @@ impl VerterLanguageServer {
         let provider_surface_matches_live_source =
             self.capture_provider_request_surface(uri).is_some();
 
+        // Freshness token: evaluated UNDER the per-document repair lock, so a
+        // concurrent repair that committed while this call waited makes every
+        // condition below false and the redundant repair is skipped. This is the
+        // coalescing half of the singleflight.
         if !needs_sync
             && has_committed_state
             && ide_already_synced
@@ -947,6 +966,11 @@ impl VerterLanguageServer {
         {
             return; // IDE is fresh
         }
+
+        // Consume the dirty flag only once this call is the single repair that
+        // will run. Holding the per-document lock means no concurrent repair can
+        // race the check above against this removal.
+        self.needs_ide_sync.remove(&canonical_id);
 
         tracing::info!(
             "ensure_current_file_synced: flushing IDE sync for {} (needs_sync={}, has_state={})",
@@ -1266,6 +1290,17 @@ impl VerterLanguageServer {
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
             return;
         };
+
+        // Serialize the close+reopen against any concurrent interactive repair on
+        // this document (same per-document singleflight as
+        // `ensure_current_file_synced`): a repair that opens the NEW IDE path must
+        // never interleave with this path's close of the SAME provider buffer.
+        let repair_lock = self
+            .ide_sync_repair_locks
+            .entry(canonical_id.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _repair_guard = repair_lock.lock().await;
 
         self.documents.recompile_and_refresh_mapper(uri);
 

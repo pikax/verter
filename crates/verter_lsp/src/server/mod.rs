@@ -306,6 +306,14 @@ pub struct VerterLanguageServer {
     /// Canonical IDs needing **interactive IDE sync** (set by did_change, cleared by
     /// `ensure_current_file_synced`). Only the IDE TSX path is flushed on hover/completion.
     needs_ide_sync: Arc<DashSet<String>>,
+    /// Per-document singleflight for the interactive IDE-sync repair
+    /// (`ensure_current_file_synced`). A hover/completion/definition storm on one
+    /// document must coalesce into ONE repair, not N concurrent foreground repairs
+    /// stampeding the provider (recompile + carrier gateway + sync per request).
+    /// The guard serializes repairs per canonical id; a waiter re-checks freshness
+    /// after acquiring it and returns without re-repairing when a concurrent repair
+    /// already made the document fresh.
+    ide_sync_repair_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Canonical IDs needing **deferred API/.vue.ts sync** + owner-aware reconciliation.
     /// Set by did_change and by the interactive path (when API is deferred).
     /// Cleared by the coordinator's debounced sync after a resolver snapshot exists.
@@ -410,6 +418,7 @@ impl VerterLanguageServer {
         });
 
         let needs_ide_sync = Arc::new(DashSet::new());
+        let ide_sync_repair_locks = Arc::new(DashMap::new());
         let needs_deferred_sync = Arc::new(DashSet::new());
         let documents = Arc::new(DocumentRegistry::new(config.host));
         let position_encoding = Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16));
@@ -518,6 +527,7 @@ impl VerterLanguageServer {
                 e2e_provider_only_completions_enabled(),
             ),
             needs_ide_sync,
+            ide_sync_repair_locks,
             needs_deferred_sync,
             pending_snapshot_provider_sync,
             sync_coordinator,

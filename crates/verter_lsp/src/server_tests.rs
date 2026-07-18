@@ -9121,11 +9121,79 @@ const msg = 'hello'
     );
 }
 
-/// Owner loss (production path) RETRACTS the carrier's store
-/// membership through the REAL production sync-transition entry
-/// `ensure_current_file_synced` (NOT `publish_carrier` directly). A carrier
-/// published while OWNED must DISAPPEAR from the on-disk carrier store (the
-/// `@verter/typescript-plugin`'s `getExternalFiles` source) once its owner is gone.
+/// D2: a storm of concurrent interactive repairs on ONE document (rapid
+/// hover/completion sweeping) must coalesce into a SINGLE foreground repair, not
+/// N concurrent recompile + carrier-gateway + provider-sync passes stampeding the
+/// provider. The per-document singleflight serializes the repairs; the freshness
+/// token (re-checked under the lock) lets the waiters whose trigger was already
+/// resolved by the in-flight repair return without re-syncing.
+///
+/// RED pre-fix: with no singleflight, every concurrent caller observed
+/// `has_committed_state == false` (none had committed yet) and ran the full
+/// repair, so the IDE `.tsx` was opened N times for N concurrent requests.
+#[tokio::test(flavor = "multi_thread")]
+async fn ensure_current_file_synced_singleflights_concurrent_repairs() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+    let canonical_id = "/workspace/src/App.vue";
+
+    let ide_syncs = |provider: &MockTypeProvider| {
+        provider
+            .file_sync_calls()
+            .iter()
+            .filter(|call| {
+                matches!(
+                    call,
+                    MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+                        if path == "/workspace/src/App.vue.tsx"
+                )
+            })
+            .count()
+    };
+
+    // Fire 16 concurrent repairs on the same document (the hover storm).
+    let repairs: Vec<_> = (0..16)
+        .map(|_| server.ensure_current_file_synced(&uri))
+        .collect();
+    futures_util::future::join_all(repairs).await;
+
+    assert_eq!(
+        ide_syncs(&provider),
+        1,
+        "16 concurrent repairs must coalesce into ONE IDE sync, calls={:?}",
+        provider.file_sync_calls()
+    );
+    // Correctness: the single repair still committed a live IDE state.
+    let state = server
+        .provider_sync_state_for_source(canonical_id)
+        .expect("the coalesced repair must commit a provider sync state");
+    assert!(
+        state.ide_background_loaded,
+        "the coalesced repair must leave the IDE companion loaded"
+    );
+
+    // A subsequent sequential repair is a no-op (the freshness token holds).
+    server.ensure_current_file_synced(&uri).await;
+    assert_eq!(
+        ide_syncs(&provider),
+        1,
+        "a fresh document must not re-sync on a later interactive pass, calls={:?}",
+        provider.file_sync_calls()
+    );
+}
+
 ///
 /// RED before the fix: the interactive `publish_carrier_to_external_ts` early-
 /// returned on the no-owner transition WITHOUT retracting — the retract inside
