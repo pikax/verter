@@ -199,4 +199,53 @@ describe("hydrateMacroTypeDeps demand-driven contract", () => {
     // The reka/radix heritage chain: the .vue dep's @/ alias import loads.
     expect(upserts).toContain("/proj/src/Primitive.ts");
   });
+
+  // Regression guard (F14): a path-alias specifier (`@/…`) resolves PER
+  // PACKAGE. Two packages that both import `@/Primitive` resolve it — through
+  // the importer-aware resolve hook — to two DIFFERENT files, and both must
+  // hydrate. An importer-agnostic cache keyed on the bare specifier would let
+  // package B warm-hit package A's file and silently drop B's own heritage.
+  it("resolves the same @/ alias per-package (no importer-agnostic warm hit)", async () => {
+    // Importer-aware hook: `@/Primitive` and `./types` resolve relative to the
+    // importing package, exactly like a per-package tsconfig `paths` alias.
+    const resolveId = async (source: string, importer: string) => {
+      const pkg = importer.includes("/pkgA/") ? "pkgA" : "pkgB";
+      if (source === "./types") return `/${pkg}/src/types.d.ts`;
+      if (source === "@/Primitive") return `/${pkg}/src/Primitive.ts`;
+      return null;
+    };
+
+    const { host, ws, upserts } = makeWorld({
+      "/pkgA/src/App.vue": {
+        source: "<template/>",
+        analysis: {
+          macroTypeDeps: [{ typeName: "Props", importSource: "./types", macroKind: "defineProps" }],
+        },
+      },
+      "/pkgA/src/types.d.ts": {
+        source: "import type { P } from '@/Primitive';\nexport interface Props extends P {}",
+        analysis: { imports: [{ source: "@/Primitive" }] },
+      },
+      "/pkgA/src/Primitive.ts": { source: "export interface P { a: string }", analysis: {} },
+      "/pkgB/src/App.vue": {
+        source: "<template/>",
+        analysis: {
+          macroTypeDeps: [{ typeName: "Props", importSource: "./types", macroKind: "defineProps" }],
+        },
+      },
+      "/pkgB/src/types.d.ts": {
+        source: "import type { P } from '@/Primitive';\nexport interface Props extends P {}",
+        analysis: { imports: [{ source: "@/Primitive" }] },
+      },
+      "/pkgB/src/Primitive.ts": { source: "export interface P { b: number }", analysis: {} },
+    });
+
+    // Hydrate package A first, then package B, against the SAME host memo.
+    await hydrateMacroTypeDeps(host, "/pkgA/src/App.vue", resolveId, ws);
+    await hydrateMacroTypeDeps(host, "/pkgB/src/App.vue", resolveId, ws);
+
+    // Each package's OWN Primitive must be hydrated — not A's for both.
+    expect(upserts).toContain("/pkgA/src/Primitive.ts");
+    expect(upserts).toContain("/pkgB/src/Primitive.ts");
+  });
 });
