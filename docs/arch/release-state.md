@@ -20,9 +20,11 @@ and fixture disposition are recorded in
 
 ## Supported product surfaces
 
-- **Vue compilation and IDE support:** Rust runtime and IDE compilation,
-  source mapping, component metadata, the Rust LSP, and editor-owned
-  TypeScript serving are release surfaces.
+- **Vue (the primary supported framework):** Rust runtime and IDE
+  compilation, source mapping, component metadata, the Rust LSP, and
+  editor-owned TypeScript serving are release surfaces. The hybrid LSP/IDE
+  experience routes through the editor-owned TypeScript provider (TSGO or
+  tsserver, see below).
 - **TypeScript serving:** interactive editor features and rich diagnostics use
   one editor-owned TypeScript route per epoch. TSGO and tsserver remain
   provider choices, with fallback occurring only after a connected demand
@@ -31,12 +33,15 @@ and fixture disposition are recorded in
 - **Editors:** VS Code is the primary packaged integration. Neovim, Helix,
   Zed, and Lapce adapters use the shared native client and LSP contracts, with
   each adapter's packaging limitations documented alongside its implementation.
-- **Svelte:** native client compilation is experimental and pinned to
-  `svelte@5.56.3`. Covered behavior is protected by runtime, conformance, and
-  official-oracle tests. Unsupported runtime features and unavailable server
-  output fail closed with typed diagnostics; they do not return successful
-  placeholder modules. See the [unplugin API](../api/unplugin.md) and
-  [Svelte compiler architecture](./svelte-native-compiler-plan.md).
+- **Svelte (experimental):** native **client** compilation is experimental and
+  pinned to `svelte@5.56.3`; it is usable for the in-scope covered fixtures,
+  whose behavior is protected by runtime, conformance, and official-oracle
+  tests. **SSR and hydration are not shipped** — they are post-merge follow-ups
+  (the CSR/SSR hydration round-trip gate is a plan target, not a current
+  status). Unsupported runtime features and unavailable server output fail
+  closed with typed diagnostics; they do not return successful placeholder
+  modules. See the [unplugin API](../api/unplugin.md) and the forward-looking
+  [Svelte compiler program plan](./svelte-native-compiler-plan.md).
 
 Verter remains beta software. The public [guide](../guide/index.md) is the
 authority for user-facing maturity and installation expectations.
@@ -117,6 +122,22 @@ The following are improvements, not silently claimed release capabilities:
   and performance evidence;
 - continue typeinfo performance work without weakening typed completeness,
   cache admission, or public diagnostics.
+
+## Release-gate dependencies and post-merge backlog
+
+The non-LSP surfaces are green. The **full-green release gate additionally awaits
+the external LSP branch**: a set of LSP-owned architecture-guard cleanups, the C5
+provider-surface-store naming/wiring, and three relay-shim signal tests that need
+a bare-CI runner. These are LSP-branch turf, not non-LSP blockers, and are
+enumerated in [`next/lsp-pending.md`](./next/lsp-pending.md). Deferred cleanup
+debt from the release-clean review is tracked in
+[`next/deferred-cleanup-debt.md`](./next/deferred-cleanup-debt.md).
+
+The forward-looking program backlog executed **after** this release train —
+typeinfo TypeScript-checker parity, the gate-integrity block, and the
+cache-admission closure design — lives under [`next/`](./next/README.md). Nothing
+in that directory is shipped capability; this document is the authority for what
+is.
 
 Release verification remains the non-vacuous gate described in
 [Testing](../contributing/testing.md), followed by independent review of one
