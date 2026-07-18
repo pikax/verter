@@ -15523,3 +15523,49 @@ console.log(foo)
         tsx.code
     );
 }
+
+/// Official-Vue parity lock: an optional `boolean` prop emits `{ type: Boolean }`
+/// with NO `default: undefined`, regardless of the prop name. Parameterized over
+/// several names to prove the runtime prop shape is NOT keyed on a specific
+/// spelling (`rounded` / `trueValue` must behave identically to `foo`).
+#[test]
+fn optional_boolean_prop_is_official_type_boolean_no_default_for_any_name() {
+    for name in ["foo", "rounded", "trueValue", "disabled", "modelValue"] {
+        let src = format!(
+            "<script setup lang=\"ts\">\ndefineProps<{{ {name}?: boolean }}>()\n</script>\n<template><div/></template>"
+        );
+        let result = compile_sfc(&src);
+        assert!(
+            result.errors.is_empty(),
+            "compile errors for {name}: {:?}",
+            result.errors
+        );
+        let code = &result.script.as_ref().unwrap().code;
+        assert!(
+            code.contains(&format!("{name}: {{ type: Boolean }}")),
+            "optional boolean `{name}` must emit official `{{ type: Boolean }}`, got:\n{code}"
+        );
+        assert!(
+            !code.contains("default: undefined"),
+            "optional boolean `{name}` must NOT emit `default: undefined` (official Vue \
+             boolean-casts absent optionals to false), got:\n{code}"
+        );
+
+        // Same parity through the withDefaults path (empty defaults object):
+        // an undeclared optional boolean stays `{ type: Boolean }` with no default.
+        let wd_src = format!(
+            "<script setup lang=\"ts\">\nwithDefaults(defineProps<{{ {name}?: boolean }}>(), {{}})\n</script>\n<template><div/></template>"
+        );
+        let wd = compile_sfc(&wd_src);
+        assert!(wd.errors.is_empty(), "wd compile errors {name}: {:?}", wd.errors);
+        let wd_code = &wd.script.as_ref().unwrap().code;
+        assert!(
+            wd_code.contains(&format!("{name}: {{ type: Boolean }}")),
+            "withDefaults optional boolean `{name}` must emit `{{ type: Boolean }}`, got:\n{wd_code}"
+        );
+        assert!(
+            !wd_code.contains("default: undefined"),
+            "withDefaults optional boolean `{name}` must NOT emit `default: undefined`, got:\n{wd_code}"
+        );
+    }
+}
