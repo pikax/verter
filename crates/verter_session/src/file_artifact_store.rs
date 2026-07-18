@@ -12,15 +12,11 @@
 //!
 //! - [`FileArtifactKey`] — `(canonical, content_hash, parse_env_hash, parser_version)`.
 //! - [`FileArtifacts`] — the per-file payload: `IndexedReady`, `FileFacts`,
-//!   `ParsedEdges`, `parse_stable_hash`, `augmentations`.
+//!   `parse_stable_hash`, `augmentations`.
 //! - [`AugmentationTargetKey`] / [`AugmenterSet`] — the inverse-lookup index
 //!   for module augmentations (R29).
 //! - [`FileFacts`] — placeholder; per-file fact registry payload (populated
 //!   by the fact-emission walk).
-//! - [`ParsedEdges`] — content-addressed import-edge facts published per
-//!   file version (populated when the workspace-edge map becomes
-//!   idempotent on the env-hash quintuple when the workspace-edge map becomes
-//!   idempotent on the env-hash quintuple).
 //! - [`ModuleAugmentationFact`] — per-file syntactic augmentation fact
 //!   (populated by the fact-emission walk; left empty until then).
 //!
@@ -446,25 +442,6 @@ impl FileFacts {
     }
 }
 
-// ── ParsedEdges ──
-
-/// Content-addressed parsed import-edge facts for a single file version.
-///
-/// Empty placeholder. The workspace-edge map becomes idempotent
-/// on the env-hash quintuple, at which point this type holds the
-/// authoritative content-addressed edge facts directly.
-#[derive(Debug, Default, Clone)]
-pub struct ParsedEdges {
-    _stage1_placeholder: (),
-}
-
-impl ParsedEdges {
-    #[must_use]
-    pub fn empty() -> Self {
-        Self::default()
-    }
-}
-
 // ── ModuleAugmentationFact ──
 
 /// A single `declare module "<specifier>" { ... }` block emitted by the
@@ -640,14 +617,15 @@ pub struct AugmenterSet {
 
 /// The per-file payload stored under [`FileArtifactKey`].
 ///
-/// Owns the canonical `IndexedReady` artifact along with the placeholder
-/// fact-registry / parsed-edges / augmentation containers thby the fact-emission walk +
-/// later fact-emission + workspace-edge work will populate.
+/// Owns the canonical `IndexedReady` artifact along with the per-file
+/// fact-registry and augmentation containers the fact-emission walk
+/// populates. Cross-file import edges are NOT stored here — they live in
+/// the workspace [`EdgeStore`](verter_workspace) keyed by
+/// [`verter_workspace::ParsedEdge`].
 #[derive(Debug, Clone)]
 pub struct FileArtifacts {
     pub indexed: Arc<IndexedReady>,
     pub facts: Arc<FileFacts>,
-    pub parsed_edges: Arc<ParsedEdges>,
     pub parse_stable_hash: Hash16,
     pub augmentations: Arc<Vec<ModuleAugmentationFact>>,
 }
@@ -675,7 +653,6 @@ impl FileArtifacts {
         Self {
             indexed,
             facts: Arc::new(emission.facts),
-            parsed_edges: Arc::new(ParsedEdges::empty()),
             parse_stable_hash,
             augmentations: Arc::new(emission.augmentations),
         }

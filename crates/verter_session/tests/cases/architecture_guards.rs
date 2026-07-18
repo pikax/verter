@@ -13651,8 +13651,8 @@ fn getcomponentmeta_uses_per_macro_projectors() {
 /// Production source must reference the unified
 /// `evict_unreachable_artifacts` reachability sweep, NOT the
 /// historical `evict_unreachable_indexed_ready` name. The store the
-/// sweep operates on holds `IndexedReady`, `FileFacts`, `ParsedEdges`,
-/// and augmentations under one key, so the broader name is the
+/// sweep operates on holds `IndexedReady`, `FileFacts`, and
+/// augmentations under one key, so the broader name is the
 /// correct one. Doc-comment back-references in non-production paths
 /// (e.g. `.phase-markers/`, `tools/orchestrator/reports/`, plan docs)
 /// are out of scope.

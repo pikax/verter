@@ -887,13 +887,12 @@ fn synth_augmenter_artifacts_for_specifier(
     specifier: &str,
     parse_stable_hash: Hash16,
 ) -> Arc<FileArtifacts> {
-    use super::{FileFacts, ModuleAugmentationFact, ParsedEdges};
+    use super::{FileFacts, ModuleAugmentationFact};
     use verter_semantic::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
 
     Arc::new(FileArtifacts {
         indexed: synth_indexed(0xA9),
         facts: Arc::new(FileFacts::empty()),
-        parsed_edges: Arc::new(ParsedEdges::empty()),
         parse_stable_hash,
         augmentations: Arc::new(vec![ModuleAugmentationFact {
             specifier: InternedSpecifier::from(specifier),
@@ -1264,12 +1263,11 @@ fn genuine_augmenter_change_via_insert_artifacts_still_invalidates_and_bumps() {
     // augmenter's contribution to the effective surface even though the
     // declared specifier is the same.
     let changed = {
-        use super::{FileFacts, ModuleAugmentationFact, ParsedEdges};
+        use super::{FileFacts, ModuleAugmentationFact};
         use verter_semantic::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
         Arc::new(FileArtifacts {
             indexed: synth_indexed(0xA9),
             facts: Arc::new(FileFacts::empty()),
-            parsed_edges: Arc::new(ParsedEdges::empty()),
             parse_stable_hash: [0x11u8; 16],
             augmentations: Arc::new(vec![ModuleAugmentationFact {
                 specifier: InternedSpecifier::from("./dep"),
@@ -1419,12 +1417,11 @@ fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
     // are unchanged, but the fact multiset governs which index rows the
     // augmenter contributes to, so a fact change must still invalidate.
     let diff_facts = {
-        use super::{FileFacts, ModuleAugmentationFact, ParsedEdges};
+        use super::{FileFacts, ModuleAugmentationFact};
         use verter_semantic::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
         Arc::new(FileArtifacts {
             indexed: synth_indexed(0xA9),
             facts: Arc::new(FileFacts::empty()),
-            parsed_edges: Arc::new(ParsedEdges::empty()),
             parse_stable_hash: [0x11u8; 16],
             augmentations: Arc::new(vec![ModuleAugmentationFact {
                 specifier: InternedSpecifier::from("./dep"),
