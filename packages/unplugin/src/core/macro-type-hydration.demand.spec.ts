@@ -248,4 +248,41 @@ describe("hydrateMacroTypeDeps demand-driven contract", () => {
     expect(upserts).toContain("/pkgA/src/Primitive.ts");
     expect(upserts).toContain("/pkgB/src/Primitive.ts");
   });
+
+  // Regression guard (F24): the vue closure walk must follow PLAIN value
+  // imports, not only `import type` ones. An intermediate `.vue` whose
+  // heritage base arrives via a plain `import { Base }` (no `type` keyword,
+  // verbatimModuleSyntax off) and which declares no own defineProps still
+  // contributes `Base` to a downstream `defineProps<X>()`. Filtering the
+  // closure to type-only imports would drop `base.ts` and under-hydrate.
+  it("walks plain (non-type) heritage imports inside an intermediate .vue closure", async () => {
+    const resolveId = async (source: string) =>
+      source === "./Base.vue"
+        ? "/proj/src/Base.vue"
+        : source === "./base"
+          ? "/proj/src/base.ts"
+          : null;
+    const { host, ws, upserts } = makeWorld({
+      [ENTRY]: {
+        source: "<template/>",
+        analysis: {
+          macroTypeDeps: [{ typeName: "X", importSource: "./Base.vue", macroKind: "defineProps" }],
+        },
+      },
+      "/proj/src/Base.vue": {
+        // Plain value import (no `type` keyword) feeding an exported heritage
+        // interface; the .vue itself has NO defineProps macro of its own.
+        source:
+          "<script setup lang='ts'>import { Base } from './base'\nexport interface X extends Base {}</script>",
+        analysis: { imports: [{ source: "./base" }] },
+      },
+      "/proj/src/base.ts": { source: "export class Base { a = 1 }", analysis: {} },
+    });
+
+    await hydrateMacroTypeDeps(host, ENTRY, resolveId, ws);
+
+    expect(upserts).toContain("/proj/src/Base.vue");
+    // The plain-import heritage base must be hydrated for downstream props.
+    expect(upserts).toContain("/proj/src/base.ts");
+  });
 });
