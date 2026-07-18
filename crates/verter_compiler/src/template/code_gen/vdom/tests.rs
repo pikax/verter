@@ -435,6 +435,53 @@ fn multi_root_fragment_with_comment_stays_stable_not_dev_root() {
     );
 }
 
+/// F19 (ported from grok spec, verified against official @vue/compiler-dom):
+/// a comment beside a SINGLE logical root (here a v-if/v-else chain, which is
+/// ONE logical root) flags the Fragment `STABLE_FRAGMENT | DEV_ROOT_FRAGMENT`
+/// (2112) so fallthrough / single-root filtering ignore the comment vnode.
+#[test]
+fn dev_root_fragment_comment_plus_single_conditional_root() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <!-- note -->
+  <div v-if="a" />
+  <div v-else />
+</template>
+<script setup>const a = true;</script>"#,
+    );
+    assert!(
+        code.contains("2112 /* STABLE_FRAGMENT, DEV_ROOT_FRAGMENT */"),
+        "comment + single conditional root must be DEV_ROOT_FRAGMENT (2112).\n{code}"
+    );
+}
+
+/// F19 (ported from grok spec): a comment beside a SINGLE component root flags
+/// DEV_ROOT_FRAGMENT (2112), and the component is a plain `_createVNode`
+/// (fragment child), never a bare `_createBlock` without `_openBlock`.
+#[test]
+fn dev_root_fragment_comment_plus_single_component_root() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <!-- no scoped styles -->
+  <CheckboxRoot name="test" />
+</template>
+<script setup>import CheckboxRoot from './CheckboxRoot.vue'</script>"#,
+    );
+    assert!(
+        code.contains("2112 /* STABLE_FRAGMENT, DEV_ROOT_FRAGMENT */"),
+        "comment + single component root must be DEV_ROOT_FRAGMENT (2112).\n{code}"
+    );
+    assert!(
+        code.contains("_createVNode("),
+        "the component beside a root comment must be a _createVNode fragment child.\n{code}"
+    );
+    // NEGATIVE: must not be a bare block without openBlock.
+    assert!(
+        !code.contains("_createBlock($setup.CheckboxRoot") || code.contains("_createVNode("),
+        "component next to a root comment must not be a bare _createBlock.\n{code}"
+    );
+}
+
 /// F13: sibling v-if/v-else chains under one parent get a GLOBAL running branch
 /// key (0,1 then 2,3), never a per-chain reset (0,1,0,1). Duplicate keys break
 /// Vue's keyed patching and log "Duplicate keys".

@@ -869,6 +869,11 @@ pub const PATCH_UNKEYED_FRAGMENT: u32 = 256;
 pub const PATCH_NEED_PATCH: u32 = 512;
 /// Component needs force update (has dynamic slots).
 pub const PATCH_DYNAMIC_SLOTS: u32 = 1024;
+/// Dev-only root fragment: a root Fragment created only because comments (or
+/// other non-element root nodes) sit beside a SINGLE logical root. The runtime
+/// filters to that real root for fallthrough / HMR
+/// (`PatchFlags.DEV_ROOT_FRAGMENT`; combined with STABLE_FRAGMENT yields 2112).
+pub const PATCH_DEV_ROOT_FRAGMENT: u32 = 2048;
 
 /// Format a patch flag with dev-mode comment.
 /// Returns a bump-allocated string like `1 /* TEXT */`.
@@ -922,6 +927,7 @@ pub fn format_patch_flag<'a>(
             (PATCH_UNKEYED_FRAGMENT, "UNKEYED_FRAGMENT"),
             (PATCH_NEED_PATCH, "NEED_PATCH"),
             (PATCH_DYNAMIC_SLOTS, "DYNAMIC_SLOTS"),
+            (PATCH_DEV_ROOT_FRAGMENT, "DEV_ROOT_FRAGMENT"),
         ];
         for &(mask, name) in FLAG_NAMES {
             if flag & mask != 0 {

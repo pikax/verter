@@ -320,7 +320,16 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                     }
                 }
                 AstNodeKind::Interpolation(_) => effective += 1,
-                AstNodeKind::Comment(_) => {} // Comments don't count as roots
+                AstNodeKind::Comment(_) => {
+                    // An EMITTED comment is a real root node — it forces a
+                    // multi-node root Fragment, so the sole non-comment root
+                    // becomes a Fragment child (`_createVNode`), not a block.
+                    // When comments are stripped they emit nothing and never
+                    // affect single-root block topology.
+                    if self.options.comments {
+                        effective += 1;
+                    }
+                }
             }
         }
         self.single_root = effective == 1;
@@ -542,12 +551,35 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                     root_children,
                 );
 
-                // Close fragment + render function
-                let flag_str = helpers::format_patch_flag(
-                    helpers::PATCH_STABLE_FRAGMENT,
-                    self.options.is_production,
-                    |s| out.alloc_str(s),
-                );
+                // Close fragment + render function.
+                //
+                // Official Vue flags a root Fragment `STABLE_FRAGMENT |
+                // DEV_ROOT_FRAGMENT` (2112) when it exists ONLY because comments
+                // sit beside a SINGLE logical non-comment root — so the runtime
+                // filters to the real root for fallthrough / HMR. A v-if/v-else
+                // chain counts as ONE logical root (its continuation arms do not
+                // add). Two or more real roots stay a plain STABLE_FRAGMENT (64).
+                let has_comment = children.iter().any(|c| c.kind == ChildKind::Comment);
+                let logical_root_count = children
+                    .iter()
+                    .filter(|c| {
+                        !matches!(
+                            c.kind,
+                            ChildKind::Comment
+                                | ChildKind::WhitespaceNewline
+                                | ChildKind::WhitespaceSpace
+                        ) && c.condition != Some(ConditionChainRole::Continuation)
+                    })
+                    .count();
+                let frag_flag = if has_comment && logical_root_count == 1 {
+                    helpers::PATCH_STABLE_FRAGMENT | helpers::PATCH_DEV_ROOT_FRAGMENT
+                } else {
+                    helpers::PATCH_STABLE_FRAGMENT
+                };
+                let flag_str =
+                    helpers::format_patch_flag(frag_flag, self.options.is_production, |s| {
+                        out.alloc_str(s)
+                    });
                 let mut close_buf = String::with_capacity(32);
                 close_buf.push_str("\n], ");
                 close_buf.push_str(flag_str);
