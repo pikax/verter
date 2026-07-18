@@ -33,7 +33,7 @@
 //!   — the synthesised default-export typeinfo path produces a result
 //!   structurally compatible with the macro-path props.
 //!
-//! - **#6** `getcomponentmeta_phase5_emits_one_request_record` — the
+//! - **#6** `getcomponentmeta_emits_one_request_record` — the
 //!   audit substrate sees exactly one record per getComponentMeta
 //!   call after the projector decomposition. Discriminates against
 //!   any future commit that re-introduces a `_with_audit` re-entrance
@@ -246,7 +246,7 @@ fn getcomponentmeta_decomposes_through_dispatch_primitives() {
 // the `indexed_access_two_levels` correctness-suite fixture
 // (`tests/cases/correctness/fixtures.rs`), which is the canonical Tier-1
 // regression for this invariant — duplicated here so the
-// `phase5_decomposition_tests` characterization fails loudly when the
+// `per_macro_projector_decomposition_tests` characterization fails loudly when the
 // projector's reducer is regressed (e.g. an early-return that bypasses
 // `materialize_component_meta_type_expr_until_stable`).
 const NESTED_INDEXED_ACCESS_VUE: &str = r#"<script setup lang="ts">
@@ -680,7 +680,7 @@ fn evaluate_indexed_access_terminal_in_navigate_stays_shallow() {
 /// not invoke any audited public host method (`*_with_audit`), or
 /// they would plant nested registrations.
 #[test]
-fn getcomponentmeta_phase5_emits_one_request_record() {
+fn getcomponentmeta_emits_one_request_record() {
     let host = audit_enabled_host(&[
         ("/workspace/src/types.ts", SHARED_TYPES_TS),
         ("/workspace/src/Comp.vue", SHARED_VUE),

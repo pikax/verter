@@ -64,7 +64,7 @@ defineOptions({ inheritAttrs: false })
 /// decomposition. Each affected macro field MUST still produce a
 /// non-default value.
 #[test]
-fn getcomponentmeta_native_payload_unchanged_post_phase5() {
+fn getcomponentmeta_native_payload_unchanged_after_decomposition() {
     let host = build_host(&[("/workspace/src/Comp.vue", SIMPLE_VUE)]);
 
     let meta = host

@@ -45,16 +45,16 @@ mod pe4_evaluate_depth_budget;
 mod pe4_mapped_type_k_independent_hoist;
 #[path = "g_misc2/pe4_substitute_hash_cons.rs"]
 mod pe4_substitute_hash_cons;
-#[path = "g_misc2/phase5_decomposition_tests.rs"]
-mod phase5_decomposition_tests;
-#[path = "g_misc2/phase5_native_payload_parity.rs"]
-mod phase5_native_payload_parity;
-#[path = "g_misc2/phase5_q20_benchmark.rs"]
-mod phase5_q20_benchmark;
+#[path = "g_misc2/per_macro_projector_decomposition_tests.rs"]
+mod per_macro_projector_decomposition_tests;
+#[path = "g_misc2/per_macro_projector_native_payload_parity.rs"]
+mod per_macro_projector_native_payload_parity;
 #[path = "g_misc2/process_rss_wasm.rs"]
 mod process_rss_wasm;
 #[path = "g_misc2/process_rss_windows.rs"]
 mod process_rss_windows;
+#[path = "g_misc2/projector_decomposition_warm_cold_benchmark.rs"]
+mod projector_decomposition_warm_cold_benchmark;
 #[path = "g_misc2/r21_c5_cross_file_provenance.rs"]
 mod r21_c5_cross_file_provenance;
 #[path = "g_misc2/recursive_substitute_memo.rs"]

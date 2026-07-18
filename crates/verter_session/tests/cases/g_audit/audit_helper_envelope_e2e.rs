@@ -27,7 +27,7 @@ use verter_session::host_manage::{
 use verter_session::request_context::{RequestContext, RequestContextGuard};
 
 #[test]
-fn phase1_counters_no_op_without_request_context() {
+fn counters_no_op_without_request_context() {
     // Nothing installed → every helper is a zero-op. We can only
     // assert by absence: the call returns; nothing panics; no global
     // state we can observe is touched. The assertion is that the
@@ -43,7 +43,7 @@ fn phase1_counters_no_op_without_request_context() {
 }
 
 #[test]
-fn phase1_counters_increment_under_request_context() {
+fn counters_increment_under_request_context() {
     let acc = Arc::new(RequestFootprintAccumulator::new());
     let ctx = RequestContext::new(101, Arc::from("/c.vue"), true, Some(Arc::clone(&acc)));
     let _g = RequestContextGuard::install(Arc::clone(&ctx));
@@ -74,7 +74,7 @@ fn phase1_counters_increment_under_request_context() {
 }
 
 #[test]
-fn phase1_new_structured_events_appended_to_accumulator() {
+fn new_structured_events_appended_to_accumulator() {
     let acc = Arc::new(RequestFootprintAccumulator::new());
     let ctx = RequestContext::new(202, Arc::from("/d.vue"), true, Some(Arc::clone(&acc)));
     let _g = RequestContextGuard::install(Arc::clone(&ctx));
@@ -135,7 +135,7 @@ fn phase1_new_structured_events_appended_to_accumulator() {
 }
 
 #[test]
-fn phase1_cache_outcome_kind_tainted_serializes_round_trip() {
+fn cache_outcome_kind_tainted_serializes_round_trip() {
     let value = CacheOutcomeKind::Tainted;
     let json = serde_json::to_string(&value).expect("serialize");
     assert_eq!(json, "\"Tainted\"");
@@ -144,7 +144,7 @@ fn phase1_cache_outcome_kind_tainted_serializes_round_trip() {
 }
 
 #[test]
-fn phase1_pub_mirror_enums_have_expected_variants() {
+fn pub_mirror_enums_have_expected_variants() {
     // `MaterializationScopeAudit` and `ProjectionModeAudit` are PUB
     // (not pub(crate)) so this integration test can construct them.
     let scopes = [
@@ -171,7 +171,7 @@ fn phase1_pub_mirror_enums_have_expected_variants() {
 }
 
 #[test]
-fn phase1_materialize_skip_reason_covers_all_arms() {
+fn materialize_skip_reason_covers_all_arms() {
     let arms = [
         MaterializeSkipReason::FunctionPropertyAtNested,
         MaterializeSkipReason::GenericRefWithArgsTopLevel,

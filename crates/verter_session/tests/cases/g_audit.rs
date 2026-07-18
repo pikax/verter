@@ -10,10 +10,10 @@ mod audit_docs;
 mod audit_dropped_registration_emits_no_record;
 #[path = "g_audit/audit_event_shape.rs"]
 mod audit_event_shape;
+#[path = "g_audit/audit_helper_envelope_e2e.rs"]
+mod audit_helper_envelope_e2e;
 #[path = "g_audit/audit_observer_tls_propagation.rs"]
 mod audit_observer_tls_propagation;
-#[path = "g_audit/audit_phase_1_e2e.rs"]
-mod audit_phase_1_e2e;
 #[path = "g_audit/audit_records_per_host_isolated.rs"]
 mod audit_records_per_host_isolated;
 #[path = "g_audit/audit_request_registration_active_variant_inserts_and_finalizes.rs"]

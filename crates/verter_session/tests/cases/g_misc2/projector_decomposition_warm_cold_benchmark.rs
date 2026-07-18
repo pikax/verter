@@ -1,4 +1,4 @@
-//! Q20 benchmark tracking for the projector decomposition.
+//! Warm/cold latency benchmark tracking for the projector decomposition.
 //!
 //! Records the warm and cold latency of `getComponentMeta` for a
 //! representative ChatMessage-like fixture as a regression baseline
@@ -102,12 +102,12 @@ fn median_ns(samples: &mut [u128]) -> u128 {
     samples[samples.len() / 2]
 }
 
-/// Q20 benchmark — 10 iterations, median cold + median warm.
+/// Warm/cold latency benchmark — 10 iterations, median cold + median warm.
 /// Asserts (a) warm median is dramatically faster than cold median
 /// (cache fence functions), (b) totals stay within 10s budget,
 /// (c) prop counts match across cold/warm passes.
 #[test]
-fn phase5_q20_benchmark_recorded() {
+fn projector_decomposition_warm_cold_benchmark_recorded() {
     const ITERATIONS: usize = 10;
 
     let mut cold_samples: Vec<u128> = Vec::with_capacity(ITERATIONS);
