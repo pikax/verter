@@ -3617,8 +3617,8 @@ export default {
     );
     // Negative: must NOT contain broken expression with truncated identifier
     assert!(
-        !code.contains("d$setup."),
-        "must NOT have broken 'd$setup.' from off-by-one in dynamic attr name, got:\n{}",
+        !code.contains("d_ctx."),
+        "must NOT have broken 'd_ctx.' from off-by-one in dynamic attr name, got:\n{}",
         code
     );
 }
@@ -3688,8 +3688,8 @@ const val = ref(true)
         code
     );
     assert!(
-        !code.contains("d$setup."),
-        "must NOT have broken 'd$setup.' from off-by-one in dynamic attr name, got:\n{}",
+        !code.contains("d_ctx."),
+        "must NOT have broken 'd_ctx.' from off-by-one in dynamic attr name, got:\n{}",
         code
     );
 }
@@ -3827,10 +3827,17 @@ const { invert = false, brightness = 0 } = defineProps<{
 </script>
 <template><Child :invert :brightness /></template>"#,
     );
-    // Official resolves destructured props through _ctx./bindings
+    // Official resolves destructured props through _ctx./bindings — pin the
+    // resolved VALUE expression, not key presence: a regression emitting a
+    // bare `invert` (free identifier → ReferenceError in non-inline
+    // ssrRender) must fail this test.
     assert!(
-        code.contains("invert:") && code.contains("brightness:"),
-        "destructured prop shorthands must emit invert + brightness, got:\n{code}"
+        code.contains("invert: _ctx.invert") && code.contains("brightness: _ctx.brightness"),
+        "destructured prop shorthands must resolve values through _ctx., got:\n{code}"
+    );
+    assert!(
+        !code.contains("invert: invert") && !code.contains("brightness: brightness"),
+        "shorthand values must never emit bare identifiers, got:\n{code}"
     );
 }
 
