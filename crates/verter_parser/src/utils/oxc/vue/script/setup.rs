@@ -1034,11 +1034,12 @@ fn extract_object_arg<'a>(
     ctx: &ScriptParseContext<'a>,
 ) -> MacroObjectArg<'a> {
     let mut properties = Vec::new();
-    // Object spreads (`...Defaults`) — reka-ui PopperContent pattern:
-    // `withDefaults(defineProps<T>(), { ...PopperContentPropsDefaultValue })`.
-    // Store the identifier name so script codegen can expand from the
-    // companion/setup binding's object literal.
-    let mut spread_identifiers: Vec<String> = Vec::new();
+    // Object spreads (`...Defaults`) — the PopperContent-style pattern:
+    // `withDefaults(defineProps<T>(), { ...SharedDefaultValues })`.
+    // ANY spread (identifier or arbitrary expression) makes the defaults
+    // object non-static: codegen routes the whole object expression
+    // through `_mergeDefaults` at runtime.
+    let mut has_spread = false;
 
     for prop in &obj.properties {
         match prop {
@@ -1082,10 +1083,8 @@ fn extract_object_arg<'a>(
                     });
                 }
             }
-            ObjectPropertyKind::SpreadProperty(spread) => {
-                if let Expression::Identifier(id) = &spread.argument {
-                    spread_identifiers.push(id.name.to_string());
-                }
+            ObjectPropertyKind::SpreadProperty(_) => {
+                has_spread = true;
             }
         }
     }
@@ -1093,7 +1092,7 @@ fn extract_object_arg<'a>(
     MacroObjectArg {
         span: Span::from(obj.span),
         properties,
-        spread_identifiers,
+        has_spread,
     }
 }
 

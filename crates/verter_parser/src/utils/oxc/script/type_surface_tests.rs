@@ -397,13 +397,49 @@ fn test_format_runtime_types_multiple() {
 }
 
 #[test]
-fn test_format_runtime_types_filters_unknown() {
-    // Unknown types should be filtered out
+fn test_format_runtime_types_unknown_union_matches_official() {
+    // Official @vue/compiler-sfc rule: an unresolvable union member forces
+    // `null` (accept anything, skip validation) UNLESS Boolean is present
+    // (the boolean cast needs the declared constructor) or a default
+    // exists alongside Function (a function default value must not be
+    // treated as a factory).
     assert_eq!(
         format_runtime_types(&[RuntimeType::String, RuntimeType::Unknown]),
-        "String"
+        "null",
+        "string | Unresolved must skip validation like official, not warn as String"
     );
     assert_eq!(format_runtime_types(&[RuntimeType::Unknown]), "null");
+    assert_eq!(
+        format_runtime_types(&[RuntimeType::Boolean, RuntimeType::Unknown]),
+        "Boolean"
+    );
+    assert_eq!(
+        format_runtime_types(&[
+            RuntimeType::String,
+            RuntimeType::Boolean,
+            RuntimeType::Unknown
+        ]),
+        "[String, Boolean]"
+    );
+    // Function survives Unknown only WITH a default present.
+    assert_eq!(
+        format_runtime_types_with_default(&[RuntimeType::Function, RuntimeType::Unknown], true),
+        "Function"
+    );
+    assert_eq!(
+        format_runtime_types_with_default(&[RuntimeType::Function, RuntimeType::Unknown], false),
+        "null"
+    );
+    // The unresolved-DateValue shape: Unknown + Array + null → null.
+    assert_eq!(
+        format_runtime_types(&[RuntimeType::Unknown, RuntimeType::Array, RuntimeType::Null]),
+        "null"
+    );
+    // No unknown member → the concrete list is untouched.
+    assert_eq!(
+        format_runtime_types(&[RuntimeType::String, RuntimeType::Number]),
+        "[String, Number]"
+    );
 }
 
 #[test]

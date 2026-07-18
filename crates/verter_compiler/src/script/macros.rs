@@ -13,13 +13,10 @@ use rustc_hash::FxHashMap;
 use super::prepared::PreparedCompanion;
 use crate::template::code_gen::binding::BindingType;
 use crate::template::code_gen::types::CodeGenOutput;
-use crate::utils::oxc::script::type_surface::{format_runtime_types, RuntimeType};
+use crate::utils::oxc::script::type_surface::{
+    format_runtime_types, format_runtime_types_with_default,
+};
 use crate::utils::oxc::vue::{ScriptItem, ScriptMacro};
-
-/// True when every runtime constructor is Boolean (optional pure-bool props).
-fn prop_types_are_boolean_only(types: &[RuntimeType]) -> bool {
-    !types.is_empty() && types.iter().all(|t| matches!(t, RuntimeType::Boolean))
-}
 
 use super::ScriptContext;
 
@@ -93,9 +90,6 @@ pub(super) struct MacroState {
     /// Model entries from `defineModel()` calls — each needs a prop and emit declaration.
     /// Tuple of (model_name, optional_options_source).
     pub model_names: Vec<(String, Option<String>)>,
-    /// When true, the props section uses `_mergeDefaults(...)` and the
-    /// script preamble must import `mergeDefaults as _mergeDefaults` from vue.
-    pub needs_merge_defaults: bool,
 }
 
 impl MacroState {
@@ -107,7 +101,6 @@ impl MacroState {
             has_expose: false,
             has_emit: false,
             model_names: Vec::new(),
-            needs_merge_defaults: false,
         }
     }
 }
@@ -214,17 +207,13 @@ pub(super) fn process_macro_item<'a>(
                         props_obj.push_str(&type_str);
                         if !prop.optional {
                             props_obj.push_str(", required: true");
-                        } else if prop_types_are_boolean_only(&prop.types) {
-                            // Optional pure-Boolean props default to `false` in
-                            // Vue when no default is declared. That breaks
-                            // reka-ui story components that `v-bind="props"`
-                            // onto a child whose own defaults (e.g.
-                            // `trueValue: () => true`) must win when the
-                            // parent did not set the prop — emit an
-                            // explicit `default: undefined` so Vue treats
-                            // the prop as three-state (true/false/undefined).
-                            props_obj.push_str(", default: undefined");
                         }
+                        // Optional props (Boolean included) emit NO default,
+                        // matching official plugin-vue: the runtime resolves
+                        // an absent optional Boolean to `false` via the
+                        // boolean cast. An explicit `default: undefined`
+                        // would make `props.x === false` fail for unset
+                        // props — an observable divergence.
                         props_obj.push_str(" },\n");
                     }
                     props_obj.push('}');
@@ -393,12 +382,6 @@ pub(super) fn process_macro_item<'a>(
                             .insert(ctx.alloc.alloc_str(name), BindingType::Props);
                         emitted_names.insert(name.to_string());
 
-                        let type_str = format_runtime_types(&prop.types);
-                        props_obj.push_str("    ");
-                        props_obj.push_str(name);
-                        props_obj.push_str(": { type: ");
-                        props_obj.push_str(&type_str);
-
                         // Check if this prop has a default in the defaults object.
                         // defaults spans are OXC-local (0-based within content_str).
                         let default_prop = defaults
@@ -409,6 +392,16 @@ pub(super) fn process_macro_item<'a>(
                                 .map(|vs| section_text(vs.start, vs.end, content_str, stripped))
                         });
 
+                        // Official parity: a declared default keeps Function
+                        // alive in an otherwise-unresolvable union (function
+                        // default value vs factory distinction).
+                        let type_str =
+                            format_runtime_types_with_default(&prop.types, default_value.is_some());
+                        props_obj.push_str("    ");
+                        props_obj.push_str(name);
+                        props_obj.push_str(": { type: ");
+                        props_obj.push_str(&type_str);
+
                         if let Some(val) = default_value {
                             props_obj.push_str(", default: ");
                             if default_prop.is_some_and(|p| p.is_method) {
@@ -418,19 +411,11 @@ pub(super) fn process_macro_item<'a>(
                             }
                         } else if !prop.optional {
                             props_obj.push_str(", required: true");
-                        } else if prop_types_are_boolean_only(&prop.types)
-                            && defaults
-                                .as_ref()
-                                .is_none_or(|d| d.spread_identifiers.is_empty())
-                        {
-                            // See type-based defineProps path: optional pure
-                            // Boolean must not fall through to Vue's false
-                            // default when the consumer never set the prop.
-                            // Skip when defaults come from a spread table
-                            // (`...PopperContentPropsDefaultValue`) that
-                            // supplies the real defaults via mergeDefaults.
-                            props_obj.push_str(", default: undefined");
                         }
+                        // Optional props with no declared default emit NO
+                        // default entry — official plugin-vue shape; the
+                        // runtime boolean-casts absent optional Booleans to
+                        // `false`.
                         props_obj.push_str(" },\n");
                     }
                     // Defaults for keys NOT present on the resolved type surface
@@ -465,19 +450,18 @@ pub(super) fn process_macro_item<'a>(
                     }
                     props_obj.push('}');
                     // Spreads: `withDefaults(defineProps<T>(), { ...Defaults })`
-                    // → `_mergeDefaults({...typed props...}, Defaults)`.
-                    // reka-ui PopperContent / similar shared default tables.
-                    if let Some(d) = defaults.as_ref() {
-                        if !d.spread_identifiers.is_empty() {
-                            state.needs_merge_defaults = true;
-                            let mut merged = String::from("_mergeDefaults(");
-                            merged.push_str(&props_obj);
-                            for name in &d.spread_identifiers {
-                                merged.push_str(", ");
-                                merged.push_str(name);
-                            }
-                            merged.push(')');
-                            props_obj = merged;
+                    // — a defaults object containing ANY spread is not
+                    // statically analyzable. Pass the WHOLE second-argument
+                    // expression through Vue's 2-arity
+                    // `_mergeDefaults(base, defaults)` (official shape):
+                    // runtime object-spread evaluation preserves the user's
+                    // key precedence, and non-identifier spreads ride along.
+                    if defaults.as_ref().is_some_and(|d| d.has_spread) {
+                        if let Some(arg_span) = defaults_arg_span {
+                            let defaults_src =
+                                section_text(arg_span.start, arg_span.end, content_str, stripped);
+                            ctx.imports.push("_mergeDefaults");
+                            props_obj = format!("_mergeDefaults({}, {})", props_obj, defaults_src);
                         }
                     }
                     // When defaults is a *variable* (not an object literal),
@@ -489,9 +473,9 @@ pub(super) fn process_macro_item<'a>(
                         if let Some(arg_span) = defaults_arg_span {
                             let defaults_src =
                                 section_text(arg_span.start, arg_span.end, content_str, stripped);
+                            ctx.imports.push("_mergeDefaults");
                             state.props_section =
                                 Some(format!("_mergeDefaults({}, {})", props_obj, defaults_src));
-                            state.needs_merge_defaults = true;
                         } else {
                             state.props_section = Some(props_obj);
                         }

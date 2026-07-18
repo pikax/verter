@@ -141,13 +141,25 @@ impl RuntimeType {
 /// Single type: `String`
 /// Multiple types: `[String, Number]`
 ///
-/// When any arm is [`RuntimeType::Unknown`] (unresolved import like
-/// `DateValue` from `@internationalized/date`) alongside concrete arms
-/// (`Array`, `null`), emit `null` (Vue "any") rather than a partial
-/// constructor list. Otherwise `DateValue | DateValue[] | null` becomes
-/// `[Array, null]` and rejects plain date objects (reka-ui MonthPicker
-/// `modelValue` / selection regressions).
+/// Equivalent to [`format_runtime_types_with_default`] with
+/// `has_default = false` — use the `_with_default` variant when the prop's
+/// declared-default information is available (the withDefaults path).
 pub fn format_runtime_types(types: &[RuntimeType]) -> String {
+    format_runtime_types_with_default(types, false)
+}
+
+/// Format runtime types as a Vue prop type value, official-parity for
+/// unions containing an unresolvable member.
+///
+/// Official `@vue/compiler-sfc` rule: when a union member cannot be
+/// resolved to a runtime constructor ([`RuntimeType::Unknown`], e.g. an
+/// unhydrated `DateValue` import), the prop type becomes `null` (accept
+/// anything, skip validation) UNLESS Boolean is present (the runtime
+/// boolean cast needs the declared constructor) or a default is declared
+/// alongside Function (a function default VALUE must not be treated as a
+/// factory). In the surviving cases the Unknown member is filtered and
+/// the concrete constructors remain.
+pub fn format_runtime_types_with_default(types: &[RuntimeType], has_default: bool) -> String {
     let has_unknown = types.iter().any(|t| matches!(t, RuntimeType::Unknown));
     // Filter out Unknown types
     let valid_types: Vec<_> = types
@@ -159,17 +171,17 @@ pub fn format_runtime_types(types: &[RuntimeType]) -> String {
         return "null".to_string();
     }
 
-    // Unresolved object-like union arm mixed with Array/null only
-    // (`DateValue | DateValue[] | null`) → accept anything. Keep
-    // filtering Unknown when other concrete constructors remain
-    // (e.g. `string | SomeImported` → String).
-    if has_unknown
-        && !valid_types.is_empty()
-        && valid_types
+    if has_unknown {
+        let keeps_concrete = valid_types
             .iter()
-            .all(|t| matches!(t, RuntimeType::Array | RuntimeType::Null))
-    {
-        return "null".to_string();
+            .any(|t| matches!(t, RuntimeType::Boolean))
+            || (has_default
+                && valid_types
+                    .iter()
+                    .any(|t| matches!(t, RuntimeType::Function)));
+        if !keeps_concrete {
+            return "null".to_string();
+        }
     }
 
     if valid_types.len() == 1 {

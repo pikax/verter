@@ -2369,3 +2369,180 @@ const emit = defineEmits<AlertDialogEmits>()
         "defineEmits of external property-form emits must emit runtime emits array, got:\n{output}"
     );
 }
+
+// ── Optional Boolean props: official parity (no `default: undefined`) ──
+
+/// Official plugin-vue emits `{ type: Boolean }` for an optional Boolean
+/// prop with NO default; the runtime resolves an absent optional Boolean
+/// to `false` (boolean cast). An explicit `default: undefined` diverges
+/// observably (`props.x === false` fails for unset props).
+#[test]
+fn optional_boolean_prop_emits_no_default_type_based() {
+    let alloc = Allocator::default();
+    let content = "\nconst props = defineProps<{ disabled?: boolean, label?: string }>()\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let _result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "BoolTest",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(
+        output.contains("disabled: { type: Boolean }"),
+        "optional Boolean prop must emit the bare official shape, got:\n{output}"
+    );
+    assert!(
+        !output.contains("default: undefined"),
+        "no prop may carry `default: undefined` (official emits no default), got:\n{output}"
+    );
+    assert!(
+        output.contains("label: { type: String }"),
+        "optional non-Boolean prop keeps its bare shape, got:\n{output}"
+    );
+}
+
+/// Same official shape on the withDefaults path when the Boolean prop has
+/// no declared default: no `default: undefined`, and declared defaults for
+/// OTHER props still emit.
+#[test]
+fn optional_boolean_prop_emits_no_default_with_defaults_path() {
+    let alloc = Allocator::default();
+    let content = "\nconst props = withDefaults(defineProps<{ disabled?: boolean, color?: string }>(), { color: 'red' })\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let _result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "BoolTest",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(
+        output.contains("disabled: { type: Boolean }"),
+        "optional Boolean without a declared default must stay bare, got:\n{output}"
+    );
+    assert!(
+        !output.contains("default: undefined"),
+        "withDefaults path must not invent `default: undefined`, got:\n{output}"
+    );
+    assert!(
+        output.contains("default: 'red'"),
+        "declared defaults must still emit, got:\n{output}"
+    );
+}
+
+// ── `_mergeDefaults` emission must carry its runtime import ──
+
+/// `withDefaults(defineProps<T>(), { ...SPREAD })` compiles to
+/// `_mergeDefaults(...)`; the vue import list must carry
+/// `_mergeDefaults` or the output throws ReferenceError at runtime.
+#[test]
+fn merge_defaults_spread_pushes_runtime_import() {
+    let alloc = Allocator::default();
+    let content =
+        "\nconst props = withDefaults(defineProps<{ a?: string }>(), { ...SHARED_DEFAULTS })\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "MergeTest",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(
+        output.contains("_mergeDefaults("),
+        "spread defaults must compile through _mergeDefaults, got:\n{output}"
+    );
+    assert!(
+        result.imports.contains(&"_mergeDefaults"),
+        "emitting _mergeDefaults REQUIRES the runtime import, got imports: {:?}",
+        result.imports
+    );
+}
+
+/// Variable (non-literal) defaults wrap with `_mergeDefaults(base, VAR)`
+/// and must also carry the import.
+#[test]
+fn merge_defaults_variable_pushes_runtime_import() {
+    let alloc = Allocator::default();
+    let content = "\nconst props = withDefaults(defineProps<{ a?: string }>(), DEFAULTS)\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "MergeTest",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(
+        output.contains("_mergeDefaults("),
+        "variable defaults must compile through _mergeDefaults, got:\n{output}"
+    );
+    assert!(
+        result.imports.contains(&"_mergeDefaults"),
+        "emitting _mergeDefaults REQUIRES the runtime import, got imports: {:?}",
+        result.imports
+    );
+}
+
+/// Negative: a plain typed defineProps never pulls the mergeDefaults
+/// import.
+#[test]
+fn plain_define_props_has_no_merge_defaults_import() {
+    let alloc = Allocator::default();
+    let content = "\nconst props = defineProps<{ a?: string }>()\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "PlainTest",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(!output.contains("_mergeDefaults("));
+    assert!(
+        !result.imports.contains(&"_mergeDefaults"),
+        "plain defineProps must not import mergeDefaults, got imports: {:?}",
+        result.imports
+    );
+}
