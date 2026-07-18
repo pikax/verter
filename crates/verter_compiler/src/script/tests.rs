@@ -2546,3 +2546,64 @@ fn plain_define_props_has_no_merge_defaults_import() {
         result.imports
     );
 }
+
+/// A props-shaped type surface routed into `defineEmits` must NOT invent an
+/// `emits: [...]` array from prop key names — emit names come exclusively
+/// from resolved call signatures (fail-closed negative for the deleted
+/// props→emits recovery fallback).
+#[test]
+fn define_emits_props_only_surface_does_not_invent_emits() {
+    let alloc = Allocator::default();
+    let content = "\nconst emit = defineEmits<{ title: string, count: number }>()\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let _result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "EmitsTest",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(
+        !output.contains("emits: [\"title\""),
+        "prop key names must never become emit names, got:\n{output}"
+    );
+    assert!(
+        !output.contains("\"count\""),
+        "props-only surface must not produce any emits entries, got:\n{output}"
+    );
+}
+
+/// The legitimate named-tuple property form keeps producing emits.
+#[test]
+fn define_emits_named_tuple_property_form_still_produces_emits() {
+    let alloc = Allocator::default();
+    let content = "\nconst emit = defineEmits<{ change: [id: number], close: [] }>()\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let _result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "EmitsTest",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(
+        output.contains("emits: [\"change\", \"close\"]"),
+        "named-tuple emits must produce the emits array, got:\n{output}"
+    );
+}

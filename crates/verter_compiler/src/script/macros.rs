@@ -252,26 +252,22 @@ pub(super) fn process_macro_item<'a>(
                 state.emits_section = Some(arr_text.to_string());
             }
 
-            // Type-based defineEmits: extract emit event names from resolved type.
-            // Prefer call_signatures (call-signature form and property-form
-            // classified as emits). Fall back to prop key names for the
-            // Vue property form `{ 'update:open': [boolean] }` when that
-            // surface was only partially rehydrated as props (dual-script
-            // local alias of a re-exported emits type — AlertDialogRoot).
+            // Type-based defineEmits: emit event names come EXCLUSIVELY from
+            // resolved call signatures (call-signature form and named-tuple
+            // property form, both classified as emits during resolution —
+            // including alias / indexed-access forwarding). A surface that
+            // resolved to plain PROPS only is NOT an emits declaration:
+            // inventing `emits: [...]` from prop key names would silently
+            // convert a mis-routed props-shaped type into runtime emit
+            // filtering. Fail closed instead (no emits section).
             if let Some(tp) = type_params {
-                let mut emit_names: Vec<String> = Vec::new();
                 if !tp.resolved.call_signatures.is_empty() {
-                    for emit in &tp.resolved.call_signatures {
-                        emit_names.push(format!("\"{}\"", emit.name));
-                    }
-                } else if !tp.resolved.props.is_empty() {
-                    for prop in &tp.resolved.props {
-                        if let Some(ref name) = prop.key_name {
-                            emit_names.push(format!("\"{name}\""));
-                        }
-                    }
-                }
-                if !emit_names.is_empty() {
+                    let emit_names: Vec<String> = tp
+                        .resolved
+                        .call_signatures
+                        .iter()
+                        .map(|emit| format!("\"{}\"", emit.name))
+                        .collect();
                     state.emits_section = Some(format!("[{}]", emit_names.join(", ")));
                 }
             }
