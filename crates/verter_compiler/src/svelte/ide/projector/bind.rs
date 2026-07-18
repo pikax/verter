@@ -77,7 +77,7 @@ impl TemplateProjector<'_, '_> {
         // form on an intrinsic element (`bind:this={get, set}` — the host-instance
         // getter/setter pair official accepts), which routes to the F5 host-typed
         // `__verter_bind_fn` check; every other `bind:this` (a single lvalue target, or a
-        // component host — 5f) is the host-instance invariant check. `bind:group` is
+        // component host) is the host-instance invariant check. `bind:group` is
         // special only where its contract applies (an `<input>`); on any other tag it is
         // an unknown binding and falls through to the attribute/error path.
         if dir.local == "this" {
@@ -233,7 +233,7 @@ impl TemplateProjector<'_, '_> {
     /// function-binding path uses, specialized with the `bind:this` host type (the contract
     /// table's `{HOST}` placeholder is NOT a real type, so `bind:this` cannot route through
     /// the generic `project_function_binding` — it needs the resolved host type here).
-    /// Element-only: a component `bind:this` is dispatched to `project_bind_this` (5f).
+    /// Element-only: a component `bind:this` is dispatched to `project_bind_this`.
     fn project_bind_this_function(
         &mut self,
         el: &SvelteElement,

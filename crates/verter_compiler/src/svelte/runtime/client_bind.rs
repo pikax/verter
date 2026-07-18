@@ -1,4 +1,4 @@
-//! The DOM-hosted `$.bind_*` EMISSION half of the client backend (5c).
+//! The DOM-hosted `$.bind_*` EMISSION half of the client backend.
 //!
 //! Extracted from `client.rs` (the file-size guard boundary): these are the
 //! [`ClientEmitter`] methods that emit a Svelte `bind:*` directive's runtime call

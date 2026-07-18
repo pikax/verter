@@ -337,7 +337,7 @@ pub(super) fn classify_script_items(
             }
         }
         // A DESTRUCTURED or NON-PRIMITIVE `$state` declarator (ANY declarator across
-        // ALL statements, multi-declarator scanned) is the advanced state form (5g)
+        // ALL statements, multi-declarator scanned) is the advanced state form
         // — fail closed before lowering so the primitive-identifier lowering never
         // sees a destructure or a deep-reactive proxy init.
         match expr_emit::state_decl_shape_for_grammar(

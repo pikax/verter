@@ -152,7 +152,8 @@ pub enum RuntimeHelper {
     /// `ReadWrite`.
     Property,
     /// `$.bind_this(host, set, get)` — `bind:this`. (Routing is host-specific; the
-    /// element host is owned by 5c, the component / special-element hosts by 5f.)
+    /// element host is owned by the DOM-bind backend, the component / special-element
+    /// hosts by their own backend.)
     This,
     /// `$.bind_window_size('<name>', set)` — `<svelte:window>` dimension reads
     /// (`innerWidth` / `innerHeight` / `outerWidth` / `outerHeight`). The dimension NAME is
@@ -211,9 +212,10 @@ pub enum OfficialRuntimeHelper {
     /// `$.bind_this` — `bind:this` (host-routed).
     This,
     /// `$.bind_files(input, get, set)` — `<input type="file">` `bind:files` (get/set,
-    /// read-write). Runtime-unsupported in 5c.
+    /// read-write). Runtime-unsupported in the DOM-bind backend.
     Files,
-    /// `$.bind_focused(el, set)` — `bind:focused` (setter-only). Runtime-supported (5f-b).
+    /// `$.bind_focused(el, set)` — `bind:focused` (setter-only). Runtime-supported by the
+    /// special-host bind backend.
     Focused,
     /// `$.bind_volume(el, get, set)` — media `bind:volume` (get/set). Runtime-unsupported.
     Volume,
@@ -241,13 +243,13 @@ pub enum OfficialRuntimeHelper {
     /// (`contentRect`/`contentBoxSize`/`borderBoxSize`/`devicePixelContentBoxSize`),
     /// setter-only with a string-literal name arg. Runtime-unsupported.
     ResizeObserver,
-    /// `$.bind_window_size('<name>', set)` — `<svelte:window>` dimension reads (5f-b).
+    /// `$.bind_window_size('<name>', set)` — `<svelte:window>` dimension reads.
     WindowSize,
-    /// `$.bind_window_scroll('x'|'y', get, set)` — `<svelte:window>` scroll positions (5f-b).
+    /// `$.bind_window_scroll('x'|'y', get, set)` — `<svelte:window>` scroll positions.
     WindowScroll,
-    /// `$.bind_online(set)` — `<svelte:window bind:online>` (5f-b).
+    /// `$.bind_online(set)` — `<svelte:window bind:online>`.
     Online,
-    /// `$.bind_active_element(set)` — `<svelte:document bind:activeElement>` (5f-b).
+    /// `$.bind_active_element(set)` — `<svelte:document bind:activeElement>`.
     ActiveElement,
 }
 
@@ -270,7 +272,7 @@ impl OfficialRuntimeHelper {
             Self::ContentEditable => RuntimeHelper::ContentEditable,
             Self::Property => RuntimeHelper::Property,
             Self::This => RuntimeHelper::This,
-            // The dedicated special-host helpers (5f-b) — the native client runtime EMITS
+            // The dedicated special-host helpers — the native client runtime EMITS
             // them (their rows are `RuntimeSupport::Supported`).
             Self::Focused => RuntimeHelper::Focused,
             Self::WindowSize => RuntimeHelper::WindowSize,
@@ -513,7 +515,7 @@ pub struct RuntimeBindRouting {
     /// The prelude cleanup the host emits before the bind call.
     pub prelude: BindPrelude,
     /// The should_proxy policy — whether the setter takes the 3rd `true` arg. FALSE
-    /// for every DOM bind this function returns (the proxy flag is a 5f
+    /// for every DOM bind this function returns (the proxy flag is a
     /// component/window-host policy).
     pub should_proxy: bool,
 }
@@ -527,8 +529,9 @@ pub struct RuntimeBindRouting {
 /// textarea adds the `remove_textarea_child` prelude) and `$.bind_select_value` on
 /// `<select>`; `checked` selects `$.bind_checked` on `<input>` (with the
 /// `remove_input_defaults` prelude). Every other name delegates to the shared
-/// contract row's runtime columns. `this` is host-routed (element host owned by 5c,
-/// component host by 5f) and intentionally returns `None` here — the runtime handles
+/// contract row's runtime columns. `this` is host-routed (element host owned by the
+/// DOM-bind backend, component host by its own backend) and intentionally returns
+/// `None` here — the runtime handles
 /// `bind:this` through its own element-host path, not this DOM-value router.
 #[must_use]
 pub fn resolve_runtime_bind(name: &str, tag: &str) -> Option<RuntimeBindRouting> {

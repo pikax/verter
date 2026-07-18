@@ -1,6 +1,6 @@
 //! The tri-state const-fold CONTRACT for the Svelte client mixed-template emitter.
 //!
-//! Per the architect ruling (the decidable convergence for Block 5a), a mixed-chunk
+//! Per the architect ruling (the decidable convergence for the mixed-template const-fold surface), a mixed-chunk
 //! constant expression (`id="a {EXPR} b"` over demoted-`$state` / literals) classifies
 //! as EXACTLY one of three outcomes — Verter does NOT reimplement full JS-semantic
 //! exactness:

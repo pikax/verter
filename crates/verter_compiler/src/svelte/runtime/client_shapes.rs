@@ -191,7 +191,7 @@ pub(super) fn classify_event_handler_shape(
 ///
 /// Decided structurally over the parsed arrow + the scope-aware binding table — a
 /// plain call, a declaration, an `if`, an update of a non-`$state` (a plain local /
-/// prop / derived), or an empty block all fail (drive the handler to the 5d
+/// prop / derived), or an empty block all fail (drive the handler to the fail-closed
 /// wrapper form).
 fn arrow_body_is_state_writes(
     arrow: &oxc_ast::ast::ArrowFunctionExpression<'_>,
@@ -426,7 +426,7 @@ pub(super) fn text_chunk_is_simple_ascii(chunk: &str) -> bool {
 
 /// The accepted shape of a supported `bind:` directive.
 ///
-/// The supported boundary (5c, DOM-hosted binds):
+/// The supported boundary (DOM-hosted binds):
 /// - `bind:this` on an intrinsic element to a bare non-prop IDENTIFIER, OR a
 ///   two-element getter/setter FUNCTION-PAIR (`bind:this={get, set}`) — both the
 ///   [`This`](Self::This) shape (discriminated by its [`BindGetSetForm`]).
@@ -442,7 +442,7 @@ pub(super) fn text_chunk_is_simple_ascii(chunk: &str) -> bool {
 /// A `bind:value` to a PROP ident, a member rooted at a non-`$state` binding, a
 /// non-lvalue (`{f()}`), a sequence target on an identifier/member-only bind
 /// (`bind:group={get, set}`), a non-two-element sequence, an unsupported `(name, host)`
-/// pair, or a `bind:this` to a member / prop all fail closed (5c). A two-element
+/// pair, or a `bind:this` to a member / prop all fail closed. A two-element
 /// function-pair `{get, set}` on a policy-allowed bind (`bind:value`/`bind:checked`/…)
 /// IS admitted (`FunctionPair`); only identifier/member-only binds refuse a sequence.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -549,7 +549,7 @@ pub(super) enum BindGetSetForm {
 /// would record a shape the emitter then silently drops. The scope-aware binding lookup
 /// resolves the target identifier's kind. ONLY a `bind:value` on an `<input>` to a reactive
 /// `$state` signal IDENTIFIER and a `bind:this` to a non-prop IDENTIFIER are accepted; a
-/// plain-local / prop / member / non-lvalue / sourceless target fails closed (5c).
+/// plain-local / prop / member / non-lvalue / sourceless target fails closed.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn classify_bind_shape(
     target: &str,
@@ -571,7 +571,7 @@ pub(super) fn classify_bind_shape(
     // is a distinct official surface (svelte strips the wrapper and emits the clean
     // lvalue setter; Verter would format the setter from the raw source, emitting an
     // invalid `name! = $$value`). The canonical-lvalue-from-TS lowering is a
-    // deferral, so a TS-wrapped target fails closed (5c) — only a CLEAN identifier
+    // deferral, so a TS-wrapped target fails closed — only a CLEAN identifier
     // lvalue is supported. Checked structurally over the parsed target, BEFORE the
     // lvalue classification (which unwraps the TS spine).
     //
@@ -581,9 +581,9 @@ pub(super) fn classify_bind_shape(
     // `lang="ts"` component is a settled broad deferral that fails closed ENTIRELY as
     // `TypeScript` at the parse gate, BEFORE any bind classification (characterized by
     // `lang_ts_component_with_bind_targets_fails_closed`). So this TS-wrapped refusal
-    // is MOOT for the 5c-reachable surface (a defense-in-depth stop, not a live 5c
+    // is MOOT for the DOM-bind-reachable surface (a defense-in-depth stop, not a live DOM-bind
     // boundary); the canonical-lvalue-from-TS widening belongs to whenever `lang="ts"`
-    // components are opened (a TypeScript-script block), NOT 5c — the underlying
+    // components are opened (a TypeScript-script block), NOT the DOM-bind surface — the underlying
     // TS-spine strip already exists (`expr::expr_wrapped_ident`). Read from the shared
     // bind-target fact (computed once at analysis time) — no per-call reparse.
     //
@@ -611,7 +611,7 @@ pub(super) fn classify_bind_shape(
         // user-supplied get/set passed DIRECTLY (`$.bind_this(el, set, get)`), matching
         // official svelte@5.56.3. A member `bind:this={refs[0]}` / a prop target / a
         // FREE-or-undeclared identifier target is the deferral-ledger member-bind /
-        // prop-bind / declared-target-completion form (5c).
+        // prop-bind / declared-target-completion form.
         "this" => {
             // The shorthand `bind:this` is not valid Svelte; an explicit target is required.
             let Some(e) = expr else {
@@ -633,11 +633,11 @@ pub(super) fn classify_bind_shape(
                     // with the synthesized DOM local (a free `bind:this={button}` on a
                     // `<button>` aliases the DOM `button`). The supported shape is a
                     // DECLARED instance-script local (`let el;`), so a target that names
-                    // no declared local fails closed (5c) — mooting the collision.
+                    // no declared local fails closed — mooting the collision.
                     if !instance_locals.contains(name) {
                         return Err(refuse());
                     }
-                    // A PROP target is the deferral-ledger prop-bind form (5c). A
+                    // A PROP target is the deferral-ledger prop-bind form. A
                     // non-prop binding (a `$state` ref-target, a plain local) is the
                     // supported `bind:this` ident.
                     match bindings.resolve_kind(scopes, scope, name) {
@@ -675,7 +675,7 @@ pub(super) fn classify_bind_shape(
         // Every other bind name routes through the SHARED runtime-bind router (the
         // DATA-DRIVEN authority): `value`/`checked` (builtin form-control binds) +
         // the wide `bind:` family (`group`/media/dimension/contenteditable/property).
-        // An unsupported `(name, host)` pair has no routing and fails closed (5c/5f).
+        // An unsupported `(name, host)` pair has no routing and fails closed.
         // The host's typed attributes feed the official host-attribute gates.
         name => {
             classify_dom_value_bind(name, tag, host_attrs, expr, scope, bindings, scopes, refuse)
@@ -724,7 +724,7 @@ fn classify_dom_value_bind(
     refuse: impl Fn() -> UnsupportedSvelteRuntimeSurface,
 ) -> Result<ClientBindShape, UnsupportedSvelteRuntimeSurface> {
     // The runtime routing for this `(name, host)`. No routing ⇒ an unsupported DOM
-    // bind (or a component/window-host bind, not yet supported, owned by 5f) ⇒ fail closed.
+    // bind (or a component/window-host bind, not yet supported)⇒ fail closed.
     let Some(routing) = resolve_runtime_bind(name, tag) else {
         return Err(refuse());
     };
@@ -860,7 +860,7 @@ fn classify_dom_value_bind(
             }
         }
         // A non-lvalue target (`bind:value={f()}` — a call, a literal, a binary, or a
-        // non-two-element sequence) fails closed (5c).
+        // non-two-element sequence) fails closed.
         None => Err(refuse()),
     }
 }
@@ -972,8 +972,8 @@ pub(super) enum ClientDynamicAttrShape {
 /// The dynamic-attribute names the client backend DEFERS to a later vertical (so the
 /// generic open-set arm does not silently mis-emit them). Form-control value/checked
 /// setters (`$.set_value` / `$.set_checked` / `$.set_selected` / `$.set_default_*`)
-/// are the bindings-breadth surface (5c); `defaultValue` / `defaultChecked` are the
-/// non-static-property form-default family (also 5c). The decision keys on the
+/// are the bindings-breadth surface; `defaultValue` / `defaultChecked` are the
+/// non-static-property form-default family. The decision keys on the
 /// NORMALIZED name so `defaultvalue` / `defaultValue` both match.
 fn dynamic_attr_deferred_to_5c(normalized: &str) -> bool {
     matches!(
@@ -989,9 +989,9 @@ fn dynamic_attr_deferred_to_5c(normalized: &str) -> bool {
 /// The classifier order mirrors the official `RegularElement.js` attribute dispatch:
 ///
 /// 1. A `value` / `checked` / `selected` / `defaultValue` / `defaultChecked` name is
-///    the form-control setter family (5c) — fail closed FIRST (so a `value={v}`
+///    the form-control setter family — fail closed FIRST (so a `value={v}`
 ///    reports the form-control deferral, not the generic accept).
-/// 2. An `is` attribute is the customized-built-in surface (5h) — but it is already
+/// 2. An `is` attribute is the customized-built-in surface — but it is already
 ///    refused at the element gate, so it never reaches here.
 /// 3. `autofocus` → [`ClientDynamicAttrShape::Autofocus`].
 /// 4. `dir` is the special reflected-attr arm (`el.dir = el.dir`) — DEFERRED (a
@@ -1018,10 +1018,10 @@ pub(super) fn classify_dynamic_attr_shape(
     // on.
     let normalized = super::client_allowlist::normalize_attribute(name);
     // (1) The form-control setter family (`value` / `checked` / `selected` /
-    // `defaultValue` / `defaultChecked`) is the bindings-breadth surface (5c) — it
+    // `defaultValue` / `defaultChecked`) is the bindings-breadth surface — it
     // emits the dedicated `$.set_value` / `$.set_checked` / `$.set_selected` /
     // `$.set_default_*` form helpers, alongside `bind:value` / `bind:checked`. Refuse
-    // it through the 5c-owning `Binding` channel (the form-control attribute IS the
+    // it through the DOM-bind-owning `Binding` channel (the form-control attribute IS the
     // target a `bind:` would write), so the diagnostic carries the right owning block.
     if dynamic_attr_deferred_to_5c(&normalized) {
         return Err(UnsupportedSvelteRuntimeSurface::Binding {
@@ -1149,7 +1149,7 @@ pub(super) fn collect_prop_locals(instance_source: Option<&str>) -> Vec<String> 
 /// `$derived` / `$derived.by` / `$props`) whose declaration keyword is NOT `let`.
 ///
 /// Only a `let` rune declarator is supported. `var` / `const` rune declarators are
-/// a DISTINCT official surface that Verter does not emit (5g):
+/// a DISTINCT official surface that Verter does not emit:
 ///
 /// - a `var` `$state` / `$derived` read is `$.safe_get(name)` (the `var`-hoisting
 ///   form), NOT `$.get(name)`;

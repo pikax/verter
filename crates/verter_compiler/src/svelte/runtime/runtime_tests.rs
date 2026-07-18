@@ -4154,7 +4154,7 @@ mod topology_oracle {
         SvelteHelper::Head,
         SvelteHelper::BindThis,
         SvelteHelper::BindValue,
-        // The 5c DOM-hosted bind family + the textarea prelude.
+        // The DOM-hosted bind family + the textarea prelude.
         SvelteHelper::BindSelectValue,
         SvelteHelper::BindChecked,
         SvelteHelper::BindGroup,
@@ -4164,7 +4164,7 @@ mod topology_oracle {
         SvelteHelper::BindElementSize,
         SvelteHelper::BindContentEditable,
         SvelteHelper::BindProperty,
-        // The 5f-b special-host bind helpers (`<svelte:window|document>`).
+        // The special-host bind helpers (`<svelte:window|document>`).
         SvelteHelper::BindWindowSize,
         SvelteHelper::BindWindowScroll,
         SvelteHelper::BindOnline,
@@ -4382,10 +4382,10 @@ mod topology_oracle {
     /// that must be FIXED, not added here.
     const DEFERRAL_LEDGER: &[LedgerRow] = &[
         // (The `bindings/bind_checked_group.svelte` Skeleton ledger row was REMOVED:
-        // 5c's bind-aware default stripping now pulls the static `value` out of a
+        // The DOM-bind backend's bind-aware default stripping now pulls the static `value` out of a
         // `bind:group` input's skeleton, so the planned skeleton MATCHES official —
         // the matrix asserts it. The fixture as a whole still fails closed elsewhere on
-        // the checkbox-group `$state([])` array-proxy, owned by 5g.)
+        // the checkbox-group `$state([])` array-proxy, owned by the runes backend.)
         //
         // (The `css/scoped_styles.svelte` Skeleton ledger row was REMOVED: the
         // scope-class injection now bakes `svelte-<hash>` into the planned

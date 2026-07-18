@@ -1213,7 +1213,7 @@ fn render_inside_each_block_emits_a_dynamic_snippet_call() {
 
 #[test]
 fn each_block_emits_supported_surface() {
-    // The `{#each}` block IS supported (5e): a `$props()`-sourced array iterated with a
+    // The `{#each}` block IS supported: a `$props()`-sourced array iterated with a
     // reactive item body emits `$.each(...)` — NOT a fail-closed block refusal.
     let js = emit_result(
         "<script>let { items } = $props();</script>\n{#each items as x}<p>{x}</p>{/each}\n",
@@ -3183,8 +3183,8 @@ fn input_spread_with_a_value_attr_keeps_the_trailing_tail() {
 
 #[test]
 fn input_default_value_with_bind_value_emits_property_write_before_bind() {
-    // (5c) A static `defaultValue` CO-LOCATED with a `bind:value` on an `<input>` IS a
-    // supported 5c surface: official emits the `input.defaultValue = 'x'` property write
+    // A static `defaultValue` CO-LOCATED with a `bind:value` on an `<input>` IS a
+    // supported surface: official emits the `input.defaultValue = 'x'` property write
     // BEFORE the bind, and the default attribute SUPPRESSES the `$.remove_input_defaults`
     // prelude (the default is set explicitly). Verified against svelte@5.56.3:
     //   input.defaultValue = 'x';
@@ -3221,7 +3221,7 @@ fn input_default_value_with_bind_value_emits_property_write_before_bind() {
 
 #[test]
 fn input_default_value_after_bind_still_emits_property_write_before_bind() {
-    // (5c) Source attribute ORDER does not matter: `<input bind:value={v} defaultValue="x">`
+    // Source attribute ORDER does not matter: `<input bind:value={v} defaultValue="x">`
     // (default attr AFTER the bind in source) still emits `input.defaultValue = 'x'` BEFORE
     // the `$.bind_value` call. Verified against svelte@5.56.3 (identical output to the
     // before-order case). RED would be an order-sensitive emission that placed the write
@@ -3242,7 +3242,7 @@ fn input_default_value_after_bind_still_emits_property_write_before_bind() {
 
 #[test]
 fn input_default_checked_with_bind_checked_emits_property_write_before_bind() {
-    // (5c) A valueless static `defaultChecked` CO-LOCATED with a `bind:checked` on a
+    // A valueless static `defaultChecked` CO-LOCATED with a `bind:checked` on a
     // checkbox `<input>` IS supported: official emits `input.defaultChecked = true` BEFORE
     // the bind, suppressing `$.remove_input_defaults`. Verified against svelte@5.56.3:
     //   input.defaultChecked = true;
@@ -3276,7 +3276,7 @@ fn input_default_checked_with_bind_checked_emits_property_write_before_bind() {
 
 #[test]
 fn textarea_default_value_with_bind_value_emits_property_write_and_keeps_child_clear() {
-    // (5c) A static `defaultValue` co-located with `bind:value` on a `<textarea>` IS
+    // A static `defaultValue` co-located with `bind:value` on a `<textarea>` IS
     // supported. Verified against svelte@5.56.3: the `$.remove_textarea_child` prelude is
     // NOT suppressed (only `$.remove_input_defaults` is), and the property write lands
     // between the child-clear and the bind:
@@ -3322,7 +3322,7 @@ fn standalone_default_checked_without_bind_still_fails_closed() {
     // `bind:checked` STAYS fail-closed at the static-attr allowlist (`DynamicAttribute { name:
     // "defaultChecked" }`). Official svelte@5.56.3 ACCEPTS it (oracle-verified: emits
     // `input.defaultChecked = true;`), but standalone form-default PROPERTY-attribute emission
-    // is OUT of 5c's ordinary-DOM `bind:*` charter (D-27). The acceptance is gated on a
+    // is OUT of the DOM-bind backend's ordinary-DOM `bind:*` charter (D-27). The acceptance is gated on a
     // co-located MATCHING bind, so a bare `<input defaultChecked>` is NOT whitelisted. RED
     // would be a blanket defaultChecked acceptance.
     assert_fail_closed(
@@ -3336,7 +3336,7 @@ fn default_checked_with_mismatched_bind_value_fails_closed() {
     // NEGATIVE control: `defaultChecked` co-located with the WRONG bind (`bind:value`,
     // not `bind:checked`) STAYS fail-closed. The acceptance pairs `defaultValue`↔`bind:value`
     // and `defaultChecked`↔`bind:checked` ONLY — a mismatched default+bind is a conservative
-    // refusal (NARROWER than official, which accepts the mixed form; 5c keeps the strict
+    // refusal (NARROWER than official, which accepts the mixed form; the DOM-bind backend keeps the strict
     // co-location boundary). RED would be an acceptance keyed on "any default + any bind".
     assert_fail_closed(
         "<script>let v = $state(\"\");</script>\n<input defaultChecked bind:value={v} />\n",
@@ -3821,11 +3821,11 @@ fn no_value_radio_group_bind_still_declares_binding_group() {
 
 #[test]
 fn radio_group_bind_emits_component_fn_scoped_binding_group_and_per_input_value() {
-    // 5c: radio `bind:group` (primitive `$state('')`) EMITS (oracle CASE `group`):
+    // DOM-bind backend — radio `bind:group` (primitive `$state('')`) EMITS (oracle CASE `group`):
     // a component-FUNCTION-scoped `const binding_group = []`, per-input
     // `$.remove_input_defaults` + `input.value = input.__value = '<value>'`, and a
     // per-input `$.bind_group(binding_group, [], input, () => $.get(g), ($$value) =>
-    // $.set(g, $$value))`. RED against the pre-5c tree (which refused `bind:group`).
+    // $.set(g, $$value))`. RED against the pre-DOM-bind tree (which refused `bind:group`).
     let js = emit(
         "<script>let g = $state('');</script>\n\
          <input type=\"radio\" bind:group={g} value=\"a\" />\n\
@@ -4149,7 +4149,7 @@ fn bind_group_keypath_distinguishes_static_member_from_computed_string() {
 #[test]
 fn element_bind_this_function_pair_emits_direct_bind_this() {
     // Finding C (R4): an INTRINSIC element `bind:this={get, set}` (a getter/setter
-    // function-pair) is IN 5c scope. Official svelte@5.56.3 accepts it and emits
+    // function-pair) is IN the DOM-bind backend's scope. Official svelte@5.56.3 accepts it and emits
     // `$.bind_this(div, <set>, <get>)` — the user-supplied get/set passed DIRECTLY (setter
     // slot FIRST, getter slot SECOND), NO synthesized `($$value) =>` / `() =>` thunk wrapper.
     //
@@ -4346,7 +4346,7 @@ fn independent_bind_groups_renumber_past_a_user_binding_group_collision() {
 
 #[test]
 fn radio_group_bind_entity_decodes_the_static_value_attr() {
-    // (5c) The static `bind:group` `value` attribute is ENTITY-DECODED before the
+    // The static `bind:group` `value` attribute is ENTITY-DECODED before the
     // `input.value = input.__value` write — official runs the static value through the
     // attribute-value entity decoder, exactly like every other static attribute. Verified
     // against svelte@5.56.3 for `value="a&amp;b"`:
@@ -4370,10 +4370,10 @@ fn radio_group_bind_entity_decodes_the_static_value_attr() {
 
 #[test]
 fn checked_bind_now_emits_remove_input_defaults_and_bind_checked() {
-    // 5c: `bind:checked` on an `<input type="checkbox">` EMITS (it used to fail
+    // DOM-bind backend — `bind:checked` on an `<input type="checkbox">` EMITS (it used to fail
     // closed). The pinned svelte@5.56.3 shape (oracle CASE `checked`) is
     // `$.remove_input_defaults(input)` then `$.bind_checked(input, () => $.get(c),
-    // ($$value) => $.set(c, $$value))`. RED against the pre-5c tree (which refused it).
+    // ($$value) => $.set(c, $$value))`. RED against the pre-DOM-bind tree (which refused it).
     let js = emit(
         "<script>let c = $state(false);</script>\n<input type=\"checkbox\" bind:checked={c} />\n",
         "App.svelte",
@@ -4795,7 +4795,7 @@ fn bind_value_plain_local_ident_emits_plain_ident_lvalue() {
 
 #[test]
 fn bind_value_uninitialized_plain_local_ident_emits_plain_ident_lvalue() {
-    // (5c) An UNINITIALIZED plain-local bind target (`let v;`, never a rune) is a
+    // An UNINITIALIZED plain-local bind target (`let v;`, never a rune) is a
     // supported DOM-bind target — official keeps the bare local verbatim and emits the
     // plain read/write closures `$.bind_value(input, () => v, ($$value) => v = $$value)`,
     // identical to the initialized plain-local shape. Verified against svelte@5.56.3:
@@ -4933,7 +4933,7 @@ fn bind_value_inline_function_pair_emits_helper_with_rewritten_closures() {
 
 #[test]
 fn bind_group_function_pair_refuses_while_non_group_function_pairs_emit() {
-    // (5c) F1: `bind:group` is the SOLE identifier/member-only bind. A function-pair
+    // F1: `bind:group` is the SOLE identifier/member-only bind. A function-pair
     // (SequenceExpression) target on `bind:group` is the official `bind_group_invalid_expression`
     // reject — `bind:group` can only bind to an Identifier or MemberExpression (verified
     // svelte@5.56.3: `<input type="radio" bind:group={() => g, (x) => g = x}>` →
@@ -4981,9 +4981,9 @@ fn bind_group_function_pair_refuses_while_non_group_function_pairs_emit() {
 
 #[test]
 fn bind_value_named_function_pair_lowers_decls_and_passes_idents() {
-    // (5c) A function-pair bind referencing NAMED top-level `function` declarations
+    // A function-pair bind referencing NAMED top-level `function` declarations
     // (`function get(){...} function set(next){...} <input bind:value={get,set}>`) IS a
-    // supported 5c surface — the named functions are inside the supported 5c function-binding
+    // supported surface — the named functions are inside the supported function-binding
     // `bind:x={get,set}` on DOM hosts. The function declarations are ADMITTED (their names
     // are exactly the function-pair-referenced set) and LOWERED with body signal reads /
     // writes rewritten; the bind passes the function IDENTS directly. Verified against
@@ -5021,7 +5021,7 @@ fn bind_value_named_function_pair_lowers_decls_and_passes_idents() {
 
 #[test]
 fn bind_value_named_function_pair_full_module_matches_official_structure() {
-    // (5c) Full-module structural golden for the named-function-pair surface. Asserts the
+    // Full-module structural golden for the named-function-pair surface. Asserts the
     // load-bearing facts in source order: the state decl, BOTH lowered function
     // declarations (bodies rewritten), the `remove_input_defaults` prelude, and the
     // `$.bind_value(input, get, set)` ident-passing call. Verified against svelte@5.56.3:
@@ -5752,19 +5752,19 @@ fn bind_value_bare_import_root_fails_closed_at_the_bind_lvalue_gate() {
 //
 // `<select>` / `<option>` / `<textarea>` ARE in the finite client-core element
 // allowlist (`a` / `button` / `div` / `h1` / `input` / `p` / `video` / `textarea` /
-// `select` / `option` / `audio` / `details`) — they were added as 5c `bind:value`
+// `select` / `option` / `audio` / `details`) — they were added as DOM-bind `bind:value`
 // hosts. So a component using them passes the ELEMENT gate; the refusal MOVES to
 // their special content / attr models (a static `value` / `selected` is the
-// form-control setter family 5c owns via `bind:value`, NOT a static-attr
+// form-control setter family the DOM-bind backend owns via `bind:value`, NOT a static-attr
 // serializer), which fail closed at the ATTR gate. `<datalist>` is NOT allowlisted,
 // so it still fails closed at the ELEMENT gate
 // (`svelte-runtime-unsupported-element`) on the FIRST out-of-allowlist element.
 
 #[test]
 fn select_option_static_value_attr_fails_closed_at_the_form_control_gate() {
-    // `<select>`/`<option>` are now in the element allowlist (5c bind hosts), so the
+    // `<select>`/`<option>` are now in the element allowlist (DOM-bind hosts), so the
     // refusal MOVES to the static `value` attr on `<option>`: a static `value` is the
-    // form-control setter family (5c emits `bind:value`, NOT the static-`value`
+    // form-control setter family (the DOM-bind backend emits `bind:value`, NOT the static-`value`
     // serializer), so it fails closed via the `DynamicAttribute`/form-control channel.
     // RED if the static `value` attr were silently serialized.
     assert_fail_closed(
@@ -5776,7 +5776,7 @@ fn select_option_static_value_attr_fails_closed_at_the_form_control_gate() {
 #[test]
 fn select_static_value_attr_fails_closed_at_the_form_control_gate() {
     // `<select value="x">` — the static `value` on the now-allowed `<select>` host is
-    // the form-control setter family (5c owns `bind:value`, not the static-`value`
+    // the form-control setter family (the DOM-bind backend owns `bind:value`, not the static-`value`
     // attr), so it fails closed at the attr gate, NOT the element gate.
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<select value=\"x\"><option>A</option></select>\n<button onclick={() => c++}>{c}</button>\n",
@@ -5796,8 +5796,8 @@ fn datalist_element_fails_closed_at_the_element_allowlist() {
 
 #[test]
 fn textarea_static_value_attr_fails_closed_at_the_form_control_gate() {
-    // `<textarea>` is now an allowed 5c bind host, so a static `value` attr (the
-    // form-control setter family — 5c emits `bind:value`, not the static-`value`
+    // `<textarea>` is now an allowed DOM-bind host, so a static `value` attr (the
+    // form-control setter family — the DOM-bind backend emits `bind:value`, not the static-`value`
     // serializer) fails closed at the attr gate. The empty content passes the
     // special-content gate; the static `value` is the refusal.
     assert_fail_closed(
@@ -6696,7 +6696,7 @@ fn svelte_component_special_emits_dollar_component() {
 
 #[test]
 fn svelte_component_special_with_imported_default_uses_bare_callee() {
-    // The DYNAMIC-COMPONENT-VALUE half of the 5f-a `.svelte`-default-import subset: a `.svelte`
+    // The DYNAMIC-COMPONENT-VALUE half of the `.svelte`-default-import subset: a `.svelte`
     // DEFAULT import (`import Child from './Child.svelte'`) consumed as the `<svelte:component
     // this={Child}>` selector. The import is admitted to the prelude REGARDLESS of being used as a
     // dynamic value (not a static `<Child/>` callee), and the `this` expression resolves the
@@ -7061,7 +7061,7 @@ fn component_style_directive_fails_closed() {
 #[test]
 fn component_bind_prop_unwritable_root_fails_closed() {
     // A component `bind:value={p}` whose root resolves to a `$props()` PROP (a non-writable
-    // root under the shared 5c writable-root policy) fails CLOSED — the component bind setter
+    // root under the shared DOM-bind writable-root policy) fails CLOSED — the component bind setter
     // is never synthesized from a non-writable root. The prop-bind refusal sweep scans only
     // `IrNode::Element`, so this gate is what catches a COMPONENT bind to a prop.
     assert_fail_closed(
@@ -7634,7 +7634,7 @@ fn regular_element_uppercase_dynamic_class_pins_divergent_emission() {
     // recognizes only the lowercase spelling as the class channel, so the uppercase
     // name takes the generic path: `$.set_attribute(div, 'class', k)` (the NAME
     // lowercases at emission, but the routing decision already missed `$.set_class`).
-    // This is a TEMPORARY non-parity divergence owned by the general 5a/parser
+    // This is a TEMPORARY non-parity divergence owned by the general typed-setter/parser
     // class/style attribute-identity + emission-routing layer and tracked as
     // debt-ledger row D-37 (docs/arch/svelte-native-compiler-plan.md). This test pins
     // the current divergent shape and MUST fail (go RED) when that convergence lands.
@@ -7683,7 +7683,7 @@ fn regular_element_uppercase_static_lone_class_pins_fail_closed() {
     // case-SENSITIVE, so the unrecognized uppercase spelling falls through to the
     // dynamic-attr classifier and FAILS CLOSED as the `DynamicAttribute` surface with
     // the authored name. This fail-close is a TEMPORARY non-parity divergence owned
-    // by the general 5a/parser static-attribute identity/serializer layer and tracked
+    // by the general typed-setter/parser static-attribute identity/serializer layer and tracked
     // as debt-ledger row D-37 (docs/arch/svelte-native-compiler-plan.md). This test
     // pins the current refusal and MUST fail (go RED — start accepting) when that
     // convergence lands. (The fixture carries a rune so mode inference lands on runes
@@ -7754,7 +7754,7 @@ fn uppercase_style_directive_prefix_is_not_a_style_directive() {
     // `STYLE:color`; Verter's directive-kind table is lowercase-only, so the
     // unknown-directive candidate FAILS CLOSED (never a `[$.STYLE]` / `$.set_style`
     // emission). This fail-close is a TEMPORARY non-parity divergence — official accepts
-    // the generic-attribute fold, Verter refuses — owned by the general 5a/parser
+    // the generic-attribute fold, Verter refuses — owned by the general typed-setter/parser
     // attribute-name case-normalization follow-up and tracked as debt-ledger row D-37
     // (docs/arch/svelte-native-compiler-plan.md). It is NOT official parity. The
     // conservative refusal is fail-close-safe until that convergence lands.
@@ -8655,7 +8655,7 @@ fn props_rest_basic_lowers_rest_props_capture_with_delocalized_named_read() {
     );
 }
 
-// ── 5g-e: native Svelte client `$props()` rest + whole-object capture ──
+// ── native Svelte client `$props()` rest + whole-object capture ──
 // Emission POSITIVES (each pinned against svelte@5.56.3; discriminating with a
 // NEGATIVE assertion), then the §10a malformed-sibling fail-closed enumeration.
 
@@ -8767,7 +8767,7 @@ fn props_rest_string_key_excludes_and_bracket_reads() {
 
 #[test]
 fn props_rest_composes_with_default() {
-    // POSITIVE 5: `{ a = 1, ...rest }` composes the 5g-d `$.prop` default with the
+    // POSITIVE 5: `{ a = 1, ...rest }` composes the `$.prop` default with the
     // rest capture into ONE `let` — the default decl FIRST, the rest decl LAST (its
     // source position), comma-joined.
     let js = emit(
@@ -8843,7 +8843,7 @@ fn props_rest_component_spread_lowers_spread_props() {
 fn props_rest_nonexcluded_member_read_delocalizes_with_context() {
     // POSITIVE 9: `{ a, ...rest }` with a NON-excluded member read `rest.x` (in a
     // state-write handler — the rewriter path; a TEMPLATE member interpolation is the
-    // pre-existing reactive-text-completion deferral, not a 5g-e surface) —
+    // pre-existing reactive-text-completion deferral, not a rest/whole-capture surface) —
     // de-localizes to `$$props.x` AND opens the context frame (a member read through
     // the rest binding). Oracle: `rest.member-in-handler`.
     let js = emit(
@@ -9294,7 +9294,7 @@ fn props_rest_plain_assign_bare_member_rhs_stays_verbatim() {
     );
 }
 
-// ── 5g-e REOPEN: optional-chain rest/whole member reads PRESERVE the `?.` ──
+// ── optional-chain rest/whole member reads PRESERVE the `?.` ──
 // De-localization replaces ONLY the object identifier (`rest`/`all` → `$$props`),
 // never the whole member span, so the optional axis, property spelling, and any
 // downstream chain stay verbatim from source. Each correctness test is RED at
@@ -10747,7 +10747,7 @@ fn style_selector_refusal_carries_the_construct_span_and_selector_code() {
     );
 }
 
-// ── Block 5f-b review-fix regression coverage (F1–F12) ──
+// ── Special-host bind review-fix regression coverage (F1–F12) ──
 
 #[test]
 fn svelte_head_call_title_emits_memoized_deferred_template_effect() {
@@ -14115,7 +14115,7 @@ fn ts_wrapped_dom_bind_target_in_plain_script_fails_closed() {
     // E (lvalue-widening boundary): a TS-WRAPPED DOM-bind target (`bind:value={v!}` /
     // `{v as string}`) on an ordinary DOM host stays CLOSED — the canonical-lvalue-
     // from-TS strip is a deferral (owned by the future `lang="ts"`-script block, NOT
-    // 5c). Oracle determination (svelte@5.56.3): official PARSE-REJECTS this exact
+    // the DOM-bind backend). Oracle determination (svelte@5.56.3): official PARSE-REJECTS this exact
     // form in a PLAIN `<script>` (`Expected token }`); it is only valid under
     // `lang="ts"`, which Verter refuses ENTIRELY as `TypeScript` upstream. Verter's
     // plain-script parser is TSX-LENIENT, so it accepts `v!` syntactically and REACHES
@@ -14150,7 +14150,7 @@ fn ts_wrapped_dom_bind_target_in_plain_script_fails_closed() {
             "a TS-wrapped `bind:value={{{target}}}` must fail closed as the `value` binding surface, got {err:?}"
         );
     }
-    // NEGATIVE: the clean (unwrapped) form on the SAME host is the supported 5c shape —
+    // NEGATIVE: the clean (unwrapped) form on the SAME host is the supported shape —
     // the refusal is SPECIFIC to the TS wrapper, not a blanket `bind:value` refusal.
     let clean = "<script>let v = $state(\"\");</script>\n<input bind:value={v} />\n<p>{v}</p>\n";
     let js = emit(clean, "App.svelte");
@@ -14455,10 +14455,10 @@ fn bare_instantiation_bind_target_stays_fail_closed() {
 fn group_single_value_provably_defined_omits_outer_coalesce() {
     // A `bind:group` SINGLE value whose expression is PROVABLY DEFINED omits the outer
     // `?? ''` coercion — official svelte@5.56.3 gates the coercion on `evaluated.is_defined`,
-    // NOT on single-vs-mixed. Oracle-verified (svelte@5.56.3) over the SUPPORTED 5c value
+    // NOT on single-vs-mixed. Oracle-verified (svelte@5.56.3) over the SUPPORTED DOM-bind value
     // sources: a demoted `$state(5)`, a literal `5`, and a literal `false` all emit
     // `input.value = input.__value = V;` (NO outer `?? ''`). (A bare `let n = 5` is an
-    // unsupported instance-script item in 5c, so a demoted `$state` is the identifier vehicle.)
+    // unsupported instance-script item in the DOM-bind backend, so a demoted `$state` is the identifier vehicle.)
     // RED before the fix: every `AttrValue::Single` group value emitted the inert
     // `(input.__value = V) ?? ''` regardless of definedness.
     let cases = [
@@ -14493,7 +14493,7 @@ fn group_single_value_provably_defined_omits_outer_coalesce() {
 fn group_single_value_not_provably_defined_keeps_outer_coalesce() {
     // NEGATIVE CONTROL: a `bind:group` SINGLE value that is NOT provably defined KEEPS the
     // outer `?? ''` (official keeps it for a null / undefined / reactive value). Oracle-verified
-    // (svelte@5.56.3) over SUPPORTED 5c value sources: a literal `null` emits
+    // (svelte@5.56.3) over SUPPORTED DOM-bind value sources: a literal `null` emits
     // `input.value = (input.__value = null) ?? '';`, and a demoted `$state(null)` emits
     // `input.value = (input.__value = n) ?? '';`. This guards against over-suppression — GREEN
     // before AND after the fix (a control that the definedness gate is not blanket-applied).
@@ -14910,11 +14910,11 @@ fn standard_identifier_safe_element_tags_still_emit() {
 
 #[test]
 fn textarea_interpolation_content_fails_closed_at_the_special_content_model_gate() {
-    // `<textarea>` IS an allowed 5c `bind:value` host, so it PASSES the element
+    // `<textarea>` IS an allowed DOM-bind `bind:value` host, so it PASSES the element
     // allowlist gate; the refusal is the SPECIAL CONTENT-MODEL gate, NOT the element
     // allowlist. A `<textarea>` with INTERPOLATION content (`<textarea>{c}</textarea>`)
     // is the official `textarea.value` / `$.template_effect` reactive-content surface
-    // 5c does NOT emit — so it fails closed on the textarea content model as
+    // the DOM-bind backend does NOT emit — so it fails closed on the textarea content model as
     // `Element { tag: "textarea" }`, exactly like the `<option>{c}</option>` case
     // below. RED if Verter silently emitted the divergent reactive-content module.
     assert_fail_closed(
@@ -14925,9 +14925,9 @@ fn textarea_interpolation_content_fails_closed_at_the_special_content_model_gate
 
 #[test]
 fn option_with_interpolation_content_fails_closed_at_the_special_content_gate() {
-    // `<select>`/`<option>` are now ALLOWED 5c bind hosts, but an `<option>` with an
+    // `<select>`/`<option>` are now ALLOWED DOM-bind hosts, but an `<option>` with an
     // INTERPOLATION child (`<option>{c}</option>`) is the official `option.__value` /
-    // `option_value` reactive-tracking content surface 5c does NOT emit — so it fails
+    // `option_value` reactive-tracking content surface the DOM-bind backend does NOT emit — so it fails
     // closed at the special-content gate as `Element { tag: "option" }` (the option's
     // content model, NOT a static-option select host). RED if Verter silently emitted
     // the divergent `option.__value` tracking module.
@@ -14936,7 +14936,7 @@ fn option_with_interpolation_content_fails_closed_at_the_special_content_gate() 
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Element { tag, .. } if tag == "option"),
     );
     // A nested element child inside `<option>` is likewise not the static-option
-    // interior 5c supports — it fails closed on the option content model.
+    // interior the DOM-bind backend supports — it fails closed on the option content model.
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<select><option><b>{c}</b></option></select><button onclick={() => c++}>x</button>\n",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Element { tag, .. } if tag == "option"),
@@ -14945,10 +14945,10 @@ fn option_with_interpolation_content_fails_closed_at_the_special_content_gate() 
 
 #[test]
 fn static_textarea_content_fails_closed_at_the_special_content_model_gate() {
-    // `<textarea>` IS an allowed 5c `bind:value` host (it passes the element
+    // `<textarea>` IS an allowed DOM-bind `bind:value` host (it passes the element
     // allowlist), so the refusal is the SPECIAL CONTENT-MODEL gate, NOT the element
     // allowlist. Even STATIC-only `<textarea>hi</textarea>` content is the official
-    // raw-text `textarea` content model 5c does NOT own (5c emits `<textarea>` ONLY as
+    // raw-text `textarea` content model the DOM-bind backend does NOT own (it emits `<textarea>` ONLY as
     // the empty `bind:value` host shape — `$.remove_textarea_child` then `$.bind_value`
     // — so any interior content, static or interpolated, is out of the supported
     // content model). It fails closed as `Element { tag: "textarea" }` at the
@@ -14962,8 +14962,8 @@ fn static_textarea_content_fails_closed_at_the_special_content_model_gate() {
 
 #[test]
 fn textarea_bind_value_with_static_text_fallback_child_emits() {
-    // (5c) A `<textarea bind:value={v}>fallback</textarea>` — a `bind:value` host with a
-    // STATIC-TEXT fallback child — IS a supported 5c surface: the existing
+    // A `<textarea bind:value={v}>fallback</textarea>` — a `bind:value` host with a
+    // STATIC-TEXT fallback child — IS a supported surface: the existing
     // `$.remove_textarea_child` prelude clears the baked static child at runtime, so the
     // bind is unaffected. Verified against svelte@5.56.3 (the static text is baked into
     // the cloned skeleton, then stripped):
@@ -14997,7 +14997,7 @@ fn textarea_bind_value_with_dynamic_content_child_still_fails_closed() {
     // NEGATIVE control for the F6a static-fallback narrowing (and the D-22 deferral): a
     // `<textarea bind:value={v}>{c}</textarea>` with a DYNAMIC interpolation child STAYS
     // fail-closed. Official emits `$.set_value(textarea, c)` BEFORE the bind — a textarea
-    // CONTENT channel distinct from the static-fallback child (which 5c clears via
+    // CONTENT channel distinct from the static-fallback child (which the DOM-bind backend clears via
     // `remove_textarea_child`). The static-text relaxation must NOT leak into the dynamic
     // content surface, which is owned by a later content-model layer (ledger D-22). RED
     // would be a broadened "allow any textarea child" admission.
@@ -18109,7 +18109,7 @@ fn directive_batch_emit_panics_loudly_when_its_target_rank_is_missing() {
     );
 }
 
-// ─── Block 5g-b: `$state.raw` + proxied object-`$state` + `$state.snapshot` ───
+// ─── `$state.raw` + proxied object-`$state` + `$state.snapshot` ───
 //
 // The STATE FAMILY: the deep-reactive object/array `$state` declarator (BareProxy /
 // StateProxy), the `$state.raw` opt-out (RawStateSignal / PlainLet), the raw-aware

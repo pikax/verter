@@ -56,7 +56,7 @@ pub(super) const RUNE_ROOT_NAMES: &[&str] = verter_parser::svelte_reactivity::RU
 ///
 // TODO(follow-up): lower `$derived(e)` / `$derived.by(fn)` → `$.derived(() => e)` /
 // `$.derived(fn)` read via `$.get`, instead of failing closed. Owned by the
-// runes-completion block (5g).
+// runes-completion surface.
 ///
 /// `is_instance` is `false` for a `<script module>` program and for a wrapped
 /// template expression — neither hosts ANY supported PRE-COLLECTED rune position,

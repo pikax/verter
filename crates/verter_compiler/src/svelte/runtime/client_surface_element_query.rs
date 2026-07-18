@@ -35,7 +35,7 @@ pub(super) fn element_own_namespace(inherited: Namespace, tag: &str) -> Namespac
 
 /// Whether an element carries an `is` attribute (in ANY attribute form — static,
 /// dynamic, or mixed). An `is=` element is a customized built-in (the web-components
-/// surface); it is rejected at the custom-element owner (5h) BEFORE the attr walk,
+/// surface); it is rejected at the custom-element owner BEFORE the attr walk,
 /// regardless of whether its tag is hyphenated. Driven from the typed `AttrIr`
 /// inventory, never a source scan.
 pub(super) fn element_carries_is_attribute(el: &super::ir::ElementIr) -> bool {

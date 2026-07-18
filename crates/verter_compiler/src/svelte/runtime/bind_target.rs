@@ -57,7 +57,7 @@ pub struct BindTargetFact {
     /// tagged-template carrying TS type arguments (`g<a,b>(c)`), OR a TS-only node in a deeper
     /// sub-expression (a typed arrow / function param, a typed local). Detected by the wholesale
     /// shared `expression_contains_non_plain_svelte_js` scan (one authority for both bind lanes).
-    /// A deferred official surface that fails closed (5c): official svelte@5.56.3
+    /// A deferred official surface that fails closed: official svelte@5.56.3
     /// PARSE-REJECTS plain-script TS in ANY template-expression position. The structural walk
     /// covers the member object spine + computed-index expressions, so a NON-ROOT TS node
     /// (`o!.x`, `a[x as T]`, `a[x!]`) is caught EXACTLY like a root wrapper (`name!` /
