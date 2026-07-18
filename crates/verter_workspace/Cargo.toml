@@ -11,6 +11,10 @@ publish = false
 
 [features]
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
+# Tests that require third-party repository checkouts beside this repo
+# (Testing-Hermeticity): excluded from the default canonical run; enable
+# explicitly with `--features external-corpus`.
+external-corpus = []
 
 [dependencies]
 arc-swap = "1.9"

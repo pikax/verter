@@ -12,7 +12,7 @@ use crate::types::NodeProp;
 
 use super::super::binding::BindingResolver;
 use super::super::shared::helpers::{extract_directive_value, parse_v_for_expression, VdomHelper};
-use super::super::types::{CodeGenOutput, ScopeClose};
+use super::super::types::{CodeGenOutput, ConditionBranchClose, ScopeClose};
 
 // ======================== v-if / v-else-if / v-else ========================
 
@@ -192,6 +192,37 @@ pub fn format_scope_close(close: &ScopeClose, is_production: bool) -> &'static s
             (false, false) => "}), 256 /* UNKEYED_FRAGMENT */))",
             (false, true) => "}), 256))",
         },
+        // Fragment close, then the branch's ternary close. Fully
+        // enumerated so every combination stays a static string.
+        ScopeClose::ForInCondition {
+            is_keyed,
+            condition,
+        } => match (is_keyed, is_production, condition) {
+            (true, false, ConditionBranchClose::IfTernary) => {
+                "}), 128 /* KEYED_FRAGMENT */)) : _createCommentVNode(\"v-if\", true)"
+            }
+            (true, false, ConditionBranchClose::ElseIfTernary) => {
+                "}), 128 /* KEYED_FRAGMENT */)) : "
+            }
+            (true, false, ConditionBranchClose::Else) => "}), 128 /* KEYED_FRAGMENT */))",
+            (true, true, ConditionBranchClose::IfTernary) => {
+                "}), 128)) : _createCommentVNode(\"v-if\", true)"
+            }
+            (true, true, ConditionBranchClose::ElseIfTernary) => "}), 128)) : ",
+            (true, true, ConditionBranchClose::Else) => "}), 128))",
+            (false, false, ConditionBranchClose::IfTernary) => {
+                "}), 256 /* UNKEYED_FRAGMENT */)) : _createCommentVNode(\"v-if\", true)"
+            }
+            (false, false, ConditionBranchClose::ElseIfTernary) => {
+                "}), 256 /* UNKEYED_FRAGMENT */)) : "
+            }
+            (false, false, ConditionBranchClose::Else) => "}), 256 /* UNKEYED_FRAGMENT */))",
+            (false, true, ConditionBranchClose::IfTernary) => {
+                "}), 256)) : _createCommentVNode(\"v-if\", true)"
+            }
+            (false, true, ConditionBranchClose::ElseIfTernary) => "}), 256)) : ",
+            (false, true, ConditionBranchClose::Else) => "}), 256))",
+        },
         ScopeClose::SlotWrapper => ")",
     }
 }
@@ -208,6 +239,15 @@ pub fn collect_scope_imports(close: &ScopeClose, out: &mut CodeGenOutput<'_>) {
             out.add_vdom_import(VdomHelper::CreateElementBlock);
             out.add_vdom_import(VdomHelper::Fragment);
             out.add_vdom_import(VdomHelper::RenderList);
+        }
+        ScopeClose::ForInCondition { condition, .. } => {
+            out.add_vdom_import(VdomHelper::OpenBlock);
+            out.add_vdom_import(VdomHelper::CreateElementBlock);
+            out.add_vdom_import(VdomHelper::Fragment);
+            out.add_vdom_import(VdomHelper::RenderList);
+            if matches!(condition, ConditionBranchClose::IfTernary) {
+                out.add_vdom_import(VdomHelper::CreateCommentVNode);
+            }
         }
         ScopeClose::SlotWrapper => {}
     }

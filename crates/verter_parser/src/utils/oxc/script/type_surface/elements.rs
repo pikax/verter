@@ -20,7 +20,6 @@ use super::{
 };
 
 /// Resolve members from a type literal's members array.
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(super) fn resolve_type_literal_members(
     members: &[TSSignature],
     base_offset: u32,
@@ -28,12 +27,47 @@ pub(super) fn resolve_type_literal_members(
     source: &[u8],
     from_root_body: bool,
 ) {
+    resolve_type_literal_members_with_ctx(
+        members,
+        base_offset,
+        result,
+        source,
+        from_root_body,
+        None,
+    );
+}
+
+/// Like [`resolve_type_literal_members`], but with an optional local
+/// [`TypeResolutionContext`]. The context extends the named-tuple emit
+/// shorthand (`change: [id: number]`) to member VALUE types that are
+/// indexed accesses resolving to a tuple through local declarations —
+/// `escapeKeydown: LayerEmits['escapeKeydown']`, the reka-ui /
+/// oku-primitives `DismissableLayer` emit-forwarding pattern.
+///
+/// Classification is AST-shape driven (alias / interface lookups through
+/// the context walking to a `TSTupleType` node) — never display-text
+/// driven. With `ctx = None`, or when the indexed access does not resolve
+/// to a tuple, behavior is identical to [`resolve_type_literal_members`]:
+/// the member stays a plain prop.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
+pub(super) fn resolve_type_literal_members_with_ctx<'ctx, 'a: 'ctx>(
+    members: &[TSSignature],
+    base_offset: u32,
+    result: &mut ResolvedElements,
+    source: &[u8],
+    from_root_body: bool,
+    ctx: Option<&TypeResolutionContext<'ctx, 'a>>,
+) {
     for member in members {
         match member {
             TSSignature::TSPropertySignature(prop) => {
                 // Check if this is a shorthand emit: { change: [id: number] }
                 // Properties with tuple/array type values are treated as emits
                 if let Some(emit) = resolve_property_as_emit(prop, base_offset, source) {
+                    result.call_signatures.push(emit);
+                } else if let Some(emit) =
+                    ctx.and_then(|ctx| resolve_property_as_emit_via_ctx(prop, base_offset, ctx))
+                {
                     result.call_signatures.push(emit);
                 } else if let Some(resolved) =
                     resolve_property_signature(prop, base_offset, source, from_root_body)
@@ -58,6 +92,144 @@ pub(super) fn resolve_type_literal_members(
             _ => {}
         }
     }
+}
+
+/// Named-tuple emit shorthand through the local type context: the property
+/// VALUE is an indexed access (`Emits['key']`, optionally parenthesized)
+/// whose target member resolves to a tuple type.
+///
+/// Scoped to indexed accesses on purpose: a bare alias reference to a tuple
+/// (`coords: TupleAlias`) keeps its pre-existing plain-prop classification,
+/// matching the source-only path, so props surfaces are not re-classified.
+fn resolve_property_as_emit_via_ctx<'ctx, 'a: 'ctx>(
+    prop: &TSPropertySignature<'_>,
+    base_offset: u32,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+) -> Option<ResolvedNamedCallSignature> {
+    let ann = prop.type_annotation.as_ref()?;
+    let mut value = &ann.type_annotation;
+    while let TSType::TSParenthesizedType(paren) = value {
+        value = &paren.type_annotation;
+    }
+    let TSType::TSIndexedAccessType(_) = value else {
+        return None;
+    };
+    let name = get_property_key_name(&prop.key)?;
+    let key_span = get_property_key_span(&prop.key, base_offset)?;
+    let mut visited = Vec::new();
+    let tuple_text = ctx_resolved_tuple_text(value, ctx, &mut visited)?;
+    Some(ResolvedNamedCallSignature {
+        span: Span {
+            start: prop.span.start + base_offset,
+            end: prop.span.end + base_offset,
+        },
+        name,
+        name_span: Some(key_span),
+        signature: ResolvedCallPayloadForm::Tuple { tuple_text },
+        map_local: true,
+        span_is_absolute: base_offset != 0,
+    })
+}
+
+/// Resolve a type through the local context to a TUPLE's source text.
+///
+/// Follows, AST-shape driven: parenthesized types (transparent); bare
+/// (argument-less) type-alias references (`visited` guards name cycles);
+/// indexed access with a string-literal index whose object resolves to a
+/// type literal, an interface body, or an alias chain to either.
+///
+/// Returns `None` for everything else — including companion (host-external)
+/// surfaces, which carry no AST to slice a tuple from. Callers treat `None`
+/// as "not an emit": the member stays a plain prop.
+fn ctx_resolved_tuple_text<'ctx, 'a: 'ctx>(
+    ty: &TSType<'_>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+    visited: &mut Vec<String>,
+) -> Option<String> {
+    match ty {
+        TSType::TSTupleType(tuple) => {
+            slice_source_span(ctx.source, tuple.span.start, tuple.span.end)
+        }
+        TSType::TSParenthesizedType(paren) => {
+            ctx_resolved_tuple_text(&paren.type_annotation, ctx, visited)
+        }
+        TSType::TSTypeReference(type_ref) if type_ref.type_arguments.is_none() => {
+            let name = get_type_reference_name(&type_ref.type_name);
+            if visited.contains(&name) {
+                return None;
+            }
+            visited.push(name.clone());
+            let result = ctx
+                .find_type_alias(name.as_bytes())
+                .and_then(|(aliased, _)| ctx_resolved_tuple_text(aliased, ctx, visited));
+            visited.pop();
+            result
+        }
+        TSType::TSIndexedAccessType(indexed) => {
+            let TSType::TSLiteralType(lit) = &indexed.index_type else {
+                return None;
+            };
+            let TSLiteral::StringLiteral(key) = &lit.literal else {
+                return None;
+            };
+            ctx_indexed_member_tuple_text(&indexed.object_type, key.value.as_str(), ctx, visited)
+        }
+        _ => None,
+    }
+}
+
+/// Resolve `Object['key']`: find `key`'s property signature on the object
+/// type (type literal, interface body, or an alias chain to either) and
+/// resolve its VALUE type to a tuple's source text.
+fn ctx_indexed_member_tuple_text<'ctx, 'a: 'ctx>(
+    object: &TSType<'_>,
+    key: &str,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+    visited: &mut Vec<String>,
+) -> Option<String> {
+    match object {
+        TSType::TSTypeLiteral(lit) => member_value_tuple_text(&lit.members, key, ctx, visited),
+        TSType::TSParenthesizedType(paren) => {
+            ctx_indexed_member_tuple_text(&paren.type_annotation, key, ctx, visited)
+        }
+        TSType::TSTypeReference(type_ref) if type_ref.type_arguments.is_none() => {
+            let name = get_type_reference_name(&type_ref.type_name);
+            if visited.contains(&name) {
+                return None;
+            }
+            visited.push(name.clone());
+            let result = if let Some((aliased, _)) = ctx.find_type_alias(name.as_bytes()) {
+                ctx_indexed_member_tuple_text(aliased, key, ctx, visited)
+            } else if let Some((members, _, _, _)) = ctx.find_interface(name.as_bytes()) {
+                member_value_tuple_text(members, key, ctx, visited)
+            } else {
+                None
+            };
+            visited.pop();
+            result
+        }
+        _ => None,
+    }
+}
+
+/// Find `key` among property signatures and resolve its value to a tuple's
+/// source text.
+fn member_value_tuple_text<'ctx, 'a: 'ctx>(
+    members: &[TSSignature<'_>],
+    key: &str,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+    visited: &mut Vec<String>,
+) -> Option<String> {
+    members.iter().find_map(|member| {
+        let TSSignature::TSPropertySignature(prop) = member else {
+            return None;
+        };
+        if get_property_key_name(&prop.key).as_deref() != Some(key) {
+            return None;
+        }
+        let ann = prop.type_annotation.as_ref()?;
+        ctx_resolved_tuple_text(&ann.type_annotation, ctx, visited)
+    })
 }
 
 #[derive(Debug, Clone)]

@@ -63,6 +63,80 @@ fn frontier_forbid_guard_is_thread_local() {
     );
 }
 
+/// A completely EMPTY .vue file (0 bytes — e.g. motion-vue's playground
+/// Home.vue) is a valid empty component. The host must serve a Main virtual
+/// node exporting `defineComponent({ __name })` with an empty public surface
+/// ($props: {}, no slots) — never `MissingVirtualNode`.
+#[test]
+fn empty_sfc_serves_empty_component_not_missing_virtual_node() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_vue(&host, "/src/Home.vue", "");
+
+    host.ensure_compiled("/src/Home.vue", &profile())
+        .expect("empty SFC must compile on the host lane");
+
+    let resp = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Home.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("empty SFC must serve a Main virtual node");
+    assert!(
+        resp.code.contains("defineComponent(") && resp.code.contains("export default"),
+        "empty SFC Main must export a defineComponent shell, got:\n{}",
+        resp.code
+    );
+    assert!(
+        resp.code.contains("__name: \"Home\""),
+        "empty SFC Main should carry the filename-derived __name, got:\n{}",
+        resp.code
+    );
+    assert!(
+        !resp.diagnostics.has_errors,
+        "empty SFC must compile without error diagnostics, got: {:?}",
+        resp.diagnostics.diagnostics
+    );
+    // Negative surface: nothing fabricated.
+    assert!(
+        !resp.code.contains("props:") && !resp.code.contains("slots"),
+        "empty SFC Main must not fabricate props/slots, got:\n{}",
+        resp.code
+    );
+
+    // The IDE lane serves a TSX artifact for the empty carrier too.
+    let has_tsx = host
+        .ensure_ide_compiled("/src/Home.vue", &profile())
+        .expect("empty SFC must compile on the IDE lane");
+    assert!(has_tsx, "empty SFC must produce an IDE artifact");
+    assert!(
+        host.get_ide("/src/Home.vue", &profile()).is_some(),
+        "empty SFC IDE artifact must be servable"
+    );
+
+    // The imported public surface is EMPTY: no props, no events, no slots.
+    let meta = host
+        .get_component_meta("/src/Home.vue")
+        .expect("empty SFC must publish component meta");
+    assert!(
+        meta.props.is_empty(),
+        "empty SFC has no props: {:?}",
+        meta.props
+    );
+    assert!(meta.events.is_empty(), "empty SFC has no events");
+    assert!(meta.slots.is_empty(), "empty SFC has no slots");
+
+    // A sibling importing the empty component keeps compiling.
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        "<script setup lang=\"ts\">\nimport Home from './Home.vue'\n</script>\n<template><Home /></template>",
+    );
+    host.ensure_compiled("/src/App.vue", &profile())
+        .expect("importing an empty SFC must compile");
+}
+
 fn compile_main_error(host: &VerterHost, canonical_id: &str) -> crate::DiagnosticsSnapshot {
     match host.get_virtual_file(VirtualQuery {
         raw_id: None,
@@ -516,6 +590,911 @@ fn invalid_imported_define_emits_type_keeps_emits_shape_error() {
             .contains("defineEmits() type argument 'Emits' must resolve to emit call signatures or a named-tuple emits object."),
         "expected emits-shape diagnostic, got: {}",
         invalid.message
+    );
+}
+
+/// Baseline: imported `defineEmits<Omit<Base, keys>>()` with direct tuple
+/// properties (no indexed access). Must resolve to emit signatures.
+#[test]
+fn imported_define_emits_omit_of_direct_tuple_fields_resolves() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        r#"<script setup lang="ts">
+import type { SubEmits } from './types'
+const emit = defineEmits<SubEmits>()
+emit('escapeKeydown', new KeyboardEvent('keydown'))
+</script>
+<template><div /></template>"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        r#"export type BaseEmits = {
+  closeAutoFocus: [event: Event]
+  entryFocus: [event: Event]
+  escapeKeydown: [event: KeyboardEvent]
+  pointerdownOutside: [event: PointerEvent]
+}
+export type SubEmits = Omit<BaseEmits, 'closeAutoFocus' | 'entryFocus'>
+"#,
+    );
+    host.set_import_dependencies(
+        "/src/Comp.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("Omit of direct tuple emits must compile");
+
+    assert!(
+        !response.diagnostics.has_errors,
+        "must not error: {:?}",
+        response.diagnostics.diagnostics
+    );
+    assert!(
+        !response
+            .diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "XInvalidMacroType"),
+        "must not XInvalidMacroType: {:?}",
+        response.diagnostics.diagnostics
+    );
+}
+
+/// Indexed-access emit field without Omit (same-file base type):
+/// `escapeKeydown: LayerEmits['escapeKeydown']`.
+#[test]
+fn imported_define_emits_indexed_access_tuple_fields_resolves() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        r#"<script setup lang="ts">
+import type { SharedEmits } from './types'
+const emit = defineEmits<SharedEmits>()
+emit('escapeKeydown', new KeyboardEvent('keydown'))
+</script>
+<template><div /></template>"#,
+    );
+    // Keep LayerEmits in the SAME file as SharedEmits so the only variable
+    // under test is indexed-access property types (not cross-file loading).
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        r#"export type LayerEmits = {
+  escapeKeydown: [event: KeyboardEvent]
+  pointerdownOutside: [event: PointerEvent]
+}
+export type SharedEmits = {
+  escapeKeydown: LayerEmits['escapeKeydown']
+  pointerdownOutside: LayerEmits['pointerdownOutside']
+}
+"#,
+    );
+    host.set_import_dependencies(
+        "/src/Comp.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("indexed-access emit fields must compile");
+
+    assert!(
+        !response.diagnostics.has_errors,
+        "must not error: {:?}",
+        response.diagnostics.diagnostics
+    );
+    assert!(
+        !response
+            .diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "XInvalidMacroType"),
+        "must not XInvalidMacroType: {:?}",
+        response.diagnostics.diagnostics
+    );
+}
+
+/// oku-primitives / reka-style pattern: `defineEmits<Alias>()` where Alias =
+/// `Omit<SharedEmits, …>` and SharedEmits fields are **indexed accesses** into
+/// another emits object (`DismissableLayerEmits['escapeKeydown']`). Official
+/// Vue accepts this; the host must resolve call/tuple signatures (not
+/// XInvalidMacroType with empty surfaces).
+#[test]
+fn imported_define_emits_omit_of_indexed_access_fields_resolves() {
+    let host = strict_host();
+    let source = r#"<script setup lang="ts">
+import type { ContextMenuSubContentImplEmits } from './ContextMenuSubContentImpl'
+const emit = defineEmits<ContextMenuSubContentImplEmits>()
+emit('escapeKeydown', new KeyboardEvent('keydown'))
+</script>
+<template><div /></template>"#;
+    upsert_vue(&host, "/src/ContextMenuSubContentImpl.vue", source);
+    upsert_non_sfc(
+        &host,
+        "/src/DismissableLayer.ts",
+        r#"export type DismissableLayerEmits = {
+  escapeKeydown: [event: KeyboardEvent]
+  pointerdownOutside: [event: PointerEvent]
+  focusOutside: [event: FocusEvent]
+  interactOutside: [event: Event]
+}
+"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/MenuContentImpl.ts",
+        r#"import type { DismissableLayerEmits } from './DismissableLayer'
+export type UseMenuContentImplSharedEmits = {
+  closeAutoFocus: [event: Event]
+  entryFocus: [event: Event]
+  escapeKeydown: DismissableLayerEmits['escapeKeydown']
+  pointerdownOutside: DismissableLayerEmits['pointerdownOutside']
+  focusOutside: DismissableLayerEmits['focusOutside']
+  interactOutside: DismissableLayerEmits['interactOutside']
+}
+export type MenuSubContentImplEmits = Omit<
+  UseMenuContentImplSharedEmits,
+  'closeAutoFocus' | 'entryFocus'
+>
+"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/ContextMenuSubContentImpl.ts",
+        r#"import type { MenuSubContentImplEmits } from './MenuContentImpl'
+export type ContextMenuSubContentImplEmits = MenuSubContentImplEmits
+"#,
+    );
+    host.set_import_dependencies(
+        "/src/ContextMenuSubContentImpl.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./ContextMenuSubContentImpl".to_string(),
+            resolved_canonical_id: Some("/src/ContextMenuSubContentImpl.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/ContextMenuSubContentImpl.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./MenuContentImpl".to_string(),
+            resolved_canonical_id: Some("/src/MenuContentImpl.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/MenuContentImpl.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./DismissableLayer".to_string(),
+            resolved_canonical_id: Some("/src/DismissableLayer.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/ContextMenuSubContentImpl.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("Omit+indexed-access emit alias chain must compile");
+
+    assert!(
+        !response.diagnostics.has_errors,
+        "must not error on Omit+indexed-access emit alias: {:?}",
+        response.diagnostics.diagnostics
+    );
+    assert!(
+        !response
+            .diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "XInvalidMacroType"),
+        "must not report XInvalidMacroType: {:?}",
+        response.diagnostics.diagnostics
+    );
+    // Runtime emit handlers should appear (camelCase on* form).
+    assert!(
+        response.code.contains("onEscapeKeydown") || response.code.contains("escapeKeydown"),
+        "resolved emit surface should include escapeKeydown, got: {}",
+        response.code
+    );
+}
+
+/// oku Label.vue: `withDefaults(defineProps<LabelProps>(), DEFAULT_LABEL_PROPS)`
+/// with no declarator; template uses bare `as`. Compile must emit `$props.as`
+/// (not `_ctx.as`) so the default `'label'` applies at runtime.
+#[test]
+fn label_with_defaults_imported_props_template_binds_dollar_props() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/Label.ts",
+        r#"export interface LabelProps {
+  as?: string
+}
+export const DEFAULT_LABEL_PROPS = {
+  as: 'label',
+}
+"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/Label.vue",
+        r#"<script setup lang="ts">
+import type { LabelProps } from './Label.ts'
+import { DEFAULT_LABEL_PROPS } from './Label.ts'
+withDefaults(defineProps<LabelProps>(), DEFAULT_LABEL_PROPS)
+</script>
+<template>
+  <component :is="as" />
+</template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/Label.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./Label.ts".to_string(),
+            resolved_canonical_id: Some("/src/Label.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Label.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("Label withDefaults must compile");
+
+    assert!(
+        !response.diagnostics.has_errors,
+        "errors: {:?}",
+        response.diagnostics.diagnostics
+    );
+    // Render should use $props.as (or __props.as), not free _ctx.as.
+    assert!(
+        response.code.contains("$props.as")
+            || response.code.contains("__props.as")
+            || response.code.contains("$props[\"as\"]"),
+        "template must bind prop via $props.as, got:\n{}",
+        response.code
+    );
+    assert!(
+        !response.code.contains("_ctx.as"),
+        "must not use _ctx.as for defineProps binding, got:\n{}",
+        response.code
+    );
+    // Variable defaults compile to the EXACT official shape:
+    // `_mergeDefaults(<typed props>, DEFAULT_LABEL_PROPS)` — pin it (an
+    // OR-chain over alternative shapes cannot catch a broken emission).
+    assert!(
+        response.code.contains("_mergeDefaults("),
+        "variable defaults must compile through _mergeDefaults. Got:\n{}",
+        response.code
+    );
+    assert!(
+        response.code.contains("DEFAULT_LABEL_PROPS)"),
+        "the defaults VARIABLE must be the mergeDefaults argument. Got:\n{}",
+        response.code
+    );
+    assert!(
+        response.code.contains("mergeDefaults as _mergeDefaults"),
+        "the mergeDefaults runtime import must be emitted. Got:\n{}",
+        response.code
+    );
+}
+
+/// Same Label pattern but `as?: PrimitiveProps['as']` (indexed access) as in
+/// real oku-primitives sources.
+#[test]
+fn label_with_defaults_indexed_access_prop_type_binds_dollar_props() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/Primitive.ts",
+        r#"export interface PrimitiveProps {
+  as?: string | object
+  asChild?: boolean
+}
+"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/Label.ts",
+        r#"import type { PrimitiveProps } from './Primitive'
+export interface LabelProps {
+  as?: PrimitiveProps['as']
+}
+export const DEFAULT_LABEL_PROPS = {
+  as: 'label' as const,
+}
+"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/Label.vue",
+        r#"<script setup lang="ts">
+import type { LabelProps } from './Label.ts'
+import { DEFAULT_LABEL_PROPS } from './Label.ts'
+withDefaults(defineProps<LabelProps>(), DEFAULT_LABEL_PROPS)
+</script>
+<template>
+  <component :is="as" />
+</template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/Label.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./Primitive".to_string(),
+            resolved_canonical_id: Some("/src/Primitive.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/Label.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./Label.ts".to_string(),
+            resolved_canonical_id: Some("/src/Label.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Label.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("Label with indexed-access prop type must compile");
+
+    assert!(
+        !response.diagnostics.has_errors,
+        "errors: {:?}",
+        response.diagnostics.diagnostics
+    );
+    assert!(
+        response.code.contains("$props.as")
+            || response.code.contains("__props.as")
+            || response.code.contains("$props[\"as\"]"),
+        "template must bind $props.as, got:\n{}",
+        response.code
+    );
+    assert!(
+        !response.code.contains("_ctx.as"),
+        "must not use _ctx.as, got:\n{}",
+        response.code
+    );
+    // Pin the exact variable-defaults shape (see the sibling test).
+    assert!(
+        response.code.contains("_mergeDefaults(") && response.code.contains("DEFAULT_LABEL_PROPS)"),
+        "props must merge DEFAULT_LABEL_PROPS via _mergeDefaults. Got:\n{}",
+        response.code
+    );
+    assert!(
+        response.code.contains("mergeDefaults as _mergeDefaults"),
+        "the mergeDefaults runtime import must be emitted. Got:\n{}",
+        response.code
+    );
+}
+
+/// reka-ui: `import type { PrimitiveProps } from '@/Primitive'` via tsconfig
+/// paths, then `export interface XProps extends PrimitiveProps` in a `.vue`
+/// companion script. Consumer defineProps must not HOST_MISSING PrimitiveProps.
+#[test]
+fn define_props_extends_at_alias_primitive_props_resolves() {
+    let host = strict_host();
+    host.configure_projects(vec![{
+        let mut cfg = verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            "/project".to_string(),
+            "/project".to_string(),
+            Some("/project/tsconfig.json".to_string()),
+        );
+        cfg.workspace_aliases = vec![verter_workspace::WorkspaceAlias {
+            find: "@/".to_string(),
+            replacement: "/project/src/".to_string(),
+        }];
+        cfg.compiler_options.paths = vec![("@/*".to_string(), vec!["/project/src/*".to_string()])];
+        cfg
+    }]);
+    upsert_non_sfc(
+        &host,
+        "/project/src/Primitive/index.ts",
+        r#"export interface PrimitiveProps {
+  asChild?: boolean
+  as?: string
+}
+"#,
+    );
+    upsert_vue(
+        &host,
+        "/project/src/Separator/BaseSeparator.vue",
+        r#"<script lang="ts">
+import type { PrimitiveProps } from '@/Primitive'
+export interface BaseSeparatorProps extends PrimitiveProps {
+  orientation?: 'horizontal' | 'vertical'
+}
+</script>
+<script setup lang="ts">
+const props = defineProps<BaseSeparatorProps>()
+</script>
+<template><div /></template>"#,
+    );
+    upsert_vue(
+        &host,
+        "/project/src/Separator/Separator.vue",
+        r#"<script setup lang="ts">
+import type { BaseSeparatorProps } from './BaseSeparator.vue'
+const props = defineProps<BaseSeparatorProps>()
+</script>
+<template><div>{{ props.orientation }}</div></template>"#,
+    );
+    host.set_import_dependencies(
+        "/project/src/Separator/BaseSeparator.vue",
+        vec![crate::DependencyResolution {
+            specifier: "@/Primitive".to_string(),
+            resolved_canonical_id: Some("/project/src/Primitive/index.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/project/src/Separator/Separator.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./BaseSeparator.vue".to_string(),
+            resolved_canonical_id: Some("/project/src/Separator/BaseSeparator.vue".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/project/src/Separator/Separator.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("@/ alias heritage must compile");
+
+    assert!(
+        !response.diagnostics.has_errors,
+        "must not error: {:?}",
+        response.diagnostics.diagnostics
+    );
+    assert!(
+        !response
+            .diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP"),
+        "must not HOST_MISSING PrimitiveProps via @/: {:?}",
+        response.diagnostics.diagnostics
+    );
+}
+
+/// radix Separator pattern: local empty interface re-export of an imported
+/// props type (`export interface SeparatorProps extends BaseSeparatorProps`
+/// plus `defineProps<SeparatorProps>()`) must expand full heritage runtime
+/// props (asChild/as from PrimitiveProps, orientation/decorative from base).
+#[test]
+fn define_props_local_empty_interface_extends_imported_expands_heritage_props() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/Primitive.ts",
+        r#"export interface PrimitiveProps {
+  asChild?: boolean
+  as?: string
+}
+"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/BaseSeparator.vue",
+        r#"<script lang="ts">
+import type { PrimitiveProps } from './Primitive'
+export interface BaseSeparatorProps extends PrimitiveProps {
+  orientation?: 'horizontal' | 'vertical'
+  decorative?: boolean
+}
+</script>
+<script setup lang="ts">
+const props = defineProps<BaseSeparatorProps>()
+</script>
+<template><div /></template>"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/Separator.vue",
+        r#"<script lang="ts">
+import type { BaseSeparatorProps } from './BaseSeparator.vue'
+export interface SeparatorProps extends BaseSeparatorProps {}
+</script>
+<script setup lang="ts">
+const props = withDefaults(defineProps<SeparatorProps>(), {
+  orientation: 'horizontal',
+})
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/BaseSeparator.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./Primitive".to_string(),
+            resolved_canonical_id: Some("/src/Primitive.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/Separator.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./BaseSeparator.vue".to_string(),
+            resolved_canonical_id: Some("/src/BaseSeparator.vue".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Separator.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("local empty interface extends imported must compile");
+
+    assert!(
+        !response.diagnostics.has_errors,
+        "must not error: {:?}",
+        response.diagnostics.diagnostics
+    );
+    assert!(
+        response.code.contains("asChild"),
+        "heritage prop asChild must appear in runtime props, got:\n{}",
+        response.code
+    );
+    assert!(
+        response.code.contains("orientation"),
+        "local/withDefaults orientation must appear, got:\n{}",
+        response.code
+    );
+    assert!(
+        response.code.contains("decorative"),
+        "heritage prop decorative must appear in runtime props, got:\n{}",
+        response.code
+    );
+    assert!(
+        response.code.contains("as:") || response.code.contains("as,"),
+        "heritage prop as must appear in runtime props, got:\n{}",
+        response.code
+    );
+}
+
+/// Local interface with own members + extends imported base (not empty-body).
+#[test]
+fn define_props_local_interface_with_members_extends_imported() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/Base.ts",
+        r#"export interface BaseProps {
+  base?: string
+}
+"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        r#"<script lang="ts">
+import type { BaseProps } from './Base'
+export interface CompProps extends BaseProps {
+  local?: number
+}
+</script>
+<script setup lang="ts">
+defineProps<CompProps>()
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/Comp.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./Base".to_string(),
+            resolved_canonical_id: Some("/src/Base.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("local interface with members + extends must compile");
+
+    assert!(
+        !response.diagnostics.has_errors,
+        "must not error: {:?}",
+        response.diagnostics.diagnostics
+    );
+    assert!(
+        response.code.contains("base"),
+        "inherited base must appear, got:\n{}",
+        response.code
+    );
+    assert!(
+        response.code.contains("local"),
+        "own local member must appear, got:\n{}",
+        response.code
+    );
+}
+
+/// Type-alias re-export of an imported interface used as defineProps arg.
+#[test]
+fn define_props_type_alias_reexport_of_imported_interface() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/Base.ts",
+        r#"export interface BaseProps {
+  foo?: string
+  bar?: boolean
+}
+"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        r#"<script setup lang="ts">
+import type { BaseProps } from './Base'
+type Props = BaseProps
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/Comp.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./Base".to_string(),
+            resolved_canonical_id: Some("/src/Base.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("type alias reexport must compile");
+
+    assert!(
+        !response.diagnostics.has_errors,
+        "must not error: {:?}",
+        response.diagnostics.diagnostics
+    );
+    assert!(
+        response.code.contains("foo"),
+        "aliased prop foo must appear, got:\n{}",
+        response.code
+    );
+    assert!(
+        response.code.contains("bar"),
+        "aliased prop bar must appear, got:\n{}",
+        response.code
+    );
+}
+
+/// Local empty interface extends imported type alias of object type.
+#[test]
+fn define_props_local_empty_extends_imported_type_alias_object() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/Base.ts",
+        r#"export type BaseProps = {
+  alpha?: string
+  beta?: number
+}
+"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        r#"<script lang="ts">
+import type { BaseProps } from './Base'
+export interface Props extends BaseProps {}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/Comp.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./Base".to_string(),
+            resolved_canonical_id: Some("/src/Base.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("empty extends type-alias object must compile");
+
+    assert!(
+        !response.diagnostics.has_errors,
+        "must not error: {:?}",
+        response.diagnostics.diagnostics
+    );
+    assert!(
+        response.code.contains("alpha"),
+        "alpha from type alias must appear, got:\n{}",
+        response.code
+    );
+    assert!(
+        response.code.contains("beta"),
+        "beta from type alias must appear, got:\n{}",
+        response.code
+    );
+}
+
+/// Single-file: empty interface chain (no import) must expand all members.
+#[test]
+fn define_props_same_file_empty_interface_extends_chain() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        r#"<script setup lang="ts">
+interface A { a?: string }
+interface B extends A { b?: number }
+interface C extends B {}
+defineProps<C>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("same-file empty extends chain must compile");
+
+    assert!(
+        !response.diagnostics.has_errors,
+        "must not error: {:?}",
+        response.diagnostics.diagnostics
+    );
+    assert!(
+        response.code.contains("a:") || response.code.contains("\"a\""),
+        "chain prop a must appear, got:\n{}",
+        response.code
+    );
+    assert!(
+        response.code.contains("b:") || response.code.contains("\"b\""),
+        "chain prop b must appear, got:\n{}",
+        response.code
+    );
+}
+
+/// reka-ui pattern: consumer imports props interface exported from another
+/// `.vue` companion `<script lang="ts">` block that `extends PrimitiveProps`.
+/// Nested PrimitiveProps must resolve (no HOST_MISSING_MACRO_TYPE_DEP).
+#[test]
+fn define_props_extends_primitive_from_sibling_vue_script_block_resolves() {
+    let host = strict_host();
+    // Declaring SFC: companion script exports RangeCalendarNextProps extends PrimitiveProps.
+    upsert_vue(
+        &host,
+        "/src/RangeCalendarNext.vue",
+        r#"<script lang="ts">
+import type { PrimitiveProps } from './Primitive'
+export interface RangeCalendarNextProps extends PrimitiveProps {
+  nextPage?: () => void
+}
+</script>
+<script setup lang="ts">
+const props = withDefaults(defineProps<RangeCalendarNextProps>(), { as: 'button' })
+</script>
+<template><button /></template>"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/Primitive.ts",
+        r#"export interface PrimitiveProps {
+  asChild?: boolean
+  as?: string
+}
+"#,
+    );
+    // Consumer mirrors DateRangePickerNext.vue importing from RangeCalendarNext.
+    upsert_vue(
+        &host,
+        "/src/DateRangePickerNext.vue",
+        r#"<script setup lang="ts">
+import type { RangeCalendarNextProps } from './RangeCalendarNext.vue'
+const props = defineProps<RangeCalendarNextProps>()
+</script>
+<template><button>{{ props.as }}</button></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/RangeCalendarNext.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./Primitive".to_string(),
+            resolved_canonical_id: Some("/src/Primitive.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/DateRangePickerNext.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./RangeCalendarNext.vue".to_string(),
+            resolved_canonical_id: Some("/src/RangeCalendarNext.vue".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/DateRangePickerNext.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("cross-vue extends PrimitiveProps must compile");
+
+    assert!(
+        !response.diagnostics.has_errors,
+        "must not error: {:?}",
+        response.diagnostics.diagnostics
+    );
+    assert!(
+        !response
+            .diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP"),
+        "must not HOST_MISSING PrimitiveProps: {:?}",
+        response.diagnostics.diagnostics
     );
 }
 
@@ -4177,6 +5156,7 @@ fn type_import_reexport_prefers_declaration_companion_over_runtime_js() {
             "/workspace/src/Consumer.vue",
             0,
             "AccordionRootEmits",
+            &mut Vec::new(),
         )
     })
     .expect("external type resolution should produce a result");
@@ -4343,6 +5323,51 @@ const SETUP = 2;
     assert!(content.contains("COMPANION"), "should contain COMPANION");
     assert!(content.contains("SETUP"), "should contain SETUP");
     assert!(!content.contains("<template>"), "must not contain template");
+}
+
+/// A JS comment containing `` `<style scoped>` `` must not truncate the
+/// setup block. reka-ui RadioGroupItem has such a comment; truncating drops
+/// every `defineProps` and leaves RadioGroup without a `value` prop.
+#[test]
+fn extract_vue_script_content_handles_style_tag_in_line_comment() {
+    let source = r#"<script lang="ts">
+export interface ItemProps { value?: string }
+</script>
+<script setup lang="ts">
+const props = defineProps<ItemProps>()
+// consumer `<style scoped>` keeps working. (issue #2751)
+const scopeId = 1
+</script>
+<template><div /></template>
+<style scoped>
+.foo {}
+</style>"#;
+
+    let parsed = verter_compiler::compile::parse_sfc(source, None, None);
+    let with_cache = crate::host_resolve::extract_vue_script_content(source, Some(&parsed))
+        .expect("cached extraction should succeed");
+    let without_cache = crate::host_resolve::extract_vue_script_content(source, None)
+        .expect("non-cached extraction should succeed");
+
+    for (label, content) in [("cached", &with_cache), ("raw-scan", &without_cache)] {
+        assert!(
+            content.contains("defineProps"),
+            "{label}: setup must include defineProps, got:\n{content}"
+        );
+        assert!(
+            content.contains("scopeId"),
+            "{label}: setup must include code after the style-looking comment, got:\n{content}"
+        );
+        assert!(
+            content.contains("ItemProps"),
+            "{label}: companion interface must be retained, got:\n{content}"
+        );
+        // The real style block content is blanked (not a script span).
+        assert!(
+            !content.contains(".foo"),
+            "{label}: must not include real <style> block body as script, got:\n{content}"
+        );
+    }
 }
 
 #[test]
@@ -4805,6 +5830,580 @@ fn vue_api_projector_rejects_a_non_carrier_vue_language() {
     );
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// FOUND macro type argument whose SURFACE composition (heritage `extends`
+// parent, intersection / union arm) references an unresolvable IMPORT-BACKED
+// type. The dep type itself RESOLVES — the miss sits one level deeper, inside
+// the declaring file — so the legacy missing-root path stays silent; the
+// shared shallow walker reports the dropped arm and the collector tiers it as
+// a fatal error. Member-position references and non-import-backed (ambient)
+// heritage names must stay silent.
+// ───────────────────────────────────────────────────────────────────────────
+
+fn ensure_compiled_error(host: &VerterHost, canonical_id: &str) -> crate::DiagnosticsSnapshot {
+    match host.ensure_compiled(canonical_id, &profile()) {
+        Err(HostError::CompileError(failure)) => failure.diagnostics,
+        Err(other) => panic!("expected compile error, got {other:?}"),
+        Ok(()) => panic!("expected compile error, got successful compile"),
+    }
+}
+
+fn assert_compiles_without_macro_type_dep_diag(host: &VerterHost, canonical_id: &str) {
+    host.ensure_compiled(canonical_id, &profile())
+        .unwrap_or_else(|err| panic!("{canonical_id} must compile, got {err:?}"));
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(canonical_id.to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .unwrap_or_else(|err| panic!("{canonical_id} must serve a Main node, got {err:?}"));
+    assert!(
+        !response
+            .diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP"),
+        "{canonical_id} must not surface HOST_MISSING_MACRO_TYPE_DEP: {:?}",
+        response.diagnostics.diagnostics
+    );
+}
+
+/// Shared dep-file fixture: every `Found*` type RESOLVES, but its surface
+/// composition references a name imported from the missing module `./nope`.
+fn upsert_unresolved_surface_arm_types(host: &VerterHost) {
+    upsert_non_sfc(
+        host,
+        "/src/types.ts",
+        "import type { NotFoundHeritage, NotFoundArm, NotFoundUnionArm } from './nope'\n\
+         export interface FoundExtendsMissing extends NotFoundHeritage { a?: string }\n\
+         export interface Base { b?: number }\n\
+         export type FoundIntersectAlias = Base & NotFoundArm\n\
+         export type FoundUnionAlias = Base | NotFoundUnionArm",
+    );
+}
+
+fn surface_arm_sfc(type_name: &str) -> String {
+    format!(
+        "<script setup lang=\"ts\">\nimport type {{ {type_name} }} from './types'\nconst props = defineProps<{type_name}>()\n</script>\n<template><div/></template>"
+    )
+}
+
+#[test]
+fn found_macro_type_with_missing_heritage_parent_fails_compile() {
+    let host = strict_host();
+    upsert_unresolved_surface_arm_types(&host);
+    let source = surface_arm_sfc("FoundExtendsMissing");
+    upsert_vue(&host, "/src/A.vue", &source);
+
+    let diagnostics = ensure_compiled_error(&host, "/src/A.vue");
+    let missing = find_diag(&diagnostics, "HOST_MISSING_MACRO_TYPE_DEP");
+    assert_eq!(missing.severity, HostSeverity::Error);
+    assert!(
+        missing.message.contains("NotFoundHeritage"),
+        "heritage-arm miss must name the unresolved type: {}",
+        missing.message
+    );
+    assert!(
+        missing.message.contains("FoundExtendsMissing"),
+        "heritage-arm miss must name the resolved dep type: {}",
+        missing.message
+    );
+    // The diagnostic anchors to the SFC's owning import statement.
+    let import_start = source.find("import type").unwrap() as u32;
+    let import_end =
+        import_start + "import type { FoundExtendsMissing } from './types'".len() as u32;
+    assert_eq!(
+        missing.span,
+        Some(Span::new(import_start, import_end)),
+        "surface-arm miss span should point at the owning import"
+    );
+    // The intersection-arm miss belongs to FoundIntersectAlias, which this
+    // component does not consume.
+    assert!(
+        !diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("NotFoundArm")),
+        "unconsumed sibling types must not contribute arms: {:?}",
+        diagnostics.diagnostics
+    );
+}
+
+#[test]
+fn found_macro_type_with_missing_intersection_arm_fails_compile() {
+    let host = strict_host();
+    upsert_unresolved_surface_arm_types(&host);
+    upsert_vue(&host, "/src/B.vue", &surface_arm_sfc("FoundIntersectAlias"));
+
+    let diagnostics = ensure_compiled_error(&host, "/src/B.vue");
+    let missing = find_diag(&diagnostics, "HOST_MISSING_MACRO_TYPE_DEP");
+    assert_eq!(missing.severity, HostSeverity::Error);
+    assert!(
+        missing.message.contains("NotFoundArm"),
+        "intersection-arm miss must name the unresolved type: {}",
+        missing.message
+    );
+}
+
+#[test]
+fn found_macro_type_with_missing_union_arm_fails_compile() {
+    let host = strict_host();
+    upsert_unresolved_surface_arm_types(&host);
+    upsert_vue(&host, "/src/C.vue", &surface_arm_sfc("FoundUnionAlias"));
+
+    let diagnostics = ensure_compiled_error(&host, "/src/C.vue");
+    let missing = find_diag(&diagnostics, "HOST_MISSING_MACRO_TYPE_DEP");
+    assert_eq!(missing.severity, HostSeverity::Error);
+    assert!(
+        missing.message.contains("NotFoundUnionArm"),
+        "union-arm miss must name the unresolved type: {}",
+        missing.message
+    );
+}
+
+#[test]
+fn found_macro_type_with_member_level_missing_types_still_compiles() {
+    // MEMBER-position references to an unresolvable import degrade that
+    // member's runtime type to `null` — never a surface-arm error. Nested
+    // references are not collected at all.
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "import type { NotFound, NotFound2 } from './nope'\n\
+         export interface FoundMemberMissing { foo: NotFound }\n\
+         export interface FoundNestedMissing { foo: { test: NotFound2 } }",
+    );
+    upsert_vue(&host, "/src/A.vue", &surface_arm_sfc("FoundMemberMissing"));
+    upsert_vue(&host, "/src/B.vue", &surface_arm_sfc("FoundNestedMissing"));
+
+    assert_compiles_without_macro_type_dep_diag(&host, "/src/A.vue");
+    assert_compiles_without_macro_type_dep_diag(&host, "/src/B.vue");
+}
+
+#[test]
+fn found_macro_type_with_ambient_heritage_name_still_compiles() {
+    // The unresolved heritage name is NOT an import binding of the declaring
+    // file — it may be ambient / lib-provided, so the surface-arm error must
+    // not fire.
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface FoundGlobalHeritage extends SomeUndeclaredGlobal { a?: string }",
+    );
+    upsert_vue(&host, "/src/A.vue", &surface_arm_sfc("FoundGlobalHeritage"));
+
+    assert_compiles_without_macro_type_dep_diag(&host, "/src/A.vue");
+}
+
+#[test]
+fn found_macro_type_with_resolvable_heritage_chain_still_compiles() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface Base2 { b?: number }\n\
+         export interface FoundOk extends Base2 { a?: string }",
+    );
+    upsert_vue(&host, "/src/A.vue", &surface_arm_sfc("FoundOk"));
+
+    assert_compiles_without_macro_type_dep_diag(&host, "/src/A.vue");
+}
+
+/// A surface arm whose name is PROVABLY absent behind a star re-export
+/// barrel is fatal: the export-surface probe walks `export *` targets
+/// transitively, so a barrel does not shield a genuinely missing name.
+#[test]
+fn found_macro_type_arm_provably_absent_behind_star_barrel_fails_compile() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/empty-mod.ts",
+        "export interface Unrelated { u?: number }",
+    );
+    upsert_non_sfc(&host, "/src/barrel.ts", "export * from './empty-mod'");
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "import type { Ghost } from './barrel'\n\
+         export interface FoundGhostHeritage extends Ghost { a?: string }",
+    );
+    upsert_vue(&host, "/src/A.vue", &surface_arm_sfc("FoundGhostHeritage"));
+
+    let diagnostics = ensure_compiled_error(&host, "/src/A.vue");
+    assert!(
+        diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP" && d.message.contains("Ghost")),
+        "a provably-absent star-barrel arm must be fatal and name the arm: {:?}",
+        diagnostics.diagnostics
+    );
+}
+
+/// Control: a heritage parent that RESOLVES through a star re-export barrel
+/// compiles silently — the arm materialises, so no walker miss fires at all.
+#[test]
+fn found_macro_type_with_heritage_behind_star_reexport_compiles() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/base.ts",
+        "export interface BarrelBase { b?: number }",
+    );
+    upsert_non_sfc(&host, "/src/barrel.ts", "export * from './base'");
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "import type { BarrelBase } from './barrel'\n\
+         export interface FoundViaBarrel extends BarrelBase { a?: string }",
+    );
+    upsert_vue(&host, "/src/A.vue", &surface_arm_sfc("FoundViaBarrel"));
+
+    assert_compiles_without_macro_type_dep_diag(&host, "/src/A.vue");
+}
+
+/// HostBacked mirror of the render-lane member-position tier: a MEMBER
+/// annotation whose type import is missing compiles successfully, surfaces a
+/// WARNING, and the member's runtime type degrades to `null`.
+#[test]
+fn member_position_missing_macro_type_warns_and_degrades_on_host_lane() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/src/MemberMiss.vue",
+        "<script setup lang=\"ts\">\nimport type { Missing } from './nope'\nconst props = defineProps<{ foo: Missing }>()\n</script>\n<template><div>{{ foo }}</div></template>",
+    );
+
+    host.ensure_compiled("/src/MemberMiss.vue", &profile())
+        .expect("member-position miss must not abort the host lane");
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/MemberMiss.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("member-position miss must still serve a Main node");
+    let warning = response
+        .diagnostics
+        .diagnostics
+        .iter()
+        .find(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP")
+        .expect("member-position miss surfaces a HOST_MISSING_MACRO_TYPE_DEP diagnostic");
+    assert_eq!(
+        warning.severity,
+        HostSeverity::Warning,
+        "member-position miss is a warning, never fatal"
+    );
+    assert!(
+        response
+            .code
+            .contains("foo: { type: null, required: true }"),
+        "member with unresolvable type must degrade to `type: null`:\n{}",
+        response.code
+    );
+}
+
+#[test]
+fn found_macro_type_missing_surface_arm_error_repeats_on_recompile() {
+    // Cold/warm parity: re-demanding the same failed compile reproduces the
+    // same surface-arm error (the fact lives on the cached dispatch value and
+    // replays on warm reads).
+    let host = strict_host();
+    upsert_unresolved_surface_arm_types(&host);
+    upsert_vue(&host, "/src/A.vue", &surface_arm_sfc("FoundExtendsMissing"));
+
+    let cold = ensure_compiled_error(&host, "/src/A.vue");
+    let cold_missing = find_diag(&cold, "HOST_MISSING_MACRO_TYPE_DEP");
+    assert!(cold_missing.message.contains("NotFoundHeritage"));
+
+    let warm = ensure_compiled_error(&host, "/src/A.vue");
+    let warm_missing = find_diag(&warm, "HOST_MISSING_MACRO_TYPE_DEP");
+    assert_eq!(
+        cold_missing.message, warm_missing.message,
+        "recompile must reproduce the identical surface-arm error"
+    );
+    assert_eq!(warm_missing.severity, HostSeverity::Error);
+}
+
+/// Creating the previously-missing arm source CLEARS the error: the next
+/// compile resolves the heritage arm instead of replaying the stale
+/// dropped-arm fact from the surface memo.
+#[test]
+fn found_macro_type_surface_arm_error_clears_when_missing_source_appears() {
+    let host = strict_host();
+    upsert_unresolved_surface_arm_types(&host);
+    upsert_vue(&host, "/src/A.vue", &surface_arm_sfc("FoundExtendsMissing"));
+
+    let cold = ensure_compiled_error(&host, "/src/A.vue");
+    assert!(find_diag(&cold, "HOST_MISSING_MACRO_TYPE_DEP")
+        .message
+        .contains("NotFoundHeritage"));
+
+    // The missing module appears with the required exports.
+    upsert_non_sfc(
+        &host,
+        "/src/nope.ts",
+        "export interface NotFoundHeritage { inherited?: number }\n\
+         export interface NotFoundArm { arm?: number }\n\
+         export interface NotFoundUnionArm { u?: number }",
+    );
+
+    assert_compiles_without_macro_type_dep_diag(&host, "/src/A.vue");
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Bare directory import specifiers (`.` / `..`) — in-tree relative routes
+// that resolve to a directory index. TypeScript treats a bare `.`/`..` as a
+// relative path (`pathIsRelative`: /^\.\.?($|[\\/])/), so the shared
+// resolver and the surface-arm adjudicator must resolve them exactly like
+// the `./`/`../` forms: an in-tree heritage arm imported `from '..'` must
+// materialise (no false-positive fatal HOST_MISSING_MACRO_TYPE_DEP), while
+// a name provably absent from the resolved parent index stays fatal.
+// (reka-ui `ListboxFilter.vue` / `_DatePicker.vue` regression shape.)
+// ───────────────────────────────────────────────────────────────────────────
+
+/// The reka-ui anchor fixture: `PrimitiveProps` is declared in a directory
+/// module, re-exported by its directory index, re-exported again by the
+/// package root index (a directory-hop named re-export chain), and consumed
+/// as heritage through `heritage_specifier` — the bare parent-directory
+/// specifier `'..'` under test, or its spelled-out `'../index'` control.
+fn upsert_parent_dir_barrel_fixture(host: &VerterHost, heritage_specifier: &str) {
+    upsert_non_sfc(
+        host,
+        "/src/Primitive/Primitive.ts",
+        "export interface PrimitiveProps { as?: string }",
+    );
+    upsert_non_sfc(
+        host,
+        "/src/Primitive/index.ts",
+        "export { type PrimitiveProps } from './Primitive'",
+    );
+    upsert_non_sfc(
+        host,
+        "/src/index.ts",
+        "export { type PrimitiveProps } from './Primitive'\nexport * from './Listbox'",
+    );
+    upsert_non_sfc(
+        host,
+        "/src/Listbox/index.ts",
+        "export { type ListboxFilterProps } from './ListboxFilter.vue'",
+    );
+    upsert_vue(
+        host,
+        "/src/Listbox/ListboxFilter.vue",
+        &format!(
+            "<script lang=\"ts\">\nimport type {{ PrimitiveProps }} from '{heritage_specifier}'\nexport interface ListboxFilterProps extends PrimitiveProps {{ modelValue?: string }}\n</script>\n<script setup lang=\"ts\">\nconst props = defineProps<ListboxFilterProps>()\n</script>\n<template><input/></template>"
+        ),
+    );
+    upsert_vue(
+        host,
+        "/src/Autocomplete/AutocompleteInput.vue",
+        "<script lang=\"ts\">\nimport type { ListboxFilterProps } from '../Listbox'\nexport interface AutocompleteInputProps extends ListboxFilterProps {}\n</script>\n<script setup lang=\"ts\">\nconst props = defineProps<AutocompleteInputProps>()\n</script>\n<template><div/></template>",
+    );
+}
+
+fn main_node_code(host: &VerterHost, canonical_id: &str) -> String {
+    host.get_virtual_file(VirtualQuery {
+        raw_id: None,
+        canonical_id: Some(canonical_id.to_string()),
+        node_kind: Some(VirtualNodeKind::Main),
+        compile_profile: profile(),
+    })
+    .unwrap_or_else(|err| panic!("{canonical_id} must serve a Main node, got {err:?}"))
+    .code
+    .to_string()
+}
+
+/// The exact corpus failure shape: the consumer's macro type dep RESOLVES
+/// (through a sibling barrel), but the dep type's own heritage is imported
+/// `from '..'`. The heritage arm must resolve through the parent-directory
+/// index — never adjudicate as an unresolvable surface arm — and the whole
+/// pipeline must behave byte-identically to the spelled-out `'../index'`
+/// control (a bare directory specifier is not a special case).
+#[test]
+fn found_macro_type_with_heritage_via_bare_parent_dir_import_compiles() {
+    let bare = strict_host();
+    upsert_parent_dir_barrel_fixture(&bare, "..");
+    let control = strict_host();
+    upsert_parent_dir_barrel_fixture(&control, "../index");
+
+    assert_compiles_without_macro_type_dep_diag(
+        &control,
+        "/src/Autocomplete/AutocompleteInput.vue",
+    );
+    assert_compiles_without_macro_type_dep_diag(&bare, "/src/Autocomplete/AutocompleteInput.vue");
+    assert_compiles_without_macro_type_dep_diag(&bare, "/src/Listbox/ListboxFilter.vue");
+
+    // The consumer sources are identical in both hosts — the emitted Main
+    // must be too (the `'..'` route resolves to the same declaration chain).
+    assert_eq!(
+        main_node_code(&bare, "/src/Autocomplete/AutocompleteInput.vue"),
+        main_node_code(&control, "/src/Autocomplete/AutocompleteInput.vue"),
+        "bare '..' heritage must produce the same consumer emission as '../index'"
+    );
+
+    // The dep's OWN compile enumerates its own-body member — and must not
+    // degrade it to a null runtime type under the bare-specifier route.
+    let dep_code = main_node_code(&bare, "/src/Listbox/ListboxFilter.vue");
+    assert!(
+        dep_code.contains("modelValue: { type: String }"),
+        "dep's own-body member must keep its runtime type under a '..' heritage import:\n{dep_code}"
+    );
+    assert!(
+        !dep_code.contains("type: null"),
+        "no member may degrade to a null runtime type when the '..' route resolves:\n{dep_code}"
+    );
+}
+
+/// Backslash spelling of the same heritage route: the `.vue` SOURCE TEXT
+/// carries `from '..\\index'`, whose JS-cooked module-specifier VALUE is
+/// `..\index` (one backslash). TS `pathIsRelative` (`/^\.\.?($|[\\/])/`)
+/// classifies it relative and normalizes `\` → `/` when combining paths, so
+/// it must resolve — end to end, through the macro-type dep pipeline —
+/// byte-identically to the `'../index'` spelling: no false-positive fatal
+/// HOST_MISSING_MACRO_TYPE_DEP, no node_modules ancestor-walk misroute.
+#[test]
+fn found_macro_type_with_heritage_via_backslash_parent_dir_import_compiles() {
+    let backslash = strict_host();
+    upsert_parent_dir_barrel_fixture(&backslash, "..\\\\index");
+    let control = strict_host();
+    upsert_parent_dir_barrel_fixture(&control, "../index");
+
+    assert_compiles_without_macro_type_dep_diag(
+        &control,
+        "/src/Autocomplete/AutocompleteInput.vue",
+    );
+    assert_compiles_without_macro_type_dep_diag(
+        &backslash,
+        "/src/Autocomplete/AutocompleteInput.vue",
+    );
+    assert_compiles_without_macro_type_dep_diag(&backslash, "/src/Listbox/ListboxFilter.vue");
+
+    // The consumer sources are identical in both hosts — the emitted Main
+    // must be too (the `'..\index'` route resolves to the same declaration
+    // chain as `'../index'`).
+    assert_eq!(
+        main_node_code(&backslash, "/src/Autocomplete/AutocompleteInput.vue"),
+        main_node_code(&control, "/src/Autocomplete/AutocompleteInput.vue"),
+        "'..\\index' heritage must produce the same consumer emission as '../index'"
+    );
+
+    // The dep's OWN compile enumerates its own-body member — and must not
+    // degrade it to a null runtime type under the backslash-specifier route.
+    let dep_code = main_node_code(&backslash, "/src/Listbox/ListboxFilter.vue");
+    assert!(
+        dep_code.contains("modelValue: { type: String }"),
+        "dep's own-body member must keep its runtime type under a '..\\index' heritage import:\n{dep_code}"
+    );
+    assert!(
+        !dep_code.contains("type: null"),
+        "no member may degrade to a null runtime type when the '..\\index' route resolves:\n{dep_code}"
+    );
+}
+
+/// Direct root-import shape: `defineProps<T>()` whose type argument is
+/// imported `from '..'` (the parent-directory index). The root import must
+/// load from the PARENT directory's index — a bare `'..'` is a relative
+/// specifier, never a bare package name. The importer's own directory also
+/// has an index (the reka-ui layout): a misrouted `'..'` that lands on the
+/// importer's own directory index cannot find `RootProps` there.
+#[test]
+fn macro_type_root_import_via_bare_parent_dir_specifier_compiles() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/index.ts",
+        "export interface RootProps { title?: string }",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/Comp/index.ts",
+        "export interface Unrelated { u?: number }",
+    );
+    upsert_vue(
+        &host,
+        "/src/Comp/Comp.vue",
+        "<script setup lang=\"ts\">\nimport type { RootProps } from '..'\nconst props = defineProps<RootProps>()\n</script>\n<template><div/></template>",
+    );
+
+    assert_compiles_without_macro_type_dep_diag(&host, "/src/Comp/Comp.vue");
+
+    // Positive: the imported root type's member materialises with its real
+    // runtime type — proving `'..'` loaded the PARENT index (the decoy
+    // `/src/Comp/index.ts` has no `RootProps`).
+    let code = main_node_code(&host, "/src/Comp/Comp.vue");
+    assert!(
+        code.contains("title: { type: String }"),
+        "the '..'-imported root type's member must enumerate with its runtime type:\n{code}"
+    );
+    assert!(
+        !code.contains("type: null"),
+        "no member may degrade to a null runtime type when '..' resolves:\n{code}"
+    );
+}
+
+/// Bare `'.'` — the current-directory index — is the same specifier class.
+#[test]
+fn macro_type_root_import_via_bare_current_dir_specifier_compiles() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/Comp/index.ts",
+        "export interface RootProps { title?: string }",
+    );
+    upsert_vue(
+        &host,
+        "/src/Comp/Comp.vue",
+        "<script setup lang=\"ts\">\nimport type { RootProps } from '.'\nconst props = defineProps<RootProps>()\n</script>\n<template><div/></template>",
+    );
+
+    assert_compiles_without_macro_type_dep_diag(&host, "/src/Comp/Comp.vue");
+    let code = main_node_code(&host, "/src/Comp/Comp.vue");
+    assert!(
+        code.contains("title: { type: String }"),
+        "the '.'-imported root type's member must enumerate with its runtime type:\n{code}"
+    );
+}
+
+/// Overcorrection guard (the honest-fatal direction): the `'..'` route now
+/// RESOLVES to the parent index, but the requested heritage name is provably
+/// absent from its export surface — the surface-arm error must survive.
+#[test]
+fn found_macro_type_arm_provably_absent_via_bare_parent_dir_import_fails_compile() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/index.ts",
+        "export interface Unrelated { u?: number }",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/Listbox/types.ts",
+        "import type { Ghost } from '..'\n\
+         export interface FoundGhostParent extends Ghost { a?: string }",
+    );
+    upsert_vue(
+        &host,
+        "/src/A.vue",
+        "<script setup lang=\"ts\">\nimport type { FoundGhostParent } from './Listbox/types'\nconst props = defineProps<FoundGhostParent>()\n</script>\n<template><div/></template>",
+    );
+
+    let diagnostics = ensure_compiled_error(&host, "/src/A.vue");
+    assert!(
+        diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP" && d.message.contains("Ghost")),
+        "a name provably absent from the resolved '..' index must stay fatal: {:?}",
+        diagnostics.diagnostics
+    );
+}
+
 #[test]
 fn render_legacy_body_operates_on_the_resolved_canonical_without_re_resolving() {
     // The legacy body renders the canonical it is GIVEN — it does NOT resolve
@@ -4853,4 +6452,153 @@ fn render_legacy_body_operates_on_the_resolved_canonical_without_re_resolving() 
             .is_some(),
         "the host entry must still serve the alias end-to-end via one resolution"
     );
+}
+
+/// Local alias of an external property-form emits type must produce
+/// `emits: ["update:open"]` at runtime (AlertDialogRoot pattern).
+#[test]
+fn host_defineemits_local_alias_of_external_emits() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export type RootEmits = { 'update:open': [value: boolean] }\n",
+    );
+    upsert_vue(
+        &host,
+        "/src/Alias.vue",
+        r#"<script setup lang="ts">
+import type { RootEmits } from './types'
+type A = RootEmits
+const emit = defineEmits<A>()
+</script>
+<template><div /></template>
+"#,
+    );
+
+    host.set_import_dependencies(
+        "/src/Alias.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    host.ensure_compiled("/src/Alias.vue", &profile())
+        .expect("alias emits SFC must compile");
+
+    let resp = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Alias.vue".into()),
+            compile_profile: profile(),
+            node_kind: Some(VirtualNodeKind::Main),
+        })
+        .expect("virtual file");
+    let code = resp.code.as_ref();
+    assert!(
+        code.contains("update:open") && code.contains("emits:"),
+        "local alias of external emits must produce runtime emits array, got:\n{code}"
+    );
+}
+
+#[test]
+fn host_defineemits_direct_external_emits() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export type RootEmits = { 'update:open': [value: boolean] }\n",
+    );
+    upsert_vue(
+        &host,
+        "/src/Direct.vue",
+        r#"<script setup lang="ts">
+import type { RootEmits } from './types'
+const emit = defineEmits<RootEmits>()
+</script>
+<template><div /></template>
+"#,
+    );
+
+    host.ensure_compiled("/src/Direct.vue", &profile())
+        .expect("direct emits SFC must compile");
+
+    let resp = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Direct.vue".into()),
+            compile_profile: profile(),
+            node_kind: Some(VirtualNodeKind::Main),
+        })
+        .expect("virtual file");
+    let code = resp.code.as_ref();
+    assert!(
+        code.contains("update:open") && code.contains("emits:"),
+        "direct external emits must produce runtime emits array, got:\n{code}"
+    );
+}
+
+#[test]
+fn host_defineemits_local_alias_of_local_emits() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_vue(
+        &host,
+        "/src/LocalAlias.vue",
+        r#"<script setup lang="ts">
+type RootEmits = { 'update:open': [value: boolean] }
+type A = RootEmits
+const emit = defineEmits<A>()
+</script>
+<template><div /></template>
+"#,
+    );
+
+    host.ensure_compiled("/src/LocalAlias.vue", &profile())
+        .expect("local alias emits must compile");
+
+    let resp = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/LocalAlias.vue".into()),
+            compile_profile: profile(),
+            node_kind: Some(VirtualNodeKind::Main),
+        })
+        .expect("virtual file");
+    let code = resp.code.as_ref();
+    assert!(
+        code.contains("update:open") && code.contains("emits:"),
+        "local alias of local emits must produce runtime emits array, got:\n{code}"
+    );
+}
+
+/// `</script><template>` with NO whitespace between the tags: the raw
+/// scanner's close match is a COMPLETE tag, so no after-byte boundary rule
+/// may apply — requiring one silently dropped the block's span and lost
+/// macros whenever the raw scan was authoritative.
+#[test]
+fn extract_vue_script_content_handles_adjacent_close_and_template() {
+    let source = "<script lang=\"ts\">\nexport interface ItemProps { value?: string }\n</script><script setup lang=\"ts\">\nconst props = defineProps<ItemProps>()\n</script><template><div /></template>";
+
+    let parsed = verter_compiler::compile::parse_sfc(source, None, None);
+    let with_cache = crate::host_resolve::extract_vue_script_content(source, Some(&parsed))
+        .expect("cached extraction should succeed");
+    let without_cache = crate::host_resolve::extract_vue_script_content(source, None)
+        .expect("non-cached extraction should succeed");
+
+    for (label, content) in [("cached", &with_cache), ("raw-scan", &without_cache)] {
+        assert!(
+            content.contains("defineProps"),
+            "{label}: setup must include defineProps with adjacent close tags, got:\n{content}"
+        );
+        assert!(
+            content.contains("ItemProps"),
+            "{label}: companion interface must survive adjacent close tags, got:\n{content}"
+        );
+        assert!(
+            !content.contains("<template>"),
+            "{label}: template markup must not leak into script content, got:\n{content}"
+        );
+    }
 }

@@ -140,7 +140,27 @@ impl RuntimeType {
 /// Format runtime types as a Vue prop type value.
 /// Single type: `String`
 /// Multiple types: `[String, Number]`
+///
+/// Equivalent to [`format_runtime_types_with_default`] with
+/// `has_default = false` — use the `_with_default` variant when the prop's
+/// declared-default information is available (the withDefaults path).
 pub fn format_runtime_types(types: &[RuntimeType]) -> String {
+    format_runtime_types_with_default(types, false)
+}
+
+/// Format runtime types as a Vue prop type value, official-parity for
+/// unions containing an unresolvable member.
+///
+/// Official `@vue/compiler-sfc` rule: when a union member cannot be
+/// resolved to a runtime constructor ([`RuntimeType::Unknown`], e.g. an
+/// unhydrated `DateValue` import), the prop type becomes `null` (accept
+/// anything, skip validation) UNLESS Boolean is present (the runtime
+/// boolean cast needs the declared constructor) or a default is declared
+/// alongside Function (a function default VALUE must not be treated as a
+/// factory). In the surviving cases the Unknown member is filtered and
+/// the concrete constructors remain.
+pub fn format_runtime_types_with_default(types: &[RuntimeType], has_default: bool) -> String {
+    let has_unknown = types.iter().any(|t| matches!(t, RuntimeType::Unknown));
     // Filter out Unknown types
     let valid_types: Vec<_> = types
         .iter()
@@ -149,6 +169,19 @@ pub fn format_runtime_types(types: &[RuntimeType]) -> String {
 
     if valid_types.is_empty() {
         return "null".to_string();
+    }
+
+    if has_unknown {
+        let keeps_concrete = valid_types
+            .iter()
+            .any(|t| matches!(t, RuntimeType::Boolean))
+            || (has_default
+                && valid_types
+                    .iter()
+                    .any(|t| matches!(t, RuntimeType::Function)));
+        if !keeps_concrete {
+            return "null".to_string();
+        }
     }
 
     if valid_types.len() == 1 {
@@ -782,12 +815,6 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
     }
 }
 
-fn symbol_key_from_span(source: &[u8], span: Span) -> Box<[u8]> {
-    source[span.start as usize..span.end as usize]
-        .to_vec()
-        .into_boxed_slice()
-}
-
 fn binding_name_from_span(source: &[u8], span: Span) -> Option<&str> {
     std::str::from_utf8(&source[span.start as usize..span.end as usize]).ok()
 }
@@ -850,22 +877,24 @@ pub fn build_type_context<'ctx, 'a: 'ctx>(
     for stmt in &program.body {
         match stmt {
             // Collect type aliases: `type Foo = { bar: string }`
+            // Key by the identifier NAME (not a span slice of `source`):
+            // span/source coordinate mismatches (SFC-absolute spans vs
+            // content-local source) previously produced unusable keys so
+            // `find_type_alias("A")` for `type A = RootEmits` failed and
+            // defineEmits never saw the external emits surface.
             Statement::TSTypeAliasDeclaration(alias) => {
-                // alias.id.span is already adjusted by adjust_program_spans() to SFC coordinates,
-                // so we use it directly — no additional offset needed.
-                let name_span = Span::from(alias.id.span);
+                let key: Box<[u8]> = alias.id.name.as_bytes().into();
                 ctx.type_aliases.insert(
-                    symbol_key_from_span(source, name_span),
+                    key,
                     (&alias.type_annotation, alias.type_parameters.as_deref()),
                 );
             }
             // Collect interfaces: `interface Foo { bar: string }`
             Statement::TSInterfaceDeclaration(interface) => {
-                // interface.id.span is already adjusted by adjust_program_spans() to SFC coordinates.
-                let name_span = Span::from(interface.id.span);
+                let key: Box<[u8]> = interface.id.name.as_bytes().into();
                 let extends = extract_heritage_type_names(&interface.extends);
                 ctx.interfaces.insert(
-                    symbol_key_from_span(source, name_span),
+                    key,
                     InterfaceResolutionEntry {
                         members: &interface.body.body,
                         extends,
@@ -876,8 +905,8 @@ pub fn build_type_context<'ctx, 'a: 'ctx>(
             }
             Statement::ClassDeclaration(class) => {
                 if let Some(id) = &class.id {
-                    ctx.classes
-                        .insert(symbol_key_from_span(source, Span::from(id.span)), class);
+                    let key: Box<[u8]> = id.name.as_bytes().into();
+                    ctx.classes.insert(key, class);
                 }
             }
             // Collect exported type aliases and interfaces:
@@ -886,17 +915,17 @@ pub fn build_type_context<'ctx, 'a: 'ctx>(
                 if let Some(decl) = &export.declaration {
                     match decl {
                         Declaration::TSTypeAliasDeclaration(alias) => {
-                            let name_span = Span::from(alias.id.span);
+                            let key: Box<[u8]> = alias.id.name.as_bytes().into();
                             ctx.type_aliases.insert(
-                                symbol_key_from_span(source, name_span),
+                                key,
                                 (&alias.type_annotation, alias.type_parameters.as_deref()),
                             );
                         }
                         Declaration::TSInterfaceDeclaration(interface) => {
-                            let name_span = Span::from(interface.id.span);
+                            let key: Box<[u8]> = interface.id.name.as_bytes().into();
                             let extends = extract_heritage_type_names(&interface.extends);
                             ctx.interfaces.insert(
-                                symbol_key_from_span(source, name_span),
+                                key,
                                 InterfaceResolutionEntry {
                                     members: &interface.body.body,
                                     extends,
@@ -907,10 +936,8 @@ pub fn build_type_context<'ctx, 'a: 'ctx>(
                         }
                         Declaration::ClassDeclaration(class) => {
                             if let Some(id) = &class.id {
-                                ctx.classes.insert(
-                                    symbol_key_from_span(source, Span::from(id.span)),
-                                    class,
-                                );
+                                let key: Box<[u8]> = id.name.as_bytes().into();
+                                ctx.classes.insert(key, class);
                             }
                         }
                         _ => {}
@@ -920,15 +947,15 @@ pub fn build_type_context<'ctx, 'a: 'ctx>(
             Statement::ExportDefaultDeclaration(export) => match &export.declaration {
                 ExportDefaultDeclarationKind::ClassDeclaration(class) => {
                     if let Some(id) = &class.id {
-                        ctx.classes
-                            .insert(symbol_key_from_span(source, Span::from(id.span)), class);
+                        let key: Box<[u8]> = id.name.as_bytes().into();
+                        ctx.classes.insert(key, class);
                     }
                 }
                 ExportDefaultDeclarationKind::TSInterfaceDeclaration(interface) => {
-                    let name_span = Span::from(interface.id.span);
+                    let key: Box<[u8]> = interface.id.name.as_bytes().into();
                     let extends = extract_heritage_type_names(&interface.extends);
                     ctx.interfaces.insert(
-                        symbol_key_from_span(source, name_span),
+                        key,
                         InterfaceResolutionEntry {
                             members: &interface.body.body,
                             extends,
@@ -1013,8 +1040,24 @@ pub fn extract_companion_types(
     source: &[u8],
     content_offset: u32,
 ) -> rustc_hash::FxHashMap<String, ResolvedElements> {
+    extract_companion_types_with_externals(program, source, content_offset, None)
+}
+
+/// Like [`extract_companion_types`], but seeds the type context with
+/// host-resolved external types so empty-body local interfaces that
+/// `extends ImportedProps` (radix Separator pattern) inherit the full
+/// imported surface instead of resolving to zero members.
+pub fn extract_companion_types_with_externals(
+    program: &Program<'_>,
+    source: &[u8],
+    content_offset: u32,
+    external_types: Option<&rustc_hash::FxHashMap<String, ResolvedElements>>,
+) -> rustc_hash::FxHashMap<String, ResolvedElements> {
     // Build a full type context so we can resolve extends and cross-references
-    let ctx = build_type_context(program, source, content_offset);
+    let mut ctx = build_type_context(program, source, content_offset);
+    if let Some(ext) = external_types {
+        ctx.extend_companion_types(ext);
+    }
 
     let mut types = rustc_hash::FxHashMap::default();
 
@@ -1028,17 +1071,36 @@ pub fn extract_companion_types(
     // these per-prop facts when the caller is at the macro-T root, and flips
     // every prop to `false` when the caller is itself at heritage descent.
     let from_root_body = true;
+    // Simple `type A = B` aliases — second pass copies B's surface into A
+    // when A resolved empty (AlertDialogEmits = DialogRootEmits).
+    let mut simple_aliases: Vec<(String, String)> = Vec::new();
 
     for stmt in &program.body {
         match stmt {
             Statement::TSTypeAliasDeclaration(alias) => {
                 let name = alias.id.name.as_str().to_string();
-                let resolved = resolve_type_elements_with_ctx_ref(
+                let mut resolved = resolve_type_elements_with_ctx_ref(
                     &alias.type_annotation,
                     content_offset,
                     &ctx,
                     from_root_body,
                 );
+                if let TSType::TSTypeReference(type_ref) = &alias.type_annotation {
+                    if type_ref.type_arguments.is_none() {
+                        let ref_name = get_type_reference_name(&type_ref.type_name);
+                        simple_aliases.push((name.clone(), ref_name.clone()));
+                        if let Some(ext) = external_types {
+                            if let Some(external) = ext.get(&ref_name) {
+                                if resolved_surface_is_empty(&resolved)
+                                    || (resolved.call_signatures.is_empty()
+                                        && !external.call_signatures.is_empty())
+                                {
+                                    resolved = external.clone();
+                                }
+                            }
+                        }
+                    }
+                }
                 types.insert(name, resolved);
             }
             Statement::TSInterfaceDeclaration(interface) => {
@@ -1081,12 +1143,28 @@ pub fn extract_companion_types(
                     match decl {
                         Declaration::TSTypeAliasDeclaration(alias) => {
                             let name = alias.id.name.as_str().to_string();
-                            let resolved = resolve_type_elements_with_ctx_ref(
+                            let mut resolved = resolve_type_elements_with_ctx_ref(
                                 &alias.type_annotation,
                                 content_offset,
                                 &ctx,
                                 from_root_body,
                             );
+                            if let TSType::TSTypeReference(type_ref) = &alias.type_annotation {
+                                if type_ref.type_arguments.is_none() {
+                                    let ref_name = get_type_reference_name(&type_ref.type_name);
+                                    simple_aliases.push((name.clone(), ref_name.clone()));
+                                    if let Some(ext) = external_types {
+                                        if let Some(external) = ext.get(&ref_name) {
+                                            if resolved_surface_is_empty(&resolved)
+                                                || (resolved.call_signatures.is_empty()
+                                                    && !external.call_signatures.is_empty())
+                                            {
+                                                resolved = external.clone();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             types.insert(name, resolved);
                         }
                         Declaration::TSInterfaceDeclaration(interface) => {
@@ -1132,7 +1210,29 @@ pub fn extract_companion_types(
         }
     }
 
+    // Second pass: fill simple aliases that stayed empty after the first
+    // pass once their targets (external or later-declared) are in `types`.
+    for (alias_name, target_name) in &simple_aliases {
+        let alias_empty = types.get(alias_name).is_none_or(resolved_surface_is_empty);
+        if !alias_empty {
+            continue;
+        }
+        let target = types
+            .get(target_name)
+            .cloned()
+            .or_else(|| external_types.and_then(|ext| ext.get(target_name).cloned()));
+        if let Some(target) = target {
+            if !resolved_surface_is_empty(&target) {
+                types.insert(alias_name.clone(), target);
+            }
+        }
+    }
+
     types
+}
+
+fn resolved_surface_is_empty(resolved: &ResolvedElements) -> bool {
+    resolved.props.is_empty() && resolved.call_signatures.is_empty() && !resolved.has_call_signature
 }
 
 /// Resolve type elements from a TSType node.
@@ -1221,7 +1321,7 @@ mod elements;
 use elements::{
     callable_signature_text, extract_string_literal_keys_with_ctx, get_property_key_name,
     get_property_key_span, has_immediate_vue_ignore_comment, resolve_mapped_type_with_ctx,
-    resolve_type_literal_members, span_text,
+    resolve_type_literal_members, resolve_type_literal_members_with_ctx, span_text,
 };
 
 mod infer;

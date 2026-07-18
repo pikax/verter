@@ -222,6 +222,7 @@ fn binding_fields_from_param_node(
         first_param,
         Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
         ProjectionReductionContext::published(ProjectionMode::Shallow),
+        None,
     ) else {
         return Vec::new();
     };

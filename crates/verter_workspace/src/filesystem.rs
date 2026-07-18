@@ -838,3 +838,8 @@ fn basename_from_path(path: &str) -> Option<String> {
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "filesystem_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "external-corpus"))]
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "filesystem_external_corpus_tests.rs"]
+mod external_corpus_tests;

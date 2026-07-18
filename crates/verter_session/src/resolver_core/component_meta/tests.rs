@@ -425,6 +425,7 @@ fn resolve_component_meta_parts_prefers_combined_imported_macro_surface() {
             type_name: "Props".to_string(),
             macro_kind: AnalyzedMacroKind::DefineProps,
             macro_span: Span::new(0, 20),
+            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 
@@ -526,6 +527,7 @@ fn resolve_component_meta_parts_fallthrough_reuses_combined_imported_macro_surfa
             type_name: "Emits".to_string(),
             macro_kind: AnalyzedMacroKind::DefineEmits,
             macro_span: Span::new(0, 20),
+            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 
@@ -653,6 +655,7 @@ fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_when_eva
             type_name: "Emits".to_string(),
             macro_kind: AnalyzedMacroKind::DefineEmits,
             macro_span: Span::new(0, 20),
+            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 
@@ -745,6 +748,7 @@ defineEmits<Emits>()
             type_name: "RootEmits".to_string(),
             macro_kind: AnalyzedMacroKind::DefineEmits,
             macro_span: Span::new(0, source.len() as u32),
+            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 
@@ -1050,6 +1054,7 @@ type LocalItem = {
                 macro_kind: AnalyzedMacroKind::DefineProps,
                 macro_index: 0,
                 macro_span: Span::new(0, source.len() as u32),
+                usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
             },
             verter_semantic::analysis::types::MacroTypeDep {
                 type_name: "ImportedKeys".to_string(),
@@ -1057,6 +1062,7 @@ type LocalItem = {
                 macro_kind: AnalyzedMacroKind::DefineProps,
                 macro_index: 0,
                 macro_span: Span::new(0, source.len() as u32),
+                usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
             },
         ],
     };
@@ -1183,6 +1189,7 @@ type Props = Pick<ImportedBase, 'href'>
             macro_kind: AnalyzedMacroKind::DefineProps,
             macro_index: 0,
             macro_span: Span::new(0, source.len() as u32),
+            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 
@@ -1297,6 +1304,7 @@ type Props = Pick<ImportedBase, 'href'>
             macro_kind: AnalyzedMacroKind::DefineProps,
             macro_index: 0,
             macro_span: Span::new(0, source.len() as u32),
+            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 
@@ -1389,6 +1397,7 @@ type Props = {
             macro_kind: AnalyzedMacroKind::DefineProps,
             macro_index: 0,
             macro_span: Span::new(0, source.len() as u32),
+            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 
@@ -1485,6 +1494,7 @@ type Props = {
             macro_kind: AnalyzedMacroKind::DefineProps,
             macro_index: 0,
             macro_span: Span::new(0, source.len() as u32),
+            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 
@@ -1576,6 +1586,7 @@ type Props = Omit<ImportedBase, 'hidden'>
             macro_kind: AnalyzedMacroKind::DefineProps,
             macro_index: 0,
             macro_span: Span::new(0, source.len() as u32),
+            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 
@@ -1668,6 +1679,7 @@ type Props = Omit<ImportedBase, 'hidden'>
             macro_kind: AnalyzedMacroKind::DefineProps,
             macro_index: 0,
             macro_span: Span::new(0, source.len() as u32),
+            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 
@@ -1746,6 +1758,7 @@ fn resolve_component_meta_parts_keeps_direct_imported_macro_root_seeded() {
             macro_kind: AnalyzedMacroKind::DefineProps,
             macro_index: 0,
             macro_span: Span::new(0, 1),
+            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 
@@ -1858,6 +1871,7 @@ fn resolve_component_meta_parts_seeds_imported_macro_root_when_graph_metadata_un
             macro_kind: AnalyzedMacroKind::DefineProps,
             macro_index: 0,
             macro_span: Span::new(0, 1),
+            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 

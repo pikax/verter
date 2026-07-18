@@ -244,6 +244,249 @@ fn content_request_with_imported_module_augmentation_downgrades_to_stateless() {
 }
 
 #[test]
+fn content_request_with_bare_parent_dir_import_of_augmented_module_downgrades_to_stateless() {
+    // The owner imports `{ Foo } from '..'` — a bare parent-directory
+    // specifier in TS's `pathIsRelative` class — resolving to
+    // `/src/index.ts`, and (by binding) an augmenter whose
+    // `declare module './index'` retargets that same module. The
+    // per-import probe target for the `'..'` edge must bucket as
+    // `ResolvedRelativeCanonical(/src/index.ts)`: bucketing it as
+    // `ExternalSpecifier("..")` never matches the augmenter's RELATIVE
+    // fact (relative facts are excluded from the external arm), the
+    // probe reports "no augmenters reach me", and the Content request
+    // admits a content-addressed entry carrying NO augmenter
+    // fingerprint into the one cache family with no read-side fact
+    // rail — editing `aug.ts` would then leave the key byte-identical
+    // and serve stale output. The session-side classifier must use the
+    // same `pathIsRelative` class as the resolver
+    // (`verter_workspace::resolver::is_relative_specifier`), not a
+    // narrower `./`/`../` prefix check.
+    //
+    // Discriminator: with the narrow prefix check, NO reason fires
+    // (the `'../aug'` edge buckets to the augmenter file itself, which
+    // its own fact does not target) → the request stays Content and
+    // publishes one entry → the assertions below fail. With the shared
+    // classifier, the `'..'` edge probes the resolved parent index,
+    // matches the augmenter fact, and floors the request to Stateless.
+    let host = host();
+    upsert_ts(
+        &host,
+        "/src/index.ts",
+        "export interface Foo { a: number }\n",
+    );
+    // The augmenter exports a value (so a binding import materialises
+    // it into the artifact store before the probe's target scan) AND
+    // augments `./index` — the module the owner consumes via `'..'`.
+    upsert_ts(
+        &host,
+        "/src/aug.ts",
+        "export const marker = 1;\n\
+         declare module './index' {\n\
+         \x20 interface Foo { extension: string }\n\
+         }\n",
+    );
+    // The owner lives one directory DOWN so `'..'` resolves to the
+    // augmented `/src/index.ts`. `Foo` is used only in an annotation —
+    // no macro type dep, so the module-augmentation probe is the ONLY
+    // reason available to fire.
+    upsert_vue(
+        &host,
+        "/src/sub/Comp.vue",
+        "<script setup lang=\"ts\">\n\
+         import { marker } from '../aug';\n\
+         import type { Foo } from '..';\n\
+         const f: Foo | null = marker ? null : null;\n\
+         </script>\n\
+         <template><div>{{ f }}</div></template>\n",
+    );
+    let profile = content_profile();
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/sub/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Script),
+            compile_profile: profile.clone(),
+        })
+        .expect("compile");
+
+    assert_eq!(response.requested_mode, CompileCacheMode::Content);
+    assert_eq!(
+        response.actual_mode,
+        CompileCacheMode::Stateless,
+        "a Content request whose owner imports an augmented module via bare '..' \
+         MUST downgrade to Stateless — the probe target must be the RESOLVED \
+         parent index canonical, not ExternalSpecifier(\"..\")"
+    );
+    assert_eq!(
+        response.downgrade_reason,
+        Some(DowngradeReason::HasModuleAugmentation),
+        "the firing reason must be HasModuleAugmentation, got {:?}",
+        response.downgrade_reason
+    );
+    // Stateless floor ⇒ NO content-addressed entry was published.
+    assert_eq!(
+        host.compile_output_pure_content_entry_count(),
+        0,
+        "a downgraded Content request must NOT publish a content-addressed entry"
+    );
+
+    // Edit-replay: after the augmenter changes, a re-request must STILL
+    // floor to Stateless with zero content-addressed entries — the
+    // no-fact-rail family never captures this owner. (Byte-level
+    // staleness is structurally unobservable for this class: an owner
+    // whose macros consume the augmented type floors independently via
+    // HasMacroTypeDeps, and a no-macro owner's compiled bytes do not
+    // encode augmentation members — the cache-family admission IS the
+    // observable, as in every other test in this file.)
+    upsert_ts(
+        &host,
+        "/src/aug.ts",
+        "export const marker = 1;\n\
+         declare module './index' {\n\
+         \x20 interface Foo { extensionRenamed: boolean }\n\
+         }\n",
+    );
+    let replay = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/sub/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Script),
+            compile_profile: profile.clone(),
+        })
+        .expect("recompile after augmenter edit");
+    assert_eq!(
+        replay.actual_mode,
+        CompileCacheMode::Stateless,
+        "the post-edit re-request must stay floored to Stateless"
+    );
+    assert_eq!(
+        host.compile_output_pure_content_entry_count(),
+        0,
+        "no content-addressed entry may exist after the augmenter edit replay"
+    );
+}
+
+#[test]
+fn content_request_with_augmenter_declaring_bare_parent_dir_module_downgrades_to_stateless() {
+    // The FACT-side sibling of the bare-'..' IMPORT test above: here the
+    // bare parent-dir spelling lives on the AUGMENTER — a file in a
+    // subdirectory whose `declare module '..'` augments its parent
+    // directory's index module. The fact's specifier is `'..'`, so the
+    // fact-side classification inside `augmenter_matches_target` (the
+    // index cold-scan matcher in `file_artifact_store.rs`) is the
+    // deciding site: it must classify the fact via the shared
+    // `pathIsRelative` predicate and resolve it against the AUGMENTER's
+    // own directory to `ResolvedRelativeCanonical(/src/index.ts)` —
+    // matching the owner's probe target for its `'..'` import edge.
+    //
+    // Discriminator: re-narrowing the matcher's fact classification to a
+    // `./`/`../` prefix check makes the `'..'` fact masquerade as an
+    // EXTERNAL module named `..`, which can never match the relative
+    // probe target — the probe reports "no augmenters", NO reason fires,
+    // the request stays Content and publishes one content-addressed
+    // entry, and the assertions below fail. (The owner's import-edge
+    // classification in `host_cache_runtime.rs` is NOT enough on its
+    // own: both sides must agree on the relative class.)
+    let host = host();
+    upsert_ts(
+        &host,
+        "/src/index.ts",
+        "export interface Foo { a: number }\n",
+    );
+    // The augmenter lives one directory DOWN from the module it
+    // augments: its `declare module '..'` resolves against
+    // `/src/pkg/aug.ts` to the parent-directory index `/src/index.ts`.
+    // It exports a value so a binding import materialises it into the
+    // artifact store before the probe's target scan.
+    upsert_ts(
+        &host,
+        "/src/pkg/aug.ts",
+        "export const marker = 1;\n\
+         declare module '..' {\n\
+         \x20 interface Foo { extension: string }\n\
+         }\n",
+    );
+    // The owner consumes the augmented module via its own bare-'..' edge
+    // (resolving to /src/index.ts) and materialises the augmenter via a
+    // binding import. `Foo` is used only in an annotation — no macro
+    // type dep, so the module-augmentation probe is the ONLY reason
+    // available to fire.
+    upsert_vue(
+        &host,
+        "/src/sub/Comp.vue",
+        "<script setup lang=\"ts\">\n\
+         import { marker } from '../pkg/aug';\n\
+         import type { Foo } from '..';\n\
+         const f: Foo | null = marker ? null : null;\n\
+         </script>\n\
+         <template><div>{{ f }}</div></template>\n",
+    );
+    let profile = content_profile();
+
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/sub/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Script),
+            compile_profile: profile.clone(),
+        })
+        .expect("compile");
+
+    assert_eq!(response.requested_mode, CompileCacheMode::Content);
+    assert_eq!(
+        response.actual_mode,
+        CompileCacheMode::Stateless,
+        "a Content request whose owner imports a module augmented by a \
+         `declare module '..'` fact MUST downgrade to Stateless — the index \
+         matcher must classify the fact relative and resolve it against the \
+         augmenter's own directory, not treat it as ExternalSpecifier(\"..\")"
+    );
+    assert_eq!(
+        response.downgrade_reason,
+        Some(DowngradeReason::HasModuleAugmentation),
+        "the firing reason must be HasModuleAugmentation, got {:?}",
+        response.downgrade_reason
+    );
+    assert_eq!(
+        host.compile_output_pure_content_entry_count(),
+        0,
+        "a downgraded Content request must NOT publish a content-addressed entry"
+    );
+
+    // Edit-replay: the augmenter change routes through the store's
+    // insert-side invalidation (`augmenter_fact_could_contribute` on the
+    // same relative class) and the re-request must STILL floor to
+    // Stateless with zero content-addressed entries.
+    upsert_ts(
+        &host,
+        "/src/pkg/aug.ts",
+        "export const marker = 1;\n\
+         declare module '..' {\n\
+         \x20 interface Foo { extensionRenamed: boolean }\n\
+         }\n",
+    );
+    let replay = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/sub/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Script),
+            compile_profile: profile.clone(),
+        })
+        .expect("recompile after augmenter edit");
+    assert_eq!(
+        replay.actual_mode,
+        CompileCacheMode::Stateless,
+        "the post-edit re-request must stay floored to Stateless"
+    );
+    assert_eq!(
+        host.compile_output_pure_content_entry_count(),
+        0,
+        "no content-addressed entry may exist after the augmenter edit replay"
+    );
+}
+
+#[test]
 fn targeted_invalidation_evicts_content_entry_and_forces_recompile() {
     // A `Content` key carries no fact rail, so a targeted
     // `invalidate_compile_slots` MUST evict the content-addressed entry

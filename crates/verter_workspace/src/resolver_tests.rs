@@ -1640,6 +1640,143 @@ fn resolve_relative_unowned_to_owned_target() {
     );
 }
 
+/// TypeScript `pathIsRelative` (/^\.\.?($|[\\/])/) classifies a bare `.` /
+/// `..` as a relative path: `import ... from '..'` resolves to the parent
+/// directory's index module — never a bare package name. (reka-ui
+/// `import type { PrimitiveProps } from '..'` regression shape.)
+#[test]
+fn bare_parent_and_current_dir_specifiers_resolve_to_directory_index() {
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let reader = TestReader::with_files(&[
+        "/workspace/src/index.ts",
+        "/workspace/src/Listbox/index.ts",
+        "/workspace/src/Listbox/ListboxFilter.vue",
+    ]);
+
+    let parent = resolver
+        .resolve_with_reader(
+            &reader,
+            &ResolveRequest {
+                importer_id: "/workspace/src/Listbox/ListboxFilter.vue".to_string(),
+                specifier: "..".to_string(),
+                kind: ResolveRequestKind::TypeImport,
+                phase: ResolvePhase::CodegenBlocker,
+            },
+        )
+        .expect("bare '..' must resolve as a relative parent-directory import");
+    assert_eq!(parent.source_id, "/workspace/src/index.ts");
+    assert_eq!(parent.resolution_kind, ResolutionKind::Relative);
+
+    let current = resolver
+        .resolve_with_reader(
+            &reader,
+            &ResolveRequest {
+                importer_id: "/workspace/src/Listbox/ListboxFilter.vue".to_string(),
+                specifier: ".".to_string(),
+                kind: ResolveRequestKind::TypeImport,
+                phase: ResolvePhase::CodegenBlocker,
+            },
+        )
+        .expect("bare '.' must resolve as a relative current-directory import");
+    assert_eq!(current.source_id, "/workspace/src/Listbox/index.ts");
+    assert_eq!(current.resolution_kind, ResolutionKind::Relative);
+}
+
+/// The specifier classifier matches TS `pathIsRelative` exactly: bare `.` /
+/// `..` and the `./` / `../` / `.\` / `..\` prefixes are relative (the
+/// regex's `[\\/]` class covers BOTH separators); dot-LEADING names that
+/// are not dot-SEGMENTS (`.hidden`, `..foo`, `...`) are not, and a package
+/// name containing a backslash keeps its bytes and stays non-relative.
+#[test]
+fn is_relative_specifier_matches_ts_path_is_relative() {
+    assert!(is_relative_specifier("."));
+    assert!(is_relative_specifier(".."));
+    assert!(is_relative_specifier("./x"));
+    assert!(is_relative_specifier("../x"));
+    assert!(is_relative_specifier("../.."));
+    assert!(is_relative_specifier(".\\x"));
+    assert!(is_relative_specifier("..\\x"));
+    assert!(is_relative_specifier(".\\"));
+    assert!(is_relative_specifier("..\\"));
+
+    assert!(!is_relative_specifier(""));
+    assert!(!is_relative_specifier(".hidden"));
+    assert!(!is_relative_specifier(".foo"));
+    assert!(!is_relative_specifier("..foo"));
+    assert!(!is_relative_specifier("..."));
+    assert!(!is_relative_specifier("pkg"));
+    assert!(!is_relative_specifier("pkg\\sub"));
+    assert!(!is_relative_specifier("@scope/pkg"));
+    assert!(!is_relative_specifier("#imports"));
+}
+
+/// TS `pathIsRelative` classifies the backslash forms `.\x` / `..\x` as
+/// relative and `combinePaths`/`normalizeSlashes` rewrites `\` → `/` when
+/// joining — so `'..\Primitive'` must resolve byte-identically to
+/// `'../Primitive'`, never fall into the node_modules ancestor walk (where
+/// `{ancestor}/node_modules/..` collapses back to the ancestor itself).
+#[test]
+fn backslash_relative_specifiers_resolve_identically_to_slash_forms() {
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let reader = TestReader::with_files(&[
+        "/workspace/src/Primitive/index.ts",
+        // Decoy: a SIBLING `Primitive` inside the importer's own directory.
+        // The broken node_modules ancestor walk collapses
+        // `/workspace/src/Listbox/node_modules/..\Primitive` back to
+        // `/workspace/src/Listbox/Primitive` and hits THIS file — the
+        // wrong-match hazard the relative classification prevents.
+        "/workspace/src/Listbox/Primitive/index.ts",
+        "/workspace/src/Listbox/index.ts",
+        "/workspace/src/Listbox/sub/index.ts",
+        "/workspace/src/a/b.ts",
+        "/workspace/src/Listbox/ListboxFilter.vue",
+    ]);
+    let resolve = |specifier: &str| {
+        resolver
+            .resolve_with_reader(
+                &reader,
+                &ResolveRequest {
+                    importer_id: "/workspace/src/Listbox/ListboxFilter.vue".to_string(),
+                    specifier: specifier.to_string(),
+                    kind: ResolveRequestKind::TypeImport,
+                    phase: ResolvePhase::CodegenBlocker,
+                },
+            )
+            .unwrap_or_else(|| panic!("specifier {specifier:?} must resolve as relative"))
+    };
+
+    // `..\Primitive` — a backslash parent hop — resolves exactly like
+    // `../Primitive` (byte-identical canonical, same resolution kind).
+    let slash = resolve("../Primitive");
+    let backslash = resolve("..\\Primitive");
+    assert_eq!(slash.source_id, "/workspace/src/Primitive/index.ts");
+    assert_eq!(backslash.source_id, slash.source_id);
+    assert_eq!(backslash.resolution_kind, ResolutionKind::Relative);
+
+    // `.\sub` — a backslash current-dir hop — resolves exactly like `./sub`.
+    let slash = resolve("./sub");
+    let backslash = resolve(".\\sub");
+    assert_eq!(slash.source_id, "/workspace/src/Listbox/sub/index.ts");
+    assert_eq!(backslash.source_id, slash.source_id);
+    assert_eq!(backslash.resolution_kind, ResolutionKind::Relative);
+
+    // Mixed separators: `../a\b` is relative by its `../` prefix and the
+    // interior `\` normalizes during the join, like TS `combinePaths`.
+    let mixed = resolve("../a\\b");
+    assert_eq!(mixed.source_id, "/workspace/src/a/b.ts");
+    assert_eq!(mixed.resolution_kind, ResolutionKind::Relative);
+}
+
 /// Absolute path imports should resolve for unowned importers.
 #[test]
 fn resolve_absolute_without_project_owner() {

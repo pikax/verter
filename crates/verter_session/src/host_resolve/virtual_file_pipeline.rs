@@ -2548,9 +2548,20 @@ impl VerterHost {
         );
         unresolved_macro_type_diags.extend(missing_macro_type_diags);
 
-        if !unresolved_macro_type_diags.is_empty() {
-            diagnostics =
-                diagnostics.merge(DiagnosticsSnapshot::from_vec(unresolved_macro_type_diags));
+        // Tiered routing: a MEMBER-position missing macro type dep arrives as
+        // a WARNING (the compiler degrades that member's runtime type to
+        // `null`) — it surfaces on the successful compile and never aborts.
+        // Error-severity collector diagnostics (surface-position misses,
+        // resolution budget exhaustion) stay fatal.
+        let (fatal_macro_type_diags, soft_macro_type_diags): (Vec<_>, Vec<_>) =
+            unresolved_macro_type_diags
+                .into_iter()
+                .partition(|d| d.severity == HostSeverity::Error);
+        if !soft_macro_type_diags.is_empty() {
+            diagnostics = diagnostics.merge(DiagnosticsSnapshot::from_vec(soft_macro_type_diags));
+        }
+        if !fatal_macro_type_diags.is_empty() {
+            diagnostics = diagnostics.merge(DiagnosticsSnapshot::from_vec(fatal_macro_type_diags));
             return Err(diagnostics);
         }
 
@@ -3048,7 +3059,10 @@ impl VerterHost {
         // the successful output. EVERY OTHER diagnostic stays FATAL — keyed
         // on its structured code, never a whole-file flag:
         //   - collector `HOST_MISSING_MACRO_TYPE_DEP` = the softenable
-        //     unresolved-import case;
+        //     unresolved-import case (MEMBER-position misses already arrive
+        //     as warnings from the tiered collector; SURFACE-position misses
+        //     arrive as errors and are softened here — the render lane's
+        //     bundler contract);
         //   - collector `HOST_EXTERNAL_TYPE_DEPTH_LIMIT` /
         //     `HOST_EXTERNAL_TYPE_STEP_LIMIT` = resolution RESOURCE
         //     exhaustion (a pathological/too-deep type), which stays FATAL —

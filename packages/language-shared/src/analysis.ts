@@ -75,10 +75,20 @@ export interface AnalyzedMacro {
   spanEnd: number;
 }
 
+/**
+ * Structural position of a macro type reference — the missing-dependency
+ * diagnostic tier. `surface` misses (direct type argument, intersection/union
+ * arms, extends heritage, alias chains) are errors; `member` misses (a
+ * top-level member's value annotation) degrade that member's runtime type to
+ * `null` and warn. Nested references are never collected as deps.
+ */
+export type MacroTypeDepUsage = "surface" | "member";
+
 export interface MacroTypeDep {
   typeName: string;
   importSource: string;
   macroKind: AnalyzedMacroKind;
+  usage: MacroTypeDepUsage;
 }
 
 // ── Template Analysis Types ────────────────────────────────────

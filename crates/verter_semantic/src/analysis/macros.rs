@@ -8,8 +8,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::analysis::types::{
     AnalyzedDefaultValue, AnalyzedEmitField, AnalyzedExposeField, AnalyzedMacro, AnalyzedMacroKind,
-    AnalyzedPropField, AnalyzedSlotField, AnalyzedSlotFieldBinding, JsdocTag, ResolvedLocalType,
-    TypeResolutionSource,
+    AnalyzedPropField, AnalyzedSlotField, AnalyzedSlotFieldBinding, JsdocTag, MacroTypeDepUsage,
+    ResolvedLocalType, TypeResolutionSource,
 };
 
 /// Classify a callee name as a Vue compiler macro.
@@ -200,6 +200,260 @@ fn collect_qualified_name_root(name: &TSQualifiedName<'_>, refs: &mut Vec<String
             collect_qualified_name_root(inner, refs);
         }
         _ => {}
+    }
+}
+
+/// Root identifier of a `TSTypeName` (`Ns.Inner` → `Ns`).
+fn type_ref_root_name(type_name: &TSTypeName<'_>) -> Option<String> {
+    let mut current = type_name;
+    loop {
+        match current {
+            TSTypeName::IdentifierReference(id) => return Some(id.name.to_string()),
+            TSTypeName::QualifiedName(qualified) => current = &qualified.left,
+            _ => return None,
+        }
+    }
+}
+
+/// Classify every type reference of each type-based macro's TYPE ARGUMENT by
+/// structural position (the [`MacroTypeDepUsage`] tier):
+///
+/// - **Surface** — enumerates the macro's top-level runtime surface: the
+///   argument root, intersection/union arms, `extends` heritage chains,
+///   alias-chain hops, and (conservatively) every reference inside argument
+///   shapes whose surface cannot be enumerated syntactically (indexed
+///   access, conditionals, `keyof`, generic instantiations, …).
+/// - **Member** — a top-level member's value annotation root
+///   (`defineProps<{ foo: X }>()` → `X`), including through local alias
+///   chains and union/intersection arms of the annotation.
+/// - references nested deeper are NOT collected: runtime codegen never needs
+///   them (`defineProps<{ foo: { test: X } }>()` → `foo` is `Object`
+///   regardless of `X`).
+///
+/// Returns one `(name, strongest role)` list per macro, in first-occurrence
+/// order (index-aligned with `macros`; `Surface` outranks `Member`). The
+/// deterministic order keeps the derived `macro_type_deps` payload stable.
+pub(crate) fn classify_macro_type_reference_roles(
+    program: &Program<'_>,
+    macros: &[AnalyzedMacro],
+) -> Vec<Vec<(String, MacroTypeDepUsage)>> {
+    let registry = build_local_type_registry(program);
+    macros
+        .iter()
+        .map(|mac| {
+            if !mac.is_type_based {
+                return Vec::new();
+            }
+            let Some(type_arg) = find_macro_call_at_span(program, mac.span)
+                .and_then(|call| call.type_arguments.as_ref())
+                .and_then(|args| args.params.first())
+            else {
+                return Vec::new();
+            };
+            let mut walk = RoleWalk {
+                registry: &registry,
+                roles: Vec::new(),
+                role_index: FxHashMap::default(),
+                visited: FxHashSet::default(),
+            };
+            walk.surface_type(type_arg);
+            walk.roles
+        })
+        .collect()
+}
+
+/// Role-classifying walker over a macro type argument (see
+/// [`classify_macro_type_reference_roles`]).
+struct RoleWalk<'a, 'r> {
+    registry: &'r FxHashMap<String, LocalTypeDecl<'a>>,
+    /// First-occurrence-ordered `(name, strongest role)` results.
+    roles: Vec<(String, MacroTypeDepUsage)>,
+    role_index: FxHashMap<String, usize>,
+    /// Local-chain cycle guard, keyed per role so a name reached first
+    /// through a member chain still gets its surface chain walked.
+    visited: FxHashSet<(String, MacroTypeDepUsage)>,
+}
+
+impl<'a> RoleWalk<'a, '_> {
+    fn record(&mut self, name: String, role: MacroTypeDepUsage) {
+        if let Some(&at) = self.role_index.get(&name) {
+            // Surface outranks Member.
+            if role == MacroTypeDepUsage::Surface {
+                self.roles[at].1 = MacroTypeDepUsage::Surface;
+            }
+        } else {
+            self.role_index.insert(name.clone(), self.roles.len());
+            self.roles.push((name, role));
+        }
+    }
+
+    /// Conservative flat collection: every reference inside `ts_type` is
+    /// recorded as SURFACE and its local chain followed — used for argument
+    /// shapes whose surface cannot be enumerated syntactically.
+    fn surface_flat(&mut self, ts_type: &TSType<'a>) {
+        for name in collect_type_references(ts_type) {
+            self.record(name.clone(), MacroTypeDepUsage::Surface);
+            self.follow_local_surface(&name);
+        }
+    }
+
+    /// Walk a type in a SURFACE position (the argument root or a
+    /// composition arm of it).
+    fn surface_type(&mut self, ts_type: &TSType<'a>) {
+        match ts_type {
+            TSType::TSTypeReference(type_ref) => {
+                let Some(name) = type_ref_root_name(&type_ref.type_name) else {
+                    return;
+                };
+                self.record(name.clone(), MacroTypeDepUsage::Surface);
+                // Type arguments in a surface position stay SURFACE —
+                // conservative: a generic instantiation's argument can shape
+                // the surface (utility pass-throughs such as
+                // `Partial<T>` / `Pick<T, K>`, local generic aliases).
+                if let Some(args) = &type_ref.type_arguments {
+                    for param in &args.params {
+                        self.surface_type(param);
+                    }
+                }
+                self.follow_local_surface(&name);
+            }
+            TSType::TSIntersectionType(intersection) => {
+                for arm in &intersection.types {
+                    self.surface_type(arm);
+                }
+            }
+            TSType::TSUnionType(union) => {
+                for arm in &union.types {
+                    self.surface_type(arm);
+                }
+            }
+            TSType::TSParenthesizedType(paren) => self.surface_type(&paren.type_annotation),
+            TSType::TSTypeLiteral(literal) => self.literal_members(&literal.members),
+            TSType::TSMappedType(mapped) => {
+                // The key domain enumerates the surface; the value is a
+                // per-member annotation.
+                self.surface_type(&mapped.constraint);
+                if let Some(value) = &mapped.type_annotation {
+                    self.member_type(value);
+                }
+            }
+            // Indexed access, conditionals, `keyof`, template literals, …:
+            // the surface cannot be enumerated syntactically — every inner
+            // reference is required — the conservative fatal tier.
+            other => self.surface_flat(other),
+        }
+    }
+
+    /// Follow a LOCAL declaration's surface chain: `extends` heritage stays
+    /// SURFACE (an unresolvable parent hides members), alias bodies re-enter
+    /// the surface walk, and the declaration's own literal members classify
+    /// as member annotations.
+    fn follow_local_surface(&mut self, name: &str) {
+        if !self
+            .visited
+            .insert((name.to_string(), MacroTypeDepUsage::Surface))
+        {
+            return;
+        }
+        match self.registry.get(name) {
+            Some(LocalTypeDecl::Interface { body, extends }) => {
+                for heritage in extends.iter() {
+                    if let Some(parent) = heritage_name(&heritage.expression) {
+                        self.record(parent.clone(), MacroTypeDepUsage::Surface);
+                        self.follow_local_surface(&parent);
+                    }
+                    // Heritage type arguments (`extends Base<X>`,
+                    // `extends Pick<X, K>`) stay SURFACE — conservative:
+                    // they can shape the inherited member set.
+                    if let Some(args) = &heritage.type_arguments {
+                        for param in &args.params {
+                            self.surface_type(param);
+                        }
+                    }
+                }
+                self.literal_members(&body.body);
+            }
+            Some(LocalTypeDecl::Alias(aliased)) => {
+                let aliased = *aliased;
+                self.surface_type(aliased);
+            }
+            Some(LocalTypeDecl::Class) | None => {}
+        }
+    }
+
+    /// Classify the member annotations of a type-literal / interface body in
+    /// a surface position.
+    fn literal_members(&mut self, members: &[TSSignature<'a>]) {
+        for member in members {
+            match member {
+                TSSignature::TSPropertySignature(prop) => {
+                    if let Some(annotation) = &prop.type_annotation {
+                        self.member_type(&annotation.type_annotation);
+                    }
+                }
+                TSSignature::TSCallSignatureDeclaration(call_sig) => {
+                    // Emits call-signature form: the FIRST parameter is the
+                    // event-name domain (surface); later parameters are the
+                    // payload, which runtime codegen never reads.
+                    if let Some(first) = call_sig.params.items.first() {
+                        if let Some(annotation) = &first.type_annotation {
+                            self.surface_flat(&annotation.type_annotation);
+                        }
+                    }
+                }
+                // Method signatures (function-typed props), index
+                // signatures, construct signatures: value positions runtime
+                // codegen never reads.
+                _ => {}
+            }
+        }
+    }
+
+    /// Walk a top-level member's value annotation: its root references are
+    /// MEMBER tier (constructor inference), local alias chains stay
+    /// transparent, and anything deeper is nested (not collected).
+    fn member_type(&mut self, ts_type: &TSType<'a>) {
+        match ts_type {
+            TSType::TSTypeReference(type_ref) => {
+                let Some(name) = type_ref_root_name(&type_ref.type_name) else {
+                    return;
+                };
+                self.record(name.clone(), MacroTypeDepUsage::Member);
+                // Type arguments are nested (`foo: Array<X>` — the
+                // constructor derives from the head).
+                self.follow_local_member(&name);
+            }
+            TSType::TSUnionType(union) => {
+                for arm in &union.types {
+                    self.member_type(arm);
+                }
+            }
+            TSType::TSIntersectionType(intersection) => {
+                for arm in &intersection.types {
+                    self.member_type(arm);
+                }
+            }
+            TSType::TSParenthesizedType(paren) => self.member_type(&paren.type_annotation),
+            // Arrays, tuples, function types, literals, inline objects, …:
+            // the constructor is derivable syntactically; inner references
+            // are nested.
+            _ => {}
+        }
+    }
+
+    /// A local ALIAS is transparent for constructor inference; a local
+    /// interface / class is an `Object` constructor regardless of its body.
+    fn follow_local_member(&mut self, name: &str) {
+        if !self
+            .visited
+            .insert((name.to_string(), MacroTypeDepUsage::Member))
+        {
+            return;
+        }
+        if let Some(LocalTypeDecl::Alias(aliased)) = self.registry.get(name) {
+            let aliased = *aliased;
+            self.member_type(aliased);
+        }
     }
 }
 

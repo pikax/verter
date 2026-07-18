@@ -427,6 +427,68 @@ const x = 1
     expect(result.code).not.toContain(`?vue&type=style`);
     expect(result.code).toContain(`?vue&type=script`);
   });
+
+  it("CSS modules import as lang.module.* and attach __cssModules via export helper", async () => {
+    const plugin = await createVitePlugin();
+    const file = join(tempDir, "CssModules.vue").replace(/\\/g, "/");
+    const sfc = `<template><div :class="$style.red">x</div></template>
+<script setup>
+import { ref } from 'vue'
+const count = ref(0)
+</script>
+<style module>
+.red { color: red }
+</style>`;
+
+    const result = await plugin.transform(sfc, file);
+    expect(result).toBeDefined();
+    // Positive: module styles use Vite's CSS-modules query form + default import
+    expect(result.code).toContain(`lang.module.css`);
+    expect(result.code).toMatch(/import style0 from /);
+    expect(result.code).toContain(`"$style": style0`);
+    expect(result.code).toContain(`__cssModules`);
+    expect(result.code).toContain(`_export_sfc`);
+    // Negative: plain side-effect import must not be used for module styles
+    // (would not expose the class map on the component).
+    expect(result.code).not.toMatch(/import\s+"[^"]*type=style&index=0&lang\.module\.css"/);
+    // Non-module fallback path still exports a default
+    expect(result.code).toContain(`export default`);
+  });
+
+  it("named CSS module exposes custom binding name", async () => {
+    const plugin = await createVitePlugin();
+    const file = join(tempDir, "NamedModules.vue").replace(/\\/g, "/");
+    const sfc = `<template><div :class="classes.btn">x</div></template>
+<style module="classes">
+.btn { color: blue }
+</style>`;
+
+    const result = await plugin.transform(sfc, file);
+    expect(result).toBeDefined();
+    expect(result.code).toContain(`lang.module.css`);
+    expect(result.code).toContain(`"classes": style0`);
+    expect(result.code).not.toContain(`"$style": style0`);
+  });
+
+  it("mixed module and non-module styles only default-import the module block", async () => {
+    const plugin = await createVitePlugin();
+    const file = join(tempDir, "MixedStyles.vue").replace(/\\/g, "/");
+    const sfc = `<template><div :class="$style.a" class="b">x</div></template>
+<style module>
+.a { color: red }
+</style>
+<style>
+.b { color: blue }
+</style>`;
+
+    const result = await plugin.transform(sfc, file);
+    expect(result).toBeDefined();
+    expect(result.code).toMatch(/import style0 from /);
+    expect(result.code).toContain(`lang.module.css`);
+    // Non-module block stays a side-effect import
+    expect(result.code).toMatch(/import\s+"[^"]*type=style&index=1&lang\.css"/);
+    expect(result.code).toContain(`__cssModules`);
+  });
 });
 
 describe("vite compat shim", () => {

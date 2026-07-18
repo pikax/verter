@@ -3653,6 +3653,199 @@ fn is_member_expression_accepts_ts_as_cast() {
     assert!(!super::is_member_expression(""));
 }
 
+/// The official Vue compiler validates v-model expressions with
+/// `parseExpression` + `unwrapTSNode`: the unwrapped node must be a
+/// `MemberExpression` / `OptionalMemberExpression` / `Identifier` (not
+/// `undefined`). TS wrappers (`as`, `satisfies`, `!`, parentheses) are
+/// transparent. This matrix pins Verter to those semantics.
+#[test]
+fn is_member_expression_accepts_official_vue_valid_forms() {
+    let valid = [
+        // plain identifiers
+        "foo",
+        "_foo",
+        "$foo",
+        "foo1",
+        "NaN",
+        " foo ",
+        // unicode identifiers
+        "变量",
+        "café",
+        // member chains
+        "a.b",
+        "a.b.c",
+        "a['k']",
+        "a[0]",
+        "a[idx]",
+        "a.b[c].d",
+        "this.foo",
+        // computed access with arbitrary inner expressions
+        "a[idx + 1]",
+        "a[fn(x)]",
+        "a[\"with ] in string\"]",
+        "a['it\\'s']",
+        // optional chaining (accepted by the official compiler)
+        "a?.b",
+        "a?.[k]",
+        "a?.b.c",
+        // whitespace between tokens
+        "a . b",
+        "a\n  .b",
+        "a [0]",
+        "obj\n    .prop",
+        // TS `as` casts
+        "foo as string",
+        "foo as string[]",
+        "foo as Record<string, any>",
+        "a.b as unknown as string",
+        "foo as (x: string) => void",
+        "foo as A<B<C>>",
+        // satisfies
+        "foo satisfies string",
+        "a.b satisfies Record<string, unknown>",
+        // parenthesized forms (the official compiler drops parens; unwrapTSNode sees through)
+        "(foo)",
+        "((foo))",
+        "(a.b)",
+        "(foo as string)",
+        "((foo as string))",
+        "( foo as string )",
+        "(a.b as any)",
+        "(foo satisfies string)",
+        "(myValue as unknown) as string",
+        // member access on parenthesized casts
+        "(foo as any).bar",
+        "(arr as string[])[0]",
+        "(obj.a as MyObj).b",
+        // non-null assertions
+        "foo!",
+        "a!.b",
+        "a.b!",
+        "a!.b!.c",
+        "(a.b)!",
+        "foo! as string",
+        "(foo!)",
+        // member access on call results is a member expression —
+        // the official compiler accepts it
+        "fn(x).y",
+        "a.b().c",
+        "list[getIdx()].value",
+        "(a + b).c",
+        // literal-rooted member chains and optional calls followed by a
+        // member — both pass the official compiler's member check
+        "'str'.length",
+        "\"str\".length",
+        "fn?.().x",
+        "a?.b?.().c",
+        // type-grammar coverage in cast suffixes
+        "foo as -1",
+        "foo as 'lit'",
+        "foo as Ns.Inner",
+        "foo as keyof T",
+        "foo as readonly string[]",
+        "foo as | A | B",
+        "foo as A<B>[]",
+        "foo as T extends U ? A : B",
+        "foo as (x: unknown) => x is string",
+        "foo as typeof window",
+        "foo as A & B | C",
+    ];
+    for expr in valid {
+        assert!(
+            super::is_member_expression(expr),
+            "expected VALID (official Vue accepts): {expr:?}"
+        );
+    }
+}
+
+#[test]
+fn is_member_expression_rejects_official_vue_invalid_forms() {
+    let invalid = [
+        // empty
+        "",
+        "   ",
+        // binary / unary / assignment / ternary / sequence expressions
+        "a + b",
+        "a - b",
+        "a + b.c",
+        "a.b + c",
+        "a = b",
+        "a += b",
+        "a ? b : c",
+        "a, b",
+        "(a, b)",
+        "!foo",
+        "-a.b",
+        "typeof a",
+        "void 0",
+        "new Foo()",
+        // calls as the final node
+        "fn()",
+        "a.b()",
+        "a?.()",
+        "fn?.()",
+        "fn(x)!",
+        "(fn)(x)",
+        // empty parenthesized groups are parse errors
+        "().x",
+        "( ).x",
+        // literals
+        "123",
+        "1.5",
+        "0x10",
+        "'str'",
+        "\"str\"",
+        // bare keyword literals (not identifiers/members; `undefined`
+        // is explicitly rejected by the official compiler)
+        "undefined",
+        "this",
+        "true",
+        "false",
+        "null",
+        "(this)",
+        // reserved words cannot start an expression
+        "switch.x",
+        "class.x",
+        // malformed casts / unbalanced groups
+        "a as",
+        "(myValue as string",
+        "a as string, b",
+        "foo as X > y",
+        // the type grammar ends at expression operators: the official compiler re-enters
+        // expression context and rejects the resulting Binary/Logical/
+        // Conditional expression
+        "a as string + b",
+        "a as T ? b : c",
+        "a as any || b",
+        "a as any && b",
+        "a as T - b",
+        "a as T U",
+        "a as string bar",
+        "foo as if while",
+        "a as A |",
+        "a as T = b",
+        // malformed member syntax
+        "a.",
+        ".a",
+        "a..b",
+        "a[",
+        "a]",
+        "a[]",
+        "a !== b",
+        "a != b",
+        // array/object literals
+        "[a]",
+        "{ a }",
+        "...a",
+    ];
+    for expr in invalid {
+        assert!(
+            !super::is_member_expression(expr),
+            "expected INVALID (official Vue rejects): {expr:?}"
+        );
+    }
+}
+
 #[test]
 fn v_slot_dotted_name_includes_full_name_in_arg() {
     // v-slot:item.title should have arg_end covering "item.title", not just "item"

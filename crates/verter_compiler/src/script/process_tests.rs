@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn build_wrapper_start_basic() {
-    let result = build_setup_wrapper_start("Test", false, false, false, None, None, None, false);
+    let result = build_setup_wrapper_start("Test", false, false, false, None, None, None);
     assert!(result.contains("__name: 'Test'"));
     assert!(result.contains("setup(__props) {"));
     assert!(!result.contains("async"));
@@ -10,13 +10,13 @@ fn build_wrapper_start_basic() {
 
 #[test]
 fn build_wrapper_start_async() {
-    let result = build_setup_wrapper_start("Test", true, false, false, None, None, None, false);
+    let result = build_setup_wrapper_start("Test", true, false, false, None, None, None);
     assert!(result.contains("async setup(__props"));
 }
 
 #[test]
 fn build_wrapper_start_no_name() {
-    let result = build_setup_wrapper_start("", false, false, false, None, None, None, false);
+    let result = build_setup_wrapper_start("", false, false, false, None, None, None);
     assert!(!result.contains("__name"));
 }
 
@@ -30,36 +30,27 @@ fn build_wrapper_start_with_props() {
         Some("{ title: String }"),
         None,
         None,
-        false,
     );
     assert!(result.contains("props: { title: String }"));
 }
 
 #[test]
 fn build_wrapper_start_with_emits() {
-    let result = build_setup_wrapper_start(
-        "Test",
-        false,
-        false,
-        true,
-        None,
-        Some("['click']"),
-        None,
-        false,
-    );
+    let result =
+        build_setup_wrapper_start("Test", false, false, true, None, Some("['click']"), None);
     assert!(result.contains("emits: ['click']"));
     assert!(result.contains("emit: __emit"));
 }
 
 #[test]
 fn build_wrapper_start_with_expose() {
-    let result = build_setup_wrapper_start("Test", false, true, false, None, None, None, false);
+    let result = build_setup_wrapper_start("Test", false, true, false, None, None, None);
     assert!(result.contains("expose: __expose"));
 }
 
 #[test]
 fn build_wrapper_start_with_expose_and_emit() {
-    let result = build_setup_wrapper_start("Test", false, true, true, None, None, None, false);
+    let result = build_setup_wrapper_start("Test", false, true, true, None, None, None);
     assert!(result.contains("expose: __expose, emit: __emit"));
 }
 
@@ -73,7 +64,6 @@ fn build_wrapper_start_with_options() {
         None,
         None,
         Some("inheritAttrs: false"),
-        false,
     );
     assert!(result.contains("inheritAttrs: false"));
     // Options should come before __name

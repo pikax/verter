@@ -59,7 +59,7 @@ use crate::tsc;
 use crate::utils::oxc::script::type_surface::RuntimeType;
 use crate::utils::oxc::vue::{MacroTypeParams, ScriptItem, ScriptMacro};
 
-use helpers::{extract_attrs, extract_block_ranges};
+use helpers::{empty_sfc_script_block, extract_attrs, extract_block_ranges};
 
 // ── Orchestrator ───────────────────────────────────────────────────
 
@@ -858,8 +858,8 @@ fn compile_inner(
             })
         } else if has_scoped_style || use_vapor || verter_options.ssr {
             // Template-only component with scoped styles, vapor mode, or SSR:
-            // Emit a synthetic script block so __scopeId / __vapor / __ssrInlineRender
-            // propagates to consumers (playground, bundler, etc.).
+            // Emit a synthetic script block so __scopeId / __vapor propagates
+            // to consumers (playground, bundler, etc.).
             let mut code = String::with_capacity(128);
             code.push_str("const __sfc__ = {};\n");
             if has_scoped_style {
@@ -870,9 +870,8 @@ fn compile_inner(
             if use_vapor {
                 code.push_str("__sfc__.__vapor = true;\n");
             }
-            if verter_options.ssr {
-                code.push_str("__sfc__.__ssrInlineRender = true;\n");
-            }
+            // Non-inline SSR attaches `ssrRender` on the component after
+            // template codegen; do not claim `__ssrInlineRender`.
             code.push_str("export default __sfc__;\n");
             Some(VerterScriptBlock {
                 code,
@@ -882,7 +881,15 @@ fn compile_inner(
                 attrs: Vec::new(),
             })
         } else {
-            None
+            // A completely empty SFC is a valid EMPTY component (see
+            // `empty_sfc_script_block`); anything else has no script block.
+            empty_sfc_script_block(
+                parsed,
+                &custom_blocks,
+                &component_name,
+                options.runtime_module_name.as_deref().unwrap_or("vue"),
+                script_duration_ms,
+            )
         };
     } // end if needs_script
 
@@ -973,6 +980,17 @@ fn compile_inner(
                         tpl_ct.remove(tpl_tag_end as u32, input.len() as u32);
                     }
 
+                    let ssr_css_vars = if verter_options.ssr {
+                        // Dedup by var_name (same v-bind may appear in multiple style blocks)
+                        let mut seen = rustc_hash::FxHashSet::default();
+                        all_v_bind_vars
+                            .iter()
+                            .filter(|v| seen.insert(v.var_name.clone()))
+                            .map(|v| (v.var_name.clone(), v.expression.clone()))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     let tpl_options = TemplateCodeGenOptions {
                         mode: if verter_options.ssr {
                             CodeGenMode::Ssr
@@ -994,6 +1012,7 @@ fn compile_inner(
                         } else {
                             String::new()
                         },
+                        ssr_css_vars,
                     };
 
                     let tpl_imports = generate_template(

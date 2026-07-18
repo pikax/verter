@@ -1063,6 +1063,7 @@ fn assert_callback_row_param_resolves_precisely(
             crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Shallow,
             ),
+            None,
         )
         .expect("`Row` resolves to an object surface in its declaring scope");
     assert!(

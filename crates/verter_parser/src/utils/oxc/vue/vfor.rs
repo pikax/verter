@@ -111,6 +111,15 @@ pub struct VForWithBindings<'a> {
     ///
     /// Feeds ONLY the liveness usage union, never runtime codegen.
     pub liveness_reference_names: Vec<String>,
+
+    /// Free-reference NAMES from the iterable that resolve to TEMPLATE-SCOPE
+    /// locals (this v-for's own aliases or an enclosing v-for/v-slot scope's
+    /// locals passed via `ignored`). Complements [`references`] /
+    /// [`liveness_reference_names`], which both EXCLUDE scope locals.
+    /// Consumed by the official-parity `hasScopeRef` slot-flag decision.
+    ///
+    /// [`references`]: Self::references
+    pub scope_local_reference_names: Vec<String>,
 }
 
 impl<'a> VForWithBindings<'a> {
@@ -222,15 +231,16 @@ fn collect_vfor_left_local_spans(expr: &Expression<'_>, locals: &mut Vec<Span>) 
 
 /// Extract bindings from a VForParseResult.
 ///
-/// This is an internal function used by `parse_vfor_with_bindings`. Returns the
-/// local spans, the runtime reference spans, and the liveness reference NAMES.
-/// The runtime references are spans (a self-referential-struct workaround);
-/// liveness carries owned names so it never depends on the partial span shift.
+/// This is an internal function used by `parse_vfor_with_bindings`. Returns
+/// the local spans, the runtime reference spans, the liveness reference
+/// NAMES, and the scope-local reference NAMES. The runtime references are
+/// spans (a self-referential-struct workaround); the name sets carry owned
+/// names so they never depend on the partial span shift.
 fn extract_vfor_bindings_internal(
     result: &VForParseResult<'_>,
     input: &str,
     ignored_extra: &[&str],
-) -> (Vec<Span>, Vec<Span>, Vec<String>) {
+) -> (Vec<Span>, Vec<Span>, Vec<String>, Vec<String>) {
     let mut locals = Vec::new();
     let mut references_set = FxHashSet::default();
 
@@ -264,13 +274,18 @@ fn extract_vfor_bindings_internal(
     // source (`v-for="x in rows.map(r => fmt(r))"`) is recorded, and global-named
     // references (`v-for="x in Date"` over a `const Date` binding) are retained.
     let mut liveness_reference_names: Vec<String> = Vec::new();
+    let mut scope_local_reference_names: Vec<String> = Vec::new();
     if let Some(right) = &result.right {
         collect_expression_reference_spans(right, &ignored, &mut references_set);
         // The complete `Visit` walker has no `ignored` parameter (it suppresses
         // only lexically-shadowed names); the v-for LEFT locals are declared
-        // outside the source expression, so exclude them here by name.
+        // outside the source expression, so partition here by name: non-ignored
+        // names feed liveness, ignored (template-scope) names feed the
+        // scope-local reference set for the slot-flag `hasScopeRef` decision.
         for name in collect_expression_free_refs(right) {
-            if !ignored.contains(name.as_bytes()) {
+            if ignored.contains(name.as_bytes()) {
+                scope_local_reference_names.push(name.to_string());
+            } else {
                 liveness_reference_names.push(name.to_string());
             }
         }
@@ -280,7 +295,12 @@ fn extract_vfor_bindings_internal(
     // Sort by start position — downstream consumers (prefix_vfor_references_into)
     // use a forward-scanning cursor that assumes ascending order.
     references.sort_unstable_by_key(|s| s.start);
-    (locals, references, liveness_reference_names)
+    (
+        locals,
+        references,
+        liveness_reference_names,
+        scope_local_reference_names,
+    )
 }
 
 /// Parse a Vue v-for expression from a span within a larger source string.
@@ -479,9 +499,9 @@ pub fn parse_vfor_with_bindings_sliced<'a>(
     // pass — no re-slice, no re-parse, no per-span shift.
     let result = parse_vfor_sliced(allocator, span, input, source_type);
 
-    let (locals, references, liveness_reference_names) =
+    let (locals, references, liveness_reference_names, scope_local_reference_names) =
         if result.has_left_errors() || result.has_right_errors() {
-            (Vec::new(), Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new())
         } else {
             extract_vfor_bindings_internal(&result, input, ignored)
         };
@@ -491,6 +511,7 @@ pub fn parse_vfor_with_bindings_sliced<'a>(
         locals,
         references,
         liveness_reference_names,
+        scope_local_reference_names,
     }
 }
 

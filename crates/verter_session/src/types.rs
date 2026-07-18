@@ -1204,6 +1204,12 @@ pub struct CompileProfile {
     pub is_production: bool,
     /// Server-side rendering mode.
     pub ssr: bool,
+    /// SSR asset-collection module id registered on `ssrContext.modules`.
+    /// Vite's ssr-manifest keys are ROOT-RELATIVE, so the bundler plugin
+    /// supplies `normalizePath(relative(root, filename))` here (the shape
+    /// `@vitejs/plugin-vue` registers). `None` falls back to the canonical
+    /// id — correct only when the caller's manifest keys are canonical.
+    pub ssr_module_id: Option<String>,
     /// HMR code injection strategy.
     pub hmr_strategy: HmrStrategy,
     /// Explicit component ID for scoped style hashing (auto-generated if `None`).
@@ -1277,6 +1283,7 @@ impl Default for CompileProfile {
             filename: None,
             is_production: false,
             ssr: false,
+            ssr_module_id: None,
             hmr_strategy: HmrStrategy::None,
             component_id: None,
             delimiters: None,

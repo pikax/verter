@@ -20,6 +20,16 @@ pub struct BindingResolver<'alloc> {
     bindings: FxHashMap<&'alloc str, BindingType>,
     is_inline: bool,
     is_vapor: bool,
+    /// SSR mode: Verter's non-inline `ssrRender(_ctx, _push, _parent, _attrs)`
+    /// has no `$setup`/`$props`/`$data`/`$options` parameters. Setup state,
+    /// props, data, and options are reached through the instance proxy as
+    /// `_ctx.*`. This is a RATIFIED INTERIM DIVERGENCE from official
+    /// non-inline `@vue/compiler-ssr` output (8-param signature, `$setup.*`
+    /// routing, `__isScriptSetup` marker) — see
+    /// `docs/arch/ssr-noninline-shape-divergence.md` for the runtime
+    /// evidence and compatibility consequences. Free `$setup` references in
+    /// this signature are a runtime `ReferenceError`.
+    is_ssr: bool,
     /// TSX mode: props use `__props.`, known bindings are bare, unresolved use
     /// `___VERTER___instance.` for instance property access. No `.value` suffix.
     /// Block scope `shallowUnwrapRef` handles unwrapping.
@@ -37,6 +47,7 @@ impl<'alloc> BindingResolver<'alloc> {
             bindings,
             is_inline,
             is_vapor: false,
+            is_ssr: false,
             is_tsx: false,
             const_props: None,
         }
@@ -55,6 +66,7 @@ impl<'alloc> BindingResolver<'alloc> {
             bindings,
             is_inline,
             is_vapor: false,
+            is_ssr: false,
             is_tsx: false,
             const_props,
         }
@@ -64,6 +76,12 @@ impl<'alloc> BindingResolver<'alloc> {
     #[inline]
     pub fn set_vapor(&mut self, vapor: bool) {
         self.is_vapor = vapor;
+    }
+
+    /// Set the SSR mode flag. Non-inline SSR binds through `_ctx.` only.
+    #[inline]
+    pub fn set_ssr(&mut self, ssr: bool) {
+        self.is_ssr = ssr;
     }
 
     /// Set the TSX mode flag. When true, unresolved bindings use
@@ -134,6 +152,9 @@ impl<'alloc> BindingResolver<'alloc> {
     ///   unresolved identifiers use `___VERTER___instance.` (matches Vue's `_ctx.` behavior),
     ///   globals and keywords remain bare
     /// - **Vapor mode**: all bindings use `_ctx.` (matching Vue's official vapor compiler)
+    /// - **SSR non-inline**: setup/props/data/options all use `_ctx.` — the
+    ///   `ssrRender(_ctx, _push, _parent, _attrs)` signature has no `$setup`
+    ///   parameter, so `$setup.*` would be a free reference / runtime error
     /// - **VDOM mode**:
     ///   - Props: `__props.` (inline) or `$props.` (standalone)
     ///   - Setup bindings: `""` (inline) or `$setup.` (standalone)
@@ -161,6 +182,16 @@ impl<'alloc> BindingResolver<'alloc> {
         }
         if self.is_vapor {
             return "_ctx.";
+        }
+        // Non-inline SSR: instance proxy only. Inline SSR still uses bare /
+        // __props. because the render closes over setup locals.
+        if self.is_ssr && !self.is_inline {
+            return match self.bindings.get(ident) {
+                Some(BindingType::PropsDestructured) => "",
+                Some(_) => "_ctx.",
+                None if ident == "$event" => "",
+                None => "_ctx.",
+            };
         }
         match self.bindings.get(ident) {
             Some(bt) if bt.is_props() => {

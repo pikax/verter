@@ -83,6 +83,12 @@ pub struct TemplateCodeGenOptions {
     pub hoist_static: bool,
     /// Scope ID for scoped styles (e.g., `"data-v-a1b2c3d4"`).
     pub scope_id: String,
+    /// Style `v-bind()` variables for SSR. Each entry is `(css_var_name, expression)`
+    /// e.g. `("--a1b2c3d4-color", "color")`. Non-empty only for SSR mode: the
+    /// template injects `const _cssVars = { style: { ... } }` and merges it into
+    /// root `_ssrRenderAttrs` so CSS variables appear in the HTML (client uses
+    /// `_useCssVars` instead).
+    pub ssr_css_vars: Vec<(String, String)>,
 }
 
 impl Default for TemplateCodeGenOptions {
@@ -98,6 +104,7 @@ impl Default for TemplateCodeGenOptions {
             has_scoped_style: false,
             hoist_static: true,
             scope_id: String::new(),
+            ssr_css_vars: Vec::new(),
         }
     }
 }
@@ -216,7 +223,18 @@ pub fn generate_template<'alloc>(
             r.set_vapor(true);
             r
         }
-        CodeGenMode::Vdom | CodeGenMode::Ssr => {
+        CodeGenMode::Ssr => {
+            let mut r = BindingResolver::new_with_const_props(
+                bindings,
+                options.is_inline,
+                const_props_alloc,
+            );
+            // Non-inline ssrRender(_ctx, _push, _parent, _attrs) has no $setup
+            // param — bindings must go through the instance proxy as _ctx.*.
+            r.set_ssr(true);
+            r
+        }
+        CodeGenMode::Vdom => {
             BindingResolver::new_with_const_props(bindings, options.is_inline, const_props_alloc)
         }
     };
@@ -224,7 +242,7 @@ pub fn generate_template<'alloc>(
 
     match options.mode {
         CodeGenMode::Vdom => {
-            let mut gen = vdom::VdomCodeGen::new(ast, resolver, options);
+            let mut gen = vdom::VdomCodeGen::new(ast, oxc_ast, resolver, options);
             walker::walk_template(ast, oxc_ast, source, &mut gen, &mut out);
         }
         CodeGenMode::Vapor => {

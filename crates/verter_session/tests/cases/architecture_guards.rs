@@ -5258,28 +5258,54 @@ mod foundations_guards {
     // ── Guard 4 — external_corpus_paths_not_present_outside_gated_tests ──
 
     /// Predicate: scan a test file's source for path strings
-    /// referencing `.integration-tests/repos/...`. Returns `true`
-    /// when at least one such reference is found AND the file is
-    /// NOT gated behind a Cargo feature.
+    /// referencing an external corpus — `.integration-tests/repos/...`
+    /// or a sibling third-party checkout beside the repo (`../vize/...`).
+    /// Returns `true` when at least one such reference is found in CODE
+    /// (line comments are stripped: documenting a deleted third-party
+    /// coupling is not a dependency) AND the file carries NO
+    /// external-corpus feature gate — neither a file-level `#![cfg(...)]`
+    /// inner attribute nor an item-level
+    /// `#[cfg(feature = "external-corpus")]` marker. Item-level detection
+    /// is best-effort textual (a gated mod exempts the whole file); the
+    /// discriminating target is a file with a live corpus path and no
+    /// gate anywhere — the historical `../vize` evasion shape.
     pub fn test_file_has_ungated_external_corpus_path(src: &str) -> bool {
-        let has_path = src.contains(".integration-tests/repos/")
-            || src.contains(".integration-tests\\repos\\");
+        let has_path = src.lines().any(|line| {
+            let code = match line.find("//") {
+                Some(idx) => &line[..idx],
+                None => line,
+            };
+            code.contains(".integration-tests/repos/")
+                || code.contains(".integration-tests\\repos\\")
+                || code.contains("../vize")
+                || code.contains("..\\vize")
+                || code.contains("/vize/tests/")
+                || code.contains("\\vize\\tests\\")
+        });
         if !has_path {
             return false;
         }
         let gated = src.lines().any(|line| {
             let t = line.trim_start();
-            t.starts_with("#![cfg(feature =") || t.starts_with("#![cfg(any(feature =")
+            t.starts_with("#![cfg(feature =")
+                || t.starts_with("#![cfg(any(feature =")
+                || t.starts_with("#[cfg(feature = \"external-corpus\")]")
+                || t.starts_with("#[cfg(any(feature = \"external-corpus\"")
+                || t.starts_with("#[cfg(all(test, feature = \"external-corpus\"")
         });
         !gated
     }
 
-    /// Walk every test file under `crates/<crate>/tests/` (across all
-    /// crates) and return the set of files that violate the rule.
-    /// `architecture_guards.rs` is self-exempt: it MUST hold the
-    /// literal path string in the predicate body, and the
-    /// deliberate-violation test exercises the predicate
-    /// independently.
+    /// Walk every Rust source file under `crates/<crate>/tests/` AND
+    /// `crates/<crate>/src/` (across all crates) and return the set of
+    /// files that violate the rule. `src/` is scanned because inline
+    /// `#[cfg(test)]` unit-test files can reference external corpora
+    /// just as easily as integration-test targets can — the
+    /// `../vize` sibling-checkout spelling historically evaded this
+    /// guard from `src/filesystem_tests.rs`. `architecture_guards.rs`
+    /// is self-exempt: it MUST hold the literal path string in the
+    /// predicate body, and the deliberate-violation test exercises
+    /// the predicate independently.
     pub fn guard4_violations() -> Vec<String> {
         let crates_root = workspace_root().join("crates");
         let mut violations = Vec::new();
@@ -5292,11 +5318,13 @@ mod foundations_guards {
             if !path.is_dir() {
                 continue;
             }
-            let tests_dir = path.join("tests");
-            if !tests_dir.exists() {
-                continue;
+            let mut stack: Vec<std::path::PathBuf> = Vec::new();
+            for scan_dir in ["tests", "src"] {
+                let dir = path.join(scan_dir);
+                if dir.exists() {
+                    stack.push(dir);
+                }
             }
-            let mut stack = vec![tests_dir];
             while let Some(dir) = stack.pop() {
                 let read = match fs::read_dir(&dir) {
                     Ok(it) => it,
@@ -5377,6 +5405,46 @@ mod foundations_guards {
         assert!(
             !test_file_has_ungated_external_corpus_path(&local_only),
             "guard 4 must NOT flag tests that use vendored fixtures",
+        );
+
+        // Sibling-checkout spelling (`../<repo>` beside this repo) — the
+        // historical guard evasion. Construct at runtime per the pattern
+        // above.
+        let sibling = format!("..{}{}", "/", "vize");
+        let bad_sibling = format!(
+            "#[test]\nfn t() {{ let p = std::path::PathBuf::from(\"{}/tests/_fixtures/x\"); }}",
+            sibling
+        );
+        let gated_sibling = format!(
+            "#![cfg(feature = \"external-corpus\")]\n#[test]\nfn t() {{ let p = std::path::PathBuf::from(\"{}/tests/_fixtures/x\"); }}",
+            sibling
+        );
+        assert!(
+            test_file_has_ungated_external_corpus_path(&bad_sibling),
+            "guard 4 must flag ungated sibling-checkout references",
+        );
+        assert!(
+            !test_file_has_ungated_external_corpus_path(&gated_sibling),
+            "guard 4 must NOT flag sibling-checkout references inside a feature-gated file",
+        );
+
+        // Item-level gating (`#[cfg(feature = "external-corpus")] mod ...`)
+        // counts as gated; comment-only mentions are not dependencies.
+        let item_gated = format!(
+            "#[cfg(feature = \"external-corpus\")]\nmod external_corpus {{\n    const P: &str = \"{}nuxt-ui\";\n}}",
+            forbidden_segment
+        );
+        let comment_only = format!(
+            "// the old test read {}nuxt-ui and was deleted\nfn t() {{}}",
+            forbidden_segment
+        );
+        assert!(
+            !test_file_has_ungated_external_corpus_path(&item_gated),
+            "guard 4 must NOT flag references inside an item-gated external-corpus mod",
+        );
+        assert!(
+            !test_file_has_ungated_external_corpus_path(&comment_only),
+            "guard 4 must NOT flag comment-only mentions of corpus paths",
         );
     }
 
@@ -5968,6 +6036,13 @@ mod foundations_guards {
             // Pending B-C5 split, this file is exempt.
             "crates/verter_session/src/host_manage/prepared_decl.rs",
             "crates/verter_compiler/src/compile/template_data.rs",
+            // 1506 lines after the empty-SFC shell + SSR script-flag work.
+            // `codex/release-clean` edits the SAME `compile_inner` region;
+            // splitting this file BEFORE that merge would manufacture
+            // guaranteed semantic conflicts. Split it as the first follow-up
+            // AFTER the release-clean integration lands, then remove this
+            // exemption.
+            "crates/verter_compiler/src/compile/mod.rs",
             // The canonical HTML5 named-character-reference table (~2231 entries),
             // auto-generated from the pinned official svelte `entities.js` by
             // `scripts/generate-svelte-entities.mjs` and byte-pinned by the
@@ -14633,6 +14708,85 @@ mod typed_ir_resolver_guards {
     }
 
     // -----------------------------------------------------------------------
+    // Guard 4b: display-text payload-form sniffing inside the typeinfo
+    // pipeline. `starts_with('[')` on a rendered type display decided
+    // Tuple-vs-Call emit payload form in
+    // `typeinfo/framework_surface/vue_exec/imported_elements.rs` — the
+    // exact "shape sniffing on display text" class Typed-IR-Only
+    // forbids, and one the `Pick<`-prefix needles above were too narrow
+    // to catch. Payload-form classification must come from
+    // `SemanticNodeData` / `TypeExpr` node shape; display strings are
+    // minted FROM typed values for output only.
+    // -----------------------------------------------------------------------
+    const TYPEINFO_DISPLAY_SNIFF_ALLOWLIST: &[(&str, u32, &str)] = &[];
+
+    fn scan_typeinfo_display_sniff() -> Vec<(String, u32, String)> {
+        let needles: &[&str] = &[r#"starts_with('[')"#, r#"starts_with("[")"#];
+        let files = collect_production_rs_files();
+        let mut out: Vec<(String, u32, String)> = Vec::new();
+        for (path, rel) in &files {
+            if !rel.starts_with("crates/verter_session/src/typeinfo/") {
+                continue;
+            }
+            let src = match fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let stripped = preprocess(&src);
+            for (idx, line) in stripped.split('\n').enumerate() {
+                let line_no = (idx + 1) as u32;
+                for needle in needles {
+                    if line.contains(needle) {
+                        out.push((rel.clone(), line_no, (*needle).to_string()));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn no_display_text_payload_sniff_in_typeinfo() {
+        let actual = scan_typeinfo_display_sniff();
+        assert_exact_allowlist_match(
+            "no_display_text_payload_sniff_in_typeinfo",
+            &actual,
+            TYPEINFO_DISPLAY_SNIFF_ALLOWLIST,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Guard 4c: the export-surface probe in
+    // `host_resolve/external_macro_collector.rs` is a diagnostics-only
+    // adjudicator over HOST-INDEXED facts. It must never grow a parser
+    // re-walk (OXC parse of dependency sources) or call the semantic
+    // dispatch — that would make it a second resolver beside the shared
+    // engine. See the module docs ("Export-surface probe ownership").
+    // -----------------------------------------------------------------------
+    #[test]
+    fn export_probe_consumes_indexed_facts_only() {
+        let src = fs::read_to_string(
+            super::workspace_root()
+                .join("crates/verter_session/src/host_resolve/external_macro_collector.rs"),
+        )
+        .expect("read external_macro_collector.rs");
+        for needle in [
+            "Parser::new",
+            "oxc_parser::",
+            "parse_program",
+            "ProjectSemanticDispatch",
+            "resolve_hot_handle",
+            "execute_cooperative",
+        ] {
+            assert!(
+                !src.contains(needle),
+                "external_macro_collector.rs must adjudicate from indexed facts only; \
+                 found forbidden `{needle}` (a parser re-walk / second resolver path)"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Guard 5: role inference from identifier name suffix.
     // `name.ends_with("Props" | "Emits" | "Events" | "Slots" | "Model")`
     // (and `*_name` / `identifier` / `*_identifier` / `ident` /
@@ -17405,7 +17559,7 @@ mod single_resolution_engine_guards {
         // blocks parse once and thread their resolved companion/external
         // surfaces to every compile consumer — pass-through of
         // already-resolved data, NOT a new engine path.
-        ("crates/verter_compiler/src/script/prepared.rs", 10),
+        ("crates/verter_compiler/src/script/prepared.rs", 9),
         ("crates/verter_compiler/src/tsc/script.rs", 35),
         ("crates/verter_parser/src/utils/oxc/script/mod.rs", 1),
         (
@@ -17502,9 +17656,15 @@ mod single_resolution_engine_guards {
         // one added mention of the same boundary DTO, zero added
         // resolution); the whole file deletes with the same legacy-DTO
         // consolidation.
+        //
+        // 45 -> 48: the alias-tolerant defineEmits gate
+        // (`bare_named_type_arg`) plus the node-domain payload-form
+        // classification both still ENCODE into this legacy DTO vocabulary
+        // (the file's output shape). Added mentions of the boundary DTO,
+        // zero added resolution.
         (
             "crates/verter_session/src/typeinfo/framework_surface/vue_exec/imported_elements.rs",
-            45,
+            48,
         ),
     ];
 
@@ -17560,7 +17720,11 @@ mod single_resolution_engine_guards {
         // parsed once and their resolved companion/external `ResolvedElements`
         // surfaces are threaded to every compile consumer through `PreparedScript`,
         // not re-resolved per consumer. Pass-through of already-resolved data.
-        ("crates/verter_compiler/src/script/prepared.rs", 7),
+        // 7 -> 8: the companion extraction now receives the host-resolved
+        // external map (extract_companion_types_with_externals wiring - the
+        // radix local-extends heritage fix). Pass-through of already-resolved
+        // data, not a new resolution site.
+        ("crates/verter_compiler/src/script/prepared.rs", 8),
         ("crates/verter_compiler/src/tsc/script.rs", 5),
         ("crates/verter_parser/src/utils/oxc/vue/script/macros.rs", 2),
         ("crates/verter_parser/src/utils/oxc/vue/script/mod.rs", 2),
@@ -17568,9 +17732,13 @@ mod single_resolution_engine_guards {
             "crates/verter_parser/src/utils/oxc/script/type_surface/decl.rs",
             27,
         ),
+        // 3 -> 4: the reconstructed resolve_type_literal_members_with_ctx
+        // (the review-mandated compile-break fix) carries one additional
+        // `&mut ResolvedElements` sink parameter. Parse-boundary lowering,
+        // not query-time resolution.
         (
             "crates/verter_parser/src/utils/oxc/script/type_surface/elements.rs",
-            3,
+            4,
         ),
         (
             "crates/verter_parser/src/utils/oxc/script/type_surface/external.rs",
@@ -17580,9 +17748,13 @@ mod single_resolution_engine_guards {
             "crates/verter_parser/src/utils/oxc/script/type_surface/infer.rs",
             5,
         ),
+        // 18 -> 21: extract_companion_types_with_externals (external-seeded
+        // companion extraction) + resolved_surface_is_empty, landed with the
+        // reka-ui alias/heritage work. Shrink direction still applies to the
+        // engine itself; these are threading sites for already-resolved data.
         (
             "crates/verter_parser/src/utils/oxc/script/type_surface/mod.rs",
-            18,
+            21,
         ),
         ("crates/verter_parser/src/utils/oxc/vue/script/setup.rs", 1),
         (

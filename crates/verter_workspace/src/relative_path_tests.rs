@@ -25,6 +25,69 @@ fn join_relative_corpus() {
 }
 
 #[test]
+fn join_relative_backslash_separators_join_identically_to_slash_forms() {
+    // TS `normalizeSlashes` parity: `\` is a separator in module
+    // specifiers, so every backslash spelling joins byte-identically to
+    // its `/` twin. Without the rewrite the backslash SEGMENT survives
+    // verbatim (`/src/Listbox/..\index`) and can never match a
+    // `/`-separated canonical id.
+    assert_eq!(
+        join_relative("/src/Listbox/Filter.vue", "..\\index"),
+        join_relative("/src/Listbox/Filter.vue", "../index"),
+    );
+    assert_eq!(
+        join_relative("/src/Listbox/Filter.vue", "..\\index"),
+        "/src/index",
+    );
+    assert_eq!(join_relative("/src/Comp.vue", ".\\types"), "/src/types");
+    assert_eq!(
+        join_relative("/src/a/b/c.vue", "..\\..\\d\\e"),
+        join_relative("/src/a/b/c.vue", "../../d/e"),
+    );
+    // Mixed separators collapse the same way.
+    assert_eq!(
+        join_relative("/src/Listbox/Filter.vue", "..\\Primitive/index"),
+        "/src/Primitive/index",
+    );
+    // Negative: the rewrite must NOT alter slash-form results (byte-pin
+    // against the corpus above).
+    assert_eq!(join_relative("/src/Comp.vue", "./types"), "/src/types");
+}
+
+#[test]
+fn join_relative_backslash_rewrite_applies_only_to_the_relative_class() {
+    // The `\` → `/` rewrite is separator normalization for the TS
+    // `pathIsRelative` class ONLY (`.`/`..` bare + `./`/`../`/`.\`/`..\`
+    // prefixes). A dot-prefixed specifier OUTSIDE that class
+    // (`.alias\types`, `..foo\bar` — TS: package-ish, a resolution error)
+    // must keep its bytes: the backslash segment survives verbatim, so the
+    // joined path can never match a `/`-separated canonical id
+    // (fail-closed), instead of silently resolving against a real file at
+    // the slash-rewritten path (`/src/.alias/types.ts`) — a wrong
+    // resolution AND a wrong dependency edge, diverging from TS.
+    let joined = join_relative("/src/Comp.vue", ".alias\\types");
+    assert!(
+        joined.contains('\\'),
+        "non-relative dot-prefixed specifier must keep its backslash \
+         (fail-closed unmatchable join), got {joined:?}"
+    );
+    assert_eq!(joined, "/src/.alias\\types");
+
+    let joined = join_relative("/src/Comp.vue", "..foo\\bar");
+    assert!(
+        joined.contains('\\'),
+        "'..foo\\bar' is not in the pathIsRelative class (no separator \
+         after '..'); its backslash must survive, got {joined:?}"
+    );
+    assert_eq!(joined, "/src/..foo\\bar");
+
+    // The genuinely-relative spellings still normalize (regression pin
+    // for the gated rewrite).
+    assert_eq!(join_relative("/src/Comp.vue", ".\\x"), "/src/x");
+    assert_eq!(join_relative("/src/a/Comp.vue", "..\\x"), "/src/x");
+}
+
+#[test]
 fn normalize_relative_specifier_trims_trailing_slash() {
     assert_eq!(normalize_relative_specifier("./types/"), "./types");
     assert_eq!(normalize_relative_specifier("./types"), "./types");

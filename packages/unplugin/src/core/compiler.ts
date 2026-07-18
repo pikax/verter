@@ -42,6 +42,14 @@ export function loadHost(config?: { devMode?: boolean }): VerterHost {
   return host;
 }
 
+/**
+ * The already-created host, if any — never creates one. Watcher paths use
+ * this so an unrelated file event cannot lazily construct a host.
+ */
+export function peekHost(): VerterHost | null {
+  return host;
+}
+
 export function resetHost(): void {
   host?.close();
   host = null;

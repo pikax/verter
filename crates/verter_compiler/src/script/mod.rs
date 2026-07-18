@@ -36,7 +36,9 @@ pub struct ScriptCodeGenOptions<'a> {
     pub inline_template: bool,
     /// Vapor mode output.
     pub is_vapor: bool,
-    /// SSR mode output — emits `__ssrInlineRender: true`.
+    /// SSR mode. Non-inline path attaches `ssrRender` separately and returns
+    /// plain setup bindings (no `__isScriptSetup` / `__ssrInlineRender`) so the
+    /// instance proxy exposes them to `_ctx.*` in `ssrRender`.
     pub ssr: bool,
     /// Whether any `<style scoped>` block exists.
     pub has_scoped_style: bool,

@@ -2245,6 +2245,7 @@ impl NapiVerterHost {
                         types_module_name: p.typesModuleName,
                         delimiters,
                         custom_elements: p.customElements,
+                        ssr_module_id: p.ssrModuleId,
                     },
                 }
             }
@@ -3019,6 +3020,11 @@ pub struct NapiCompileBatchRenderProfile {
     pub delimiterClose: Option<String>,
     /// Custom-element tag names (affect template codegen).
     pub customElements: Option<Vec<String>>,
+    /// SSR asset-collection module id registered on `ssrContext.modules`.
+    /// Vite's ssr-manifest keys are ROOT-RELATIVE — the plugin supplies
+    /// `normalizePath(relative(root, filename))`; absent falls back to the
+    /// canonical id.
+    pub ssrModuleId: Option<String>,
 }
 
 /// Caller-configurable options for [`NapiVerterHost::compile_many`].

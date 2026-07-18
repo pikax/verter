@@ -21,7 +21,9 @@ use oxc_parser::Parser;
 use rustc_hash::FxHashMap;
 
 use crate::parser::types::RootNodeScript;
-use crate::utils::oxc::script::type_surface::{extract_companion_types, ResolvedElements};
+use crate::utils::oxc::script::type_surface::{
+    extract_companion_types_with_externals, ResolvedElements,
+};
 use crate::utils::oxc::vue::{
     parse_script, parse_script_with_companion, ScriptMode, ScriptParseResult,
 };
@@ -84,10 +86,15 @@ impl<'alloc> PreparedScript<'alloc> {
         // Companion type extraction only matters when a `<script setup>` consumes
         // it; an Options-API standalone `<script>` is still parsed once here (so
         // its codegen and force-js consumers reuse the parse) but skips the
-        // unused type pass.
+        // unused type pass. Host-resolved EXTERNAL types seed the companion's
+        // own extraction: a companion interface that `extends ImportedProps`
+        // (radix Separator pattern) must inherit the imported surface here —
+        // otherwise its (empty) local resolution SHADOWS the external entry in
+        // the merged map and defineProps sees zero members.
         let extract_companion_types = script_setup.is_some();
-        let companion = script
-            .and_then(|s| PreparedCompanion::build(source, s, alloc, extract_companion_types));
+        let companion = script.and_then(|s| {
+            PreparedCompanion::build(source, s, alloc, extract_companion_types, external_types)
+        });
 
         let setup = script_setup.and_then(|ss| {
             PreparedSetup::build(source, ss, alloc, companion.as_ref(), external_types)
@@ -166,6 +173,7 @@ impl<'alloc> PreparedCompanion<'alloc> {
         script: &'p RootNodeScript,
         alloc: &'alloc Allocator,
         extract_types: bool,
+        external_types: Option<&FxHashMap<String, ResolvedElements>>,
     ) -> Option<Self> {
         let content_span = script.content?;
         let content_start = content_span.start;
@@ -178,7 +186,12 @@ impl<'alloc> PreparedCompanion<'alloc> {
 
         let parse_result = parse_script(program, ScriptMode::Options, content_start, content_str);
         let companion_types = if extract_types {
-            extract_companion_types(program, content_str.as_bytes(), content_start)
+            extract_companion_types_with_externals(
+                program,
+                content_str.as_bytes(),
+                content_start,
+                external_types,
+            )
         } else {
             FxHashMap::default()
         };

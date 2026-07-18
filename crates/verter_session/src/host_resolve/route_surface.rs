@@ -448,7 +448,9 @@ impl VerterHost {
                 .diagnostics
                 .into_iter()
                 .map(|diag| HostDiagnostic {
-                    severity: HostSeverity::Error,
+                    // The collector tiers severity by the dep's structural
+                    // position (surface miss = error, member miss = warning).
+                    severity: diag.severity,
                     code: diag.code,
                     message: diag.message,
                     span: diag.span,

@@ -166,7 +166,7 @@ Primary output of `build_script_analysis()`. Produced by a single OXC parse + AS
 | `imports` | `Vec<AnalyzedImport>` | All import declarations with source, bindings, spans |
 | `bindings` | `Vec<AnalyzedBinding>` | Top-level variable/function/class declarations |
 | `macros` | `Vec<AnalyzedMacro>` | Vue macro calls (defineProps, defineEmits, etc.) |
-| `macro_type_deps` | `Vec<MacroTypeDep>` | Cross-file type references used by macros |
+| `macro_type_deps` | `Vec<MacroTypeDep>` | Cross-file type references used by macros, tiered by structural position (`usage: MacroTypeDepUsage` — `Surface` = argument root / intersection-union arms / extends heritage / alias chains, missing ⇒ error; `Member` = top-level member annotation, missing ⇒ warning + `null` degrade). References nested deeper are never collected (runtime codegen does not need them) |
 | `flags` | `AnalysisFlags` | Bitwise flags for O(1) queries |
 | `exported_functions` | `Vec<AnalyzedExportedFunction>` | Non-SFC exported functions (composable analysis) |
 

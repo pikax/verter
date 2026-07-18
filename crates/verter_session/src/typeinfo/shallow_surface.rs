@@ -105,6 +105,7 @@ impl VerterHost {
             base,
             Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
             ProjectionReductionContext::published(ProjectionMode::Shallow),
+            None,
         )
     }
 
@@ -133,6 +134,11 @@ impl VerterHost {
     /// members stay `false` — the same own-body-vs-heritage provenance the eager
     /// rail records. `mode` MUST stay `Shallow` so the surface is one-level
     /// (member values stay reference-style).
+    ///
+    /// `walker_diagnostics`, when supplied, receives the shallow walker's
+    /// side-band diagnostics for this projection (cycle short-circuits,
+    /// unresolved surface arms, …) — replayed transparently on warm memo
+    /// reads. Callers that don't consume them pass `None`.
     pub(crate) fn project_shallow_surface_from_base(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
@@ -140,6 +146,9 @@ impl VerterHost {
         base: SemanticNodeId,
         path: Arc<[PathSegment]>,
         context: ProjectionReductionContext,
+        walker_diagnostics: Option<
+            &mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
+        >,
     ) -> Option<TypeInfoSurface> {
         debug_assert_eq!(
             context.mode,
@@ -153,13 +162,23 @@ impl VerterHost {
         // (intermediate hops `Navigate`, terminal in the caller's mode) and
         // synthesises the LEAF's surface. This path PRESERVES call / construct
         // signatures, so an emit interface's call signatures survive here (the
-        // emit normalizer reads them).
-        let terminal = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+        // emit normalizer reads them). `execute_read` (NOT `execute_type_node`)
+        // keeps the walker's side-band diagnostics on hand for the sink; it
+        // does not record dispatch-intent counters itself, so record them
+        // here — this surface synthesis stays visible to the projection-op
+        // budget fuse exactly as it was through `execute_type_node`.
+        let key = SemanticQueryKey::ProjectPath {
             base,
             path,
             context,
-        }) {
-            QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+        };
+        dispatch.record_dispatch_intent_counters(&key);
+        let surface_read = dispatch.execute_read(key);
+        if let Some(sink) = walker_diagnostics {
+            sink.extend(surface_read.walker_diagnostics.iter().cloned());
+        }
+        let terminal = match surface_read.value {
+            QueryResult::Value(node) => node,
             QueryResult::Recursive(node) => node,
             QueryResult::Error(_) => return None,
         };
