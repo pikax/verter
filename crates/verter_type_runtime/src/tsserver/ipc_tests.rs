@@ -587,6 +587,9 @@ async fn tsserver_shutdown_completes_within_timeout() {
         stdin_tx,
         pending,
         next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        crash_notify: None,
+        membership_recovery: Mutex::new(None),
     });
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -996,6 +999,9 @@ async fn test_configure_tsserver_session_sends_no_inferred_project_options() {
         stdin_tx: stdin_tx.clone(),
         pending: Arc::clone(&pending),
         next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        crash_notify: None,
+        membership_recovery: Mutex::new(None),
     });
 
     let seen_commands = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -1069,6 +1075,9 @@ async fn run_update_file_capture(
         stdin_tx: stdin_tx.clone(),
         pending: Arc::new(Mutex::new(HashMap::new())),
         next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        crash_notify: None,
+        membership_recovery: Mutex::new(None),
     });
 
     let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
@@ -1227,6 +1236,9 @@ async fn run_notify_carrier_changed_capture(companion: &str) -> Vec<serde_json::
         stdin_tx: stdin_tx.clone(),
         pending: Arc::new(Mutex::new(HashMap::new())),
         next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        crash_notify: None,
+        membership_recovery: Mutex::new(None),
     });
 
     // The exact command sequence of `TsserverTypeProvider::notify_carrier_changed`.
@@ -1382,6 +1394,9 @@ async fn run_resync_capture(
         stdin_tx: stdin_tx.clone(),
         pending: Arc::new(Mutex::new(HashMap::new())),
         next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        crash_notify: None,
+        membership_recovery: Mutex::new(None),
     });
 
     let opened_files: Arc<Mutex<HashMap<String, OpenKind>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -1529,6 +1544,9 @@ async fn carrier_open_send_failure_rolls_back_tracking_for_retry() {
         stdin_tx,
         pending: Arc::new(Mutex::new(HashMap::new())),
         next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        crash_notify: None,
+        membership_recovery: Mutex::new(None),
     };
 
     let file = "/project/src/App.vue.tsx";
@@ -2382,6 +2400,9 @@ fn resync_harness() -> ResyncHarness {
         stdin_tx: stdin_tx.clone(),
         pending: Arc::new(Mutex::new(HashMap::new())),
         next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        crash_notify: None,
+        membership_recovery: Mutex::new(None),
     });
     ResyncHarness {
         transport,
@@ -2587,6 +2608,9 @@ async fn resync_generation_gate_rejects_close_reopen_aba() {
         stdin_tx: stdin_tx.clone(),
         pending: Arc::new(Mutex::new(HashMap::new())),
         next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        crash_notify: None,
+        membership_recovery: Mutex::new(None),
     };
 
     let opened_files: Mutex<HashMap<String, OpenKind>> = Mutex::new(HashMap::new());
@@ -2690,5 +2714,178 @@ async fn resync_generation_gate_rejects_close_reopen_aba() {
         !resent_stale,
         "the stale captured bytes must not be resent after a close→reopen (the gate must skip \
          the superseded reopen), frames={frames:?}"
+    );
+}
+
+// ── hang detection + reloadProjects storm bounding (D2) ───────────────
+
+/// Build a bare transport wired to a duplex whose "tsserver" side is never read
+/// (requests are accepted into the pipe but never answered), exposing the
+/// crash_notify + frame-capture surface a hang/storm test drives.
+struct StormHarness {
+    transport: Arc<TsserverTransport>,
+    stdin_tx: mpsc::Sender<TsserverStdinMessage>,
+    crash_notify: Arc<Notify>,
+    client_reader: tokio::io::DuplexStream,
+}
+
+fn storm_harness() -> StormHarness {
+    let (client_reader, server_writer) = tokio::io::duplex(65536);
+    let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
+    tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
+    let crash_notify = Arc::new(Notify::new());
+    let transport = Arc::new(TsserverTransport {
+        stdin_tx: stdin_tx.clone(),
+        pending: Arc::new(Mutex::new(HashMap::new())),
+        next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        crash_notify: Some(Arc::clone(&crash_notify)),
+        membership_recovery: Mutex::new(None),
+    });
+    StormHarness {
+        transport,
+        stdin_tx,
+        crash_notify,
+        client_reader,
+    }
+}
+
+/// D2: a wedged-but-alive tsserver (accepts requests, never responds) must be
+/// detected via consecutive timeouts and trigger a restart — not silently time
+/// out every request for the rest of the session.
+#[tokio::test]
+async fn consecutive_timeouts_fire_crash_notify() {
+    let harness = storm_harness();
+    // Register the waiter BEFORE the timeouts so notify_waiters cannot be missed.
+    let waiter = {
+        let crash_notify = Arc::clone(&harness.crash_notify);
+        tokio::spawn(async move {
+            crash_notify.notified().await;
+        })
+    };
+
+    for _ in 0..HANG_THRESHOLD {
+        let result = harness
+            .transport
+            .request_with_timeout(
+                "quickinfo",
+                serde_json::json!({ "file": "/w/App.vue.tsx", "line": 1, "offset": 1 }),
+                std::time::Duration::from_millis(30),
+            )
+            .await;
+        assert!(result.is_err(), "an unanswered request must time out");
+    }
+
+    tokio::time::timeout(std::time::Duration::from_millis(500), waiter)
+        .await
+        .expect("hang detection must fire crash_notify after HANG_THRESHOLD consecutive timeouts")
+        .expect("waiter task must not panic");
+}
+
+/// A successful response resets the consecutive-timeout counter, so an isolated
+/// timeout followed by healthy traffic never escalates to a spurious restart.
+#[tokio::test]
+async fn successful_response_resets_hang_counter() {
+    let harness = storm_harness();
+    // Two timeouts (below threshold) — the counter advances but must not fire.
+    for _ in 0..(HANG_THRESHOLD - 1) {
+        let _ = harness
+            .transport
+            .request_with_timeout(
+                "quickinfo",
+                serde_json::json!({ "file": "/w/App.vue.tsx", "line": 1, "offset": 1 }),
+                std::time::Duration::from_millis(30),
+            )
+            .await;
+    }
+    assert_eq!(
+        harness
+            .transport
+            .consecutive_failures
+            .load(Ordering::Relaxed),
+        HANG_THRESHOLD - 1,
+    );
+
+    // Issue a real request and resolve its pending entry from the "tsserver" side.
+    let request_transport = Arc::clone(&harness.transport);
+    let request_task = tokio::spawn(async move {
+        request_transport
+            .request_with_timeout(
+                "quickinfo",
+                serde_json::json!({ "file": "/w/App.vue.tsx", "line": 1, "offset": 1 }),
+                std::time::Duration::from_millis(500),
+            )
+            .await
+    });
+    // Let the request register its pending entry, then answer it.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    {
+        let mut pending = harness.transport.pending.lock().await;
+        let drained: Vec<_> = pending.drain().collect();
+        if let Some((_seq, tx)) = drained.into_iter().next() {
+            let _ = tx.send(serde_json::json!({"success": true, "body": null}));
+        }
+    }
+    let ok = request_task.await.expect("request task must not panic");
+    assert!(ok.is_ok(), "an answered request resolves Ok");
+    assert_eq!(
+        harness
+            .transport
+            .consecutive_failures
+            .load(Ordering::Relaxed),
+        0,
+        "a successful response resets the consecutive-timeout counter"
+    );
+}
+
+/// D2: a storm of concurrent cold-miss membership recoveries must coalesce into
+/// a single `reloadProjects` send, never one reload per concurrent query.
+#[tokio::test]
+async fn reload_projects_recovery_coalesces_under_concurrency() {
+    let harness = storm_harness();
+
+    let mut handles = Vec::new();
+    for _ in 0..32 {
+        let transport = Arc::clone(&harness.transport);
+        handles.push(tokio::spawn(async move {
+            recover_companion_membership(&transport).await;
+        }));
+    }
+    for handle in handles {
+        handle.await.expect("recovery task must not panic");
+    }
+
+    let frames = drain_frames(&harness.stdin_tx, harness.client_reader).await;
+    let reloads = frames
+        .iter()
+        .filter(|frame| frame["command"] == "reloadProjects")
+        .count();
+    assert_eq!(
+        reloads, 1,
+        "32 concurrent cold-miss recoveries must coalesce into ONE reloadProjects, frames={frames:?}"
+    );
+}
+
+/// After the cooldown window a fresh recovery IS sent (the gate rate-limits, it
+/// does not permanently latch shut).
+#[tokio::test]
+async fn reload_projects_recovery_fires_again_after_cooldown() {
+    let harness = storm_harness();
+
+    recover_companion_membership(&harness.transport).await;
+    // Within the cooldown: a second recovery is suppressed.
+    recover_companion_membership(&harness.transport).await;
+    // Past the cooldown: a third recovery fires a second reload.
+    tokio::time::sleep(MEMBERSHIP_RECOVERY_COOLDOWN + std::time::Duration::from_millis(80)).await;
+    recover_companion_membership(&harness.transport).await;
+
+    let frames = drain_frames(&harness.stdin_tx, harness.client_reader).await;
+    let reloads = frames
+        .iter()
+        .filter(|frame| frame["command"] == "reloadProjects")
+        .count();
+    assert_eq!(
+        reloads, 2,
+        "the first and post-cooldown recoveries fire; the within-cooldown one is suppressed, frames={frames:?}"
     );
 }

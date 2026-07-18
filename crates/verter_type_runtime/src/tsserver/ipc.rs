@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -97,7 +97,32 @@ struct TsserverTransport {
     /// Pending request senders, keyed by sequence number.
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
     next_seq: AtomicI64,
+    /// Counts consecutive request timeouts. Reset to 0 on any successful response.
+    /// When this reaches `HANG_THRESHOLD`, fires `crash_notify` to trigger a restart
+    /// via the `ResilientProvider` crash-recovery machinery — a wedged-but-alive
+    /// tsserver (accepts requests, never responds) must be detected and restarted,
+    /// not silently time out every request for the rest of the session.
+    consecutive_failures: AtomicU32,
+    /// Shared with `ResilientProvider` — signaled when the provider appears hung.
+    crash_notify: Option<Arc<Notify>>,
+    /// Singleflight + cooldown stamp for `reloadProjects` membership recovery.
+    /// Under a hover/diagnostics storm, dozens of concurrent cold-miss retries would
+    /// each fire `reloadProjects` (a full all-projects rebuild), saturating tsserver.
+    /// The stamp coalesces those to at most one reload per cooldown window.
+    membership_recovery: Mutex<Option<std::time::Instant>>,
 }
+
+/// Number of consecutive request timeouts before the transport signals a hang.
+/// Mirrors the tsgo transport's `HANG_THRESHOLD`: when reached, `crash_notify` is
+/// fired so the `ResilientProvider` restarts the wedged process (kill, backoff,
+/// re-spawn, replay desired state) instead of timing out forever.
+const HANG_THRESHOLD: u32 = 3;
+
+/// Minimum interval between `reloadProjects` membership-recovery sends. A cold
+/// "Could not find source file" retry loop calls the recovery on every iteration;
+/// without a cooldown a storm of concurrent cold queries fires a `reloadProjects`
+/// (a full all-projects rebuild) per retry per query.
+const MEMBERSHIP_RECOVERY_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(300);
 
 impl TsserverTransport {
     /// Send a tsserver request and wait for the response.
@@ -105,6 +130,19 @@ impl TsserverTransport {
         &self,
         command: &str,
         arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, TypeProviderError> {
+        self.request_with_timeout(command, arguments, std::time::Duration::from_secs(10))
+            .await
+    }
+
+    /// Send a tsserver request with a custom response timeout. Split from
+    /// [`TsserverTransport::request`] so tests can exercise the timeout / hang
+    /// detection path without waiting the full production timeout.
+    async fn request_with_timeout(
+        &self,
+        command: &str,
+        arguments: serde_json::Value,
+        timeout: std::time::Duration,
     ) -> Result<serde_json::Value, TypeProviderError> {
         crate::type_runtime_trace_scope_async!(
             "tsserver_transport_request",
@@ -135,9 +173,12 @@ impl TsserverTransport {
                     .await
                     .map_err(|_| TypeProviderError::new("stdin writer closed"))?;
 
-                let result = tokio::time::timeout(std::time::Duration::from_secs(10), rx).await;
+                let result = tokio::time::timeout(timeout, rx).await;
                 match result {
                     Ok(Ok(val)) => {
+                        // Any response (even a tsserver-level error) proves the process
+                        // is alive and answering — reset the hang detector.
+                        self.consecutive_failures.store(0, Ordering::Relaxed);
                         // Check for tsserver error
                         if let Some(false) = val.get("success").and_then(|v| v.as_bool()) {
                             let msg = val
@@ -183,12 +224,22 @@ impl TsserverTransport {
                     Err(_) => {
                         // Timeout — clean up the pending entry to prevent leak
                         self.pending.lock().await.remove(&seq);
+                        let count = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                        if count >= HANG_THRESHOLD {
+                            tracing::error!(
+                                "tsserver appears hung ({count} consecutive timeouts) — triggering restart"
+                            );
+                            if let Some(notify) = &self.crash_notify {
+                                notify.notify_waiters();
+                            }
+                        }
                         crate::type_runtime_trace_event!(
                             "tsserver_transport_request_error",
                             format!("command={} seq={} message=timeout", command, seq),
                         );
                         Err(TypeProviderError::new(format!(
-                            "request '{command}' timed out after 10s"
+                            "request '{command}' timed out after {}s",
+                            timeout.as_secs()
                         )))
                     }
                 }
@@ -648,6 +699,21 @@ fn tsserver_diag_error_is_companion_not_ready(message: &str) -> bool {
 /// swallowed so a mid-restart provider never turns a cold-recovery touch into a
 /// hard error.
 async fn recover_companion_membership(transport: &TsserverTransport) {
+    // Singleflight + cooldown: under a hover/diagnostics storm dozens of concurrent
+    // cold-miss retries reach here together. Without a gate each would fire its own
+    // `reloadProjects` (a full all-projects rebuild), stampeding tsserver. Stamp the
+    // send under the lock (released before the network send) so at most one reload is
+    // issued per cooldown window across ALL concurrent queries; the cold retry loops
+    // keep re-querying and observe the first reload's effect.
+    {
+        let mut last = transport.membership_recovery.lock().await;
+        if let Some(last_fired) = *last {
+            if last_fired.elapsed() < MEMBERSHIP_RECOVERY_COOLDOWN {
+                return;
+            }
+        }
+        *last = Some(std::time::Instant::now());
+    }
     let _ = transport
         .command_no_response("reloadProjects", serde_json::json!({}))
         .await;
@@ -995,6 +1061,9 @@ impl TsserverTypeProvider {
             stdin_tx: stdin_tx.clone(),
             pending: Arc::clone(&pending),
             next_seq: AtomicI64::new(1),
+            consecutive_failures: AtomicU32::new(0),
+            crash_notify: crash_notify.clone(),
+            membership_recovery: Mutex::new(None),
         });
 
         let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
