@@ -4,7 +4,7 @@
     "generatedBy": "scripts/gen-vue-macro-runtime-oracle.mjs",
     "compiler": "@vue/compiler-sfc",
     "version": "3.5.34",
-    "fixtureSha256": "ea72b5bf4baa693add1390d249b98f79092669431efa2b16bc52cf5a09a6d8e0",
+    "fixtureSha256": "6b9935c3ca4f81cd399d3ad26b3c10e720c181b20af7de49a2e8b96f2b3539cb",
     "compileOptions": {
       "isProd": false,
       "inlineTemplate": false
@@ -153,9 +153,10 @@
         "tuple",
         "callable",
         "nominal",
+        "weak-collection",
         "structural-object"
       ],
-      "sourceSha256": "b249cafe2d529d9e7e1263e75d7bb9c47046593ac55c2ea2d34221ec980d833b",
+      "sourceSha256": "d8ca493317106bde5a9ca0968c19a1dac32c58dd1ab0fe94b478439ed5741bea",
       "runtime": {
         "props": [
           {
@@ -207,6 +208,24 @@
             "name": "set",
             "constructors": [
               "Set"
+            ],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "weakMap",
+            "constructors": [
+              "WeakMap"
+            ],
+            "required": true,
+            "skipCheck": false,
+            "default": null
+          },
+          {
+            "name": "weakSet",
+            "constructors": [
+              "WeakSet"
             ],
             "required": true,
             "skipCheck": false,

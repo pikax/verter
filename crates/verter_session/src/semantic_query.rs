@@ -3000,6 +3000,8 @@ pub enum BroadRuntimeKind {
     Date,
     Map,
     Set,
+    WeakMap,
+    WeakSet,
     Promise,
     Error,
     Object,

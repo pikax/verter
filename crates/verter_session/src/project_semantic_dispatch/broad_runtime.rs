@@ -262,6 +262,8 @@ fn broad_kind_for_nominal(kind: RuntimeNominal) -> BroadRuntimeKind {
         RuntimeNominal::Date => BroadRuntimeKind::Date,
         RuntimeNominal::Map => BroadRuntimeKind::Map,
         RuntimeNominal::Set => BroadRuntimeKind::Set,
+        RuntimeNominal::WeakMap => BroadRuntimeKind::WeakMap,
+        RuntimeNominal::WeakSet => BroadRuntimeKind::WeakSet,
         RuntimeNominal::Promise => BroadRuntimeKind::Promise,
         RuntimeNominal::Error => BroadRuntimeKind::Error,
     }

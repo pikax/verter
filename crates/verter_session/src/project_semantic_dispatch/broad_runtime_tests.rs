@@ -172,18 +172,12 @@ fn broad_runtime_recognizes_only_shadow_safe_builtin_nominal_identities() {
             },
         })
     };
-    let user_date = graph.intern_node(SemanticNodeData::DeclRef {
-        identity: DeclIdentity {
-            canonical_id: Arc::from("/src/date.ts"),
-            whole_hash: HashValue::default(),
-            decl_name: Arc::from("Date"),
-        },
-    });
-
     for (name, expected) in [
         ("Date", BroadRuntimeKind::Date),
         ("Map", BroadRuntimeKind::Map),
         ("Set", BroadRuntimeKind::Set),
+        ("WeakMap", BroadRuntimeKind::WeakMap),
+        ("WeakSet", BroadRuntimeKind::WeakSet),
         ("Promise", BroadRuntimeKind::Promise),
         ("Error", BroadRuntimeKind::Error),
     ] {
@@ -193,11 +187,20 @@ fn broad_runtime_recognizes_only_shadow_safe_builtin_nominal_identities() {
             "{name}"
         );
     }
-    assert_eq!(
-        classify(&ProjectSemanticDispatch::new(&host), user_date).kinds(),
-        &[BroadRuntimeKind::Unknown],
-        "a user declaration named Date is not the global nominal"
-    );
+    for name in ["Date", "WeakMap", "WeakSet"] {
+        let user_nominal = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: DeclIdentity {
+                canonical_id: Arc::from(format!("/src/{name}.ts")),
+                whole_hash: HashValue::default(),
+                decl_name: Arc::from(name),
+            },
+        });
+        assert_eq!(
+            classify(&ProjectSemanticDispatch::new(&host), user_nominal).kinds(),
+            &[BroadRuntimeKind::Unknown],
+            "a user declaration named {name} is not the global nominal"
+        );
+    }
 }
 
 #[test]

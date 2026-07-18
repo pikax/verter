@@ -68,6 +68,8 @@ pub enum RuntimeNominal {
     Date,
     Map,
     Set,
+    WeakMap,
+    WeakSet,
     Promise,
     Error,
 }
@@ -79,6 +81,8 @@ impl RuntimeNominal {
             "Date" => Some(Self::Date),
             "Map" => Some(Self::Map),
             "Set" => Some(Self::Set),
+            "WeakMap" => Some(Self::WeakMap),
+            "WeakSet" => Some(Self::WeakSet),
             "Promise" => Some(Self::Promise),
             "Error" => Some(Self::Error),
             _ => None,

@@ -67,6 +67,8 @@ fn pinned_vue_macro_oracle_carries_provenance_and_discriminating_runtime_facts()
         ("date", "Date"),
         ("map", "Map"),
         ("set", "Set"),
+        ("weakMap", "WeakMap"),
+        ("weakSet", "WeakSet"),
         ("promise", "Promise"),
         ("error", "Error"),
         ("userClass", "Object"),

@@ -29,7 +29,15 @@ defineProps<{
   },
   {
     id: "containers-callables-and-nominals",
-    axes: ["props", "array", "tuple", "callable", "nominal", "structural-object"],
+    axes: [
+      "props",
+      "array",
+      "tuple",
+      "callable",
+      "nominal",
+      "weak-collection",
+      "structural-object",
+    ],
     source: `<script setup lang="ts">
 class UserClass {}
 interface UserObject { nested: { value: string } }
@@ -40,6 +48,8 @@ defineProps<{
   date: Date
   map: Map<string, string>
   set: Set<string>
+  weakMap: WeakMap<object, string>
+  weakSet: WeakSet<object>
   promise: Promise<string>
   error: Error
   userClass: UserClass

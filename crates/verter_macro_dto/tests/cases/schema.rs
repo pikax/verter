@@ -142,6 +142,8 @@ fn constructors_are_closed_ordered_and_deduplicated_without_bigint() {
         RuntimeConstructor::Date,
         RuntimeConstructor::Map,
         RuntimeConstructor::Set,
+        RuntimeConstructor::WeakMap,
+        RuntimeConstructor::WeakSet,
         RuntimeConstructor::Promise,
         RuntimeConstructor::Error,
         RuntimeConstructor::Object,
@@ -149,26 +151,13 @@ fn constructors_are_closed_ordered_and_deduplicated_without_bigint() {
     ];
     let labels: Vec<Option<&str>> = every
         .iter()
-        .map(|constructor| match constructor {
-            RuntimeConstructor::String => Some("String"),
-            RuntimeConstructor::Number => Some("Number"),
-            RuntimeConstructor::Boolean => Some("Boolean"),
-            RuntimeConstructor::Symbol => Some("Symbol"),
-            RuntimeConstructor::Null => None,
-            RuntimeConstructor::Array => Some("Array"),
-            RuntimeConstructor::Function => Some("Function"),
-            RuntimeConstructor::Date => Some("Date"),
-            RuntimeConstructor::Map => Some("Map"),
-            RuntimeConstructor::Set => Some("Set"),
-            RuntimeConstructor::Promise => Some("Promise"),
-            RuntimeConstructor::Error => Some("Error"),
-            RuntimeConstructor::Object => Some("Object"),
-            RuntimeConstructor::Unknown => None,
-        })
+        .map(|constructor| constructor.as_constructor())
         .collect();
     assert_eq!(labels[0], Some("String"));
     assert_eq!(labels[4], None);
-    assert_eq!(labels[13], None);
+    assert_eq!(labels[10], Some("WeakMap"));
+    assert_eq!(labels[11], Some("WeakSet"));
+    assert_eq!(labels[15], None);
 }
 
 #[test]

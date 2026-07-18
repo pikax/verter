@@ -81,4 +81,15 @@ test("the pinned compiler generates the complete deterministic fixture matrix", 
       "imported-utility-and-indexed",
     ],
   );
+
+  const nominal = first.cases.find(({ id }) => id === "containers-callables-and-nominals");
+  assert.deepEqual(
+    nominal.runtime.props
+      .filter(({ name }) => name === "weakMap" || name === "weakSet")
+      .map(({ name, constructors }) => ({ name, constructors })),
+    [
+      { name: "weakMap", constructors: ["WeakMap"] },
+      { name: "weakSet", constructors: ["WeakSet"] },
+    ],
+  );
 });
