@@ -17657,14 +17657,14 @@ mod single_resolution_engine_guards {
         // resolution); the whole file deletes with the same legacy-DTO
         // consolidation.
         //
-        // 45 -> 49: the alias-tolerant defineEmits gate
-        // (`bare_named_type_arg`) plus the typed-IR payload-form
+        // 45 -> 48: the alias-tolerant defineEmits gate
+        // (`bare_named_type_arg`) plus the node-domain payload-form
         // classification both still ENCODE into this legacy DTO vocabulary
         // (the file's output shape). Added mentions of the boundary DTO,
         // zero added resolution.
         (
             "crates/verter_session/src/typeinfo/framework_surface/vue_exec/imported_elements.rs",
-            49,
+            48,
         ),
     ];
 
