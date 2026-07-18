@@ -58,18 +58,16 @@ fn two_envs_coexist_for_same_canonical() {
 }
 
 #[test]
-fn file_artifacts_carry_indexed_facts_edges_augmentations() {
+fn file_artifacts_carry_indexed_facts_augmentations() {
     let store = FileArtifactStore::new();
     let key = make_key("/m.ts", 7, 7);
     let payload = make_artifacts(0xcc);
     store.insert_artifacts(key.clone(), payload);
     let got = store.get_artifacts(&key).expect("entry MUST exist");
-    // Every FileArtifacts has the four sub-fields wired (facts,
-    // parsed_edges, augmentations, plus parse_stable_hash) along with
-    // the canonical IndexedReady.
+    // Every FileArtifacts has its sub-fields wired (facts, augmentations,
+    // plus parse_stable_hash) along with the canonical IndexedReady.
     assert_eq!(got.indexed.whole_hash, [0xccu8; 16]);
     let _facts: &verter_session::file_artifact_store::FileFacts = &got.facts;
-    let _edges: &verter_session::file_artifact_store::ParsedEdges = &got.parsed_edges;
     assert!(
         got.augmentations.is_empty(),
         "augmentations are empty for this fixture"

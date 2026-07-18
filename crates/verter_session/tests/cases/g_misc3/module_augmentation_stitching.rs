@@ -86,7 +86,6 @@ fn insert_artifact_from_fixture(
     let artifacts = Arc::new(FileArtifacts {
         indexed,
         facts: Arc::new(emission.facts),
-        parsed_edges: Arc::new(verter_session::file_artifact_store::ParsedEdges::empty()),
         parse_stable_hash,
         augmentations: Arc::new(emission.augmentations),
     });
@@ -115,7 +114,6 @@ fn insert_artifact_with_raw_source(
     let artifacts = Arc::new(FileArtifacts {
         indexed,
         facts: Arc::new(emission.facts),
-        parsed_edges: Arc::new(verter_session::file_artifact_store::ParsedEdges::empty()),
         parse_stable_hash,
         augmentations: Arc::new(emission.augmentations),
     });
@@ -140,7 +138,6 @@ fn build_filler_artifacts(raw: &str, content_hash: [u8; 16]) -> Arc<FileArtifact
     Arc::new(FileArtifacts {
         indexed,
         facts: Arc::new(emission.facts),
-        parsed_edges: Arc::new(verter_session::file_artifact_store::ParsedEdges::empty()),
         parse_stable_hash,
         augmentations: Arc::new(emission.augmentations),
     })
@@ -268,7 +265,6 @@ fn session_overlay_augmenter_isolated_from_base_index() {
         Arc::new(FileArtifacts {
             indexed,
             facts: Arc::new(emission.facts),
-            parsed_edges: Arc::new(verter_session::file_artifact_store::ParsedEdges::empty()),
             parse_stable_hash,
             augmentations: Arc::new(emission.augmentations),
         }),
@@ -363,7 +359,6 @@ fn seed_base_and_overlay_augmenters(
         Arc::new(FileArtifacts {
             indexed,
             facts: Arc::new(emission.facts),
-            parsed_edges: Arc::new(verter_session::file_artifact_store::ParsedEdges::empty()),
             parse_stable_hash,
             augmentations: Arc::new(emission.augmentations),
         }),
@@ -1039,7 +1034,6 @@ fn insert_artifact_at_parser_version(
     let artifacts = Arc::new(FileArtifacts {
         indexed,
         facts: Arc::new(emission.facts),
-        parsed_edges: Arc::new(verter_session::file_artifact_store::ParsedEdges::empty()),
         parse_stable_hash,
         augmentations: Arc::new(emission.augmentations),
     });

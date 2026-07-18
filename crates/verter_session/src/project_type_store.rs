@@ -1562,9 +1562,9 @@ impl ProjectTypeStore {
     /// branch in default builds.
     ///
     /// The sweep operates on the unified [`FileArtifactStore`], which
-    /// holds `IndexedReady`, `FileFacts`, `ParsedEdges`, and
-    /// augmentations under one key — hence the broader name reflects
-    /// what reachability GC actually drops.
+    /// holds `IndexedReady`, `FileFacts`, and augmentations under one
+    /// key — hence the broader name reflects what reachability GC
+    /// actually drops.
     pub fn evict_unreachable_artifacts(
         &self,
         live_publish_set: &rustc_hash::FxHashSet<(Arc<str>, Hash16)>,
