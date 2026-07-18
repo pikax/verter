@@ -15557,7 +15557,11 @@ fn optional_boolean_prop_is_official_type_boolean_no_default_for_any_name() {
             "<script setup lang=\"ts\">\nwithDefaults(defineProps<{{ {name}?: boolean }}>(), {{}})\n</script>\n<template><div/></template>"
         );
         let wd = compile_sfc(&wd_src);
-        assert!(wd.errors.is_empty(), "wd compile errors {name}: {:?}", wd.errors);
+        assert!(
+            wd.errors.is_empty(),
+            "wd compile errors {name}: {:?}",
+            wd.errors
+        );
         let wd_code = &wd.script.as_ref().unwrap().code;
         assert!(
             wd_code.contains(&format!("{name}: {{ type: Boolean }}")),
@@ -15568,4 +15572,46 @@ fn optional_boolean_prop_is_official_type_boolean_no_default_for_any_name() {
             "withDefaults optional boolean `{name}` must NOT emit `default: undefined`, got:\n{wd_code}"
         );
     }
+}
+
+/// `withDefaults(defineProps<T>(), { ...Defaults, k: make<X>() })` under force_js
+/// must strip TypeScript from the FULL defaults object passed to `_mergeDefaults`
+/// — not only the individual resolved-type prop values. The whole second-argument
+/// expression is emitted verbatim on the spread path, so nested type args
+/// (`make<number>(0)`) would otherwise leak into the JS output.
+#[test]
+fn force_js_with_defaults_spread_strips_full_defaults_object() {
+    let result = compile_sfc(
+        r#"
+<script setup lang="ts">
+const base = { as: 'div' }
+function make<T>(v: T): T { return v }
+interface Props { as?: string; n?: number }
+const props = withDefaults(defineProps<Props>(), {
+  ...base,
+  n: make<number>(0),
+})
+</script>
+<template><div>{{ props.as }}</div></template>
+"#,
+    );
+    let script = result.script.as_ref().expect("script");
+    let code = &script.code;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert!(
+        code.contains("_mergeDefaults"),
+        "spread defaults must use _mergeDefaults, got:\n{code}"
+    );
+    assert!(
+        code.contains("...base"),
+        "full defaults spread expression must remain, got:\n{code}"
+    );
+    assert!(
+        !code.contains("make<number>") && !code.contains("<number>"),
+        "type args inside the defaults object must be stripped under force_js, got:\n{code}"
+    );
+    assert!(
+        code.contains("make(0)"),
+        "runtime call in defaults must remain, got:\n{code}"
+    );
 }

@@ -894,15 +894,21 @@ fn collect_call_section<'a>(
         }
         "withDefaults" => {
             if let Some(arg) = call.arguments.get(1).and_then(|a| a.as_expression()) {
-                match arg {
-                    Expression::ObjectExpression(obj) => {
-                        for prop in &obj.properties {
-                            if let ObjectPropertyKind::ObjectProperty(p) = prop {
-                                strip_section(&p.value, content_str, alloc, sections);
-                            }
+                // Cache the FULL defaults expression stripped. The spread path
+                // (`{ ...Defaults, k: v }`) and the variable path both emit the
+                // whole second argument verbatim into `_mergeDefaults(base, …)`,
+                // and a spread object's own values (`make<number>(0)`) are
+                // TypeScript that would otherwise leak into the JS output.
+                strip_section(arg, content_str, alloc, sections);
+                // Also cache each object-literal property value individually —
+                // the resolved-type props path reads per-key defaults by their
+                // value span (object-literal, non-spread case).
+                if let Expression::ObjectExpression(obj) = arg {
+                    for prop in &obj.properties {
+                        if let ObjectPropertyKind::ObjectProperty(p) = prop {
+                            strip_section(&p.value, content_str, alloc, sections);
                         }
                     }
-                    other => strip_section(other, content_str, alloc, sections),
                 }
             }
         }
