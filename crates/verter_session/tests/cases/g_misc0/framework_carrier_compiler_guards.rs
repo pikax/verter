@@ -303,9 +303,10 @@ fn svelte_component_on_directive_not_loose_rewrite() {
     // intrinsic — a COMPONENT-kind element routes the checked `__verter_event`
     // helper (payload-checked), while an INTRINSIC element keeps the verbatim DOM
     // `onevent` rewrite. The loose `on:`→`onclick` verbatim rewrite must NOT be
-    // applied unconditionally to every element.
+    // applied unconditionally to every element. The directive arms (including
+    // `project_directive`) live in the projector's `directive` submodule.
     let projector = strip_line_comments(&read_src(
-        "crates/verter_compiler/src/svelte/ide/projector/mod.rs",
+        "crates/verter_compiler/src/svelte/ide/projector/directive.rs",
     ));
     // The `On` arm branches on `SvelteElementKind::Component` and routes the
     // checked component-event helper for components.
