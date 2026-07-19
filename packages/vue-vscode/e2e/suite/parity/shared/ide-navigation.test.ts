@@ -16,6 +16,7 @@ import {
   findOffset,
   openRelative,
   pollUntil,
+  registerFrameworkTest,
   failParityGap,
 } from "../../../lib/parityHarness";
 import {
@@ -857,16 +858,14 @@ suite(`IDE navigation + completion [${FIXTURE_NAME}]`, function () {
           "transition",
         ]);
         // Local names get the real function hover (never the shim).
-        const actionHover = await assertHoverNeedles(
-          { file: parent, token: "highlight", occurrence: 1 },
+        await assertHoverNeedles(
+          { file: parent, token: "use:highlight", occurrence: 0, caretOffset: 5 },
           ["highlight", "HTMLElement"],
         );
-        const transitionHover = await assertHoverNeedles(
-          { file: parent, token: "fade", occurrence: 1 },
-          ["fade", "TransitionConfig"],
-        );
-        void actionHover;
-        void transitionHover;
+        await assertHoverNeedles({ file: parent, token: "fade", occurrence: 1 }, [
+          "fade",
+          "TransitionConfig",
+        ]);
       }
     } catch (err) {
       failParityGap(
@@ -879,10 +878,9 @@ suite(`IDE navigation + completion [${FIXTURE_NAME}]`, function () {
     }
   });
 
-  test("ide.hover.custom-directive", async function () {
+  registerFrameworkTest("vue", "ide.hover.custom-directive", async function () {
     const fw = parityFramework();
     if (!fw) throw new Error("TEST_DEFECT: parity suite loaded for an inapplicable fixture");
-    if (fw !== "vue") return;
     const parent = parentFile(fw);
     try {
       // `v-my-thing` → typed hover naming the resolved `vMyThing` binding.
