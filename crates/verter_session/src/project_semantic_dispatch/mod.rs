@@ -58,8 +58,8 @@ use std::sync::Arc;
 use verter_semantic::analysis::type_solver::host::{
     BareRefOrigin, ResolvedRootIdentity, UtilitySource,
 };
-use verter_semantic::analysis::type_solver::PreparedTypeDecl;
 
+use crate::resolver_core::prepared_decl::PreparedTypeDeclResolution;
 use crate::resolver_core::{BudgetDomain, BudgetExceededFailure, ResolverContext};
 use crate::semantic_query::{
     BranchSelection, CacheRead, DeclIdentity, DepSignature, DepVersion, IndexKey, LiteralValue,
@@ -3228,14 +3228,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
 /// Implementations: [`SessionDispatchHost`] routes per-base via the
 /// node-scope sidecar.
 pub trait DispatchHost {
-    /// Look up a prepared type declaration by its canonical root identity,
-    /// using the scope recorded in `base`'s sidecar to select the correct
-    /// declaration-scope payload.
+    /// Look up a prepared-declaration projection outcome by canonical root
+    /// identity, preserving a recoverable exact authored preparation failure
+    /// as a typed partial carrier.
     fn resolve_prepared_type_decl(
         &self,
         base: SemanticNodeId,
         root_identity: &ResolvedRootIdentity,
-    ) -> Option<Arc<PreparedTypeDecl>>;
+    ) -> PreparedTypeDeclResolution;
 
     /// Resolve a `(canonical_id, symbol_name)` pair into a stable root
     /// declaration identity, following re-exports and barrel hops through
@@ -3357,7 +3357,7 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
         &self,
         base: SemanticNodeId,
         root_identity: &ResolvedRootIdentity,
-    ) -> Option<Arc<PreparedTypeDecl>> {
+    ) -> PreparedTypeDeclResolution {
         let (scope, payload) = self.scope_payload_for_base(base);
         crate::resolver_core::bare_name_resolve::resolve_prepared_type_decl_via_host(
             self.ctx,

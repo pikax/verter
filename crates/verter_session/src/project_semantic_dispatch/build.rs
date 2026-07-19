@@ -17,6 +17,7 @@ use super::{
     empty_signature, utility_param_names, ConditionalBranchSelection, DispatchHost,
     InferPatternSelection, ProjectSemanticDispatch, SessionDispatchHost, ShallowRelation,
 };
+use crate::resolver_core::prepared_decl::PreparedTypeDeclResolution;
 use crate::semantic_query::demand::{Demand, MaterializedPoint, MaterializedSet, ProjectionPath};
 use crate::semantic_query::{
     BranchSelection, DepSignature, IndexKey, IndexSignature, LiteralValue, NodeScopeId,
@@ -2516,9 +2517,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
             decl_owner,
             decl_name.as_ref(),
         );
-        let prepared = match adapter.resolve_prepared_type_decl(base, &ri) {
-            Some(p) => p,
-            None => {
+        let (prepared, authored_partial) = match adapter.resolve_prepared_type_decl(base, &ri) {
+            PreparedTypeDeclResolution::Complete(declaration) => (declaration, false),
+            PreparedTypeDeclResolution::AuthoredPartial {
+                root_identity,
+                declaration,
+                failure,
+            } => {
+                debug_assert_eq!(root_identity, declaration.root_identity);
+                debug_assert!(matches!(
+                    failure,
+                    crate::resolver_core::prepared_decl::PreparationFailure::MissingExternalOwner { .. }
+                ));
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::PreparationFailure,
+                );
+                self.fold_local_partial_completeness(
+                    crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY,
+                );
+                (declaration, true)
+            }
+            PreparedTypeDeclResolution::Missing => {
+                let mut out = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                    QueryResult::Value(self.opaque(QueryError::Miss)),
+                    empty_signature(),
+                ));
+                out.cache_suppress = true;
+                return out;
+            }
+            PreparedTypeDeclResolution::Failed { failure, .. } => {
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::PreparationFailure,
+                );
+                tracing::error!(
+                    ?failure,
+                    canonical_id = decl_canonical.as_ref(),
+                    ?decl_owner,
+                    symbol = decl_name.as_ref(),
+                    "prepared type declaration failed without an authored partial carrier"
+                );
                 let mut out = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
                     QueryResult::Value(self.opaque(QueryError::Miss)),
                     empty_signature(),
@@ -2824,6 +2861,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
                 crate::resolver_core::resolver_context::NonCacheableReadReason::UnobservableSource,
             );
+        }
+        if authored_partial {
+            output.result_is_partial = true;
+            output.cache_suppress = true;
         }
         output
     }
@@ -3489,9 +3530,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
             identity.owner,
             identity.decl_name.as_ref(),
         );
-        adapter
-            .resolve_prepared_type_decl(base, &ri)
-            .map(|prepared| prepared.kind)
+        match adapter.resolve_prepared_type_decl(base, &ri) {
+            PreparedTypeDeclResolution::Complete(prepared) => Some(prepared.kind),
+            PreparedTypeDeclResolution::AuthoredPartial {
+                declaration: prepared,
+                ..
+            } => {
+                self.fold_local_partial_completeness(
+                    crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY,
+                );
+                Some(prepared.kind)
+            }
+            PreparedTypeDeclResolution::Missing => None,
+            PreparedTypeDeclResolution::Failed { .. } => {
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::PreparationFailure,
+                );
+                None
+            }
+        }
     }
 
     /// Lower a prepared declaration's `body` carrying the macro-surface

@@ -2439,6 +2439,11 @@ impl PartialReasonSet {
     /// demand's host-recursion ceiling. Structural worklist depth is not
     /// counted by this rail.
     pub const CONNECTED_QUERY_DEPTH_LIMIT: Self = Self(1 << 12);
+    /// An exact authored declaration was available, but at least one imported
+    /// dependency owner could not be resolved. The usable authored subset is
+    /// preserved for fail-closed consumers and is never warm-admitted as a
+    /// complete result.
+    pub const MISSING_DEPENDENCY: Self = Self(1 << 13);
 
     /// The empty reason set (no partial reasons recorded).
     #[must_use]

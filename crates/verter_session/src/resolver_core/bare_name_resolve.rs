@@ -28,9 +28,8 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
-use verter_semantic::analysis::type_solver::PreparedTypeDecl;
 
-use super::prepared_decl::{ImportBinding, TypeParamBinding};
+use super::prepared_decl::{ImportBinding, PreparedTypeDeclResolution, TypeParamBinding};
 use crate::resolver_core::ResolverContext;
 
 /// Declaration-scope context used by bare-name root-identity resolution.
@@ -422,12 +421,13 @@ fn resolve_imported_type_root_identity(
     resolved
 }
 
-/// Resolve a `PreparedTypeDecl` for a root identity using ctx-owned
-/// caches. Mirrors `SessionSolverHost::resolve_prepared_type_decl`:
+/// Resolve a prepared-declaration projection outcome for a root identity using
+/// ctx-owned caches. Strict declarations remain cache-owned; a recoverable
+/// exact authored failure is returned explicitly as `AuthoredPartial`.
 ///
-/// 1. Direct `prepared_type_decl` lookup at the root's canonical.
+/// 1. Direct projection lookup at the root's canonical.
 /// 2. Import-root walk via `resolve_imported_type_root`, then retry
-///    `prepared_type_decl` at the resolved `(canonical, name)`.
+///    at the resolved exact `(canonical, owner, name)`.
 ///
 /// **Script-setup type-parameter bindings are NOT reachable through
 /// this function.** Script-setup parameters are not type-aliases and
@@ -445,17 +445,23 @@ pub(crate) fn resolve_prepared_type_decl_via_host(
     _scope_canonical_id: Option<&str>,
     _scope_payload: Option<&DeclarationScopePayload>,
     root_identity: &ResolvedRootIdentity,
-) -> Option<Arc<PreparedTypeDecl>> {
-    if let Some(prepared) = ctx.prepared_type_decl_return_only(
-        &root_identity.canonical_id,
-        root_identity.owner,
-        &root_identity.symbol_name,
-    ) {
-        return Some(prepared);
+) -> PreparedTypeDeclResolution {
+    let read = |identity: &ResolvedRootIdentity| {
+        let Some(bundle) = ctx.prepared_decl_bundle(identity.canonical_id.as_ref()) else {
+            return PreparedTypeDeclResolution::Missing;
+        };
+        bundle
+            .prepared_type_decls
+            .get_in_for_projection(identity.owner, identity.symbol_name.as_ref())
+    };
+
+    let direct = read(root_identity);
+    if !direct.is_missing() {
+        return direct;
     }
 
     if root_identity.canonical_id.is_empty() {
-        return None;
+        return PreparedTypeDeclResolution::Missing;
     }
 
     // Facts-returning form + tracer record (see
@@ -466,16 +472,14 @@ pub(crate) fn resolve_prepared_type_decl_via_host(
         &root_identity.symbol_name,
     );
     ctx.observe_borrowed_signature(&route_facts);
-    let final_identity = final_identity?;
+    let Some(final_identity) = final_identity else {
+        return PreparedTypeDeclResolution::Missing;
+    };
     if final_identity == *root_identity {
-        return None;
+        return PreparedTypeDeclResolution::Missing;
     }
 
-    ctx.prepared_type_decl_return_only(
-        &final_identity.canonical_id,
-        final_identity.owner,
-        &final_identity.symbol_name,
-    )
+    read(&final_identity)
 }
 
 /// Resolve an unqualified namespace-member reference to its QUALIFIED sibling

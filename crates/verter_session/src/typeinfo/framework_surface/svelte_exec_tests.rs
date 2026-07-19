@@ -211,6 +211,22 @@ fn exported_route_closure_keeps_same_name_class_owners_disjoint() {
              <div />";
     let (host, _view) = host_with_svelte(canonical, source);
 
+    let state = host
+        .routed_shallow_state(canonical)
+        .expect("route-owner fixture indexes");
+    let instance_owner = verter_type_expr::TopLevelOwnerId::instance(0);
+    let module_owner = verter_type_expr::TopLevelOwnerId::module(0);
+    assert_eq!(
+        state.required_declaration_import_names_in(instance_owner, "Shared"),
+        rustc_hash::FxHashSet::from_iter(["InstanceDep".to_string()]),
+        "the instance declaration-carrier closure is exact-owner"
+    );
+    assert_eq!(
+        state.required_declaration_import_names_in(module_owner, "Shared"),
+        rustc_hash::FxHashSet::from_iter(["ModuleDep".to_string()]),
+        "the module declaration-carrier closure is exact-owner"
+    );
+
     let instance = host.required_import_routes_for_exported_route(
         canonical,
         "InstanceShared",
@@ -1815,8 +1831,44 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect("svelte facts");
     let props_type = facts.props_type.as_ref().expect("props type");
+    let props_owner = verter_type_expr::TopLevelOwnerId::instance(0);
+    let preparation = ctx
+        .prepared_decl_bundle(component)
+        .expect("prepared declaration bundle")
+        .prepared_type_decls
+        .get_in_for_projection(props_owner, "Props");
+    match preparation {
+        crate::resolver_core::prepared_decl::PreparedTypeDeclResolution::AuthoredPartial {
+            root_identity,
+            declaration,
+            failure:
+                crate::resolver_core::prepared_decl::PreparationFailure::MissingExternalOwner {
+                    local_name,
+                },
+        } => {
+            assert_eq!(root_identity.owner, props_owner);
+            assert_eq!(root_identity.symbol_name.as_ref(), "Props");
+            assert_eq!(local_name, "Args");
+            assert!(
+                declaration.member_index.contains_key("bad")
+                    && declaration.member_index.contains_key("good"),
+                "the exact authored declaration survives as a partial carrier"
+            );
+        }
+        other => panic!("expected exact authored partial preparation, got {other:?}"),
+    }
+
+    let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
     let surface =
         navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let completeness = crate::request_context::current_cold_compute_completeness();
+    assert!(
+        completeness.is_partial()
+            && completeness
+                .reasons()
+                .contains(crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY),
+        "an unresolved imported owner produces typed MissingDependency partiality, got {completeness:?}"
+    );
     let dispatch = ctx.dispatch();
     let context = crate::semantic_query::ProjectionReductionContext::published(
         crate::semantic_query::ProjectionMode::Navigate,
@@ -1828,11 +1880,57 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
         .iter()
         .find(|m| m.name.as_ref() == "bad")
         .expect("the `bad` member is present");
+    let graph = ctx.project_type_store().semantic_graph();
+    let bad_data = graph.node_data(bad.value).expect("bad member graph node");
+    let crate::semantic_query::SemanticNodeData::InstantiationRef { base, args } =
+        bad_data.as_ref()
+    else {
+        panic!("the authored Snippet application remains a carrier, got {bad_data:?}");
+    };
+    assert_eq!(base.decl_name.as_ref(), "Snippet");
+    let [args_node] = args.as_ref() else {
+        panic!("Snippet carries exactly one Params argument, got {args:?}");
+    };
+    let args_data = graph.node_data(*args_node).expect("Args graph node");
+    assert_eq!(
+        args_data
+            .bare_ref_head()
+            .map(|(name, _scope)| name.as_ref()),
+        Some("Args"),
+        "the unresolved exact-owner import stays an authored BareRef"
+    );
     assert_eq!(
         CallableNodeView::new(&dispatch, bad.value).validated_snippet_positional_params(context),
         None,
         "an unresolved `Params` carrier fails closed (never a present slot \
          presented as binding-complete)"
+    );
+
+    let base = dispatch
+        .raise_semantic_type_source_to_hot(
+            &verter_type_expr::facts::SemanticTypeSource::Authored(props_type.locator.clone()),
+            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                scope_canonical_id: component,
+                scope_owner: props_owner,
+                context:
+                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                        crate::semantic_query::ProjectionMode::Navigate,
+                    ),
+                interior_failures: None,
+            },
+        )
+        .expect("props payload raises")
+        .node();
+    let read = dispatch.execute_read(crate::semantic_query::SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Shallow,
+        ),
+    });
+    assert!(
+        read.result_is_partial && read.cache_suppress,
+        "the usable carrier is Partial and ReturnOnly, never complete/cacheable"
     );
 
     // DTO surface half: the normalizer DROPS `bad` and keeps `good`.
@@ -1855,5 +1953,105 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
             .collect::<Vec<_>>(),
         vec!["item"],
         "the resolvable snippet publishes its ordered binding"
+    );
+}
+
+#[test]
+fn snippet_resolved_params_preparation_stays_complete_and_cacheable() {
+    let component = "/workspace/ResolvedSnippet.svelte";
+    let source = "<script lang=\"ts\">\n\
+             import type { Snippet } from './snippet';\n\
+             import type { Args } from './types';\n\
+             interface Props { row: Snippet<Args> }\n\
+             let { row }: Props = $props();\n\
+             void row;\n\
+             </script>\n\
+             <div />";
+    let (host, view) = workspace_host_with_svelte(
+        component,
+        source,
+        &[
+            (
+                "/workspace/snippet.ts",
+                "export interface Snippet<Params extends unknown[] = []> {\n\
+                     (this: void, ...args: Params): { __brand: 'snippet' };\n\
+                     }\n",
+            ),
+            (
+                "/workspace/types.ts",
+                "export type Args = [item: string];\n",
+            ),
+        ],
+    );
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let props_owner = verter_type_expr::TopLevelOwnerId::instance(0);
+
+    let preparation = ctx
+        .prepared_decl_bundle(component)
+        .expect("prepared declaration bundle")
+        .prepared_type_decls
+        .get_in_for_projection(props_owner, "Props");
+    let crate::resolver_core::prepared_decl::PreparedTypeDeclResolution::Complete(declaration) =
+        preparation
+    else {
+        panic!("fully resolved Props must prepare completely, got {preparation:?}");
+    };
+    assert_eq!(declaration.root_identity.owner, props_owner);
+    assert!(declaration.member_index.contains_key("row"));
+
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, component)
+        .expect("svelte facts");
+    let props_type = facts.props_type.as_ref().expect("props type");
+    let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
+    let surface =
+        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    assert_eq!(
+        crate::request_context::current_cold_compute_completeness(),
+        crate::semantic_query::ResultCompleteness::Complete,
+        "a fully resolved declaration remains Complete"
+    );
+
+    let row = surface
+        .members
+        .iter()
+        .find(|member| member.name.as_ref() == "row")
+        .expect("resolved row member");
+    let dispatch = ctx.dispatch();
+    let params = CallableNodeView::new(&dispatch, row.value)
+        .validated_snippet_positional_params(
+            crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Navigate,
+            ),
+        )
+        .expect("resolved Args tuple validates");
+    assert_eq!(params.len(), 1);
+
+    let base = dispatch
+        .raise_semantic_type_source_to_hot(
+            &verter_type_expr::facts::SemanticTypeSource::Authored(props_type.locator.clone()),
+            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                scope_canonical_id: component,
+                scope_owner: props_owner,
+                context:
+                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                        crate::semantic_query::ProjectionMode::Navigate,
+                    ),
+                interior_failures: None,
+            },
+        )
+        .expect("props payload raises")
+        .node();
+    let read = dispatch.execute_read(crate::semantic_query::SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Shallow,
+        ),
+    });
+    assert!(
+        !read.result_is_partial && !read.cache_suppress,
+        "the fully resolved path remains Complete and cacheable"
     );
 }

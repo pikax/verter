@@ -566,12 +566,20 @@ fn svelte_framework_surface_warm_hit_is_value_stable() {
 #[test]
 fn svelte_get_public_api_renders_the_declaration_shim() {
     let host = host();
-    let src = r#"<script lang="ts">
+    let src = r#"<script module lang="ts">
+  import type { WidgetProps } from './module-props';
+</script>
+<script lang="ts">
   import type { WidgetProps } from './props';
   let { props }: { props: WidgetProps } = $props();
   export function focus() {}
 </script>
 "#;
+    upsert_ts(
+        &host,
+        "/module-props.ts",
+        "export interface WidgetProps { wrongOwner: true }\n",
+    );
     upsert_ts(
         &host,
         "/props.ts",
@@ -624,6 +632,10 @@ fn svelte_get_public_api_renders_the_declaration_shim() {
         code.contains("import type") && code.contains("WidgetProps") && code.contains("./props"),
         "the type-only import prelude imports the preserved WidgetProps reference:\n{code}"
     );
+    assert!(
+        !code.contains("./module-props") && !code.contains("wrongOwner"),
+        "the instance props reference must never resolve through the same-name module owner:\n{code}"
+    );
 }
 
 #[test]
@@ -647,9 +659,25 @@ fn svelte_runes_state_export_projects_the_native_component_exports_generic() {
     let indexed = host
         .ensure_indexed_ready("/ExposePublic.svelte")
         .expect("the runes component indexes");
+    let instance_owner = verter_type_expr::TopLevelOwnerId::instance(0);
+    let module_owner = verter_type_expr::TopLevelOwnerId::module(0);
     assert!(
-        indexed.shallow_state.value_symbol("publicCount").is_some(),
-        "the exported local binding must remain addressable by the shared typeof resolver"
+        indexed
+            .shallow_state
+            .has_value_symbol_in(instance_owner, "publicCount"),
+        "the exported local binding must remain addressable in its exact instance owner"
+    );
+    assert!(
+        !indexed
+            .shallow_state
+            .has_value_symbol_in(module_owner, "publicCount"),
+        "the instance export must not alias the module owner"
+    );
+    assert!(
+        !indexed
+            .shallow_state
+            .has_type_symbol_in(instance_owner, "publicCount"),
+        "the runtime state binding must not alias type space"
     );
 
     let declaration = host

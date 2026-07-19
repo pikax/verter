@@ -71,6 +71,35 @@ pub enum PreparationFailure {
     AuthoredOrdinalOverflow { count: usize },
 }
 
+/// Projection-facing prepared-declaration lookup.
+///
+/// Strict prepared declarations are the only values admitted to the shared
+/// cache. When strict preparation fails solely because an exact authored
+/// declaration references an unresolved import, projection may consume an
+/// ephemeral declaration that retains the known authored shape while carrying
+/// the typed failure. The partial declaration is never written into a slot.
+#[derive(Debug, Clone)]
+pub enum PreparedTypeDeclResolution {
+    Complete(Arc<PreparedTypeDecl>),
+    AuthoredPartial {
+        root_identity: ResolvedRootIdentity,
+        declaration: Arc<PreparedTypeDecl>,
+        failure: PreparationFailure,
+    },
+    Missing,
+    Failed {
+        root_identity: ResolvedRootIdentity,
+        failure: PreparationFailure,
+    },
+}
+
+impl PreparedTypeDeclResolution {
+    #[must_use]
+    pub fn is_missing(&self) -> bool {
+        matches!(self, Self::Missing)
+    }
+}
+
 impl<T> PreparedDeclOutcome<T> {
     /// Collapse to the plain `Option` for direct/standalone callers
     /// (`prepare_exported_*`, tests) that do NOT admit into the write-once
@@ -461,30 +490,9 @@ fn prepare_type_decl_from_lowered(
         count.set(count.get().saturating_add(1));
     });
 
-    let mut prepared = PreparedTypeDecl::new(
-        ResolvedRootIdentity::new_in_owner(
-            Arc::clone(canonical_id),
-            owner,
-            interner.intern(symbol_name),
-        ),
-        lowered.kind,
-    );
-    // A merged interface carries its ordered contributor SLOTS so body
-    // lowering interns a `MergedDecl` peer-merge carrier rather than
-    // collapsing to a bare intersection.
-    if lowered.body.is_merged() {
-        prepared
-            .set_merged_contributors(lowered.body.contributors().len())
-            .map_err(|overflow| PreparationFailure::AuthoredOrdinalOverflow {
-                count: overflow.count,
-            })?;
-    }
-    prepared.type_parameters = lowered.narrow_type_parameters.clone();
-    prepared.vue_ignored_heritage = Arc::clone(&lowered.vue_ignored_heritage);
     let empty_deps = ClassifiedTypeDeps::default();
     let deps = deps.unwrap_or(&empty_deps);
-    prepared.local_deps = deps.local_deps.clone();
-    prepared.external_deps = deps
+    let external_deps = deps
         .external_deps
         .iter()
         .map(|dep| {
@@ -513,7 +521,7 @@ fn prepare_type_decl_from_lowered(
     // identity canonical all share pooled allocations minted through the
     // store-owned interner — a local entry costs zero fresh string copies
     // once the pool is warm.
-    prepared.name_resolution = if !symbol_name.contains('.') {
+    let name_resolution = if !symbol_name.contains('.') {
         match shared_name_resolution_base {
             Some(base) => Arc::clone(base),
             None => Arc::new(build_type_name_resolution_base(
@@ -568,6 +576,59 @@ fn prepare_type_decl_from_lowered(
         )?;
         Arc::new(table)
     };
+
+    finish_prepared_type_decl(
+        canonical_id,
+        state,
+        owner,
+        symbol_name,
+        lowered,
+        deps,
+        external_deps,
+        name_resolution,
+        interner,
+    )
+}
+
+/// Assemble the common prepared-declaration shell from producer-owned facts.
+/// Both strict cache preparation and the projection-only authored-partial
+/// path route here, so binder, member-index, heritage, and invalidation facts
+/// cannot drift between the two representations.
+#[allow(clippy::too_many_arguments)]
+fn finish_prepared_type_decl(
+    canonical_id: &Arc<str>,
+    state: &ShallowFileState,
+    owner: verter_type_expr::TopLevelOwnerId,
+    symbol_name: &str,
+    lowered: &LoweredTypeDecl,
+    deps: &ClassifiedTypeDeps,
+    external_deps: Vec<PreparedExternalDep>,
+    name_resolution: SharedNameResolutionBase,
+    interner: &IdentityInterner,
+) -> Result<PreparedTypeDecl, PreparationFailure> {
+    let mut prepared = PreparedTypeDecl::new(
+        ResolvedRootIdentity::new_in_owner(
+            Arc::clone(canonical_id),
+            owner,
+            interner.intern(symbol_name),
+        ),
+        lowered.kind,
+    );
+    // A merged interface carries its ordered contributor SLOTS so body
+    // lowering interns a `MergedDecl` peer-merge carrier rather than
+    // collapsing to a bare intersection.
+    if lowered.body.is_merged() {
+        prepared
+            .set_merged_contributors(lowered.body.contributors().len())
+            .map_err(|overflow| PreparationFailure::AuthoredOrdinalOverflow {
+                count: overflow.count,
+            })?;
+    }
+    prepared.type_parameters = lowered.narrow_type_parameters.clone();
+    prepared.vue_ignored_heritage = Arc::clone(&lowered.vue_ignored_heritage);
+    prepared.local_deps = deps.local_deps.clone();
+    prepared.external_deps = external_deps;
+    prepared.name_resolution = name_resolution;
 
     // Populate cache deps for invalidation
     let hash_u64 = u64::from_le_bytes(state.whole_hash[..8].try_into().unwrap_or_default());
@@ -652,6 +713,118 @@ fn insert_type_space_import_resolutions(
         table.insert(interner.intern(local_name), resolved);
     }
     Ok(())
+}
+
+/// Insert only import identities whose exact owner was canonicalized.
+///
+/// This is exclusively for the projection-only authored-partial carrier. A
+/// missing entry stays absent so later lowering retains the authored bare
+/// reference; no source owner, ordinary owner, or name-only fallback is ever
+/// invented. Strict preparation continues to use
+/// [`insert_type_space_import_resolutions`] and fails on the first miss.
+fn insert_resolvable_type_space_imports(
+    table: &mut FxHashMap<Arc<str>, ResolvedRootIdentity>,
+    state: &ShallowFileState,
+    owner: verter_type_expr::TopLevelOwnerId,
+    import_canonicalization: &ImportCanonicalization,
+    interner: &IdentityInterner,
+) {
+    for (local, _target) in state.owner_import_targets.iter() {
+        if local.owner != owner || state.has_type_symbol_in(owner, local.name.as_ref()) {
+            continue;
+        }
+        let Some(resolved) = import_canonicalization
+            .final_resolution
+            .get(&verter_type_expr::DeclKey::new(owner, local.name.as_ref()))
+        else {
+            continue;
+        };
+        table.insert(interner.intern(local.name.as_ref()), resolved.clone());
+    }
+}
+
+/// Build an ephemeral projection carrier for an exact authored declaration
+/// whose strict preparation failed with `MissingExternalOwner`.
+///
+/// The carrier copies the same producer-owned declaration facts as a strict
+/// prepared declaration, but retains only canonicalized external identities.
+/// It is returned directly to the active projection and is never admitted to
+/// the write-once prepared slot.
+fn prepare_authored_partial_type_decl(
+    canonical_id: &Arc<str>,
+    state: &ShallowFileState,
+    owner: verter_type_expr::TopLevelOwnerId,
+    symbol_name: &str,
+    import_canonicalization: &ImportCanonicalization,
+    interner: &IdentityInterner,
+) -> Result<Option<PreparedTypeDecl>, PreparationFailure> {
+    if !state.has_type_symbol_in(owner, symbol_name) {
+        return Ok(None);
+    }
+    let lowered = match state.type_decl_outcome_in(owner, symbol_name) {
+        DemandOutcome::LeaseMiss | DemandOutcome::Ready(None) => return Ok(None),
+        DemandOutcome::Ready(Some(lowered)) => lowered,
+    };
+    if state.is_import_local_in(owner, symbol_name) {
+        return Ok(None);
+    }
+
+    let classified = state.type_deps_in(owner, symbol_name);
+    let empty_deps = ClassifiedTypeDeps::default();
+    let deps = classified.as_deref().unwrap_or(&empty_deps);
+    let external_deps =
+        deps.external_deps
+            .iter()
+            .filter_map(|dep| {
+                let identity = import_canonicalization.final_resolution.get(
+                    &verter_type_expr::DeclKey::new(owner, dep.local_name.as_str()),
+                )?;
+                Some(PreparedExternalDep {
+                    canonical_id: identity.canonical_id.to_string(),
+                    owner: identity.owner,
+                    symbol_name: identity.symbol_name.to_string(),
+                })
+            })
+            .collect();
+
+    let mut table = FxHashMap::default();
+    table.reserve(
+        state.type_symbol_names().count()
+            + state.value_symbol_names().count()
+            + state.owner_import_targets.len(),
+    );
+    insert_file_symbol_resolutions(&mut table, canonical_id, state, owner, interner);
+    if symbol_name.contains('.') {
+        add_namespace_sibling_resolutions(
+            &mut table,
+            state,
+            owner,
+            symbol_name,
+            canonical_id,
+            None,
+            interner,
+        );
+    }
+    insert_resolvable_type_space_imports(
+        &mut table,
+        state,
+        owner,
+        import_canonicalization,
+        interner,
+    );
+
+    finish_prepared_type_decl(
+        canonical_id,
+        state,
+        owner,
+        symbol_name,
+        lowered.as_ref(),
+        deps,
+        external_deps,
+        Arc::new(table),
+        interner,
+    )
+    .map(Some)
 }
 
 /// Insert the VALUE-space import entries — same FINAL-definition
@@ -1183,6 +1356,56 @@ impl PreparedTypeDeclCache {
                 Ok(committed)
             }
             PreparedDeclOutcome::Failed(failure) => Err(failure),
+        }
+    }
+
+    /// Projection lookup that preserves a recoverable typed preparation
+    /// failure as an ephemeral exact-owner authored declaration.
+    ///
+    /// [`Self::get_in`] remains the strict cache API. This method never commits
+    /// an `AuthoredPartial` value into the write-once slot; callers must mark
+    /// the derived semantic result partial and non-cacheable.
+    pub fn get_in_for_projection(
+        &self,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol_name: &str,
+    ) -> PreparedTypeDeclResolution {
+        let root_identity = ResolvedRootIdentity::new_in_owner(
+            Arc::clone(&self.canonical_id),
+            owner,
+            self.interner.intern(symbol_name),
+        );
+        match self.get_in(owner, symbol_name) {
+            Ok(Some(declaration)) => PreparedTypeDeclResolution::Complete(declaration),
+            Ok(None) => PreparedTypeDeclResolution::Missing,
+            Err(failure @ PreparationFailure::MissingExternalOwner { .. }) => {
+                match prepare_authored_partial_type_decl(
+                    &self.canonical_id,
+                    self.state.as_ref(),
+                    owner,
+                    symbol_name,
+                    &self.import_canonicalization,
+                    &self.interner,
+                ) {
+                    Ok(Some(declaration)) => PreparedTypeDeclResolution::AuthoredPartial {
+                        root_identity,
+                        declaration: Arc::new(declaration),
+                        failure,
+                    },
+                    Ok(None) => PreparedTypeDeclResolution::Failed {
+                        root_identity,
+                        failure,
+                    },
+                    Err(recovery_failure) => PreparedTypeDeclResolution::Failed {
+                        root_identity,
+                        failure: recovery_failure,
+                    },
+                }
+            }
+            Err(failure) => PreparedTypeDeclResolution::Failed {
+                root_identity,
+                failure,
+            },
         }
     }
 

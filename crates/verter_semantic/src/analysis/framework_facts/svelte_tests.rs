@@ -64,14 +64,18 @@ fn module_export(exported_name: &str, local_name: &str, source_span: Span) -> Sv
     }
 }
 
-/// The macro-payload locator `capture` emits: anchored to the component's
-/// `default` value symbol under the analyzer's local-file convention, at the
-/// macro call's source-order ordinal and payload position.
-fn macro_payload_locator(macro_index: u32, payload: MacroPayloadPosition) -> AuthoredBodyLocator {
+/// Build the macro-payload locator `capture` emits for one explicit lexical
+/// owner: the component's `default` value symbol under the analyzer's
+/// local-file convention, at the macro call's ordinal and payload position.
+fn macro_payload_locator(
+    owner: TopLevelOwnerId,
+    macro_index: u32,
+    payload: MacroPayloadPosition,
+) -> AuthoredBodyLocator {
     AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
         anchor: AuthoredAnchor {
             canonical_id: Arc::from(""),
-            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            owner,
             symbol: Arc::from("default"),
             space: LocatorSymbolSpace::Value,
         },
@@ -80,15 +84,24 @@ fn macro_payload_locator(macro_index: u32, payload: MacroPayloadPosition) -> Aut
     })
 }
 
+fn instance_macro_payload_locator(
+    macro_index: u32,
+    payload: MacroPayloadPosition,
+) -> AuthoredBodyLocator {
+    macro_payload_locator(TopLevelOwnerId::instance(0), macro_index, payload)
+}
+
 /// A fully-synthetic authored-type payload ref (fixed hash bytes) for
-/// validate / hash-shape tests that construct candidates directly.
+/// validate / hash-shape tests that construct candidates directly. It uses
+/// the ordinary-file Module owner deliberately; capture fixtures use the
+/// separate instance helper and must never inherit this synthetic control.
 fn payload_ref(
     macro_index: u32,
     payload: MacroPayloadPosition,
     seed: u8,
 ) -> AuthoredTypePayloadRef {
     AuthoredTypePayloadRef {
-        locator: macro_payload_locator(macro_index, payload),
+        locator: macro_payload_locator(TopLevelOwnerId::ordinary_file(), macro_index, payload),
         payload_hash: [seed; 16],
     }
 }
@@ -105,8 +118,63 @@ fn captures_props_generic_argument_type() {
     let payload = props.props_type.as_ref().expect("props payload ref");
     assert_eq!(
         payload.locator,
-        macro_payload_locator(0, MacroPayloadPosition::TypeArgument)
+        instance_macro_payload_locator(0, MacroPayloadPosition::TypeArgument)
     );
+}
+
+#[test]
+fn captured_macro_payload_owner_is_instance_and_module_address_is_rejected() {
+    let src = "let { name } = $props<Props>();";
+    let c = capture(src);
+    let payload = c
+        .props
+        .as_ref()
+        .and_then(|props| props.props_type.as_ref())
+        .expect("props payload ref");
+    let module_locator = macro_payload_locator(
+        TopLevelOwnerId::module(0),
+        0,
+        MacroPayloadPosition::TypeArgument,
+    );
+    assert_eq!(
+        payload.locator,
+        instance_macro_payload_locator(0, MacroPayloadPosition::TypeArgument)
+    );
+    assert_ne!(
+        payload.locator, module_locator,
+        "module and instance macro addresses must remain distinct"
+    );
+
+    with_program(src, |program| {
+        let owners =
+            crate::analysis::top_level_owners::TopLevelOwnerTable::try_from_statement_owners(
+                program.body.len(),
+                std::iter::repeat_n(TopLevelOwnerId::instance(0), program.body.len()),
+            )
+            .expect("instance test owner table");
+        assert!(matches!(
+            lower_svelte_type_argument_at_with_owners(
+                program,
+                src,
+                None,
+                &owners,
+                TopLevelOwnerId::instance(0),
+                0,
+            ),
+            SvelteTypeArgumentLowering::TypeArgument(_)
+        ));
+        assert!(matches!(
+            lower_svelte_type_argument_at_with_owners(
+                program,
+                src,
+                None,
+                &owners,
+                TopLevelOwnerId::module(0),
+                0,
+            ),
+            SvelteTypeArgumentLowering::OwnerMismatch
+        ));
+    });
 }
 
 #[test]
@@ -119,7 +187,7 @@ fn captures_props_destructuring_annotation_type() {
     let payload = props.props_type.as_ref().expect("props payload ref");
     assert_eq!(
         payload.locator,
-        macro_payload_locator(0, MacroPayloadPosition::TypeAnnotation)
+        instance_macro_payload_locator(0, MacroPayloadPosition::TypeAnnotation)
     );
     assert_eq!(props.props_type_display.as_deref(), Some("Props"));
     assert_eq!(props.props_type_references, ["Props"]);
@@ -151,7 +219,7 @@ fn captures_javascript_jsdoc_props_annotation_type() {
         .expect("the JSDoc @type payload is captured");
     assert_eq!(
         payload.locator,
-        macro_payload_locator(0, MacroPayloadPosition::TypeAnnotation)
+        instance_macro_payload_locator(0, MacroPayloadPosition::TypeAnnotation)
     );
     let members = props
         .props_leaf_members
@@ -184,7 +252,7 @@ fn inline_and_instantiation_payloads_are_captured_not_dropped() {
     let inline = props.props_type.as_ref().expect("inline payload captured");
     assert_eq!(
         inline.locator,
-        macro_payload_locator(0, MacroPayloadPosition::TypeArgument)
+        instance_macro_payload_locator(0, MacroPayloadPosition::TypeArgument)
     );
 
     // An instantiation carrying type arguments captures at the annotation
@@ -197,7 +265,7 @@ fn inline_and_instantiation_payloads_are_captured_not_dropped() {
         .expect("instantiation payload captured");
     assert_eq!(
         inst.locator,
-        macro_payload_locator(0, MacroPayloadPosition::TypeAnnotation)
+        instance_macro_payload_locator(0, MacroPayloadPosition::TypeAnnotation)
     );
 
     // An authored generic argument still WINS over the annotation (the
@@ -208,7 +276,7 @@ fn inline_and_instantiation_payloads_are_captured_not_dropped() {
     let winner = props.props_type.as_ref().expect("generic-arg payload wins");
     assert_eq!(
         winner.locator,
-        macro_payload_locator(0, MacroPayloadPosition::TypeArgument)
+        instance_macro_payload_locator(0, MacroPayloadPosition::TypeArgument)
     );
 }
 
@@ -225,7 +293,7 @@ fn captures_props_from_eval_source_with_imports_and_exports() {
         .expect("the destructuring annotation must capture a props payload ref");
     assert_eq!(
         payload.locator,
-        macro_payload_locator(0, MacroPayloadPosition::TypeAnnotation)
+        instance_macro_payload_locator(0, MacroPayloadPosition::TypeAnnotation)
     );
     assert!(has_instance_export(&c, "focus"));
 }
@@ -670,7 +738,7 @@ fn captures_dispatcher_event_type_argument() {
         .expect("dispatcher payload ref");
     assert_eq!(
         payload.locator,
-        macro_payload_locator(0, MacroPayloadPosition::TypeArgument)
+        instance_macro_payload_locator(0, MacroPayloadPosition::TypeArgument)
     );
     assert_eq!(c.dispatcher_import_source.as_deref(), Some("svelte"));
 }
@@ -690,7 +758,7 @@ fn inline_literal_dispatcher_payload_is_captured() {
         .expect("inline dispatcher payload captured");
     assert_eq!(
         payload.locator,
-        macro_payload_locator(0, MacroPayloadPosition::TypeArgument)
+        instance_macro_payload_locator(0, MacroPayloadPosition::TypeArgument)
     );
     assert_eq!(c.dispatcher_import_source.as_deref(), Some("svelte"));
 }
@@ -717,11 +785,11 @@ fn props_and_dispatcher_calls_draw_distinct_macro_ordinals() {
         .expect("dispatcher payload ref");
     assert_eq!(
         props_locator,
-        macro_payload_locator(0, MacroPayloadPosition::TypeArgument)
+        instance_macro_payload_locator(0, MacroPayloadPosition::TypeArgument)
     );
     assert_eq!(
         dispatcher_locator,
-        macro_payload_locator(1, MacroPayloadPosition::TypeArgument)
+        instance_macro_payload_locator(1, MacroPayloadPosition::TypeArgument)
     );
     assert_ne!(props_locator, dispatcher_locator);
 }

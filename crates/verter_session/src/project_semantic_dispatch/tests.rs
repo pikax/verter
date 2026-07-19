@@ -1756,19 +1756,142 @@ fn dispatch_host_adapter_routes_per_base_scope() {
 
     // Trait methods route through `solver_host_for_base`. Without
     // prepared decls set up, `resolve_prepared_type_decl` returns
-    // `None` but the call succeeds for all scopes (no panic, no
+    // `Missing` but the call succeeds for all scopes (no panic, no
     // stale state between calls).
     let ri = ResolvedRootIdentity::new("/w/scope_a.ts", "Missing");
-    assert!(adapter.resolve_prepared_type_decl(anchor_a, &ri).is_none());
-    assert!(adapter.resolve_prepared_type_decl(anchor_b, &ri).is_none());
+    assert!(adapter
+        .resolve_prepared_type_decl(anchor_a, &ri)
+        .is_missing());
+    assert!(adapter
+        .resolve_prepared_type_decl(anchor_b, &ri)
+        .is_missing());
     assert!(adapter
         .resolve_prepared_type_decl(global_anchor, &ri)
-        .is_none());
+        .is_missing());
 
     // `utility_source` and `bare_ref_origin` behave per-scope; without
     // user shadowings these return `Builtin` / `Unknown` respectively.
     let _ = adapter.utility_source(anchor_a, "Partial");
     let _ = adapter.bare_ref_origin(anchor_a, "Foo");
+}
+
+#[test]
+fn dispatch_host_preserves_prepared_outcomes_and_final_hop_identity() {
+    use crate::resolver_core::prepared_decl::{PreparationFailure, PreparedTypeDeclResolution};
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/complete.ts",
+        "export interface Complete { value: string }",
+    );
+    upsert_ts(
+        &host,
+        "/w/partial.ts",
+        "import type { Missing } from './absent';\n\
+         export interface Partial { bad: Missing; good: string }",
+    );
+    upsert_ts(
+        &host,
+        "/w/failed.ts",
+        "import type { Missing } from './absent';\n\
+         declare global { interface GlobalOnly { bad: Missing } }\n\
+         export {};",
+    );
+    upsert_ts(
+        &host,
+        "/w/base.ts",
+        "export interface FinalTarget { value: number }",
+    );
+    upsert_ts(
+        &host,
+        "/w/barrel.ts",
+        "export type { FinalTarget } from './base'",
+    );
+
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let anchor_for = |canonical: &str| {
+        let indexed = host
+            .ensure_indexed_ready(canonical)
+            .unwrap_or_else(|| panic!("{canonical} indexes"));
+        graph.intern_node_with_scope(
+            SemanticNodeData::Primitive(PrimitiveKind::Never),
+            NodeScopeId::File {
+                canonical_id: Arc::from(canonical),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: indexed.whole_hash,
+                local_scope: None,
+            },
+        )
+    };
+    let adapter = SessionDispatchHost::new(&host);
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+
+    let complete = adapter.resolve_prepared_type_decl(
+        anchor_for("/w/complete.ts"),
+        &ResolvedRootIdentity::new_in_owner("/w/complete.ts", owner, "Complete"),
+    );
+    let PreparedTypeDeclResolution::Complete(complete) = complete else {
+        panic!("exact authored declaration must be Complete, got {complete:?}");
+    };
+    assert_eq!(complete.root_identity.owner, owner);
+
+    let partial = adapter.resolve_prepared_type_decl(
+        anchor_for("/w/partial.ts"),
+        &ResolvedRootIdentity::new_in_owner("/w/partial.ts", owner, "Partial"),
+    );
+    let PreparedTypeDeclResolution::AuthoredPartial {
+        root_identity,
+        declaration,
+        failure: PreparationFailure::MissingExternalOwner { local_name },
+    } = partial
+    else {
+        panic!("exact recoverable failure must be AuthoredPartial, got {partial:?}");
+    };
+    assert_eq!(root_identity.owner, owner);
+    assert_eq!(local_name, "Missing");
+    assert!(
+        declaration.member_index.contains_key("bad")
+            && declaration.member_index.contains_key("good")
+    );
+
+    assert!(adapter
+        .resolve_prepared_type_decl(
+            anchor_for("/w/complete.ts"),
+            &ResolvedRootIdentity::new_in_owner("/w/complete.ts", owner, "Absent"),
+        )
+        .is_missing());
+
+    let failed = adapter.resolve_prepared_type_decl(
+        anchor_for("/w/failed.ts"),
+        &ResolvedRootIdentity::new_in_owner("/w/failed.ts", owner, "GlobalOnly"),
+    );
+    let PreparedTypeDeclResolution::Failed {
+        root_identity,
+        failure: PreparationFailure::MissingExternalOwner { local_name },
+    } = failed
+    else {
+        panic!("non-file-surface authored failure must fail closed, got {failed:?}");
+    };
+    assert_eq!(root_identity.symbol_name.as_ref(), "GlobalOnly");
+    assert_eq!(local_name, "Missing");
+
+    let final_hop = adapter.resolve_prepared_type_decl(
+        anchor_for("/w/barrel.ts"),
+        &ResolvedRootIdentity::new_in_owner("/w/barrel.ts", owner, "FinalTarget"),
+    );
+    let PreparedTypeDeclResolution::Complete(final_hop) = final_hop else {
+        panic!("barrel route must resolve to a Complete final declaration, got {final_hop:?}");
+    };
+    assert_eq!(
+        (
+            final_hop.root_identity.canonical_id.as_ref(),
+            final_hop.root_identity.owner,
+            final_hop.root_identity.symbol_name.as_ref(),
+        ),
+        ("/w/base.ts", owner, "FinalTarget"),
+        "the projection outcome preserves the final exact defining identity"
+    );
 }
 
 /// `build_resolve_decl` records the declaration's origin scope in

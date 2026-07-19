@@ -1363,7 +1363,14 @@ impl VerterHost {
                         kind == verter_semantic::analysis::type_eval::TypeDeclKind::Class
                     })
                 {
-                    for required_name in state.required_import_names_in(owner, symbol_name) {
+                    // A class's public declaration carrier includes member
+                    // annotations that are intentionally absent from its
+                    // structural dependency subset. Preserve those imports
+                    // through the exact authored owner; a same-name class in
+                    // another Svelte script owner is a distinct closure.
+                    for required_name in
+                        state.required_declaration_import_names_in(owner, symbol_name)
+                    {
                         result
                             .entry(required_name)
                             .and_modify(|existing| {

@@ -33,6 +33,12 @@ use verter_type_expr::{DeclKey, TopLevelOwnerId, TypeExpr};
 // Core types
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy)]
+enum RequiredImportClosure {
+    Structural,
+    DeclarationCarrier,
+}
+
 /// Authoritative shallow state for one imported file.
 ///
 /// Keyed by `(canonical_id, whole_hash)`.  Invalidated when the file’s
@@ -2113,6 +2119,34 @@ impl ShallowFileState {
         owner: TopLevelOwnerId,
         type_name: &str,
     ) -> FxHashSet<String> {
+        self.required_import_names_for_closure_in(
+            owner,
+            type_name,
+            RequiredImportClosure::Structural,
+        )
+    }
+
+    /// Exact-owner transitive import closure required to reproduce a type's
+    /// declaration carrier. Unlike the structural closure, this retains
+    /// dependencies that occur only in class member declarations.
+    pub(crate) fn required_declaration_import_names_in(
+        &self,
+        owner: TopLevelOwnerId,
+        type_name: &str,
+    ) -> FxHashSet<String> {
+        self.required_import_names_for_closure_in(
+            owner,
+            type_name,
+            RequiredImportClosure::DeclarationCarrier,
+        )
+    }
+
+    fn required_import_names_for_closure_in(
+        &self,
+        owner: TopLevelOwnerId,
+        type_name: &str,
+        closure: RequiredImportClosure,
+    ) -> FxHashSet<String> {
         let mut required_imports = FxHashSet::default();
         let mut visited = FxHashSet::default();
         let mut pending = vec![type_name.to_string()];
@@ -2140,7 +2174,11 @@ impl ShallowFileState {
                 let Some(lowered) = self.decl_bodies.type_decl_in(owner, &current) else {
                     continue;
                 };
-                for reference in &lowered.structural_dependency_paths {
+                let references = match closure {
+                    RequiredImportClosure::Structural => &lowered.structural_dependency_paths,
+                    RequiredImportClosure::DeclarationCarrier => &lowered.declaration_carrier_paths,
+                };
+                for reference in references {
                     let root = reference.root().to_string();
                     if is_import_local(&root) {
                         required_imports.insert(root);
