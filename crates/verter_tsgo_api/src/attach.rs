@@ -194,6 +194,25 @@ impl TsgoLspConnection {
     pub fn ownership(&self) -> ConnectionOwnership {
         self.ownership
     }
+
+    /// The crate-internal raw-connection accessor for the toolchain validator
+    /// ([`crate::toolchain::validation`]): an OWNED, freshly-spawned connection
+    /// must run its `initialize` handshake through
+    /// [`TsgoAttach::lsp_handshake`] before any attach composition.
+    pub(crate) fn json_rpc(&self) -> &JsonRpcConnection {
+        &self.conn
+    }
+
+    /// Terminate an OWNED throwaway connection: close the wire and kill + reap
+    /// the child. Crate-internal — used by the toolchain validator after a
+    /// capability smoke; production teardown stays on [`TsgoAttach`].
+    pub(crate) async fn terminate(mut self) {
+        let _ = self.conn.close().await;
+        if let Some(mut child) = self.child.take() {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+    }
 }
 
 impl std::fmt::Debug for TsgoLspConnection {
@@ -271,7 +290,15 @@ impl TsgoLspConnectionSource for SpawnOwnTsgoLsp {
 }
 
 /// Spawn `tsgo --lsp --stdio` and wrap its stdio in a [`JsonRpcConnection`].
-async fn spawn_own_lsp_connection(exe: &Path, cwd: &Path) -> TsgoApiResult<TsgoLspConnection> {
+///
+/// `pub(crate)` for the toolchain validator's capability smoke
+/// ([`crate::toolchain::validation`]). The child is `kill_on_drop`: a dropped
+/// connection (e.g. a bounded validation timing out mid-handshake) never leaks
+/// the engine process.
+pub(crate) async fn spawn_own_lsp_connection(
+    exe: &Path,
+    cwd: &Path,
+) -> TsgoApiResult<TsgoLspConnection> {
     let mut child = tokio::process::Command::new(exe)
         .arg("--lsp")
         .arg("--stdio")
@@ -279,6 +306,7 @@ async fn spawn_own_lsp_connection(exe: &Path, cwd: &Path) -> TsgoApiResult<TsgoL
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| {
             TsgoApiError::Spawn(format!("spawn `{} --lsp --stdio`: {e}", exe.display()))

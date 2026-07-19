@@ -17,5 +17,7 @@
 //! branch's lane).
 
 pub mod bundle;
+pub mod discovery;
 pub mod platform;
 pub mod policy;
+pub mod validation;

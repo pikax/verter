@@ -48,8 +48,10 @@ impl TsgoPlatform {
 }
 
 /// The ONE manifest: every supported desktop target. Generated consumers
-/// (resolver, bundle, cache, packaging) MUST derive from this table.
-pub const PLATFORM_MANIFEST: &[TsgoPlatform] = &[
+/// (resolver, bundle, cache, packaging) MUST derive from this table. A
+/// `static` (not `const`) so there is exactly ONE materialization — entry
+/// identity (`ptr::eq`) is meaningful.
+pub static PLATFORM_MANIFEST: &[TsgoPlatform] = &[
     TsgoPlatform {
         npm_os: "darwin",
         npm_arch: "arm64",
