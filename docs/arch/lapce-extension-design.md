@@ -132,7 +132,7 @@ VS Code activates on `onLanguage:vue`, `onLanguage:svelte` (plus the TS/JS varia
 
 The `verter-lsp` CLI (`crates/verter_lsp/src/main.rs`, hand-rolled `CliArgs::parse`, not clap) accepts: `--type-provider={auto|tsgo|tsserver|extension|off}`, `--tsdk=<path>`, `--plugin-path=<path>`, `--mcp-port=<n>` (parsed but **ignored** — LSP no longer embeds MCP), `--mcp-lint-preset=<preset>` (ignored), and a **positional workspace root**.
 
-**Decisive simplification for Lapce: use `--type-provider=tsgo`.** In `main.rs`, `--tsdk` is consumed **only** by the tsserver path (`find_tsserver(args.tsdk…)`). `try_spawn_tsgo` ignores `--tsdk` entirely and discovers the native TypeScript 7 binary via `find_tsgo_binary_canonical(workspace_root)` (order: `VERTER_TSGO_BIN` env → workspace `node_modules` → PATH → npm/npx cache). The volt does **not** need to ship a TypeScript SDK. The user installs `typescript@7` per-project, which installs the matching `@typescript/typescript-<platform>-<arch>` binary.
+**Decisive simplification for Lapce: use `--type-provider=tsgo`.** In `main.rs`, `--tsdk` is consumed **only** by the tsserver path (`find_tsserver(args.tsdk…)`). `try_spawn_tsgo` ignores `--tsdk` entirely and resolves the native TypeScript 7 binary via the `verter_tsgo_api::toolchain` 4-tier resolver (`VERTER_TSGO_BIN` → shared PATH → project-local `node_modules` → update cache → bundled sidecar; each candidate is version- and capability-validated). The volt does **not** need to ship a TypeScript SDK. The user installs `typescript@7` per-project, which installs the matching `@typescript/typescript-<platform>-<arch>` binary.
 
 `--plugin-path` (tsserver-only) and the `--mcp-*` flags are **omitted** for the Lapce volt.
 
