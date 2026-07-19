@@ -45,6 +45,27 @@ impl TsgoPlatform {
     pub fn bundled_executable_rel_path(&self) -> PathBuf {
         PathBuf::from("tsgo").join("lib").join(self.executable)
     }
+
+    /// The executable names PATH traversal looks for, in order: the native
+    /// engine first, then the legacy native-preview name; on Windows each bare
+    /// name is followed by its npm `.cmd` shim. The ONE source of these names
+    /// — the manifest contract is that no consumer hardcodes per-OS names.
+    pub fn path_executable_names(&self) -> &'static [&'static str] {
+        if self.npm_os == "win32" {
+            &["tsc.exe", "tsc.cmd", "tsgo.exe", "tsgo.cmd"]
+        } else {
+            &["tsc", "tsgo"]
+        }
+    }
+
+    /// The legacy native-preview `.bin` shim name (`tsgo` / `tsgo.cmd`).
+    pub fn legacy_bin_shim(&self) -> &'static str {
+        if self.npm_os == "win32" {
+            "tsgo.cmd"
+        } else {
+            "tsgo"
+        }
+    }
 }
 
 /// The ONE manifest: every supported desktop target. Generated consumers
@@ -286,6 +307,35 @@ mod tests {
             } else {
                 assert!(!row.executable.ends_with(".exe"), "{row:?}");
                 assert!(!row.bin_shim.ends_with(".cmd"), "{row:?}");
+            }
+        }
+    }
+
+    // ── DISCRIMINATING: the PATH-trial names and the legacy shim are derived
+    //    from the manifest row, consistently per OS family — the native engine
+    //    name leads, and every name carries the row's expected extension. ──────
+    #[test]
+    fn path_and_legacy_names_derive_from_the_manifest_row() {
+        for row in PLATFORM_MANIFEST {
+            let names = row.path_executable_names();
+            assert_eq!(names[0], row.executable, "the native engine leads {row:?}");
+            if row.npm_os == "win32" {
+                assert_eq!(names.len(), 4, "{row:?}");
+                assert!(
+                    names
+                        .iter()
+                        .all(|n| n.ends_with(".exe") || n.ends_with(".cmd")),
+                    "{row:?}"
+                );
+                assert!(row.legacy_bin_shim().ends_with(".cmd"), "{row:?}");
+                assert!(
+                    names[2].starts_with("tsgo"),
+                    "the legacy name follows: {row:?}"
+                );
+            } else {
+                assert_eq!(names.len(), 2, "{row:?}");
+                assert_eq!(names[1], "tsgo", "the legacy name follows: {row:?}");
+                assert!(!row.legacy_bin_shim().ends_with(".cmd"), "{row:?}");
             }
         }
     }

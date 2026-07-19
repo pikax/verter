@@ -349,7 +349,7 @@ pub fn enumerate_candidates(request: &ResolutionRequest) -> CandidateEnumeration
             if dir.as_os_str().is_empty() || !dirs.insert(dir.as_path()) {
                 continue;
             }
-            for name in path_executable_names(platform) {
+            for name in platform.path_executable_names() {
                 let candidate = dir.join(name);
                 if candidate.is_file() {
                     push(&mut out, &mut seen, candidate, Provenance::SharedPath);
@@ -409,7 +409,7 @@ pub fn enumerate_candidates(request: &ResolutionRequest) -> CandidateEnumeration
                 push(&mut out, &mut seen, nested, Provenance::ProjectLocal);
             }
             // (d) The `.bin` shims (native first, then the legacy name).
-            for shim in [platform.bin_shim, legacy_tsgo_shim(platform)] {
+            for shim in [platform.bin_shim, platform.legacy_bin_shim()] {
                 let candidate = node_modules.join(".bin").join(shim);
                 if candidate.is_file() {
                     push(&mut out, &mut seen, candidate, Provenance::ProjectLocal);
@@ -453,27 +453,6 @@ pub fn enumerate_candidates(request: &ResolutionRequest) -> CandidateEnumeration
     }
 
     out
-}
-
-/// The executable names PATH traversal looks for, in order (native engine
-/// first, then the legacy native-preview name). On Windows the npm `.cmd`
-/// shims follow their `.exe` counterparts.
-fn path_executable_names(platform: &TsgoPlatform) -> Vec<&'static str> {
-    let _ = platform;
-    if cfg!(windows) {
-        vec!["tsc.exe", "tsc.cmd", "tsgo.exe", "tsgo.cmd"]
-    } else {
-        vec!["tsc", "tsgo"]
-    }
-}
-
-/// The legacy native-preview `.bin` shim name for the platform.
-fn legacy_tsgo_shim(platform: &TsgoPlatform) -> &'static str {
-    if platform.npm_os == "win32" {
-        "tsgo.cmd"
-    } else {
-        "tsgo"
-    }
 }
 
 /// The per-user cache identity (`verter-tsgo-v1/<user>/…`).
@@ -765,7 +744,7 @@ mod tests {
         std::fs::create_dir_all(&project_root).unwrap();
         let nm = Path::new("proj/node_modules");
         let local_flat = fixture.file(&nm.join(&pkg_rel));
-        let local_bin = fixture.file(&nm.join(".bin").join(host.executable));
+        let local_bin = fixture.file(&nm.join(".bin").join(host.bin_shim));
         let local_pnpm = fixture.file(
             &nm.join(".pnpm")
                 .join(format!(
@@ -987,6 +966,94 @@ mod tests {
         assert_eq!(
             enumeration.candidates[0].provenance,
             Provenance::EnvOverride
+        );
+    }
+
+    // ── DISCRIMINATING (H10): the PATH tier enumerates EXACTLY the names the
+    //    platform manifest publishes — per-OS binary names have ONE source
+    //    (the manifest), never a hardcoded branch in discovery. ────────────────
+    #[test]
+    fn path_tier_enumerates_exactly_the_manifest_names() {
+        let fixture = Fixture::new("pathnames");
+        let host = host_platform().unwrap();
+        let dir = fixture.path("sharedbin");
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in host.path_executable_names() {
+            fixture.file(&Path::new("sharedbin").join(name));
+        }
+        let enumeration = enumerate_candidates(&request(None, None, vec![dir.clone()], None, None));
+        let mut found: Vec<String> = enumeration
+            .candidates
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        let mut expected: Vec<String> = host
+            .path_executable_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        expected.sort();
+        expected.dedup();
+        assert_eq!(
+            found, expected,
+            "the PATH tier must enumerate exactly the manifest's names"
+        );
+        assert!(
+            enumeration
+                .candidates
+                .iter()
+                .all(|c| c.provenance == Provenance::SharedPath),
+            "PATH hits are SharedPath: {:?}",
+            enumeration.candidates
+        );
+    }
+
+    // ── DISCRIMINATING (H10): the legacy `.bin` shim is found via the
+    //    manifest's legacy name (no duplicated OS branch in discovery). ────────
+    #[test]
+    fn legacy_bin_shim_is_found_via_the_manifest_name() {
+        let fixture = Fixture::new("legacyshim");
+        let host = host_platform().unwrap();
+        let shim = fixture.file(&Path::new("proj/node_modules/.bin").join(host.legacy_bin_shim()));
+        let enumeration = enumerate_candidates(&request(
+            Some(fixture.path("proj")),
+            None,
+            vec![],
+            None,
+            None,
+        ));
+        assert!(
+            enumeration
+                .candidates
+                .iter()
+                .any(|c| c.path == shim && c.provenance == Provenance::ProjectLocal),
+            "the legacy shim at the manifest's name must be enumerated: {:?}",
+            enumeration.candidates
+        );
+    }
+
+    // ── DISCRIMINATING (B7): the full fixture's `.bin` candidate IS the
+    //    platform `bin_shim` name — production enumerates `bin_shim`, so a
+    //    fixture planting any other name (e.g. the package executable)
+    //    silently mismatches the accept list on Windows. Tie them here. ────────
+    #[test]
+    fn full_fixture_bin_candidate_matches_the_platform_bin_shim() {
+        let f = full_fixture("binshim");
+        let host = host_platform().unwrap();
+        assert_eq!(
+            f.local_bin.file_name().unwrap().to_string_lossy().as_ref(),
+            host.bin_shim,
+            "the fixture's `.bin` file name must equal the platform bin_shim"
+        );
+        let enumeration = enumerate_candidates(&f.request());
+        assert!(
+            enumeration
+                .candidates
+                .iter()
+                .any(|c| c.path == f.local_bin && c.provenance == Provenance::ProjectLocal),
+            "the fixture `.bin` candidate must be enumerated: {:?}",
+            enumeration.candidates
         );
     }
 
