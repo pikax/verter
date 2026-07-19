@@ -186,6 +186,7 @@ mod tests {
         let analysis = FileAnalysisSnapshot {
             imports: vec![verter_semantic::analysis::AnalyzedImport {
                 source: "vue".into(),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_only: false,
                 bindings: vec![],
                 span: verter_span::Span::new(24, 49),
@@ -220,6 +221,7 @@ mod tests {
         let analysis = FileAnalysisSnapshot {
             macros: (vec![AnalyzedMacro {
                 kind: AnalyzedMacroKind::DefineProps,
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,
                 type_references: vec![],
                 binding_name: None,
@@ -368,6 +370,7 @@ mod tests {
         let analysis = FileAnalysisSnapshot {
             imports: vec![verter_semantic::analysis::AnalyzedImport {
                 source: "vue".into(),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_only: false,
                 bindings: vec![],
                 span: verter_span::Span::new(24, 49),
@@ -403,6 +406,7 @@ mod tests {
         let analysis = FileAnalysisSnapshot {
             macros: (vec![AnalyzedMacro {
                 kind: AnalyzedMacroKind::DefineProps,
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,
                 type_references: vec![],
                 binding_name: None,
@@ -442,6 +446,7 @@ mod tests {
         let analysis = FileAnalysisSnapshot {
             macros: (vec![AnalyzedMacro {
                 kind: AnalyzedMacroKind::DefineProps,
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: false,
                 type_references: vec![],
                 binding_name: None,

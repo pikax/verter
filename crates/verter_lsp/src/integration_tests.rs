@@ -2338,7 +2338,7 @@ defineProps<{ value: Unsafe }>()
     assert_eq!(error.detail_code(), "unsupported-declaration-shape");
     assert_eq!(
         error.subject(),
-        verter_compiler::tsc::TscFailureSubject::Macro { syntax_index: 0 }
+        verter_session::PublicApiProjectionSubject::Macro { syntax_index: 0 }
     );
     assert_eq!(
         error.declaration_shape_reason().map(|reason| reason.code()),

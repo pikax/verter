@@ -3,14 +3,14 @@
 //!
 //! The lane produces byte-identical `Main` output to the `HostBacked`
 //! session wrapper through the SAME shared substrate + host-side
-//! assembly, without the per-file wrapper overhead, and softens exactly
-//! the unresolved-imported-macro fatality to a warning.
+//! assembly, without the per-file wrapper overhead. Unavailable macro roots
+//! fail closed; only row-local runtime-type degradation remains a warning.
 //!
 //! | Test | Discriminating assertion |
 //! | ---- | ------------------------ |
 //! | `rail_a_ide_carrier_is_distinct_from_render_output` | IDE TSX carrier is NOT the render lane's JS `Main` (a regression routing IDE through render would collapse them). |
 //! | `runtime_render_matches_host_backed_wrapper_output` | Byte-identical `Main` for simple / local-macro / cross-file-macro, prod+dev, sourcemap, CodeTransform cases. |
-//! | `runtime_render_unresolved_imported_macro_type_is_soft` | Unresolved imported macro renders + warns (not fatal, not empty). |
+//! | `runtime_render_unresolved_imported_macro_type_is_fatal` | An unavailable authoritative macro root remains fatal and emits no partial render. |
 //! | `runtime_render_local_type_error_is_fatal` | Local invalid macro usage stays fatal. |
 //! | `runtime_render_syntax_error_is_fatal` | Template/script syntax error stays fatal. |
 //! | `runtime_render_bypasses_stage_c_wrapper` | Zero wrapper-op counter hits on a simple render; >0 on HostBacked. |
@@ -410,53 +410,39 @@ fn runtime_render_matches_host_backed_wrapper_output() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 4 — unresolved imported macro type is SOFT on RuntimeRender
+// Test 4 — unavailable authoritative macro roots stay FATAL
 // ---------------------------------------------------------------------------
 
 /// `defineProps<ImportedT>()` whose import target is ABSENT: on
-/// RuntimeRender the file renders successfully (the compiler degrades the
-/// type to `Unknown`) and surfaces a WARNING diagnostic — NOT a fatal
-/// error, NOT empty code. DISCRIMINATING: the HostBacked lane returns this
-/// as a fatal error entry, so the assertions distinguish the two.
+/// RuntimeRender the producer returns a typed unresolved root outcome. The
+/// compiler must fail closed instead of treating a missing authoritative root
+/// as a row-local degradation and emitting a partial component.
 #[test]
-fn runtime_render_unresolved_imported_macro_type_is_soft() {
+fn runtime_render_unresolved_imported_macro_type_is_fatal() {
     let src = "<script setup lang=\"ts\">\nimport type { MissingT } from './does-not-exist'\ndefineProps<MissingT>()\n</script>\n<template><div /></template>\n";
 
     let host_r = new_host();
     let render = render_one(&host_r, "/proj/Unresolved.vue", src);
-    assert!(
-        render.errors.is_empty(),
-        "RuntimeRender must NOT treat an unresolved imported macro as fatal: {:?}",
-        render.errors
+    assert_eq!(
+        render.errors,
+        vec!["[/proj/Unresolved.vue] Authoritative runtime semantics for macro syntax index 0 are unresolved (missing-declaration).".to_owned()],
+        "RuntimeRender must preserve the typed unavailable-root diagnostic"
     );
     assert!(
-        !render.code.is_empty(),
-        "RuntimeRender must still render (compiler degrades the type to Unknown)"
+        render.code.is_empty(),
+        "a fatal macro-root outcome must not emit partial component code"
     );
     assert!(
-        !render.diagnostics.is_empty(),
-        "RuntimeRender must surface a warning diagnostic for the unresolved macro type"
-    );
-    assert!(
-        render
-            .diagnostics
-            .iter()
-            .all(|d| d.severity == crate::types::HostSeverity::Warning),
-        "the soft diagnostic must be WARNING severity, not error: {:?}",
-        render
-            .diagnostics
-            .iter()
-            .map(|d| format!("{:?}:{}", d.severity, d.code))
-            .collect::<Vec<_>>()
+        render.diagnostics.is_empty(),
+        "fatal outcomes must not leak a duplicate success-warning rail"
     );
 
-    // The HostBacked lane treats the SAME input as fatal — proves the soft
-    // behavior is lane-specific, not a global relaxation.
+    // Both runtime lanes consume the same authoritative root policy.
     let host_h = new_host();
     let host_backed = host_backed_one(&host_h, "/proj/Unresolved.vue", src);
     assert!(
         !host_backed.errors.is_empty(),
-        "HostBacked must still treat the unresolved imported macro as fatal"
+        "HostBacked must also treat the unresolved imported macro as fatal"
     );
 }
 
@@ -465,8 +451,8 @@ fn runtime_render_unresolved_imported_macro_type_is_soft() {
 // ---------------------------------------------------------------------------
 
 /// The missing-external-source fatal (site 1) stays hard on the render
-/// lane. DISCRIMINATING: a lane that softened errors beyond the
-/// imported-macro-resolution site would let this render.
+/// lane. DISCRIMINATING: a lane that relaxed typed fatal outcomes would let
+/// this render.
 #[test]
 fn runtime_render_missing_external_src_is_fatal() {
     // A `<script src="...">` pointing at a file that was never upserted:
@@ -497,11 +483,8 @@ fn runtime_render_missing_external_src_is_fatal() {
 
 /// A `defineProps<T>()` whose imported `T` RESOLVES but is NOT object-like
 /// (e.g. a `string` alias) is a genuine local misuse: the compiler emits a
-/// fatal `XInvalidMacroType` (NOT the softenable
-/// `XUnresolvedImportedMacroType`). It must stay FATAL on the render lane —
-/// the soft contract covers ONLY unresolved-RESOLUTION, never wrong-shape.
-/// DISCRIMINATING: the pre-fix over-broad gate (`code=="XInvalidMacroType"`)
-/// would have softened this; the structural code split keeps it fatal.
+/// fatal `XInvalidMacroType`. It must stay FATAL on the render lane; a resolved
+/// non-object carrier must never collapse to a complete empty object surface.
 #[test]
 fn runtime_render_resolved_wrong_shape_imported_macro_is_fatal() {
     let host = new_host();
@@ -528,8 +511,7 @@ fn runtime_render_resolved_wrong_shape_imported_macro_is_fatal() {
 // ---------------------------------------------------------------------------
 
 /// A script syntax error must stay fatal on the render lane.
-/// DISCRIMINATING: only site 2 (unresolved imported macro) is softened;
-/// syntax errors (site 6, `compile_diags.has_errors`) stay fatal.
+/// DISCRIMINATING: syntax errors (`compile_diags.has_errors`) stay fatal.
 #[test]
 fn runtime_render_syntax_error_is_fatal() {
     let src = "<script setup lang=\"ts\">\nconst n: = \n</script>\n<template><div></template>\n";
@@ -904,19 +886,15 @@ fn runtime_render_threads_per_input_component_id_into_scope() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 11 (S4) — soft-macro boundary: one missing + one resolved import
+// Test 11 (S4) — one missing root remains fatal beside one resolved root
 // ---------------------------------------------------------------------------
 
-/// Locks the soft-macro boundary: an SFC with TWO imported macro types
-/// where ONE resolves and ONE is missing renders successfully with a
-/// WARNING (for the missing one only) — the resolved one is NOT dragged
-/// into fatality, and the missing one is NOT fatal. DISCRIMINATING: a lane
-/// that softened nothing would be fatal; one that softened everything would
-/// hide a genuinely fatal case. Locks the two-surface soft gate (the
-/// collector missing-diagnostic AND the compiler `XInvalidMacroType`
-/// downgraded only for the unresolved-import case).
+/// An SFC with two imported macro roots where one resolves and one is missing
+/// must fail at the unavailable root's exact syntax identity. A resolved
+/// sibling cannot turn the missing authoritative outcome into a row-local
+/// warning or admit partial component code.
 #[test]
-fn runtime_render_mixed_resolved_and_missing_imported_macro_is_soft() {
+fn runtime_render_mixed_resolved_and_missing_imported_macro_is_fatal() {
     let host = new_host();
     // A resolvable sibling providing `GoodProps`; `MissingProps` has no
     // resolvable source.
@@ -930,56 +908,22 @@ fn runtime_render_mixed_resolved_and_missing_imported_macro_is_soft() {
     let src = "<script setup lang=\"ts\">\nimport type { GoodProps } from './good'\nimport type { MissingEmits } from './nope'\ndefineProps<GoodProps>()\ndefineEmits<MissingEmits>()\n</script>\n<template><div>{{ a }}</div></template>\n";
     let render = render_one(&host, "/proj/Mixed.vue", src);
 
-    assert!(
-        render.errors.is_empty(),
-        "a mix of one resolved + one missing imported macro must NOT be fatal: {:?}",
-        render.errors
+    assert_eq!(
+        render.errors,
+        vec!["[/proj/Mixed.vue] Authoritative runtime semantics for macro syntax index 1 are unresolved (missing-declaration).".to_owned()],
+        "the unavailable emits root must retain its exact typed failure identity"
     );
     assert!(
-        !render.code.is_empty(),
-        "the mixed case must still render (missing type degrades to Unknown)"
+        render.code.is_empty(),
+        "an unavailable root must not admit a partial component"
     );
     assert!(
-        !render.diagnostics.is_empty()
-            && render
-                .diagnostics
-                .iter()
-                .all(|d| d.severity == crate::types::HostSeverity::Warning),
-        "the missing imported type must surface as a WARNING (not error): {:?}",
-        render
-            .diagnostics
-            .iter()
-            .map(|d| format!("{:?}:{}", d.severity, d.code))
-            .collect::<Vec<_>>()
+        render.diagnostics.is_empty(),
+        "fatal outcomes must not also populate the success-warning rail"
     );
-    // The soft warning is the imported-macro-RESOLUTION diagnostic
-    // specifically (structured code), not some other softened error.
-    assert!(
-        render
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "XUnresolvedImportedMacroType"
-                || d.code == "HOST_MISSING_MACRO_TYPE_DEP"),
-        "the soft warning must be the unresolved-imported-macro diagnostic: {:?}",
-        render
-            .diagnostics
-            .iter()
-            .map(|d| d.code.clone())
-            .collect::<Vec<_>>()
-    );
-    // The resolved `GoodProps` must materialize concretely — its declared
-    // prop key `a` appears in the runtime props declaration. (This file has
-    // a MISSING import, so the HostBacked `get_virtual_file` oracle hard-
-    // fails on it and cannot be used for byte-parity here — that is exactly
-    // the soft-case exclusion. Instead, byte-compare against an EQUIVALENT
-    // file with the missing import removed but `GoodProps` unchanged: the
-    // resolved props surface must be identical, proving GoodProps still
-    // materialized despite the co-occurring soft diagnostic.)
-    assert!(
-        render.code.contains("\"a\"") || render.code.contains("'a'") || render.code.contains(" a:"),
-        "the resolved prop `a` must materialize in the render props declaration:\n{}",
-        render.code
-    );
+
+    // Control: the resolved sibling remains independently healthy and
+    // byte-identical to HostBacked when the unavailable root is removed.
     let good_only_src = "<script setup lang=\"ts\">\nimport type { GoodProps } from './good'\ndefineProps<GoodProps>()\n</script>\n<template><div>{{ a }}</div></template>\n";
     let good_only = render_one(&host, "/proj/GoodOnly.vue", good_only_src);
     assert!(
@@ -1005,24 +949,16 @@ fn runtime_render_mixed_resolved_and_missing_imported_macro_is_soft() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 12 — soft-macro boundary: a wrong-shape import co-occurring with a
-// missing import stays FATAL (the discriminating guard for the structural
-// per-diagnostic soft gate)
+// Test 12 — co-occurring unavailable and wrong-shape roots stay FATAL
 // ---------------------------------------------------------------------------
 
-/// The sharpest soft-macro boundary case. A file has BOTH:
-///   - a MISSING imported macro type (`MissingProps`, softenable), AND
+/// A file has BOTH:
+///   - a MISSING imported macro type (`MissingProps`), AND
 ///   - a RESOLVED-but-wrong-shape imported macro type (`WrongEmits`, a
 ///     string alias with no call signatures → fatal `XInvalidMacroType`).
 ///
-/// The render lane MUST stay FATAL — the presence of a softenable missing
-/// import must NOT drag the co-occurring wrong-shape error into a warning.
-/// DISCRIMINATING: the pre-fix whole-file gate
-/// (`had_unresolved_import && code=="XInvalidMacroType"`) softened EVERY
-/// `XInvalidMacroType` once any import was missing, so it would have made
-/// this render succeed. The structural per-diagnostic code split
-/// (`XUnresolvedImportedMacroType` softened; `XInvalidMacroType` fatal)
-/// keeps it fatal. Reverting the fix flips this test RED.
+/// The render lane MUST stay FATAL: neither closed root outcome may be
+/// rewritten into a row-local warning.
 #[test]
 fn runtime_render_wrong_shape_with_missing_import_stays_fatal() {
     let host = new_host();
@@ -1033,14 +969,13 @@ fn runtime_render_wrong_shape_with_missing_import_stays_fatal() {
         "/proj/wrongemits.ts",
         "export type WrongEmits = string\n",
     );
-    // `MissingProps` has no resolvable source → softenable
-    // unresolved-import.
+    // `MissingProps` has no resolvable source → fatal unavailable root.
     let src = "<script setup lang=\"ts\">\nimport type { MissingProps } from './nope'\nimport type { WrongEmits } from './wrongemits'\ndefineProps<MissingProps>()\ndefineEmits<WrongEmits>()\n</script>\n<template><div /></template>\n";
     let render = render_one(&host, "/proj/WrongPlusMissing.vue", src);
     assert!(
         !render.errors.is_empty(),
         "a wrong-shape imported macro co-occurring with a missing import must \
-         stay FATAL — the missing import must not soften the wrong-shape error \
+         stay FATAL — neither root may be rewritten into a warning \
          (got code: {:?}, diagnostics: {:?})",
         render.code,
         render
@@ -1274,9 +1209,9 @@ fn runtime_render_upper_drive_input_single_hop_relative_import_control() {
 
 /// Render-lane CONTRACT pin: a MEMBER-position missing macro type
 /// (`defineProps<{ foo: Missing }>()`) compiles with a WARNING and the
-/// member's runtime type degrades to `null`. (The lane softens every
-/// missing-dep diagnostic, so this guards the lane contract; the
-/// DISCRIMINATING tier test is the HostBacked
+/// member's runtime type degrades to `null`. This is a closed row-local
+/// outcome, distinct from an unavailable root. The DISCRIMINATING tier test is
+/// the HostBacked
 /// `member_position_missing_macro_type_warns_and_degrades_on_host_lane`.)
 #[test]
 fn runtime_render_member_position_missing_macro_type_warns_and_degrades_to_null() {
@@ -1287,7 +1222,7 @@ fn runtime_render_member_position_missing_macro_type_warns_and_degrades_to_null(
         &host,
         "/proj/MemberMiss.vue",
         src,
-        simple_render_profile(),
+        render_profile(false, false, false, crate::types::HmrStrategy::None),
         None,
     );
     assert!(
@@ -1298,8 +1233,21 @@ fn runtime_render_member_position_missing_macro_type_warns_and_degrades_to_null(
     let warning = render
         .diagnostics
         .iter()
-        .find(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP")
-        .expect("member-position miss surfaces a HOST_MISSING_MACRO_TYPE_DEP diagnostic");
+        .find(|d| d.code == "XUnresolvedImportedMacroType")
+        .unwrap_or_else(|| {
+            panic!(
+                "member-position miss must surface the typed compiler diagnostic: {:?}",
+                render
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| (
+                        diagnostic.code.as_str(),
+                        &diagnostic.severity,
+                        diagnostic.message.as_str(),
+                    ))
+                    .collect::<Vec<_>>()
+            )
+        });
     assert_eq!(
         warning.severity,
         crate::HostSeverity::Warning,
@@ -1316,7 +1264,9 @@ fn runtime_render_member_position_missing_macro_type_warns_and_degrades_to_null(
 /// Structural tiering on the render lane: a NESTED missing macro type
 /// (`defineProps<{ foo: { test: Missing } }>()`) is never collected as a dep
 /// — the compile is clean (no diagnostic at all) and the member keeps its
-/// syntactically-derived `Object` constructor.
+/// syntactically-derived `Object` constructor. The test uses dev output so the
+/// constructor remains observable; pinned Vue production output intentionally
+/// strips it to `{}`.
 #[test]
 fn runtime_render_nested_missing_macro_type_is_silent() {
     let host = new_host();
@@ -1326,7 +1276,7 @@ fn runtime_render_nested_missing_macro_type_is_silent() {
         &host,
         "/proj/NestedMiss.vue",
         src,
-        simple_render_profile(),
+        render_profile(false, false, false, crate::types::HmrStrategy::None),
         None,
     );
     assert!(

@@ -569,16 +569,10 @@ impl<'a> TypeDependencyCollector<'a> {
                 }
             }
             TSType::JSDocNullableType(nullable) => {
-                self.visit_type(
-                    &nullable.type_annotation,
-                    StructuralDependencyContext::CarrierOnly,
-                );
+                self.visit_type(&nullable.type_annotation, context);
             }
             TSType::JSDocNonNullableType(non_nullable) => {
-                self.visit_type(
-                    &non_nullable.type_annotation,
-                    StructuralDependencyContext::CarrierOnly,
-                );
+                self.visit_type(&non_nullable.type_annotation, context);
             }
             _ => {}
         }

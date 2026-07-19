@@ -220,3 +220,37 @@ fn script_route_inventory_is_body_independent_and_owner_exact() {
     assert_eq!(invalid.statement_count(), 2);
     assert_eq!(invalid.owner_count(), 1);
 }
+
+#[test]
+fn default_export_surfaces_route_through_the_default_symbol() {
+    let owner = TopLevelOwnerId::ordinary_file();
+    for (source, capability) in [
+        (
+            "export default class Props { label!: string }",
+            RouteCapability::TypeAndValue,
+        ),
+        (
+            "export default interface Props { label: string }",
+            RouteCapability::TypeOnly,
+        ),
+        (
+            "export default { label: 'ok' } as const",
+            RouteCapability::ValueOnly,
+        ),
+    ] {
+        let parsed = parse(source);
+        assert!(!parsed.panicked, "fixture must parse: {source}");
+
+        let inventory = build_script_route_inventory(&parsed.program);
+        assert_eq!(
+            inventory.local_exports,
+            [ScriptLocalExportRoute {
+                owner,
+                exported: "default".into(),
+                local: "default".into(),
+                capability,
+            }],
+            "the route must target the canonical default header: {source}",
+        );
+    }
+}

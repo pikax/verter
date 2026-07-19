@@ -3829,6 +3829,7 @@ dependencies = [
  "verter_diagnostics",
  "verter_semantic",
  "verter_span",
+ "verter_type_expr",
 ]
 
 [[package]]
@@ -3940,6 +3941,7 @@ dependencies = [
  "serde_json",
  "verter_semantic",
  "verter_span",
+ "verter_type_expr",
  "verter_workspace",
 ]
 
@@ -4026,6 +4028,7 @@ dependencies = [
  "verter_session",
  "verter_span",
  "verter_tsgo_api",
+ "verter_type_expr",
  "verter_type_runtime",
  "verter_workspace",
 ]
@@ -4064,6 +4067,7 @@ dependencies = [
  "verter_semantic",
  "verter_session",
  "verter_span",
+ "verter_type_expr",
  "verter_workspace",
  "walkdir",
 ]

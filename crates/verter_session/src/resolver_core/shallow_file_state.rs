@@ -260,8 +260,11 @@ pub struct ClassifiedTypeDeps {
     /// Names of import-local symbols this type directly depends on.
     /// These become `ExternalSymbolRef` during frontier traversal.
     pub external_deps: Vec<ExternalSymbolRef>,
-    /// TSC declaration-carrier closure. Kept separate so component-meta keeps
-    /// its historical FULL/STRUCTURAL breadth.
+    /// TSC declaration-carrier closure. Local names follow the validated
+    /// lexical-owner chain (an instance owner may fall back to its unique
+    /// module owner); the TSC projector resolves each name back to its exact
+    /// owner before emitting a carrier. Kept separate so component-meta keeps
+    /// its exact-owner FULL/STRUCTURAL breadth.
     pub declaration_local_deps: Vec<String>,
     pub declaration_external_deps: Vec<ExternalSymbolRef>,
     /// Bare namespace roots cannot identify an exported declaration carrier.
@@ -281,6 +284,11 @@ pub(crate) struct ClassifiedDependencyPaths {
     pub(crate) local_deps: Vec<String>,
     pub(crate) external_deps: Vec<ExternalSymbolRef>,
     pub(crate) unroutable_imports: Vec<String>,
+}
+
+enum LexicalValueBinding<'a> {
+    Import(&'a ImportTarget),
+    Local(TopLevelOwnerId),
 }
 
 /// Slim HEADER metadata for one locally-declared value symbol.
@@ -1266,6 +1274,29 @@ impl ShallowFileState {
             .flatten()
     }
 
+    fn lexical_owner_chain(&self, owner: TopLevelOwnerId) -> impl Iterator<Item = TopLevelOwnerId> {
+        std::iter::once(owner).chain(self.validated_lexical_parent_owner(owner))
+    }
+
+    fn visible_value_binding(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<LexicalValueBinding<'_>> {
+        for candidate in self.lexical_owner_chain(owner) {
+            if let Some(target) = self
+                .owner_import_targets
+                .get(&DeclKey::new(candidate, name))
+            {
+                return Some(LexicalValueBinding::Import(target));
+            }
+            if self.has_value_symbol_in(candidate, name) {
+                return Some(LexicalValueBinding::Local(candidate));
+            }
+        }
+        None
+    }
+
     /// Every `(scope, name)` key in the augmentation-scope TYPE inventory
     /// (header-level).
     pub fn augmentation_type_keys(
@@ -1808,6 +1839,91 @@ impl ShallowFileState {
         }
     }
 
+    /// Declaration-output dependency classification follows the same
+    /// validated one-way lexical-owner chain as bare-name resolution. The
+    /// returned local names are intentionally resolved to exact owners by the
+    /// TSC projector, while imported carriers retain their structural route.
+    fn classify_declaration_dependency_paths(
+        &self,
+        declaration_owner: TopLevelOwnerId,
+        declaration_name: &str,
+        paths: &FxHashSet<TypeDependencyPathFact>,
+    ) -> ClassifiedDependencyPaths {
+        let mut local = FxHashSet::default();
+        let mut external = FxHashSet::default();
+        let mut unroutable = FxHashSet::default();
+
+        for path in paths {
+            let root = path.root();
+            for binding_owner in self.lexical_owner_chain(declaration_owner) {
+                if let Some(target) = self
+                    .owner_import_targets
+                    .get(&DeclKey::new(binding_owner, root))
+                {
+                    let (imported_name, member_path) = if target.is_namespace {
+                        let Some((exported_name, member_path)) = path.member_path().split_first()
+                        else {
+                            unroutable.insert(root.to_string());
+                            break;
+                        };
+                        (exported_name.clone(), member_path)
+                    } else {
+                        (target.imported_name.clone(), path.member_path())
+                    };
+                    let route = if member_path.is_empty() {
+                        RouteDemand::Whole
+                    } else {
+                        RouteDemand::MemberPath(Arc::from(member_path.to_vec().into_boxed_slice()))
+                    };
+                    external.insert(ExternalSymbolRef {
+                        local_name: root.to_string(),
+                        source_specifier: target.source_specifier.clone(),
+                        imported_name,
+                        canonical_id: external_canonical(target),
+                        route,
+                    });
+                    break;
+                }
+
+                if binding_owner == declaration_owner && root == declaration_name {
+                    break;
+                }
+                if self.has_type_symbol_in(binding_owner, root) {
+                    local.insert(root.to_string());
+                    break;
+                }
+            }
+        }
+
+        let mut local = local.into_iter().collect::<Vec<_>>();
+        local.sort();
+        let mut external = external.into_iter().collect::<Vec<_>>();
+        external.sort_by(|left, right| {
+            left.local_name
+                .cmp(&right.local_name)
+                .then_with(|| left.source_specifier.cmp(&right.source_specifier))
+                .then_with(|| left.imported_name.cmp(&right.imported_name))
+                .then_with(|| {
+                    let left_path: &[String] = match &left.route {
+                        RouteDemand::MemberPath(path) => path,
+                        _ => &[],
+                    };
+                    let right_path: &[String] = match &right.route {
+                        RouteDemand::MemberPath(path) => path,
+                        _ => &[],
+                    };
+                    left_path.cmp(right_path)
+                })
+        });
+        let mut unroutable = unroutable.into_iter().collect::<Vec<_>>();
+        unroutable.sort();
+        ClassifiedDependencyPaths {
+            local_deps: local,
+            external_deps: external,
+            unroutable_imports: unroutable,
+        }
+    }
+
     /// Classify one file-scope TYPE symbol's dependency edges: the local
     /// vs external split over the per-declaration dependency names,
     /// `typeof`-root import edges appended, deterministic ordering by
@@ -1828,47 +1944,49 @@ impl ShallowFileState {
         };
 
         let legacy = self.classify_dependency_paths(owner, name, &lowered.dependency_paths);
-        let declaration =
-            self.classify_dependency_paths(owner, name, &lowered.declaration_carrier_paths);
+        let declaration = self.classify_declaration_dependency_paths(
+            owner,
+            name,
+            &lowered.declaration_carrier_paths,
+        );
         let local_deps = legacy.local_deps;
         let mut external_deps = legacy.external_deps;
         let declaration_local_deps = declaration.local_deps;
         let mut declaration_external_deps = declaration.external_deps;
         let mut unroutable_declaration_dependencies = declaration.unroutable_imports;
 
-        let mut owner_value_deps = lowered
+        let value_paths = lowered
             .value_query_paths
             .iter()
-            .chain(lowered.value_position_paths.iter())
-            .map(TypeDependencyPathFact::root)
-            .filter(|root| {
-                !self
-                    .owner_import_targets
-                    .contains_key(&DeclKey::new(owner, *root))
+            .chain(lowered.value_position_paths.iter());
+        let mut owner_value_deps = value_paths
+            .clone()
+            .filter_map(|path| {
+                let root = path.root();
+                let LexicalValueBinding::Local(value_owner) =
+                    self.visible_value_binding(owner, root)?
+                else {
+                    return None;
+                };
+                (root != name && !self.has_type_symbol_in(value_owner, root))
+                    .then(|| root.to_owned())
             })
-            .filter(|root| *root != name)
-            .filter(|root| {
-                self.has_value_symbol_in(owner, root) && !self.has_type_symbol_in(owner, root)
-            })
-            .map(str::to_owned)
             .collect::<Vec<_>>();
         owner_value_deps.sort();
         owner_value_deps.dedup();
 
-        let mut retained_value_carrier_deps = lowered
-            .value_query_paths
-            .iter()
-            .chain(lowered.value_position_paths.iter())
-            .map(TypeDependencyPathFact::root)
-            .filter(|root| {
-                !self
-                    .owner_import_targets
-                    .contains_key(&DeclKey::new(owner, *root))
+        let mut retained_value_carrier_deps = value_paths
+            .clone()
+            .filter_map(|path| {
+                let root = path.root();
+                let LexicalValueBinding::Local(value_owner) =
+                    self.visible_value_binding(owner, root)?
+                else {
+                    return None;
+                };
+                self.has_type_symbol_in(value_owner, root)
+                    .then(|| root.to_owned())
             })
-            .filter(|root| {
-                self.has_value_symbol_in(owner, root) && self.has_type_symbol_in(owner, root)
-            })
-            .map(str::to_owned)
             .collect::<Vec<_>>();
         retained_value_carrier_deps.sort();
         retained_value_carrier_deps.dedup();
@@ -1884,27 +2002,36 @@ impl ShallowFileState {
             .chain(lowered.value_position_paths.iter())
         {
             let root = path.root();
-            let Some(target) = self.owner_import_targets.get(&DeclKey::new(owner, root)) else {
-                continue;
-            };
-            let external = ExternalSymbolRef {
-                local_name: root.to_string(),
-                source_specifier: target.source_specifier.clone(),
-                imported_name: target.imported_name.clone(),
-                canonical_id: external_canonical(target),
-                route: RouteDemand::Whole,
-            };
-            if !external_deps
-                .iter()
-                .any(|dependency| dependency.local_name == root)
-            {
-                external_deps.push(external.clone());
+            if let Some(target) = self.owner_import_targets.get(&DeclKey::new(owner, root)) {
+                let external = ExternalSymbolRef {
+                    local_name: root.to_string(),
+                    source_specifier: target.source_specifier.clone(),
+                    imported_name: target.imported_name.clone(),
+                    canonical_id: external_canonical(target),
+                    route: RouteDemand::Whole,
+                };
+                if !external_deps
+                    .iter()
+                    .any(|dependency| dependency.local_name == root)
+                {
+                    external_deps.push(external);
+                }
             }
-            if !declaration_external_deps
-                .iter()
-                .any(|dependency| dependency.local_name == root)
+            if let Some(LexicalValueBinding::Import(target)) =
+                self.visible_value_binding(owner, root)
             {
-                declaration_external_deps.push(external);
+                if !declaration_external_deps
+                    .iter()
+                    .any(|dependency| dependency.local_name == root)
+                {
+                    declaration_external_deps.push(ExternalSymbolRef {
+                        local_name: root.to_string(),
+                        source_specifier: target.source_specifier.clone(),
+                        imported_name: target.imported_name.clone(),
+                        canonical_id: external_canonical(target),
+                        route: RouteDemand::Whole,
+                    });
+                }
             }
         }
 
@@ -1933,8 +2060,10 @@ impl ShallowFileState {
             .iter()
             .map(TypeDependencyPathFact::root)
             .filter(|root| {
-                self.owner_import_targets
-                    .contains_key(&DeclKey::new(owner, *root))
+                matches!(
+                    self.visible_value_binding(owner, root),
+                    Some(LexicalValueBinding::Import(_))
+                )
             })
             .map(str::to_string)
             .collect::<FxHashSet<_>>()
@@ -1946,8 +2075,10 @@ impl ShallowFileState {
             .iter()
             .map(TypeDependencyPathFact::root)
             .filter(|root| {
-                self.owner_import_targets
-                    .contains_key(&DeclKey::new(owner, *root))
+                matches!(
+                    self.visible_value_binding(owner, root),
+                    Some(LexicalValueBinding::Import(_))
+                )
             })
             .map(str::to_string)
             .collect::<FxHashSet<_>>()
@@ -2682,6 +2813,72 @@ mod tests {
     }
 
     #[test]
+    fn declaration_carrier_edges_follow_only_the_validated_lexical_parent_chain() {
+        let module = TopLevelOwnerId::module(0);
+        let instance = TopLevelOwnerId::instance(0);
+        let source = concat!(
+            "interface ParentLocal { parent: true }\n",
+            "interface Shadowed { parent: true }\n",
+            "enum ParentEnum { Parent = 1 }\n",
+            "const parentValue = { parent: true }\n",
+            "import { parentImportedValue } from './parent'\n",
+            "import * as ParentNS from './parent'\n",
+            "type ParentCannotSeeInstance = InstanceOnly\n",
+            "interface InstanceOnly { instance: true }\n",
+            "interface Shadowed { instance: true }\n",
+            "type Props = { local: ParentLocal; shadow: Shadowed; enum: ParentEnum; enumCtor: typeof ParentEnum; value: typeof parentValue; importedValue: typeof parentImportedValue; qualified: ParentNS.External }\n",
+        );
+        let state = ShallowFileState::service_backed_for_test_with_statement_owners(
+            "/ws/lexical-carriers.ts",
+            source,
+            &[
+                module, module, module, module, module, module, module, instance, instance,
+                instance,
+            ],
+        );
+
+        let setup = state
+            .type_deps_in(instance, "Props")
+            .expect("setup declaration dependency facts");
+        assert_eq!(
+            setup.declaration_local_deps,
+            ["ParentEnum", "ParentLocal", "Shadowed"],
+            "setup sees exact-owner declarations first and then the unique module parent",
+        );
+        assert_eq!(setup.owner_value_deps, ["parentValue"]);
+        assert_eq!(setup.retained_value_carrier_deps, ["ParentEnum"]);
+        assert_eq!(
+            setup
+                .declaration_external_deps
+                .iter()
+                .map(|dependency| (
+                    dependency.local_name.as_str(),
+                    dependency.source_specifier.as_str(),
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("ParentNS", "./parent"),
+                ("parentImportedValue", "./parent"),
+            ],
+            "namespace and value imports both retain the parent owner route",
+        );
+        assert_eq!(
+            setup.local_deps,
+            ["Shadowed"],
+            "the general resolver closure remains exact-owner; lexical fallback is declaration-only",
+        );
+        assert!(setup.external_deps.is_empty());
+
+        let module_deps = state
+            .type_deps_in(module, "ParentCannotSeeInstance")
+            .expect("module declaration dependency facts");
+        assert!(
+            module_deps.declaration_local_deps.is_empty(),
+            "module owners must never traverse the reverse edge into setup/instance scope",
+        );
+    }
+
+    #[test]
     fn deep_inference_type_tree_fails_with_typed_budget_without_recursion() {
         let mut expr = TypeExpr::Primitive(verter_type_expr::PrimitiveName::String);
         for _ in 0..=SEMANTIC_INFERENCE_TRAVERSAL_BUDGET {
@@ -3204,11 +3401,23 @@ export interface Props { child: Inner; data: Local }
             edges.insert("./inner".to_string(), "/resolved/inner.ts".to_string());
             edges
         };
-        let prepared = super::super::prepared_decl::prepare_exported_type_decl(
+        let owner = TopLevelOwnerId::ordinary_file();
+        let import_canonicalization = super::super::prepared_decl::ImportCanonicalization {
+            final_resolution: FxHashMap::from_iter([(
+                DeclKey::new(owner, "Inner"),
+                verter_semantic::analysis::type_solver::ResolvedRootIdentity::new_in_owner(
+                    "/resolved/inner.ts",
+                    owner,
+                    "Inner",
+                ),
+            )]),
+        };
+        let prepared = super::super::prepared_decl::prepare_local_type_decl(
             "/src/types.ts",
             &state,
             "Props",
             Some(&dep_edges),
+            &import_canonicalization,
             &crate::identity_interner::IdentityInterner::with_default_budget(),
         )
         .expect("Props preparation should not fail")

@@ -3292,6 +3292,7 @@ fn collect_imported_carrier_priority_ids_keeps_only_resolved_vue_imports() {
         imports: vec![
             verter_semantic::analysis::AnalyzedImport {
                 source: "./MyComp.vue".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_only: false,
                 bindings: Vec::new(),
                 span: verter_span::Span::new(0, 0),
@@ -3299,6 +3300,7 @@ fn collect_imported_carrier_priority_ids_keeps_only_resolved_vue_imports() {
             },
             verter_semantic::analysis::AnalyzedImport {
                 source: "./utils".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 is_type_only: false,
                 bindings: Vec::new(),
                 span: verter_span::Span::new(0, 0),
@@ -3306,6 +3308,7 @@ fn collect_imported_carrier_priority_ids_keeps_only_resolved_vue_imports() {
             },
             verter_semantic::analysis::AnalyzedImport {
                 source: "./Other.vue".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_only: false,
                 bindings: Vec::new(),
                 span: verter_span::Span::new(0, 0),
@@ -3313,6 +3316,7 @@ fn collect_imported_carrier_priority_ids_keeps_only_resolved_vue_imports() {
             },
             verter_semantic::analysis::AnalyzedImport {
                 source: "./MyComp.vue".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 is_type_only: false,
                 bindings: Vec::new(),
                 span: verter_span::Span::new(0, 0),
@@ -3357,6 +3361,7 @@ fn collect_imported_carrier_priority_ids_falls_back_to_relative_resolution() {
     let imports = vec![
         verter_semantic::analysis::AnalyzedImport {
             source: "./TypedSlotComp.vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: Vec::new(),
             span: verter_span::Span::new(0, 0),
@@ -3364,6 +3369,7 @@ fn collect_imported_carrier_priority_ids_falls_back_to_relative_resolution() {
         },
         verter_semantic::analysis::AnalyzedImport {
             source: "./utils".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_only: false,
             bindings: Vec::new(),
             span: verter_span::Span::new(0, 0),

@@ -133,6 +133,24 @@ fn source_ranges_mark_overwrites_as_non_linear_replacements() {
 }
 
 #[test]
+fn source_range_projection_retains_live_generated_unmapped_boundaries() {
+    let allocator = Allocator::default();
+    let mut transform = CodeTransform::new("abcd", &allocator);
+    transform.overwrite_with_unmapped_boundaries(1, 3, "XYZ", &[1]);
+    transform.prepend_left_with_unmapped_boundaries(4, "PQ", &[1]);
+
+    let (output, _, boundaries) =
+        transform.build_string_with_source_ranges_and_unmapped_boundaries();
+
+    assert_eq!(output, "aXYZdPQ");
+    assert_eq!(boundaries, vec![2, 6]);
+
+    transform.overwrite(1, 3, "Z");
+    let (_, _, boundaries) = transform.build_string_with_source_ranges_and_unmapped_boundaries();
+    assert_eq!(boundaries, vec![4]);
+}
+
+#[test]
 fn source_ranges_omit_removed_and_empty_overwrite_bytes() {
     let allocator = Allocator::default();
     let mut middle = CodeTransform::new("abcd", &allocator);

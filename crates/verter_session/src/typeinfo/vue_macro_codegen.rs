@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use rustc_hash::FxHashSet;
 use verter_macro_dto::{
     AuthoredMemberOrdinal, MacroAnchor, MacroFailure, MacroInvalidReason, MacroMemberReason,
     MacroPartialReason, MacroRuntimeBundle, MacroRuntimeEntry, MacroRuntimeOutcome,
@@ -23,7 +24,8 @@ use verter_macro_dto::{
 };
 use verter_semantic::analysis::component_meta::MacroExpansionKind;
 use verter_semantic::analysis::{
-    AnalyzedMacro, AnalyzedMacroKind, LocalDeclarationKind, ScriptAnalysisSnapshot,
+    AnalyzedMacro, AnalyzedMacroKind, LocalDeclarationKind, MacroTypeDepUsage,
+    ScriptAnalysisSnapshot,
 };
 
 use crate::locator_identity::BroadRuntimeSubjectLocator;
@@ -33,8 +35,8 @@ use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::{FactReadSetFinalise, ResolverContext, StoreViewCompatToken};
 use crate::semantic_query::{
     BroadRuntimeKind, PartialReasonSet, PathSegment, ProjectionMode, ProjectionReductionContext,
-    QueryResult, ResultCompleteness, SemanticQueryApi, SemanticQueryValue,
-    SurfaceProvenanceContext,
+    QueryResult, ResolveDeclKey, ResultCompleteness, ScopeId, SemanticNodeData, SemanticQueryApi,
+    SemanticQueryKey, SemanticQueryValue, SurfaceProvenanceContext,
 };
 use crate::typeinfo::surface::TypeInfoSurface;
 use crate::VerterHost;
@@ -464,15 +466,17 @@ impl VerterHost {
                 PartialReasonSet::UNSTABLE_STATE,
                 MacroPartialReason::UnstableState,
             ),
-            Err(ScopedCacheNodeError::Panicked | ScopedCacheNodeError::TypeMismatch) => {
-                terminal_partial_vue_macro_codegen_output(
-                    ctx,
-                    owner_canonical,
-                    demand,
-                    PartialReasonSet::SEMANTIC_QUERY_FAULT,
-                    MacroPartialReason::IncompleteTraversal,
-                )
-            }
+            Err(
+                ScopedCacheNodeError::Panicked
+                | ScopedCacheNodeError::TypeMismatch
+                | ScopedCacheNodeError::Reentrant,
+            ) => terminal_partial_vue_macro_codegen_output(
+                ctx,
+                owner_canonical,
+                demand,
+                PartialReasonSet::SEMANTIC_QUERY_FAULT,
+                MacroPartialReason::IncompleteTraversal,
+            ),
         }
     }
 
@@ -639,6 +643,7 @@ impl VerterHost {
                                         &dispatch,
                                         payload,
                                         &subject,
+                                        script_analysis,
                                         mac,
                                         payload_index,
                                         defaults_index,
@@ -867,6 +872,7 @@ impl VerterHost {
         dispatch: &ProjectSemanticDispatch<'_>,
         payload: crate::semantic_query::SemanticNodeId,
         runtime_subject: &BroadRuntimeSubjectLocator,
+        analysis: &ScriptAnalysisSnapshot,
         mac: &AnalyzedMacro,
         payload_index: usize,
         defaults_index: Option<usize>,
@@ -894,23 +900,49 @@ impl VerterHost {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         };
 
+        let member_dependency_names = analysis
+            .macro_type_deps
+            .iter()
+            .filter(|dependency| {
+                dependency.macro_index == payload_index && dependency.macro_span == mac.span
+            })
+            .filter(|dependency| {
+                matches!(
+                    dependency.usage,
+                    MacroTypeDepUsage::Member | MacroTypeDepUsage::ValueQueryMember
+                )
+            })
+            .map(|dependency| dependency.type_name.as_str())
+            .collect::<FxHashSet<_>>();
+
         let mut props = Vec::new();
         for member in surface
             .members
             .iter()
             .filter(|member| member.visibility.is_public())
         {
-            let type_shape = match classify_runtime(
+            let type_shape = if direct_member_dependency_is_missing(
                 dispatch,
-                runtime_subject.member(Arc::clone(&member.name)),
-                counters,
+                member.value,
+                &member_dependency_names,
             ) {
-                Ok(classification) => RuntimePropType::Resolved {
-                    constructors: classification.constructors,
-                    skip_check: classification.skip_check,
-                },
-                Err(failure) => {
-                    RuntimePropType::Degraded(MacroFailure::new(failure.member(), None))
+                RuntimePropType::Degraded(MacroFailure::new(
+                    MacroMemberReason::Unresolved(UnresolvedReason::MissingDependency),
+                    None,
+                ))
+            } else {
+                match classify_runtime(
+                    dispatch,
+                    runtime_subject.member(Arc::clone(&member.name)),
+                    counters,
+                ) {
+                    Ok(classification) => RuntimePropType::Resolved {
+                        constructors: classification.constructors,
+                        skip_check: classification.skip_check,
+                    },
+                    Err(failure) => {
+                        RuntimePropType::Degraded(MacroFailure::new(failure.member(), None))
+                    }
                 }
             };
             props.push(RuntimeProp {
@@ -1861,10 +1893,11 @@ fn collect_local_declaration_closure(
             });
     }
     for dependency in &deps.retained_value_carrier_deps {
+        let value_owner = local_value_owner(inventory, owner, dependency)?;
         retained_value_dependencies
             .entry(identity.clone())
             .or_default()
-            .insert(retained_value_carrier(inventory, owner, dependency)?);
+            .insert(retained_value_carrier(inventory, value_owner, dependency)?);
     }
 
     let mut local_deps = deps.declaration_local_deps.clone();
@@ -2017,6 +2050,7 @@ fn tsc_emit_rows(
             authored_emit_anchor(mac, payload_index, effective_index, field.name.as_str()),
         );
     }
+    rows.sort_by_key(|row| authored_emit_order(row.anchor));
 
     if crate::request_context::current_cold_compute_completeness().is_partial() {
         return Err(partial_failure());
@@ -2127,24 +2161,319 @@ fn render_tsc_parameter(name: &str, ty: &str, optional: bool, rest: bool) -> Str
     )
 }
 
-fn is_definitely_non_object_root(
+/// Prove a row-local missing dependency without conflating it with an
+/// authored `unknown` or with a reference nested below a constructor-bearing
+/// shell. The semantic analyzer is the authority for which imported heads are
+/// MEMBER-tier dependencies; this walk only follows the transparent shapes
+/// that participate in broad constructor inference.
+fn direct_member_dependency_is_missing(
     dispatch: &ProjectSemanticDispatch<'_>,
     subject: crate::semantic_query::SemanticNodeId,
+    dependency_names: &FxHashSet<&str>,
 ) -> bool {
-    use crate::semantic_query::SemanticNodeData;
+    if dependency_names.is_empty() {
+        return false;
+    }
 
-    matches!(
-        crate::project_semantic_dispatch::node_data_for(dispatch.ctx, subject).as_deref(),
-        Some(
+    let carrier_context =
+        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
+    let eager_context =
+        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Expanded);
+    let mut work = vec![(subject, false)];
+    let mut visited = FxHashSet::default();
+
+    while let Some((node, tracked_dependency)) = work.pop() {
+        if !visited.insert((node, tracked_dependency)) {
+            continue;
+        }
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node) else {
+            continue;
+        };
+        match data.as_ref() {
+            SemanticNodeData::Alias(inner) => work.push((*inner, tracked_dependency)),
+            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+                work.extend(arms.iter().copied().map(|arm| (arm, tracked_dependency)));
+            }
+            SemanticNodeData::BareRef(_) => {
+                let (name, _) = data.bare_ref_head().expect("BareRef carrier head");
+                let tracked_dependency =
+                    tracked_dependency || dependency_names.contains(name.as_ref());
+                drop(data);
+                let resolved = dispatch.resolve_carrier_subject_node(
+                    node,
+                    if tracked_dependency {
+                        eager_context
+                    } else {
+                        carrier_context
+                    },
+                );
+                if crate::request_context::current_cold_compute_completeness().is_partial() {
+                    return false;
+                }
+                if resolved != node {
+                    work.push((resolved, tracked_dependency));
+                }
+            }
+            SemanticNodeData::TypeOf(_) => {
+                let (root, _) = data.typeof_head().expect("TypeOf carrier head");
+                let tracked_dependency =
+                    tracked_dependency || dependency_names.contains(root.name.as_ref());
+                drop(data);
+                let resolved = dispatch.resolve_carrier_subject_node(
+                    node,
+                    if tracked_dependency {
+                        eager_context
+                    } else {
+                        carrier_context
+                    },
+                );
+                if crate::request_context::current_cold_compute_completeness().is_partial() {
+                    return false;
+                }
+                if resolved != node {
+                    work.push((resolved, tracked_dependency));
+                }
+            }
+            SemanticNodeData::ImportType(_) => {
+                drop(data);
+                let resolved = dispatch.resolve_carrier_subject_node(
+                    node,
+                    if tracked_dependency {
+                        eager_context
+                    } else {
+                        carrier_context
+                    },
+                );
+                if crate::request_context::current_cold_compute_completeness().is_partial() {
+                    return false;
+                }
+                if resolved != node {
+                    work.push((resolved, tracked_dependency));
+                }
+            }
+            SemanticNodeData::DeclRef { identity } => {
+                let tracked_dependency =
+                    tracked_dependency || dependency_names.contains(identity.decl_name.as_ref());
+                let identity = identity.clone();
+                drop(data);
+                match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                    scope: ScopeId {
+                        canonical_id: Arc::clone(&identity.canonical_id),
+                        owner: identity.owner,
+                        local_scope: None,
+                    },
+                    name: Arc::clone(&identity.decl_name),
+                })) {
+                    QueryResult::Value(resolved) if resolved.value != node => {
+                        work.push((resolved.value, tracked_dependency));
+                    }
+                    QueryResult::Error(crate::semantic_query::QueryError::Miss)
+                        if tracked_dependency
+                            && !crate::request_context::current_cold_compute_completeness()
+                                .is_partial() =>
+                    {
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+            SemanticNodeData::InstantiationRef { base, args } => {
+                let tracked_dependency =
+                    tracked_dependency || dependency_names.contains(base.decl_name.as_ref());
+                let base = base.clone();
+                let args = Arc::clone(args);
+                drop(data);
+                match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+                    crate::semantic_query::InstantiateKey::new(
+                        dispatch.type_slot_for(
+                            Arc::clone(&base.canonical_id),
+                            base.owner,
+                            Arc::clone(&base.decl_name),
+                        ),
+                        args,
+                        dispatch.instantiate_context_for(
+                            &base.canonical_id,
+                            if tracked_dependency {
+                                eager_context
+                            } else {
+                                carrier_context
+                            },
+                        ),
+                    ),
+                )) {
+                    QueryResult::Value(resolved) if resolved.value != node => {
+                        work.push((resolved.value, tracked_dependency));
+                    }
+                    QueryResult::Error(crate::semantic_query::QueryError::Miss)
+                        if tracked_dependency
+                            && !crate::request_context::current_cold_compute_completeness()
+                                .is_partial() =>
+                    {
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+            SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder {
+                canonical_id,
+                owner,
+                name,
+                ..
+            }) => {
+                let tracked_dependency =
+                    tracked_dependency || dependency_names.contains(name.as_ref());
+                let canonical_id = Arc::clone(canonical_id);
+                let owner = *owner;
+                let name = Arc::clone(name);
+                drop(data);
+                match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+                    crate::semantic_query::InstantiateKey::new(
+                        dispatch.type_slot_for(Arc::clone(&canonical_id), owner, name),
+                        Arc::from([]),
+                        dispatch.instantiate_context_for(
+                            &canonical_id,
+                            if tracked_dependency {
+                                eager_context
+                            } else {
+                                carrier_context
+                            },
+                        ),
+                    ),
+                )) {
+                    QueryResult::Value(resolved) if resolved.value != node => {
+                        work.push((resolved.value, tracked_dependency));
+                    }
+                    QueryResult::Error(crate::semantic_query::QueryError::Miss)
+                        if tracked_dependency
+                            && !crate::request_context::current_cold_compute_completeness()
+                                .is_partial() =>
+                    {
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+            SemanticNodeData::Opaque(crate::semantic_query::QueryError::Miss)
+                if tracked_dependency
+                    && !crate::request_context::current_cold_compute_completeness()
+                        .is_partial() =>
+            {
+                return true;
+            }
+            // Constructor-bearing shells are terminals. In particular, never
+            // descend into Object/Array/Tuple children: those references are
+            // nested and intentionally absent from `macro_type_deps`.
+            _ => {}
+        }
+    }
+
+    false
+}
+
+fn is_definitely_non_object_root(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    mut subject: crate::semantic_query::SemanticNodeId,
+) -> bool {
+    let mut visited = FxHashSet::default();
+    let resolution_context =
+        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
+
+    while visited.insert(subject) {
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, subject)
+        else {
+            return false;
+        };
+        match data.as_ref() {
             SemanticNodeData::Primitive(_)
-                | SemanticNodeData::Literal(_)
-                | SemanticNodeData::TemplateLiteral { .. }
-                | SemanticNodeData::Array { .. }
-                | SemanticNodeData::Tuple { .. }
-                | SemanticNodeData::Function { .. }
-                | SemanticNodeData::ConstructorType { .. }
-        )
-    )
+            | SemanticNodeData::Literal(_)
+            | SemanticNodeData::TemplateLiteral { .. }
+            | SemanticNodeData::Array { .. }
+            | SemanticNodeData::Tuple { .. }
+            | SemanticNodeData::Function { .. }
+            | SemanticNodeData::ConstructorType { .. } => return true,
+            SemanticNodeData::Alias(inner) => subject = *inner,
+            SemanticNodeData::BareRef(_)
+            | SemanticNodeData::ImportType(_)
+            | SemanticNodeData::TypeOf(_) => {
+                drop(data);
+                let resolved = dispatch.resolve_carrier_subject_node(subject, resolution_context);
+                if resolved == subject {
+                    return false;
+                }
+                subject = resolved;
+            }
+            SemanticNodeData::DeclRef { identity } => {
+                let identity = identity.clone();
+                drop(data);
+                let resolved =
+                    dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                        scope: ScopeId {
+                            canonical_id: Arc::clone(&identity.canonical_id),
+                            owner: identity.owner,
+                            local_scope: None,
+                        },
+                        name: Arc::clone(&identity.decl_name),
+                    }));
+                let QueryResult::Value(resolved) = resolved else {
+                    return false;
+                };
+                if resolved.value == subject {
+                    return false;
+                }
+                subject = resolved.value;
+            }
+            SemanticNodeData::InstantiationRef { base, args } => {
+                let base = base.clone();
+                let args = Arc::clone(args);
+                drop(data);
+                let resolved = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+                    crate::semantic_query::InstantiateKey::new(
+                        dispatch.type_slot_for(
+                            Arc::clone(&base.canonical_id),
+                            base.owner,
+                            Arc::clone(&base.decl_name),
+                        ),
+                        args,
+                        dispatch.instantiate_context_for(&base.canonical_id, resolution_context),
+                    ),
+                ));
+                let QueryResult::Value(resolved) = resolved else {
+                    return false;
+                };
+                if resolved.value == subject {
+                    return false;
+                }
+                subject = resolved.value;
+            }
+            SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder {
+                canonical_id,
+                owner,
+                name,
+                ..
+            }) => {
+                let canonical_id = Arc::clone(canonical_id);
+                let owner = *owner;
+                let name = Arc::clone(name);
+                drop(data);
+                let resolved = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+                    crate::semantic_query::InstantiateKey::new(
+                        dispatch.type_slot_for(Arc::clone(&canonical_id), owner, name),
+                        Arc::from([]),
+                        dispatch.instantiate_context_for(&canonical_id, resolution_context),
+                    ),
+                ));
+                let QueryResult::Value(resolved) = resolved else {
+                    return false;
+                };
+                if resolved.value == subject {
+                    return false;
+                }
+                subject = resolved.value;
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 struct RuntimeClassification {
@@ -2263,7 +2592,15 @@ fn emit_rows(
             authored_emit_anchor(mac, payload_index, effective_index, member.name.as_ref()),
         );
     }
+    rows.sort_by_key(|row| authored_emit_order(row.anchor));
     rows
+}
+
+fn authored_emit_order(anchor: MacroAnchor) -> (u8, u32) {
+    match anchor {
+        MacroAnchor::Authored { member_ordinal, .. } => (0, member_ordinal.get()),
+        MacroAnchor::MacroArgument { .. } | MacroAnchor::Synthesized { .. } => (1, 0),
+    }
 }
 
 fn push_emit(rows: &mut Vec<RuntimeEmit>, name: &str, anchor: MacroAnchor) {

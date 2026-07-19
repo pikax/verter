@@ -4892,7 +4892,7 @@ defineProps<{ value: Unsafe }>()
     assert_eq!(error.detail_code(), "unsupported-declaration-shape");
     assert_eq!(
         error.subject(),
-        verter_compiler::tsc::TscFailureSubject::Macro { syntax_index: 0 }
+        crate::PublicApiProjectionSubject::Macro { syntax_index: 0 }
     );
     assert_eq!(error.macro_syntax_index(), Some(0));
     assert_eq!(
@@ -4917,7 +4917,7 @@ import type { Attrs } from './types'
 
     assert_eq!(
         error.subject(),
-        verter_compiler::tsc::TscFailureSubject::ScriptSetupAttrs { source_range }
+        crate::PublicApiProjectionSubject::ScriptSetupAttrs { source_range }
     );
     assert_eq!(error.macro_syntax_index(), None);
     assert!(matches!(
@@ -5352,8 +5352,13 @@ fn member_position_missing_macro_type_warns_and_degrades_on_host_lane() {
         .diagnostics
         .diagnostics
         .iter()
-        .find(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP")
-        .expect("member-position miss surfaces a HOST_MISSING_MACRO_TYPE_DEP diagnostic");
+        .find(|d| d.code == "XUnresolvedImportedMacroType")
+        .unwrap_or_else(|| {
+            panic!(
+                "member-position miss must surface the compiler's typed row diagnostic: {:?}",
+                response.diagnostics.diagnostics
+            )
+        });
     assert_eq!(
         warning.severity,
         HostSeverity::Warning,

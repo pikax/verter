@@ -541,19 +541,20 @@ fn code_only_projection_failure_does_not_advance_surface_generation() {
     use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
     let host = VerterHost::new_standalone(HostConfig::default());
-    host.upsert(UpsertRequest {
-        canonical_id: Some(CANONICAL.to_string()),
-        input_id: CANONICAL.to_string(),
-        source: Arc::from(
-            r#"<script setup lang="ts">
+    let _update = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(CANONICAL.to_string()),
+            input_id: CANONICAL.to_string(),
+            source: Arc::from(
+                r#"<script setup lang="ts">
 enum Unsafe { Value = Math.random() }
 defineProps<{ value: Unsafe }>()
 </script>"#,
-        ),
-        file_language: FileLanguage::vue(),
-        aliases: Vec::new(),
-    })
-    .expect("upsert unsafe enum fixture");
+            ),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert unsafe enum fixture");
 
     let store = ProviderSurfaceStore::new();
     let before = store.record(record_surface("last known good\n", "unsafe carrier\n"));

@@ -1496,7 +1496,7 @@ fn explicit_emit_fixture_drives_emit_and_handler_parameter_contracts() {
 
     assert!(output
         .code
-        .contains("((event: 'save', id: number) => void)"));
+        .contains(r#"((event: "save", id: number) => void)"#));
     assert!(output.code.contains("(payload: number) => void"));
 }
 
@@ -1556,10 +1556,6 @@ fn gen_tsc_output_testing(sfc: &str) -> super::script::TscOutput {
         MacroTscInput::NotRequired,
     )
     .expect("fixture has no typed codegen macro")
-}
-
-fn gen_tsc_output_testing_with(sfc: &str, fixtures: &[TscFixture<'_>]) -> super::script::TscOutput {
-    gen_tsc_mode_with(sfc, TscMode::Testing, fixtures)
 }
 
 fn offset_to_zero_based_line_col(text: &str, offset: usize) -> (u32, u32) {
@@ -1742,13 +1738,13 @@ const title = defineModel<string>('title')
     assert!(r.contains("props: {"), "runtime props in __comp");
     assert!(r.contains("title: String"), "runtime model prop");
     assert!(r.contains("emits: ["), "runtime emits in __comp");
-    assert!(r.contains("'update:title'"), "runtime model emit");
+    assert!(r.contains("\"update:title\""), "runtime model emit");
     assert!(
         r.contains("\"onUpdate:title\""),
         "model onUpdate prop in declare"
     );
     assert!(
-        r.contains("event: 'update:title', v: string"),
+        r.contains(r#"event: "update:title", v: string"#),
         "model emit type in $emit overload"
     );
     assert!(!r.contains("defineModel"), "macro removed");
@@ -1768,13 +1764,13 @@ defineEmits(['change', 'update:model'])
     );
 
     assert!(r.contains("emits: ["), "runtime emits in __comp");
-    assert!(r.contains("'change'"), "runtime emits has change");
+    assert!(r.contains("\"change\""), "runtime emits has change");
     assert!(
-        r.contains("'update:model'"),
+        r.contains("\"update:model\""),
         "runtime emits has update:model"
     );
     assert!(
-        r.contains("event: 'update:model'"),
+        r.contains(r#"event: "update:model""#),
         "typed emits in $emit overload"
     );
     assert!(!r.contains("setup("), "no setup() in __comp");
@@ -2071,9 +2067,9 @@ const isValid = computed(() => props.title !== '')
         "no PropType in runtime"
     );
     assert!(comp_section.contains("emits: ["), "runtime emits");
-    assert!(comp_section.contains("'submit'"), "submit emit");
-    assert!(comp_section.contains("'cancel'"), "cancel emit");
-    assert!(comp_section.contains("'update:name'"), "model emit");
+    assert!(comp_section.contains("\"submit\""), "submit emit");
+    assert!(comp_section.contains("\"cancel\""), "cancel emit");
+    assert!(comp_section.contains("\"update:name\""), "model emit");
 
     let declare_section = r.split("declare const").nth(1).unwrap();
     assert!(
@@ -2161,7 +2157,7 @@ withDefaults(defineProps<Props>(), { title: 'hello' })
         "import type statement present"
     );
     assert!(
-        r.contains("Omit<Props, 'title'> & Partial<Pick<Props, 'title'>>"),
+        r.contains(r#"Omit<Props, "title"> & Partial<Pick<Props, "title">>"#),
         "defaulted imported props should be wrapped to make keys optional: {r}"
     );
     assert!(!r.contains("withDefaults"), "macro removed");
@@ -2170,8 +2166,7 @@ withDefaults(defineProps<Props>(), { title: 'hello' })
 // @ai-generated - Companion-script resolved prop spans should be consumed as absolute SFC spans.
 #[test]
 fn tsc_testing_mode_same_sfc_companion_props_use_absolute_spans() {
-    let r = gen_tsc_output_testing_with(
-        r#"<script lang="ts">
+    let source = r#"<script lang="ts">
 export interface Props {
   title: string
   count?: number
@@ -2181,22 +2176,33 @@ export interface Props {
 withDefaults(defineProps<Props>(), {
   title: 'hello',
 })
-</script><template><div>{{ title }} {{ count }}</div></template>"#,
-        &[props_root_fixture_at(
-            0,
+</script><template><div>{{ title }} {{ count }}</div></template>"#;
+    let mut bundle = fixture_bundle(&[props_fixture_identity(
+        0,
+        1,
+        &[
+            root_prop("title", false, "string", 0),
+            root_prop("count", true, "number", 0),
+        ],
+        &[],
+        &[(
             "Props",
-            &[
-                root_prop("title", false, "string", 0),
-                root_prop("count", true, "number", 0),
-            ],
-            &[],
-            &[(
-                "Props",
-                "interface Props {\n  title: string\n  count?: number\n}",
-            )],
+            "interface Props {\n  title: string\n  count?: number\n}",
         )],
-    )
-    .code;
+    )]);
+    let MacroTscOutcome::Complete(MacroTscProjection::Props(props)) =
+        &mut bundle.entries[0].outcome
+    else {
+        unreachable!()
+    };
+    let [declaration] = props.scope.dependency_declarations.as_mut_slice() else {
+        unreachable!()
+    };
+    declaration.owner = TscScriptOwner::Companion;
+
+    let r = generate_with_bundle(source, TscMode::Testing, &bundle)
+        .expect("companion-owned fixture must match typed macro syntax")
+        .code;
 
     assert!(
         r.contains("declare const title: string"),
@@ -2285,7 +2291,7 @@ const mv = defineModel<number>()
 
     assert!(r.contains("modelValue: Number"), "runtime modelValue prop");
     assert!(
-        r.contains("'update:modelValue'"),
+        r.contains("\"update:modelValue\""),
         "runtime update:modelValue emit"
     );
     assert!(
@@ -2313,8 +2319,11 @@ const last = defineModel<string>('lastName')
 
     assert!(r.contains("firstName: String"), "runtime firstName prop");
     assert!(r.contains("lastName: String"), "runtime lastName prop");
-    assert!(r.contains("'update:firstName'"), "runtime update:firstName");
-    assert!(r.contains("'update:lastName'"), "runtime update:lastName");
+    assert!(
+        r.contains("\"update:firstName\""),
+        "runtime update:firstName"
+    );
+    assert!(r.contains("\"update:lastName\""), "runtime update:lastName");
     assert!(r.contains("firstName?: string"), "TS firstName type");
     assert!(r.contains("lastName?: string"), "TS lastName type");
 }
@@ -2354,7 +2363,7 @@ const user = defineModel<User>()
     );
     assert!(r.contains("modelValue?: User"), "TS User type");
     assert!(
-        r.contains("event: 'update:modelValue', v: User"),
+        r.contains(r#"event: "update:modelValue", v: User"#),
         "emit type with User in $emit overload"
     );
 }
@@ -2567,7 +2576,7 @@ const stopObservation = ref(false)
     );
     assert!(
         r.contains(
-            "$props: import(\"vue\").PublicProps & Omit<WatermarkProps, 'zIndex' | 'rotate' | 'content' | 'gap'> & Partial<Pick<WatermarkProps, 'zIndex' | 'rotate' | 'content' | 'gap'>>"
+            r#"$props: import("vue").PublicProps & Omit<WatermarkProps, "zIndex" | "rotate" | "content" | "gap"> & Partial<Pick<WatermarkProps, "zIndex" | "rotate" | "content" | "gap">>"#
         ),
         "defaulted imported props should be optional in $props"
     );
@@ -2633,7 +2642,7 @@ const dir = ref<'ltr' | 'rtl'>('ltr')
         r.contains("orientation?"),
         "orientation optional via default"
     );
-    assert!(r.contains("'init-api'"), "emit name in output");
+    assert!(r.contains("\"init-api\""), "emit name in output");
     assert!(!r.contains("const dir"), "no script body");
 }
 
@@ -2885,7 +2894,7 @@ withDefaults(defineProps<Props>(), { title: 'hello' })
     // $props should preserve the named type while optionalizing defaulted keys
     assert!(
         r.contains(
-            "$props: import(\"vue\").PublicProps & Omit<Props, 'title'> & Partial<Pick<Props, 'title'>>"
+            r#"$props: import("vue").PublicProps & Omit<Props, "title"> & Partial<Pick<Props, "title">>"#
         ),
         "should wrap named props when defaults are present: got {}",
         r
@@ -4122,7 +4131,7 @@ defineEmits({
         "object emits should inline the camel handler key: {r}"
     );
     assert!(
-        r.contains("((event: 'my-event', value: string) => void)"),
+        r.contains(r#"((event: "my-event", value: string) => void)"#),
         "object emits should inline $emit overloads from validator params: {r}"
     );
 }
@@ -4250,11 +4259,11 @@ defineEmits<{
     );
 
     assert!(
-        r.contains("((event: 'change', ...args: [value: string]) => void)"),
+        r.contains(r#"((event: "change", ...args: [value: string]) => void)"#),
         "shorthand emits should inline tuple overloads in $emit: {r}"
     );
     assert!(
-        r.contains("((event: 'update', ...args: [id: number, data: { name: string }]) => void)"),
+        r.contains(r#"((event: "update", ...args: [id: number, data: { name: string }]) => void)"#),
         "shorthand emits should preserve tuple payload text in $emit: {r}"
     );
     assert!(
@@ -4303,7 +4312,7 @@ defineEmits<{ (e: 'click', event: MouseEvent): void }>()
     );
 
     assert!(
-        r.contains("((event: 'click', event: MouseEvent) => void)"),
+        r.contains(r#"((event: "click", event: MouseEvent) => void)"#),
         "function-form emits should inline $emit overloads: {r}"
     );
     assert!(
@@ -4330,7 +4339,7 @@ defineEmits({
         "object-arg emits should inline handler props: {r}"
     );
     assert!(
-        r.contains("((event: 'submit', ...args: unknown[]) => void)"),
+        r.contains(r#"((event: "submit", ...args: unknown[]) => void)"#),
         "null validators should fall back to unknown[] in $emit: {r}"
     );
     assert!(
@@ -5359,7 +5368,7 @@ export default defineComponent({
         "options-API prop `msg` survives into the declaration surface, got:\n{d}"
     );
     assert!(
-        d.contains("'change'"),
+        d.contains("\"change\""),
         "options-API emit `change` survives into the declaration emit surface, got:\n{d}"
     );
 

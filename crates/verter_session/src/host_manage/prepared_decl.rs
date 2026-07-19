@@ -2947,6 +2947,56 @@ impl VerterHost {
         (String, verter_type_expr::TopLevelOwnerId, String),
         Vec<crate::resolver_core::FactVersionRef>,
     )> {
+        // A published source snapshot already owns the parser-produced local
+        // export surface and the exact owner-qualified declaration headers.
+        // Use that header fact before joining the heavier IndexedReady lane.
+        // This is deliberately conservative: aliases and default exports need
+        // the route inventory to map exported names back to local symbols, and
+        // duplicate owners are ambiguous, so all three fall through.
+        if imported_name != "default" && !self.is_canonical_evicted(dep_canonical) {
+            let source_snapshot = self.scheduler.try_get_source(dep_canonical);
+            let source_data = source_snapshot.as_ref().and_then(|snapshot| {
+                snapshot.downcast_data::<crate::host_executor::HostSourceData>()
+            });
+            if let Some(source_data) = source_data {
+                let has_direct_local_export =
+                    source_data.parse.export_signatures.iter().any(|signature| {
+                        signature.name == imported_name && signature.reexport_source.is_none()
+                    });
+                if has_direct_local_export {
+                    let mut exact_owner = None;
+                    let mut ambiguous_owner = false;
+                    for declaration in source_data
+                        .parse
+                        .script_analysis
+                        .declaration_entries
+                        .iter()
+                        .filter(|declaration| declaration.name == imported_name)
+                    {
+                        match exact_owner {
+                            None => exact_owner = Some(declaration.owner),
+                            Some(owner) if owner == declaration.owner => {}
+                            Some(_) => {
+                                ambiguous_owner = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !ambiguous_owner {
+                        if let Some(owner) = exact_owner {
+                            return Some((
+                                (dep_canonical.to_string(), owner, imported_name.to_string()),
+                                vec![crate::resolver_core::FactVersionRef::FileWholeHash {
+                                    canonical_id: dep_canonical.to_string(),
+                                    hash: source_data.parse.whole_hash,
+                                }],
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
         let dep_serve = self.routed_shallow_state_serve(dep_canonical)?;
         let shallow = std::sync::Arc::clone(&dep_serve.state);
         let (target_canonical, target_symbol) = match shallow.export_target(imported_name)? {
@@ -2964,7 +3014,29 @@ impl VerterHost {
                 (next_canonical, original_name.clone())
             }
             crate::resolver_core::ExportTarget::Local { owner, symbol_name } => {
-                let import_target = shallow.import_target_in(*owner, symbol_name.as_str())?;
+                let Some(import_target) = shallow.import_target_in(*owner, symbol_name.as_str())
+                else {
+                    if !shallow.has_type_symbol_in(*owner, symbol_name.as_str())
+                        && !shallow.has_value_symbol_in(*owner, symbol_name.as_str())
+                    {
+                        return None;
+                    }
+
+                    let resolved = (dep_canonical.to_string(), *owner, symbol_name.clone());
+                    if !dep_serve.store_published {
+                        return Some((resolved, Vec::new()));
+                    }
+
+                    let mut facts = Vec::new();
+                    let mut seen = rustc_hash::FxHashSet::default();
+                    self.append_file_whole_and_route_fact_versions(
+                        dep_canonical,
+                        Some(shallow.as_ref()),
+                        &mut facts,
+                        &mut seen,
+                    );
+                    return Some((resolved, facts));
+                };
                 let next_canonical = if import_target.canonical_id.is_empty() {
                     self.resolve_route_type_edge(
                         dep_canonical,

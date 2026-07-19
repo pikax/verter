@@ -12,6 +12,21 @@ fn test_interner() -> Arc<crate::identity_interner::IdentityInterner> {
     Arc::new(crate::identity_interner::IdentityInterner::with_default_budget())
 }
 
+fn ordinary_import_canonicalization(entries: &[(&str, &str, &str)]) -> ImportCanonicalization {
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    ImportCanonicalization {
+        final_resolution: entries
+            .iter()
+            .map(|(local_name, canonical_id, symbol_name)| {
+                (
+                    verter_type_expr::DeclKey::new(owner, *local_name),
+                    ResolvedRootIdentity::new_in_owner(*canonical_id, owner, *symbol_name),
+                )
+            })
+            .collect(),
+    }
+}
+
 #[test]
 fn prepares_local_exported_type_decl_from_shallow_file_state() {
     let source = "export interface Props { label: string }";
@@ -111,12 +126,17 @@ export type Button = ComponentConfig<typeof theme>
         ("./types".to_string(), "/src/types.ts".to_string()),
         ("./theme".to_string(), "/src/theme.ts".to_string()),
     ]);
+    let import_canonicalization = ordinary_import_canonicalization(&[
+        ("ComponentConfig", "/src/types.ts", "ComponentConfig"),
+        ("theme", "/src/theme.ts", "theme"),
+    ]);
 
-    let prepared = prepare_exported_type_decl(
+    let prepared = prepare_local_type_decl(
         "/src/button-types.ts",
         &state,
         "Button",
         Some(&dep_edges),
+        &import_canonicalization,
         &test_interner(),
     )
     .expect("Button preparation should succeed")
@@ -143,6 +163,8 @@ import { Separator } from './runtime'
     let state = ShallowFileState::service_backed_for_test(source);
     let dep_edges =
         FxHashMap::from_iter([("./runtime".to_string(), "/src/runtime.ts".to_string())]);
+    let import_canonicalization =
+        ordinary_import_canonicalization(&[("Separator", "/src/runtime.ts", "Separator")]);
 
     assert!(
         state.has_type_symbol("Separator"),
@@ -153,11 +175,12 @@ import { Separator } from './runtime'
         "the same-named runtime import is intentionally present as the collision control"
     );
 
-    let slots = prepare_exported_type_decl(
+    let slots = prepare_local_type_decl(
         "/src/Separator.vue",
         &state,
         "SeparatorSlots",
         Some(&dep_edges),
+        &import_canonicalization,
         &test_interner(),
     )
     .expect("SeparatorSlots preparation should succeed")
@@ -177,7 +200,7 @@ import { Separator } from './runtime'
             &state,
             "Separator",
             Some(&dep_edges),
-            &ImportCanonicalization::default(),
+            &import_canonicalization,
             &test_interner(),
         )
         .expect("Separator preparation should succeed")
@@ -187,7 +210,7 @@ import { Separator } from './runtime'
 }
 
 #[test]
-fn prepared_type_decl_falls_back_to_canonical_relative_targets_without_dep_edges() {
+fn prepared_type_decl_uses_explicit_canonical_relative_targets() {
     let source = r#"
 import type { ComponentConfig } from './tv.ts'
 import type { AppConfig } from './schema.ts'
@@ -196,11 +219,22 @@ import theme from './theme.ts'
 export type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
 "#;
     let state = ShallowFileState::service_backed_for_test(source);
+    let import_canonicalization = ordinary_import_canonicalization(&[
+        ("ComponentConfig", "/src/tv.ts", "ComponentConfig"),
+        ("AppConfig", "/src/schema.ts", "AppConfig"),
+        ("theme", "/src/theme.ts", "default"),
+    ]);
 
-    let prepared =
-        prepare_exported_type_decl("/src/Button.vue", &state, "Button", None, &test_interner())
-            .expect("Button preparation should succeed")
-            .expect("Button should be present");
+    let prepared = prepare_local_type_decl(
+        "/src/Button.vue",
+        &state,
+        "Button",
+        None,
+        &import_canonicalization,
+        &test_interner(),
+    )
+    .expect("Button preparation should succeed")
+    .expect("Button should be present");
 
     assert_eq!(
         prepared
@@ -226,19 +260,22 @@ export type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
 }
 
 #[test]
-fn prepared_value_decl_falls_back_to_canonical_relative_targets_without_dep_edges() {
+fn prepared_value_decl_uses_explicit_canonical_relative_targets() {
     let source = r#"
 import type { Theme } from './theme.ts'
 
 export const defaults: Theme = {} as Theme
 "#;
     let state = ShallowFileState::service_backed_for_test(source);
+    let import_canonicalization =
+        ordinary_import_canonicalization(&[("Theme", "/src/theme.ts", "Theme")]);
 
-    let prepared = prepare_exported_value_decl(
+    let prepared = prepare_local_value_decl(
         "/src/Button.vue",
         &state,
         "defaults",
         None,
+        &import_canonicalization,
         &test_interner(),
     )
     .expect("defaults should be present");
@@ -272,11 +309,19 @@ type Local = { x: number }
 export interface Props { child: Inner; data: Local }
 "#;
     let state = ShallowFileState::service_backed_for_test(source);
+    let import_canonicalization =
+        ordinary_import_canonicalization(&[("Inner", "/src/inner.ts", "Inner")]);
 
-    let prepared =
-        prepare_exported_type_decl("/src/types.ts", &state, "Props", None, &test_interner())
-            .expect("Props preparation should succeed")
-            .expect("Props should be present");
+    let prepared = prepare_local_type_decl(
+        "/src/types.ts",
+        &state,
+        "Props",
+        None,
+        &import_canonicalization,
+        &test_interner(),
+    )
+    .expect("Props preparation should succeed")
+    .expect("Props should be present");
 
     // Should have a member index for 'child' and 'data'
     assert!(
@@ -498,6 +543,8 @@ export namespace NS {
 "#;
     let state = ShallowFileState::service_backed_for_test(source);
     let dep_edges = FxHashMap::from_iter([("./items".to_string(), "/src/items.ts".to_string())]);
+    let import_canonicalization =
+        ordinary_import_canonicalization(&[("Item", "/src/items.ts", "Item")]);
     // The bare name is an import local and NOT a file-scope type symbol
     // (the namespace member is indexed under "NS.Item" only).
     assert!(state.is_import_local("Item"));
@@ -508,7 +555,7 @@ export namespace NS {
         &state,
         "NS.Holder",
         Some(&dep_edges),
-        &ImportCanonicalization::default(),
+        &import_canonicalization,
         &test_interner(),
     )
     .expect("NS.Holder preparation should succeed")
@@ -540,6 +587,8 @@ export interface SeparatorSlots { root: Separator }
     let state = ShallowFileState::service_backed_for_test(source);
     let dep_edges =
         FxHashMap::from_iter([("./runtime".to_string(), "/src/runtime.ts".to_string())]);
+    let import_canonicalization =
+        ordinary_import_canonicalization(&[("Separator", "/src/runtime.ts", "Separator")]);
     assert!(state.has_type_symbol("Separator"));
     assert!(state.is_import_local("Separator"));
 
@@ -548,7 +597,7 @@ export interface SeparatorSlots { root: Separator }
         &state,
         "SeparatorSlots",
         Some(&dep_edges),
-        &ImportCanonicalization::default(),
+        &import_canonicalization,
         &test_interner(),
     )
     .expect("SeparatorSlots preparation should succeed")
@@ -567,7 +616,7 @@ export interface SeparatorSlots { root: Separator }
         &state,
         "defaults",
         Some(&dep_edges),
-        &ImportCanonicalization::default(),
+        &import_canonicalization,
         &test_interner(),
     )
     .expect("defaults should be present");
@@ -598,13 +647,15 @@ export namespace NS {
 "#;
     let state = ShallowFileState::service_backed_for_test(source);
     let dep_edges = FxHashMap::from_iter([("./helper".to_string(), "/src/helper.ts".to_string())]);
+    let import_canonicalization =
+        ordinary_import_canonicalization(&[("helper", "/src/helper.ts", "helper")]);
 
     let plain = prepare_local_type_decl(
         "/ws/fixture.ts",
         &state,
         "Plain",
         Some(&dep_edges),
-        &ImportCanonicalization::default(),
+        &import_canonicalization,
         &test_interner(),
     )
     .expect("Plain preparation should succeed")
@@ -614,7 +665,7 @@ export namespace NS {
         &state,
         "NS.Holder",
         Some(&dep_edges),
-        &ImportCanonicalization::default(),
+        &import_canonicalization,
         &test_interner(),
     )
     .expect("NS.Holder preparation should succeed")
@@ -652,18 +703,23 @@ export namespace NS {
 }
 "#;
     let state = ShallowFileState::service_backed_for_test(source);
+    let import_canonicalization = Arc::new(ordinary_import_canonicalization(&[(
+        "helper",
+        "/src/helper.ts",
+        "helper",
+    )]));
     let type_cache = build_prepared_type_decl_cache(
         "/ws/fixture.ts",
         Arc::clone(&state),
         Arc::new(FxHashMap::default()),
-        Arc::new(ImportCanonicalization::default()),
+        Arc::clone(&import_canonicalization),
         &test_interner(),
     );
     let value_cache = build_prepared_value_decl_cache(
         "/ws/fixture.ts",
         Arc::clone(&state),
         Arc::new(FxHashMap::default()),
-        Arc::new(ImportCanonicalization::default()),
+        import_canonicalization,
         &test_interner(),
     );
 

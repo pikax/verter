@@ -1091,19 +1091,20 @@ mod public_api_projection_hover_transport_tests {
     #[test]
     fn child_hover_preserves_projection_failure_on_jsonrpc_transport() {
         let host = VerterHost::new_standalone(HostConfig::default());
-        host.upsert(UpsertRequest {
-            canonical_id: Some("/src/UnsafeEnum.vue".to_string()),
-            input_id: "/src/UnsafeEnum.vue".to_string(),
-            source: Arc::from(
-                r#"<script setup lang="ts">
+        let _update = host
+            .upsert(UpsertRequest {
+                canonical_id: Some("/src/UnsafeEnum.vue".to_string()),
+                input_id: "/src/UnsafeEnum.vue".to_string(),
+                source: Arc::from(
+                    r#"<script setup lang="ts">
 enum Unsafe { Value = Math.random() }
 defineProps<{ value: Unsafe }>()
 </script>"#,
-            ),
-            file_language: FileLanguage::vue(),
-            aliases: Vec::new(),
-        })
-        .expect("upsert unsafe enum");
+                ),
+                file_language: FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert unsafe enum");
         let projection_error = host
             .get_public_api_with_mode("/src/UnsafeEnum.vue", PublicApiMode::Declaration, None)
             .expect_err("unsafe enum projection");

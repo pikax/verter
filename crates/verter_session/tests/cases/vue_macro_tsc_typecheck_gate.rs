@@ -232,7 +232,8 @@ interface Base<T> {}
 class Payload<T extends string> extends ImportedBase implements Base<T> {
   readonly literal = 1
   value = 1
-  constructor(public id?: number, protected name = "x") {}
+  // Keep the authored fixture valid: Verter preserves Testing-mode class bodies.
+  constructor(public id?: number, protected name = "x") { super() }
   method(input = 1) { return input }
 }
 enum Kind { Zero, Two = Zero + 2, Text = "text" }
@@ -300,7 +301,8 @@ const publicMethodResult: number = publicPayload.method(2)
 const publicId: number | undefined = publicPayload.id
 const publicBase: number = publicPayload.base
 const publicImportedCode: 'external' = publicInstance.$props.imported.code
-const publicKindAsNumber: number = publicInstance.$props.kind
+// Kind is heterogeneous because Text is a string member; its primitive domain is string | number.
+const publicKindAsPrimitive: string | number = publicInstance.$props.kind
 const publicKindFromCtor: typeof publicInstance.$props.kind =
   publicInstance.$props.kindCtor.Two
 const publicKindNotAny: IsAny<typeof publicInstance.$props.kind> = false
@@ -348,7 +350,7 @@ const testingMethodResult: number = testingPayload.method(2)
 const testingId: number | undefined = testingPayload.id
 const testingBase: number = testingPayload.base
 const testingImportedCode: 'external' = testingInstance.$props.imported.code
-const testingKindAsNumber: number = testingInstance.$props.kind
+const testingKindAsPrimitive: string | number = testingInstance.$props.kind
 const testingKindFromCtor: typeof testingInstance.$props.kind =
   testingInstance.$props.kindCtor.Two
 const testingKindNotAny: IsAny<typeof testingInstance.$props.kind> = false
@@ -393,7 +395,7 @@ const declarationMethodResult: number = declarationPayload.method(2)
 const declarationId: number | undefined = declarationPayload.id
 const declarationBase: number = declarationPayload.base
 const declarationImportedCode: 'external' = declarationInstance.$props.imported.code
-const declarationKindAsNumber: number = declarationInstance.$props.kind
+const declarationKindAsPrimitive: string | number = declarationInstance.$props.kind
 const declarationKindFromCtor: typeof declarationInstance.$props.kind =
   declarationInstance.$props.kindCtor.Two
 const declarationKindNotAny: IsAny<typeof declarationInstance.$props.kind> = false
@@ -422,7 +424,7 @@ void publicMethodResult
 void publicId
 void publicBase
 void publicImportedCode
-void publicKindAsNumber
+void publicKindAsPrimitive
 void publicKindFromCtor
 void publicKindNotAny
 void publicBadKind
@@ -432,7 +434,7 @@ void testingMethodResult
 void testingId
 void testingBase
 void testingImportedCode
-void testingKindAsNumber
+void testingKindAsPrimitive
 void testingKindFromCtor
 void testingKindNotAny
 void testingBindingValue
@@ -443,7 +445,7 @@ void declarationMethodResult
 void declarationId
 void declarationBase
 void declarationImportedCode
-void declarationKindAsNumber
+void declarationKindAsPrimitive
 void declarationKindFromCtor
 void declarationKindNotAny
 
@@ -771,7 +773,7 @@ fn public_result_reports_owner_body_value_dependency_as_structured_failure() {
         assert_eq!(error.code(), "tsc-generation", "mode={mode:?}");
         assert_eq!(
             error.subject(),
-            verter_compiler::tsc::TscFailureSubject::Macro { syntax_index: 0 },
+            verter_session::PublicApiProjectionSubject::Macro { syntax_index: 0 },
             "mode={mode:?}"
         );
         assert_eq!(

@@ -495,6 +495,57 @@ pub(crate) fn component_meta_registry_public_route_owner_local_root(
     Some(root_name)
 }
 
+/// Recover owner-local utility/indexed routes authored at a macro's type-arg
+/// root before public-field expansion consumes that wrapper. Per-field
+/// collection cannot recover `defineProps<Pick<Foo, K>>()` from the expanded
+/// `Foo` members, while nested field annotations retain their own structural
+/// locators and continue through the existing field collector.
+pub(crate) fn collect_component_meta_registry_public_macro_root_refs(
+    ctx: &dyn ResolverContext,
+    owner_canonical: &str,
+    snapshot: &FileAnalysisSnapshot,
+    published_names: &rustc_hash::FxHashSet<String>,
+    queued_names: &mut rustc_hash::FxHashSet<String>,
+    output: &mut VecDeque<PendingComponentMetaRegistryRef>,
+    source_hint: Option<&str>,
+) {
+    for (macro_index, macro_call) in snapshot.macros.iter().enumerate() {
+        if !macro_call.is_type_based || macro_call.parsed_type_argument.is_none() {
+            continue;
+        }
+        let Some(hot) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
+            ctx,
+            owner_canonical,
+            macro_index,
+        ) else {
+            continue;
+        };
+        let route_root_name = component_meta_registry_node_utility_route(ctx, hot.node())
+            .or_else(|| component_meta_registry_node_indexed_access_route(ctx, hot.node()))
+            .map(|(root, _)| root);
+        let Some(owner_local_root) = component_meta_registry_public_route_owner_local_root(
+            ctx,
+            owner_canonical,
+            macro_call.owner,
+            snapshot,
+            route_root_name.as_deref(),
+            source_hint,
+        ) else {
+            continue;
+        };
+        enqueue_component_meta_registry_ref(
+            published_names,
+            queued_names,
+            output,
+            owner_local_root.as_str(),
+            source_hint,
+            macro_call.owner,
+            None,
+            RouteDemand::Whole,
+        );
+    }
+}
+
 pub(crate) fn enqueue_component_meta_registry_ref(
     published_names: &rustc_hash::FxHashSet<String>,
     queued_names: &mut rustc_hash::FxHashSet<String>,
@@ -2306,10 +2357,15 @@ export interface AvatarProps {
             resolved,
             Some((
                 "/src/Avatar.vue".to_string(),
-                verter_type_expr::TopLevelOwnerId::instance(0),
+                verter_type_expr::TopLevelOwnerId::module(0),
                 "AvatarProps".to_string(),
             )),
-            "registry import roots should collapse direct named owner imports to the canonical defining file instead of keeping the barrel canonical",
+            "registry import roots must preserve the exact module-script owner from the defining Vue file instead of substituting the consumer instance owner",
+        );
+        assert_ne!(
+            resolved.as_ref().map(|(_, owner, _)| *owner),
+            Some(verter_type_expr::TopLevelOwnerId::instance(0)),
+            "the consumer's instance owner is not authoritative for a declaration authored in the dependency's normal script block",
         );
     }
 }

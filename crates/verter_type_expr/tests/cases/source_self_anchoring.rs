@@ -14,7 +14,7 @@ use verter_type_expr::facts::DeclarationOrigin;
 use verter_type_expr::facts::{
     ClosedTypeFact, FactOrLocator, FunctionParamFact, FunctionSignatureFact, LeafTypeFact,
     ObjectMemberFact, ObjectPropertyFact, ObjectShapeFact, ProjectedMemberFact, ProjectedTypeFact,
-    ResolvedLocalShape, SemanticTypeSource, SynthesizedMemberFact,
+    ResolvedLocalShape, ReturnInferenceCompleteness, SemanticTypeSource, SynthesizedMemberFact,
 };
 use verter_type_expr::locators::{
     AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, MacroPayloadLocator,

@@ -586,16 +586,20 @@ export interface CheckboxProps {
 <template><div /></template>"#,
     );
 
-    let initial = host
-        .prepared_type_decl("/workspace/Checkbox.vue", "CheckboxProps")
-        .expect("CheckboxProps should prepare before import routes are upgraded");
-    assert_eq!(
-        initial
-            .name_resolution
-            .get("theme")
-            .map(|identity| identity.canonical_id.as_ref()),
-        Some("#build/ui/checkbox"),
-        "before the import route is upgraded the prepared decl should still carry the raw alias target",
+    let initial_view = host.resolver_store_view_read().into_owned_view();
+    assert!(
+        matches!(
+            host.prepared_type_decl_in_with_store_view(
+                &initial_view,
+                "/workspace/Checkbox.vue",
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "CheckboxProps",
+            ),
+            Err(crate::resolver_core::prepared_decl::PreparationFailure::MissingExternalOwner {
+                local_name,
+            }) if local_name == "theme"
+        ),
+        "an unresolved alias has no authoritative target owner and must fail closed before the route upgrade",
     );
 
     host.set_import_dependencies(
@@ -615,8 +619,8 @@ export interface CheckboxProps {
             .name_resolution
             .get("theme")
             .map(|identity| (identity.canonical_id.as_ref(), identity.symbol_name.as_ref())),
-        Some(("/workspace/.nuxt/ui/checkbox.ts", "default")),
-        "prepared decl caches must rebuild when dependency resolutions improve so later typeof/name-resolution walks do not reopen the raw alias path",
+        Some(("/workspace/.nuxt/ui/checkbox.ts", "theme")),
+        "prepared decl caches must rebuild to the exact exported value owner when dependency resolutions improve",
     );
 }
 
@@ -1669,7 +1673,7 @@ fn prepared_type_decl_mints_content_free_class_heritage_base_facts() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn prepared_type_decl_reuses_indexed_package_shallow_state_without_reread() {
+fn prepared_type_decl_reuses_warmed_package_target_and_materializes_cold_helper_once() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/workspace/node_modules/pkg/dist/index.d.ts",
@@ -1724,6 +1728,13 @@ fn prepared_type_decl_reuses_indexed_package_shallow_state_without_reread() {
         verter_type_expr::TopLevelOwnerId::ordinary_file()
     );
     assert_eq!(target.symbol_name.as_ref(), "PackageEmits");
+    assert!(
+        host.project_type_store
+            .indexed()
+            .get_any("/workspace/node_modules/pkg/dist/payload.d.ts")
+            .is_none(),
+        "the helper must remain cold until exact-owner canonicalization demands it",
+    );
 
     ws.reset_reads();
     host.provenance().reset();
@@ -1759,26 +1770,26 @@ fn prepared_type_decl_reuses_indexed_package_shallow_state_without_reread() {
             .is_some(),
         "the inspected active package target owns a canonical IndexedReady",
     );
-    // The ONCE/no-reread discriminator: the prepared-decl build runs
-    // entirely against the artifacts the first resolution warmed — zero
-    // new materialisations (a re-build of the warmed package target
-    // would show up here even if the workspace read were served by an
-    // intermediate cache).
+    // The exact-owner discriminator: index/index3 are already warm, while
+    // Payload has no authoritative target owner yet. Preparation therefore
+    // builds exactly the one cold helper; rebuilding either warm package
+    // artifact or reading Payload twice would raise these counts above one.
     assert_eq!(
         host.provenance().snapshot().indexed_ready_materializes,
-        0,
-        "the prepared-decl build must REUSE the warmed package artifacts — \
-         zero IndexedReady materialisations",
+        1,
+        "the prepared-decl build must reuse index/index3 and materialize only the previously unowned helper",
     );
     assert_eq!(
         ws.read_count("/workspace/node_modules/pkg/dist/payload.d.ts"),
-        0,
-        "the prepared declaration lookup resolves imported helper edges from the dependency tables without reading the helper source",
+        1,
+        "exact target ownership requires one cold helper read and no duplicate read",
     );
     assert!(
-        host.project_type_store.indexed().get_any("/workspace/node_modules/pkg/dist/payload.d.ts")
-            .is_none(),
-        "imported helper edges the walk never inspects stay shallow: no IndexedReady is materialized for them",
+        host.project_type_store
+            .indexed()
+            .get_any("/workspace/node_modules/pkg/dist/payload.d.ts")
+            .is_some(),
+        "the exact-owner helper materialization must publish one reusable IndexedReady artifact",
     );
 }
 
@@ -9254,6 +9265,85 @@ export interface Props {
         ws.read_count("/src/b.ts"),
         0,
         "imported-root proof for a local export must not read later unrelated dependency sources",
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn direct_imported_type_root_fast_path_reuses_exact_owner_local_type_declaration() {
+    let host = make_host();
+    upsert_vue(
+        &host,
+        "/src/types.vue",
+        r#"<script lang="ts">
+export interface Props { label: string }
+</script>
+<template><div /></template>"#,
+    );
+
+    let analysis = host
+        .scheduler_script_analysis("/src/types.vue")
+        .expect("the provider should own a published parse-header surface");
+    assert!(
+        analysis.declaration_entries.iter().any(|entry| {
+            entry.name == "Props"
+                && entry.owner == verter_type_expr::TopLevelOwnerId::module(0)
+                && entry.kind == verter_semantic::analysis::LocalDeclarationKind::Type
+        }),
+        "the fixture must expose a type-only symbol in the module-script owner",
+    );
+    assert!(
+        !analysis.declaration_entries.iter().any(|entry| {
+            entry.name == "Props"
+                && matches!(
+                    entry.kind,
+                    verter_semantic::analysis::LocalDeclarationKind::Value
+                        | verter_semantic::analysis::LocalDeclarationKind::TypeAndValue
+                )
+        }),
+        "the fixture must not let a value-space fallback hide a type-space regression",
+    );
+    assert!(
+        host.project_type_store
+            .indexed()
+            .get_any("/src/types.vue")
+            .is_none(),
+        "the fixture must start with headers only, not a prebuilt IndexedReady artifact",
+    );
+
+    host.provenance().reset();
+    let (resolved, facts) = host
+        .resolve_direct_imported_type_root_fast_path("/src/types.vue", "Props")
+        .expect("a direct local exported declaration should stay on the shallow fast path");
+
+    assert_eq!(
+        resolved,
+        expected_imported_root_tuple(
+            "/src/types.vue",
+            verter_type_expr::TopLevelOwnerId::module(0),
+            "Props",
+        ),
+        "the fast path must preserve the exact defining owner and symbol",
+    );
+    assert!(
+        facts.iter().any(|fact| matches!(
+            fact,
+            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
+                if canonical_id == "/src/types.vue"
+        )),
+        "the direct-local proof must track the provider content hash",
+    );
+    assert_eq!(
+        host.provenance().snapshot().indexed_ready_materializes,
+        0,
+        "a published exact local header must not materialize an IndexedReady artifact",
+    );
+    assert!(
+        host.project_type_store
+            .indexed()
+            .get_any("/src/types.vue")
+            .is_none(),
+        "the header fast path must leave the IndexedReady store cold",
     );
 }
 

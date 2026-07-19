@@ -291,10 +291,10 @@ fn public_api_projection_mcp_error(
 ) -> ErrorData {
     let unavailable_outcome = error.unavailable_outcome();
     let subject = match error.subject() {
-        verter_compiler::tsc::TscFailureSubject::Macro { syntax_index } => {
+        verter_session::PublicApiProjectionSubject::Macro { syntax_index } => {
             serde_json::json!({ "kind": "macro", "syntaxIndex": syntax_index })
         }
-        verter_compiler::tsc::TscFailureSubject::ScriptSetupAttrs { source_range } => {
+        verter_session::PublicApiProjectionSubject::ScriptSetupAttrs { source_range } => {
             serde_json::json!({
                 "kind": "scriptSetupAttrs",
                 "sourceRange": { "start": source_range.start, "end": source_range.end },
@@ -3854,6 +3854,7 @@ const count = ref(0)
             module_references: Vec::new(),
             macros: vec![verter_semantic::analysis::types::AnalyzedMacro {
                 kind: AnalyzedMacroKind::DefineProps,
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,
                 type_references: vec![
                     "Type1".into(),

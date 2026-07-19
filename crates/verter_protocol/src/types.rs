@@ -358,30 +358,45 @@ pub struct FfiTscResponse {
     pub source_map: Option<String>,
 }
 
-/// Stable structured identity for a failed public-API projection.
+/// Dependency-neutral syntax carrier for a failed public-API projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-pub enum FfiTscFailureSubject {
+pub enum PublicApiProjectionSubject {
     Macro { syntax_index: u32 },
     ScriptSetupAttrs { source_range: verter_span::Span },
 }
 
+impl std::fmt::Display for PublicApiProjectionSubject {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Macro { syntax_index } => {
+                write!(formatter, "macro syntax index {syntax_index}")
+            }
+            Self::ScriptSetupAttrs { source_range } => write!(
+                formatter,
+                "script setup attrs source range {}..{}",
+                source_range.start, source_range.end
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
-mod ffi_tsc_failure_subject_tests {
-    use super::FfiTscFailureSubject;
+mod public_api_projection_subject_tests {
+    use super::PublicApiProjectionSubject;
 
     #[test]
     fn serializes_as_closed_discriminated_union() {
         assert_eq!(
-            serde_json::to_value(FfiTscFailureSubject::Macro { syntax_index: 7 }).unwrap(),
+            serde_json::to_value(PublicApiProjectionSubject::Macro { syntax_index: 7 }).unwrap(),
             serde_json::json!({ "kind": "macro", "syntaxIndex": 7 })
         );
         assert_eq!(
-            serde_json::to_value(FfiTscFailureSubject::ScriptSetupAttrs {
+            serde_json::to_value(PublicApiProjectionSubject::ScriptSetupAttrs {
                 source_range: verter_span::Span::new(31, 37),
             })
             .unwrap(),
@@ -399,7 +414,7 @@ mod ffi_tsc_failure_subject_tests {
 pub struct FfiPublicApiProjectionError {
     pub code: String,
     pub detail_code: String,
-    pub subject: FfiTscFailureSubject,
+    pub subject: PublicApiProjectionSubject,
     pub declaration_shape_reason: Option<String>,
     pub member_ordinal: Option<u32>,
     pub outcome_kind: Option<String>,

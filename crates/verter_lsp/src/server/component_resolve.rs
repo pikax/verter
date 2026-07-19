@@ -1204,6 +1204,7 @@ mod imported_component_candidate_tests {
         let mut analysis = verter_session::FileAnalysisSnapshot::default();
         analysis.imports.push(AnalyzedImport {
             source: "../shared/DirectChild".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_only: false,
             bindings: Vec::new(),
             span: verter_span::Span::default(),

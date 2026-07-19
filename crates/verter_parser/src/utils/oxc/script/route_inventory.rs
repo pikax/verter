@@ -391,13 +391,9 @@ fn record_default_export(
     routes: &mut Vec<ScriptLocalExportRoute>,
 ) {
     let (local, capability) = match &declaration.declaration {
-        ExportDefaultDeclarationKind::ClassDeclaration(class) => (
-            class
-                .id
-                .as_ref()
-                .map_or("default", |identifier| identifier.name.as_str()),
-            RouteCapability::TypeAndValue,
-        ),
+        ExportDefaultDeclarationKind::ClassDeclaration(_) => {
+            ("default", RouteCapability::TypeAndValue)
+        }
         ExportDefaultDeclarationKind::FunctionDeclaration(function) => (
             function
                 .id
@@ -405,12 +401,13 @@ fn record_default_export(
                 .map_or("default", |identifier| identifier.name.as_str()),
             RouteCapability::ValueOnly,
         ),
-        ExportDefaultDeclarationKind::TSInterfaceDeclaration(interface) => {
-            (interface.id.name.as_str(), RouteCapability::TypeOnly)
+        ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => {
+            ("default", RouteCapability::TypeOnly)
         }
         ExportDefaultDeclarationKind::Identifier(identifier) => {
             (identifier.name.as_str(), RouteCapability::ValueOnly)
         }
+        other if other.as_expression().is_some() => ("default", RouteCapability::ValueOnly),
         _ => return,
     };
     routes.push(ScriptLocalExportRoute {

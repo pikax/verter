@@ -86,6 +86,29 @@ impl DeclarationPath {
         &self.members
     }
 
+    /// Canonical declaration key used by the current lowering environment.
+    /// Namespace segments are joined from their structural representation;
+    /// consumers never recover structure by splitting dotted text.
+    #[must_use]
+    pub fn qualified_key(&self) -> DeclKey {
+        if self.members.is_empty() {
+            return self.root.clone();
+        }
+        let capacity = self.root.name.len()
+            + self
+                .members
+                .iter()
+                .map(|member| member.len() + 1)
+                .sum::<usize>();
+        let mut name = String::with_capacity(capacity);
+        name.push_str(&self.root.name);
+        for member in self.members.iter() {
+            name.push('.');
+            name.push_str(member);
+        }
+        DeclKey::new(self.root.owner, name)
+    }
+
     #[must_use]
     pub fn appended(&self, member: impl Into<String>) -> Self {
         let mut members = self.members.to_vec();

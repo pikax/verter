@@ -57,13 +57,13 @@ use verter_session::VerterHost;
 use type_provider::traits::TypeProvider;
 
 fn public_api_projection_subject_json(
-    subject: verter_compiler::tsc::TscFailureSubject,
+    subject: verter_session::PublicApiProjectionSubject,
 ) -> serde_json::Value {
     match subject {
-        verter_compiler::tsc::TscFailureSubject::Macro { syntax_index } => {
+        verter_session::PublicApiProjectionSubject::Macro { syntax_index } => {
             serde_json::json!({ "kind": "macro", "syntaxIndex": syntax_index })
         }
-        verter_compiler::tsc::TscFailureSubject::ScriptSetupAttrs { source_range } => {
+        verter_session::PublicApiProjectionSubject::ScriptSetupAttrs { source_range } => {
             serde_json::json!({
                 "kind": "scriptSetupAttrs",
                 "sourceRange": { "start": source_range.start, "end": source_range.end },
@@ -135,19 +135,20 @@ mod public_api_projection_transport_tests {
     #[test]
     fn jsonrpc_projection_error_preserves_every_stable_field() {
         let host = VerterHost::new_standalone(HostConfig::default());
-        host.upsert(UpsertRequest {
-            canonical_id: Some("/src/UnsafeEnum.vue".to_string()),
-            input_id: "/src/UnsafeEnum.vue".to_string(),
-            source: Arc::from(
-                r#"<script setup lang="ts">
+        let _update = host
+            .upsert(UpsertRequest {
+                canonical_id: Some("/src/UnsafeEnum.vue".to_string()),
+                input_id: "/src/UnsafeEnum.vue".to_string(),
+                source: Arc::from(
+                    r#"<script setup lang="ts">
 enum Unsafe { Value = Math.random() }
 defineProps<{ value: Unsafe }>()
 </script>"#,
-            ),
-            file_language: FileLanguage::vue(),
-            aliases: Vec::new(),
-        })
-        .expect("upsert unsafe enum");
+                ),
+                file_language: FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert unsafe enum");
         let projection_error = host
             .get_public_api_with_mode("/src/UnsafeEnum.vue", PublicApiMode::Declaration, None)
             .expect_err("unsafe enum projection");

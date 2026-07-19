@@ -682,18 +682,18 @@ fn test_percent_decode_uri() {
 /// must produce the same canonical form for both inputs.
 #[test]
 fn test_normalize_file_uri() {
-    let our_uri = "file:///C:/Users/Someone/AppData/Local/Temp/test/App.vue.tsx";
-    let tsgo_uri = "file:///c%3A/users/someone/appdata/local/temp/test/App.vue.tsx";
-
-    let our_normalized = normalize_file_uri(our_uri);
-    let tsgo_normalized = normalize_file_uri(tsgo_uri);
-
     // On Windows, both should normalize to the same lowercase form
     #[cfg(windows)]
-    assert_eq!(
-        our_normalized, tsgo_normalized,
-        "normalized URIs must match: ours={our_normalized}, tsgo={tsgo_normalized}"
-    );
+    {
+        let our_uri = "file:///C:/Users/Someone/AppData/Local/Temp/test/App.vue.tsx";
+        let tsgo_uri = "file:///c%3A/users/someone/appdata/local/temp/test/App.vue.tsx";
+        let our_normalized = normalize_file_uri(our_uri);
+        let tsgo_normalized = normalize_file_uri(tsgo_uri);
+        assert_eq!(
+            our_normalized, tsgo_normalized,
+            "normalized URIs must match: ours={our_normalized}, tsgo={tsgo_normalized}"
+        );
+    }
 
     // On non-Windows, percent-decoding still happens
     #[cfg(not(windows))]
@@ -705,6 +705,7 @@ fn test_normalize_file_uri() {
 
 /// @ai-generated — normalize_file_uri produces matching keys for diagnostics cache
 #[test]
+#[cfg(windows)]
 fn test_normalize_file_uri_cache_key_match() {
     // Simulate what open_file does: path_to_uri → normalize → cache key
     let path = "C:/Users/Someone/AppData/Local/Temp/verter_test/App.vue.tsx";

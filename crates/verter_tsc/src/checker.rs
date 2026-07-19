@@ -31,7 +31,8 @@ use rayon::prelude::*;
 use tempfile::TempDir;
 use verter_compiler::compile::{CodegenOptions, CompileTarget, VerterCompileOptions};
 use verter_session::{
-    FileLanguage, HostConfig, PublicApiProjectionError, UpsertRequest, VerterHost,
+    FileLanguage, HostConfig, PublicApiProjectionError, PublicApiProjectionSubject, UpsertRequest,
+    VerterHost,
 };
 
 use crate::api_check;
@@ -72,7 +73,7 @@ pub struct PublicApiFailure {
     pub source: PathBuf,
     pub code: &'static str,
     pub detail_code: &'static str,
-    pub subject: verter_compiler::tsc::TscFailureSubject,
+    pub subject: PublicApiProjectionSubject,
     pub declaration_shape_reason: Option<&'static str>,
     pub member_ordinal: Option<u32>,
     pub outcome_kind: Option<&'static str>,
@@ -431,19 +432,20 @@ pub fn run(
             ))
         })?;
         let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
-        host.upsert(UpsertRequest {
-            canonical_id: Some(canonical_id.clone()),
-            input_id: canonical_id,
-            source: std::sync::Arc::<str>::from(source),
-            file_language: FileLanguage::vue(),
-            aliases: Vec::new(),
-        })
-        .map_err(|error| {
-            api_check::TypecheckError::new(format!(
-                "verter-tsc: failed to ingest carrier source {}: {error}",
-                vue_path.display()
-            ))
-        })?;
+        let _update = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(canonical_id.clone()),
+                input_id: canonical_id,
+                source: std::sync::Arc::<str>::from(source),
+                file_language: FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .map_err(|error| {
+                api_check::TypecheckError::new(format!(
+                    "verter-tsc: failed to ingest carrier source {}: {error}",
+                    vue_path.display()
+                ))
+            })?;
     }
 
     // ── Typecheck stage: in-memory tsgo `--api` (the `--noEmit` diagnostic set). ──
@@ -2511,14 +2513,15 @@ defineProps<{ value: Unsafe }>()
             ),
         ] {
             let canonical = path.to_string_lossy().replace('\\', "/");
-            host.upsert(UpsertRequest {
-                canonical_id: Some(canonical.clone()),
-                input_id: canonical,
-                source: std::sync::Arc::from(source),
-                file_language: FileLanguage::vue(),
-                aliases: Vec::new(),
-            })
-            .expect("upsert batch fixture");
+            let _update = host
+                .upsert(UpsertRequest {
+                    canonical_id: Some(canonical.clone()),
+                    input_id: canonical,
+                    source: std::sync::Arc::from(source),
+                    file_language: FileLanguage::vue(),
+                    aliases: Vec::new(),
+                })
+                .expect("upsert batch fixture");
         }
 
         let batch = generate_public_api_stubs(
@@ -2547,7 +2550,7 @@ defineProps<{ value: Unsafe }>()
         assert_eq!(failure.detail_code, "unsupported-declaration-shape");
         assert_eq!(
             failure.subject,
-            verter_compiler::tsc::TscFailureSubject::Macro { syntax_index: 0 }
+            PublicApiProjectionSubject::Macro { syntax_index: 0 }
         );
         assert_eq!(
             failure.declaration_shape_reason,
@@ -2605,7 +2608,7 @@ defineProps<{ value: Unsafe }>()
         assert_eq!(failure.detail_code, "invalid-authored-member-ordinal");
         assert_eq!(
             failure.subject,
-            verter_compiler::tsc::TscFailureSubject::Macro { syntax_index: 5 }
+            PublicApiProjectionSubject::Macro { syntax_index: 5 }
         );
         assert_eq!(failure.declaration_shape_reason, None);
         assert_eq!(failure.member_ordinal, Some(11));
@@ -2683,7 +2686,7 @@ defineProps<{ value: Unsafe }>()
             assert_eq!(failure.detail_code, "unavailable-outcome");
             assert_eq!(
                 failure.subject,
-                TscFailureSubject::Macro {
+                PublicApiProjectionSubject::Macro {
                     syntax_index: syntax_index as u32,
                 }
             );
@@ -2724,7 +2727,7 @@ defineProps<{ value: Unsafe }>()
 
         assert_eq!(
             failure.subject,
-            TscFailureSubject::ScriptSetupAttrs {
+            PublicApiProjectionSubject::ScriptSetupAttrs {
                 source_range: verter_span::Span::new(31, 37),
             }
         );

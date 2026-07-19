@@ -618,6 +618,8 @@ pub enum ScopedCacheNodeError {
     Panicked,
     /// The same typed identity was used concurrently for different value types.
     TypeMismatch,
+    /// A producer synchronously requested its own active cache-node identity.
+    Reentrant,
 }
 
 #[derive(Clone)]
@@ -1478,6 +1480,9 @@ impl Scheduler {
         }
 
         let identity = request.identity();
+        if crate::caller_kind::active_path_contains_work(&identity) {
+            return Err(ScopedCacheNodeError::Reentrant);
+        }
         let owner_id = self.next_scoped_owner_id.fetch_add(1, Ordering::Relaxed);
         let flight = {
             let _gate = self.scoped_cache_gate.lock();
@@ -1584,43 +1589,50 @@ impl Scheduler {
                     .take()
                     .expect("only the caller that supplied this closure can claim it once");
                 let identity_for_path = identity.clone();
+                let identity_for_publication = identity.clone();
                 let context_for_worker = request_context.clone();
                 let aggregate_for_worker = aggregate.clone();
+                let flight_for_worker = Arc::clone(flight);
+                let scheduler_for_worker = Arc::clone(self);
                 let run = move || {
                     let _request_guard =
                         context_for_worker.map(|context| Arc::clone(&context.0).install_tls());
                     let _job_guard = crate::cancellation::JobCancellationGuard::install(
                         aggregate_for_worker.clone(),
                     );
-                    crate::caller_kind::with_active_path(identity_for_path, || {
+                    let outcome = crate::caller_kind::with_active_path(identity_for_path, || {
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             operation(&aggregate_for_worker)
                         }))
-                    })
+                    });
+                    match outcome {
+                        Ok(value) => {
+                            let value: Arc<dyn Any + Send + Sync> = Arc::new(value);
+                            let terminal = if aggregate_for_worker.is_cancelled() {
+                                ScopedCacheTerminal::Cancelled
+                            } else {
+                                ScopedCacheTerminal::Value(value)
+                            };
+                            let success = matches!(terminal, ScopedCacheTerminal::Value(_));
+                            scheduler_for_worker.terminalize_scoped_cache_flight(
+                                &identity_for_publication,
+                                &flight_for_worker,
+                                terminal,
+                                success,
+                            );
+                        }
+                        Err(_) => scheduler_for_worker.terminalize_scoped_cache_flight(
+                            &identity_for_publication,
+                            &flight_for_worker,
+                            ScopedCacheTerminal::Panicked,
+                            false,
+                        ),
+                    }
                 };
                 #[cfg(not(target_arch = "wasm32"))]
-                let outcome = self.cpu_pool.install(run);
+                self.cpu_pool.install(run);
                 #[cfg(target_arch = "wasm32")]
-                let outcome = run();
-
-                match outcome {
-                    Ok(value) => {
-                        let value: Arc<dyn Any + Send + Sync> = Arc::new(value);
-                        let terminal = if aggregate.is_cancelled() {
-                            ScopedCacheTerminal::Cancelled
-                        } else {
-                            ScopedCacheTerminal::Value(value)
-                        };
-                        let success = matches!(terminal, ScopedCacheTerminal::Value(_));
-                        self.terminalize_scoped_cache_flight(identity, flight, terminal, success);
-                    }
-                    Err(_) => self.terminalize_scoped_cache_flight(
-                        identity,
-                        flight,
-                        ScopedCacheTerminal::Panicked,
-                        false,
-                    ),
-                }
+                run();
                 continue;
             }
 
@@ -6403,6 +6415,121 @@ mod tests {
             41
         );
         assert_eq!(builds.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            scheduler.dag.lock().cache_node_terminal_counts(),
+            crate::dag::CacheNodeTerminalCounts {
+                completed: 1,
+                cancelled: 0,
+            }
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn scoped_cache_publishes_before_cross_pool_installer_returns() {
+        let scheduler = Scheduler::test_new(
+            SchedulerConfig {
+                cpu_threads: 1,
+                ..SchedulerConfig::default()
+            },
+            Arc::new(MemorySourceLoader::new()),
+        );
+        let (leader_context, _leader_token) = scoped_test_context(10);
+        let (joiner_context, _joiner_token) = scoped_test_context(11);
+        let leader_request = scoped_test_request(leader_context);
+        let joiner_request = scoped_test_request(joiner_context);
+        let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let submissions_before = scheduler.counters.submit_count.load(Ordering::Relaxed);
+        let (joiner_entered_tx, joiner_entered_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        let coordinator = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .thread_name(|_| "scoped-cache-coordinator".to_owned())
+            .build()
+            .expect("coordinator pool must build");
+        let scheduler_for_thread = Arc::clone(&scheduler);
+        let builds_for_thread = Arc::clone(&builds);
+        std::thread::spawn(move || {
+            let outcomes = coordinator.install(|| {
+                rayon::join(
+                    || {
+                        scheduler_for_thread.execute_scoped_cache_node(leader_request, move |_| {
+                            builds_for_thread.fetch_add(1, Ordering::SeqCst);
+                            joiner_entered_rx
+                                .recv_timeout(std::time::Duration::from_secs(5))
+                                .expect("the coordinator must re-enter the queued joiner");
+                            41_u64
+                        })
+                    },
+                    || {
+                        joiner_entered_tx.send(()).unwrap();
+                        scheduler_for_thread.execute_scoped_cache_node(joiner_request, |_| -> u64 {
+                            panic!("deduplicated joiner must not execute its closure")
+                        })
+                    },
+                )
+            });
+            let _ = done_tx.send(outcomes);
+        });
+
+        let (leader, joiner) = done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("worker-side publication must release the re-entrant joiner");
+        assert_eq!(*leader.expect("leader result"), 41);
+        assert_eq!(*joiner.expect("joiner result"), 41);
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            scheduler.counters.submit_count.load(Ordering::Relaxed) - submissions_before,
+            2,
+            "both owners submit, but they must share one scoped build"
+        );
+        assert_eq!(
+            scheduler.dag.lock().cache_node_terminal_counts(),
+            crate::dag::CacheNodeTerminalCounts {
+                completed: 1,
+                cancelled: 0,
+            }
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn scoped_cache_rejects_same_active_identity_without_second_submission() {
+        let scheduler = Scheduler::test_new(
+            SchedulerConfig {
+                cpu_threads: 1,
+                ..SchedulerConfig::default()
+            },
+            Arc::new(MemorySourceLoader::new()),
+        );
+        let (context, _token) = scoped_test_context(12);
+        let outer_request = scoped_test_request(context);
+        let nested_request = outer_request.clone();
+        let submissions_before = scheduler.counters.submit_count.load(Ordering::Relaxed);
+        let scheduler_for_thread = Arc::clone(&scheduler);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            let scheduler_for_builder = Arc::clone(&scheduler_for_thread);
+            let result = scheduler_for_thread.execute_scoped_cache_node(outer_request, move |_| {
+                scheduler_for_builder
+                    .execute_scoped_cache_node(nested_request, |_| 99_u64)
+                    .expect_err("same-active-identity recursion must be rejected")
+            });
+            let _ = done_tx.send(result);
+        });
+
+        let result = done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("same-active-identity recursion must not block")
+            .expect("outer scoped producer must publish");
+        assert_eq!(*result, ScopedCacheNodeError::Reentrant);
+        assert_eq!(
+            scheduler.counters.submit_count.load(Ordering::Relaxed) - submissions_before,
+            1,
+            "the rejected recursive demand must not submit a second node"
+        );
         assert_eq!(
             scheduler.dag.lock().cache_node_terminal_counts(),
             crate::dag::CacheNodeTerminalCounts {

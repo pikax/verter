@@ -802,7 +802,7 @@ impl WasmVerterHost {
 
     /// Run a single type-resolution query through the shared dispatch
     /// and return the produced `RequestAuditRecord` as a JSON string.
-    /// Resolves `decl_name` in the top-level scope of `canonical_id`.
+    /// Resolves `decl_name` in the ordinary module top-level of `canonical_id`.
     /// Returns `null` when audit is disabled.
     #[wasm_bindgen(js_name = "resolveTypeWithAudit")]
     pub fn resolve_type_with_audit(
@@ -816,10 +816,10 @@ impl WasmVerterHost {
         let decl_name_owned = decl_name.to_string();
         catch_panic(AssertUnwindSafe(move || {
             let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-                scope: ScopeId {
-                    canonical_id: std::sync::Arc::<str>::from(canonical_id_owned.as_str()),
-                    local_scope: None,
-                },
+                scope: ScopeId::file(
+                    std::sync::Arc::<str>::from(canonical_id_owned.as_str()),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
                 name: std::sync::Arc::<str>::from(decl_name_owned.as_str()),
             });
             let record = host
@@ -1444,7 +1444,7 @@ fn build_selector_match_results(
 #[cfg(test)]
 mod tests {
     use super::{default_known_dependency_extensions, lint_diagnostics_to_utf16};
-    use super::{host, FfiConversionError, FfiTscFailureSubject, WasmVerterHost};
+    use super::{host, FfiConversionError, PublicApiProjectionSubject, WasmVerterHost};
     #[cfg(target_arch = "wasm32")]
     use super::{
         public_api_to_wasm_value, FfiPublicApiProjectionError, FfiPublicApiResult, FfiTscResponse,
@@ -1587,7 +1587,7 @@ mod tests {
                 host::HostConfig::default(),
             )),
         };
-        wasm_host
+        let _unsafe_update = wasm_host
             .inner
             .upsert(host::UpsertRequest {
                 canonical_id: Some("/src/UnsafeEnum.vue".to_string()),
@@ -1602,7 +1602,7 @@ defineProps<{ value: Unsafe }>()
                 aliases: Vec::new(),
             })
             .expect("upsert unsafe enum");
-        wasm_host
+        let _plain_update = wasm_host
             .inner
             .upsert(host::UpsertRequest {
                 canonical_id: Some("/src/plain.ts".to_string()),
@@ -1622,7 +1622,7 @@ defineProps<{ value: Unsafe }>()
         assert_eq!(error.detail_code, "unsupported-declaration-shape");
         assert_eq!(
             error.subject,
-            FfiTscFailureSubject::Macro { syntax_index: 0 }
+            PublicApiProjectionSubject::Macro { syntax_index: 0 }
         );
         assert_eq!(
             error.declaration_shape_reason.as_deref(),
@@ -1684,7 +1684,7 @@ defineProps<{ value: Unsafe }>()
                 error: Some(FfiPublicApiProjectionError {
                     code: "tsc-generation".to_string(),
                     detail_code: "unavailable-outcome".to_string(),
-                    subject: FfiTscFailureSubject::Macro {
+                    subject: PublicApiProjectionSubject::Macro {
                         syntax_index: syntax_index as u32,
                     },
                     declaration_shape_reason: None,
@@ -1723,7 +1723,7 @@ defineProps<{ value: Unsafe }>()
             error: Some(FfiPublicApiProjectionError {
                 code: "tsc-generation".to_string(),
                 detail_code: "unavailable-outcome".to_string(),
-                subject: FfiTscFailureSubject::ScriptSetupAttrs {
+                subject: PublicApiProjectionSubject::ScriptSetupAttrs {
                     source_range: verter_span::Span::new(31, 37),
                 },
                 declaration_shape_reason: None,

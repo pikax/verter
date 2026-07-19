@@ -2160,11 +2160,19 @@ impl PublicApiProjectionError {
         }
     }
 
-    /// Exact compiler-owned syntax carrier associated with the failure.
+    /// Dependency-neutral syntax carrier associated with the failure.
     #[must_use]
-    pub const fn subject(&self) -> verter_compiler::tsc::TscFailureSubject {
-        match self {
+    pub const fn subject(&self) -> crate::PublicApiProjectionSubject {
+        let subject = match self {
             Self::TscGeneration(error) => error.subject(),
+        };
+        match subject {
+            verter_compiler::tsc::TscFailureSubject::Macro { syntax_index } => {
+                crate::PublicApiProjectionSubject::Macro { syntax_index }
+            }
+            verter_compiler::tsc::TscFailureSubject::ScriptSetupAttrs { source_range } => {
+                crate::PublicApiProjectionSubject::ScriptSetupAttrs { source_range }
+            }
         }
     }
 

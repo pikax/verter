@@ -505,6 +505,7 @@ fn make_child_with_models(model_names: &[Option<&str>]) -> FileAnalysisSnapshot 
             .iter()
             .map(|name| AnalyzedMacro {
                 kind: AnalyzedMacroKind::DefineModel,
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,
                 type_references: vec![],
                 binding_name: None,
@@ -798,6 +799,7 @@ fn make_child_with_macro_props(prop_names: &[&str]) -> FileAnalysisSnapshot {
     FileAnalysisSnapshot {
         macros: vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineProps,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
             type_references: vec![],
             binding_name: None,
@@ -885,6 +887,7 @@ fn macro_fallback_with_defaults_pattern() {
         macros: vec![
             AnalyzedMacro {
                 kind: AnalyzedMacroKind::WithDefaults,
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: false,
                 type_references: vec![],
                 binding_name: None,
@@ -903,6 +906,7 @@ fn macro_fallback_with_defaults_pattern() {
             },
             AnalyzedMacro {
                 kind: AnalyzedMacroKind::DefineProps,
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,
                 type_references: vec![],
                 binding_name: None,
@@ -1029,6 +1033,7 @@ fn make_child_with_required_slots(slot_names: &[(&str, bool)]) -> FileAnalysisSn
     FileAnalysisSnapshot {
         macros: vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineSlots,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
             type_references: vec![],
             binding_name: None,

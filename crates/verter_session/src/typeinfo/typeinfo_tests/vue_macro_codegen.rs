@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use verter_macro_dto::{
-    MacroAnchor, MacroPartialReason, MacroRuntimeOutcome, MacroRuntimeShape, MacroTscOutcome,
-    MacroTscProjection, PropsDefaultsAssociation, RuntimeConstructor, RuntimeProp,
-    SynthesizedRowKind, TscDeclarationFailureReason, TscInferredClassTypePosition, TscScriptOwner,
-    TscSemanticInferenceUnavailableReason, UnsupportedReason,
+    MacroAnchor, MacroMemberReason, MacroPartialReason, MacroRuntimeOutcome, MacroRuntimeShape,
+    MacroTscOutcome, MacroTscProjection, PropsDefaultsAssociation, RuntimeConstructor, RuntimeProp,
+    RuntimePropType, SynthesizedRowKind, TscDeclarationFailureReason, TscInferredClassTypePosition,
+    TscScriptOwner, TscSemanticInferenceUnavailableReason, UnresolvedReason, UnsupportedReason,
 };
 
 use crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand;
@@ -918,6 +918,69 @@ defineProps<{
     );
 }
 
+#[test]
+fn runtime_props_degrade_only_a_direct_missing_member_dependency() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_ts(
+        &host,
+        "/src/member-types.ts",
+        "export type ExternalUnknown = unknown",
+    );
+    upsert(
+        &host,
+        "/src/MemberDependency.vue",
+        r#"<script setup lang="ts">
+import type { Missing } from './missing'
+import type { ExternalUnknown } from './member-types'
+defineProps<{
+  direct: Missing
+  nested: { value: Missing }
+  resolvedUnknown: ExternalUnknown
+  honestUnknown: unknown
+}>()
+</script>"#,
+    );
+
+    let output = produce(
+        &host,
+        "/src/MemberDependency.vue",
+        VueMacroCodegenDemand::Runtime,
+    );
+    let runtime = output.runtime.expect("runtime bundle");
+    let MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(props)) =
+        &runtime.entries[0].outcome
+    else {
+        panic!("a member dependency miss must preserve the complete prop surface: {runtime:?}");
+    };
+    assert_eq!(
+        props
+            .props
+            .iter()
+            .map(|prop| prop.name.as_str())
+            .collect::<Vec<_>>(),
+        ["direct", "nested", "resolvedUnknown", "honestUnknown"]
+    );
+    assert!(matches!(
+        props.props[0].type_shape,
+        RuntimePropType::Degraded(ref failure)
+            if failure.reason
+                == MacroMemberReason::Unresolved(UnresolvedReason::MissingDependency)
+    ));
+    assert_eq!(
+        constructors(&props.props[1]),
+        [RuntimeConstructor::Object],
+        "nested references are outside runtime constructor demand"
+    );
+    assert!(
+        constructors(&props.props[2]).is_empty(),
+        "a resolved imported `unknown` is complete and must not masquerade as degradation"
+    );
+    assert!(
+        constructors(&props.props[3]).is_empty(),
+        "an authored `unknown` is complete and must not masquerade as degradation"
+    );
+}
+
 /// Mutation recipe: route runtime props/emits through ordinary
 /// `MacroObjectSurface`, or suppress every heritage arm once any directive is
 /// present. The ignored names then leak into runtime (or the non-ignored names
@@ -1355,6 +1418,22 @@ defineModel<string>('title')
         ["save", "cancel", "close"]
     );
 
+    let tsc_output = produce(&host, "/src/Events.vue", VueMacroCodegenDemand::Tsc);
+    let tsc = tsc_output.tsc.expect("TSC bundle");
+    let MacroTscOutcome::Complete(MacroTscProjection::Emits(emits)) = &tsc.entries[0].outcome
+    else {
+        panic!("expected TSC emit shape: {tsc:?}");
+    };
+    assert_eq!(
+        emits
+            .events
+            .iter()
+            .map(|event| event.name.as_str())
+            .collect::<Vec<_>>(),
+        ["save", "cancel", "close"],
+        "runtime and TSC projections must preserve one authored event order"
+    );
+
     let MacroRuntimeOutcome::Complete(MacroRuntimeShape::Model(model)) =
         &runtime.entries[1].outcome
     else {
@@ -1409,7 +1488,7 @@ defineModel<Payload>('selected')
             .iter()
             .map(|event| (event.name.as_str(), event.emit_parameters.as_str()))
             .collect::<Vec<_>>(),
-        [("cancel", "reason?: string"), ("save", "value: Local")]
+        [("save", "value: Local"), ("cancel", "reason?: string")]
     );
     assert!(emits
         .scope
@@ -1482,6 +1561,44 @@ fn resolved_non_object_props_are_invalid_not_complete_empty() {
                 if failure.reason == verter_macro_dto::MacroInvalidReason::NonObjectRoot
         ),
         "a resolved primitive root must retain the invalid-root policy: {bundle:?}"
+    );
+}
+
+#[test]
+fn resolved_imported_non_object_props_are_invalid_on_both_codegen_rails() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_ts(&host, "/src/wrong.ts", "export type WrongProps = string\n");
+    upsert(
+        &host,
+        "/src/InvalidImported.vue",
+        r#"<script setup lang="ts">
+import type { WrongProps } from './wrong'
+defineProps<WrongProps>()
+</script>"#,
+    );
+
+    let output = produce(
+        &host,
+        "/src/InvalidImported.vue",
+        VueMacroCodegenDemand::RuntimeAndTsc,
+    );
+    let runtime = output.runtime.expect("runtime bundle");
+    assert!(
+        matches!(
+            runtime.entries[0].outcome,
+            MacroRuntimeOutcome::Invalid(ref failure)
+                if failure.reason == verter_macro_dto::MacroInvalidReason::NonObjectRoot
+        ),
+        "a resolved imported primitive root must be runtime-invalid: {runtime:?}"
+    );
+    let tsc = output.tsc.expect("TSC bundle");
+    assert!(
+        matches!(
+            tsc.entries[0].outcome,
+            MacroTscOutcome::Invalid(ref failure)
+                if failure.reason == verter_macro_dto::MacroInvalidReason::NonObjectRoot
+        ),
+        "a resolved imported primitive root must be TSC-invalid: {tsc:?}"
     );
 }
 

@@ -82,6 +82,7 @@ fn b1_generate_define_slots_from_template() {
         AnalysisFlags::empty(),
         vec![AnalyzedImport {
             source: "vue".into(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![],
             span: verter_span::Span::new(24, 49),
@@ -143,6 +144,7 @@ fn b1_no_action_when_define_slots_exists() {
         vec![],
         vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineSlots,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
             type_references: vec!["default".into()],
             binding_name: None,
@@ -220,6 +222,7 @@ fn b2_generate_define_emits_from_undeclared() {
         AnalysisFlags::empty(),
         vec![AnalyzedImport {
             source: "vue".into(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![],
             span: verter_span::Span::new(24, 49),
@@ -273,6 +276,7 @@ fn b2_no_action_when_all_emits_declared() {
         vec![],
         vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineEmits,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
             type_references: vec![],
             binding_name: Some("emit".into()),
@@ -332,6 +336,7 @@ fn b4_add_missing_emit_to_existing_type_based() {
         vec![],
         vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineEmits,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
             type_references: vec![],
             binding_name: Some("emit".into()),
@@ -407,6 +412,7 @@ fn b4_add_missing_emit_to_runtime_array() {
         vec![],
         vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineEmits,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: false,
             type_references: vec![],
             binding_name: Some("emit".into()),
@@ -575,6 +581,7 @@ fn b1_insert_after_last_import() {
         vec![
             AnalyzedImport {
                 source: "vue".into(),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_only: false,
                 bindings: vec![],
                 span: verter_span::Span::new(24, 49),
@@ -582,6 +589,7 @@ fn b1_insert_after_last_import() {
             },
             AnalyzedImport {
                 source: "vue".into(),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_only: false,
                 bindings: vec![],
                 span: verter_span::Span::new(50, 80),
@@ -861,6 +869,7 @@ fn b3_detects_missing_slot() {
         vec![],
         vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineSlots,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
             type_references: vec![],
             binding_name: None,
@@ -944,6 +953,7 @@ fn b3_no_action_when_all_present() {
         vec![],
         vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineSlots,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
             type_references: vec![],
             binding_name: None,
@@ -998,6 +1008,7 @@ fn b5_missing_prop_detected() {
         vec![],
         vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineSlots,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
             type_references: vec![],
             binding_name: None,
@@ -1055,6 +1066,7 @@ fn b5_no_action_when_props_match() {
         vec![],
         vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineSlots,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
             type_references: vec![],
             binding_name: None,
@@ -1111,6 +1123,7 @@ fn cursor_on_slot_element_shows_slot_actions() {
         AnalysisFlags::empty(),
         vec![AnalyzedImport {
             source: "vue".into(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![],
             span: verter_span::Span::new(24, 49),
@@ -1183,6 +1196,7 @@ fn cursor_on_define_slots_macro_shows_augmentation_actions() {
         vec![],
         vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineSlots,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
             type_references: vec![],
             binding_name: None,
@@ -1243,6 +1257,7 @@ fn cursor_none_shows_all_actions() {
         AnalysisFlags::empty(),
         vec![AnalyzedImport {
             source: "vue".into(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![],
             span: verter_span::Span::new(24, 49),

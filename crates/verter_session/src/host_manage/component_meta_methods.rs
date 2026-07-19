@@ -45,9 +45,11 @@ use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
 use crate::meta_resolve::build_origin_graph;
 
 use crate::resolver_core::component_meta_registry::{
-    collect_component_meta_registry_public_field_refs, collect_component_meta_registry_refs_node,
-    enqueue_component_meta_registry_ref, owner_component_meta_registry_import_root,
-    upsert_component_meta_registry_entry, PendingComponentMetaRegistryRef,
+    collect_component_meta_registry_public_field_refs,
+    collect_component_meta_registry_public_macro_root_refs,
+    collect_component_meta_registry_refs_node, enqueue_component_meta_registry_ref,
+    owner_component_meta_registry_import_root, upsert_component_meta_registry_entry,
+    PendingComponentMetaRegistryRef,
 };
 
 // The sink-owned macro-output expansion demand API + its MODULE-PRIVATE
@@ -1510,6 +1512,15 @@ impl VerterHost {
             .map(|entry| entry.name.clone())
             .collect();
         let public_field_collect_started = debug_enabled.then(Instant::now);
+        collect_component_meta_registry_public_macro_root_refs(
+            query_engine.ctx,
+            owner_canonical,
+            snapshot,
+            &published_names,
+            &mut queued_names,
+            &mut referenced_names,
+            Some(owner_canonical),
+        );
         if let Some(evaluated_types) = evaluated_types {
             for field in &evaluated_types.props {
                 collect_component_meta_registry_public_field_refs(

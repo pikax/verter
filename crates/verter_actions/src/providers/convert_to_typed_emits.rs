@@ -83,6 +83,7 @@ mod tests {
         AnalyzedEmitField, AnalyzedMacro, AnalyzedMacroKind, ScriptAnalysisSnapshot,
     };
     use verter_span::Span;
+    use verter_type_expr::TopLevelOwnerId;
 
     fn make_diag(span: Span) -> LintDiagnostic {
         LintDiagnostic {
@@ -113,6 +114,7 @@ mod tests {
 
     fn make_macro(emit_fields: Vec<AnalyzedEmitField>, span: Span) -> AnalyzedMacro {
         AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineEmits,
             is_type_based: false,
             type_references: vec![],

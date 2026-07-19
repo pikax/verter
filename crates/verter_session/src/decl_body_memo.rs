@@ -1349,8 +1349,7 @@ impl DeclBodyMemo {
                 (AugmentationScopeKind, DeclKey),
                 RetainedValueTransients,
             > = FxHashMap::default();
-            let mut dep_records: FxHashMap<DeclarationPath, DeclDependencyFacts> =
-                FxHashMap::default();
+            let mut dep_records: FxHashMap<DeclKey, DeclDependencyFacts> = FxHashMap::default();
             for contributor in &contributors {
                 let index = contributor.anchor.contributor_index;
                 let Some(stmt) = program.body.get(index as usize) else {
@@ -1414,7 +1413,10 @@ impl DeclBodyMemo {
                     &mut scratch,
                 );
                 for (declaration, deps) in collect_statement_dependency_names(stmt, owner) {
-                    dep_records.entry(declaration).or_default().extend(deps);
+                    dep_records
+                        .entry(declaration.qualified_key())
+                        .or_default()
+                        .extend(deps);
                 }
             }
             if let Some(jsdoc_typedef) = jsdoc_typedef {
@@ -1428,7 +1430,7 @@ impl DeclBodyMemo {
                     &mut scratch,
                 ) {
                     dep_records
-                        .entry(DeclarationPath::root(key.clone()))
+                        .entry(key.clone())
                         .or_default()
                         .extend(typedef.dependencies);
                     let retained = retained_types.entry(key.clone()).or_default();
@@ -1450,10 +1452,7 @@ impl DeclBodyMemo {
             };
             let empty_retained = RetainedTypeTransients::default();
             for (decl_key, group) in &scratch.type_symbols {
-                let dependencies = dep_records
-                    .get(&DeclarationPath::root(decl_key.clone()))
-                    .cloned()
-                    .unwrap_or_default();
+                let dependencies = dep_records.get(decl_key).cloned().unwrap_or_default();
                 // An enum's type-space body is derived from its MERGED
                 // value members (same name → matching value group), so the
                 // type and value spaces never diverge.
@@ -1646,9 +1645,11 @@ impl DeclBodyMemo {
     ) {
         let covers =
             |contributors: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor]| {
-                contributors
-                    .iter()
-                    .all(|candidate| lowered_statements.contains(candidate))
+                contributors.iter().all(|candidate| {
+                    lowered_statements
+                        .iter()
+                        .any(|lowered| lowered.anchor == candidate.anchor)
+                })
             };
         for (key, decl) in batch.types {
             if demanded_file_scope == Some((SymbolSpace::Type, &key)) {
@@ -2273,7 +2274,7 @@ pub(crate) fn lowered_decls_from_env_and_program(
     let header_index = build_decl_header_index(program, source);
     let mut retained_types: FxHashMap<DeclKey, RetainedTypeTransients> = FxHashMap::default();
     let mut retained_values: FxHashMap<DeclKey, RetainedValueTransients> = FxHashMap::default();
-    let mut dep_records: FxHashMap<DeclarationPath, DeclDependencyFacts> = FxHashMap::default();
+    let mut dep_records: FxHashMap<DeclKey, DeclDependencyFacts> = FxHashMap::default();
     for (index, stmt) in program.body.iter().enumerate() {
         let parts = lower_statement_parts(stmt, source);
         let contributor_anchor =
@@ -2309,7 +2310,7 @@ pub(crate) fn lowered_decls_from_env_and_program(
         }
         for (declaration, dependencies) in collect_statement_dependency_names(stmt, owner) {
             dep_records
-                .entry(declaration)
+                .entry(declaration.qualified_key())
                 .or_default()
                 .extend(dependencies);
         }
@@ -2319,10 +2320,7 @@ pub(crate) fn lowered_decls_from_env_and_program(
         .type_symbols
         .iter()
         .map(|(key, group)| {
-            let dependencies = dep_records
-                .get(&DeclarationPath::root(key.clone()))
-                .cloned()
-                .unwrap_or_default();
+            let dependencies = dep_records.get(key).cloned().unwrap_or_default();
             let enum_type_arms = env
                 .value_symbols
                 .get(key)

@@ -70,6 +70,7 @@ path = "src/main.rs"
 futures-util = "0.3.32"
 verter_compiler = { path = "../verter_compiler" }
 verter_macro_dto = { path = "../verter_macro_dto" }
+verter_type_expr = { workspace = true }
 # The wire-equivalence integration test byte-compares the ACTUAL NAPI
 # protocol encoding of the LSP route's envelope.
 verter_protocol = { path = "../verter_protocol" }

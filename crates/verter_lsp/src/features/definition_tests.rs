@@ -81,6 +81,7 @@ fn test_go_to_import_with_resolved_canonical_id_no_export_resolver_falls_back_to
         vec![],
         vec![AnalyzedImport {
             source: "vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "ref".to_string(),
@@ -133,6 +134,7 @@ fn test_go_to_import_with_resolved_canonical_id_and_export_resolver() {
         vec![],
         vec![AnalyzedImport {
             source: "vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "ref".to_string(),
@@ -203,6 +205,7 @@ fn test_go_to_import_falls_back_to_path_resolution_when_resolved_canonical_id_fa
         vec![],
         vec![AnalyzedImport {
             source: "./components".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "Overlay".to_string(),
@@ -274,6 +277,7 @@ fn test_go_to_import_without_resolution_falls_back_to_import_span() {
         vec![],
         vec![AnalyzedImport {
             source: "./utils".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "helper".to_string(),
@@ -326,6 +330,7 @@ fn test_go_to_macro_binding_from_template() {
         vec![],
         vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineProps,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
             type_references: vec![],
             binding_name: Some("props".to_string()),
@@ -425,6 +430,7 @@ fn test_no_definition_inside_html_comment() {
         }],
         vec![AnalyzedImport {
             source: "./MyComponent.vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "MyComponent".to_string(),
@@ -493,6 +499,7 @@ fn test_go_to_component_definition_from_template() {
     let analysis = FileAnalysisSnapshot {
         imports: vec![AnalyzedImport {
             source: "./ChildComp.vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "ChildComp".to_string(),
@@ -1092,6 +1099,7 @@ fn test_import_source_string_navigation() {
         vec![],
         vec![AnalyzedImport {
             source: "./Foo.vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "Foo".to_string(),
@@ -1155,6 +1163,7 @@ fn test_path_alias_resolution_on_binding() {
         vec![],
         vec![AnalyzedImport {
             source: "@/components/Foo.vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "Foo".to_string(),
@@ -1279,6 +1288,7 @@ fn test_path_alias_resolution_on_import_string() {
         vec![],
         vec![AnalyzedImport {
             source: "@/components/Foo.vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "Foo".to_string(),
@@ -1640,6 +1650,7 @@ fn test_path_alias_resolution_on_component_tag() {
     let analysis = FileAnalysisSnapshot {
         imports: vec![AnalyzedImport {
             source: "@/components/FooComp.vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "FooComp".to_string(),
@@ -2083,6 +2094,7 @@ fn test_go_to_definition_dollar_props() {
     let analysis = FileAnalysisSnapshot {
         macros: (vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineProps,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
             type_references: vec![],
             binding_name: Some("props".into()),
@@ -2149,6 +2161,7 @@ fn test_go_to_definition_dollar_emit() {
     let analysis = FileAnalysisSnapshot {
         macros: (vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineEmits,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: false,
             type_references: vec![],
             binding_name: Some("emit".into()),
@@ -2263,6 +2276,7 @@ fn definition_prop_field_type_based() {
         vec![],
         vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineProps,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
             type_references: vec![],
             binding_name: Some("props".to_string()),
@@ -2349,6 +2363,7 @@ fn definition_prop_field_runtime() {
         vec![],
         vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineProps,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: false,
             type_references: vec![],
             binding_name: None,
@@ -2441,6 +2456,7 @@ fn definition_binding_takes_precedence_over_prop_field() {
         vec![],
         vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineProps,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
             type_references: vec![],
             binding_name: Some("props".to_string()),
@@ -2516,6 +2532,7 @@ fn test_vue_default_import_retries_with_default_binding() {
         vec![],
         vec![AnalyzedImport {
             source: "./Child.vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "MyComp".to_string(),
@@ -2588,6 +2605,7 @@ fn test_named_import_non_carrier_no_default_fallback() {
         vec![],
         vec![AnalyzedImport {
             source: "./utils".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "helper".to_string(),
@@ -2634,6 +2652,7 @@ fn test_component_tag_default_fallback() {
     let analysis = FileAnalysisSnapshot {
         imports: vec![AnalyzedImport {
             source: "./WrappedBtn.vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "WrappedBtn".to_string(),
@@ -2728,6 +2747,7 @@ fn test_script_context_vue_import_default_fallback() {
         vec![],
         vec![AnalyzedImport {
             source: "./Comp.vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "Comp".to_string(),

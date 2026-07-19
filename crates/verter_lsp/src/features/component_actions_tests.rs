@@ -100,6 +100,7 @@ fn add_prop_to_type_based_define_props() {
         ),
         macros: (vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineProps,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
             type_references: vec![],
             binding_name: None,
@@ -175,6 +176,7 @@ fn add_prop_generates_define_props_when_missing() {
     let child_analysis = FileAnalysisSnapshot {
         imports: vec![verter_semantic::analysis::AnalyzedImport {
             source: "vue".into(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![],
             span: verter_span::Span::new(24, 49),
@@ -240,6 +242,7 @@ fn no_action_for_runtime_based_define_props() {
     let child_analysis = FileAnalysisSnapshot {
         macros: (vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineProps,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: false,
             type_references: vec![],
             binding_name: None,
@@ -313,6 +316,7 @@ fn add_define_model_to_child() {
     let child_analysis = FileAnalysisSnapshot {
         imports: vec![verter_semantic::analysis::AnalyzedImport {
             source: "vue".into(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![],
             span: verter_span::Span::new(24, 49),
@@ -672,6 +676,7 @@ fn suggest_matching_props_from_imports() {
         vec![], // no local bindings
         vec![verter_semantic::analysis::AnalyzedImport {
             source: "./data".into(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![verter_semantic::analysis::types::AnalyzedImportBinding {
                 name: "title".into(),
@@ -706,6 +711,7 @@ fn suggest_matching_props_type_only_import_excluded() {
         vec![],
         vec![verter_semantic::analysis::AnalyzedImport {
             source: "./types".into(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: true,
             bindings: vec![verter_semantic::analysis::types::AnalyzedImportBinding {
                 name: "title".into(),

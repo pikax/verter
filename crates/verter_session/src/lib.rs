@@ -415,6 +415,9 @@ pub use verter_compiler::VERTER_TYPES_STANDALONE_DTS;
 // Re-export CompileTarget so downstream crates (LSP, MCP, FFI) can use it
 // without adding verter_compiler as a direct dependency.
 pub use verter_compiler::compile::CompileTarget;
+// Re-export the dependency-neutral public-API failure carrier. Downstream
+// adapters must not depend on compiler internals merely to encode failures.
+pub use verter_protocol::types::PublicApiProjectionSubject;
 
 use std::sync::Arc;
 

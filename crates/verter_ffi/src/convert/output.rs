@@ -17,18 +17,10 @@ pub fn host_public_api_projection_error_to_ffi(
     error: host::PublicApiProjectionError,
 ) -> FfiPublicApiProjectionError {
     let unavailable_outcome = error.unavailable_outcome();
-    let subject = match error.subject() {
-        verter_compiler::tsc::TscFailureSubject::Macro { syntax_index } => {
-            FfiTscFailureSubject::Macro { syntax_index }
-        }
-        verter_compiler::tsc::TscFailureSubject::ScriptSetupAttrs { source_range } => {
-            FfiTscFailureSubject::ScriptSetupAttrs { source_range }
-        }
-    };
     FfiPublicApiProjectionError {
         code: error.code().to_string(),
         detail_code: error.detail_code().to_string(),
-        subject,
+        subject: error.subject(),
         declaration_shape_reason: error
             .declaration_shape_reason()
             .map(|reason| reason.code().to_string()),
@@ -83,7 +75,7 @@ mod public_api_tests {
         assert_eq!(error.detail_code, "unsupported-declaration-shape");
         assert_eq!(
             error.subject,
-            FfiTscFailureSubject::Macro { syntax_index: 7 }
+            PublicApiProjectionSubject::Macro { syntax_index: 7 }
         );
         assert_eq!(
             error.declaration_shape_reason.as_deref(),
@@ -152,7 +144,7 @@ mod public_api_tests {
             assert_eq!(error.detail_code, "unavailable-outcome");
             assert_eq!(
                 error.subject,
-                FfiTscFailureSubject::Macro {
+                PublicApiProjectionSubject::Macro {
                     syntax_index: syntax_index as u32,
                 }
             );
@@ -179,7 +171,7 @@ mod public_api_tests {
         let error = result.error.expect("failure must occupy the error rail");
         assert_eq!(
             error.subject,
-            FfiTscFailureSubject::ScriptSetupAttrs { source_range }
+            PublicApiProjectionSubject::ScriptSetupAttrs { source_range }
         );
         assert_eq!(error.outcome_kind.as_deref(), Some("invalid"));
         assert_eq!(

@@ -642,13 +642,33 @@ struct ClassDeclarationPlan {
 struct AuthoredFragment {
     text: String,
     source_start: u32,
+    /// Parser-token starts relative to `text`. Splitting original transform
+    /// chunks at these positions gives every preserved authored token its own
+    /// exact V3 source-map anchor without mapping synthetic replacements.
+    token_starts: Vec<u32>,
 }
 
 #[derive(Clone)]
 enum DeclarationEdit {
-    Insert { offset: u32, text: String },
-    Remove { start: u32, end: u32 },
-    Overwrite { start: u32, end: u32, text: String },
+    Insert {
+        offset: u32,
+        text: String,
+    },
+    Remove {
+        start: u32,
+        end: u32,
+    },
+    Overwrite {
+        start: u32,
+        end: u32,
+        text: String,
+    },
+    SyntheticType {
+        start: u32,
+        end: u32,
+        text: String,
+        type_offset: u32,
+    },
 }
 
 #[derive(Clone)]
@@ -1688,6 +1708,11 @@ fn collect_local_type_inventory(
         let authored = AuthoredFragment {
             text: authored_text.to_owned(),
             source_start: source_offset.saturating_add(authored_start),
+            token_starts: tokens
+                .iter()
+                .filter(|token| token.start() >= authored_start && token.start() < authored_end)
+                .map(|token| token.start() - authored_start)
+                .collect(),
         };
         let public = if matches!(statement, Statement::ExportDefaultDeclaration(_)) {
             let (Some(export), Some(default)) = (
@@ -1858,6 +1883,9 @@ fn render_authored_fragment(
 ) -> RenderedText {
     let allocator = Allocator::default();
     let mut transform = CodeTransform::new(&fragment.text, &allocator);
+    for token_start in &fragment.token_starts {
+        let _ = transform.try_add_sourcemap_location(*token_start);
+    }
     for (offset, byte) in fragment.text.bytes().enumerate() {
         if byte == b'\n' && offset + 1 < fragment.text.len() {
             let _ = transform.try_add_sourcemap_location((offset + 1) as u32);
@@ -1874,10 +1902,28 @@ fn render_authored_fragment(
             DeclarationEdit::Overwrite { start, end, text } => {
                 transform.overwrite(*start, *end, text);
             }
+            DeclarationEdit::SyntheticType {
+                start,
+                end,
+                text,
+                type_offset,
+            } => {
+                if start == end {
+                    transform.prepend_left_with_unmapped_boundaries(*start, text, &[*type_offset]);
+                } else {
+                    transform.overwrite_with_unmapped_boundaries(
+                        *start,
+                        *end,
+                        text,
+                        &[*type_offset],
+                    );
+                }
+            }
         }
     }
-    let (text, ranges) = transform.build_string_with_source_ranges();
-    compose_authored_transform(text, ranges, fragment.source_start)
+    let (text, ranges, unmapped_boundaries) =
+        transform.build_string_with_source_ranges_and_unmapped_boundaries();
+    compose_authored_transform(text, ranges, unmapped_boundaries, fragment.source_start)
 }
 
 fn relative_range(span: oxc_span::Span, authored_start: u32) -> Option<(u32, u32)> {
@@ -3319,18 +3365,12 @@ fn render_class_declaration(
                 row.type_text.as_str(),
                 target.suffix
             );
-            if target.start == target.end {
-                edits.push(DeclarationEdit::Insert {
-                    offset: target.start,
-                    text,
-                });
-            } else {
-                edits.push(DeclarationEdit::Overwrite {
-                    start: target.start,
-                    end: target.end,
-                    text,
-                });
-            }
+            edits.push(DeclarationEdit::SyntheticType {
+                start: target.start,
+                end: target.end,
+                text,
+                type_offset: target.prefix.len() as u32,
+            });
         }
     }
     consumed
@@ -5171,9 +5211,10 @@ fn render_authored_props_argument(
         .filter(|name| !handled_defaults.contains(name.as_str()))
         .cloned()
         .collect::<Vec<_>>();
-    let (text, ranges) = transform.build_string_with_source_ranges();
+    let (text, ranges, unmapped_boundaries) =
+        transform.build_string_with_source_ranges_and_unmapped_boundaries();
     (
-        compose_authored_transform(text, ranges, argument.source_start),
+        compose_authored_transform(text, ranges, unmapped_boundaries, argument.source_start),
         unresolved_defaults,
     )
 }
@@ -5181,6 +5222,7 @@ fn render_authored_props_argument(
 fn compose_authored_transform(
     text: String,
     ranges: Vec<GeneratedSourceRange>,
+    unmapped_boundaries: Vec<u32>,
     source_start: u32,
 ) -> RenderedText {
     let mut rendered = RenderedText::default();
@@ -5215,6 +5257,22 @@ fn compose_authored_transform(
     }
     if cursor < text.len() {
         rendered.push_str(&text[cursor..]);
+    }
+    for boundary in unmapped_boundaries {
+        let generated_offset = boundary as usize;
+        match rendered
+            .mappings
+            .binary_search_by_key(&generated_offset, |mapping| mapping.generated_offset)
+        {
+            Ok(index) => rendered.mappings[index].source_span = None,
+            Err(index) => rendered.mappings.insert(
+                index,
+                GeneratedMapping {
+                    generated_offset,
+                    source_span: None,
+                },
+            ),
+        }
     }
     rendered
 }

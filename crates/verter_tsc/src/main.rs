@@ -171,6 +171,11 @@ fn main() {
             process::exit(2);
         }
     };
+    debug_assert_eq!(
+        result.public_api_outcomes.len(),
+        config.vue_files.len(),
+        "public API projection must retain exactly one outcome per input carrier"
+    );
 
     for diagnostic in &result.diagnostics {
         println!("{diagnostic}");

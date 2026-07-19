@@ -132,6 +132,7 @@ mod tests {
     fn make_macro(kind: AnalyzedMacroKind, start: u32, end: u32) -> AnalyzedMacro {
         AnalyzedMacro {
             kind,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: false,
             type_references: vec![],
             binding_name: None,

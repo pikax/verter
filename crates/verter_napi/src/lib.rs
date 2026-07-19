@@ -634,11 +634,13 @@ impl From<FfiTscResponse> for NapiTscResponse {
 impl From<FfiPublicApiProjectionError> for NapiPublicApiProjectionError {
     fn from(value: FfiPublicApiProjectionError) -> Self {
         let subject = match value.subject {
-            FfiTscFailureSubject::Macro { syntax_index } => Either::A(NapiTscMacroFailureSubject {
-                kind: "macro".to_string(),
-                syntaxIndex: syntax_index,
-            }),
-            FfiTscFailureSubject::ScriptSetupAttrs { source_range } => {
+            PublicApiProjectionSubject::Macro { syntax_index } => {
+                Either::A(NapiTscMacroFailureSubject {
+                    kind: "macro".to_string(),
+                    syntaxIndex: syntax_index,
+                })
+            }
+            PublicApiProjectionSubject::ScriptSetupAttrs { source_range } => {
                 Either::B(NapiTscScriptSetupAttrsFailureSubject {
                     kind: "scriptSetupAttrs".to_string(),
                     sourceRange: NapiSourceRange {
@@ -2390,7 +2392,7 @@ impl NapiVerterHost {
     /// Run a single type-resolution query through the shared dispatch
     /// and return the produced `RequestAuditRecord` as a JSON
     /// `Buffer`. The query resolves `decl_name` in the top-level
-    /// scope of `canonical_id`. Returns `null` when audit is
+    /// ordinary module scope of `canonical_id`. Returns `null` when audit is
     /// disabled.
     #[napi(js_name = "resolveTypeWithAudit")]
     pub fn resolve_type_with_audit(
@@ -2402,10 +2404,10 @@ impl NapiVerterHost {
         let host = std::sync::Arc::clone(&self.inner);
         catch_panic(std::panic::AssertUnwindSafe(move || {
             let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-                scope: ScopeId {
-                    canonical_id: std::sync::Arc::<str>::from(canonical_id.as_str()),
-                    local_scope: None,
-                },
+                scope: ScopeId::file(
+                    std::sync::Arc::<str>::from(canonical_id.as_str()),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
                 name: std::sync::Arc::<str>::from(decl_name.as_str()),
             });
             let record = host
@@ -3472,7 +3474,7 @@ mod tests {
                 host::HostConfig::default(),
             )),
         };
-        napi_host
+        let _unsafe_update = napi_host
             .inner
             .upsert(host::UpsertRequest {
                 canonical_id: Some("/src/UnsafeEnum.vue".to_string()),
@@ -3487,7 +3489,7 @@ defineProps<{ value: Unsafe }>()
                 aliases: Vec::new(),
             })
             .expect("upsert unsafe enum");
-        napi_host
+        let _plain_update = napi_host
             .inner
             .upsert(host::UpsertRequest {
                 canonical_id: Some("/src/plain.ts".to_string()),
@@ -3543,7 +3545,7 @@ defineProps<{ value: Unsafe }>()
             let error: NapiPublicApiProjectionError = FfiPublicApiProjectionError {
                 code: "tsc-generation".to_string(),
                 detail_code: "unavailable-outcome".to_string(),
-                subject: FfiTscFailureSubject::Macro {
+                subject: PublicApiProjectionSubject::Macro {
                     syntax_index: syntax_index as u32,
                 },
                 declaration_shape_reason: None,
@@ -3573,7 +3575,7 @@ defineProps<{ value: Unsafe }>()
         let attrs_error: NapiPublicApiProjectionError = FfiPublicApiProjectionError {
             code: "tsc-generation".to_string(),
             detail_code: "unavailable-outcome".to_string(),
-            subject: FfiTscFailureSubject::ScriptSetupAttrs {
+            subject: PublicApiProjectionSubject::ScriptSetupAttrs {
                 source_range: verter_span::Span::new(31, 37),
             },
             declaration_shape_reason: None,
