@@ -71,6 +71,79 @@ pub fn definition_at_position(
         return None;
     }
 
+    // D6: custom directive NAME token (`v-my-thing` → `vMyThing`) — navigate
+    // to the authored directive declaration (setup binding or import). Runs
+    // BEFORE the word guard: a caret on the `-` of a kebab directive name
+    // yields no identifier word, and the whole template section below is
+    // word-guarded. Built-ins have no authored target (fail-closed empty);
+    // unknown directives stay silent.
+    if in_template {
+        if let Some(ref template) = analysis.template {
+            for el in &template.elements {
+                for dir in &el.directives {
+                    if crate::features::hover_directive_names::is_known_builtin_directive_pub(
+                        &dir.name,
+                    ) {
+                        continue;
+                    }
+                    let region_end = dir
+                        .arg_span
+                        .as_ref()
+                        .map(|span| span.start)
+                        .unwrap_or(dir.name_end);
+                    if (offset as u32) < dir.span.start || (offset as u32) >= region_end {
+                        continue;
+                    }
+                    let binding_name =
+                        crate::features::hover_directive_names::custom_directive_binding_name(
+                            &dir.name,
+                        );
+                    if let Some(binding) = analysis.bindings.iter().find(|b| b.name == binding_name)
+                    {
+                        if binding.span.start > 0 || binding.span.end > 0 {
+                            return span_definition(
+                                binding.span.start,
+                                binding.span.end,
+                                line_index,
+                            );
+                        }
+                        return None;
+                    }
+                    for import in &analysis.imports {
+                        for ib in &import.bindings {
+                            if ib.name == binding_name {
+                                if let Some(ref cid) = import.resolved_canonical_id {
+                                    if let Some(result) = try_precise_cross_file(
+                                        cid,
+                                        &binding_name,
+                                        resolve_export_location,
+                                    ) {
+                                        return Some(result);
+                                    }
+                                    return None;
+                                }
+                                if let Some(resolved) =
+                                    resolve_path.as_ref().and_then(|rp| rp(&import.source))
+                                {
+                                    if let Some(result) = try_precise_cross_file(
+                                        &resolved,
+                                        &binding_name,
+                                        resolve_export_location,
+                                    ) {
+                                        return Some(result);
+                                    }
+                                    return None;
+                                }
+                            }
+                        }
+                    }
+                    // No authored declaration found → silent.
+                    return None;
+                }
+            }
+        }
+    }
+
     let word = word_at_offset(source, offset);
 
     // Word-based navigation (import bindings, component tags, script bindings)
@@ -230,76 +303,6 @@ pub fn definition_at_position(
                                 }
                             }
                         }
-                    }
-                }
-            }
-
-            // D6: custom directive NAME token (`v-my-thing` → `vMyThing`) —
-            // navigate to the authored directive declaration (setup binding or
-            // import). Built-ins have no authored target (fail-closed empty);
-            // unknown directives stay silent.
-            if let Some(ref template) = analysis.template {
-                for el in &template.elements {
-                    for dir in &el.directives {
-                        if crate::features::hover_directive_names::is_known_builtin_directive_pub(
-                            &dir.name,
-                        ) {
-                            continue;
-                        }
-                        let region_end = dir
-                            .arg_span
-                            .as_ref()
-                            .map(|span| span.start)
-                            .unwrap_or(dir.name_end);
-                        if (offset as u32) < dir.span.start || (offset as u32) >= region_end {
-                            continue;
-                        }
-                        let binding_name =
-                            crate::features::hover_directive_names::custom_directive_binding_name(
-                                &dir.name,
-                            );
-                        if let Some(binding) =
-                            analysis.bindings.iter().find(|b| b.name == binding_name)
-                        {
-                            if binding.span.start > 0 || binding.span.end > 0 {
-                                return span_definition(
-                                    binding.span.start,
-                                    binding.span.end,
-                                    line_index,
-                                );
-                            }
-                            return None;
-                        }
-                        for import in &analysis.imports {
-                            for ib in &import.bindings {
-                                if ib.name == binding_name {
-                                    if let Some(ref cid) = import.resolved_canonical_id {
-                                        if let Some(result) = try_precise_cross_file(
-                                            cid,
-                                            &binding_name,
-                                            resolve_export_location,
-                                        ) {
-                                            return Some(result);
-                                        }
-                                        return None;
-                                    }
-                                    if let Some(resolved) =
-                                        resolve_path.as_ref().and_then(|rp| rp(&import.source))
-                                    {
-                                        if let Some(result) = try_precise_cross_file(
-                                            &resolved,
-                                            &binding_name,
-                                            resolve_export_location,
-                                        ) {
-                                            return Some(result);
-                                        }
-                                        return None;
-                                    }
-                                }
-                            }
-                        }
-                        // No authored declaration found → silent.
-                        return None;
                     }
                 }
             }

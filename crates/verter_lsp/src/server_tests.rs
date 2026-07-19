@@ -24886,6 +24886,22 @@ async fn contract_directive_hovers_survive_sfc_scanner_dead_zones() {
         "custom directive definition must navigate to the authored declaration"
     );
 
+    // The exact editor caret — token start + 1, ON the kebab dash, where no
+    // identifier word exists — must resolve identically (the template
+    // definition sections below the word guard never run there).
+    let mut dash_position = find_document_position(server, &uri, "v-my-thing", 0);
+    dash_position.character += 1;
+    let response = server
+        .goto_definition(goto_definition_params(&uri, dash_position))
+        .await
+        .expect("goto definition should succeed")
+        .expect("custom directive navigation must resolve from the dash caret");
+    let locations = definition_locations(response);
+    assert!(
+        locations.iter().any(|loc| loc.uri == uri),
+        "the dash caret must land the same-file declaration: {locations:?}"
+    );
+
     drain_handle.abort();
     drop(service);
 }

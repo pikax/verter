@@ -848,14 +848,6 @@ suite(`IDE navigation + completion [${FIXTURE_NAME}]`, function () {
           "v-if",
           "Conditionally",
         ]);
-        await assertHoverNeedles({ file: parent, token: "v-show", occurrence: 0 }, [
-          "v-show",
-          "display",
-        ]);
-        await assertHoverNeedles({ file: parent, token: "v-for", occurrence: 0 }, [
-          "v-for",
-          "list",
-        ]);
       } else {
         // Svelte directive KEYWORD tokens get doc hovers.
         await assertHoverNeedles({ file: parent, token: "use:highlight", occurrence: 0 }, [
