@@ -1,16 +1,8 @@
-/**
- * Endurance scenario 3 — hover/definition storms (D2 reproduction) with a
- * concurrent typer churning the import-chain root.
- *
- * Bounded in-flight workers sustain storm traffic across carrier files for
- * VERTER_ENDURANCE_STORM_MS (default 20s); every request must settle
- * (answered or properly cancelled — a timeout is a silent drop and fails),
- * content stays correct, p95 stays bounded, the provider survives, and
- * hover/definition still answer correctly after the storm.
- */
+/** Hover/definition storm endurance lanes against the real LSP. */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
+  ENDURANCE_LANES,
   carrierStormProbes,
   loadEnduranceConfig,
   runStormScenario,
@@ -27,34 +19,32 @@ import {
 
 const config = loadEnduranceConfig();
 
-describe.sequential(`endurance: hover-definition-storm [${config.route}]`, () => {
-  let rig: EnduranceRig;
-  let receipt: EnduranceReceipt | null = null;
+for (const lane of ENDURANCE_LANES) {
+  describe.sequential(`endurance: storm [${lane.id}/${config.route}]`, () => {
+    let rig: EnduranceRig;
+    let receipt: EnduranceReceipt | null = null;
+    const workspace = stormWorkspace(undefined, lane);
 
-  beforeAll(async () => {
-    const { files, carriers } = stormWorkspace();
-    rig = await materializeRig(files, config);
-    for (const carrier of carriers) {
-      rig.session.openFile(carrier);
-    }
-  });
-
-  afterAll(async () => {
-    await disposeRig(rig);
-  });
-
-  it("sustains a mixed storm with zero dropped requests and correct answers", async () => {
-    const { files, carriers } = stormWorkspace();
-    const probes = carrierStormProbes(carriers);
-    const churn = { relativePath: carriers[0], baseText: files[carriers[0]] };
-    receipt = await runStormScenario(scenarioContext(rig, "hover-definition-storm"), {
-      probes,
-      churn,
+    beforeAll(async () => {
+      rig = await materializeRig(workspace.files, config);
+      for (const carrier of workspace.carriers) rig.session.openFile(carrier);
     });
-    attestReceipt(receipt, { requireFinalSanity: true });
-    // Storm traffic must be real: many more requests than probes, and p95 within
-    // the per-route bound (tsserver's reflects its single-threaded engine capacity).
-    expect(receipt.requestsSent).toBeGreaterThanOrEqual(50);
-    expect(receipt.latency.overall.p95).toBeLessThanOrEqual(config.stormP95MaxMs);
-  }, 3_600_000);
-});
+    afterAll(async () => {
+      await disposeRig(rig);
+    });
+
+    it("sustains mixed traffic with current post-storm answers", async () => {
+      receipt = await runStormScenario(scenarioContext(rig, "hover-definition-storm", lane), {
+        probes: carrierStormProbes(workspace.carriers, lane),
+        churn: {
+          relativePath: workspace.carriers[0],
+          baseText: workspace.files[workspace.carriers[0]],
+        },
+      });
+      attestReceipt(receipt, { requireFinalSanity: true });
+      expect(receipt.frameworks[lane.framework]?.[lane.mode]).toBeDefined();
+      expect(receipt.requestsSent).toBeGreaterThanOrEqual(50);
+      expect(receipt.latency.overall.p95).toBeLessThanOrEqual(config.stormP95MaxMs);
+    }, 3_600_000);
+  });
+}

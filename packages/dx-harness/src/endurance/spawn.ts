@@ -20,7 +20,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { LspClient } from "@verter/lsp-test-client";
 
 import { awaitRawLspStartup } from "../core/startupGate.js";
-import type { EnduranceProviderRoute } from "./types.js";
+import type { EnduranceProviderRoute, ProviderRuntimeAttestation } from "./types.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 /** `packages/dx-harness/src/endurance` → repo root (same depth from `dist/endurance`). */
@@ -117,8 +117,38 @@ export interface EnduranceLspHandle {
   readonly relay?: LspClient;
   readonly route: EnduranceProviderRoute;
   readonly workspaceRoot: string;
+  /** Snapshot provider-process evidence without consulting the verter-lsp PID. */
+  providerAttestation(): ProviderRuntimeAttestation;
   /** Graceful shutdown + force-kill fallback; never hangs, idempotent. */
   dispose(): Promise<void>;
+}
+
+interface ProviderStartedNotification {
+  readonly pid?: number;
+  readonly kind?: string;
+}
+
+export function parseProviderRuntimeAttestation(stderr: string): {
+  restartLogCount: number;
+  reloadProjectsCount: number;
+} {
+  const restartLogCount = (stderr.match(/restarted successfully \(attempt\s+\d+\)/g) ?? []).length;
+  const reloadProjectsCount = (
+    stderr.match(
+      /\[verter-meta-trace\][^\r\n]*event=start[^\r\n]*name="tsserver_transport_command"[^\r\n]*detail="command=reloadProjects\b/g,
+    ) ?? []
+  ).length;
+  return { restartLogCount, reloadProjectsCount };
+}
+
+function processIsAlive(pid: number | null): boolean {
+  if (pid === null || !Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
 }
 
 /**
@@ -156,6 +186,9 @@ export async function spawnEnduranceLsp(
     VERTER_TSGO_BIN: tsgoBin,
     VERTER_LOG: "info",
     VERTER_E2E_TEST: "1",
+    // Emits a stable start-event for every tsserver command. Receipts count
+    // reloadProjects from that emitted evidence, never from an assumed zero.
+    VERTER_TYPE_RUNTIME_TRACE: "1",
     // NOTE: VERTER_E2E_PROVIDER_ONLY_COMPLETIONS is deliberately NOT set — that
     // flag zeroes Verter's NATIVE completion producer (see server/mod.rs
     // `provider_only_completions`), and the D1 contract this harness asserts
@@ -230,10 +263,47 @@ export async function spawnEnduranceLsp(
     args.push(`--shared-control-dir=${controlDir}`, `--shared-session-key=${sessionKey}`);
   }
 
+  const providerStarts: ProviderStartedNotification[] = [];
   const client = new LspClient("verter-lsp", lspBin, args, root, {
     defaultTimeout: 30_000,
     env,
+    onAnyNotification(method, params) {
+      if (method === "$/verter/typeProviderStarted") providerStarts.push(params ?? {});
+    },
   });
+
+  const providerAttestation = (): ProviderRuntimeAttestation => {
+    const runtime = parseProviderRuntimeAttestation(client.stderr.text());
+    if (route === "shared-tsgo") {
+      const pid = relay?.process.pid ?? null;
+      return {
+        pid,
+        kind: "shared-tsgo-relay",
+        evidence: "editor-owned-relay",
+        aliveAtEnd: relay?.isAlive() === true && processIsAlive(pid),
+        restartCount: runtime.restartLogCount,
+        providerStartCount: pid === null ? 0 : 1,
+        reloadProjectsCount: runtime.reloadProjectsCount,
+        restartLogCount: runtime.restartLogCount,
+      };
+    }
+    const validStarts = providerStarts.filter(
+      (item): item is { pid: number; kind?: string } =>
+        Number.isSafeInteger(item.pid) && (item.pid ?? 0) > 0,
+    );
+    const latest = validStarts.at(-1);
+    const pid = latest?.pid ?? null;
+    return {
+      pid,
+      kind: latest?.kind ?? route,
+      evidence: "typeProviderStarted",
+      aliveAtEnd: processIsAlive(pid),
+      restartCount: Math.max(Math.max(0, validStarts.length - 1), runtime.restartLogCount),
+      providerStartCount: validStarts.length,
+      reloadProjectsCount: runtime.reloadProjectsCount,
+      restartLogCount: runtime.restartLogCount,
+    };
+  };
 
   let disposed = false;
   const dispose = async (): Promise<void> => {
@@ -280,7 +350,7 @@ export async function spawnEnduranceLsp(
     });
     client.sendNotification("initialized", {});
     await startup;
-    return { client, relay, route, workspaceRoot: root, dispose };
+    return { client, relay, route, workspaceRoot: root, providerAttestation, dispose };
   } catch (error) {
     await dispose();
     throw error;

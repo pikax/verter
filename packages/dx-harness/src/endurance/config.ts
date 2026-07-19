@@ -52,6 +52,21 @@ function readInt(
   return Math.floor(value);
 }
 
+function readNumber(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  fallback: number,
+  { min }: { min: number },
+): number {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < min) {
+    throw new Error(`${name} must be a number >= ${min}, got ${JSON.stringify(raw)}`);
+  }
+  return value;
+}
+
 function readRoute(env: NodeJS.ProcessEnv): EnduranceProviderRoute {
   const raw = env.VERTER_ENDURANCE_PROVIDER ?? "tsgo";
   if (!(ENDURANCE_PROVIDER_ROUTES as readonly string[]).includes(raw)) {
@@ -82,7 +97,13 @@ export function loadEnduranceConfig(env: NodeJS.ProcessEnv = process.env): Endur
       route === "tsserver" ? 5_000 : 2_000,
       { min: 1 },
     ),
-    degradationFactor: readInt(env, "VERTER_ENDURANCE_DEGRADATION_FACTOR", 1.5, { min: 1 }),
+    scaleStormP95MaxMs: readInt(
+      env,
+      "VERTER_ENDURANCE_SCALE_STORM_P95_MAX_MS",
+      route === "tsserver" ? 8_000 : 2_000,
+      { min: 1 },
+    ),
+    degradationFactor: readNumber(env, "VERTER_ENDURANCE_DEGRADATION_FACTOR", 1.5, { min: 1 }),
     degradationFloorMs: readInt(env, "VERTER_ENDURANCE_DEGRADATION_FLOOR_MS", 250, { min: 1 }),
     windowMs: readInt(env, "VERTER_ENDURANCE_WINDOW_MS", 30_000, { min: 1000 }),
     maxInFlight: readInt(env, "VERTER_ENDURANCE_MAX_IN_FLIGHT", 8, { min: 1 }),

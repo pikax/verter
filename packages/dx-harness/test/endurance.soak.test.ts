@@ -1,20 +1,10 @@
-/**
- * Endurance scenario 4 — soak.
- *
- * Sustained mixed workload (typing + hover + completion + definition across
- * files) for VERTER_ENDURANCE_SOAK_MS (default 150s). Asserts: no p95
- * degradation trend across time windows (late <= early * factor AND late <=
- * absolute bound), provider alive, ZERO unanswered requests, RSS under the
- * ceiling (skipped with an explicit note on unsupported platforms), and a
- * final full-feature sanity pass after the soak.
- */
+/** Mixed-workload soak lanes against the real LSP. */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
+  ENDURANCE_LANES,
   loadEnduranceConfig,
   runSoakScenario,
-  SOAK_SCRATCH_PATH,
-  SOAK_TYPED_DOC,
   soakProbes,
   soakWorkspace,
   type EnduranceReceipt,
@@ -30,52 +20,48 @@ import {
 
 const config = loadEnduranceConfig();
 
-describe.sequential(`endurance: soak [${config.route}]`, () => {
-  let rig: EnduranceRig;
-  let receipt: EnduranceReceipt | null = null;
+for (const lane of ENDURANCE_LANES) {
+  describe.sequential(`endurance: soak [${lane.id}/${config.route}]`, () => {
+    let rig: EnduranceRig;
+    let receipt: EnduranceReceipt | null = null;
+    const workspace = soakWorkspace(4, lane);
 
-  beforeAll(async () => {
-    const { files, carriers } = soakWorkspace();
-    rig = await materializeRig(files, config);
-    rig.session.openFile("src/Child.vue");
-    rig.session.openFile("src/App.vue");
-    for (const carrier of carriers) {
-      rig.session.openFile(carrier);
-    }
-    // The typer's scratch buffer starts empty.
-    rig.session.openFile(SOAK_SCRATCH_PATH, "");
-  });
-
-  afterAll(async () => {
-    await disposeRig(rig);
-  });
-
-  it("sustains a mixed workload with bounded latency/RSS and a clean final sanity pass", async () => {
-    const { carriers } = soakWorkspace();
-    const probes = soakProbes(carriers);
-    receipt = await runSoakScenario(scenarioContext(rig, "soak"), {
-      probes,
-      typingFile: { relativePath: SOAK_SCRATCH_PATH, typedText: SOAK_TYPED_DOC },
+    beforeAll(async () => {
+      rig = await materializeRig(workspace.files, config);
+      rig.session.openFile(workspace.childPath);
+      rig.session.openFile(workspace.appPath);
+      for (const carrier of workspace.carriers) rig.session.openFile(carrier);
+      rig.session.openFile(workspace.scratchPath, "");
     });
-    attestReceipt(receipt, { requireFinalSanity: true });
-    expectRssWithinCeiling(receipt, config);
-    // Absolute p95 bound always applies.
-    expect(receipt.latency.overall.p95).toBeLessThanOrEqual(config.p95MaxMs);
-    // Degradation trend: only meaningful with >=2 usable windows; a shorter
-    // run reports null and is honestly trend-skipped (never vacuously passed).
-    if (receipt.degradationCheck) {
-      const check = receipt.degradationCheck;
-      expect(
-        check.pass,
-        `late-window p95 ${check.lateWindowP95}ms is a meaningful degradation over early-window ` +
-          `p95 ${check.earlyWindowP95}ms (fails only when ratio > ${check.factor}x AND ` +
-          `delta > ${check.floorMs}ms floor; actual delta ${check.lateWindowP95 - check.earlyWindowP95}ms)`,
-      ).toBe(true);
-      expect(check.lateWindowP95).toBeLessThanOrEqual(config.p95MaxMs);
-    } else {
-      console.log(
-        "[endurance] soak too short for a two-window trend check — degradation trend skipped explicitly",
-      );
-    }
-  }, 3_600_000);
-});
+    afterAll(async () => {
+      await disposeRig(rig);
+    });
+
+    it("keeps latency/RSS bounded with a clean final sanity pass", async () => {
+      receipt = await runSoakScenario(scenarioContext(rig, "soak", lane), {
+        probes: soakProbes(workspace.carriers, lane),
+        typingFile: {
+          relativePath: workspace.scratchPath,
+          typedText: workspace.typedDocument,
+        },
+      });
+      attestReceipt(receipt, { requireFinalSanity: true });
+      expect(receipt.frameworks[lane.framework]?.[lane.mode]).toBeDefined();
+      expectRssWithinCeiling(receipt, config);
+      expect(receipt.latency.overall.p95).toBeLessThanOrEqual(config.p95MaxMs);
+      if (receipt.degradationCheck) {
+        const check = receipt.degradationCheck;
+        expect(
+          check.pass,
+          `meaningful degradation: early=${check.earlyWindowP95} late=${check.lateWindowP95} ` +
+            `factor=${check.factor} floor=${check.floorMs}`,
+        ).toBe(true);
+        expect(check.lateWindowP95).toBeLessThanOrEqual(config.p95MaxMs);
+      } else {
+        console.log(
+          "[endurance] soak has fewer than two usable windows; trend check skipped explicitly",
+        );
+      }
+    }, 3_600_000);
+  });
+}

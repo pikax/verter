@@ -1,17 +1,5 @@
 #!/usr/bin/env node
-/**
- * generate-endurance-corpus.mjs — emit a synthetic Vue corpus for the
- * endurance scale lane.
- *
- *   node scripts/generate-endurance-corpus.mjs <targetDir> [count=300] [seed=42]
- *
- * Emits `count` synthetic `.vue` SFCs under `<targetDir>/src/components/`
- * (varied props/emits/slots, each importing 0–2 EARLIER components so the
- * graph is a DAG), a `<targetDir>/src/App.vue` consuming a sample of them,
- * and a strict `<targetDir>/tsconfig.json`. Deterministic for (count, seed):
- * layouts are computed in one PRNG pass, so parents always bind REAL props
- * of their children. No network, no external deps — plain Node ESM.
- */
+/** Emit a deterministic Vue/Svelte × TypeScript/JavaScript endurance corpus. */
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -28,7 +16,13 @@ if (!Number.isInteger(count) || count < 2) {
   process.exit(2);
 }
 
-/** mulberry32 — tiny deterministic PRNG. */
+const LANES = [
+  { id: "vue-ts", framework: "vue", mode: "ts" },
+  { id: "vue-js", framework: "vue", mode: "js" },
+  { id: "svelte-ts", framework: "svelte", mode: "ts" },
+  { id: "svelte-js", framework: "svelte", mode: "js" },
+];
+
 function prng(seedValue) {
   let state = seedValue >>> 0;
   return () => {
@@ -40,126 +34,154 @@ function prng(seedValue) {
   };
 }
 
-const NOUNS = ["alpha", "beta", "gamma", "delta", "omega", "sigma", "kappa", "zeta"];
-const PROP_WORDS = [
-  "label",
-  "title",
-  "count",
-  "size",
-  "tone",
-  "mode",
-  "caption",
-  "value",
-  "status",
-  "level",
-  "summary",
-  "detail",
-  "header",
-  "footer",
-  "prefix",
-  "suffix",
-];
-const EVENT_WORDS = ["select", "submit", "close", "toggle", "change", "focus"];
-const PROP_TYPES = ["string", "number", "boolean"];
-
-// ── Pass 1: deterministic layouts (in index order; imports only go backwards) ─
+const WORDS = ["label", "title", "count", "size", "tone", "mode", "caption", "value"];
 const random = prng(seed);
-const pickFrom = (items) => items[Math.floor(random() * items.length)];
 const layouts = [];
 for (let index = 0; index < count; index += 1) {
-  const propCount = 2 + Math.floor(random() * 3); // 2..4 props
-  const props = [{ name: `${pickFrom(PROP_WORDS)}${index}`, type: "string", optional: false }];
-  while (props.length < propCount) {
-    const name = `${pickFrom(PROP_WORDS)}${index}`;
-    if (props.some((prop) => prop.name === name)) continue;
-    props.push({ name, type: pickFrom(PROP_TYPES), optional: random() < 0.4 });
-  }
-  const importCount = index === 0 ? 0 : Math.min(index, Math.floor(random() * 3));
+  const first = `${WORDS[Math.floor(random() * WORDS.length)]}${index}`;
+  const second = `${WORDS[Math.floor(random() * WORDS.length)]}${index}Extra`;
   const imports = [];
-  while (imports.length < importCount) {
-    const dep = Math.floor(random() * index);
-    if (!imports.includes(dep)) imports.push(dep);
-  }
-  imports.sort((a, b) => a - b);
+  if (index > 0) imports.push(Math.floor(random() * index));
   layouts.push({
     name: `Corpus${index}`,
-    noun: pickFrom(NOUNS),
-    props,
-    eventName: `${pickFrom(EVENT_WORDS)}${index}`,
+    props: [first, second],
+    unusedProp: `unusedonly${String(index).padStart(6, "0")}`,
+    event: `select${index}`,
     local: `padLocal${index}`,
     handler: `onCorpus${index}Fire`,
-    hasSlot: random() < 0.5,
     imports,
   });
 }
 
-// ── Pass 2: emit sources from layouts ─────────────────────────────────────
-function componentSource(layout) {
-  const lines = ['<script setup lang="ts">'];
-  for (const dep of layout.imports) {
-    lines.push(`import Corpus${dep} from "./Corpus${dep}.vue";`);
-  }
-  lines.push(`interface ${layout.name}Props {`);
-  for (const prop of layout.props) {
-    lines.push(`  ${prop.name}${prop.optional ? "?" : ""}: ${prop.type};`);
+function vueSource(layout, lane) {
+  const lines = [lane.mode === "ts" ? '<script setup lang="ts">' : "<script setup>\n// @ts-check"];
+  for (const dep of layout.imports) lines.push(`import Corpus${dep} from "./Corpus${dep}.vue";`);
+  if (lane.mode === "ts") {
+    lines.push(
+      `interface ${layout.name}Props {`,
+      `  ${layout.props[0]}: string;`,
+      `  ${layout.props[1]}?: number;`,
+      `  ${layout.unusedProp}?: boolean;`,
+      "}",
+      `const props = defineProps<${layout.name}Props>();`,
+      `const emit = defineEmits<{ (e: "${layout.event}", value: string): void }>();`,
+    );
+  } else {
+    lines.push(
+      `const props = defineProps({ ${layout.props[0]}: { type: String, required: true }, ${layout.props[1]}: Number, ${layout.unusedProp}: Boolean });`,
+      `const emit = defineEmits(["${layout.event}"]);`,
+    );
   }
   lines.push(
-    "}",
-    `const props = defineProps<${layout.name}Props>();`,
-    `const emit = defineEmits<{ (e: "${layout.eventName}", value: string): void }>();`,
-  );
-  if (layout.hasSlot) {
-    lines.push("defineSlots<{ default(props: { row: number }): any }>();");
-  }
-  lines.push(
-    `const ${layout.local} = \`${layout.noun}:\${props.${layout.props[0].name}}\`;`,
+    `const ${layout.local} = \`lane:\${props.${layout.props[0]}}\`;`,
+    `const ${layout.local}Length = ${layout.local}.length;`,
     `function ${layout.handler}() {`,
-    `  emit("${layout.eventName}", String(props.${layout.props[0].name}));`,
+    `  emit("${layout.event}", String(props.${layout.props[0]}));`,
     "}",
     "</script>",
-    "",
     "<template>",
     "  <section>",
-    `    <span :title="props.${layout.props[0].name}">{{ ${layout.local} }}</span>`,
+    `    <span :title="props.${layout.props[0]}">{{ ${layout.local} }}</span>`,
     `    <button @click="${layout.handler}">fire</button>`,
   );
   for (const dep of layout.imports) {
-    // The child's FIRST prop is always a required string — bind it cleanly.
-    lines.push(`    <Corpus${dep} :${layouts[dep].props[0].name}="'x'" />`);
+    lines.push(`    <Corpus${dep} :${layouts[dep].props[0]}="'x'" />`);
+    lines.push(`    <Corpus${dep} />`);
   }
   lines.push("  </section>", "</template>", "");
   return lines.join("\n");
 }
 
-mkdirSync(path.join(targetDir, "src", "components"), { recursive: true });
-for (const layout of layouts) {
-  writeFileSync(
-    path.join(targetDir, "src", "components", `${layout.name}.vue`),
-    componentSource(layout),
+function svelteSource(layout, lane) {
+  const lines = [lane.mode === "ts" ? '<script lang="ts">' : "<script>\n  // @ts-check"];
+  for (const dep of layout.imports)
+    lines.push(`  import Corpus${dep} from "./Corpus${dep}.svelte";`);
+  if (lane.mode === "ts") {
+    lines.push(
+      '  import type { Snippet } from "svelte";',
+      `  interface ${layout.name}Props {`,
+      `    ${layout.props[0]}: string;`,
+      `    ${layout.props[1]}?: number;`,
+      `    ${layout.unusedProp}?: boolean;`,
+      "    onselect?: (value: string) => void;",
+      "    content?: Snippet<[string]>;",
+      "  }",
+      `  let { ${layout.props[0]}, ${layout.props[1]}, onselect, content }: ${layout.name}Props = $props();`,
+    );
+  } else {
+    lines.push(
+      `  /** @type {{ ${layout.props[0]}: string, ${layout.props[1]}?: number, ${layout.unusedProp}?: boolean, onselect?: (value: string) => void, content?: import("svelte").Snippet<[string]> }} */`,
+      `  let { ${layout.props[0]}, ${layout.props[1]}, onselect, content } = $props();`,
+    );
+  }
+  lines.push(
+    `  let ${layout.local} = $derived(\`lane:\${${layout.props[0]}}\`);`,
+    `  const ${layout.props[0]}Length = ${layout.props[0]}.length;`,
+    `  const ${layout.local}Length = ${layout.local}.length;`,
+    "  const contentRef = content;",
+    `  function ${layout.handler}() {`,
+    `    onselect?.(String(${layout.props[0]}));`,
+    "  }",
+    `  const ${layout.handler}Ref = ${layout.handler};`,
+    "</script>",
+    `{#snippet corpusSnippet(value)}`,
+    "  <strong>{value}</strong>",
+    "{/snippet}",
+    "<section>",
+    `  <span title={${layout.props[0]}}>{${layout.local}}</span>`,
+    `  <button onclick={${layout.handler}}>fire</button>`,
+    `  {@render corpusSnippet(${layout.local})}`,
   );
+  for (const dep of layout.imports) {
+    lines.push(`  <Corpus${dep} ${layouts[dep].props[0]}="x" />`);
+    lines.push(`  <Corpus${dep} />`);
+  }
+  lines.push("</section>", "");
+  return lines.join("\n");
 }
 
-const appImports = [];
-for (let k = 0; k < Math.min(10, count); k += 1) {
-  appImports.push(Math.floor((k * count) / 10));
+for (const lane of LANES) {
+  const laneDir = path.join(targetDir, "src", lane.id);
+  mkdirSync(laneDir, { recursive: true });
+  for (const layout of layouts) {
+    writeFileSync(
+      path.join(laneDir, `${layout.name}.${lane.framework}`),
+      lane.framework === "vue" ? vueSource(layout, lane) : svelteSource(layout, lane),
+    );
+  }
+  const imports = layouts.slice(0, Math.min(10, count));
+  const app =
+    lane.framework === "vue"
+      ? [
+          lane.mode === "ts" ? '<script setup lang="ts">' : "<script setup>\n// @ts-check",
+          ...imports.map((layout) => `import ${layout.name} from "./${layout.name}.vue";`),
+          'const appHeading = "corpus";',
+          "const appHeadingLength = appHeading.length;",
+          "</script>",
+          "<template>",
+          "  <main>",
+          "    <h1>{{ appHeading }}</h1>",
+          ...imports.map((layout) => `    <${layout.name} :${layout.props[0]}="'x'" />`),
+          ...imports.map((layout) => `    <${layout.name} />`),
+          "  </main>",
+          "</template>",
+          "",
+        ].join("\n")
+      : [
+          lane.mode === "ts" ? '<script lang="ts">' : "<script>\n  // @ts-check",
+          ...imports.map((layout) => `  import ${layout.name} from "./${layout.name}.svelte";`),
+          '  let appHeading = $state("corpus");',
+          "  const appHeadingLength = appHeading.length;",
+          "</script>",
+          "<main>",
+          "  <h1>{appHeading}</h1>",
+          ...imports.map((layout) => `  <${layout.name} ${layout.props[0]}="x" />`),
+          ...imports.map((layout) => `  <${layout.name} />`),
+          "</main>",
+          "",
+        ].join("\n");
+  writeFileSync(path.join(laneDir, `App.${lane.framework}`), app);
 }
-writeFileSync(
-  path.join(targetDir, "src", "App.vue"),
-  [
-    '<script setup lang="ts">',
-    ...appImports.map((i) => `import Corpus${i} from "./components/Corpus${i}.vue";`),
-    'const appHeading = "corpus";',
-    "</script>",
-    "",
-    "<template>",
-    "  <main>",
-    "    <h1>{{ appHeading }}</h1>",
-    ...appImports.map((i) => `    <Corpus${i} :${layouts[i].props[0].name}="'x'" />`),
-    "  </main>",
-    "</template>",
-    "",
-  ].join("\n"),
-);
 
 writeFileSync(
   path.join(targetDir, "tsconfig.json"),
@@ -186,5 +208,5 @@ writeFileSync(
 );
 
 console.log(
-  `[generate-endurance-corpus] wrote ${count} components + App.vue to ${targetDir} (seed=${seed})`,
+  `[generate-endurance-corpus] wrote ${count} components + App per lane across ${LANES.length} lanes to ${targetDir} (seed=${seed})`,
 );

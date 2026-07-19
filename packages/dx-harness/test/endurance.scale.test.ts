@@ -1,11 +1,4 @@
-/**
- * Endurance scale lane — storm + heavy-update + soak against an EXTERNAL
- * corpus (VERTER_ENDURANCE_CORPUS_DIR) or a generated synthetic corpus
- * (VERTER_ENDURANCE_SYNTHETIC_SCALE=1). The corpus is used strictly
- * READ-ONLY: files are opened from disk and all edits are in-memory
- * didChange overlays — the harness never writes into the corpus directory.
- * When neither env var is set the lane reports an explicit skip.
- */
+/** Read-only scale lane over an external or generated four-lane corpus. */
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,6 +8,8 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
+  ENDURANCE_LANES,
+  buildReceipt,
   deriveCorpusProbes,
   disposeWorkspace,
   FailureBag,
@@ -22,7 +17,9 @@ import {
   runRenameCycles,
   runSoakScenario,
   runStormScenario,
+  type CorpusLaneSection,
   type CorpusProbeDerivation,
+  type EnduranceLane,
   type EnduranceReceipt,
 } from "../src/endurance/index.js";
 import {
@@ -31,7 +28,6 @@ import {
   expectRssWithinCeiling,
   scenarioContext,
   spawnRig,
-  type EnduranceRig,
 } from "./endurance.helpers.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -40,105 +36,145 @@ const SCALE_ENABLED = config.corpusDir !== null || config.syntheticScale;
 
 describe.sequential(`endurance: scale lane [${config.route}]`, () => {
   if (!SCALE_ENABLED) {
-    it.skip(
-      "VERTER_ENDURANCE_CORPUS_DIR unset — scale lane skipped " +
-        "(set VERTER_ENDURANCE_CORPUS_DIR to an external project root, or " +
-        "VERTER_ENDURANCE_SYNTHETIC_SCALE=1 to generate a synthetic corpus)",
-      () => {},
-    );
+    it.skip("scale lane disabled (set VERTER_ENDURANCE_CORPUS_DIR or VERTER_ENDURANCE_SYNTHETIC_SCALE=1)", () => {});
     return;
   }
 
-  let rig: EnduranceRig;
+  let corpusRoot: string;
   let derivation: CorpusProbeDerivation;
   let generatedDir: string | null = null;
 
-  beforeAll(async () => {
-    let corpusDir = config.corpusDir;
-    if (!corpusDir) {
-      generatedDir = mkdtempSync(path.join(tmpdir(), "verter-endurance-corpus-"));
-      corpusDir = generatedDir;
+  beforeAll(() => {
+    corpusRoot = config.corpusDir ?? mkdtempSync(path.join(tmpdir(), "verter-endurance-corpus-"));
+    if (config.corpusDir === null) {
+      generatedDir = corpusRoot;
       const generator = path.resolve(HERE, "..", "scripts", "generate-endurance-corpus.mjs");
-      execFileSync(process.execPath, [generator, corpusDir, String(config.scaleCorpusFiles)], {
+      execFileSync(process.execPath, [generator, corpusRoot, String(config.scaleCorpusFiles)], {
         stdio: "inherit",
       });
     }
-    derivation = deriveCorpusProbes(corpusDir, { maxFiles: config.scaleOpenFiles });
+    derivation = deriveCorpusProbes(corpusRoot, { maxFiles: config.scaleOpenFiles });
     if (derivation.probes.length < 6) {
       throw new Error(
-        `scale lane: only ${derivation.probes.length} probes derivable from ${corpusDir} — corpus too small or atypical`,
+        `scale lane derived only ${derivation.probes.length} probes from ${corpusRoot}`,
       );
-    }
-    rig = await spawnRig(corpusDir, config, false);
-    for (const file of derivation.files) {
-      rig.session.openFile(file);
     }
   });
 
-  afterAll(async () => {
-    await disposeRig(rig); // ownsWorkspace === false: the corpus is never removed.
-    // Retry-hardened removal (Windows transient EBUSY on just-killed children).
+  afterAll(() => {
     if (generatedDir) disposeWorkspace(generatedDir);
   });
 
-  it("storm against the corpus", async () => {
-    const churn = derivation.churnFile
-      ? {
-          relativePath: derivation.churnFile,
-          baseText: readFileSync(path.join(rig.workspaceRoot, derivation.churnFile), "utf8"),
-        }
-      : undefined;
-    const receipt: EnduranceReceipt = await runStormScenario(scenarioContext(rig, "scale-storm"), {
-      probes: derivation.probes,
-      churn,
-    });
-    attestReceipt(receipt, { requireFinalSanity: true });
-    expect(receipt.latency.overall.p95).toBeLessThanOrEqual(config.stormP95MaxMs);
-  }, 3_600_000);
-
-  it("heavy-update rename cycles against a corpus file (overlay-only)", async () => {
-    if (!derivation.renameTarget) {
-      console.log(
-        "[endurance] no rename target derivable from corpus — rename leg skipped explicitly",
-      );
-      return;
-    }
-    const failures = new FailureBag();
-    const cycles = Math.min(config.heavyUpdateCycles, 20);
-    await runRenameCycles(
-      scenarioContext(rig, "scale-heavy-update"),
-      derivation.renameTarget.file,
-      derivation.renameTarget.ident,
-      cycles,
-      failures,
+  function laneFor(section: CorpusLaneSection): EnduranceLane {
+    const lane = ENDURANCE_LANES.find(
+      (candidate) => candidate.framework === section.framework && candidate.mode === section.mode,
     );
-    expect([...failures.list], `rename-cycle failures:\n${failures.list.join("\n")}`).toEqual([]);
-    expect(rig.session.tracker.unanswered).toBe(0);
-    expect(rig.session.tracker.errored).toBe(0);
-    expect(rig.handle.client.isAlive()).toBe(true);
+    if (!lane) throw new Error(`unknown corpus lane ${section.framework}-${section.mode}`);
+    return lane;
+  }
+
+  it("storms every discovered framework/mode section with lane-scoped receipts", async () => {
+    for (const section of derivation.lanes) {
+      if (section.probes.length === 0) continue;
+      const lane = laneFor(section);
+      const rig = await spawnRig(corpusRoot, config, false);
+      try {
+        for (const file of section.files) rig.session.openFile(file);
+        const churnFile = section.files.find((file) =>
+          readFileSync(path.join(corpusRoot, file), "utf8").includes("</script>"),
+        );
+        const stableProbes = section.probes.filter((probe) => probe.relativePath !== churnFile);
+        if (stableProbes.length === 0)
+          throw new Error(`scale storm has no stable probes for ${lane.id}`);
+        const receipt: EnduranceReceipt = await runStormScenario(
+          scenarioContext(rig, "scale-storm", lane),
+          {
+            probes: stableProbes,
+            churn: churnFile
+              ? {
+                  relativePath: churnFile,
+                  baseText: readFileSync(path.join(corpusRoot, churnFile), "utf8"),
+                }
+              : undefined,
+          },
+        );
+        attestReceipt(receipt, { requireFinalSanity: true });
+        expect(receipt.frameworks[section.framework]?.[section.mode]).toBeDefined();
+        // Scale-storm bound: a real corpus program under storm is heavier than
+        // the synthetic-carrier storm (see types.ts `scaleStormP95MaxMs`).
+        expect(receipt.latency.overall.p95).toBeLessThanOrEqual(config.scaleStormP95MaxMs);
+      } finally {
+        await disposeRig(rig);
+      }
+    }
   }, 3_600_000);
 
-  it("soak against the corpus", async () => {
-    const churnText = derivation.churnFile
-      ? readFileSync(path.join(rig.workspaceRoot, derivation.churnFile), "utf8")
-      : null;
-    const receipt: EnduranceReceipt = await runSoakScenario(scenarioContext(rig, "scale-soak"), {
-      probes: derivation.probes,
-      typingFile:
-        derivation.churnFile && churnText !== null
-          ? { relativePath: derivation.churnFile, typedText: churnText }
-          : undefined,
-    });
-    attestReceipt(receipt, { requireFinalSanity: true });
-    expectRssWithinCeiling(receipt, config);
-    expect(receipt.latency.overall.p95).toBeLessThanOrEqual(config.p95MaxMs);
-    if (receipt.degradationCheck) {
-      expect(receipt.degradationCheck.pass).toBe(true);
-      expect(receipt.degradationCheck.lateWindowP95).toBeLessThanOrEqual(config.p95MaxMs);
-    } else {
-      console.log(
-        "[endurance] scale soak too short for a two-window trend check — skipped explicitly",
-      );
+  it("runs overlay-only rename cycles in every framework/mode section", async () => {
+    for (const section of derivation.lanes) {
+      if (!section.renameTarget)
+        throw new Error(`scale rename has no target for ${section.framework}-${section.mode}`);
+      const lane = laneFor(section);
+      const rig = await spawnRig(corpusRoot, config, false);
+      try {
+        for (const file of section.files) rig.session.openFile(file);
+        const failures = new FailureBag();
+        const context = scenarioContext(rig, "scale-heavy-update", lane);
+        const startedAtMs = Date.now();
+        context.sampler?.start();
+        const cycles = Math.min(config.heavyUpdateCycles, 20);
+        const finalSanityPass = await runRenameCycles(
+          context,
+          section.renameTarget.file,
+          section.renameTarget.ident,
+          cycles,
+          failures,
+        );
+        const receipt = buildReceipt(context, startedAtMs, {
+          finalSanityPass,
+          failures: failures.list,
+        });
+        attestReceipt(receipt, { requireFinalSanity: true });
+        expect(receipt.requestsSent).toBeGreaterThanOrEqual(cycles * 4);
+        expect(receipt.frameworks[section.framework]?.[section.mode]).toBeDefined();
+      } finally {
+        await disposeRig(rig);
+      }
+    }
+  }, 3_600_000);
+
+  it("soaks every discovered framework/mode section with lane-scoped receipts", async () => {
+    for (const section of derivation.lanes) {
+      if (section.probes.length === 0) continue;
+      const lane = laneFor(section);
+      const rig = await spawnRig(corpusRoot, config, false);
+      try {
+        for (const file of section.files) rig.session.openFile(file);
+        const typingPath = section.files.find((file) =>
+          readFileSync(path.join(corpusRoot, file), "utf8").includes("</script>"),
+        );
+        const stableProbes = section.probes.filter((probe) => probe.relativePath !== typingPath);
+        if (stableProbes.length === 0)
+          throw new Error(`scale soak has no stable probes for ${lane.id}`);
+        const receipt: EnduranceReceipt = await runSoakScenario(
+          scenarioContext(rig, "scale-soak", lane),
+          {
+            probes: stableProbes,
+            typingFile: typingPath
+              ? {
+                  relativePath: typingPath,
+                  typedText: readFileSync(path.join(corpusRoot, typingPath), "utf8"),
+                }
+              : undefined,
+          },
+        );
+        attestReceipt(receipt, { requireFinalSanity: true });
+        expect(receipt.frameworks[section.framework]?.[section.mode]).toBeDefined();
+        expectRssWithinCeiling(receipt, config);
+        expect(receipt.latency.overall.p95).toBeLessThanOrEqual(config.p95MaxMs);
+        if (receipt.degradationCheck) expect(receipt.degradationCheck.pass).toBe(true);
+      } finally {
+        await disposeRig(rig);
+      }
     }
   }, 3_600_000);
 });

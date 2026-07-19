@@ -10,7 +10,7 @@
  * drop and fails), the provider is alive after, p95 latency is bounded, and
  * hover/definition STILL answer with correct typed content after the storm.
  */
-import type { EnduranceReceipt } from "../types.js";
+import { DEFAULT_ENDURANCE_LANE, type EnduranceLane, type EnduranceReceipt } from "../types.js";
 import type { EnduranceProbe } from "../session.js";
 import { camelToKebab } from "../session.js";
 import { sleep } from "../metrics.js";
@@ -38,7 +38,10 @@ export interface StormParams {
 }
 
 /** Build the carrier storm probes (carriers 1..N — carrier 0 is the churn target). */
-export function carrierStormProbes(carriers: readonly string[]): EnduranceProbe[] {
+export function carrierStormProbes(
+  carriers: readonly string[],
+  lane: EnduranceLane = DEFAULT_ENDURANCE_LANE,
+): EnduranceProbe[] {
   const probes: EnduranceProbe[] = [];
   for (let index = 1; index < carriers.length; index += 1) {
     const relativePath = carriers[index];
@@ -46,36 +49,46 @@ export function carrierStormProbes(carriers: readonly string[]): EnduranceProbe[
     const local = `carrierLocal${index}`;
     const handler = `onCarrier${index}`;
     const childTag = `Carrier${index - 1}`;
-    const childProp = `carrierProp${index - 1}`;
+    const childUnusedProp = `carrierUnusedOnly${String(index - 1).padStart(6, "0")}`;
     probes.push(
       {
         // Provider member hover: documented type-quality gap — informational.
         kind: "hover",
         relativePath,
-        needle: `:title="props.${prop}"`,
-        cursorOffset: `:title="props.`.length,
-        expectIncludes: [],
-        informational: true,
+        needle: lane.framework === "vue" ? `:title="props.${prop}"` : `${prop}.length`,
+        cursorOffset: lane.framework === "vue" ? `:title="props.`.length : 2,
+        expectIncludes: lane.framework === "vue" ? [] : [prop],
+        ...(lane.framework === "vue"
+          ? { informational: true as const }
+          : { forbidIncludes: ["any"], requireNonEmpty: true }),
         label: `${relativePath} prop hover`,
       },
       {
-        // Vue binding hover on a local: Verter owns the answer — strong.
+        // Strong framework-local hover: the binding NAME is Verter-owned in
+        // every lane (hard + non-empty + name fragment). The TYPE TEXT at a
+        // template-mapped position is provider-owned and truthfully surfaces
+        // `any` on the tsserver route today (documented provider type-quality
+        // gap), so no type fragment is forbidden there; the Svelte probe uses
+        // a script position whose typed answer DOES forbid `any`.
         kind: "hover",
         relativePath,
-        needle: `{{ ${local} }}`,
-        cursorOffset: 3,
+        needle: lane.framework === "vue" ? `{{ ${local} }}` : `${local}.length`,
+        cursorOffset: lane.framework === "vue" ? 3 : 2,
         expectIncludes: [local],
+        forbidIncludes: lane.framework === "vue" ? [] : ["any"],
         requireNonEmpty: true,
         label: `${relativePath} local hover`,
       },
       {
-        // Template event → script handler navigation: Verter-owned mapping.
+        // Strong definition navigation: Vue event handler, Svelte imported component.
         kind: "definition",
         relativePath,
-        needle: `@click="${handler}"`,
-        cursorOffset: 8,
-        expectLineNeedle: `function ${handler}`,
-        label: `${relativePath} handler definition`,
+        needle: lane.framework === "vue" ? `@click="${handler}"` : `<${childTag}`,
+        cursorOffset: lane.framework === "vue" ? 8 : 2,
+        ...(lane.framework === "vue"
+          ? { expectLineNeedle: `function ${handler}` }
+          : { expectUriSuffix: `/${carriers[index - 1]}` }),
+        label: `${relativePath} ${lane.framework === "vue" ? "handler" : "component"} definition`,
       },
       {
         // D1 STABILITY: component attr-name completion on the bare child tag
@@ -85,10 +98,58 @@ export function carrierStormProbes(carriers: readonly string[]): EnduranceProbe[
         relativePath,
         needle: `<${childTag} />`,
         cursorOffset: `<${childTag} `.length,
-        expectLabels: [camelToKebab(childProp)],
+        expectLabels: [lane.framework === "vue" ? camelToKebab(childUnusedProp) : childUnusedProp],
         label: `${relativePath} child attr completion (D1)`,
       },
     );
+    if (lane.framework === "svelte") {
+      probes.push(
+        {
+          kind: "definition",
+          relativePath,
+          needle: `onclick={${handler}}`,
+          cursorOffset: "onclick={".length + 1,
+          expectLineNeedle: `function ${handler}`,
+          label: `${relativePath} markup event-site definition`,
+        },
+        {
+          kind: "definition",
+          relativePath,
+          needle: "onfire?.(",
+          cursorOffset: 2,
+          expectLineNeedle: `let { ${prop}, onfire, content }`,
+          label: `${relativePath} callback-event definition`,
+        },
+        {
+          kind: "hover",
+          relativePath,
+          needle: "Snippet<[string]>",
+          cursorOffset: 2,
+          expectIncludes: ["Snippet"],
+          ...(lane.mode === "js"
+            ? { informational: true as const }
+            : { forbidIncludes: ["any"], requireNonEmpty: true }),
+          label: `${relativePath} snippet hover`,
+        },
+        {
+          kind: "definition",
+          relativePath,
+          needle: "@render carrierSnippet",
+          cursorOffset: "@render ".length + 1,
+          expectLineNeedle: "{#snippet carrierSnippet",
+          label: `${relativePath} snippet definition`,
+        },
+      );
+    } else {
+      probes.push({
+        kind: "definition",
+        relativePath,
+        needle: `{{ ${local} }}`,
+        cursorOffset: 3,
+        expectLineNeedle: `const ${local}`,
+        label: `${relativePath} local definition`,
+      });
+    }
   }
   return probes;
 }
@@ -173,9 +234,13 @@ export async function runStormScenario(
 }
 
 /** Synthetic carrier workspace for the storm spec (chain: 1→0, 2→1, …). */
-export function stormWorkspace(carrierCount = STORM_CARRIER_COUNT): {
-  files: WorkspaceFiles;
-  carriers: readonly string[];
-} {
-  return buildCarrierSet(carrierCount);
+export function stormWorkspace(
+  carrierCount?: number,
+  lane?: EnduranceLane,
+): { files: WorkspaceFiles; carriers: readonly string[]; lane: EnduranceLane };
+export function stormWorkspace(
+  carrierCount = STORM_CARRIER_COUNT,
+  lane: EnduranceLane = DEFAULT_ENDURANCE_LANE,
+): { files: WorkspaceFiles; carriers: readonly string[]; lane: EnduranceLane } {
+  return buildCarrierSet(carrierCount, lane);
 }

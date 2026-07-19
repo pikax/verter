@@ -12,12 +12,19 @@
  */
 export {
   ENDURANCE_PROVIDER_ROUTES,
+  ENDURANCE_LANES,
+  DEFAULT_ENDURANCE_LANE,
   type EnduranceConfig,
+  type EnduranceFramework,
+  type EnduranceLane,
+  type EnduranceLanguageMode,
   type EnduranceProviderRoute,
   type EnduranceReceipt,
+  type FrameworkReceiptSection,
   type PercentileSummary,
   type RequestClassification,
   type WindowSummary,
+  type ProviderRuntimeAttestation,
 } from "./types.js";
 
 export { loadEnduranceConfig } from "./config.js";
@@ -41,10 +48,12 @@ export { RssSampler, readProcessRssBytes, type RssSample } from "./rss.js";
 export {
   ENDURANCE_TSCONFIG,
   buildCarrierSet,
+  carrierPath,
   carrierContent,
   childConsumerContent,
   disposeWorkspace,
   heavyUpdateChildContent,
+  laneDirectory,
   materializeWorkspace,
   type CarrierSet,
   type WorkspaceFiles,
@@ -55,6 +64,7 @@ export {
   spawnEnduranceLsp,
   type EnduranceLspHandle,
   type SpawnEnduranceLspOptions,
+  parseProviderRuntimeAttestation,
 } from "./spawn.js";
 
 export {
@@ -63,6 +73,7 @@ export {
   definitionTargets,
   EnduranceSession,
   hoverText,
+  languageIdForPath,
   type CompletionProbe,
   type DefinitionProbe,
   type DefinitionTarget,
@@ -88,12 +99,21 @@ export {
 
 export { receiptCoreFailures, receiptDestination, writeReceipt } from "./attestation.js";
 
-export { BUILD_COMPONENT_FILES, runBuildComponentScenario } from "./scenarios/buildComponent.js";
+export {
+  BUILD_COMPONENT_FILES,
+  buildComponentEventSiteProbes,
+  buildComponentIntegrationProbes,
+  buildComponentFixture,
+  runBuildComponentScenario,
+  type BuildComponentFixture,
+} from "./scenarios/buildComponent.js";
 
 export {
   HEAVY_UPDATE_FILES,
+  heavyUpdateFixture,
   runHeavyUpdateScenario,
   runRenameCycles,
+  type HeavyUpdateFixture,
 } from "./scenarios/heavyUpdate.js";
 
 export {
@@ -114,4 +134,9 @@ export {
   type SoakWorkspace,
 } from "./scenarios/soak.js";
 
-export { collectCorpusVueFiles, deriveCorpusProbes, type CorpusProbeDerivation } from "./scale.js";
+export {
+  collectCorpusCarrierFiles,
+  deriveCorpusProbes,
+  type CorpusLaneSection,
+  type CorpusProbeDerivation,
+} from "./scale.js";

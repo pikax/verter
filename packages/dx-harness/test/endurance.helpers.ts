@@ -19,6 +19,7 @@ import {
   writeReceipt,
   type EnduranceConfig,
   type EnduranceLspHandle,
+  type EnduranceLane,
   type EnduranceReceipt,
   type ScenarioContext,
   type WorkspaceFiles,
@@ -34,13 +35,19 @@ export interface EnduranceRig {
   readonly ownsWorkspace: boolean;
 }
 
-export function scenarioContext(rig: EnduranceRig, scenario: string): ScenarioContext {
+export function scenarioContext(
+  rig: EnduranceRig,
+  scenario: string,
+  lane: EnduranceLane,
+): ScenarioContext {
   return {
     scenario,
     route: rig.config.route,
+    lane,
     session: rig.session,
     config: rig.config,
     sampler: rig.sampler,
+    providerAttestation: () => rig.handle.providerAttestation(),
   };
 }
 
@@ -102,6 +109,13 @@ export function attestReceipt(
   expect(receipt.requestsSent).toBeGreaterThan(0);
   expect(receipt.requestsUnanswered).toBe(0);
   expect(receipt.providerAliveAtEnd).toBe(true);
+  expect(receipt.restartCount).toBe(0);
+  // At most ONE designed singleflight recovery event per lane (see attestation.ts).
+  expect(receipt.reloadProjectsCount).toBeLessThanOrEqual(1);
+  const section = receipt.frameworks[receipt.framework]?.[receipt.mode];
+  expect(section, `missing ${receipt.framework}/${receipt.mode} receipt section`).toBeDefined();
+  expect(section?.requestsSent).toBe(receipt.requestsSent);
+  expect(section?.requestsUnanswered).toBe(0);
 }
 
 /** RSS ceiling check — skipped with an explicit note when the platform can't read it. */

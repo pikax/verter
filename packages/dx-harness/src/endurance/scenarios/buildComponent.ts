@@ -1,19 +1,7 @@
-/**
- * Scenario 1 — build-a-component-from-scratch.
- *
- * Keystroke-level typing simulation: two SFC buffers start EMPTY and are
- * typed chunk-by-chunk (didChange per keystroke, a few ms apart) — first a
- * child (`<script setup>` with props/emits/slots, then a `<template>` using
- * them), then a parent consuming it. At realistic points (after a
- * member-access dot, after a component tag's attr introducer, inside an
- * interpolation) completion/hover/definition are fired and EVERY response is
- * asserted: typed items present, definition/hover on authored spans, latency
- * under bound. Any timed-out/rejected request fails the run.
- */
-import type { EnduranceReceipt } from "../types.js";
+/** Build a component from scratch in every framework × language-mode lane. */
 import type { EnduranceProbe } from "../session.js";
-import type { WorkspaceFiles } from "../workspace.js";
-import { ENDURANCE_TSCONFIG } from "../workspace.js";
+import { DEFAULT_ENDURANCE_LANE, type EnduranceLane, type EnduranceReceipt } from "../types.js";
+import { carrierPath, ENDURANCE_TSCONFIG, type WorkspaceFiles } from "../workspace.js";
 import {
   buildReceipt,
   convergeProbe,
@@ -25,62 +13,19 @@ import {
   type TypingCheckpoint,
 } from "./common.js";
 
-const DRAFT_CARD = "src/DraftCard.vue";
-const APP = "src/App.vue";
-
-const DRAFT_CARD_FINAL = [
-  '<script setup lang="ts">',
-  "interface DraftProps {",
-  "  title: string;",
-  "  level?: number;",
-  "}",
-  "const props = defineProps<DraftProps>();",
-  'const emit = defineEmits<{ (e: "save", title: string): void }>();',
-  "defineSlots<{ default(props: { active: boolean }): any }>();",
-  "const draftLabel = `draft:${props.title}`;",
-  "function saveDraft() {",
-  '  emit("save", props.title);',
-  "}",
-  "</script>",
-  "",
-  "<template>",
-  '  <section class="draft">',
-  '    <h2 :data-level="props.level">{{ draftLabel }}</h2>',
-  '    <button @click="saveDraft">Save</button>',
-  "  </section>",
-  "</template>",
-  "",
-].join("\n");
-
-const APP_FINAL = [
-  '<script setup lang="ts">',
-  'import DraftCard from "./DraftCard.vue";',
-  'const heading = "drafts";',
-  "function onSave(title: string) {",
-  "  console.log(title.length);",
-  "}",
-  "</script>",
-  "",
-  "<template>",
-  "  <main>",
-  "    <h1>{{ heading }}</h1>",
-  '    <DraftCard :title="heading" :level="1" @save="onSave">',
-  '      <template #default="{ active }"><span v-if="active">ready</span></template>',
-  "    </DraftCard>",
-  "  </main>",
-  "</template>",
-  "",
-].join("\n");
-
-/** The insertion typed mid-document (before `</section>`) once the SFC is complete. */
-const TEMPLATE_INSERT = '\n    <p class="note">{{ props.title }}</p>';
-const INSERT_COMPLETION_PREFIX = '\n    <p class="note">{{ props.';
-
-export const BUILD_COMPONENT_FILES: WorkspaceFiles = {
-  "tsconfig.json": ENDURANCE_TSCONFIG,
-  [DRAFT_CARD]: DRAFT_CARD_FINAL,
-  [APP]: APP_FINAL,
-};
+export interface BuildComponentFixture {
+  readonly lane: EnduranceLane;
+  readonly childPath: string;
+  readonly parentPath: string;
+  readonly childFinal: string;
+  readonly parentFinal: string;
+  readonly files: WorkspaceFiles;
+  readonly childCheckpoints: readonly TypingCheckpoint[];
+  readonly parentCheckpoints: readonly TypingCheckpoint[];
+  readonly childMemberInsertion: string;
+  readonly parentMemberInsertion: string;
+  readonly parentMemberCheckpoints: readonly TypingCheckpoint[];
+}
 
 function afterMarker(text: string, marker: string): number {
   const index = text.indexOf(marker);
@@ -88,245 +33,751 @@ function afterMarker(text: string, marker: string): number {
   return index + marker.length;
 }
 
-/** Completion probe pinned to the end of the just-typed region. */
-function endOfTypedCompletionProbe(typedSoFar: string, label: string): EnduranceProbe {
+function completionAtEnd(
+  relativePath: string,
+  typed: string,
+  labels: readonly string[],
+  label: string,
+  informational = false,
+): EnduranceProbe {
   return {
     kind: "completion",
-    relativePath: DRAFT_CARD,
-    needle: typedSoFar,
-    cursorOffset: typedSoFar.length,
-    expectLabels: ["title", "level"],
+    relativePath,
+    needle: typed,
+    cursorOffset: typed.length,
+    expectLabels: labels,
+    informational,
     label,
   };
 }
 
+function completionAtNeedle(
+  relativePath: string,
+  needle: string,
+  labels: readonly string[],
+  label: string,
+  informational = false,
+): EnduranceProbe {
+  return {
+    kind: "completion",
+    relativePath,
+    needle,
+    cursorOffset: needle.length,
+    expectLabels: labels,
+    informational,
+    label,
+  };
+}
+
+function vueFixture(lane: EnduranceLane): BuildComponentFixture {
+  const childPath = carrierPath(lane, "DraftCard");
+  const parentPath = carrierPath(lane, "App");
+  const scriptOpen =
+    lane.mode === "ts" ? '<script setup lang="ts">' : "<script setup>\n// @ts-check";
+  const props =
+    lane.mode === "ts"
+      ? [
+          "interface DraftProps {",
+          "  title: string;",
+          "  level?: number;",
+          "  unusedOnly?: boolean;",
+          "}",
+          "const props = defineProps<DraftProps>();",
+          'const emit = defineEmits<{ (e: "save", title: string): void }>();',
+          "defineSlots<{ active(props: { active: boolean }): any }>();",
+        ]
+      : [
+          "const props = defineProps({",
+          "  title: { type: String, required: true },",
+          "  level: Number,",
+          "  unusedOnly: Boolean,",
+          "});",
+          'const emit = defineEmits(["save"]);',
+          "defineSlots();",
+        ];
+  const childFinal = [
+    scriptOpen,
+    ...props,
+    "const draftLabel = `draft:${props.title}`;",
+    "const draftLength = draftLabel.length;",
+    "function saveDraft() {",
+    '  emit("save", props.title);',
+    "}",
+    "</script>",
+    "",
+    "<template>",
+    '  <section class="draft">',
+    '    <h2 :data-level="props.level">{{ draftLabel }}</h2>',
+    '    <button @click="saveDraft">Save</button>',
+    '    <slot name="active" :active="true" :unused-slot-only="false" />',
+    "  </section>",
+    "</template>",
+    "",
+  ].join("\n");
+  const parentFinal = [
+    scriptOpen,
+    `import DraftCard from "./DraftCard.${lane.framework}";`,
+    'const heading = "drafts";',
+    "const headingLength = heading.length;",
+    lane.mode === "ts" ? "function onSave(title: string) {" : "function onSave(title) {",
+    "  console.log(title.length);",
+    "}",
+    "</script>",
+    "",
+    "<template>",
+    "  <main>",
+    "    <h1>{{ heading }}</h1>",
+    '    <DraftCard :title="heading" :level="1" @save="onSave">',
+    '      <template #active="{ active }">',
+    '        <span v-if="active">ready</span>',
+    "      </template>",
+    "    </DraftCard>",
+    "  </main>",
+    "</template>",
+    "<!-- checkpoint-ready -->",
+    "<!-- typing-tail -->",
+    "<!-- post-checkpoint-tail -->",
+    "",
+  ].join("\n");
+  const childMemberInsertion = "\nconst childMemberCheckpoint = draftLabel.length;";
+  const parentMemberInsertion = "\nconst parentMemberCheckpoint = heading.length;";
+  const childCheckpoints: TypingCheckpoint[] = [
+    {
+      atLength: afterMarker(childMemberInsertion, "draftLabel."),
+      makeProbe: () =>
+        completionAtNeedle(
+          childPath,
+          "childMemberCheckpoint = draftLabel.",
+          ["length"],
+          "vue local member completion during typing",
+          true,
+        ),
+    },
+    {
+      atLength: afterMarker(childMemberInsertion, "draftLabel."),
+      makeProbe: () => ({
+        kind: "definition",
+        relativePath: childPath,
+        needle: "childMemberCheckpoint = draftLabel.",
+        cursorOffset: "childMemberCheckpoint = ".length + 1,
+        expectLineNeedle: "const draftLabel",
+        label: "vue local definition during typing",
+      }),
+    },
+  ];
+  const parentCheckpoints: TypingCheckpoint[] = [
+    {
+      atLength: afterMarker(parentFinal, "<DraftCard "),
+      makeProbe: (typed) =>
+        completionAtEnd(
+          parentPath,
+          typed,
+          ["unused-only"],
+          "vue child props completion during typing",
+        ),
+    },
+  ];
+  const parentMemberCheckpoints: TypingCheckpoint[] = [
+    {
+      atLength: afterMarker(parentMemberInsertion, "heading."),
+      makeProbe: () =>
+        completionAtNeedle(
+          parentPath,
+          "parentMemberCheckpoint = heading.",
+          ["length"],
+          "vue script completion during typing",
+          true,
+        ),
+    },
+    {
+      atLength: afterMarker(parentMemberInsertion, "heading."),
+      makeProbe: () => ({
+        kind: "definition",
+        relativePath: parentPath,
+        needle: "parentMemberCheckpoint = heading.",
+        cursorOffset: "parentMemberCheckpoint = ".length + 1,
+        expectLineNeedle: "const heading",
+        label: "vue parent local definition during typing",
+      }),
+    },
+  ];
+  return {
+    lane,
+    childPath,
+    parentPath,
+    childFinal,
+    parentFinal,
+    files: {
+      "tsconfig.json": ENDURANCE_TSCONFIG,
+      [childPath]: childFinal,
+      [parentPath]: parentFinal,
+    },
+    childCheckpoints,
+    parentCheckpoints,
+    childMemberInsertion,
+    parentMemberInsertion,
+    parentMemberCheckpoints,
+  };
+}
+
+function svelteFixture(lane: EnduranceLane): BuildComponentFixture {
+  const childPath = carrierPath(lane, "DraftCard");
+  const parentPath = carrierPath(lane, "App");
+  const scriptOpen = lane.mode === "ts" ? '<script lang="ts">' : "<script>\n  // @ts-check";
+  const props =
+    lane.mode === "ts"
+      ? [
+          '  import type { Snippet } from "svelte";',
+          "  interface DraftProps {",
+          "    title: string;",
+          "    level?: number;",
+          "    unusedOnly?: boolean;",
+          "    onclick?: () => void;",
+          "    children?: Snippet<[boolean]>;",
+          "  }",
+          "  let { title, level, onclick, children }: DraftProps = $props();",
+        ]
+      : [
+          '  /** @typedef {import("svelte").Snippet<[boolean]>} DraftChildren */',
+          "  /** @type {{ title: string, level?: number, unusedOnly?: boolean, onclick?: () => void, children?: DraftChildren }} */",
+          "  let { title, level, onclick, children } = $props();",
+        ];
+  const childFinal = [
+    scriptOpen,
+    ...props,
+    "  let draftLabel = $derived(`draft:${title}`);",
+    "  const titleLength = title.length;",
+    "  const levelValue = level;",
+    "  const draftLength = draftLabel.length;",
+    "  const childContent = children;",
+    "  function saveDraft() {",
+    "    onclick?.();",
+    "  }",
+    "  const saveDraftHandler = saveDraft;",
+    "</script>",
+    "",
+    "{#snippet draftSnippet(active)}",
+    "  <span>{active ? 'ready' : 'waiting'}</span>",
+    "{/snippet}",
+    '<section class="draft">',
+    "  <h2 data-level={level}>{draftLabel}</h2>",
+    "  <button onclick={saveDraft}>Save</button>",
+    "  {@render draftSnippet(true)}",
+    "  {@render children?.(true)}",
+    "</section>",
+    "",
+  ].join("\n");
+  const parentFinal = [
+    scriptOpen,
+    `  import DraftCard from "./DraftCard.${lane.framework}";`,
+    '  let heading = $state("drafts");',
+    lane.mode === "ts" ? "  function onSave(): void {" : "  function onSave() {",
+    "    console.log(heading.length);",
+    "  }",
+    "  const onSaveHandler = onSave;",
+    "</script>",
+    "",
+    "<main>",
+    "  <h1>{heading}</h1>",
+    "  <DraftCard title={heading} level={1} onclick={onSave}>",
+    lane.mode === "ts"
+      ? "    {#snippet children(active: boolean)}"
+      : "    {#snippet children(active)}",
+    "      <span>{active ? 'ready' : 'waiting'}</span>",
+    "    {/snippet}",
+    "  </DraftCard>",
+    "</main>",
+    "<!-- checkpoint-ready -->",
+    "<!-- typing-tail -->",
+    "<!-- post-checkpoint-tail -->",
+    "",
+  ].join("\n");
+  const childMemberInsertion = "\n  const childMemberCheckpoint = draftLabel.length;";
+  const parentMemberInsertion = "\n  const parentMemberCheckpoint = heading.length;";
+  const childCheckpoints: TypingCheckpoint[] = [
+    {
+      atLength: afterMarker(childMemberInsertion, "draftLabel."),
+      makeProbe: () =>
+        completionAtNeedle(
+          childPath,
+          "childMemberCheckpoint = draftLabel.",
+          ["length"],
+          "svelte child completion during typing",
+          true,
+        ),
+    },
+    {
+      atLength: afterMarker(childMemberInsertion, "draftLabel."),
+      makeProbe: () => ({
+        kind: "definition",
+        relativePath: childPath,
+        needle: "childMemberCheckpoint = draftLabel.",
+        cursorOffset: "childMemberCheckpoint = ".length + 1,
+        expectLineNeedle: "let draftLabel",
+        label: "svelte local definition during typing",
+      }),
+    },
+  ];
+  const parentCheckpoints: TypingCheckpoint[] = [
+    {
+      atLength: afterMarker(parentFinal, "<DraftCard "),
+      makeProbe: (typed) =>
+        completionAtEnd(
+          parentPath,
+          typed,
+          ["unusedOnly"],
+          "svelte child props completion during typing",
+        ),
+    },
+  ];
+  const parentMemberCheckpoints: TypingCheckpoint[] = [
+    {
+      atLength: afterMarker(parentMemberInsertion, "heading."),
+      makeProbe: () =>
+        completionAtNeedle(
+          parentPath,
+          "parentMemberCheckpoint = heading.",
+          ["length"],
+          "svelte parent completion during typing",
+          true,
+        ),
+    },
+    {
+      atLength: afterMarker(parentMemberInsertion, "heading."),
+      makeProbe: () => ({
+        kind: "definition",
+        relativePath: parentPath,
+        needle: "parentMemberCheckpoint = heading.",
+        cursorOffset: "parentMemberCheckpoint = ".length + 1,
+        expectLineNeedle: "let heading",
+        label: "svelte parent local definition during typing",
+      }),
+    },
+  ];
+  return {
+    lane,
+    childPath,
+    parentPath,
+    childFinal,
+    parentFinal,
+    files: {
+      "tsconfig.json": ENDURANCE_TSCONFIG,
+      [childPath]: childFinal,
+      [parentPath]: parentFinal,
+    },
+    childCheckpoints,
+    parentCheckpoints,
+    childMemberInsertion,
+    parentMemberInsertion,
+    parentMemberCheckpoints,
+  };
+}
+
+export function buildComponentFixture(
+  lane: EnduranceLane = DEFAULT_ENDURANCE_LANE,
+): BuildComponentFixture {
+  return lane.framework === "vue" ? vueFixture(lane) : svelteFixture(lane);
+}
+
+/** Hard probes proving that the parent consumes the child's typed slot/snippet contract. */
+export function buildComponentIntegrationProbes(fixture: BuildComponentFixture): EnduranceProbe[] {
+  const isVue = fixture.lane.framework === "vue";
+  const activeUse = isVue ? 'v-if="active"' : "active ? 'ready'";
+  const activeDeclaration = isVue
+    ? '<template #active="{ active }">'
+    : fixture.lane.mode === "ts"
+      ? "{#snippet children(active: boolean)}"
+      : "{#snippet children(active)}";
+  const probes: EnduranceProbe[] = isVue
+    ? [
+        {
+          kind: "definition",
+          relativePath: fixture.parentPath,
+          needle: "#active",
+          cursorOffset: 2,
+          expectUriSuffix: `/${fixture.childPath}`,
+          expectLineNeedle:
+            fixture.lane.mode === "ts" ? "defineSlots<{ active" : '<slot name="active"',
+          label: `${fixture.lane.id} parent active slot-name mapped definition`,
+        },
+      ]
+    : [
+        {
+          kind: "definition",
+          relativePath: fixture.parentPath,
+          needle: activeUse,
+          cursorOffset: 2,
+          expectLineNeedle: activeDeclaration,
+          label: `${fixture.lane.id} parent children snippet active definition`,
+        },
+      ];
+  if (fixture.lane.mode === "ts" && isVue) {
+    probes.push(
+      {
+        kind: "definition",
+        relativePath: fixture.parentPath,
+        needle: '#active="{ active }"',
+        cursorOffset: '#active="{ '.length + 1,
+        expectUriSuffix: `/${fixture.childPath}`,
+        expectLineNeedle: "active(props: { active: boolean })",
+        label: `${fixture.lane.id} parent scoped-slot active mapped definition`,
+      },
+      {
+        kind: "hover",
+        relativePath: fixture.childPath,
+        needle: "active: boolean",
+        cursorOffset: 2,
+        expectIncludes: ["active", "boolean"],
+        forbidIncludes: ["any"],
+        requireNonEmpty: true,
+        label: `${fixture.lane.id} child scoped-slot typed active hover`,
+      },
+    );
+  }
+  if (fixture.lane.mode === "ts") {
+    probes.push({
+      kind: "hover",
+      relativePath: fixture.parentPath,
+      needle: activeUse,
+      cursorOffset: isVue ? 'v-if="'.length + 1 : 2,
+      expectIncludes: isVue ? [] : ["active", "boolean"],
+      ...(isVue
+        ? { informational: true as const }
+        : { forbidIncludes: ["any"], requireNonEmpty: true }),
+      label: `${fixture.lane.id} parent ${isVue ? "scoped-slot" : "children snippet"} typed active hover`,
+    });
+  }
+  if (!isVue) {
+    probes.push({
+      kind: "definition",
+      relativePath: fixture.childPath,
+      needle: "@render children?.(true)",
+      cursorOffset: "@render ".length + 1,
+      expectLineNeedle: "let { title, level, onclick, children }",
+      label: `${fixture.lane.id} child incoming children render definition`,
+    });
+  }
+  return probes;
+}
+
+/** Hard navigation from authored markup event sites to their script handlers. */
+export function buildComponentEventSiteProbes(
+  fixture: BuildComponentFixture,
+): [EnduranceProbe, EnduranceProbe] {
+  if (fixture.lane.framework === "svelte") {
+    return [
+      {
+        kind: "definition",
+        relativePath: fixture.childPath,
+        needle: "onclick={saveDraft}",
+        cursorOffset: "onclick={".length + 1,
+        expectLineNeedle: "function saveDraft",
+        label: `${fixture.lane.id} child markup event-site definition`,
+      },
+      {
+        kind: "definition",
+        relativePath: fixture.parentPath,
+        needle: "onclick={onSave}",
+        cursorOffset: "onclick={".length + 1,
+        expectLineNeedle: "function onSave",
+        label: `${fixture.lane.id} component markup event-site definition`,
+      },
+    ];
+  }
+  return [
+    {
+      kind: "definition",
+      relativePath: fixture.childPath,
+      needle: '@click="saveDraft"',
+      cursorOffset: '@click="'.length + 1,
+      expectLineNeedle: "function saveDraft",
+      label: `${fixture.lane.id} child markup event-site definition`,
+    },
+    {
+      kind: "definition",
+      relativePath: fixture.parentPath,
+      needle: '@save="onSave"',
+      cursorOffset: '@save="'.length + 1,
+      expectLineNeedle: "function onSave",
+      label: `${fixture.lane.id} component markup event-site definition`,
+    },
+  ];
+}
+
+export const BUILD_COMPONENT_FILES: WorkspaceFiles = buildComponentFixture().files;
+
 export async function runBuildComponentScenario(
   context: ScenarioContext,
+  fixture: BuildComponentFixture = buildComponentFixture(context.lane),
 ): Promise<EnduranceReceipt> {
   const failures = new FailureBag();
   const startedAtMs = Date.now();
   const { session } = context;
   context.sampler?.start();
   try {
-    // ── Part 1: type the child SFC from an empty buffer ─────────────────
-    session.openFile(DRAFT_CARD, "");
-    const draftCheckpoints: TypingCheckpoint[] = [
-      {
-        // Member-access dot inside the template literal: `draft:${props.|
-        // INFORMATIONAL: provider member completion is documented type-quality
-        // backlog — settling is asserted, content is observed, not asserted.
-        atLength: afterMarker(DRAFT_CARD_FINAL, "`draft:${props."),
-        makeProbe: (typed) => ({
-          ...endOfTypedCompletionProbe(typed, "script template-literal member access"),
-          informational: true,
-        }),
-      },
-      {
-        // Member-access dot in the emit call args (also informational).
-        atLength: afterMarker(DRAFT_CARD_FINAL, 'emit("save", props.'),
-        makeProbe: (typed) => ({
-          ...endOfTypedCompletionProbe(typed, "script emit-arg member access"),
-          informational: true,
-        }),
-      },
-    ];
-    await typeFromScratch(context, DRAFT_CARD, DRAFT_CARD_FINAL, draftCheckpoints, failures);
-
-    // Fully-typed child: Vue binding hover + definition mapping are STABILITY
-    // assertions (Verter owns these answers).
-    await convergeProbe(
-      context,
-      {
-        kind: "hover",
-        relativePath: DRAFT_CARD,
-        needle: "{{ draftLabel }}",
-        cursorOffset: 4,
-        expectIncludes: ["draftLabel"],
-        requireNonEmpty: true,
-        label: "template interpolation local hover",
-      },
-      failures,
-    );
-    await convergeProbe(
-      context,
-      {
-        kind: "definition",
-        relativePath: DRAFT_CARD,
-        needle: "{{ draftLabel }}",
-        cursorOffset: 4,
-        expectLineNeedle: "const draftLabel",
-        label: "template interpolation → script declaration",
-      },
-      failures,
-    );
-    await convergeProbe(
-      context,
-      {
-        // `props.level` member hover: provider member typing is a documented
-        // gap — informational (settling asserted, content observed).
-        kind: "hover",
-        relativePath: DRAFT_CARD,
-        needle: "props.level",
-        cursorOffset: 7,
-        expectIncludes: [],
-        informational: true,
-        label: "template prop-attr expression hover",
-      },
-      failures,
-    );
-
-    // Mid-document typing: a new interpolation before </section>, with a
-    // member-access completion probe (informational — provider member gap).
+    session.openFile(fixture.childPath, "");
+    await typeFromScratch(context, fixture.childPath, fixture.childFinal, [], failures);
     await typeInsertion(
       context,
-      DRAFT_CARD,
-      "</section>",
-      TEMPLATE_INSERT,
-      [
+      fixture.childPath,
+      "</script>",
+      fixture.childMemberInsertion,
+      fixture.childCheckpoints,
+      failures,
+    );
+
+    const localNeedle = fixture.lane.framework === "vue" ? "{{ draftLabel }}" : "draftLabel.length";
+    await convergeProbe(
+      context,
+      {
+        // Framework-local hover: the binding NAME is Verter-owned in every lane
+        // (hard + non-empty + name fragment). The TYPE TEXT at a template-mapped
+        // position is provider-owned and truthfully surfaces `any` on the
+        // tsserver route today (the documented provider type-quality gap), so no
+        // type fragment is forbidden there; the Svelte probe uses a script
+        // position whose typed answer DOES forbid `any`.
+        kind: "hover",
+        relativePath: fixture.childPath,
+        needle: localNeedle,
+        cursorOffset: fixture.lane.framework === "vue" ? 4 : 2,
+        expectIncludes: ["draftLabel"],
+        forbidIncludes: fixture.lane.framework === "vue" ? [] : ["any"],
+        requireNonEmpty: true,
+        label: `${fixture.lane.id} child local hover`,
+      },
+      failures,
+    );
+    await convergeProbe(
+      context,
+      {
+        kind: "definition",
+        relativePath: fixture.childPath,
+        needle: localNeedle,
+        cursorOffset: fixture.lane.framework === "vue" ? 4 : 2,
+        expectLineNeedle: fixture.lane.framework === "vue" ? "const draftLabel" : "let draftLabel",
+        label: `${fixture.lane.id} child local definition`,
+      },
+      failures,
+    );
+
+    if (fixture.lane.framework === "svelte") {
+      await convergeProbe(
+        context,
         {
-          atLength: INSERT_COMPLETION_PREFIX.length,
-          makeProbe: (typed) => ({
-            kind: "completion",
-            relativePath: DRAFT_CARD,
-            needle: typed,
-            cursorOffset: typed.length,
-            expectLabels: ["title", "level"],
-            informational: true,
-            label: "template interpolation member access (mid-doc insert)",
-          }),
+          kind: "hover",
+          relativePath: fixture.childPath,
+          needle: "title.length",
+          cursorOffset: 2,
+          expectIncludes: ["title"],
+          ...(fixture.lane.mode === "js"
+            ? { informational: true as const }
+            : { forbidIncludes: ["any"], requireNonEmpty: true }),
+          label: `${fixture.lane.id} typed data prop hover`,
         },
-      ],
-      failures,
-    );
-    await convergeProbe(
-      context,
-      {
-        kind: "hover",
-        relativePath: DRAFT_CARD,
-        needle: "{{ props.title",
-        cursorOffset: "{{ props.".length,
-        expectIncludes: [],
-        informational: true,
-        label: "inserted interpolation prop hover",
-      },
-      failures,
-    );
-
-    // ── Part 2: type the parent consuming the child ─────────────────────
-    session.openFile(APP, "");
-    const appCheckpoints: TypingCheckpoint[] = [
-      {
-        // INFORMATIONAL mid-typing script member completion (provider member
-        // typing is a documented gap — settling asserted, content observed).
-        atLength: afterMarker(APP_FINAL, "console.log(title."),
-        makeProbe: (typed) => ({
+        failures,
+      );
+      await convergeProbe(
+        context,
+        {
+          kind: "definition",
+          relativePath: fixture.childPath,
+          needle: "title.length",
+          cursorOffset: 2,
+          expectLineNeedle: "let { title, level, onclick, children }",
+          label: `${fixture.lane.id} typed data prop definition`,
+        },
+        failures,
+      );
+      await convergeProbe(
+        context,
+        {
           kind: "completion",
-          relativePath: APP,
-          needle: typed,
-          cursorOffset: typed.length,
+          relativePath: fixture.childPath,
+          needle: "title.length",
+          cursorOffset: "title.".length,
           expectLabels: ["length"],
-          informational: true,
-          label: "script member access completion",
-        }),
-      },
-    ];
-    await typeFromScratch(context, APP, APP_FINAL, appCheckpoints, failures);
+          label: `${fixture.lane.id} typed data prop completion`,
+        },
+        failures,
+      );
+    }
 
-    // D1 STABILITY: attr-name completion on the (complete) `<DraftCard` usage
-    // must offer the child's typed prop names. Bound-`:attr` / `@event` attrs
-    // are NOT filtered by verter, so the complete element is valid D1 ground.
-    await convergeProbe(
+    const eventSiteProbes = buildComponentEventSiteProbes(fixture);
+    await convergeProbe(context, eventSiteProbes[0], failures);
+
+    if (fixture.lane.framework === "svelte") {
+      await convergeProbe(
+        context,
+        {
+          kind: "definition",
+          relativePath: fixture.childPath,
+          needle: "onclick?.()",
+          cursorOffset: 1,
+          expectLineNeedle: "let { title, level, onclick, children }",
+          label: `${fixture.lane.id} callback-event prop definition`,
+        },
+        failures,
+      );
+      if (fixture.lane.mode === "ts") {
+        await convergeProbe(
+          context,
+          {
+            kind: "hover",
+            relativePath: fixture.childPath,
+            needle: "Snippet<[boolean]>",
+            cursorOffset: 2,
+            expectIncludes: ["Snippet"],
+            forbidIncludes: ["any"],
+            requireNonEmpty: true,
+            label: `${fixture.lane.id} typed children Snippet type hover`,
+          },
+          failures,
+        );
+      }
+      await convergeProbe(
+        context,
+        {
+          kind: "definition",
+          relativePath: fixture.childPath,
+          needle: "const childContent = children",
+          cursorOffset: "const childContent = ".length + 1,
+          expectLineNeedle: "let { title, level, onclick, children }",
+          label: `${fixture.lane.id} typed children Snippet definition`,
+        },
+        failures,
+      );
+      await convergeProbe(
+        context,
+        {
+          kind: "definition",
+          relativePath: fixture.childPath,
+          needle: "@render draftSnippet",
+          cursorOffset: "@render ".length + 1,
+          expectLineNeedle: "{#snippet draftSnippet",
+          label: `${fixture.lane.id} snippet render definition`,
+        },
+        failures,
+      );
+    }
+
+    const insertion =
+      fixture.lane.framework === "vue"
+        ? '\n    <p class="note">{{ props.title }}</p>'
+        : '\n  <p class="note">{title}</p>';
+    await typeInsertion(context, fixture.childPath, "</section>", insertion, [], failures);
+
+    session.openFile(fixture.parentPath, "");
+    await typeFromScratch(
       context,
-      {
-        kind: "completion",
-        relativePath: APP,
-        needle: "<DraftCard ",
-        cursorOffset: "<DraftCard ".length,
-        expectLabels: ["title", "level"],
-        label: "component attr-name prop completion (D1)",
-      },
+      fixture.parentPath,
+      fixture.parentFinal,
+      fixture.parentCheckpoints,
       failures,
     );
-
-    await convergeProbe(
+    await typeInsertion(
       context,
-      {
-        kind: "hover",
-        relativePath: APP,
-        needle: "{{ heading }}",
-        cursorOffset: 4,
-        expectIncludes: ["heading"],
-        requireNonEmpty: true,
-        label: "parent interpolation hover",
-      },
-      failures,
-    );
-    await convergeProbe(
-      context,
-      {
-        // Component-tag hover: Verter owns a native answer here — it must be
-        // non-empty (type text itself is the provider's business).
-        kind: "hover",
-        relativePath: APP,
-        needle: "<DraftCard",
-        cursorOffset: 2,
-        expectIncludes: [],
-        requireNonEmpty: true,
-        label: "component tag hover answers",
-      },
+      fixture.parentPath,
+      "</script>",
+      fixture.parentMemberInsertion,
+      fixture.parentMemberCheckpoints,
       failures,
     );
     await convergeProbe(
       context,
       {
         kind: "definition",
-        relativePath: APP,
+        relativePath: fixture.parentPath,
         needle: "<DraftCard",
         cursorOffset: 2,
-        expectUriSuffix: "/DraftCard.vue",
-        label: "component tag → child file definition",
-      },
-      failures,
-    );
-    await convergeProbe(
-      context,
-      {
-        kind: "definition",
-        relativePath: APP,
-        needle: ':title="heading"',
-        cursorOffset: 9,
-        expectLineNeedle: "const heading",
-        label: "attr expression → parent script local",
+        expectUriSuffix: `/DraftCard.${fixture.lane.framework}`,
+        label: `${fixture.lane.id} component definition`,
       },
       failures,
     );
 
-    // D1 STABILITY (bind form): a FRESH `:` trigger — the shape real typing
-    // produces (`<DraftCard :` right after the colon, tag close following).
-    // Probing mid-token of a pre-existing attr (`:|title`) is not a fresh-bind
-    // position, so the ground is made by truncating the usage, probing, and
-    // restoring — exercising another edit round-trip too.
-    const draftLine = '    <DraftCard :title="heading" :level="1" @save="onSave">';
-    const truncatedLine = "    <DraftCard :>";
-    session.changeFile(APP, replaceOnce(session.textOf(APP), draftLine, truncatedLine));
-    await convergeProbe(
-      context,
-      {
-        kind: "completion",
-        relativePath: APP,
-        needle: "<DraftCard :>",
-        cursorOffset: "<DraftCard :".length,
-        expectLabels: ["title", "level"],
-        label: "component-attr bind completion (D1)",
-      },
-      failures,
-    );
-    session.changeFile(APP, replaceOnce(session.textOf(APP), truncatedLine, draftLine));
+    await convergeProbe(context, eventSiteProbes[1], failures);
 
-    return buildReceipt(context, startedAtMs, {
-      finalSanityPass: null,
-      failures: failures.list,
-    });
+    if (fixture.lane.framework === "vue") {
+      // Parent interpolation local hover: the binding NAME is Verter-owned
+      // (hard + non-empty); the TYPE TEXT at the template-mapped position is
+      // provider-owned and truthfully surfaces `any` on the tsserver route
+      // today (documented provider type-quality gap), so none is forbidden.
+      await convergeProbe(
+        context,
+        {
+          kind: "hover",
+          relativePath: fixture.parentPath,
+          needle: "{{ heading }}",
+          cursorOffset: 4,
+          expectIncludes: ["heading"],
+          forbidIncludes: [],
+          requireNonEmpty: true,
+          label: `${fixture.lane.id} parent interpolation local hover`,
+        },
+        failures,
+      );
+      // Component-tag hover: Verter owns a native answer here — it must be
+      // non-empty (the type text itself is the provider's business, so no
+      // fragment is forbidden).
+      await convergeProbe(
+        context,
+        {
+          kind: "hover",
+          relativePath: fixture.parentPath,
+          needle: "<DraftCard",
+          cursorOffset: 2,
+          expectIncludes: [],
+          forbidIncludes: [],
+          requireNonEmpty: true,
+          label: `${fixture.lane.id} component tag hover answers`,
+        },
+        failures,
+      );
+      // Attr expression → parent script local navigation (Verter-owned mapping).
+      await convergeProbe(
+        context,
+        {
+          kind: "definition",
+          relativePath: fixture.parentPath,
+          needle: ':title="heading"',
+          cursorOffset: 9,
+          expectLineNeedle: "const heading",
+          label: `${fixture.lane.id} attr expression to parent script local`,
+        },
+        failures,
+      );
+    }
+
+    if (fixture.lane.framework === "vue") {
+      const full = '    <DraftCard :title="heading" :level="1" @save="onSave">';
+      const partial = "    <DraftCard :>";
+      session.changeFile(
+        fixture.parentPath,
+        replaceOnce(session.textOf(fixture.parentPath), full, partial),
+      );
+      await convergeProbe(
+        context,
+        {
+          kind: "completion",
+          relativePath: fixture.parentPath,
+          needle: "<DraftCard :>",
+          cursorOffset: "<DraftCard :".length,
+          expectLabels: ["unused-only"],
+          label: `${fixture.lane.id} bind prop completion`,
+        },
+        failures,
+      );
+      session.changeFile(
+        fixture.parentPath,
+        replaceOnce(session.textOf(fixture.parentPath), partial, full),
+      );
+    }
+
+    for (const probe of buildComponentIntegrationProbes(fixture)) {
+      await convergeProbe(context, probe, failures);
+    }
+
+    return buildReceipt(context, startedAtMs, { finalSanityPass: null, failures: failures.list });
   } finally {
     context.sampler?.stop();
   }

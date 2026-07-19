@@ -23,11 +23,14 @@ export function receiptDestination(receipt: EnduranceReceipt, envPath: string | 
     }
     const dir = path.resolve(envPath);
     mkdirSync(dir, { recursive: true });
-    return path.join(dir, `${receipt.scenario}-${receipt.route}-${Date.now()}.json`);
+    return path.join(
+      dir,
+      `${receipt.scenario}-${receipt.framework}-${receipt.mode}-${receipt.route}-${Date.now()}.json`,
+    );
   }
   return path.join(
     tmpdir(),
-    `verter-endurance-receipt-${receipt.scenario}-${receipt.route}-${Date.now()}.json`,
+    `verter-endurance-receipt-${receipt.scenario}-${receipt.framework}-${receipt.mode}-${receipt.route}-${Date.now()}.json`,
   );
 }
 
@@ -61,5 +64,30 @@ export function receiptCoreFailures(receipt: EnduranceReceipt): string[] {
     failures.push("request counters violate sent === answered+cancelled+errored+unanswered");
   }
   if (!receipt.providerAliveAtEnd) failures.push("providerAliveAtEnd must be true");
+  if (receipt.providerProcess.pid === null)
+    failures.push("provider child/relay PID was not attested");
+  if (receipt.restartCount !== 0) {
+    failures.push(`restartCount must be 0, got ${receipt.restartCount}`);
+  }
+  // reloadProjects is the DESIGNED tsserver cold-miss recovery: singleflight +
+  // 2s cooldown, so a healthy bounded lane sees AT MOST one genuine recovery
+  // event. Zero is the norm; ONE is the mechanism working as designed (all
+  // requests answered, final sanity green); MORE than one is the D2 storm
+  // class the recovery bound exists to prevent — fail hard there.
+  if (receipt.reloadProjectsCount > 1) {
+    failures.push(
+      `reloadProjectsCount must be at most 1 (one designed recovery event), got ${receipt.reloadProjectsCount}`,
+    );
+  }
+  const laneSection = receipt.frameworks[receipt.framework]?.[receipt.mode];
+  if (!laneSection) {
+    failures.push(`missing ${receipt.framework}/${receipt.mode} receipt section`);
+  } else if (
+    laneSection.requestsSent !== receipt.requestsSent ||
+    laneSection.requestsUnanswered !== receipt.requestsUnanswered ||
+    laneSection.editsSent !== receipt.editsSent
+  ) {
+    failures.push(`${receipt.framework}/${receipt.mode} receipt section disagrees with totals`);
+  }
   return failures;
 }

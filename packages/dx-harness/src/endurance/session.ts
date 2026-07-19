@@ -36,6 +36,33 @@ export interface OpenedDocument {
   version: number;
 }
 
+/** LSP language identifier inferred from a document path. */
+export function languageIdForPath(relativePath: string): string {
+  const extension = path.posix.extname(relativePath.replaceAll("\\", "/")).toLowerCase();
+  switch (extension) {
+    case ".vue":
+      return "vue";
+    case ".svelte":
+      return "svelte";
+    case ".ts":
+    case ".mts":
+    case ".cts":
+      return "typescript";
+    case ".tsx":
+      return "typescriptreact";
+    case ".js":
+    case ".mjs":
+    case ".cjs":
+      return "javascript";
+    case ".jsx":
+      return "javascriptreact";
+    case ".json":
+      return "json";
+    default:
+      return "plaintext";
+  }
+}
+
 export interface SettledOutcome<T = unknown> {
   readonly classification: RequestClassification;
   readonly latencyMs: number;
@@ -119,14 +146,11 @@ interface ProbeBase {
    * unanswered/errored request still fails); the content expectation is not
    * checked and the observed quality feeds the receipt's `typeQuality` data.
    */
-  readonly informational?: boolean;
 }
 
-export interface HoverProbe extends ProbeBase {
+interface HoverProbeFields extends ProbeBase {
   readonly kind: "hover";
   readonly expectIncludes: readonly string[];
-  /** Fragments that must NOT appear in the hover text (staleness guards). */
-  readonly forbidIncludes?: readonly string[];
   /**
    * Assert the hover ANSWERS with non-empty content (positions where Verter
    * owns a native answer — template attr names, component tags, Vue binding
@@ -135,10 +159,18 @@ export interface HoverProbe extends ProbeBase {
   readonly requireNonEmpty?: boolean;
 }
 
+/** Hard typed hovers must explicitly reject `any`; informational observations may omit it. */
+export type HoverProbe = HoverProbeFields &
+  (
+    | { readonly informational: true; readonly forbidIncludes?: readonly string[] }
+    | { readonly informational?: false; readonly forbidIncludes: readonly string[] }
+  );
+
 export interface CompletionProbe extends ProbeBase {
   readonly kind: "completion";
   readonly expectLabels: readonly string[];
   readonly forbidLabels?: readonly string[];
+  readonly informational?: boolean;
 }
 
 export interface DefinitionProbe extends ProbeBase {
@@ -150,6 +182,7 @@ export interface DefinitionProbe extends ProbeBase {
    * the CURRENT text of the target file (robust to line shifts from edits).
    */
   readonly expectLineNeedle?: string;
+  readonly informational?: boolean;
 }
 
 export type EnduranceProbe = HoverProbe | CompletionProbe | DefinitionProbe;
@@ -212,16 +245,17 @@ export class EnduranceSession {
    * didOpen a document. `text` defaults to the on-disk content (pass an
    * explicit string — e.g. "" — for a buffer typed from scratch).
    */
-  openFile(relativePath: string, text?: string, languageId = "vue"): OpenedDocument {
+  openFile(relativePath: string, text?: string, languageId?: string): OpenedDocument {
     const normalized = relativePath.replaceAll("\\", "/");
     if (this.documents.has(normalized)) {
       throw new Error(`document already open: ${normalized}`);
     }
     const content = text ?? readFileSync(path.join(this.workspaceRoot, normalized), "utf8");
+    const resolvedLanguageId = languageId ?? languageIdForPath(normalized);
     const document: OpenedDocument = {
       relativePath: normalized,
       uri: this.uriFor(normalized),
-      languageId,
+      languageId: resolvedLanguageId,
       text: content,
       version: 1,
     };
@@ -229,7 +263,7 @@ export class EnduranceSession {
     this.client.sendNotification("textDocument/didOpen", {
       textDocument: {
         uri: document.uri,
-        languageId,
+        languageId: resolvedLanguageId,
         version: document.version,
         text: content,
       },

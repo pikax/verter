@@ -1,15 +1,9 @@
-/**
- * Endurance scenario 1 — build-a-component-from-scratch.
- *
- * Keystroke-level typing of two SFCs from empty buffers against the REAL
- * verter-lsp (route from VERTER_ENDURANCE_PROVIDER), with completion/hover/
- * definition asserted at realistic mid-typing points. Zero unanswered
- * requests; provider alive at end; JSON attestation receipt emitted.
- */
+/** Build-from-scratch endurance lanes against the real LSP. */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
-  BUILD_COMPONENT_FILES,
+  ENDURANCE_LANES,
+  buildComponentFixture,
   loadEnduranceConfig,
   runBuildComponentScenario,
   type EnduranceReceipt,
@@ -24,22 +18,29 @@ import {
 
 const config = loadEnduranceConfig();
 
-describe.sequential(`endurance: build-component-from-scratch [${config.route}]`, () => {
-  let rig: EnduranceRig;
-  let receipt: EnduranceReceipt | null = null;
+for (const lane of ENDURANCE_LANES) {
+  describe.sequential(`endurance: build-component [${lane.id}/${config.route}]`, () => {
+    let rig: EnduranceRig;
+    let receipt: EnduranceReceipt | null = null;
+    const fixture = buildComponentFixture(lane);
 
-  beforeAll(async () => {
-    rig = await materializeRig(BUILD_COMPONENT_FILES, config);
+    beforeAll(async () => {
+      rig = await materializeRig(fixture.files, config);
+    });
+    afterAll(async () => {
+      await disposeRig(rig);
+    });
+
+    it("types props, events, and snippets with completion during typing", async () => {
+      receipt = await runBuildComponentScenario(
+        scenarioContext(rig, "build-component-from-scratch", lane),
+        fixture,
+      );
+      attestReceipt(receipt);
+      expect(receipt.framework).toBe(lane.framework);
+      expect(receipt.mode).toBe(lane.mode);
+      expect(receipt.frameworks[lane.framework]?.[lane.mode]).toBeDefined();
+      expect(receipt.editsSent).toBeGreaterThan(100);
+    }, 600_000);
   });
-
-  afterAll(async () => {
-    await disposeRig(rig);
-  });
-
-  it("types two SFCs from scratch with asserted mid-typing probes", async () => {
-    receipt = await runBuildComponentScenario(scenarioContext(rig, "build-component-from-scratch"));
-    attestReceipt(receipt);
-    // Keystroke-level typing must have produced substantial edit traffic.
-    expect(receipt.editsSent).toBeGreaterThan(100);
-  }, 600_000);
-});
+}

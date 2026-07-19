@@ -17,6 +17,25 @@ export const ENDURANCE_PROVIDER_ROUTES: readonly EnduranceProviderRoute[] = [
   "shared-tsgo",
 ];
 
+export type EnduranceFramework = "vue" | "svelte";
+export type EnduranceLanguageMode = "ts" | "js";
+
+export interface EnduranceLane {
+  readonly id: `${EnduranceFramework}-${EnduranceLanguageMode}`;
+  readonly framework: EnduranceFramework;
+  readonly mode: EnduranceLanguageMode;
+}
+
+/** Every carrier workload runs this complete framework × language-mode matrix. */
+export const ENDURANCE_LANES: readonly EnduranceLane[] = [
+  { id: "vue-ts", framework: "vue", mode: "ts" },
+  { id: "vue-js", framework: "vue", mode: "js" },
+  { id: "svelte-ts", framework: "svelte", mode: "ts" },
+  { id: "svelte-js", framework: "svelte", mode: "js" },
+];
+
+export const DEFAULT_ENDURANCE_LANE: EnduranceLane = ENDURANCE_LANES[0];
+
 /**
  * How a sent request settled:
  *  - `answered`   — the server returned a result (possibly `null`).
@@ -81,6 +100,17 @@ export interface EnduranceConfig {
    * identical on every route. Env: VERTER_ENDURANCE_STORM_P95_MAX_MS.
    */
   readonly stormP95MaxMs: number;
+  /**
+   * Scale-storm p95 latency bound (ms) — the scale lane opens up to
+   * `scaleOpenFiles` corpus files and churns a real corpus program, a heavier
+   * per-request workload than the synthetic 5-carrier storm: on the tsserver
+   * route (serial engine, debug build) the measured p50 is ~1s with tail
+   * spikes to ~6.5s, so the catastrophic bound is 8000 there (2000 for
+   * tsgo/shared-tsgo, matching {@link stormP95MaxMs}). The STABILITY bound
+   * (zero unanswered, alive, post-storm correctness) is identical on every
+   * route. Env: VERTER_ENDURANCE_SCALE_STORM_P95_MAX_MS.
+   */
+  readonly scaleStormP95MaxMs: number;
   /** Late-window p95 must be <= early-window p95 * this factor (soak trend). */
   readonly degradationFactor: number;
   /**
@@ -126,11 +156,37 @@ export interface EnduranceConfig {
   readonly receiptPath: string | null;
 }
 
+export interface ProviderRuntimeAttestation {
+  /** Latest owned provider child, or the editor-owned relay on shared-tsgo. */
+  readonly pid: number | null;
+  readonly kind: string;
+  readonly evidence: "typeProviderStarted" | "editor-owned-relay";
+  readonly aliveAtEnd: boolean;
+  /** Initial spawn is excluded; each later typeProviderStarted is one restart. */
+  readonly restartCount: number;
+  readonly providerStartCount: number;
+  /** Counted from enabled type-runtime trace start events for reloadProjects. */
+  readonly reloadProjectsCount: number;
+  readonly restartLogCount: number;
+}
+
+export interface FrameworkReceiptSection {
+  readonly framework: EnduranceFramework;
+  readonly mode: EnduranceLanguageMode;
+  readonly requestsSent: number;
+  readonly requestsUnanswered: number;
+  readonly editsSent: number;
+  readonly finalSanityPass: boolean | null;
+  readonly failures: readonly string[];
+}
+
 /** The non-vacuity receipt every scenario run emits. */
 export interface EnduranceReceipt {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly scenario: string;
   readonly route: EnduranceProviderRoute;
+  readonly framework: EnduranceFramework;
+  readonly mode: EnduranceLanguageMode;
   readonly startedAt: string;
   readonly durationMs: number;
   readonly requestsSent: number;
@@ -147,6 +203,9 @@ export interface EnduranceReceipt {
   readonly maxRssBytes: number | null;
   readonly rssSupported: boolean;
   readonly providerAliveAtEnd: boolean;
+  readonly providerProcess: ProviderRuntimeAttestation;
+  readonly restartCount: number;
+  readonly reloadProjectsCount: number;
   /** Post-load full-feature sanity pass (hover+completion+definition). */
   readonly finalSanityPass: boolean | null;
   /** Soak degradation verdict; null when <2 usable windows (too short). */
@@ -168,13 +227,12 @@ export interface EnduranceReceipt {
     readonly hovers: { readonly total: number; readonly empty: number; readonly anyTyped: number };
     readonly completions: { readonly total: number; readonly empty: number };
   };
-  /** Assertion-relevant config echoed for auditability. */
-  readonly config: {
-    readonly p95MaxMs: number;
-    readonly stormP95MaxMs: number;
-    readonly rssMaxBytes: number;
-    readonly requestTimeoutMs: number;
-  };
+  /** Complete effective config echoed for auditability, including shrunk CI values. */
+  readonly config: EnduranceConfig;
+  /** Lane-scoped evidence, nested by framework then language mode. */
+  readonly frameworks: Partial<
+    Record<EnduranceFramework, Partial<Record<EnduranceLanguageMode, FrameworkReceiptSection>>>
+  >;
   /**
    * INFORMATIONAL edit-pipeline measurement (never asserted): the offered
    * didChange rate, the server-side did_change handler cost parsed from the

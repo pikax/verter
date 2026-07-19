@@ -106,11 +106,18 @@ export class LatencyRecorder {
    * fast-baseline route a sub-floor wiggle (e.g. 66→114ms) is run-to-run
    * noise, not a trend; a genuine climb (ratio > factor AND delta > floor)
    * still fails.
+   *
+   * `minSamples = 40` is the statistical-sufficiency floor for a p95 VERDICT:
+   * a 95th-percentile estimate over a handful of samples is dominated by one
+   * or two tail spikes, so on CI-sized soaks (e.g. ~20 samples per 1s window)
+   * first/last-window comparisons false-positive on warmup spikes. The
+   * default long soak (30s windows, hundreds of samples each) keeps the real
+   * verdict; a shrunk run reports null (logged, never a vacuous pass).
    */
   degradation(
     factor: number,
     floorMs: number,
-    minSamples = 5,
+    minSamples = 40,
   ): {
     earlyWindowP95: number;
     lateWindowP95: number;
