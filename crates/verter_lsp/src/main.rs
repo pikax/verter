@@ -506,6 +506,23 @@ async fn try_spawn_tsgo(
     workspace_root: &str,
     client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
 ) -> Result<Arc<dyn TypeProvider>, String> {
+    // The SPAWN PRECONDITION, checked FIRST: owned tsgo is project-bound, so
+    // require AT LEAST ONE configured project ANYWHERE under the workspace
+    // (bounded — prunes node_modules; accepts `packages/*/tsconfig.json`
+    // monorepos with no root tsconfig) BEFORE the resolver spawns or smokes
+    // ANY candidate, so a config-less workspace fails closed with zero
+    // candidate processes (a config-less workspace ⇒ no spawn). The per-query
+    // per-project binding is resolved later by the admission layer.
+    if !verter_workspace::config::has_configured_ts_project_anywhere(std::path::Path::new(
+        workspace_root,
+    )) {
+        return Err(format!(
+            "no configured TypeScript project (tsconfig.json) found anywhere under \
+             {workspace_root} — owned tsgo is project-bound and requires at least one configured \
+             project; it will not start a config-less inferred project"
+        ));
+    }
+
     // The 4-tier toolchain resolver (`verter_tsgo_api::toolchain`): shared
     // (`VERTER_TSGO_BIN`, then PATH) → project-local ancestor `node_modules` →
     // temp update cache → bundled sidecar; the first WORKING candidate wins
@@ -526,22 +543,6 @@ async fn try_spawn_tsgo(
         resolution.version,
         resolution.provenance,
     );
-
-    // The SPAWN PRECONDITION: owned tsgo is project-bound, so require AT LEAST ONE
-    // configured project ANYWHERE under the workspace (bounded — prunes node_modules;
-    // accepts `packages/*/tsconfig.json` monorepos with no root tsconfig) BEFORE
-    // spawning, so a workspace with NONE fails closed (no `tsgo --lsp` process it would
-    // have to tear down) rather than starting a config-less inferred project. The
-    // per-query per-project binding is resolved later by the admission layer.
-    if !verter_workspace::config::has_configured_ts_project_anywhere(std::path::Path::new(
-        workspace_root,
-    )) {
-        return Err(format!(
-            "no configured TypeScript project (tsconfig.json) found anywhere under \
-             {workspace_root} — owned tsgo is project-bound and requires at least one configured \
-             project; it will not start a config-less inferred project"
-        ));
-    }
 
     // `root_uri` is the LSP transport's workspace-folder metadata only — NOT the
     // project-binding decision (that is resolved per query by the admission layer).
@@ -802,5 +803,86 @@ mod tests {
             .3
             .as_deref()
             .is_some_and(|reason| reason.contains("4242")));
+    }
+
+    // ── DISCRIMINATING (H9): the configured-project admission gate runs BEFORE
+    //    any candidate spawn/smoke. A config-less workspace must perform ZERO
+    //    candidate spawns (the tsgo cutover regressed this: the resolver's
+    //    probes ran before the config check). The canary "engine" logs every
+    //    invocation, so any spawn is observable. ──────────────────────────────
+
+    /// Plant a canary engine (a sh script logging its invocations) as the
+    /// project-local platform package; returns the workspace root and the log.
+    #[cfg(unix)]
+    fn plant_canary_engine(
+        with_tsconfig: bool,
+    ) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let temp = tempfile::TempDir::new().expect("temp workspace");
+        let root = temp.path().join("workspace");
+        let log = temp.path().join("spawns.log");
+        let host = verter_tsgo_api::toolchain::platform::host_platform()
+            .expect("test host is a supported platform");
+        let pkg_lib = root
+            .join("node_modules")
+            .join(host.package_rel_path())
+            .join("lib");
+        fs::create_dir_all(&pkg_lib).expect("create package dirs");
+        let canary = pkg_lib.join(host.executable);
+        fs::write(
+            &canary,
+            format!(
+                "#!/bin/sh\necho \"invoked: $*\" >> \"{}\"\nexit 1\n",
+                log.display()
+            ),
+        )
+        .expect("write canary");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&canary).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&canary, perms).unwrap();
+        }
+        if with_tsconfig {
+            fs::write(root.join("tsconfig.json"), "{}").expect("write tsconfig");
+        }
+        (temp, root, log)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn configless_workspace_performs_zero_candidate_spawns() {
+        let (_temp, root, log) = plant_canary_engine(false);
+        let client_cell: Arc<OnceCell<tower_lsp_server::Client>> = Arc::new(OnceCell::new());
+        let result = try_spawn_tsgo(&root.to_string_lossy(), &client_cell).await;
+        let err = match result {
+            Ok(_) => panic!("a config-less workspace must fail closed"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("configured TypeScript project"),
+            "the failure must name the configured-project precondition: {err}"
+        );
+        assert!(
+            !log.exists(),
+            "ZERO candidate spawns: the configured-project admission gate must run \
+             BEFORE the resolver spawns/smokes any candidate, but the canary ran: {}",
+            fs::read_to_string(&log).unwrap_or_default()
+        );
+    }
+
+    // ── CONTROL (H9): a CONFIGURED workspace passes the admission gate, and
+    //    only then does the resolver spawn candidates (the canary runs). ──────
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn configured_workspace_admits_then_spawns() {
+        let (_temp, root, log) = plant_canary_engine(true);
+        let client_cell: Arc<OnceCell<tower_lsp_server::Client>> = Arc::new(OnceCell::new());
+        // The canary exits 1 on every invocation, so resolution ultimately
+        // fails — but the spawn must have HAPPENED (after admission).
+        let _ = try_spawn_tsgo(&root.to_string_lossy(), &client_cell).await;
+        assert!(
+            log.exists(),
+            "a configured workspace passes admission and the resolver then spawns candidates"
+        );
     }
 }
