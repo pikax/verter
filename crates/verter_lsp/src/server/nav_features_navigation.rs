@@ -25,6 +25,42 @@ use super::handler_guard::{block_in_place_if_available, HandlerGuard};
 use super::server_utils::location_from_span;
 use super::VerterLanguageServer;
 
+/// Resolve a named export's declaration `Location` in a REAL source file through
+/// the host's export tables (re-export chains followed). Fail-closed `None` when
+/// the export, source, or position conversion is unavailable.
+fn host_export_location(
+    server: &VerterLanguageServer,
+    canonical_id: &str,
+    binding_name: &str,
+) -> Option<Location> {
+    let host = &server.documents.host;
+    let (resolved_id, start, end) = host
+        .get_export_span_follow_reexports(canonical_id, binding_name)
+        .or_else(|| {
+            let (s, e) = host.get_export_span(canonical_id, binding_name)?;
+            Some((canonical_id.to_string(), s, e))
+        })?;
+    let source = host.get_source(&resolved_id)?;
+    let encoding = server.position_encoding.read().clone();
+    let li = LineIndex::new(&source, encoding);
+    let range = Range {
+        start: li.offset_to_position(start)?,
+        end: li.offset_to_position(end)?,
+    };
+    let normalized = resolved_id.replace('\\', "/");
+    let uri_str = if normalized.starts_with('/') {
+        format!("file://{normalized}")
+    } else if normalized.chars().nth(1) == Some(':') {
+        format!("file:///{normalized}")
+    } else {
+        return None;
+    };
+    Some(Location {
+        uri: uri_str.parse().ok()?,
+        range,
+    })
+}
+
 pub(super) async fn handle_goto_definition(
     server: &VerterLanguageServer,
     params: GotoDefinitionParams,
@@ -253,9 +289,126 @@ pub(super) async fn handle_goto_definition(
                                 server.resolve_barrel_type_provider_location(path, start, end)
                             };
                         let negotiated_encoding = server.position_encoding.read().clone();
+                        let provider_had_defs = !type_defs.is_empty();
+                        // GlobalComponents fallback-const NAV PROBE offsets for
+                        // any same-file synthetic targets, located through the
+                        // compiler-owned emission-contract reader BEFORE the
+                        // merge consumes the response (fail-closed `None` for
+                        // every non-fallback-const target).
+                        let nav_probe_offsets: Vec<u32> = type_defs
+                            .iter()
+                            .filter(|d| d.path == ctx.tsx_path)
+                            .filter_map(|d| {
+                                verter_session::global_component_nav_probe_offset(
+                                    &ctx.tsx_content,
+                                    d.start,
+                                    d.end,
+                                )
+                            })
+                            .collect();
                         let merged = merge::merge_definitions_with_barrel_resolver(
                             verter_result,
                             type_defs,
+                            &ctx.tsx_path,
+                            &ctx.tsx_line_index,
+                            &ctx.mapper,
+                            &ctx.carrier_line_index,
+                            Some(&|ide_path: &str| {
+                                server.foreign_ide_context(&foreign_ide_set, ide_path)
+                            }),
+                            uri,
+                            &carrier_source_exists,
+                            Some(&barrel_resolver),
+                            negotiated_encoding.clone(),
+                            &|p: &str| {
+                                block_in_place_if_available(|| {
+                                    server.documents.host().workspace_read().read_file(p)
+                                })
+                            },
+                        );
+                        // If the type provider resolved to a barrel file, follow
+                        // re-exports to the terminal declaration.
+                        let resolved = server.resolve_barrel_locations(merged);
+
+                        // Synthetic-target fallback: the provider RESOLVED the
+                        // identifier, but every returned declaration was dropped
+                        // by the fail-closed merge — the targets live in
+                        // unmapped generated text. When those targets are
+                        // GlobalComponents fallback consts (a template tag whose
+                        // binding is a synthesized const), re-issue `definition`
+                        // at the const's NAV PROBE member — the
+                        // (augmentation-merged) `GlobalComponents` interface
+                        // member — so the tag jumps to the user's real
+                        // registration declaration. An unregistered tag has no
+                        // member symbol: the probe yields nothing and the result
+                        // stays fail-closed EMPTY. Positions whose definition
+                        // the provider could not resolve at all (`type_defs`
+                        // empty) never enter this branch.
+                        let resolved_is_empty = match &resolved {
+                            None => true,
+                            Some(GotoDefinitionResponse::Array(locs)) => locs.is_empty(),
+                            Some(GotoDefinitionResponse::Link(links)) => links.is_empty(),
+                            Some(GotoDefinitionResponse::Scalar(_)) => false,
+                        };
+                        if !(provider_had_defs && resolved_is_empty) {
+                            return Ok(resolved);
+                        }
+                        tracing::debug!(
+                            "definition: all provider targets were synthetic — retrying {} \
+                             GlobalComponents nav probe(s)",
+                            nav_probe_offsets.len()
+                        );
+                        let mut probe_defs = Vec::new();
+                        for probe_offset in nav_probe_offsets {
+                            match tp.get_definition(&ctx.tsx_path, probe_offset).await {
+                                Ok(defs) => probe_defs.extend(defs),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "definition: GlobalComponents nav-probe query error: {e}"
+                                    );
+                                }
+                            }
+                        }
+                        // Post-await validation (fail closed), same as above.
+                        if !server.provider_context_still_valid(uri, &ctx) {
+                            return Ok(None);
+                        }
+                        if probe_defs.is_empty() {
+                            return Ok(None);
+                        }
+                        // A provider may follow the augmentation member THROUGH
+                        // `typeof C` to the component's synthesized API carrier
+                        // (`{name}.vue.verter.ts`) — a virtual path whose byte
+                        // offsets the fail-closed merge cannot map. Resolve that
+                        // leg natively: normalize the carrier path back to its
+                        // REAL source file and take the component's
+                        // default-export declaration span from the host's export
+                        // tables. Unresolvable legs drop (fail closed).
+                        let mut native_locations: Vec<Location> = Vec::new();
+                        probe_defs.retain(|d| {
+                            let normalized = merge::normalize_carrier_path_owned(
+                                &d.path,
+                                &carrier_source_exists,
+                            );
+                            if normalized == d.path {
+                                return true;
+                            }
+                            if let Some(loc) = host_export_location(server, &normalized, "default")
+                            {
+                                native_locations.push(loc);
+                            }
+                            false
+                        });
+                        if probe_defs.is_empty() {
+                            return Ok(if native_locations.is_empty() {
+                                None
+                            } else {
+                                Some(GotoDefinitionResponse::Array(native_locations))
+                            });
+                        }
+                        let merged = merge::merge_definitions_with_barrel_resolver(
+                            None,
+                            probe_defs,
                             &ctx.tsx_path,
                             &ctx.tsx_line_index,
                             &ctx.mapper,
@@ -273,9 +426,24 @@ pub(super) async fn handle_goto_definition(
                                 })
                             },
                         );
-                        // If the type provider resolved to a barrel file, follow
-                        // re-exports to the terminal declaration.
-                        return Ok(server.resolve_barrel_locations(merged));
+                        let mut locations = match server.resolve_barrel_locations(merged) {
+                            Some(GotoDefinitionResponse::Scalar(loc)) => vec![loc],
+                            Some(GotoDefinitionResponse::Array(locs)) => locs,
+                            Some(GotoDefinitionResponse::Link(links)) => links
+                                .into_iter()
+                                .map(|link| Location {
+                                    uri: link.target_uri,
+                                    range: link.target_selection_range,
+                                })
+                                .collect(),
+                            None => Vec::new(),
+                        };
+                        locations.extend(native_locations);
+                        return Ok(if locations.is_empty() {
+                            None
+                        } else {
+                            Some(GotoDefinitionResponse::Array(locations))
+                        });
                     }
                     Err(e) => {
                         tracing::warn!("definition: type provider error: {e}");

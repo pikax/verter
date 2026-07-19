@@ -37,6 +37,7 @@ mod definition;
 mod diagnostics;
 mod document_symbols;
 mod external_ts_baseline;
+mod global_components;
 mod hover;
 mod import_matrix;
 mod multi_fixture;

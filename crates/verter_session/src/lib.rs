@@ -409,9 +409,9 @@ pub use resolver_store::{
 // The session-overlay copy-on-write counter is deliberately NOT re-exported: it lives
 // per-host on `VerterHost::provenance().session_overlay_cows` (own-host gate metric).
 
-// Re-export for the LSP: standalone @verter/types .d.ts content.
-pub use verter_compiler::VERTER_TYPES_STANDALONE_DTS;
-
+// Re-export for the LSP: standalone @verter/types .d.ts content + the
+// GlobalComponents fallback-const NAV-PROBE locator (compiler-owned).
+pub use verter_compiler::{global_component_nav_probe_offset, VERTER_TYPES_STANDALONE_DTS};
 // Re-export CompileTarget so downstream crates (LSP, MCP, FFI) can use it
 // without adding verter_compiler as a direct dependency.
 pub use verter_compiler::compile::CompileTarget;

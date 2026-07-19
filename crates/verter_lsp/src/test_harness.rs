@@ -1267,6 +1267,7 @@ pub(crate) fn materialize_pkg_vuecomp(fixture: &str) -> std::path::PathBuf {
 const VUE_TYPE_STUB_DTS: &str = r#"// Minimal `vue` type surface for the external-TS-DX fixture carriers.
 export type PublicProps = { class?: unknown; style?: unknown };
 export type HTMLAttributes = Record<string, unknown>;
+export interface GlobalComponents {}
 export declare function defineComponent<P = {}>(options: P): {
   new (...args: any[]): { $props: P };
 };

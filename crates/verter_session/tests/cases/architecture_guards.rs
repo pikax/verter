@@ -5872,7 +5872,10 @@ mod foundations_guards {
         "pub use types::*",
         // verter_lsp::background_init,
         // verter_type_runtime::tsserver::ipc, verter_type_runtime::tsgo::ipc
-        "pub use verter_compiler::VERTER_TYPES_STANDALONE_DTS",
+        // + verter_lsp::server::nav_features_navigation (the GlobalComponents
+        // fallback-const NAV-PROBE locator — the compiler-owned emission-
+        // contract reader backing global-component tag go-to-definition)
+        "pub use verter_compiler::{global_component_nav_probe_offset, VERTER_TYPES_STANDALONE_DTS}",
         // verter_lsp::workspace_scanner, verter_lsp::server_utils,
         // verter_lsp::documents, verter_type_runtime::tsgo::ipc
         "pub use verter_compiler::compile::CompileTarget",
@@ -9394,6 +9397,10 @@ mod foundations_guards {
         (
             "crates/verter_lsp/src/real_provider_tests/rename.rs",
             "real-provider rename integration tests (`#[cfg(test)] mod real_provider_tests`) — the `read_file` helper uses `std::fs::read_to_string` to read on-disk fixture content for a CLOSED file and assert the on-disk-vs-LSP-edit contract. Same test-fixture-read category as `test_harness.rs`/`test_utils.rs`; not a NativeFs/VFS disk-boundary bypass, never workspace/semantic state.",
+        ),
+        (
+            "crates/verter_lsp/src/real_provider_tests/global_components.rs",
+            "real-provider global-component integration tests (`#[cfg(test)] mod real_provider_tests`) — `materialize_fixture_verter_types` writes the `@verter/types` declaration package under the fixture's gitignored `node_modules`, mirroring the production `materialize_verter_types` background-init step the harness does not run. Same test-fixture-materialization category as `test_harness.rs`; not a NativeFs/VFS disk-boundary bypass, never workspace/semantic state.",
         ),
         (
             "crates/verter_mcp/src/baseline.rs",
