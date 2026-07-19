@@ -16,4 +16,5 @@
 //! those stay in `verter_type_runtime` / `verter_lsp` (the provider-feature
 //! branch's lane).
 
+pub mod platform;
 pub mod policy;
