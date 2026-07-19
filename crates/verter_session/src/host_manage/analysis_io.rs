@@ -102,6 +102,7 @@ impl VerterHost {
             script_analysis.macro_usage.as_ref(),
             &script_analysis.vue_api_calls,
             bindings,
+            &script_analysis.style_vbind_roots,
         );
         Some(Arc::new(crate::template_convert::convert_raw_to_analysis(
             &raw,
@@ -271,6 +272,7 @@ impl VerterHost {
                 snapshot.macro_usage.as_ref(),
                 &snapshot.vue_api_calls,
                 &snapshot.bindings,
+                &snapshot.style_vbind_roots,
             );
             let tpl = crate::template_convert::convert_raw_to_analysis(
                 &raw,
@@ -451,7 +453,9 @@ impl VerterHost {
                 } else {
                     stored_styles
                 };
-                if !style_analyses.is_empty() && !script_analysis.bindings.is_empty() {
+                // Runs even with zero script bindings — the recorded
+                // `style_vbind_roots` also carry PROP liveness.
+                if !style_analyses.is_empty() {
                     script_analysis.mark_bindings_used_in_style(&style_analyses);
                 }
                 let snapshot = FileAnalysisSnapshot {
@@ -470,6 +474,7 @@ impl VerterHost {
                         script_analysis.script_binding_occurrences,
                     ),
                     macro_usage: script_analysis.macro_usage,
+                    style_vbind_roots: script_analysis.style_vbind_roots,
                     export_signatures: Arc::new(export_sigs),
                     options_api: script_analysis.options_api,
                     store_usages: Arc::new(script_analysis.store_usages),
@@ -1448,6 +1453,7 @@ impl VerterHost {
             css_var_manipulations: Arc::clone(&ad.arcs.css_var_manipulations),
             script_binding_occurrences: Arc::clone(&ad.arcs.script_binding_occurrences),
             macro_usage: ad.script_analysis.macro_usage.clone(),
+            style_vbind_roots: ad.script_analysis.style_vbind_roots.clone(),
             export_signatures: Arc::new(ad.export_signatures.clone()),
             options_api: ad.script_analysis.options_api.clone(),
             store_usages: Arc::clone(&ad.arcs.store_usages),

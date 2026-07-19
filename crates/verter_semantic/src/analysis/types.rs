@@ -265,6 +265,16 @@ pub struct ScriptAnalysisSnapshot {
     /// Populated during `build_script_analysis`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub declaration_entries: Vec<LocalDeclarationEntry>,
+
+    /// Root identifiers referenced by `<style>` `v-bind()` expressions
+    /// (`"color"` from `v-bind(color)`, `"theme"` from `v-bind(theme.color)`),
+    /// recorded by [`Self::mark_bindings_used_in_style`]. CSS `v-bind()`
+    /// resolves through the component's render context, which includes PROPS
+    /// by bare name — so the unused-declaration population consumes this set
+    /// for prop-member liveness, not just script-binding `used_in_style`.
+    /// Sorted + deduplicated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub style_vbind_roots: Vec<String>,
 }
 
 impl ScriptAnalysisSnapshot {
@@ -272,7 +282,10 @@ impl ScriptAnalysisSnapshot {
     ///
     /// For each `v-bind(expr)` found in style analysis, extracts the root identifier
     /// (e.g., `"color"` from `v-bind(color)`, `"theme"` from `v-bind(theme.color)`)
-    /// and sets `used_in_style = true` on the matching binding.
+    /// and sets `used_in_style = true` on the matching binding. The full root
+    /// set is also retained on [`Self::style_vbind_roots`] — style `v-bind()`
+    /// can reference PROPS by bare name (no script binding exists for those),
+    /// and prop-member liveness needs the raw set.
     pub fn mark_bindings_used_in_style(
         &mut self,
         style_analyses: &[crate::analysis::style::StyleBlockAnalysis],
@@ -298,6 +311,10 @@ impl ScriptAnalysisSnapshot {
         if referenced.is_empty() {
             return;
         }
+
+        let mut roots: Vec<String> = referenced.iter().map(|name| name.to_string()).collect();
+        roots.sort_unstable();
+        self.style_vbind_roots = roots;
 
         for binding in &mut self.bindings {
             if referenced.contains(binding.name.as_str()) {

@@ -10,8 +10,20 @@
 //! Soundness model: every `IdentifierReference` to a tracked binding must be
 //! consumed by a benign shape recognised at its PARENT node (member read,
 //! literal emit call, vue `toRef`/`toRefs` idioms); any reference left
-//! unconsumed is an escape. Shadowing a tracked name in an inner scope can
-//! only ADD escapes (false suppression), never hide a real use — fail-open.
+//! unconsumed is an escape.
+//!
+//! Scope-blindness caveat: matching is by NAME IDENTITY, not scope
+//! resolution. References to a SHADOWING inner binding of the same name are
+//! indistinguishable from references to the tracked macro binding, which
+//! produces two fail-open error classes and no false positive:
+//! - an unconsumed same-named reference (shadowed local escaping) suppresses
+//!   the kind even though the macro binding never escaped — a missed
+//!   diagnostic;
+//! - a consumed same-named reference (`props.x` on a shadowing local) marks
+//!   the macro member `x` used even though the macro binding was never read —
+//!   also a missed diagnostic (false NEGATIVE).
+//! Both err toward silence; a member is flagged unused only when NO
+//! same-named consumption exists anywhere in the script.
 
 use oxc_ast::ast::{
     Argument, BindingPattern, CallExpression, ComputedMemberExpression, Expression,

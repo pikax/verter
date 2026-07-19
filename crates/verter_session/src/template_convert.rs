@@ -32,6 +32,11 @@ pub(crate) struct UnusedDeclarationContext<'a> {
     /// The `defineProps` root binding is referenced from `<style>` `v-bind()` —
     /// member-level liveness cannot be bounded (suppresses unused-prop).
     pub props_root_used_in_style: bool,
+    /// Root identifiers referenced by `<style>` `v-bind()` expressions. CSS
+    /// `v-bind()` resolves through the component render context, which
+    /// includes PROPS by bare name — a prop whose name appears here is live
+    /// (per-member fact, not a whole-kind suppression).
+    pub style_vbind_roots: &'a [String],
 }
 
 impl<'a> UnusedDeclarationContext<'a> {
@@ -40,6 +45,7 @@ impl<'a> UnusedDeclarationContext<'a> {
         macro_usage: Option<&'a MacroUsageFacts>,
         vue_api_calls: &[VueApiCallSite],
         bindings: &[AnalyzedBinding],
+        style_vbind_roots: &'a [String],
     ) -> Self {
         let use_slots_called = vue_api_calls
             .iter()
@@ -63,6 +69,7 @@ impl<'a> UnusedDeclarationContext<'a> {
             macro_usage,
             use_slots_called,
             props_root_used_in_style,
+            style_vbind_roots,
         }
     }
 }
@@ -597,13 +604,20 @@ pub fn convert_raw_to_analysis(
 /// - props: script escape (spread/call-arg/alias/computed), destructured
 ///   `defineProps` (provider-owned TS6133 — never double-report), style
 ///   `v-bind()` on the props root, `$props` referenced in the template;
-/// - emits: script emit escape (aliased/passed/dynamic name), `$emit`
-///   referenced in the template;
+/// - emits: script emit escape (aliased/passed/dynamic name), `$emit` OR the
+///   `defineEmits` return binding referenced in the template;
 /// - slots: dynamic outlet `<slot :name="expr">`, `useSlots()` anywhere,
 ///   `$slots` referenced in the template.
 ///
 /// `defineModel` members are self-consuming: its implicit prop never enters
 /// `prop_fields`, and an explicitly declared `update:<model>` event is skipped.
+///
+/// Name-identity caveat (accepted false-NEGATIVE class, mirror of the
+/// `macro_usage` scope-blindness note): `template_mentions` matches template
+/// occurrences by NAME, not by scope — an unrelated same-named template
+/// binding (a `v-for` item variable or slot-prop shadowing a prop name) marks
+/// that member "used" and the diagnostic is missed. Errs toward silence;
+/// never produces a false positive.
 fn populate_unused_declaration_facts(
     tpl: &mut TemplateAnalysisSnapshot,
     ctx: &UnusedDeclarationContext<'_>,
@@ -705,6 +719,11 @@ fn populate_unused_declaration_facts(
                 let used_in_template = template_mentions(tpl, &field.name)
                     || props_root_template.contains(field.name.as_str())
                     || dollar_props_template.contains(field.name.as_str());
+                // `<style>` `v-bind(color)` resolves the prop by bare name
+                // through the render context — a per-member liveness fact
+                // (the whole-kind style suppression above covers only the
+                // props ROOT binding escaping into style).
+                let used_in_style = ctx.style_vbind_roots.iter().any(|root| root == &field.name);
                 definitions.push(AnalyzedPropDefinition {
                     name: field.name.clone(),
                     type_annotation: field.type_annotation.clone(),
@@ -712,7 +731,7 @@ fn populate_unused_declaration_facts(
                     is_required: !field.is_optional,
                     is_boolean: false,
                     used_in_template,
-                    used_in_script: reads.contains(field.name.as_str()),
+                    used_in_script: reads.contains(field.name.as_str()) || used_in_style,
                     span: field.span,
                 });
             }
@@ -721,7 +740,18 @@ fn populate_unused_declaration_facts(
     }
 
     // ── Emits ──
-    let emits_suppressed = usage.emit_escapes || template_mentions(tpl, "$emit");
+    // A template occurrence of the `defineEmits` RETURN BINDING
+    // (`@click="emit('close')"`, `:handler="emit"`) is the standard
+    // template-emit pattern: suppress the whole kind on any occurrence
+    // (per-name template call extraction stays deferred — fail-open).
+    let emit_binding = ctx
+        .macros
+        .iter()
+        .find(|m| matches!(m.kind, AnalyzedMacroKind::DefineEmits))
+        .and_then(|m| m.binding_name.as_deref());
+    let emits_suppressed = usage.emit_escapes
+        || template_mentions(tpl, "$emit")
+        || emit_binding.is_some_and(|name| template_mentions(tpl, name));
     if !emits_suppressed {
         let model_events: FxHashSet<String> = ctx
             .macros
@@ -1681,6 +1711,7 @@ mod tests {
                 macro_usage: usage,
                 use_slots_called: false,
                 props_root_used_in_style: false,
+                style_vbind_roots: &[],
             }
         }
 
@@ -1939,6 +1970,57 @@ mod tests {
             assert!(
                 tpl.emit_definitions.is_empty(),
                 "template $emit must suppress"
+            );
+        }
+
+        #[test]
+        fn emits_fail_open_on_template_use_of_the_emit_binding() {
+            // `@click="emit('close')"` (or `:handler="emit"`) — the standard
+            // template-emit pattern calls the `defineEmits` RETURN BINDING.
+            // Any template occurrence of that binding name must suppress the
+            // whole kind (per-name template extraction stays deferred).
+            let mut mac = macro_of(AnalyzedMacroKind::DefineEmits);
+            mac.binding_name = Some("emit".to_string());
+            mac.emit_fields = vec![emit_field("close", 10)];
+            let macros = vec![mac];
+            let raw = RawTemplateData {
+                binding_occurrences: vec![occurrence("emit")],
+                ..Default::default()
+            };
+            let usage = MacroUsageFacts::default();
+            let tpl =
+                convert_raw_to_analysis(&raw, &[], &[], None, Some(&ctx(&macros, Some(&usage))));
+            assert!(
+                tpl.emit_definitions.is_empty(),
+                "a template occurrence of the emit binding must suppress unused-emit \
+                 diagnostics (fail-open), got: {:?}",
+                tpl.emit_definitions
+            );
+        }
+
+        #[test]
+        fn style_vbind_root_matching_a_prop_name_marks_that_member_live() {
+            // `<style> .x { color: v-bind(color) } </style>` with
+            // non-destructured `defineProps<{ color; dead }>()`: `color` is
+            // live through the render context; `dead` still surfaces —
+            // a per-member fact, not a whole-kind suppression.
+            let mut mac = macro_of(AnalyzedMacroKind::DefineProps);
+            mac.prop_fields = vec![prop_field("color", 10), prop_field("dead", 20)];
+            let macros = vec![mac];
+            let usage = MacroUsageFacts::default();
+            let mut c = ctx(&macros, Some(&usage));
+            let roots = vec!["color".to_string()];
+            c.style_vbind_roots = &roots;
+            let tpl =
+                convert_raw_to_analysis(&RawTemplateData::default(), &[], &[], None, Some(&c));
+            let by_name = |n: &str| tpl.prop_definitions.iter().find(|p| p.name == n).unwrap();
+            assert!(
+                by_name("color").used_in_script,
+                "style v-bind(color) keeps the prop live"
+            );
+            assert!(
+                !by_name("dead").used_in_script && !by_name("dead").used_in_template,
+                "the style fact is per-member — dead stays flagged"
             );
         }
 

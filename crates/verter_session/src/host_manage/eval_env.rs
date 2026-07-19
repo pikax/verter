@@ -485,6 +485,7 @@ impl VerterHost {
             css_var_manipulations: Arc::new(script_analysis.css_var_manipulations),
             script_binding_occurrences: Arc::new(script_analysis.script_binding_occurrences),
             macro_usage: script_analysis.macro_usage,
+            style_vbind_roots: script_analysis.style_vbind_roots,
             export_signatures: Arc::new(parse.export_signatures),
             options_api: script_analysis.options_api,
             store_usages: Arc::new(script_analysis.store_usages),

@@ -2914,6 +2914,10 @@ impl VerterHost {
                 snapshot.script_macro_usage.as_ref(),
                 &snapshot.script_vue_api_calls,
                 &snapshot.script_bindings,
+                // The compile input's style v-bind vars are the same ROOT
+                // extraction (`expression.split('.').next()`) the analysis
+                // snapshot records.
+                &snapshot.style_v_bind_vars,
             );
             crate::template_convert::convert_raw_to_analysis(
                 raw,

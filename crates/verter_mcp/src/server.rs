@@ -223,6 +223,7 @@ fn build_script_snapshot(
         css_var_manipulations: analysis.css_var_manipulations.to_vec(),
         script_binding_occurrences: analysis.script_binding_occurrences.to_vec(),
         macro_usage: analysis.macro_usage.clone(),
+        style_vbind_roots: analysis.style_vbind_roots.clone(),
         store_usages: analysis.store_usages.to_vec(),
         store_definitions: analysis.store_definitions.to_vec(),
         first_await_offset: None,
@@ -3739,6 +3740,7 @@ const count = ref(0)
             nested_macro_calls: Vec::new(),
             is_typescript: false,
             declaration_entries: Vec::new(),
+            style_vbind_roots: Vec::new(),
         };
 
         let quality = scoring::compute_quality_score(Some(&script), None, &[], None);

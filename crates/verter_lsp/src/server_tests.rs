@@ -3330,6 +3330,7 @@ fn collect_imported_carrier_priority_ids_keeps_only_resolved_vue_imports() {
         nested_macro_calls: Vec::new(),
         is_typescript: false,
         declaration_entries: Vec::new(),
+        style_vbind_roots: Vec::new(),
     };
 
     let ids = collect_imported_carrier_priority_ids(&analysis);
@@ -15530,6 +15531,225 @@ fn svelte_legacy_slot_produces_no_unused_declaration_diagnostic() {
             Some(NumberOrString::String(code)) if code.starts_with("verter/no-unused-")
         )),
         "legacy <slot> has no declaration site — nothing to flag, got: {diags:?}"
+    );
+}
+
+/// The standard template-emit pattern — calling the `defineEmits` return
+/// binding from a template handler (`@click="emit('close')"`) — is a live
+/// emit. The whole emit kind fails open on any template occurrence of the
+/// binding (per-name template extraction stays deferred), so NOTHING may be
+/// flagged.
+#[test]
+fn template_emit_binding_call_never_flags_the_emitted_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script setup lang=\"ts\">\n\
+                  const emit = defineEmits<{ close: []; other: [] }>();\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <button @click=\"emit('close')\">x</button>\n\
+                  </template>\n";
+    let file = dir.path().join("TemplateEmit.vue");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+
+    assert!(
+        !diags.iter().any(|diag| matches!(
+            diag.code.as_ref(),
+            Some(NumberOrString::String(code)) if code == "verter/no-unused-emit-declarations"
+        )),
+        "a template call through the emit binding must suppress unused-emit \
+         diagnostics (fail-open on the binding occurrence), got: {diags:?}"
+    );
+}
+
+/// The `$emit` template form of the same pattern, end-to-end from real source
+/// (the population layer's `$emit` suppression is otherwise only exercised
+/// with hand-built occurrences).
+#[test]
+fn template_dollar_emit_call_suppresses_emit_diagnostics() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script setup lang=\"ts\">\n\
+                  defineEmits<{ close: [] }>();\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <button @click=\"$emit('close')\">x</button>\n\
+                  </template>\n";
+    let file = dir.path().join("DollarEmit.vue");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+
+    assert!(
+        !diags.iter().any(|diag| matches!(
+            diag.code.as_ref(),
+            Some(NumberOrString::String(code)) if code == "verter/no-unused-emit-declarations"
+        )),
+        "a template `$emit('close')` must suppress unused-emit diagnostics, got: {diags:?}"
+    );
+}
+
+/// A mid-edit BROKEN `<script>` (not just a broken template expression) must
+/// fail open: OXC error recovery can silently swallow real usages (here the
+/// unterminated template literal eats the `props.color` read and the
+/// `emit('save')` call), so no unused-declaration hint may be emitted while
+/// the script does not parse.
+#[test]
+fn broken_script_mid_edit_emits_no_unused_declaration_hints() {
+    // Two distinct mid-edit breakage classes: an unterminated template
+    // literal (a fatal parse) and an unterminated block comment (a
+    // RECOVERABLE parse error) — both swallow the trailing real usages, so
+    // both must fail open.
+    let sources = [
+        (
+            "BrokenLiteral.vue",
+            "<script setup lang=\"ts\">\n\
+             const props = defineProps<{ color: string }>();\n\
+             const emit = defineEmits<{ save: [] }>();\n\
+             defineSlots<{ header(): unknown }>();\n\
+             const wip = `unterminated\n\
+             console.log(props.color);\n\
+             emit('save');\n\
+             </script>\n\
+             \n\
+             <template>\n\
+             <div><slot name=\"header\" /></div>\n\
+             </template>\n",
+        ),
+        (
+            "BrokenComment.vue",
+            "<script setup lang=\"ts\">\n\
+             const props = defineProps<{ color: string }>();\n\
+             const emit = defineEmits<{ save: [] }>();\n\
+             defineSlots<{ header(): unknown }>();\n\
+             /* unterminated mid-edit comment\n\
+             console.log(props.color);\n\
+             emit('save');\n\
+             </script>\n\
+             \n\
+             <template>\n\
+             <div><slot name=\"header\" /></div>\n\
+             </template>\n",
+        ),
+    ];
+    for (name, source) in sources {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(name);
+        std::fs::write(&file, source).unwrap();
+
+        let host = crate::test_utils::make_filesystem_test_host(dir.path());
+        let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+        let uri =
+            crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: source.to_string(),
+        });
+
+        let cached_verter_diags = Arc::new(DashMap::new());
+        let diags =
+            compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+
+        assert!(
+            !diags.iter().any(|diag| matches!(
+                diag.code.as_ref(),
+                Some(NumberOrString::String(code)) if code.starts_with("verter/no-unused-")
+            )),
+            "{name}: a script with parse errors must produce ZERO unused-declaration \
+             diagnostics (fail-open — recovery can hide real usages), got: {diags:?}"
+        );
+    }
+}
+
+/// A prop consumed ONLY through `<style>` `v-bind(color)` by BARE name (no
+/// `props.` prefix, non-destructured `defineProps`) is live at runtime — the
+/// style fact must keep that member alive while a genuinely dead prop in the
+/// same component still surfaces (per-member fact, not whole-kind
+/// suppression).
+#[test]
+fn style_vbind_bare_prop_name_keeps_prop_live_and_dead_prop_flagged() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script setup lang=\"ts\">\n\
+                  defineProps<{ color: string; deadProp: string }>();\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <div class=\"x\">t</div>\n\
+                  </template>\n\
+                  \n\
+                  <style>\n\
+                  .x { color: v-bind(color); }\n\
+                  </style>\n";
+    let file = dir.path().join("StyleVBind.vue");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+
+    let unused_props: Vec<_> = diags
+        .iter()
+        .filter(|diag| {
+            matches!(
+                diag.code.as_ref(),
+                Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+            )
+        })
+        .collect();
+    assert!(
+        !unused_props
+            .iter()
+            .any(|diag| diag.message.contains("color")),
+        "`color` is live through `<style>` v-bind(color) and must not be \
+         flagged, got: {unused_props:?}"
+    );
+    assert!(
+        unused_props
+            .iter()
+            .any(|diag| diag.message.contains("deadProp")),
+        "`deadProp` is genuinely unused — the style fact is per-member, not a \
+         whole-kind suppression, got: {diags:?}"
     );
 }
 

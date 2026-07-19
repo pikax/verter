@@ -1569,6 +1569,12 @@ pub struct FileAnalysisSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub macro_usage: Option<verter_semantic::analysis::macro_usage::MacroUsageFacts>,
 
+    /// Root identifiers referenced by `<style>` `v-bind()` expressions —
+    /// style `v-bind()` resolves PROPS by bare name, so prop-member liveness
+    /// consumes this set (see `ScriptAnalysisSnapshot::style_vbind_roots`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub style_vbind_roots: Vec<String>,
+
     /// Export signatures extracted from the file's script block.
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
     pub export_signatures: Arc<Vec<verter_semantic::analysis::ExportSignature>>,

@@ -1192,12 +1192,20 @@ fn extract_slot_def(
             let base = &source[prop.start as usize..prop.name_end as usize];
             // Slot bindings: v-bind / : with an arg (scoped slots pass data via v-bind)
             if base == ":" || base == "v-bind" {
+                // `<slot :[key]="v">` — a DYNAMIC directive ARGUMENT: the
+                // bound attribute name is not statically known (it can be
+                // `name` at runtime), so the outlet inventory cannot be
+                // bounded. Flag it fail-open for unused-slot population;
+                // the definition itself is still extracted as before.
+                if prop.is_dynamic == Some(true) {
+                    data.has_dynamic_slot_outlet = true;
+                }
                 let arg = prop
                     .arg_start
                     .zip(prop.arg_end)
                     .map(|(s, e)| &source[s as usize..e as usize]);
                 if let Some(arg_name) = arg {
-                    if arg_name == "name" {
+                    if arg_name == "name" && prop.is_dynamic != Some(true) {
                         has_dynamic_name = true;
                         continue;
                     }

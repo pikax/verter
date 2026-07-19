@@ -204,14 +204,25 @@ pub fn build_script_analysis_with_scope(
     }
 
     let program = &result.program;
-    build_script_analysis_with_scope_from_program(content, source_type, program, scope)
+    build_script_analysis_with_scope_from_program(
+        content,
+        source_type,
+        program,
+        scope,
+        !result.errors.is_empty(),
+    )
 }
 
+/// `parse_errors` is whether the program's parse RECOVERED from errors
+/// (`ParserReturn::errors` non-empty, `panicked` false). Error recovery can
+/// silently drop real code, so facts that PROVE non-usage (`macro_usage`)
+/// are withheld — the unused-declaration diagnostics fail open.
 pub fn build_script_analysis_with_scope_from_program(
     content: &str,
     source_type: SourceType,
     program: &Program<'_>,
     scope: AnalysisScope,
+    parse_errors: bool,
 ) -> ScriptAnalysisSnapshot {
     // The provider-less entry is the byte-identical pre-existing path: it
     // captures NO framework script candidates (empty active set) and discards
@@ -222,6 +233,7 @@ pub fn build_script_analysis_with_scope_from_program(
         source_type,
         program,
         scope,
+        parse_errors,
         &[],
     )
     .0
@@ -242,6 +254,7 @@ pub fn build_script_analysis_with_scope_from_program_with_providers(
     source_type: SourceType,
     program: &Program<'_>,
     scope: AnalysisScope,
+    parse_errors: bool,
     active_providers: &[std::sync::Arc<dyn crate::analysis::framework_facts::ScriptFactProvider>],
 ) -> (
     ScriptAnalysisSnapshot,
@@ -252,7 +265,7 @@ pub fn build_script_analysis_with_scope_from_program_with_providers(
         content,
         program,
     );
-    let snapshot = build_script_analysis_inner(content, source_type, program, scope);
+    let snapshot = build_script_analysis_inner(content, source_type, program, scope, parse_errors);
     (snapshot, candidates)
 }
 
@@ -261,6 +274,7 @@ fn build_script_analysis_inner(
     source_type: SourceType,
     program: &Program<'_>,
     scope: AnalysisScope,
+    parse_errors: bool,
 ) -> ScriptAnalysisSnapshot {
     // â”€â”€ Single-pass collection â”€â”€
     // Imports always precede declarations in valid ESM, so the import list is
@@ -611,7 +625,11 @@ fn build_script_analysis_inner(
 
     // Script-side usage facts for macro-declared members (unused-declaration
     // diagnostics). One extra typed pass, only for files that use Vue macros.
-    let macro_usage = if macros.is_empty() {
+    // A parse that RECOVERED from errors publishes NO usage facts: recovery
+    // can silently drop real reads/calls (e.g. an unterminated block comment
+    // swallowing the rest of the script), and facts built on a partial AST
+    // would prove non-usage that is not provable — the diagnostics fail open.
+    let macro_usage = if macros.is_empty() || parse_errors {
         None
     } else {
         let props_binding = macros
@@ -666,6 +684,9 @@ fn build_script_analysis_inner(
         store_definitions,
         is_typescript: source_type.is_typescript(),
         declaration_entries,
+        // Filled by the session-side style cross-reference
+        // (`mark_bindings_used_in_style`) when style blocks are analyzed.
+        style_vbind_roots: Vec::new(),
     }
 }
 
