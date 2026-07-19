@@ -1,0 +1,431 @@
+{
+  "name": "Svelte",
+  "scopeName": "source.svelte",
+  "fileTypes": ["svelte"],
+  "uuid": "7f9e1c3b-2a64-4f08-9c15-svelte-verter",
+  "information_for_contributors": [
+    "Clean-room Svelte grammar authored for Verter, following the structure of",
+    "the sibling Vue grammar (vue.yaml / vue-generated.json): script/style tags",
+    "delegate to embedded language scopes; markup is tokenized in-grammar with",
+    "Svelte block tags, special tags, interpolations, and directive attributes."
+  ],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#script-ts" },
+    { "include": "#script-js" },
+    { "include": "#style-scss" },
+    { "include": "#style-less" },
+    { "include": "#style-sass" },
+    { "include": "#style-stylus" },
+    { "include": "#style-postcss" },
+    { "include": "#style-css" },
+    { "include": "#svelte-block-open" },
+    { "include": "#svelte-block-branch" },
+    { "include": "#svelte-block-close" },
+    { "include": "#svelte-special-tag" },
+    { "include": "#open-tag-component" },
+    { "include": "#open-tag-element" },
+    { "include": "#close-tag-component" },
+    { "include": "#close-tag-element" },
+    { "include": "#interpolation" },
+    { "include": "#entities" }
+  ],
+  "repository": {
+    "comments": {
+      "name": "comment.block.svelte",
+      "begin": "<!--",
+      "end": "-->",
+      "captures": {
+        "0": { "name": "punctuation.definition.comment.svelte" }
+      }
+    },
+    "script-ts": {
+      "begin": "(<)(script)\\b(?=[^>]*lang=('ts'|\"ts\"))(?![^/>]*/>\\s*$)",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.svelte" },
+        "2": { "name": "entity.name.tag.script.svelte" }
+      },
+      "end": "(</)(script)\\s*(>)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.svelte" },
+        "2": { "name": "entity.name.tag.script.svelte" },
+        "3": { "name": "punctuation.definition.tag.end.svelte" }
+      },
+      "patterns": [
+        { "include": "#attributes" },
+        {
+          "contentName": "source.ts",
+          "begin": "(>)",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.tag.end.svelte" }
+          },
+          "end": "(?=</script)",
+          "patterns": [{ "include": "source.ts" }]
+        }
+      ]
+    },
+    "script-js": {
+      "begin": "(<)(script)\\b(?![^/>]*/>\\s*$)",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.svelte" },
+        "2": { "name": "entity.name.tag.script.svelte" }
+      },
+      "end": "(</)(script)\\s*(>)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.svelte" },
+        "2": { "name": "entity.name.tag.script.svelte" },
+        "3": { "name": "punctuation.definition.tag.end.svelte" }
+      },
+      "patterns": [
+        { "include": "#attributes" },
+        {
+          "contentName": "source.js",
+          "begin": "(>)",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.tag.end.svelte" }
+          },
+          "end": "(?=</script)",
+          "patterns": [{ "include": "source.js" }]
+        }
+      ]
+    },
+    "style-scss": {
+      "begin": "(<)(style)\\b(?=[^>]*lang=('scss'|\"scss\"))(?![^/>]*/>\\s*$)",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.svelte" },
+        "2": { "name": "entity.name.tag.style.svelte" }
+      },
+      "end": "(</)(style)\\s*(>)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.svelte" },
+        "2": { "name": "entity.name.tag.style.svelte" },
+        "3": { "name": "punctuation.definition.tag.end.svelte" }
+      },
+      "patterns": [
+        { "include": "#attributes" },
+        {
+          "contentName": "source.css.scss",
+          "begin": "(>)",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.tag.end.svelte" }
+          },
+          "end": "(?=</style)",
+          "patterns": [{ "include": "source.css.scss" }]
+        }
+      ]
+    },
+    "style-less": {
+      "begin": "(<)(style)\\b(?=[^>]*lang=('less'|\"less\"))(?![^/>]*/>\\s*$)",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.svelte" },
+        "2": { "name": "entity.name.tag.style.svelte" }
+      },
+      "end": "(</)(style)\\s*(>)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.svelte" },
+        "2": { "name": "entity.name.tag.style.svelte" },
+        "3": { "name": "punctuation.definition.tag.end.svelte" }
+      },
+      "patterns": [
+        { "include": "#attributes" },
+        {
+          "contentName": "source.css.less",
+          "begin": "(>)",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.tag.end.svelte" }
+          },
+          "end": "(?=</style)",
+          "patterns": [{ "include": "source.css.less" }]
+        }
+      ]
+    },
+    "style-sass": {
+      "begin": "(<)(style)\\b(?=[^>]*lang=('sass'|\"sass\"))(?![^/>]*/>\\s*$)",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.svelte" },
+        "2": { "name": "entity.name.tag.style.svelte" }
+      },
+      "end": "(</)(style)\\s*(>)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.svelte" },
+        "2": { "name": "entity.name.tag.style.svelte" },
+        "3": { "name": "punctuation.definition.tag.end.svelte" }
+      },
+      "patterns": [
+        { "include": "#attributes" },
+        {
+          "contentName": "source.sass",
+          "begin": "(>)",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.tag.end.svelte" }
+          },
+          "end": "(?=</style)",
+          "patterns": [{ "include": "source.sass" }]
+        }
+      ]
+    },
+    "style-stylus": {
+      "begin": "(<)(style)\\b(?=[^>]*lang=('stylus'|\"stylus\"))(?![^/>]*/>\\s*$)",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.svelte" },
+        "2": { "name": "entity.name.tag.style.svelte" }
+      },
+      "end": "(</)(style)\\s*(>)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.svelte" },
+        "2": { "name": "entity.name.tag.style.svelte" },
+        "3": { "name": "punctuation.definition.tag.end.svelte" }
+      },
+      "patterns": [
+        { "include": "#attributes" },
+        {
+          "contentName": "source.stylus",
+          "begin": "(>)",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.tag.end.svelte" }
+          },
+          "end": "(?=</style)",
+          "patterns": [{ "include": "source.stylus" }]
+        }
+      ]
+    },
+    "style-postcss": {
+      "begin": "(<)(style)\\b(?=[^>]*lang=('postcss'|\"postcss\"))(?![^/>]*/>\\s*$)",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.svelte" },
+        "2": { "name": "entity.name.tag.style.svelte" }
+      },
+      "end": "(</)(style)\\s*(>)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.svelte" },
+        "2": { "name": "entity.name.tag.style.svelte" },
+        "3": { "name": "punctuation.definition.tag.end.svelte" }
+      },
+      "patterns": [
+        { "include": "#attributes" },
+        {
+          "contentName": "source.css.postcss",
+          "begin": "(>)",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.tag.end.svelte" }
+          },
+          "end": "(?=</style)",
+          "patterns": [{ "include": "source.css.postcss" }]
+        }
+      ]
+    },
+    "style-css": {
+      "begin": "(<)(style)\\b(?![^/>]*/>\\s*$)",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.svelte" },
+        "2": { "name": "entity.name.tag.style.svelte" }
+      },
+      "end": "(</)(style)\\s*(>)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.svelte" },
+        "2": { "name": "entity.name.tag.style.svelte" },
+        "3": { "name": "punctuation.definition.tag.end.svelte" }
+      },
+      "patterns": [
+        { "include": "#attributes" },
+        {
+          "contentName": "source.css",
+          "begin": "(>)",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.tag.end.svelte" }
+          },
+          "end": "(?=</style)",
+          "patterns": [{ "include": "source.css" }]
+        }
+      ]
+    },
+    "svelte-block-open": {
+      "name": "meta.block.start.svelte",
+      "begin": "(\\{)\\s*(#(?:if|each|await|key|snippet))(?=[\\s}])",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.block.begin.svelte" },
+        "2": { "name": "keyword.control.block.svelte" }
+      },
+      "end": "(\\})",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.block.end.svelte" }
+      },
+      "patterns": [
+        {
+          "match": "(?<![\\w$.])(then|catch)(?=\\s)",
+          "name": "keyword.control.flow.svelte"
+        },
+        { "include": "#ts-expression-safe" }
+      ]
+    },
+    "svelte-block-branch": {
+      "name": "meta.block.branch.svelte",
+      "begin": "(\\{)\\s*(:(?:else\\s+if|else|then|catch))(?=[\\s}])",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.block.begin.svelte" },
+        "2": { "name": "keyword.control.branch.svelte" }
+      },
+      "end": "(\\})",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.block.end.svelte" }
+      },
+      "patterns": [{ "include": "#ts-expression-safe" }]
+    },
+    "svelte-block-close": {
+      "name": "meta.block.end.svelte",
+      "match": "(\\{)\\s*(/(?:if|each|await|key|snippet))\\s*(\\})",
+      "captures": {
+        "1": { "name": "punctuation.definition.block.begin.svelte" },
+        "2": { "name": "keyword.control.block.svelte" },
+        "3": { "name": "punctuation.definition.block.end.svelte" }
+      }
+    },
+    "svelte-special-tag": {
+      "name": "meta.special.svelte",
+      "begin": "(\\{)\\s*(@(?:html|render|const|debug|attach))\\b",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.block.begin.svelte" },
+        "2": { "name": "keyword.control.special.svelte" }
+      },
+      "end": "(\\})",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.block.end.svelte" }
+      },
+      "patterns": [{ "include": "#ts-expression-safe" }]
+    },
+    "interpolation": {
+      "name": "expression.embedded.svelte",
+      "begin": "(\\{)(?![#:/@])",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.interpolation.begin.svelte" }
+      },
+      "end": "(\\})",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.interpolation.end.svelte" }
+      },
+      "patterns": [{ "include": "#ts-expression-safe" }]
+    },
+    "open-tag-component": {
+      "name": "meta.tag.component.svelte",
+      "begin": "(<)((?:[A-Z][\\w$]*|[a-z][\\w$]*(?:\\.[\\w$]+)+)(?:\\.[\\w$]+)*)(?=[\\s/>])",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.svelte" },
+        "2": { "name": "support.class.component.svelte" }
+      },
+      "end": "(/?>)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.tag.end.svelte" }
+      },
+      "patterns": [{ "include": "#attributes" }]
+    },
+    "open-tag-element": {
+      "name": "meta.tag.svelte",
+      "begin": "(<)([a-z][\\w:-]*)(?=[\\s/>])",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.svelte" },
+        "2": { "name": "entity.name.tag.svelte" }
+      },
+      "end": "(/?>)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.tag.end.svelte" }
+      },
+      "patterns": [{ "include": "#attributes" }]
+    },
+    "close-tag-component": {
+      "match": "(</)((?:[A-Z][\\w$]*|[a-z][\\w$]*(?:\\.[\\w$]+)+)(?:\\.[\\w$]+)*)\\s*(>)",
+      "captures": {
+        "1": { "name": "punctuation.definition.tag.begin.svelte" },
+        "2": { "name": "support.class.component.svelte" },
+        "3": { "name": "punctuation.definition.tag.end.svelte" }
+      }
+    },
+    "close-tag-element": {
+      "match": "(</)([a-z][\\w:-]*)\\s*(>)",
+      "captures": {
+        "1": { "name": "punctuation.definition.tag.begin.svelte" },
+        "2": { "name": "entity.name.tag.svelte" },
+        "3": { "name": "punctuation.definition.tag.end.svelte" }
+      }
+    },
+    "attributes": {
+      "patterns": [
+        { "include": "#attribute-directive" },
+        { "include": "#attribute-generic" },
+        {
+          "match": "=",
+          "name": "punctuation.separator.key-value.svelte"
+        },
+        { "include": "#interpolation" },
+        { "include": "#string-double-quoted" },
+        { "include": "#string-single-quoted" }
+      ]
+    },
+    "attribute-directive": {
+      "match": "(?<![\\w-])(on|bind|class|style|use|transition|in|out|animate|let)(:)([a-zA-Z][\\w.$-]*)((?:\\|[a-zA-Z]+)*)",
+      "captures": {
+        "1": { "name": "entity.other.attribute-name.directive.svelte" },
+        "2": { "name": "punctuation.separator.key-value.svelte" },
+        "3": { "name": "entity.other.attribute-name.svelte" },
+        "4": { "name": "entity.other.attribute-name.modifier.svelte" }
+      }
+    },
+    "attribute-generic": {
+      "match": "([a-zA-Z_][\\w:.$-]*)",
+      "name": "entity.other.attribute-name.svelte"
+    },
+    "string-double-quoted": {
+      "name": "string.quoted.double.svelte",
+      "begin": "\"",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.svelte" }
+      },
+      "end": "\"",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.svelte" }
+      },
+      "patterns": [{ "include": "#interpolation" }, { "include": "#entities" }]
+    },
+    "string-single-quoted": {
+      "name": "string.quoted.single.svelte",
+      "begin": "'",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.svelte" }
+      },
+      "end": "'",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.svelte" }
+      },
+      "patterns": [{ "include": "#interpolation" }, { "include": "#entities" }]
+    },
+    "entities": {
+      "patterns": [
+        {
+          "name": "constant.character.entity.svelte",
+          "match": "(&)([a-zA-Z0-9]+|#[0-9]+|#x[0-9a-fA-F]+)(;)",
+          "captures": {
+            "1": { "name": "punctuation.definition.entity.svelte" },
+            "3": { "name": "punctuation.definition.entity.svelte" }
+          }
+        }
+      ]
+    },
+    "ts-expression-safe": {
+      "patterns": [
+        {
+          "match": "(?<![_$[:alnum:]])(?:(?<=\\.\\.\\.)|(?<!\\.))(as)\\s+(const)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.as.ts" },
+            "2": { "name": "storage.modifier.ts" }
+          }
+        },
+        {
+          "match": "(?<![_$[:alnum:]])(?:(?<=\\.\\.\\.)|(?<!\\.))(as|satisfies)(?=\\s)",
+          "captures": {
+            "1": { "name": "keyword.control.as.ts" }
+          }
+        },
+        { "include": "source.ts#expression" }
+      ]
+    }
+  }
+}

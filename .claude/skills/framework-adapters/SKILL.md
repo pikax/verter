@@ -79,8 +79,12 @@ gone). The extension's `package.json` framework wiring
 (activation events, `contributes.languages`) MATCHES the manifest, pinned by
 `client_framework_manifest_drives_extension_wiring` (scans the extension
 source) + the TS specs `frameworkWiring.spec.ts` /
-`packageManifestFramework.spec.ts`. Verter ships NO Svelte TextMate grammar
-(it relies on the user's Svelte extension for syntax).
+`packageManifestFramework.spec.ts`. Verter ships its OWN Svelte TextMate
+grammar + language configuration (`syntaxes/svelte.tmLanguage.json`,
+`languages/svelte-language-configuration.json` — clean-room, structured
+after the Vue grammar, embedded TS/JS + CSS/SCSS/LESS scopes; smoke-tested
+by `svelteGrammar.spec.ts` and the `svelte-grammar.test` E2E suite), so no
+third-party Svelte extension is needed for syntax colors.
 
 ## The framework-surface executor
 

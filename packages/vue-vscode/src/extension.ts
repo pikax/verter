@@ -587,8 +587,8 @@ export async function activateVueLanguageServer(
   // The active framework carriers are EVERY registered adapter — derived from
   // the descriptor-generated client framework manifest, NOT an opt-in client
   // gate. Svelte is first-class (no opt-in). Each attaches to its manifest
-  // client language id (e.g. the existing `svelte` id; Verter contributes no
-  // grammar and relies on the user's Svelte extension for syntax).
+  // client language id, and Verter contributes the language configuration and
+  // TextMate grammar for both carriers (source.vue / source.svelte).
   const activeFrameworks = frameworkClientLanguageIds();
 
   // Options to control the language client

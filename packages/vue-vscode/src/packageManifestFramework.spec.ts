@@ -10,12 +10,21 @@ const extensionDir = path.resolve(srcDir, "..");
 interface ContributedLanguage {
   id: string;
   extensions?: string[];
+  configuration?: string;
+}
+
+interface ContributedGrammar {
+  language?: string;
+  scopeName: string;
+  path: string;
+  embeddedLanguages?: Record<string, string>;
 }
 
 interface ExtensionManifest {
   activationEvents?: string[];
   contributes?: {
     languages?: ContributedLanguage[];
+    grammars?: ContributedGrammar[];
   };
 }
 
@@ -72,8 +81,44 @@ describe("extension package manifest framework wiring (manifest-driven)", () => 
     expect(raw).not.toContain("verter.frameworks");
   });
 
-  it("does not register a TextMate grammar for svelte (relies on the user's Svelte extension)", () => {
-    const raw = readFileSync(path.join(extensionDir, "package.json"), "utf8");
-    expect(raw).not.toContain("source.svelte");
+  it("registers a TextMate grammar for svelte (source.svelte) with an on-disk grammar file", () => {
+    const grammars = pkg.contributes?.grammars ?? [];
+    const svelteGrammar = grammars.find((g) => g.language === "svelte");
+    expect(svelteGrammar, "svelte must contribute a TextMate grammar").toBeDefined();
+    expect(svelteGrammar!.scopeName).toBe("source.svelte");
+    const grammarPath = path.join(extensionDir, svelteGrammar!.path);
+    const grammarJson = JSON.parse(readFileSync(grammarPath, "utf8")) as {
+      scopeName?: string;
+      patterns?: unknown[];
+    };
+    expect(grammarJson.scopeName).toBe("source.svelte");
+    expect(Array.isArray(grammarJson.patterns)).toBe(true);
+    expect(grammarJson.patterns!.length).toBeGreaterThan(0);
+  });
+
+  it("maps the svelte grammar's embedded languages for TS/JS scripts and CSS/SCSS/LESS styles", () => {
+    const grammars = pkg.contributes?.grammars ?? [];
+    const svelteGrammar = grammars.find((g) => g.language === "svelte");
+    expect(svelteGrammar).toBeDefined();
+    const embedded = svelteGrammar!.embeddedLanguages ?? {};
+    expect(embedded["source.ts"]).toBe("typescript");
+    expect(embedded["source.js"]).toBe("javascript");
+    expect(embedded["source.css"]).toBe("css");
+    expect(embedded["source.css.scss"]).toBe("scss");
+    expect(embedded["source.css.less"]).toBe("less");
+  });
+
+  it("wires a language configuration (comments/brackets/auto-closing) onto the svelte language", () => {
+    const svelteLang = contributedLanguages.find((l) => l.id === "svelte");
+    expect(svelteLang?.configuration, "svelte must declare a language configuration").toBeDefined();
+    const configPath = path.join(extensionDir, svelteLang!.configuration!);
+    const config = JSON.parse(readFileSync(configPath, "utf8")) as {
+      comments?: { blockComment?: string[] };
+      brackets?: unknown[];
+      autoClosingPairs?: unknown[];
+    };
+    expect(config.comments?.blockComment).toEqual(["<!--", "-->"]);
+    expect(config.brackets!.length).toBeGreaterThan(0);
+    expect(config.autoClosingPairs!.length).toBeGreaterThan(0);
   });
 });

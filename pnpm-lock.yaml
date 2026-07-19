@@ -310,7 +310,7 @@ importers:
     devDependencies:
       tsdown:
         specifier: ^0.22.0
-        version: 0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0))
+        version: 0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31)
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
@@ -597,7 +597,7 @@ importers:
         version: 4.3.0
       tsdown:
         specifier: ^0.22.0
-        version: 0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0))
+        version: 0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31)
       tsx:
         specifier: ^4.22.3
         version: 4.22.3
@@ -727,6 +727,12 @@ importers:
       vscode-languageserver-types:
         specifier: ^3.17.5
         version: 3.17.5
+      vscode-oniguruma:
+        specifier: ^2.0.1
+        version: 2.0.1
+      vscode-textmate:
+        specifier: ^9.3.2
+        version: 9.3.2
 
   packages/wasm:
     devDependencies:
@@ -741,7 +747,7 @@ importers:
         version: 130.0.0
       tsdown:
         specifier: ^0.22.0
-        version: 0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0))
+        version: 0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31)
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
@@ -11180,6 +11186,12 @@ packages:
 
   vscode-nls@5.2.0:
     resolution: {integrity: sha512-RAaHx7B14ZU04EU31pT+rKz2/zSl7xMsfIZuo8pd+KZO6PXtQmpevpq3vxvWNcrGbdmhM/rr5Uw5Mz+NBfhVng==}
+
+  vscode-oniguruma@2.0.1:
+    resolution: {integrity: sha512-poJU8iHIWnC3vgphJnrLZyI3YdqRlR27xzqDmpPXYzA93R4Gk8z7T6oqDzDoHjoikA2aS82crdXFkjELCdJsjQ==}
+
+  vscode-textmate@9.3.2:
+    resolution: {integrity: sha512-n2uGbUcrjhUEBH16uGA0TvUfhWwliFZ1e3+pTjrkim1Mt7ydB41lV08aUvsi70OlzDWp6X7Bx3w/x3fAXIsN0Q==}
 
   vscode-uri@3.1.0:
     resolution: {integrity: sha512-/BpdSx+yCQGnCvecbyXdxHDkuk55/G3xwnC0GqY4gmQ3j+A+g8kzzgB4Nk/SINjqn6+waqw3EgbVF2QKExkRxQ==}
@@ -21794,7 +21806,7 @@ snapshots:
 
   ts-dedent@2.2.0: {}
 
-  tsdown@0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0)):
+  tsdown@0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31):
     dependencies:
       ansis: 4.3.0
       cac: 7.0.0
@@ -22513,6 +22525,10 @@ snapshots:
       vscode-languageserver-protocol: 3.17.5
 
   vscode-nls@5.2.0: {}
+
+  vscode-oniguruma@2.0.1: {}
+
+  vscode-textmate@9.3.2: {}
 
   vscode-uri@3.1.0: {}
 
