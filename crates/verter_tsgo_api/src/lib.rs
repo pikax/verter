@@ -44,6 +44,7 @@ pub mod offset;
 pub mod proto;
 pub mod relay;
 pub mod snapshot;
+pub mod toolchain;
 pub mod transport;
 
 pub use actor::{ClientHandle, RequestOptions};
