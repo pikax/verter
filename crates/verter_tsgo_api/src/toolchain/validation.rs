@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use super::policy::{PolicyRejection, TsgoVersion, VersionPolicy};
-use crate::attach::{spawn_own_lsp_connection, Owned, TsgoAttach};
+use crate::attach::{spawn_own_lsp_connection, TsgoAttach};
 use crate::client::probe_engine_version_bounded;
 
 /// The default bound on a `--version` probe (mirrors the owned-provider
@@ -262,13 +262,7 @@ impl ProcessValidator {
             .map_err(|e| RejectionReason::LspHandshakeFailed {
                 detail: e.to_string(),
             })?;
-        let result = match TsgoAttach::<Owned>::lsp_handshake_with_policy(
-            conn.json_rpc(),
-            &staged.uri(),
-            &self.policy,
-        )
-        .await
-        {
+        let result = match conn.lsp_handshake(&staged.uri(), &self.policy).await {
             Ok(clearance) => {
                 if versions_agree(probe, &clearance.observed_version) {
                     Ok(())

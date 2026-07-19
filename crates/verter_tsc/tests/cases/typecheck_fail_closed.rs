@@ -9,10 +9,11 @@
 //! the opposite: when the `--api` engine cannot be discovered, verter-tsc exits
 //! NON-ZERO.
 //!
-//! Hermetic: the child's `VERTER_TSGO_BIN` is removed and the temp project has no
-//! `node_modules` engine; `discover_tsgo` is scoped to `<root>/node_modules`
-//! (no parent-walk, no PATH, no npx cache), so the engine is genuinely absent
-//! regardless of what is installed on the host.
+//! Hermetic: the child's `VERTER_TSGO_BIN` is removed, the temp project has no
+//! `node_modules` engine, and the child's `PATH` is an empty directory so the
+//! resolver's PATH tier cannot find a host engine; the update cache holds no
+//! downloaded engine and no bundled sidecar ships next to the test binary, so the
+//! engine is genuinely absent regardless of what is installed on the host.
 
 use std::process::Command;
 
@@ -52,12 +53,16 @@ fn noemit_typecheck_exits_nonzero_when_api_engine_absent() {
     let (temp, tsconfig_path) = engine_absent_project();
 
     let bin = env!("CARGO_BIN_EXE_verter-tsc");
+    // An empty PATH dir: the resolver's PATH tier cannot leak a host engine
+    // into this hermetic absence.
+    let empty_path = tempfile::TempDir::new().expect("empty PATH dir");
     let output = Command::new(bin)
         .arg("--noEmit")
         .arg("-p")
         .arg(&tsconfig_path)
         // Remove any host override so discovery genuinely fails (hermetic).
         .env_remove("VERTER_TSGO_BIN")
+        .env("PATH", empty_path.path())
         .output()
         .expect("failed to execute verter-tsc");
 

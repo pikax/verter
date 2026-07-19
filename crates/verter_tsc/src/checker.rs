@@ -381,24 +381,35 @@ fn ambient_shim_carriers(base: &Path) -> Vec<(String, String)> {
     ]
 }
 
-/// Discover the gated tsgo `--api` engine (the rc `@typescript/typescript-*`
-/// native binary the wire gate pins). Mirrors the canonical discovery precedence
-/// the LSP/host uses: the explicit `VERTER_TSGO_BIN` override first, then the rc
-/// engine in the project's `node_modules` via the SHARED
-/// [`verter_tsgo_api::transport::spawn::discover_tsgo`]. The retired native-preview
-/// `tsgo` is intentionally NOT searched — it fails the wire gate, so resolving one
-/// would only fail-close after a spawn. (The npm/npx-cache rc tier of the canonical
-/// discovery lives in `verter_type_runtime`; verter-tsc cannot depend on it within
-/// this block's scope. TODO(follow-up): hoist that rc cache-search into
-/// `verter_tsgo_api` so every consumer — verter-tsc included — shares all tiers.)
-fn discover_api_engine(root: &Path) -> Option<PathBuf> {
-    if let Some(raw) = std::env::var_os("VERTER_TSGO_BIN") {
-        let path = PathBuf::from(raw);
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-    verter_tsgo_api::transport::spawn::discover_tsgo(root).ok()
+/// Resolve the gated tsgo engine for verter-tsc via the 4-tier toolchain
+/// resolver ([`verter_tsgo_api::toolchain::discovery`]): shared
+/// (`VERTER_TSGO_BIN`, then PATH) → project-local ancestor `node_modules` →
+/// temp update cache → bundled sidecar; the first WORKING candidate wins
+/// (bounded version probe + support policy + capability smoke per candidate).
+/// A resolution failure carries the actionable tier report.
+fn resolve_tsgo_engine(
+    root: &Path,
+    requirement: verter_tsgo_api::toolchain::validation::Capability,
+) -> Result<PathBuf, verter_tsgo_api::toolchain::discovery::ResolveError> {
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+        requirement,
+        Some(root.to_path_buf()),
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(
+            |e| verter_tsgo_api::toolchain::discovery::ResolveError::NoUsableCandidate {
+                rejections: Vec::new(),
+                notes: vec![format!(
+                    "verter-tsc: failed to start the tsgo resolution runtime: {e}"
+                )],
+                requirement,
+            },
+        )?;
+    runtime
+        .block_on(verter_tsgo_api::toolchain::discovery::resolve(&request))
+        .map(|resolution| resolution.path)
 }
 
 /// The in-memory tsgo `--api` typecheck stage: generate the validation carriers
@@ -412,19 +423,20 @@ fn run_inmemory_typecheck(
 ) -> Result<Vec<Diagnostic>, api_check::TypecheckError> {
     let root = strip_unc_prefix(&config.root_dir);
 
-    // Discover the GATED `--api` engine (the rc `@typescript/typescript-*` native
-    // binary the wire gate pins). No tsc fallback for the typecheck path by design —
-    // a missing or wire-diverged engine is a HARD failure (surfaced as a non-zero
-    // exit), NOT a silent empty diagnostic set that would masquerade as a clean run.
-    let engine = match discover_api_engine(&root) {
-        Some(p) => strip_unc_prefix(&p),
-        None => {
-            return Err(api_check::TypecheckError::new(
-                "verter-tsc: no gated tsgo `--api` engine found for in-memory typecheck. \
-                 Install the pinned engine (`typescript@7.0.2`) in the project's node_modules, \
-                 or point VERTER_TSGO_BIN at the `tsc` native binary. \
-                 (There is no tsc fallback for the typecheck path.)",
-            ));
+    // Resolve the GATED `--api` engine (a supported tsgo native binary —
+    // validated end-to-end by the resolver). No tsc fallback for the typecheck
+    // path by design — a missing or wire-diverged engine is a HARD failure
+    // (surfaced as a non-zero exit), NOT a silent empty diagnostic set that
+    // would masquerade as a clean run.
+    let engine = match resolve_tsgo_engine(
+        &root,
+        verter_tsgo_api::toolchain::validation::Capability::Api,
+    ) {
+        Ok(p) => strip_unc_prefix(&p),
+        Err(e) => {
+            return Err(api_check::TypecheckError::new(format!(
+                "verter-tsc: {e}. (There is no tsc fallback for the typecheck path.)"
+            )));
         }
     };
 
@@ -568,24 +580,29 @@ fn run_declaration_stage(
         tsc_tsx_paths.push(ts_path.clone());
     }
 
-    // Discover the checker for the temp-file path: tsgo, else tsc.
+    // Resolve the checker for the temp-file path. The declaration stage drives
+    // the engine as a plain CLI compiler (`tsc --project … --declaration`), so
+    // the resolver's bounded `--version` probe IS its capability check and the
+    // support policy keeps unsupported engines out; `invoke_checker` is the
+    // functional gate. (No legacy tsc fallback — an unsupported engine is
+    // refused by the version policy.)
     let root = strip_unc_prefix(&config.root_dir);
-    let checker_bin = if let Some(tsgo) = reporter::find_tsgo(&root) {
-        eprintln!(
-            "verter-tsc: declaration emit using tsgo at {}",
-            tsgo.display()
-        );
-        strip_unc_prefix(&tsgo)
-    } else if let Some(tsc) = reporter::find_tsc(&root) {
-        eprintln!("verter-tsc: declaration emit: tsgo not found, falling back to tsc");
-        strip_unc_prefix(&tsc)
-    } else {
-        eprintln!(
-            "verter-tsc: no type checker found for declaration emit. \
-             Install tsgo: npm install -D @typescript/native-preview\n\
-             Or install tsc: npm install -D typescript"
-        );
-        return (Vec::new(), Vec::new());
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+        verter_tsgo_api::toolchain::validation::Capability::Lsp,
+        Some(root.clone()),
+    );
+    let checker_bin = match verter_tsgo_api::toolchain::discovery::find_version_checked(&request) {
+        Ok(resolution) => {
+            eprintln!(
+                "verter-tsc: declaration emit using tsgo at {}",
+                resolution.path.display()
+            );
+            strip_unc_prefix(&resolution.path)
+        }
+        Err(e) => {
+            eprintln!("verter-tsc: {e}");
+            return (Vec::new(), Vec::new());
+        }
     };
 
     let decl_opts = EmitOptions {
@@ -2003,6 +2020,11 @@ mod tests {
                 r#"
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
 
+if ($Args -contains '--version') {
+    Write-Output 'Version 7.0.2'
+    exit 0
+}
+
 $project = ''
 $declaration = $false
 $declarationDir = ''
@@ -2063,6 +2085,13 @@ exit 0
 project=""
 declaration=0
 declaration_dir=""
+
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    echo "Version 7.0.2"
+    exit 0
+  fi
+done
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -2126,6 +2155,11 @@ printf "export declare const ok: number;\n" > "$declaration_dir/$(basename "$tsc
                 r#"
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
 
+if ($Args -contains '--version') {
+    Write-Output 'Version 7.0.2'
+    exit 0
+}
+
 $project = ''
 $declaration = $false
 $declarationDir = ''
@@ -2183,6 +2217,13 @@ exit 1
 project=""
 declaration=0
 declaration_dir=""
+
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    echo "Version 7.0.2"
+    exit 0
+  fi
+done
 
 while [ "$#" -gt 0 ]; do
   case "$1" in

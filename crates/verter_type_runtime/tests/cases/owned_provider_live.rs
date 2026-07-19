@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use verter_tsgo_api::transport::spawn::discover_tsgo;
 use verter_type_runtime::protocol::TypeDiagnostic;
 use verter_type_runtime::traits::TypeProvider;
 use verter_type_runtime::tsgo::{TsgoOwnedProvider, TsgoTypeProvider};
@@ -23,8 +22,12 @@ fn workspace_root() -> PathBuf {
 }
 
 fn engine_or_skip() -> Option<PathBuf> {
-    match discover_tsgo(&workspace_root()) {
-        Ok(p) => Some(p),
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+        verter_tsgo_api::toolchain::validation::Capability::Lsp,
+        Some(workspace_root()),
+    );
+    match verter_tsgo_api::toolchain::discovery::find_version_checked(&request) {
+        Ok(resolution) => Some(resolution.path),
         Err(e) => {
             if std::env::var("VERTER_REQUIRE_TSGO").is_ok() {
                 panic!("VERTER_REQUIRE_TSGO is set but tsgo was not found: {e}. A skip would be a vacuous pass.");

@@ -30,7 +30,6 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use verter_type_runtime::traits::TypeProvider;
-use verter_type_runtime::tsgo::ipc::find_tsgo_binary_canonical;
 use verter_type_runtime::tsgo::{TsgoOwnedProvider, TsgoTypeProvider};
 
 fn workspace_root() -> PathBuf {
@@ -41,12 +40,16 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Discover the engine through the canonical discovery (honors `VERTER_TSGO_BIN`
-/// first, then the workspace `node_modules`, then the npm/npx cache). Honors
-/// `VERTER_REQUIRE_TSGO` (a skip under that env is a vacuous-pass failure).
+/// Resolve the engine through the 4-tier toolchain resolver (version-checked).
+/// Honors `VERTER_REQUIRE_TSGO` (a skip under that env is a vacuous-pass
+/// failure).
 fn engine_or_skip() -> Option<PathBuf> {
-    match find_tsgo_binary_canonical(Some(&workspace_root())) {
-        Ok(p) => Some(PathBuf::from(p)),
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+        verter_tsgo_api::toolchain::validation::Capability::Lsp,
+        Some(workspace_root()),
+    );
+    match verter_tsgo_api::toolchain::discovery::find_version_checked(&request) {
+        Ok(resolution) => Some(resolution.path),
         Err(e) => {
             if std::env::var("VERTER_REQUIRE_TSGO").is_ok() {
                 panic!(

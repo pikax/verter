@@ -1,7 +1,7 @@
 //! The per-platform tsgo binary mapping — ONE manifest, zero drift.
 //!
 //! Every consumer of platform knowledge (tier-2 local discovery, the temp
-//! cache layout, the bundled sidecar path, the Phase B packager) derives from
+//! cache layout, the bundled sidecar path, the packager) derives from
 //! [`PLATFORM_MANIFEST`] below. No other code may hardcode a per-OS binary
 //! name, package suffix, or target triple.
 
@@ -41,7 +41,7 @@ impl TsgoPlatform {
     }
 
     /// `tsgo/lib/tsc[.exe]` — the bundled sidecar relative to the host
-    /// executable's directory (the Phase B offline floor).
+    /// executable's directory (the offline floor shipped with the product).
     pub fn bundled_executable_rel_path(&self) -> PathBuf {
         PathBuf::from("tsgo").join("lib").join(self.executable)
     }

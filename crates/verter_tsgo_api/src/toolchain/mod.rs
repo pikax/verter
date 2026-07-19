@@ -6,8 +6,8 @@
 //! binary `tsc[.exe]` inside the per-platform `@typescript/typescript-<os>-<arch>`
 //! npm packages. Verter supports ONE version channel — see [`policy`] — and
 //! resolves the engine through an ordered first-working resolver — see
-//! `discovery` (slice 4) — replacing the historical divergent per-consumer
-//! discovery implementations.
+//! `discovery` — the single provisioning path every consumer shares; the
+//! historical divergent per-consumer discovery implementations are deleted.
 //!
 //! Ownership boundary (ratified design): this module owns tsgo paths, platform
 //! mapping, version policy, candidate provenance, validation, and the bundle

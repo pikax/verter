@@ -68,7 +68,6 @@ use verter_workspace::workspace_snapshot::{
 use verter_workspace::{FilesystemOptions, FilesystemWorkspace, WorkspaceAccess, WorkspaceRead};
 
 use verter_tsgo_api::jsonrpc::{encode_message, MessageFramer};
-use verter_tsgo_api::transport::spawn::discover_tsgo;
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -78,11 +77,16 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Discover the engine, honoring `VERTER_REQUIRE_TSGO` (a skip under that env is a
-/// vacuous-pass failure).
+/// Resolve the engine through the 4-tier toolchain resolver (version-checked),
+/// honoring `VERTER_REQUIRE_TSGO` (a skip under that env is a vacuous-pass
+/// failure).
 fn engine_or_skip() -> Option<PathBuf> {
-    match discover_tsgo(&workspace_root()) {
-        Ok(p) => Some(p),
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+        verter_tsgo_api::toolchain::validation::Capability::Lsp,
+        Some(workspace_root()),
+    );
+    match verter_tsgo_api::toolchain::discovery::find_version_checked(&request) {
+        Ok(resolution) => Some(resolution.path),
         Err(e) => {
             if std::env::var("VERTER_REQUIRE_TSGO").is_ok() {
                 panic!("VERTER_REQUIRE_TSGO is set but tsgo was not found: {e}. A skip would be a vacuous pass.");

@@ -891,10 +891,14 @@ fn record_gate_skip(gate: &str, reason: &str) -> GateSkipRecord {
 /// returning `None` so the caller returns early. A skip is never reported as
 /// success — [`record_gate_skip`] emits a typed marker the harness detects.
 fn find_tsgo_for_gate(test_name: &str) -> Option<String> {
-    match verter_type_runtime::tsgo::find_tsgo_binary() {
-        Ok(bin) => Some(bin),
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+        verter_tsgo_api::toolchain::validation::Capability::Lsp,
+        None,
+    );
+    match verter_tsgo_api::toolchain::discovery::find_version_checked(&request) {
+        Ok(resolution) => Some(resolution.path.to_string_lossy().into_owned()),
         Err(e) => {
-            let reason = format!("tsgo not discoverable: {e:?}");
+            let reason = format!("tsgo not resolvable: {e:?}");
             match tsgo_absence_outcome(require_tsgo()) {
                 TsgoAbsence::HardFail => {
                     panic!("DX_REQUIRE_TSGO=1 but {test_name} cannot run: {reason}")

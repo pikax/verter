@@ -4,7 +4,7 @@
 //! (`major.minor.patch`). Verter supports ONE channel:
 //!
 //! - [`BUNDLED_TSGO_VERSION`] — the known-good floor Verter ships as the
-//!   offline bundled sidecar (Phase B): `7.0.2`.
+//!   offline bundled sidecar (shipped with the packaged product): `7.0.2`.
 //! - [`SUPPORTED_TSGO_RANGE`] — `>=7.0.2, <7.1.0`, STABLE ONLY. A candidate
 //!   qualifies iff its version has no prerelease AND lands in range. Stable
 //!   `7.0.x` patches auto-qualify; `7.1`, `8.0`, RCs, betas, and nightlies do
@@ -21,7 +21,7 @@
 use std::fmt;
 
 /// The bundled offline floor: the known-good tsgo build Verter ships as a
-/// sidecar (the binary itself lands in Phase B; the version contract is here).
+/// sidecar with the packaged product (the version contract lives here).
 pub const BUNDLED_TSGO_VERSION: TsgoVersion = TsgoVersion::new(7, 0, 2);
 
 /// The inclusive lower bound of the supported window.

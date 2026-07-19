@@ -3,8 +3,6 @@
 
 use std::path::{Path, PathBuf};
 
-use verter_tsgo_api::transport::spawn::discover_tsgo;
-
 /// Resolve the workspace root (where `node_modules` lives) from the crate's
 /// manifest dir.
 pub fn workspace_root() -> PathBuf {
@@ -15,16 +13,21 @@ pub fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Discover the tsgo engine binary, honoring the `VERTER_REQUIRE_TSGO` gate.
+/// Resolve the tsgo engine through the 4-tier toolchain resolver
+/// (version-checked, no capability smoke — the tests' own connect paths
+/// re-gate), honoring the `VERTER_REQUIRE_TSGO` gate.
 ///
 /// Returns `Some(path)` when the engine is found. Returns `None` ONLY when the
 /// engine is genuinely absent AND `VERTER_REQUIRE_TSGO` is not set (a no-engine
 /// environment may hermetic-skip). When `VERTER_REQUIRE_TSGO` is set and the
 /// engine is absent, this panics — a skip in the gate is a vacuous-pass failure.
 pub fn engine_or_skip() -> Option<PathBuf> {
-    let root = workspace_root();
-    match discover_tsgo(&root) {
-        Ok(path) => Some(path),
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+        verter_tsgo_api::toolchain::validation::Capability::Lsp,
+        Some(workspace_root()),
+    );
+    match verter_tsgo_api::toolchain::discovery::find_version_checked(&request) {
+        Ok(resolution) => Some(resolution.path),
         Err(e) => {
             if std::env::var("VERTER_REQUIRE_TSGO").is_ok() {
                 panic!(

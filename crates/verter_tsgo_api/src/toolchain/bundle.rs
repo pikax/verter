@@ -1,6 +1,7 @@
 //! The bundled offline fallback: sidecar LOCATION + fallback CONTRACT.
 //!
-//! Phase A defines the contract; Phase B ships the actual sidecar binary.
+//! This module defines the contract; the packaged product ships the actual
+//! sidecar binary (a source checkout has none — higher tiers must resolve).
 //! The layout is derived SOLELY from the running executable's directory —
 //! never from the process CWD, npm package names, or string-concatenated
 //! separators — and is identical for `verter-tsc`, the LSP binary, and future
@@ -8,7 +9,7 @@
 //!
 //! ```text
 //! <host-exe-dir>/tsgo/lib/tsc[.exe]            — the engine sidecar
-//! <host-exe-dir>/tsgo/verter-tsgo-bundle.json  — the integrity manifest (Phase B)
+//! <host-exe-dir>/tsgo/verter-tsgo-bundle.json  — the packager-written integrity manifest
 //! ```
 //!
 //! The contract: a bundled binary that EXISTS but fails validation is a
@@ -23,8 +24,8 @@ use super::platform::{host_platform, TsgoPlatform};
 use super::policy::{TsgoVersion, BUNDLED_TSGO_VERSION};
 
 /// The integrity manifest file name inside the `tsgo/` sidecar directory.
-/// Phase B writes it (digest + provenance for the shipped binary); Phase A
-/// fixes its location so packager and validator cannot drift.
+/// The packager writes it (digest + provenance for the shipped binary); the
+/// location is fixed here so packager and validator cannot drift.
 pub const BUNDLE_INTEGRITY_MANIFEST_FILE: &str = "verter-tsgo-bundle.json";
 
 /// The bundled tsgo version: the pinned supported floor the sidecar ships.
@@ -51,7 +52,7 @@ pub fn bundled_tsgo_path_for(host_exe: &Path, platform: &TsgoPlatform) -> PathBu
         .join(platform.bundled_executable_rel_path())
 }
 
-/// The Phase B integrity manifest path, alongside the sidecar:
+/// The bundle integrity manifest path, alongside the sidecar:
 /// `<host-exe-dir>/tsgo/verter-tsgo-bundle.json`.
 pub fn bundle_integrity_manifest_path(host_exe: &Path) -> Option<PathBuf> {
     host_exe
@@ -136,7 +137,7 @@ mod tests {
         );
     }
 
-    // ── the Phase B integrity manifest location is fixed relative to the
+    // ── the bundle integrity manifest location is fixed relative to the
     //    same exe dir (the packager and the validator cannot drift). ─────────
     #[test]
     fn integrity_manifest_path_sits_alongside_the_sidecar() {

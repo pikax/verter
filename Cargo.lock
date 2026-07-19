@@ -3955,6 +3955,7 @@ dependencies = [
  "verter_scheduler",
  "verter_session",
  "verter_span",
+ "verter_tsgo_api",
  "verter_type_runtime",
  "verter_workspace",
 ]

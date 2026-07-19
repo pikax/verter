@@ -10,15 +10,15 @@
 //!    `node_modules`: the exact host platform package (flat and pnpm store
 //!    layouts), then the `.bin` shim — NEVER a foreign-platform package;
 //! 3. **temp cache** — existing `verter-tsgo-v1/<user>/<triple>/<policy>/<v>/`
-//!    entries, newest supported version first (consume-only in Phase A; the
-//!    downloader is Phase C). The cache tree is trust-checked: no
+//!    entries, newest supported version first (consume-only here; the online
+//!    downloader is what writes them). The cache tree is trust-checked: no
 //!    symlink/reparse-point components, owner-only root on Unix;
 //! 4. **bundled** — the sidecar at `<host-exe-dir>/tsgo/lib/tsc[.exe]`
-//!    (location contract in [`crate::toolchain::bundle`]; the binary ships in
-//!    Phase B). A bundled candidate that EXISTS but fails validation is a
-//!    PRODUCT-INTEGRITY failure, not a "no provider" outcome.
+//!    (location contract in [`crate::toolchain::bundle`]; the packaged product
+//!    ships the binary). A bundled candidate that EXISTS but fails validation
+//!    is a PRODUCT-INTEGRITY failure, not a "no provider" outcome.
 //!
-//! Phase A does NO network access.
+//! Resolution NEVER touches the network.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -37,7 +37,7 @@ pub const ENV_OVERRIDE_VAR: &str = "VERTER_TSGO_BIN";
 const CACHE_DIR_NAME: &str = "verter-tsgo-v1";
 
 /// The marker file a complete cache entry carries (written last by the
-/// Phase C downloader; a directory without it is an incomplete install).
+/// downloader; a directory without it is an incomplete install).
 const READY_MARKER: &str = "READY.json";
 
 /// Which tier a candidate came from (its provenance).
@@ -166,8 +166,8 @@ pub struct Resolution {
 /// Why a resolution failed.
 #[derive(Debug)]
 pub enum ResolveError {
-    /// No candidate validated, and no bundled sidecar exists (e.g. a dev
-    /// checkout before Phase B ships the sidecar). The report lists every
+    /// No candidate validated, and no bundled sidecar exists (e.g. a source
+    /// checkout without the packaged sidecar). The report lists every
     /// rejection and tier note.
     NoUsableCandidate {
         /// Every candidate that failed validation.
@@ -428,7 +428,7 @@ pub fn enumerate_candidates(request: &ResolutionRequest) -> CandidateEnumeration
         }
     }
 
-    // ── Tier 3: the temp update cache (consume-only in Phase A) ────────────
+    // ── Tier 3: the temp update cache (consume-only) ────────────────────
     if let Some(cache_root) = &request.cache_root {
         enumerate_cache_tier(cache_root, platform, &mut out, &mut seen);
     }

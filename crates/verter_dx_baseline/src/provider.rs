@@ -230,11 +230,17 @@ pub fn resolve(
         strict,
         &|| verter_type_runtime::find_node(),
         &|| {
-            // rc-only canonical discovery: env override → workspace `node_modules`
-            // rc `tsc` → npm/npx cache. Passing the workspace root lets a project
-            // that pins `typescript@>=7` resolve its own engine.
-            verter_type_runtime::tsgo::find_tsgo_binary_canonical(Some(Path::new(workspace_root)))
+            // The 4-tier toolchain resolver (`VERTER_TSGO_BIN` → shared PATH →
+            // project-local `node_modules` → update cache → bundled),
+            // version-checked. Passing the workspace root lets a project that
+            // pins `typescript@>=7` resolve its own engine.
+            let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+                verter_tsgo_api::toolchain::validation::Capability::Lsp,
+                Some(Path::new(workspace_root).to_path_buf()),
+            );
+            verter_tsgo_api::toolchain::discovery::find_version_checked(&request)
                 .ok()
+                .map(|resolution| resolution.path.to_string_lossy().into_owned())
         },
         &|tsdk, ws| {
             verter_type_runtime::find_tsserver(Some(tsdk), Some(ws))

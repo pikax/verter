@@ -32,7 +32,6 @@ use verter_tsgo_api::proto::types::{
 };
 use verter_tsgo_api::snapshot::{AccessibleEntries, OverlaySnapshot, RealDirSource};
 use verter_tsgo_api::transport::pipe::StdioPipeTransport;
-use verter_tsgo_api::transport::spawn::discover_tsgo;
 use verter_tsgo_api::{ClientHandle, RequestOptions};
 use verter_workspace::tsgo_virtual_config::{
     augment_tsconfig_bytes, build_virtual_overlay_snapshot,
@@ -73,8 +72,12 @@ fn workspace_root() -> PathBuf {
 /// Discover the engine, honoring `VERTER_REQUIRE_TSGO` (a skip under that env is
 /// a vacuous-pass failure).
 fn engine_or_skip() -> Option<PathBuf> {
-    match discover_tsgo(&workspace_root()) {
-        Ok(p) => Some(p),
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+        verter_tsgo_api::toolchain::validation::Capability::Lsp,
+        Some(workspace_root()),
+    );
+    match verter_tsgo_api::toolchain::discovery::find_version_checked(&request) {
+        Ok(resolution) => Some(resolution.path),
         Err(e) => {
             if std::env::var("VERTER_REQUIRE_TSGO").is_ok() {
                 panic!("VERTER_REQUIRE_TSGO is set but tsgo was not found: {e}. A skip would be a vacuous pass.");

@@ -26,16 +26,18 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Resolve the gated rc `--api` engine: explicit `VERTER_TSGO_BIN` first, else the
-/// shared `verter_tsgo_api` discovery against the workspace root.
+/// Resolve the gated rc `--api` engine through the 4-tier toolchain resolver
+/// (`VERTER_TSGO_BIN` wins; then shared PATH, project-local `node_modules`,
+/// the update cache, and the bundled sidecar), version-checked against the
+/// support policy.
 fn resolve_rc_engine() -> Option<PathBuf> {
-    if let Some(raw) = std::env::var_os("VERTER_TSGO_BIN") {
-        let path = PathBuf::from(raw);
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-    verter_tsgo_api::transport::spawn::discover_tsgo(&workspace_root()).ok()
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+        verter_tsgo_api::toolchain::validation::Capability::Lsp,
+        Some(workspace_root()),
+    );
+    verter_tsgo_api::toolchain::discovery::find_version_checked(&request)
+        .ok()
+        .map(|resolution| resolution.path)
 }
 
 #[cfg(windows)]

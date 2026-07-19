@@ -81,7 +81,6 @@ use crate::jsonrpc::JsonRpcConnection;
 use crate::relay::CarrierInjectionChannel;
 use crate::toolchain::policy::VersionPolicy;
 use crate::transport::pipe_attach::connect_attach_pipe;
-use crate::transport::spawn::discover_tsgo;
 
 /// Seals [`AttachOwnership`]: the ownership markers are a closed set — the
 /// owned/non-owning write-surface split is not extensible from outside.
@@ -196,12 +195,21 @@ impl TsgoLspConnection {
         self.ownership
     }
 
-    /// The crate-internal raw-connection accessor for the toolchain validator
-    /// ([`crate::toolchain::validation`]): an OWNED, freshly-spawned connection
-    /// must run its `initialize` handshake through
-    /// [`TsgoAttach::lsp_handshake`] before any attach composition.
-    pub(crate) fn json_rpc(&self) -> &JsonRpcConnection {
-        &self.conn
+    /// Run the OWNED LSP handshake on this connection (crate-internal — the
+    /// toolchain validator's capability smoke). Delegates to the sole
+    /// handshake-half on [`TsgoAttach<Owned>`]; NO raw-wire accessor is
+    /// exposed (a non-owning connection keeps its deny-by-default surface).
+    pub(crate) async fn lsp_handshake(
+        &self,
+        root_uri: &str,
+        policy: &VersionPolicy,
+    ) -> TsgoApiResult<GateClearance> {
+        if self.ownership != ConnectionOwnership::Owned {
+            return Err(TsgoApiError::Transport(
+                "lsp_handshake must not re-`initialize` an editor-owned connection".into(),
+            ));
+        }
+        TsgoAttach::<Owned>::lsp_handshake_with_policy(&self.conn, root_uri, policy).await
     }
 
     /// Terminate an OWNED throwaway connection: close the wire and kill + reap
@@ -249,6 +257,8 @@ pub struct SpawnOwnTsgoLsp {
 
 impl SpawnOwnTsgoLsp {
     /// Build the source for an explicit engine binary + working directory.
+    /// Engine DISCOVERY lives in [`crate::toolchain::discovery`] (the 4-tier
+    /// resolver) — resolve there, then pass the validated path here.
     #[must_use]
     pub fn new(exe: impl Into<PathBuf>, cwd: impl Into<PathBuf>) -> Self {
         Self {
@@ -257,23 +267,7 @@ impl SpawnOwnTsgoLsp {
         }
     }
 
-    /// Build the source by discovering the engine under `workspace_root`
-    /// (used as the cwd). Discovery searches ONLY the workspace
-    /// `node_modules` — the pnpm `.pnpm` store layout and the classic
-    /// `@typescript/<name>` sibling layout — for the rc `typescript` package's
-    /// `tsc` binary (see [`discover_tsgo`]). There is NO env-var override, NO
-    /// PATH search, and NO npm/npx cache probe; an explicit binary goes
-    /// through [`SpawnOwnTsgoLsp::new`] instead.
-    pub fn discover(workspace_root: impl AsRef<Path>) -> TsgoApiResult<Self> {
-        let root = workspace_root.as_ref();
-        let exe = discover_tsgo(root)?;
-        Ok(Self {
-            exe,
-            cwd: root.to_path_buf(),
-        })
-    }
-
-    /// The discovered/explicit engine binary path.
+    /// The explicit engine binary path.
     #[must_use]
     pub fn exe(&self) -> &Path {
         &self.exe
@@ -726,11 +720,6 @@ pub(crate) fn parse_api_session_handle(
         .unwrap_or("")
         .to_string();
     Ok(ApiSessionHandle { session_id, pipe })
-}
-
-/// Discover the engine + cwd and build the OWNED spawn source in one step.
-pub fn owned_source_for(workspace_root: impl AsRef<Path>) -> TsgoApiResult<SpawnOwnTsgoLsp> {
-    SpawnOwnTsgoLsp::discover(workspace_root)
 }
 
 #[cfg(test)]

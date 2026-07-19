@@ -5,7 +5,7 @@ use tower_lsp_server::{LspService, Server};
 use tracing_subscriber::EnvFilter;
 use verter_lsp::server::VerterLanguageServer;
 use verter_lsp::tsgo::composite::{SharedRendezvous, SharedTsgoOverlay, TsgoCompositeProvider};
-use verter_lsp::tsgo::ipc::{find_tsgo_binary_canonical, TsgoOwnedProvider, TsgoTypeProvider};
+use verter_lsp::tsgo::ipc::{TsgoOwnedProvider, TsgoTypeProvider};
 use verter_lsp::tsgo::resilient as tsgo_resilient;
 use verter_lsp::tsserver::ipc::TsserverTypeProvider;
 use verter_lsp::tsserver::resilient as tsserver_resilient;
@@ -506,12 +506,26 @@ async fn try_spawn_tsgo(
     workspace_root: &str,
     client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
 ) -> Result<Arc<dyn TypeProvider>, String> {
-    // Canonical discovery: explicit `VERTER_TSGO_BIN` override > workspace
-    // `node_modules` (the common real-project case a bare PATH/cache search
-    // misses) > PATH > npm/npx cache.
-    let tsgo_bin = find_tsgo_binary_canonical(Some(std::path::Path::new(workspace_root)))
+    // The 4-tier toolchain resolver (`verter_tsgo_api::toolchain`): shared
+    // (`VERTER_TSGO_BIN`, then PATH) → project-local ancestor `node_modules` →
+    // temp update cache → bundled sidecar; the first WORKING candidate wins
+    // (bounded version probe + support policy + a `--lsp`/`--api` capability
+    // smoke per candidate). A resolution failure is actionable (every
+    // rejection is listed); an existing-but-invalid bundled sidecar is a
+    // product-integrity error.
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+        verter_tsgo_api::toolchain::validation::Capability::Api,
+        Some(std::path::PathBuf::from(workspace_root)),
+    );
+    let resolution = verter_tsgo_api::toolchain::discovery::resolve(&request)
+        .await
         .map_err(|err| err.to_string())?;
-    tracing::info!("found tsgo binary: {tsgo_bin}");
+    let tsgo_bin = resolution.path.to_string_lossy().into_owned();
+    tracing::info!(
+        "resolved tsgo binary: {tsgo_bin} ({} from {})",
+        resolution.version,
+        resolution.provenance,
+    );
 
     // The SPAWN PRECONDITION: owned tsgo is project-bound, so require AT LEAST ONE
     // configured project ANYWHERE under the workspace (bounded — prunes node_modules;
