@@ -132,6 +132,8 @@ The LSP delegates TypeScript type checking to an external **TypeProvider** proce
 
 **Store-backed carrier refresh**: publishing new carrier bytes must invalidate both tsserver cache classes. `TsserverTypeProvider::notify_carrier_changed` advances the plugin's monotonic `carrierStoreRefreshToken`, which makes the plugin compare manifest identities and reload only changed virtual ScriptInfos, then sends the existing content-preserving `updateOpen` touch for cold negative module-resolution entries. The plugin performs its configured-project reload on the next Node event-loop turn to avoid re-entrant graph mutation inside `configurePlugin`; an interactive hover that had to repair a stale current-file surface uses one ordered quickinfo response as the synchronization probe and returns only the subsequent refreshed result. Warm hovers remain single-query. Never replace this with an untyped fallback or a global reload on every edit.
 
+**No-silent-empty hover recovery**: a FAILED provider hover (`Err` from transport/engine restart/torn publish) never degrades to a vanishing tooltip — the carrier hover path resyncs the current file and retries exactly once against the freshly captured request surface (provider-neutral, above the per-route trait), validating and merging against the retry surface. A persistent failure fails closed after the bounded retry; a legitimate empty (`Ok(None)`) is not retried.
+
 **Key modules** (`crates/verter_lsp/src/`):
 
 - `tsgo/` -- TSGO integration (LSP client, resilient wrapper, project sync)
@@ -175,6 +177,8 @@ During `initialized()`, the LSP spawns a `WorkspaceScanner` background task inst
 3. **Tier 2**: Remaining `.vue` files not covered by any tsconfig
 
 TSGO sync is throttled (yield every 10 files) to prevent flooding. The scanner receives priority signals from `did_open` to dynamically re-order its queue. Makes `initialized()` return in <1s instead of blocking for the full scan.
+
+**Configured-project discovery**: `verter_workspace::config::discover_tsconfigs` discovers `tsconfig.json`, `tsconfig.*.json`, AND the JavaScript project config `jsconfig.json` (the configured-project authority for JS-only trees that tsserver/tsgo honor natively). A `jsconfig.json` next to a same-directory `tsconfig.json` is suppressed (TypeScript precedence). `has_configured_ts_project_anywhere` and `is_project_config` treat it identically, and `is_config_file` rebuilds the registry on jsconfig edits. Without the jsconfig arm, carriers under a jsconfig-only directory resolve `NoProject` and the tsgo carrier admission gate fails every feature closed (the js-lax D7 defect family).
 
 **Key module**: `crates/verter_lsp/src/workspace_scanner.rs` -- `WorkspaceScannerHandle`, `spawn_workspace_scanner()`, priority sorting, throttled sync loop.
 
