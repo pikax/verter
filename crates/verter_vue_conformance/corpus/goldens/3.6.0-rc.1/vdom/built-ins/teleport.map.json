@@ -4,8 +4,8 @@
     "cases/built-ins/teleport.vue"
   ],
   "names": [],
-  "mappings": ";;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;AAExB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;wBAInB,aAEW;IAFD,EAAE,EAAC,MAAM;IAAE,QAAQ,GAAG,UAAI;;8BAClC,oBAA8B,OAA3B,KAAK,EAAC,SAAS,IAAC,SAAO",
+  "mappings": ";;;wBAOE,aAEW;IAFD,EAAE,EAAC,MAAM;IAAE,QAAQ,GAAG,WAAI;;8BAClC,oBAA8B,OAA3B,KAAK,EAAC,SAAS,IAAC,SAAO",
   "sourcesContent": [
-    "<script setup>\nimport { ref } from \"vue\"\n\nconst open = ref(true)\n</script>\n\n<template>\n  <Teleport to=\"body\" :disabled=\"!open\">\n    <p class=\"overlay\">Overlay</p>\n  </Teleport>\n</template>\n"
+    "\n  <Teleport to=\"body\" :disabled=\"!open\">\n    <p class=\"overlay\">Overlay</p>\n  </Teleport>\n"
   ]
 }

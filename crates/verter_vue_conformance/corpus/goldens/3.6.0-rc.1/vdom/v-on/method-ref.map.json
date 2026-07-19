@@ -4,8 +4,8 @@
     "cases/v-on/method-ref.vue"
   ],
   "names": [],
-  "mappings": ";;;;;;;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;wBAInB,oBAEO,UAFA,QAAM,EAAE,QAAQ;IACrB,oBAAqB,gBAAb,MAAI",
+  "mappings": ";;;wBAKE,oBAEO,UAFA,QAAM,EAAE,eAAQ;IACrB,oBAAqB,gBAAb,MAAI",
   "sourcesContent": [
-    "<script setup>\nfunction onSubmit() {}\n</script>\n\n<template>\n  <form @submit=\"onSubmit\">\n    <button>Send</button>\n  </form>\n</template>\n"
+    "\n  <form @submit=\"onSubmit\">\n    <button>Send</button>\n  </form>\n"
   ]
 }

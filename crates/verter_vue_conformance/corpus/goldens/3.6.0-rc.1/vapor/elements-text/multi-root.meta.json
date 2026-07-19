@@ -4,7 +4,7 @@
   "backend": "vapor",
   "generator": {
     "name": "@verter/vue-conformance-oracle",
-    "version": 1
+    "version": 2
   },
   "versions": {
     "vue": "3.6.0-rc.1",
@@ -18,13 +18,16 @@
     "sha256": "0ff2a0e0e30c3bcd3851d83fdf7be02e757c1ebe2aa37c56cfd3b8a4f1d1ff8d"
   },
   "options": {
-    "sha256": "d95e1bcc54126950ede92ea082bbd864728ac775a34c0a6c19bb6ad69788e056",
+    "sha256": "26d80c85b02b014e87703c3215cca1da268f0d7e839aa08e235d15fa4825cf5e",
     "summary": {
       "backend": "vapor",
       "vapor": true,
       "filename": "cases/elements-text/multi-root.vue",
       "id": "elements-text/multi-root",
       "pipeline": "compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": false,
       "sourceMap": true,
       "postprocess": null
     }
@@ -32,8 +35,8 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/elements-text/multi-root.js",
-      "sha256": "47435c8a3b906e71e8b3c40aa53fc2ca9f9f2d50855bb4680ef539cf8f92d5ee",
-      "bytes": 308
+      "sha256": "a9180efa9faedb739bc0ce2cd3361492524735b98ef1530124155dbea2bc373f",
+      "bytes": 373
     },
     "map": {
       "path": "goldens/3.6.0-rc.1/vapor/elements-text/multi-root.map.json",

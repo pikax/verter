@@ -4,7 +4,7 @@
   "backend": "vapor",
   "generator": {
     "name": "@verter/vue-conformance-oracle",
-    "version": 1
+    "version": 2
   },
   "versions": {
     "vue": "3.6.0-rc.1",
@@ -18,13 +18,16 @@
     "sha256": "89bf03917610b3b8bbf4ff8e5314b8e2f36eeccca17340088749365179b93a07"
   },
   "options": {
-    "sha256": "c4988594ebe9c354f618968eb56cdf6554af7f2a7853992c9cf7b8710909811e",
+    "sha256": "fc90dc1306ce647665bf2a33c8bea34cef523ad009eba7167d14ea261e58f3f4",
     "summary": {
       "backend": "vapor",
       "vapor": true,
       "filename": "cases/v-for/object.vue",
       "id": "v-for/object",
-      "pipeline": "compileScript:inlineTemplate",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
       "sourceMap": true,
       "postprocess": null
     }
@@ -32,12 +35,12 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/v-for/object.js",
-      "sha256": "bc0a1d876b282cbfa0f1676f51954fce1ce41166dff499202b5e6cfd6cdc769d",
-      "bytes": 807
+      "sha256": "8cfc848ee8a90fa94a0a095db60f1e51f0364b7a0ddd941eeaeb26b13200bd6a",
+      "bytes": 1100
     },
     "map": {
       "path": "goldens/3.6.0-rc.1/vapor/v-for/object.map.json",
-      "sha256": "9b94b6c6d3debe79b92aeee0ce31a824bad55092f06bfa1725cc804f26053d49"
+      "sha256": "c77f177a0141b5cf61dbc9a942d7727abdbf9c4f32e707c523d5771fc21f9a45"
     }
   },
   "disposition": "compiled",

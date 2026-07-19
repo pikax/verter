@@ -4,8 +4,8 @@
     "cases/v-bind/prop-attr-modifiers.vue"
   ],
   "names": [],
-  "mappings": ";;;;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;AAExB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AACxB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;wBAInB,oBAA0D;IAApD,eAAY,EAAO,UAAI;IAAG,SAAM,EAAO,WAAK",
+  "mappings": ";;;;;wBAQE,oBAA0D;IAApD,eAAY,EAAO,WAAI;IAAG,SAAM,EAAO,YAAK",
   "sourcesContent": [
-    "<script setup>\nimport { ref } from \"vue\"\n\nconst text = ref(\"inner\")\nconst dataX = ref(\"x\")\n</script>\n\n<template>\n  <div :text-content.prop=\"text\" :data-x.attr=\"dataX\"></div>\n</template>\n"
+    "\n  <div :text-content.prop=\"text\" :data-x.attr=\"dataX\"></div>\n"
   ]
 }

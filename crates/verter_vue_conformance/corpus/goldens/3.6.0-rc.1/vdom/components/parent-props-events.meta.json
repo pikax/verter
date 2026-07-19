@@ -4,7 +4,7 @@
   "backend": "vdom",
   "generator": {
     "name": "@verter/vue-conformance-oracle",
-    "version": 1
+    "version": 2
   },
   "versions": {
     "vue": "3.6.0-rc.1",
@@ -18,13 +18,16 @@
     "sha256": "2fa6376bb5b1a4e614993a255b11541c9592b0f2429e09320920f4be022a4482"
   },
   "options": {
-    "sha256": "37656236abba3d5dcc91d824e93c928ec8b14285d0f531802667b0cd06ed579d",
+    "sha256": "ee6aab64bf4f3d125c2aa98aaef8658d9c54e93d89e6f63c7e3926f4c080e351",
     "summary": {
       "backend": "vdom",
       "vapor": false,
       "filename": "cases/components/parent-props-events.vue",
       "id": "components/parent-props-events",
-      "pipeline": "compileScript:inlineTemplate",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
       "sourceMap": true,
       "postprocess": null
     }
@@ -32,12 +35,12 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vdom/components/parent-props-events.js",
-      "sha256": "574033e34502ba486d951f3bd6da9b97161855629abdd146c6bc2eb4d3993f7d",
-      "bytes": 359
+      "sha256": "2eefe819516ecdd990b77b4705e2438d74baa7d85253d20a7100ecdd37d2ce57",
+      "bytes": 659
     },
     "map": {
       "path": "goldens/3.6.0-rc.1/vdom/components/parent-props-events.map.json",
-      "sha256": "223629260257da27e4c86eac9cac402871d74ddc17f10f97401e939484d2b8fa"
+      "sha256": "742892df5591148709431a75f8f36b51f65654d9c50979813d86a5ed5e8fafdc"
     }
   },
   "disposition": "compiled",

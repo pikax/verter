@@ -20,6 +20,24 @@
  * regenerates everything in-memory and fails on any missing / drifted /
  * stale committed artifact.
  *
+ * TOPOLOGY: the goldens use the official NON-inline emission — the same
+ * `_sfc_main`-shaped module with a SEPARATE render function that Verter
+ * ships at runtime (`verter_session::assemble_vue_main_module`). Script-setup
+ * cells: `compileScript({ inlineTemplate: false })` for the component object
+ * + `compileTemplate({ compilerOptions: { bindingMetadata } })` for the
+ * separate render fn (identical invocation shape for VDOM via compiler-dom
+ * and Vapor via compiler-vapor — vapor's render is a separate exported
+ * function just like VDOM's), assembled as
+ * `[render import line][script component object][function render][_sfc_main.render
+ * = render][export default _sfc_main]`. Template-only cells get the
+ * bundler-equivalent `const _sfc_main = {}` + attach wrapper. The official
+ * `inlineTemplate: true` topology (setup returns the render closure) is a
+ * DIFFERENT, behaviorally equivalent shape Verter does not emit (tracked as
+ * a future feature in `docs/arch/next/vue-inline-template-runtime.md`) —
+ * comparing against it makes every cell fail on assembly topology, not real
+ * divergence. The vendored `.map.json` is the render-fn (compileTemplate)
+ * map; the script block's own map is not vendored.
+ *
  * Guarantees:
  *   - PINNED: all four Vue packages AND esbuild must resolve to the exact
  *     versions declared in `./vue-golden-lib.mjs`; the generator refuses to
@@ -32,13 +50,13 @@
  *     timestamps, no absolute paths (all recorded paths are corpus-relative
  *     POSIX). Re-running with the same pins reproduces identical bytes.
  *
- * TypeScript cells: `compileScript` keeps TS syntax in its emitted module
+ * TypeScript cells: `compileScript` keeps TS syntax in its emitted script
  * (the official SFC loaders strip types downstream). For `lang="ts"` cells
- * the emitted module is type-stripped with the pinned esbuild
+ * the emitted script is type-stripped with the pinned esbuild
  * (`{ loader: "ts" }` only — no format conversion, so PURE annotations and
- * the official export shape survive) and the compiler's source map is
- * chained through the strip. Every stripped cell records the post-process in
- * its metadata. All other cells vendor the raw compiler bytes untouched.
+ * the official export shape survive). Every stripped cell records the
+ * post-process in its metadata. All other cells vendor the raw compiler
+ * bytes untouched.
  *
  * Usage:
  *   node gen-vue-goldens.mjs           # clean regenerate (rewrites goldens + manifest)
@@ -222,11 +240,130 @@ function pushDiagnostic(diagnostics, kind, error) {
 const ERROR_KINDS = new Set(["parse-error", "thrown", "returned-error"]);
 
 /**
+ * Source-map VLQ codec + SFC re-anchoring. `compileTemplate` emits original
+ * positions RELATIVE to the template block content (the bundler re-anchors
+ * them later); Verter's template maps are SFC-absolute. The oracle vendors
+ * SFC-absolute maps so both sides share one coordinate basis — the same
+ * re-anchoring `@vitejs/plugin-vue` applies (`loc.start.line - 1`, the
+ * template tag's line; columns preserved).
+ */
+const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+function decodeVlq(segment, pos) {
+  let shift = 0;
+  let value = 0;
+  for (;;) {
+    const digit = B64.indexOf(segment[pos.value++]);
+    if (digit < 0) throw new Error(`invalid base64 in mappings segment ${segment}`);
+    value |= (digit & 31) << shift;
+    if ((digit & 32) === 0) break;
+    shift += 5;
+  }
+  const negative = value & 1;
+  value >>= 1;
+  return negative ? -value : value;
+}
+
+function encodeVlq(out, value) {
+  let vlq = value < 0 ? (-value << 1) | 1 : value << 1;
+  for (;;) {
+    let digit = vlq & 31;
+    vlq >>>= 5;
+    if (vlq > 0) digit |= 32;
+    out.value += B64[digit];
+    if (vlq === 0) break;
+  }
+}
+
+function reAnchorMapLines(map, lineOffset) {
+  if (!map || typeof map.mappings !== "string" || lineOffset === 0) return map;
+  // Decode to absolute rows (fields: genCol, srcIdx, srcLine, srcCol, nameIdx).
+  const rows = [];
+  const prev = [0, 0, 0, 0, 0];
+  for (const line of map.mappings.split(";")) {
+    prev[0] = 0;
+    const rowLine = [];
+    if (line) {
+      for (const segment of line.split(",")) {
+        const pos = { value: 0 };
+        const fields = [];
+        while (pos.value < segment.length && fields.length < 5) {
+          const delta = decodeVlq(segment, pos);
+          prev[fields.length] += delta;
+          fields.push(prev[fields.length]);
+        }
+        if (fields.length >= 4) fields[2] += lineOffset; // original line
+        rowLine.push(fields);
+      }
+    }
+    rows.push(rowLine);
+  }
+  // Re-encode (field 0 resets per line; fields 1..4 run across lines).
+  const encPrev = [0, 0, 0, 0, 0];
+  const mappings = rows
+    .map((rowLine) => {
+      encPrev[0] = 0;
+      return rowLine
+        .map((fields) => {
+          const out = { value: "" };
+          for (let i = 0; i < fields.length; i += 1) {
+            encodeVlq(out, fields[i] - encPrev[i]);
+            encPrev[i] = fields[i];
+          }
+          return out.value;
+        })
+        .join(",");
+    })
+    .join(";");
+  return { ...map, mappings };
+}
+
+function splitRenderImport(code) {
+  const match = code.match(/^import \{[^}]*\} from ["']vue["'];?[ \t]*\n/);
+  if (!match) {
+    return { importLine: null, body: code };
+  }
+  return {
+    importLine: match[0].trimEnd(),
+    body: code.slice(match[0].length).replace(/^\n+/, ""),
+  };
+}
+
+/**
+ * Assemble the official NON-inline module in the shape a bundler host (and
+ * Verter's `assemble_vue_main_module`) ships: the template helper import
+ * line first, then the component object, then the separate render function,
+ * then the attach + default export. This is the apples-to-apples counterpart
+ * of Verter's shipped runtime Main — the official `inlineTemplate: true`
+ * topology (setup returns the render closure) is a DIFFERENT, behaviorally
+ * equivalent shape that is not what Verter emits (tracked as a future
+ * feature in `docs/arch/next/vue-inline-template-runtime.md`).
+ *
+ * - `renderCode` is a full `compileTemplate` module; its import line is
+ *   hoisted to the top and its `export function render` becomes the
+ *   attachable `function render`.
+ * - `scriptCode` (when present) has its `export default` rebound to
+ *   `const _sfc_main =`.
+ */
+function assembleNonInline({ importLine, body, scriptCode }) {
+  const renderBody = body.replace("export function render(", "function render(");
+  const parts = [];
+  if (importLine) parts.push(importLine);
+  if (scriptCode != null) {
+    parts.push(scriptCode.replace("export default", "const _sfc_main ="));
+  } else {
+    parts.push("const _sfc_main = {}");
+  }
+  parts.push(renderBody, "_sfc_main.render = render", "export default _sfc_main");
+  return parts.join("\n");
+}
+
+/**
  * Compile one SFC source for one backend. Returns
  * `{ code, map, diagnostics, postprocess }` — `code`/`map` are `null` when the
  * official compiler rejects the cell.
  */
-function compileCell({ caseId, source, backend }) {
+async function compileCell({ caseId, source, backend }) {
   const vapor = backend === "vapor";
   const compiler = vapor ? compilerVapor : compilerDom;
   const filename = `cases/${caseId}.vue`;
@@ -246,24 +383,56 @@ function compileCell({ caseId, source, backend }) {
 
   try {
     if (descriptor.scriptSetup) {
-      pipeline = "compileScript:inlineTemplate";
-      const result = compileScript(descriptor, {
+      pipeline = "compileScript:nonInline+compileTemplate";
+      // The render is compiled separately with the script's bindings — the
+      // official non-inline invocation, identical in shape for VDOM
+      // (compiler-dom) and Vapor (compiler-vapor; vapor's render is a
+      // separate exported function just like VDOM's).
+      const script = compileScript(descriptor, {
         id: caseId,
         vapor,
-        inlineTemplate: true,
+        inlineTemplate: false,
         fs: hermeticCompileFs,
-        templateOptions: {
-          compiler,
-          vapor,
-          sourceMap: true,
-          compilerOptions: { onError, onWarn },
+      });
+      const render = compileTemplate({
+        source: descriptor.template?.content ?? "",
+        filename,
+        id: caseId,
+        compiler,
+        vapor,
+        sourceMap: true,
+        compilerOptions: {
+          bindingMetadata: script.bindings,
+          onError,
+          onWarn,
         },
       });
-      code = result.content;
-      map = result.map ?? null;
+      for (const error of render.errors ?? []) {
+        pushDiagnostic(diagnostics, "returned-error", error);
+      }
+      let scriptCode = script.content;
+      // The official SFC pipeline strips TS types after compileScript;
+      // mirror it for `lang="ts"` cells so the vendored golden is plain JS
+      // (the render fn is plain JS already; only the script needs the strip).
+      if (descriptor.scriptSetup.lang === "ts") {
+        const stripped = await transform(scriptCode, { loader: "ts" });
+        scriptCode = stripped.code;
+        postprocess = {
+          tool: "esbuild",
+          version: ESBUILD_VERSION,
+          options: { loader: "ts" },
+          reason:
+            "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)",
+        };
+      }
+      const { importLine, body } = splitRenderImport(render.code);
+      code = assembleNonInline({ importLine, body, scriptCode });
+      // compileTemplate original positions are template-content-relative;
+      // re-anchor them SFC-absolute (the same offset the bundler applies).
+      map = reAnchorMapLines(render.map ?? null, (descriptor.template?.loc.start.line ?? 1) - 1);
     } else {
       pipeline = "compileTemplate";
-      const result = compileTemplate({
+      const render = compileTemplate({
         source: descriptor.template?.content ?? "",
         filename,
         id: caseId,
@@ -272,11 +441,14 @@ function compileCell({ caseId, source, backend }) {
         sourceMap: true,
         compilerOptions: { onError, onWarn },
       });
-      code = result.code;
-      map = result.map ?? null;
-      for (const error of result.errors ?? []) {
+      for (const error of render.errors ?? []) {
         pushDiagnostic(diagnostics, "returned-error", error);
       }
+      const { importLine, body } = splitRenderImport(render.code);
+      code = assembleNonInline({ importLine, body, scriptCode: null });
+      // compileTemplate original positions are template-content-relative;
+      // re-anchor them SFC-absolute (the same offset the bundler applies).
+      map = reAnchorMapLines(render.map ?? null, (descriptor.template?.loc.start.line ?? 1) - 1);
     }
   } catch (error) {
     pushDiagnostic(diagnostics, "thrown", error);
@@ -284,45 +456,13 @@ function compileCell({ caseId, source, backend }) {
 
   const rejected = code === null || diagnostics.some((d) => ERROR_KINDS.has(d.kind));
 
-  // The official SFC pipeline strips TS types after compileScript; mirror it
-  // for `lang="ts"` cells so the vendored golden is plain JS. The compiler's
-  // source map is chained through the strip (esbuild consumes the input
-  // sourceMappingURL), keeping the vendored map anchored to the SFC.
-  if (!rejected && descriptor.scriptSetup?.lang === "ts") {
-    const inputMap = map
-      ? `\n//# sourceMappingURL=data:application/json;base64,${Buffer.from(
-          JSON.stringify(map),
-        ).toString("base64")}`
-      : "";
-    return transform(code + inputMap, {
-      loader: "ts",
-      sourcemap: true,
-      sourcefile: filename,
-    }).then((stripped) => {
-      postprocess = {
-        tool: "esbuild",
-        version: ESBUILD_VERSION,
-        options: { loader: "ts", sourcemap: true, sourcefile: filename },
-        reason:
-          "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)",
-      };
-      return {
-        code: stripped.code,
-        map: stripped.map ? JSON.parse(stripped.map) : null,
-        diagnostics,
-        pipeline,
-        postprocess,
-      };
-    });
-  }
-
-  return Promise.resolve({
+  return {
     code: rejected ? null : code,
     map: rejected ? null : map,
     diagnostics,
     pipeline,
     postprocess,
-  });
+  };
 }
 
 /** Sorted unique `{ imported, alias }` rows imported from `vue` in `code`. */
@@ -391,6 +531,9 @@ async function buildArtifacts(versions) {
         filename: `cases/${caseId}.vue`,
         id: caseId,
         pipeline,
+        topology: "non-inline",
+        inlineTemplate: false,
+        bindingMetadata: pipeline === "compileScript:nonInline+compileTemplate",
         sourceMap: true,
         postprocess,
       };

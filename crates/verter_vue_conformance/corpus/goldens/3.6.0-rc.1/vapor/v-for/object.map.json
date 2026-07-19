@@ -3,9 +3,11 @@
   "sources": [
     "cases/v-for/object.vue"
   ],
-  "names": [],
-  "mappings": ";;;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;;AAExB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;+BAKP,YAAM;;;sDAAiB,eAAI,IAAG,IAAE,oBAAG,gBAAK;;uBAA1B,IAAI",
+  "names": [
+    "scores"
+  ],
+  "mappings": ";;;;;;;+BAQgCA,WAAM;;;sDAAiB,eAAI,IAAG,IAAE,oBAAG,gBAAK;;uBAA1B,IAAI",
   "sourcesContent": [
-    "<script setup>\nimport { ref } from \"vue\"\n\nconst scores = ref({ alice: 3, bob: 5 })\n</script>\n\n<template>\n  <ul>\n    <li v-for=\"(score, name) in scores\" :key=\"name\">{{ name }}: {{ score }}</li>\n  </ul>\n</template>\n"
+    "\n  <ul>\n    <li v-for=\"(score, name) in scores\" :key=\"name\">{{ name }}: {{ score }}</li>\n  </ul>\n"
   ]
 }

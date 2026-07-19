@@ -4,7 +4,7 @@
   "backend": "vapor",
   "generator": {
     "name": "@verter/vue-conformance-oracle",
-    "version": 1
+    "version": 2
   },
   "versions": {
     "vue": "3.6.0-rc.1",
@@ -18,13 +18,16 @@
     "sha256": "e4161885c675cfa4536f3a940b5fd6108d9ca656482a4291a26ad5bdd9f5cca7"
   },
   "options": {
-    "sha256": "09207689d97f41265abf3e6bcd875e7abf388642d913bc60babac850b54c73de",
+    "sha256": "f8c228b0183090558516393b484d6d5bb693faf99fa0c729263d8eebfaf8b12b",
     "summary": {
       "backend": "vapor",
       "vapor": true,
       "filename": "cases/conditionals/if-else-if-else.vue",
       "id": "conditionals/if-else-if-else",
-      "pipeline": "compileScript:inlineTemplate",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
       "sourceMap": true,
       "postprocess": null
     }
@@ -32,12 +35,12 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/conditionals/if-else-if-else.js",
-      "sha256": "da7bae7d5a87006f4b3d925b0aec08ff2faf9ab0f4b3098f86de0647c6cfa322",
-      "bytes": 948
+      "sha256": "e42d68e89b298219ad6fb497b3b7d6f0fb1e2fa8eefa6e4fad65015e2ea2a777",
+      "bytes": 1239
     },
     "map": {
       "path": "goldens/3.6.0-rc.1/vapor/conditionals/if-else-if-else.map.json",
-      "sha256": "8a0140014a380b713a008d2344300b7923c95b461f6061d0f20d8d2b2fed437f"
+      "sha256": "30c8b06cbe3063feeb35121af2b3245b17d8b3ddc6067244f4488d9cdf0b0a48"
     }
   },
   "disposition": "compiled",

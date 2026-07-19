@@ -4,8 +4,8 @@
     "cases/v-bind/same-name-shorthand.vue"
   ],
   "names": [],
-  "mappings": ";;;;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;AAExB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AACnB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;wBAIpB,oBAAsB;IAAhB,EAAE,EAAF,QAAE;IAAE,KAAK,EAAL,WAAK",
+  "mappings": ";;;;;wBAQE,oBAAsB;IAAhB,EAAE,EAAF,SAAE;IAAE,KAAK,EAAL,YAAK",
   "sourcesContent": [
-    "<script setup>\nimport { ref } from \"vue\"\n\nconst id = ref(\"a1\")\nconst title = ref(\"Hi\")\n</script>\n\n<template>\n  <div :id :title></div>\n</template>\n"
+    "\n  <div :id :title></div>\n"
   ]
 }

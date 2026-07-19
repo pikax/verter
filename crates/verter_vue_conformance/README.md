@@ -1,9 +1,26 @@
 # verter_vue_conformance
 
 Hermetic official **Vue 3.6 RC** compiler conformance goldens for Verter's VDOM
-and Vapor backends. This crate houses the seed corpus and the VENDORED oracle
-artifacts produced by the pinned official Vue RC toolchain; the structural
-comparator that checks Verter output against these goldens is a later slice.
+and Vapor backends, and the structural comparator that checks Verter's shipped
+output against them. This crate houses the seed corpus, the VENDORED oracle
+artifacts produced by the pinned official Vue RC toolchain, and the OXC
+structural comparator + seed conformance suite.
+
+## Oracle topology (non-inline)
+
+The vendored goldens use the official **non-inline** emission — the same
+`_sfc_main`-shaped module with a separate `function render` that Verter ships
+at runtime (`verter_session::assemble_vue_main_module`). Script-setup cells:
+`compileScript({ inlineTemplate: false })` + `compileTemplate({ compilerOptions:
+{ bindingMetadata } })` (identical invocation shape for VDOM and Vapor),
+assembled host-style; template-only cells get the bundler-equivalent
+`const _sfc_main = {}` + attach wrapper. The official `inlineTemplate: true`
+production topology is a different, behaviorally equivalent shape Verter does
+not emit — comparing against it makes every cell fail on assembly topology,
+not real divergence (tracked in
+[`docs/arch/next/vue-inline-template-runtime.md`](../../../docs/arch/next/vue-inline-template-runtime.md)).
+Vendored `.map.json` files are the compileTemplate maps re-anchored
+SFC-absolute (the same line offset the bundler applies).
 
 ## Layout
 
@@ -79,10 +96,10 @@ goldens with reversible in-memory mutation recipes (plant → require verdict �
 restore; each plant proven to have applied): cosmetic mutations (reformat,
 parens, ordinary comment, alpha-renames incl. helper aliases) PASS;
 behavioral mutations FAIL on their own axis — VDOM (`createElementBlock`→
-`createElementVNode`, patch flag `128`→`127`, drop `openBlock`, rename
-exported `render`, rename member property), Vapor (`setText`→`setHtml`,
-setter moved out of `_renderEffect`, retargeted setter binding, reordered
-effect setters, `_template` payload/flag, dropped `_delegateEvents`,
+`createElementVNode`, patch flag `128`→`127`, drop `openBlock`, rename the
+exported `_sfc_main` binding, rename member property), Vapor (`setText`→
+`setHtml`, setter moved out of `_renderEffect`, retargeted setter binding,
+reordered effect setters, `_template` payload/flag, dropped `_delegateEvents`,
 `$evtclick` ABI rename), and common (source-authored rename, diagnostics
 reorder, PURE-comment drop/move, import source/imported-helper change,
 missing source-map row + round-trip control).
@@ -90,14 +107,22 @@ missing source-map row + round-trip control).
 ## Seed conformance run + tracked dispositions
 
 `tests/cases/seed_conformance.rs` compiles all 32 seed SFCs with Verter for
-BOTH backends (`verter_compiler::compile`, `force_vapor` for vapor), assembles
-the module host-style, and compares it against the vendored golden (code +
-diagnostics; source maps for template-only cells). Every cell Verter
-currently fails is tracked in `corpus/known-divergences.json` with its exact
-comparator signature + a curated note — **the parity backlog**. The suite is
-green-with-known-gaps: a new/changed signature fails the suite, and so does a
-stale entry for a cell that starts passing (parity improved — remove the
-entry). Regenerate signatures after intentional changes:
+BOTH backends (`verter_compiler::compile`, `force_vapor` for vapor) and
+assembles the runtime Main through the GENUINE shipped pipeline — no hand
+copy: `verter_compiler::framework_common::vue_bridge::vue_result_to_runtime_bundle`
+(the carrier's real `VerterCompileResult` → `RuntimeCompileOutput`
+conversion) → `verter_session::assemble_vue_main_module` (the host's real
+assembly). The harness `CompileProfile` sets `is_production: true` so the
+assembly omits the bundler-only `__file`/HMR suffixes the compiler-level
+oracle lacks (block codegen itself stays dev, matching the official
+`compileTemplate` defaults). It compares each cell against the vendored
+golden (code + diagnostics + template source-map original anchors, both
+sides SFC-absolute). Every cell Verter currently fails is tracked in
+`corpus/known-divergences.json` with its exact comparator signature + a
+curated note — **the parity backlog**. The suite is green-with-known-gaps: a
+new/changed signature fails the suite, and so does a stale entry for a cell
+that starts passing (parity improved — remove the entry). Regenerate
+signatures after intentional changes:
 
 ```bash
 VERTER_CONFORMANCE_UPDATE=1 cargo test -p verter_vue_conformance --test main seed_conformance

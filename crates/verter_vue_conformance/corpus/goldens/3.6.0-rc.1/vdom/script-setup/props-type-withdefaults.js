@@ -1,6 +1,6 @@
+import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"
 import { defineComponent as _defineComponent } from "vue";
-import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue";
-export default /* @__PURE__ */ _defineComponent({
+const _sfc_main = /* @__PURE__ */ _defineComponent({
   __name: "props-type-withdefaults",
   props: {
     item: { type: Object, required: true },
@@ -8,19 +8,20 @@ export default /* @__PURE__ */ _defineComponent({
     tags: { type: Array, required: false, default: () => [] }
   },
   emits: ["pick", "close"],
-  setup(__props, { emit: __emit }) {
+  setup(__props, { expose: __expose, emit: __emit }) {
+    __expose();
     const props = __props;
     const emit = __emit;
-    return (_ctx, _cache) => {
-      return _openBlock(), _createElementBlock(
-        "div",
-        {
-          onClick: _cache[0] || (_cache[0] = ($event) => emit("pick", props.item))
-        },
-        _toDisplayString(__props.item.name) + " (" + _toDisplayString(__props.size) + ") " + _toDisplayString(__props.tags.length),
-        1
-        /* TEXT */
-      );
-    };
+    const __returned__ = { props, emit };
+    Object.defineProperty(__returned__, "__isScriptSetup", { enumerable: false, value: true });
+    return __returned__;
   }
 });
+
+function render(_ctx, _cache, $props, $setup, $data, $options) {
+  return (_openBlock(), _createElementBlock("div", {
+    onClick: _cache[0] || (_cache[0] = $event => ($setup.emit('pick', $setup.props.item)))
+  }, _toDisplayString($props.item.name) + " (" + _toDisplayString($props.size) + ") " + _toDisplayString($props.tags.length), 1 /* TEXT */))
+}
+_sfc_main.render = render
+export default _sfc_main

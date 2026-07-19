@@ -64,6 +64,7 @@ pub mod cache_schema;
 #[cfg(test)]
 mod cold_artifact_dedup_tests;
 mod compile;
+pub use compile::assemble_vue_main_module;
 #[cfg(test)]
 mod compile_blockers_snapshot_generation_tests;
 #[cfg(test)]

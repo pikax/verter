@@ -4,7 +4,7 @@
   "backend": "vapor",
   "generator": {
     "name": "@verter/vue-conformance-oracle",
-    "version": 1
+    "version": 2
   },
   "versions": {
     "vue": "3.6.0-rc.1",
@@ -18,21 +18,22 @@
     "sha256": "dea7b00c5a9bc412e9c4e2e02d9ef55436a4e827f80e8fc0e14e96b0a0fce377"
   },
   "options": {
-    "sha256": "7f133c62230d65f95aa59b7afc620d7ce5c6bc5e45b815fc4af12c02b0898333",
+    "sha256": "2b35db166c4bd093708fb71eda6359af69329683bd3cbc3d62674185e5e2e8e4",
     "summary": {
       "backend": "vapor",
       "vapor": true,
       "filename": "cases/script-setup/props-type-withdefaults.vue",
       "id": "script-setup/props-type-withdefaults",
-      "pipeline": "compileScript:inlineTemplate",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
       "sourceMap": true,
       "postprocess": {
         "tool": "esbuild",
         "version": "0.28.0",
         "options": {
-          "loader": "ts",
-          "sourcemap": true,
-          "sourcefile": "cases/script-setup/props-type-withdefaults.vue"
+          "loader": "ts"
         },
         "reason": "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)"
       }
@@ -41,12 +42,12 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/script-setup/props-type-withdefaults.js",
-      "sha256": "97adb210b6e65650c4f847072b8802724ec6267870ed6d3951460036da614163",
-      "bytes": 1035
+      "sha256": "e1700bc78ee34c1f1a64605d5996d7ba4c0fe645743f50b238b1f9586b7193a3",
+      "bytes": 1337
     },
     "map": {
       "path": "goldens/3.6.0-rc.1/vapor/script-setup/props-type-withdefaults.map.json",
-      "sha256": "faa2c797565cc1b088ec858ba4b8259ca322a58c690e252c374b7cdd4621dbec"
+      "sha256": "d9be0f3fb783d2e500b49a56d5d217d1ef8e187716874ef62ce95c1fa5749eff"
     }
   },
   "disposition": "compiled",

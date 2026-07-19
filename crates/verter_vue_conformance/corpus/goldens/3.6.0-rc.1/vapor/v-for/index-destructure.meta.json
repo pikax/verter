@@ -4,7 +4,7 @@
   "backend": "vapor",
   "generator": {
     "name": "@verter/vue-conformance-oracle",
-    "version": 1
+    "version": 2
   },
   "versions": {
     "vue": "3.6.0-rc.1",
@@ -18,13 +18,16 @@
     "sha256": "266c416bb7671c6be04ac24c26336f607badc2699b1814a64fc9a2269081b20c"
   },
   "options": {
-    "sha256": "d9ae6cfa09e2c2ff4dfece7beebec6758aeb8bbaa87a7b102f923c3161166171",
+    "sha256": "2216b443807938b35584cf8512a5a98ebc9ab4c9fa09f66d79fca5050b4d8a86",
     "summary": {
       "backend": "vapor",
       "vapor": true,
       "filename": "cases/v-for/index-destructure.vue",
       "id": "v-for/index-destructure",
-      "pipeline": "compileScript:inlineTemplate",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
       "sourceMap": true,
       "postprocess": null
     }
@@ -32,12 +35,12 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/v-for/index-destructure.js",
-      "sha256": "0c64c60027f8a1bd07a05fd33830e990bf5015fd73acbbd54cfd20754b239e8e",
-      "bytes": 864
+      "sha256": "48b845a749f461a9c1c862e336102bbd0f18d573a41d6f710eaf41311c29a353",
+      "bytes": 1156
     },
     "map": {
       "path": "goldens/3.6.0-rc.1/vapor/v-for/index-destructure.map.json",
-      "sha256": "b5bae2addc0afb968dea1879813d63e771a5fb4a4be2aa95510505e8df765c42"
+      "sha256": "7dbfd7353127bc50184225f97fc9c03ab1254f8ed077d767d2d01193cc91aa28"
     }
   },
   "disposition": "compiled",

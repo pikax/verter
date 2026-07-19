@@ -4,7 +4,7 @@
   "backend": "vapor",
   "generator": {
     "name": "@verter/vue-conformance-oracle",
-    "version": 1
+    "version": 2
   },
   "versions": {
     "vue": "3.6.0-rc.1",
@@ -18,13 +18,16 @@
     "sha256": "ad46747040e20ac12cdbfc92e24adedb35165f60424bf83cebc11042e1747e6a"
   },
   "options": {
-    "sha256": "cc740e1e75362402e7d35d98758a4925eecf283a997d1db4b67231ede75458b3",
+    "sha256": "8b5cf79a53dcfe2d9d677b3017f934f86ecf1af3becb4be7ed99f2885e46d614",
     "summary": {
       "backend": "vapor",
       "vapor": true,
       "filename": "cases/v-model/checkbox.vue",
       "id": "v-model/checkbox",
-      "pipeline": "compileScript:inlineTemplate",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
       "sourceMap": true,
       "postprocess": null
     }
@@ -32,12 +35,12 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/v-model/checkbox.js",
-      "sha256": "2b986d9f138746fc9f5958719d6979bccf474b6a69595eaa9990f997b895cc8b",
-      "bytes": 442
+      "sha256": "116b8cc21c847f588e61f4c7225dfb6c7c294c3d9c78183b78e369e861e857a3",
+      "bytes": 734
     },
     "map": {
       "path": "goldens/3.6.0-rc.1/vapor/v-model/checkbox.map.json",
-      "sha256": "c6a172d2ec395ce4c03e22793ae980439eb8f12e0701e8a8be080683bfc25d65"
+      "sha256": "099dbe461004fc5f2a6b98ff51669614bc1c8e99e5a3c96327c8910d7703d515"
     }
   },
   "disposition": "compiled",

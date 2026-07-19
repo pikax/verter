@@ -3,9 +3,11 @@
   "sources": [
     "cases/directives/text.vue"
   ],
-  "names": [],
-  "mappings": ";;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;;AAExB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;oDAIjB,WAAK",
+  "names": [
+    "plain"
+  ],
+  "mappings": ";;;;;;oDAOaA,UAAK",
   "sourcesContent": [
-    "<script setup>\nimport { ref } from \"vue\"\n\nconst plain = ref(\"plain text\")\n</script>\n\n<template>\n  <p v-text=\"plain\"></p>\n</template>\n"
+    "\n  <p v-text=\"plain\"></p>\n"
   ]
 }

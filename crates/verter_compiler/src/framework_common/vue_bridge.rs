@@ -493,7 +493,11 @@ impl CarrierCompiler for VueCarrierCompiler {
 /// [`RuntimeCompileOutput`]. Vue leaves `main.body_code` `None` — the host
 /// assembles the `_sfc_main` module from the neutral block fields (its
 /// virtual-file concern: style/custom virtual imports + HMR).
-fn vue_result_to_runtime_bundle(
+///
+/// Public so conformance/test harnesses can drive the genuine
+/// compile → bundle → assemble pipeline without re-implementing the
+/// conversion (the Vue conformance seed in `verter_vue_conformance`).
+pub fn vue_result_to_runtime_bundle(
     result: crate::compile::VerterCompileResult,
 ) -> RuntimeCompileOutput {
     let script = result.script.map(|s| RuntimeScriptBlock {

@@ -4,7 +4,7 @@
   "backend": "vapor",
   "generator": {
     "name": "@verter/vue-conformance-oracle",
-    "version": 1
+    "version": 2
   },
   "versions": {
     "vue": "3.6.0-rc.1",
@@ -18,13 +18,16 @@
     "sha256": "1393bcea7e94a84fc8454fec728129e94580d7ca006435a17820735fd795e6fc"
   },
   "options": {
-    "sha256": "e1d018ab436a4c4e25387a44938cc25f4bc4e62c3fb72147018d1e38e888eaa9",
+    "sha256": "554b369c13cb6acbfb4e2ac1aaad1713ab27f62311ee1b84ae3f22bb396a07bf",
     "summary": {
       "backend": "vapor",
       "vapor": true,
       "filename": "cases/v-bind/same-name-shorthand.vue",
       "id": "v-bind/same-name-shorthand",
-      "pipeline": "compileScript:inlineTemplate",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
       "sourceMap": true,
       "postprocess": null
     }
@@ -32,12 +35,12 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/v-bind/same-name-shorthand.js",
-      "sha256": "95cd3d72ca93538205cd5550a4b72843bf39d2144a4c65c1aadc6018b463139c",
-      "bytes": 429
+      "sha256": "07829aceb2d9947a2cc663524c3754209637a710ac979da0c860da9a860f3eae",
+      "bytes": 724
     },
     "map": {
       "path": "goldens/3.6.0-rc.1/vapor/v-bind/same-name-shorthand.map.json",
-      "sha256": "2811da3a14e6f8c302b3828cb509cb7c0e30cf1690451db9cdfdf20064501517"
+      "sha256": "5af2ef94cc624c65d9e08324bf866446cc4b0edfee26bde837386f2dc3fc16e8"
     }
   },
   "disposition": "compiled",

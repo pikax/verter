@@ -39,7 +39,7 @@ export const ORACLE_PACKAGES = [
 export const ESBUILD_VERSION = "0.28.0";
 
 /** Bump when the generator's emission/metadata shape changes. */
-export const GENERATOR_VERSION = 1;
+export const GENERATOR_VERSION = 2;
 
 /** Metadata schema version stamped into every `.meta.json`. */
 export const META_SCHEMA_VERSION = 1;

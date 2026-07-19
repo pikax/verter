@@ -1,14 +1,20 @@
 import { createElementVNode as _createElementVNode, toDisplayString as _toDisplayString, withCtx as _withCtx, openBlock as _openBlock, createBlock as _createBlock } from "vue"
-
 import ChildComp from "./child-comp.vue"
 
-export default {
+const _sfc_main = {
   __name: 'slots',
-  setup(__props) {
+  setup(__props, { expose: __expose }) {
+  __expose();
 
 
-return (_ctx, _cache) => {
-  return (_openBlock(), _createBlock(ChildComp, { label: "Slotted" }, {
+const __returned__ = { ChildComp }
+Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true })
+return __returned__
+}
+
+}
+function render(_ctx, _cache, $props, $setup, $data, $options) {
+  return (_openBlock(), _createBlock($setup["ChildComp"], { label: "Slotted" }, {
     header: _withCtx(() => [...(_cache[0] || (_cache[0] = [
       _createElementVNode("h1", null, "Title", -1 /* CACHED */)
     ]))]),
@@ -21,6 +27,5 @@ return (_ctx, _cache) => {
     _: 1 /* STABLE */
   }))
 }
-}
-
-}
+_sfc_main.render = render
+export default _sfc_main

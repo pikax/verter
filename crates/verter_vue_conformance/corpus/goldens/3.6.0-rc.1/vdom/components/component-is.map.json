@@ -4,8 +4,8 @@
     "cases/components/component-is.vue"
   ],
   "names": [],
-  "mappings": ";;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AACxB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;AAEvC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;wBAI3B,aAA2C,yBAA3B,aAAO,KAAE,KAAK,EAAC,SAAS",
+  "mappings": ";;;wBAQE,aAA2C,yBAA3B,cAAO,KAAE,KAAK,EAAC,SAAS",
   "sourcesContent": [
-    "<script setup>\nimport { ref } from \"vue\"\nimport ChildComp from \"./child-comp.vue\"\n\nconst current = ref(ChildComp)\n</script>\n\n<template>\n  <component :is=\"current\" label=\"Dynamic\" />\n</template>\n"
+    "\n  <component :is=\"current\" label=\"Dynamic\" />\n"
   ]
 }

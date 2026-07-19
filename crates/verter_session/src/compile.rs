@@ -61,7 +61,10 @@ pub(crate) fn merge_external_sources(
 /// so the carrier owns producing the blocks and the host owns wiring them into
 /// the `_sfc_main` object. The output is byte-identical for the same blocks
 /// regardless of how the carrier produced them.
-pub(crate) fn assemble_vue_main_module(
+///
+/// Public so conformance/test harnesses (`verter_vue_conformance`) compare
+/// against the GENUINE shipped runtime Main rather than a hand copy.
+pub fn assemble_vue_main_module(
     canonical_id: &str,
     compiled: &RuntimeCompileOutput,
     meta: &FileMeta,

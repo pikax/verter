@@ -3,9 +3,12 @@
   "sources": [
     "cases/components/parent-props-events.vue"
   ],
-  "names": [],
-  "mappings": ";AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;;AAEvC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;IAIR,KAAK,EAAC,MAAM;IAAE,KAAK,EAAE,CAAC;IAAG,QAAM,QAAE,QAAQ",
+  "names": [
+    "ChildComp",
+    "onSelect"
+  ],
+  "mappings": ";;;8BAMAA;IACa,KAAK,EAAC,MAAM;IAAE,KAAK,EAAE,CAAC;IAAG,QAAM,QAAEC,aAAQ",
   "sourcesContent": [
-    "<script setup>\nimport ChildComp from \"./child-comp.vue\"\n\nfunction onSelect() {}\n</script>\n\n<template>\n  <ChildComp label=\"Pick\" :count=\"3\" @select=\"onSelect\" />\n</template>\n"
+    "\n  <ChildComp label=\"Pick\" :count=\"3\" @select=\"onSelect\" />\n"
   ]
 }

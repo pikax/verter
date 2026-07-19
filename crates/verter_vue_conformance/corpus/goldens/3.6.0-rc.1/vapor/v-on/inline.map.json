@@ -3,9 +3,11 @@
   "sources": [
     "cases/v-on/inline.vue"
   ],
-  "names": [],
-  "mappings": ";;;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;;AAExB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;uCAID,WAAK;mCAAI,SAAO,oBAAG,WAAK",
+  "names": [
+    "count"
+  ],
+  "mappings": ";;;;;;;uCAOkBA,UAAK;mCAAI,SAAO,oBAAGA,UAAK",
   "sourcesContent": [
-    "<script setup>\nimport { ref } from \"vue\"\n\nconst count = ref(0)\n</script>\n\n<template>\n  <button @click=\"count++\">Count: {{ count }}</button>\n</template>\n"
+    "\n  <button @click=\"count++\">Count: {{ count }}</button>\n"
   ]
 }

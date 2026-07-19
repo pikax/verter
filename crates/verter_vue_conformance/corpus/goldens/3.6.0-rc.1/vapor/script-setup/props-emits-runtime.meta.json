@@ -4,7 +4,7 @@
   "backend": "vapor",
   "generator": {
     "name": "@verter/vue-conformance-oracle",
-    "version": 1
+    "version": 2
   },
   "versions": {
     "vue": "3.6.0-rc.1",
@@ -18,13 +18,16 @@
     "sha256": "e8300a565d35d56de7b1ca2c25fbb4d1e4a0b48ad2fea3b5afc8e63b21eae91a"
   },
   "options": {
-    "sha256": "61b7356909ee8856e74d42fd7602836b593d746d1ba2d7a8ac8226c75b8d520a",
+    "sha256": "22084672daa0790f9b4c85d63f4c8336218d9f9057dd62ebe023ae76f5d08fd6",
     "summary": {
       "backend": "vapor",
       "vapor": true,
       "filename": "cases/script-setup/props-emits-runtime.vue",
       "id": "script-setup/props-emits-runtime",
-      "pipeline": "compileScript:inlineTemplate",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
       "sourceMap": true,
       "postprocess": null
     }
@@ -32,12 +35,12 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/script-setup/props-emits-runtime.js",
-      "sha256": "49e971b7ac58913b59c240146736a6de69a426a3112b9fc2c9a468b7a0a74c32",
-      "bytes": 807
+      "sha256": "edc8ca4e82c6bd004afe625e6d49ea447e51c0c94dc6f0ebc9d225d5e17d8563",
+      "bytes": 1108
     },
     "map": {
       "path": "goldens/3.6.0-rc.1/vapor/script-setup/props-emits-runtime.map.json",
-      "sha256": "d9c22a58b2a8ff8f8eea5bee368d1a26ae469042c17feb733858726719df60cc"
+      "sha256": "60a5b17a5c5f1a4b50eb60cbdd2b10b886bb292b390677fb67554a91926c8a5c"
     }
   },
   "disposition": "compiled",

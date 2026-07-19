@@ -4,8 +4,8 @@
     "cases/directives/html.vue"
   ],
   "names": [],
-  "mappings": ";;;;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;AAExB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;wBAI3B,oBAAwB,SAAnB,SAAY,EAAJ,SAAG",
+  "mappings": ";;;;;wBAOE,oBAAwB,SAAnB,SAAY,EAAJ,UAAG",
   "sourcesContent": [
-    "<script setup>\nimport { ref } from \"vue\"\n\nconst raw = ref(\"<b>bold</b>\")\n</script>\n\n<template>\n  <div v-html=\"raw\"></div>\n</template>\n"
+    "\n  <div v-html=\"raw\"></div>\n"
   ]
 }

@@ -4,7 +4,7 @@
   "backend": "vapor",
   "generator": {
     "name": "@verter/vue-conformance-oracle",
-    "version": 1
+    "version": 2
   },
   "versions": {
     "vue": "3.6.0-rc.1",
@@ -18,13 +18,16 @@
     "sha256": "653c9c0f7f09121a2bc54d6b579438f2c6636f32fef90a00b781b3da30603ddd"
   },
   "options": {
-    "sha256": "b52b481a5f2775a5c8698bdf97e85b26d5bb9796e5cba8e0a3190d1ed608fdcc",
+    "sha256": "8415f087f7bebd478b10c005e0fd9fefcf25b1eafb5398c06583f380eba2bc53",
     "summary": {
       "backend": "vapor",
       "vapor": true,
       "filename": "cases/components/slots.vue",
       "id": "components/slots",
-      "pipeline": "compileScript:inlineTemplate",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
       "sourceMap": true,
       "postprocess": null
     }
@@ -32,12 +35,12 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/components/slots.js",
-      "sha256": "3e52826dc674057262c23db97bc955046f57904dc4cdcd4bef5e346c4ef3dcb5",
-      "bytes": 949
+      "sha256": "8d3234bc0b220d915ebf988258e5df6540039f1eaef0fa9044305a60352d1a86",
+      "bytes": 1246
     },
     "map": {
       "path": "goldens/3.6.0-rc.1/vapor/components/slots.map.json",
-      "sha256": "1397340136739ffe8521be652122945134dcc4d07792eea490cf62fe3ee475a8"
+      "sha256": "eefc449cd830b1702d64d2953df607e6d6c6fdf6bbd5b5f9f725ee7f03f0b05a"
     }
   },
   "disposition": "compiled",

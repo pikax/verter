@@ -4,7 +4,7 @@
   "backend": "vapor",
   "generator": {
     "name": "@verter/vue-conformance-oracle",
-    "version": 1
+    "version": 2
   },
   "versions": {
     "vue": "3.6.0-rc.1",
@@ -18,13 +18,16 @@
     "sha256": "ccec2f3e27465b962543d548e1cebee609ac84bae1ed48fc544c591b55211e05"
   },
   "options": {
-    "sha256": "3474e1fca99f53234af014eb11bb25e3a46f492dfbc9d3ee59e416fea771a548",
+    "sha256": "6d95425be7fbeb22d6b236f642243f4a83b8bd0386c5ffb135663d0f1b28b625",
     "summary": {
       "backend": "vapor",
       "vapor": true,
       "filename": "cases/components/child-comp.vue",
       "id": "components/child-comp",
-      "pipeline": "compileScript:inlineTemplate",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
       "sourceMap": true,
       "postprocess": null
     }
@@ -32,12 +35,12 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vapor/components/child-comp.js",
-      "sha256": "e76df1dcb9cf605a56eb5f2961d2d60a9fd2dd7471280179e6f8fb76b3f87413",
-      "bytes": 1098
+      "sha256": "8a306143a79b8d4dffd24ef87c34a0fb76b39fa1204d84a56dbc81c933d12f29",
+      "bytes": 1392
     },
     "map": {
       "path": "goldens/3.6.0-rc.1/vapor/components/child-comp.map.json",
-      "sha256": "5f3d3169de090926a53d416b2bf1ed9fe85c61935fb87dd3307edc05d293c4a5"
+      "sha256": "18252c7597c9e65c0a2c6b0a65807ea03cdd172dfabb589d2eea69fbe91da580"
     }
   },
   "disposition": "compiled",

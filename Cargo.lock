@@ -4442,6 +4442,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "verter_compiler",
+ "verter_session",
 ]
 
 [[package]]

@@ -29,3 +29,4 @@ oxc_span = { workspace = true }
 
 [dev-dependencies]
 verter_compiler = { path = "../verter_compiler" }
+verter_session = { path = "../verter_session" }

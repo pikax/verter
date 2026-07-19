@@ -4,8 +4,8 @@
     "cases/elements-text/interpolation.vue"
   ],
   "names": [],
-  "mappings": ";;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;AAElC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AACnB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;wBAI5C,oBAGI,WAHD,UACM,oBAAG,WAAK,IAAG,cAAY,oBAAG,aAAO,IAAG,YAC3C,yBAAQ,WAAW,MAAK,WAAS,oBAAG,WAAK",
+  "mappings": ";;;wBAQE,oBAGI,WAHD,UACM,oBAAG,YAAK,IAAG,cAAY,oBAAG,cAAO,IAAG,YAC3C,yBAAQ,WAAW,MAAK,WAAS,oBAAG,YAAK",
   "sourcesContent": [
-    "<script setup>\nimport { computed, ref } from \"vue\"\n\nconst count = ref(1)\nconst doubled = computed(() => count.value * 2)\n</script>\n\n<template>\n  <p>\n    Count: {{ count }} / Doubled: {{ doubled }} / Upper:\n    {{ \"hi\".toUpperCase() }} / Sign: {{ count > 1 ? \"many\" : \"one\" }}\n  </p>\n</template>\n"
+    "\n  <p>\n    Count: {{ count }} / Doubled: {{ doubled }} / Upper:\n    {{ \"hi\".toUpperCase() }} / Sign: {{ count > 1 ? \"many\" : \"one\" }}\n  </p>\n"
   ]
 }

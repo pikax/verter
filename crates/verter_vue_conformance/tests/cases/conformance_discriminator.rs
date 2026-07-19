@@ -216,8 +216,8 @@ fn vue_structural_conformance_discriminates_cosmetic_from_behavioral_diffs() {
             DiffDim::Structure,
         );
 
-        // Rename a source-authored member property (items.value -> items.wrapped).
-        let mutated = plant(&golden, "items.value", "items.wrapped", "member property");
+        // Rename a source-authored member property ($setup.items -> $setup.things).
+        let mutated = plant(&golden, "$setup.items", "$setup.things", "member property");
         fail(
             "vdom: rename member property",
             &mutated,
@@ -257,22 +257,47 @@ fn vue_structural_conformance_discriminates_cosmetic_from_behavioral_diffs() {
         );
     }
     {
-        // Template-only golden: the `render` export is public contract.
+        // Non-inline topology: the module's PUBLIC surface is the default
+        // export — renaming the exported `_sfc_main` binding is contract
+        // (the `render` fn itself is a private binding, renamed below as a
+        // cosmetic recipe).
         let case = "elements-text/static-element";
         let golden = golden_code(VDOM, case);
         let authored = authored(case);
-        let mutated = plant(
+
+        let mutated = plant_all(
             &golden,
-            "export function render(",
-            "export function render2(",
-            "rename exported render",
+            "_sfc_main",
+            "_sfc_other",
+            "rename exported default",
         );
         fail(
-            "vdom: rename exported render",
+            "vdom: rename exported default binding",
             &mutated,
             &golden,
             &authored,
             DiffDim::Identifier,
+        );
+
+        // Cosmetic: consistently renaming the private `render` binding AND
+        // its attach reference passes (alpha equivalence).
+        let renamed = plant(
+            &golden,
+            "function render(",
+            "function renderVdom(",
+            "rename render decl",
+        );
+        let renamed = plant(
+            &renamed,
+            "_sfc_main.render = render",
+            "_sfc_main.render = renderVdom",
+            "rename render attach ref",
+        );
+        pass(
+            "cosmetic: alpha-rename render binding",
+            &renamed,
+            &golden,
+            &authored,
         );
     }
 
@@ -297,8 +322,8 @@ fn vue_structural_conformance_discriminates_cosmetic_from_behavioral_diffs() {
         // Move _setText OUT of the _renderEffect closure.
         let mutated = plant(
             &golden,
-            "  _renderEffect(() => _setText(x0, \"Count: \" + _toDisplayString(count.value)))",
-            "  _setText(x0, \"Count: \" + _toDisplayString(count.value))\n  _renderEffect(() => {})",
+            "  _renderEffect(() => _setText(x0, \"Count: \" + _toDisplayString(_ctx.count)))",
+            "  _setText(x0, \"Count: \" + _toDisplayString(_ctx.count))\n  _renderEffect(() => {})",
             "move setter out of effect",
         );
         fail(
@@ -382,8 +407,8 @@ fn vue_structural_conformance_discriminates_cosmetic_from_behavioral_diffs() {
         let authored = authored(case);
         let mutated = plant(
             &golden,
-            "    _setProp(n0, \"title\", title.value)\n    _setProp(n0, \"disabled\", disabled.value)",
-            "    _setProp(n0, \"disabled\", disabled.value)\n    _setProp(n0, \"title\", title.value)",
+            "    _setProp(n0, \"title\", _ctx.title)\n    _setProp(n0, \"disabled\", _ctx.disabled)",
+            "    _setProp(n0, \"disabled\", _ctx.disabled)\n    _setProp(n0, \"title\", _ctx.title)",
             "reorder setters",
         );
         fail(
@@ -406,8 +431,8 @@ fn vue_structural_conformance_discriminates_cosmetic_from_behavioral_diffs() {
 
         let dropped = plant(
             &golden,
-            "export default /* @__PURE__ */ _defineComponent({",
-            "export default _defineComponent({",
+            "const _sfc_main = /* @__PURE__ */ _defineComponent({",
+            "const _sfc_main = _defineComponent({",
             "drop PURE comment",
         );
         fail(
@@ -420,8 +445,8 @@ fn vue_structural_conformance_discriminates_cosmetic_from_behavioral_diffs() {
 
         let moved = plant(
             &golden,
-            "export default /* @__PURE__ */ _defineComponent({",
-            "export default _defineComponent({",
+            "const _sfc_main = /* @__PURE__ */ _defineComponent({",
+            "const _sfc_main = _defineComponent({",
             "move PURE comment (strip)",
         );
         let moved = plant(

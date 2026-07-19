@@ -4,8 +4,8 @@
     "cases/elements-text/dynamic-class.vue"
   ],
   "names": [],
-  "mappings": ";;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;AAExB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AACvB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;wBAInB,oBAA+D;IAAzD,KAAK,qCAAa,YAAM,cAAc,UAAI;KAAG,QAAM",
+  "mappings": ";;;wBAQE,oBAA+D;IAAzD,KAAK,qCAAa,aAAM,cAAc,WAAI;KAAG,QAAM",
   "sourcesContent": [
-    "<script setup>\nimport { ref } from \"vue\"\n\nconst active = ref(true)\nconst size = ref(\"lg\")\n</script>\n\n<template>\n  <div :class=\"['card', { active }, 'size-' + size]\">Classy</div>\n</template>\n"
+    "\n  <div :class=\"['card', { active }, 'size-' + size]\">Classy</div>\n"
   ]
 }

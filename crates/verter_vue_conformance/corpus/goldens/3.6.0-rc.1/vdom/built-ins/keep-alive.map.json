@@ -4,8 +4,8 @@
     "cases/built-ins/keep-alive.vue"
   ],
   "names": [],
-  "mappings": ";;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AACxB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;AAEnD,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;wBAI3B,aAEY,cAFA,GAAG,EAAE,CAAC;mBAChB,aAA0C,yBAA1B,aAAO,KAAE,KAAK,EAAC,QAAQ",
+  "mappings": ";;;wBAQE,aAEY,cAFA,GAAG,EAAE,CAAC;mBAChB,aAA0C,yBAA1B,cAAO,KAAE,KAAK,EAAC,QAAQ",
   "sourcesContent": [
-    "<script setup>\nimport { ref } from \"vue\"\nimport ChildComp from \"../components/child-comp.vue\"\n\nconst current = ref(ChildComp)\n</script>\n\n<template>\n  <KeepAlive :max=\"2\">\n    <component :is=\"current\" label=\"Cached\" />\n  </KeepAlive>\n</template>\n"
+    "\n  <KeepAlive :max=\"2\">\n    <component :is=\"current\" label=\"Cached\" />\n  </KeepAlive>\n"
   ]
 }

@@ -2,16 +2,15 @@
 //! official Vue 3.6 RC goldens for all 32 seed SFCs (64 cells).
 //!
 //! Per case per backend, the harness compiles the SFC with Verter
-//! (`verter_compiler::compile`, `force_vapor` for the vapor cell), assembles
-//! the module the same shape the host does (template helper import line,
-//! script block with `__sfc__` → `_sfc_main`, template block appended,
-//! `_sfc_main.render = render`, `export default _sfc_main`; template-only
-//! cases mirror the official `compileTemplate` shape with
-//! `export function render`), and runs the structural comparator against the
-//! vendored golden (code + diagnostics; source maps for template-only cells
-//! where both maps cover the same render function — script-setup cells mix
-//! script+template mappings at different granularity, so the map dim is not
-//! applicable there and is exercised by the discriminator guard instead).
+//! (`verter_compiler::compile`, `force_vapor` for the vapor cell) and
+//! assembles the runtime Main through the GENUINE shipped pipeline
+//! (`vue_result_to_runtime_bundle` → `assemble_vue_main_module`), then runs
+//! the structural comparator against the vendored golden. The goldens are
+//! the official NON-inline topology — `compileScript({inlineTemplate:false})`
+//! plus `compileTemplate(bindingMetadata)` — the same `_sfc_main` + separate
+//! render-function shape Verter ships, so the comparison is apples-to-apples
+//! per backend. Source maps are compared for every cell (both sides' maps
+//! cover the template region at matching granularity).
 //!
 //! Dispositions:
 //! - PASS — the comparator found no in-contract difference.
@@ -27,9 +26,7 @@
 
 use std::collections::BTreeSet;
 
-use verter_compiler::compile::{
-    format_import_specifier, CodegenOptions, CompileDiagnosticSeverity, VerterCompileOptions,
-};
+use verter_compiler::compile::{CodegenOptions, CompileDiagnosticSeverity, VerterCompileOptions};
 use verter_vue_conformance::compare::{compare_modules, Comparison, DiagnosticRow, ModuleInput};
 use verter_vue_conformance::{
     corpus_file, corpus_root, Backend, GoldenMeta, KnownDivergenceCell, KnownDivergences, Manifest,
@@ -55,18 +52,25 @@ fn golden_meta(backend: Backend, case_id: &str) -> GoldenMeta {
 }
 
 /// The assembled Verter module + the comparison-relevant side channels.
+///
+/// The module is produced by the GENUINE shipped pipeline — no hand copy:
+/// `verter_compiler::compile` (blocks) →
+/// `verter_compiler::framework_common::vue_result_to_runtime_bundle`
+/// (the carrier's real VerterCompileResult → RuntimeCompileOutput conversion)
+/// → `verter_session::compile::assemble_vue_main_module` (the host's real
+/// runtime-Main assembly). The harness `CompileProfile` uses
+/// `is_production: true` so the assembly omits the bundler-only `__file`/HMR
+/// suffixes the compiler-level oracle does not have (block codegen itself
+/// stays dev, matching the official `compileTemplate` defaults; the
+/// assembler's `is_production` flag gates only those suffixes).
 struct VerterCell {
     code: String,
     template_map: Option<String>,
     diagnostics: Vec<DiagnosticRow>,
-    /// True when the SFC carries its own `<script>`/`<script setup>` block
-    /// (as opposed to a Verter-synthesized script block or none at all).
-    sfc_has_script: bool,
 }
 
 fn compile_verter_cell(case_id: &str, backend: Backend) -> VerterCell {
     let sfc = case_sfc_source(case_id);
-    let sfc_has_script = sfc.contains("<script");
     let alloc = oxc_allocator::Allocator::new();
     let options = CodegenOptions {
         filename: Some(format!("cases/{case_id}.vue")),
@@ -101,7 +105,6 @@ fn compile_verter_cell(case_id: &str, backend: Backend) -> VerterCell {
                     code: Some("VERTER_COMPILE_PANIC".to_string()),
                     message,
                 }],
-                sfc_has_script,
             };
         }
     };
@@ -121,59 +124,36 @@ fn compile_verter_cell(case_id: &str, backend: Backend) -> VerterCell {
         })
         .collect();
 
-    // Assemble the module (host-shaped; see header).
-    let mut module = String::new();
-    if let Some(template) = &result.template {
-        if !template.imports.is_empty() {
-            module.push_str("import { ");
-            for (index, name) in template.imports.iter().enumerate() {
-                if index > 0 {
-                    module.push_str(", ");
-                }
-                module.push_str(&format_import_specifier(name));
-            }
-            module.push_str(" } from \"vue\"\n");
-        }
-    }
-    if let Some(script) = &result.script {
-        let code = script
-            .code
-            .replace("__sfc__", "_sfc_main")
-            .replace("export default _sfc_main;\n", "");
-        module.push_str(&code);
-        if !code.ends_with('\n') {
-            module.push('\n');
-        }
-    }
-    if let Some(template) = &result.template {
-        module.push('\n');
-        let mut code = template.code.clone();
-        if result.script.is_none() {
-            // Mirror the official compileTemplate module shape for
-            // template-only SFCs: `export function render(...)`.
-            code = code.replace("function render(", "export function render(");
-        }
-        module.push_str(&code);
-        if !code.ends_with('\n') {
-            module.push('\n');
-        }
-        if result.script.is_some() {
-            if code.contains("function render(") {
-                module.push_str("_sfc_main.render = render\n");
-            }
-            module.push_str("export default _sfc_main\n");
-        }
-    }
-
+    let sfc_has_script = sfc.contains("<script");
     let template_map = result
         .template
         .as_ref()
         .and_then(|t| (!t.source_map.is_empty()).then(|| t.source_map.clone()));
+    let bundle =
+        verter_compiler::framework_common::vue_bridge::vue_result_to_runtime_bundle(result);
+    let profile = verter_session::CompileProfile {
+        filename: Some(format!("cases/{case_id}.vue")),
+        // Assembly-only flag: skips the bundler-only `__file`/HMR suffixes
+        // the compiler-level oracle lacks (see struct docs).
+        is_production: true,
+        ..Default::default()
+    };
+    let meta = verter_session::FileMeta {
+        has_script: sfc_has_script,
+        has_template: true,
+        ..Default::default()
+    };
+    let module = verter_session::assemble_vue_main_module(
+        &format!("cases/{case_id}.vue"),
+        &bundle,
+        &meta,
+        &profile,
+    );
+
     VerterCell {
         code: module,
         template_map,
         diagnostics,
-        sfc_has_script,
     }
 }
 
@@ -183,17 +163,12 @@ fn compare_cell(case_id: &str, backend: Backend) -> Comparison {
     let meta = golden_meta(backend, case_id);
     let authored = authored(case_id);
 
-    // Source maps are compared only for template-only cells, where both maps
-    // cover exactly the render function (script-setup cells mix script and
-    // template mappings at different granularity — dim not applicable).
-    let maps_comparable = !verter.sfc_has_script;
+    // Both maps cover the template region at matching granularity (the
+    // golden's map is the official compileTemplate map; Verter's is the
+    // template block map).
     let verter_input = ModuleInput {
         code: verter.code.clone(),
-        source_map: if maps_comparable {
-            verter.template_map.clone()
-        } else {
-            None
-        },
+        source_map: verter.template_map.clone(),
         diagnostics: verter.diagnostics.clone(),
     };
     let golden_diagnostics = meta
@@ -210,12 +185,7 @@ fn compare_cell(case_id: &str, backend: Backend) -> Comparison {
         .collect();
     let golden_input = ModuleInput {
         code: golden_code.clone(),
-        source_map: if maps_comparable {
-            let map = crate::common::golden_map(backend.as_str(), case_id);
-            Some(map)
-        } else {
-            None
-        },
+        source_map: Some(crate::common::golden_map(backend.as_str(), case_id)),
         diagnostics: golden_diagnostics,
     };
 

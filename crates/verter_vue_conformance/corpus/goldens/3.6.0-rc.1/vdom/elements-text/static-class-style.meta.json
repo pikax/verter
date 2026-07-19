@@ -4,7 +4,7 @@
   "backend": "vdom",
   "generator": {
     "name": "@verter/vue-conformance-oracle",
-    "version": 1
+    "version": 2
   },
   "versions": {
     "vue": "3.6.0-rc.1",
@@ -18,13 +18,16 @@
     "sha256": "f6ac1360dcea4407df709122debbb8cd4c8e225e372fce719739413a15838783"
   },
   "options": {
-    "sha256": "e0801e2797bf9b6ef931c0e3b7236d29e3ded3429552072b46b3387a07710b29",
+    "sha256": "ae326c3524c2a75cf9682ba8ee49f2d8cf124d2825dd5585ff92d5c0637383fb",
     "summary": {
       "backend": "vdom",
       "vapor": false,
       "filename": "cases/elements-text/static-class-style.vue",
       "id": "elements-text/static-class-style",
       "pipeline": "compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": false,
       "sourceMap": true,
       "postprocess": null
     }
@@ -32,8 +35,8 @@
   "artifacts": {
     "code": {
       "path": "goldens/3.6.0-rc.1/vdom/elements-text/static-class-style.js",
-      "sha256": "8cc38b16774f14171aef834f88e291d3ff66640cc22cc75235599dea063bf440",
-      "bytes": 451
+      "sha256": "cdf34d2f683093ea5a650fe11beb9b3bb22628b7af1dbb12b5c4696669c862bd",
+      "bytes": 515
     },
     "map": {
       "path": "goldens/3.6.0-rc.1/vdom/elements-text/static-class-style.map.json",

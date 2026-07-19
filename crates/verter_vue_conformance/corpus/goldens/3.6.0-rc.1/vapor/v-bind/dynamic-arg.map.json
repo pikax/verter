@@ -3,9 +3,12 @@
   "sources": [
     "cases/v-bind/dynamic-arg.vue"
   ],
-  "names": [],
-  "mappings": ";;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;;AAExB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AAC5B,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;+CAIrB,cAAU,GAAE,WAAK",
+  "names": [
+    "attrName",
+    "value"
+  ],
+  "mappings": ";;;;;+CAQMA,aAAU,GAAEC,UAAK",
   "sourcesContent": [
-    "<script setup>\nimport { ref } from \"vue\"\n\nconst attrName = ref(\"title\")\nconst value = ref(\"Tooltip\")\n</script>\n\n<template>\n  <p :[attrName]=\"value\">Dynamic attribute</p>\n</template>\n"
+    "\n  <p :[attrName]=\"value\">Dynamic attribute</p>\n"
   ]
 }
