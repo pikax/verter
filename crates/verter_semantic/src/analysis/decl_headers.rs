@@ -19,15 +19,16 @@
 //! [`crate::analysis::type_eval_build::lower_top_level_statement`] arms.
 
 use oxc_ast::ast::{
-    Class, ClassElement, Declaration, ExportDefaultDeclarationKind, Expression,
+    Class, ClassElement, Comment, Declaration, ExportDefaultDeclarationKind, Expression,
     MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, Program, Statement,
     TSEnumDeclaration, TSInterfaceDeclaration, TSModuleBlock, TSModuleDeclaration,
     TSModuleDeclarationBody, TSModuleDeclarationName, TSSignature, TSType, TSTypeAliasDeclaration,
     TSTypeParameterDeclaration, VariableDeclarationKind, VariableDeclarator,
 };
 use oxc_span::GetSpan;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use verter_span::Span;
+use verter_type_expr::facts::VueIgnoredHeritageFact;
 use verter_type_expr::span_origins::DeclContributorAnchor;
 use verter_type_expr::{DeclKey, TopLevelOwnerId};
 use verter_type_expr_oxc::property_key_name;
@@ -36,18 +37,24 @@ use crate::analysis::top_level_owners::{DeclMap, TopLevelOwnerTable, TopLevelSta
 use crate::analysis::type_eval::{AugmentationScopeKind, TypeDeclKind, ValueDeclKind};
 
 #[derive(Debug, Clone, Copy)]
-struct HeaderStatementContext {
+struct HeaderStatementContext<'a> {
     anchor: DeclContributorAnchor,
+    vue_ignore_attachment_starts: &'a FxHashSet<u32>,
 }
 
-impl HeaderStatementContext {
-    fn new(statement_index: usize, owner: TopLevelStatementOwner) -> Option<Self> {
+impl<'a> HeaderStatementContext<'a> {
+    fn new(
+        statement_index: usize,
+        owner: TopLevelStatementOwner,
+        vue_ignore_attachment_starts: &'a FxHashSet<u32>,
+    ) -> Option<Self> {
         Some(Self {
             anchor: DeclContributorAnchor {
                 contributor_index: u32::try_from(statement_index).ok()?,
                 owner: owner.owner,
                 owner_local_ordinal: owner.owner_local_ordinal,
             },
+            vue_ignore_attachment_starts,
         })
     }
 
@@ -125,6 +132,11 @@ pub struct TypeDeclHeader {
     /// statement (deduplicated; one statement can contribute several
     /// same-name declarations).
     pub contributors: Vec<DeclHeaderContributor>,
+    /// Vue runtime-only heritage suppression, addressed against the exact
+    /// lowered contributor/heritage-arm shape. This is parser-authored
+    /// comment meaning captured once at indexing; consumers never rescan
+    /// source text or comments.
+    pub vue_ignored_heritage: Vec<VueIgnoredHeritageFact>,
     /// `true` when the name exists ONLY as a JSDoc `@typedef` (no TS
     /// declaration claimed it — TS-decl precedence applied at build).
     pub from_jsdoc_typedef: bool,
@@ -283,6 +295,7 @@ impl DeclHeaderIndex {
                 type_params,
                 member_headers,
                 contributors: Vec::new(),
+                vue_ignored_heritage: Vec::new(),
                 from_jsdoc_typedef: false,
                 jsdoc_typedef: None,
             }
@@ -406,10 +419,15 @@ pub fn build_decl_header_index_with_owners(
         "validated owner table must cover the indexed program exactly"
     );
     let mut index = DeclHeaderIndex::default();
+    let vue_ignore_attachment_starts =
+        collect_vue_ignore_attachment_starts(&program.comments, source);
 
     for (stmt_index, stmt) in program.body.iter().enumerate() {
-        let Some(ctx) = HeaderStatementContext::new(stmt_index, owners.statement(stmt_index))
-        else {
+        let Some(ctx) = HeaderStatementContext::new(
+            stmt_index,
+            owners.statement(stmt_index),
+            &vue_ignore_attachment_starts,
+        ) else {
             break;
         };
         index_top_level_statement(stmt, ctx, &mut index);
@@ -449,6 +467,7 @@ pub fn build_decl_header_index_with_owners(
                 type_params: Vec::new(),
                 member_headers: Vec::new(),
                 contributors: Vec::new(),
+                vue_ignored_heritage: Vec::new(),
                 from_jsdoc_typedef: true,
                 jsdoc_typedef: Some(jsdoc_typedef),
             },
@@ -458,10 +477,45 @@ pub fn build_decl_header_index_with_owners(
     index
 }
 
+fn collect_vue_ignore_attachment_starts(comments: &[Comment], source: &str) -> FxHashSet<u32> {
+    comments
+        .iter()
+        .filter(|comment| comment.is_block())
+        .filter_map(|comment| {
+            let content = comment.content_span();
+            let content = source.get(content.start as usize..content.end as usize)?;
+            contains_exact_vue_ignore_directive(content).then_some(comment.attached_to)
+        })
+        .collect()
+}
+
+fn contains_exact_vue_ignore_directive(content: &str) -> bool {
+    const DIRECTIVE: &[u8] = b"@vue-ignore";
+
+    content
+        .as_bytes()
+        .windows(DIRECTIVE.len())
+        .enumerate()
+        .any(|(start, candidate)| {
+            if candidate != DIRECTIVE {
+                return false;
+            }
+            let bytes = content.as_bytes();
+            let before = start.checked_sub(1).and_then(|index| bytes.get(index));
+            let after = bytes.get(start + DIRECTIVE.len());
+            !before.is_some_and(|byte| is_vue_directive_token_byte(*byte))
+                && !after.is_some_and(|byte| is_vue_directive_token_byte(*byte))
+        })
+}
+
+const fn is_vue_directive_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'$' | b'@')
+}
+
 /// Mirror of `lower_top_level_statement`'s name registration, headers only.
 fn index_top_level_statement(
     stmt: &Statement<'_>,
-    ctx: HeaderStatementContext,
+    ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
 ) {
     match stmt {
@@ -543,7 +597,7 @@ fn index_top_level_statement(
 /// Mirror of `extract_from_declaration` (the `export <decl>` wrapper arms).
 fn index_declaration(
     decl: &Declaration<'_>,
-    ctx: HeaderStatementContext,
+    ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
 ) {
     match decl {
@@ -595,7 +649,7 @@ fn index_declaration(
 /// the contributor locators feed the parse-stable skeleton and facts).
 fn index_enum(
     enum_decl: &TSEnumDeclaration<'_>,
-    ctx: HeaderStatementContext,
+    ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
 ) {
     let name = enum_decl.id.name.as_str();
@@ -645,6 +699,7 @@ fn index_enum(
         enum_decl.id.span.into(),
         Vec::new(),
         Vec::new(),
+        &[],
         ctx,
     );
     let value_entry = index
@@ -671,7 +726,7 @@ fn index_enum(
 /// inner type declarations register under qualified `Ns.Name` names.
 fn index_module_declaration(
     decl: &TSModuleDeclaration<'_>,
-    ctx: HeaderStatementContext,
+    ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     prefix: Option<&str>,
 ) {
@@ -714,7 +769,7 @@ fn index_module_declaration(
 /// is private to the namespace body and is intentionally NOT indexed.
 fn index_namespaced_statement(
     stmt: &Statement<'_>,
-    ctx: HeaderStatementContext,
+    ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     namespace: &str,
 ) {
@@ -751,7 +806,7 @@ fn index_namespaced_statement(
 
 fn index_namespaced_declaration(
     decl: &Declaration<'_>,
-    ctx: HeaderStatementContext,
+    ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     namespace: &str,
 ) {
@@ -798,7 +853,7 @@ fn index_namespaced_declaration(
 /// side).
 fn index_augmentation_block(
     block: &TSModuleBlock<'_>,
-    ctx: HeaderStatementContext,
+    ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     scope: &AugmentationScopeKind,
 ) {
@@ -898,7 +953,7 @@ fn index_augmentation_block(
 /// inventory. A string-literal module name nested here contributes nothing.
 fn index_augmentation_module_declaration(
     decl: &TSModuleDeclaration<'_>,
-    ctx: HeaderStatementContext,
+    ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     scope: &AugmentationScopeKind,
     prefix: Option<&str>,
@@ -940,7 +995,7 @@ fn index_augmentation_module_declaration(
 /// Augmentation-scope mirror of `index_namespaced_statement`.
 fn index_namespaced_statement_into_augmentation(
     stmt: &Statement<'_>,
-    ctx: HeaderStatementContext,
+    ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     namespace: &str,
     scope: &AugmentationScopeKind,
@@ -979,7 +1034,7 @@ fn index_namespaced_statement_into_augmentation(
 /// Augmentation-scope mirror of `index_namespaced_declaration`.
 fn index_namespaced_declaration_into_augmentation(
     decl: &Declaration<'_>,
-    ctx: HeaderStatementContext,
+    ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     namespace: &str,
     scope: &AugmentationScopeKind,
@@ -1021,7 +1076,7 @@ fn index_namespaced_declaration_into_augmentation(
 /// `move_value_symbols_into_augmentation`, which drops the type side).
 fn index_augmentation_class_value(
     cls: &Class<'_>,
-    ctx: HeaderStatementContext,
+    ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     scope: &AugmentationScopeKind,
 ) {
@@ -1059,7 +1114,7 @@ fn index_augmentation_class_value(
 fn index_type_alias(
     decl: &TSTypeAliasDeclaration<'_>,
     name: &str,
-    ctx: HeaderStatementContext,
+    ctx: HeaderStatementContext<'_>,
     table: &mut DeclMap<TypeDeclHeader>,
 ) {
     let params = type_param_headers(decl.type_parameters.as_deref());
@@ -1072,6 +1127,7 @@ fn index_type_alias(
         decl.id.span.into(),
         params,
         members,
+        &[],
         ctx,
     );
 }
@@ -1079,7 +1135,7 @@ fn index_type_alias(
 fn index_interface(
     decl: &TSInterfaceDeclaration<'_>,
     name: &str,
-    ctx: HeaderStatementContext,
+    ctx: HeaderStatementContext<'_>,
     table: &mut DeclMap<TypeDeclHeader>,
 ) {
     let params = type_param_headers(decl.type_parameters.as_deref());
@@ -1089,6 +1145,7 @@ fn index_interface(
             members.push(header);
         }
     }
+    let ignored_heritage_arms = vue_ignored_heritage_arms(decl, ctx);
     upsert_type_header(
         table,
         name,
@@ -1097,14 +1154,58 @@ fn index_interface(
         decl.id.span.into(),
         params,
         members,
+        &ignored_heritage_arms,
         ctx,
     );
+}
+
+fn vue_ignored_heritage_arms(
+    decl: &TSInterfaceDeclaration<'_>,
+    ctx: HeaderStatementContext<'_>,
+) -> Vec<u32> {
+    let mut lowered_arm_ordinal = 0u32;
+    let mut ignored = Vec::new();
+
+    for heritage in &decl.extends {
+        if !is_lowerable_heritage_expression(&heritage.expression) {
+            continue;
+        }
+        if matches!(heritage.expression, Expression::Identifier(_))
+            && ctx
+                .vue_ignore_attachment_starts
+                .contains(&heritage.expression.span().start)
+        {
+            ignored.push(lowered_arm_ordinal);
+        }
+        let Some(next) = lowered_arm_ordinal.checked_add(1) else {
+            break;
+        };
+        lowered_arm_ordinal = next;
+    }
+    ignored
+}
+
+fn is_lowerable_heritage_expression(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::Identifier(_) => true,
+        Expression::StaticMemberExpression(member) => {
+            let mut object = &member.object;
+            loop {
+                match object {
+                    Expression::Identifier(_) => return true,
+                    Expression::StaticMemberExpression(parent) => object = &parent.object,
+                    _ => return false,
+                }
+            }
+        }
+        _ => false,
+    }
 }
 
 /// Mirror of `extract_class`'s NAME registration: a named class declares a
 /// type symbol (instance members) AND a value symbol (constructor shape +
 /// static members). An anonymous class declares nothing.
-fn index_class(decl: &Class<'_>, ctx: HeaderStatementContext, index: &mut DeclHeaderIndex) {
+fn index_class(decl: &Class<'_>, ctx: HeaderStatementContext<'_>, index: &mut DeclHeaderIndex) {
     let Some(id) = &decl.id else {
         return;
     };
@@ -1114,7 +1215,7 @@ fn index_class(decl: &Class<'_>, ctx: HeaderStatementContext, index: &mut DeclHe
 fn index_named_class(
     decl: &Class<'_>,
     name: &str,
-    ctx: HeaderStatementContext,
+    ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
 ) {
     let Some(id) = &decl.id else {
@@ -1171,6 +1272,7 @@ fn index_named_class(
         id.span.into(),
         params,
         instance_members,
+        &[],
         ctx,
     );
 
@@ -1206,7 +1308,7 @@ fn index_named_class(
 
 fn index_function(
     func: &oxc_ast::ast::Function<'_>,
-    ctx: HeaderStatementContext,
+    ctx: HeaderStatementContext<'_>,
     table: &mut DeclMap<ValueDeclHeader>,
 ) {
     let Some(id) = &func.id else {
@@ -1242,7 +1344,7 @@ fn index_function(
 fn index_variable(
     decl: &VariableDeclarator<'_>,
     kind: VariableDeclarationKind,
-    ctx: HeaderStatementContext,
+    ctx: HeaderStatementContext<'_>,
     table: &mut DeclMap<ValueDeclHeader>,
     namespace: Option<&str>,
 ) {
@@ -1303,7 +1405,7 @@ fn index_variable(
 fn alias_default_type_header(
     index: &mut DeclHeaderIndex,
     declared_name: &str,
-    ctx: HeaderStatementContext,
+    ctx: HeaderStatementContext<'_>,
 ) {
     let default_key = ctx.key("default");
     if index.type_headers.contains_key(&default_key) {
@@ -1328,7 +1430,8 @@ fn upsert_type_header(
     name_span: Span,
     params: Vec<TypeParamHeader>,
     members: Vec<MemberHeader>,
-    ctx: HeaderStatementContext,
+    ignored_heritage_arm_ordinals: &[u32],
+    ctx: HeaderStatementContext<'_>,
 ) {
     let entry = table
         .entry(ctx.key(name))
@@ -1339,6 +1442,7 @@ fn upsert_type_header(
             type_params: Vec::new(),
             member_headers: Vec::new(),
             contributors: Vec::new(),
+            vue_ignored_heritage: Vec::new(),
             from_jsdoc_typedef: false,
             jsdoc_typedef: None,
         });
@@ -1366,12 +1470,28 @@ fn upsert_type_header(
             entry.member_headers.push(member);
         }
     }
+    let contributor_ordinal = entry
+        .contributors
+        .iter()
+        .position(|contributor| contributor.anchor == ctx.anchor)
+        .unwrap_or(entry.contributors.len());
+    if let Ok(contributor_ordinal) = u32::try_from(contributor_ordinal) {
+        for &intersection_arm_ordinal in ignored_heritage_arm_ordinals {
+            let fact = VueIgnoredHeritageFact {
+                contributor_ordinal,
+                intersection_arm_ordinal,
+            };
+            if !entry.vue_ignored_heritage.contains(&fact) {
+                entry.vue_ignored_heritage.push(fact);
+            }
+        }
+    }
     push_contributor(&mut entry.contributors, ctx, span, name_span);
 }
 
 fn push_contributor(
     contributors: &mut Vec<DeclHeaderContributor>,
-    ctx: HeaderStatementContext,
+    ctx: HeaderStatementContext<'_>,
     declaration_span: Span,
     name_span: Span,
 ) {

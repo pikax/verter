@@ -183,6 +183,7 @@ fn host_cpu_threads_forwards_to_host_config() {
 fn profile_none_returns_default() {
     let result = ffi_profile_to_host(None).unwrap();
     assert!(!result.is_production);
+    assert!(!result.custom_element);
 }
 
 #[test]
@@ -238,6 +239,7 @@ fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_informatio
                 declaration_id: None,
                 resolved_name: "Props".to_string(),
                 canonical_source: "/src/types.ts".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 span: verter_span::Span::new(10, 48),
                 kind: host::meta_resolve::ResolvedDeclarationKind::Interface,
                 text: Some("export interface Props { label: string }".to_string()),
@@ -360,6 +362,7 @@ fn component_meta_type_registry_reads_positional_lane_with_duplicate_names() {
                 declaration_id: None,
                 resolved_name: "Button".to_string(),
                 canonical_source: "/src/App.vue".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 span: verter_span::Span::new(10, 52),
                 kind: host::meta_resolve::ResolvedDeclarationKind::TypeAlias,
                 text: Some(
@@ -789,6 +792,7 @@ fn profile_all_fields() {
     let profile = FfiCompileProfile {
         filename: Some("Comp.vue".to_string()),
         is_production: Some(true),
+        custom_element: Some(true),
         ssr: Some(true),
         hmr_strategy: Some("vite".to_string()),
         component_id: Some("abc123".to_string()),
@@ -807,6 +811,7 @@ fn profile_all_fields() {
     let result = ffi_profile_to_host(Some(profile)).unwrap();
     assert_eq!(result.filename, Some("Comp.vue".to_string()));
     assert!(result.is_production);
+    assert!(result.custom_element);
     assert!(result.ssr);
     assert!(result.target.needs_tsx());
     assert!(result.strict_slots);

@@ -9,8 +9,8 @@
 //! see `verter_semantic/src/facts/registry.rs`).
 //!
 //! This guard drives the ACTUAL `class Foo` lowering / shallow-analysis
-//! path end-to-end (`analyze_external_type_source` →
-//! `parse_and_build_env` → `ShallowFileState::from_analysis_with_resolver` →
+//! path end-to-end (retained parse → shallow index → lazy declaration memo →
+//! `ShallowFileState::from_route_inventory_with_resolver` →
 //! `emit_parse_facts`) and asserts both `Export` facts serve under
 //! distinct spaces on first observation through the lazy body fact
 //! path (`FileFacts::lookup_or_compute` — the publish-time registry
@@ -37,16 +37,11 @@ fn indexed_from_source(source: &str) -> Arc<IndexedReady> {
     let shallow =
         ShallowFileState::service_backed_for_test_with_hash("/dual-space.ts", source, [0u8; 16]);
 
-    let empty_external = Arc::new(
-        verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource::default(),
-    );
-
     Arc::new(IndexedReady::new_for_test_with_state(
         [0u8; 16],
         shallow,
         Arc::from(source),
         Arc::from(source),
-        empty_external,
     ))
 }
 

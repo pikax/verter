@@ -1015,26 +1015,18 @@ fn local_type_symbol_metadata_for_known_source(
     owner: verter_type_expr::TopLevelOwnerId,
     resolved_name: &str,
 ) -> Option<ResolvedLocalTypeSymbolMetadata> {
-    let analysis = ctx.external_type_analysis(canonical_source)?;
-    let declaration = verter_parser::utils::oxc::script::type_inventory::DeclarationPath::root(
-        verter_type_expr::DeclKey::new(owner, resolved_name),
-    );
-    let symbol = analysis.local_type_symbol(&declaration)?;
-    let kind = match symbol.kind {
-        verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSymbolKind::TypeAlias => {
+    let state = ctx.shallow_file_state(canonical_source)?;
+    let (symbol_kind, span) = state.type_symbol_metadata_in(owner, resolved_name)?;
+    let kind = match symbol_kind {
+        verter_semantic::analysis::type_eval::TypeDeclKind::Alias => {
             ResolvedDeclarationKind::TypeAlias
         }
-        verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSymbolKind::Interface => {
+        verter_semantic::analysis::type_eval::TypeDeclKind::Interface => {
             ResolvedDeclarationKind::Interface
         }
-        verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSymbolKind::Class => {
-            ResolvedDeclarationKind::Class
-        }
+        verter_semantic::analysis::type_eval::TypeDeclKind::Class => ResolvedDeclarationKind::Class,
     };
-    Some(ResolvedLocalTypeSymbolMetadata {
-        kind,
-        span: symbol.span,
-    })
+    Some(ResolvedLocalTypeSymbolMetadata { kind, span })
 }
 
 struct DirectPreparedDeclarationResolver<'a> {

@@ -1305,7 +1305,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let relation_input_context =
                     crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         reduction_context.mode,
-                    );
+                    )
+                    .with_orthogonal_axes_from(reduction_context);
                 let check_id = self.shallow_lower_type_expr_with_context(
                     check,
                     env,
@@ -1512,7 +1513,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         path,
                         context: crate::semantic_query::ProjectionReductionContext::published(
                             ProjectionMode::Navigate,
-                        ),
+                        )
+                        .with_orthogonal_axes_from(reduction_context),
                     }) {
                         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                         _ => return self.opaque(QueryError::Miss),

@@ -43,7 +43,6 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource;
 use verter_semantic::analysis::type_eval::DeclarationId;
 use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 use verter_workspace::{AmbientSymbolHit, ProjectStableKey};
@@ -273,14 +272,6 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
             self.complete_canonical(canonical_id);
         }
         loaded
-    }
-
-    #[inline]
-    fn external_type_analysis(
-        &self,
-        canonical_id: &str,
-    ) -> Option<Arc<AnalyzedExternalTypeSource>> {
-        crate::VerterHost::external_type_analysis(self.inner, canonical_id)
     }
 
     #[inline]
@@ -541,7 +532,7 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn with_bare_host_ctx_for_test<R>(
     host: &crate::VerterHost,
-    f: impl FnOnce(&dyn ResolverContext) -> R,
+    f: impl FnOnce(&(dyn ResolverContext + Sync)) -> R,
 ) -> R {
     let view = crate::VerterHost::resolver_store_view(host).into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());

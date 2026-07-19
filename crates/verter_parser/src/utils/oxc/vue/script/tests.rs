@@ -58,6 +58,123 @@ fn test_parse_setup_with_macro() {
 }
 
 #[test]
+fn define_model_name_is_decoded_while_span_remains_the_authored_literal() {
+    let source = r#"const model = defineModel('foo\nbar')"#;
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::tsx()).parse();
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    let result = parse_script(&parsed.program, ScriptMode::Setup, 0, source);
+
+    let (name, name_span) = result
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ScriptItem::Macro(ScriptMacro::DefineModel {
+                name, name_span, ..
+            }) => Some((*name, *name_span)),
+            _ => None,
+        })
+        .expect("defineModel macro");
+
+    assert_eq!(name, Some("foo\nbar"));
+    let name_span = name_span.expect("authored name span");
+    assert_eq!(
+        &source[name_span.start as usize..name_span.end as usize],
+        r#"'foo\nbar'"#
+    );
+}
+
+fn with_defaults_object(source: &str, check: impl FnOnce(&str, &MacroObjectArg<'_>)) {
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::tsx()).parse();
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    let result = parse_script(&parsed.program, ScriptMode::Setup, 0, source);
+    let defaults = result
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ScriptItem::Macro(ScriptMacro::WithDefaults {
+                defaults: Some(defaults),
+                ..
+            }) => Some(defaults),
+            _ => None,
+        })
+        .expect("withDefaults object");
+    check(source, defaults);
+}
+
+#[test]
+fn macro_object_static_eligibility_and_full_property_spans_are_parser_facts() {
+    with_defaults_object(
+        "withDefaults(defineProps<{ foo?: number; bar?: number }>(), { foo: 1, ['bar']: 2 })",
+        |source, object| {
+            assert_eq!(
+                object.static_eligibility,
+                MacroObjectStaticEligibility::Eligible
+            );
+            assert!(object.static_eligibility.is_eligible());
+            assert_eq!(
+                object
+                    .properties
+                    .iter()
+                    .map(|property| property.name)
+                    .collect::<Vec<_>>(),
+                ["foo", "bar"]
+            );
+            assert_eq!(
+                object
+                    .properties
+                    .iter()
+                    .map(|property| &source[property.property_span.start as usize
+                        ..property.property_span.end as usize])
+                    .collect::<Vec<_>>(),
+                ["foo: 1", "['bar']: 2"]
+            );
+        },
+    );
+}
+
+#[test]
+fn macro_property_span_includes_method_prefix_and_body() {
+    with_defaults_object(
+        "withDefaults(defineProps<{ run?: () => number }>(), { async run() { return 1 } })",
+        |source, object| {
+            let property = object.properties.first().expect("run method");
+            assert!(property.is_method);
+            assert_eq!(
+                &source[property.property_span.start as usize..property.property_span.end as usize],
+                "async run() { return 1 }"
+            );
+        },
+    );
+}
+
+#[test]
+fn macro_object_static_eligibility_distinguishes_every_unsupported_key_or_spread_shape() {
+    let cases = [
+        (
+            "withDefaults(defineProps<{}>(), { [key]: 1 })",
+            MacroObjectStaticEligibility::ContainsUnsupportedKey,
+        ),
+        (
+            "withDefaults(defineProps<{}>(), { ...defaults })",
+            MacroObjectStaticEligibility::ContainsSpread,
+        ),
+        (
+            "withDefaults(defineProps<{}>(), { 1: 'one', ...defaults })",
+            MacroObjectStaticEligibility::ContainsSpreadAndUnsupportedKey,
+        ),
+    ];
+
+    for (source, expected) in cases {
+        with_defaults_object(source, |_, object| {
+            assert_eq!(object.static_eligibility, expected, "{source}");
+            assert!(!object.static_eligibility.is_eligible(), "{source}");
+        });
+    }
+}
+
+#[test]
 fn macro_dependency_paths_come_from_typed_syntax_not_comment_or_literal_text() {
     let source = r#"
 const typed = defineProps<{ actual: Réel; literal: 'Phantom' /* Phantom */ }>()

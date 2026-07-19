@@ -2568,6 +2568,7 @@ impl VerterHost {
                 .clone()
                 .or_else(|| Some(snapshot.canonical_id.clone())),
             is_production: profile.is_production,
+            custom_element: profile.custom_element,
             source_map: profile.source_map,
             ssr: profile.ssr,
             runtime_module_name: profile.runtime_module_name.clone(),
@@ -3016,6 +3017,7 @@ impl VerterHost {
                 .clone()
                 .or_else(|| Some(snapshot.canonical_id.clone())),
             is_production: profile.is_production,
+            custom_element: profile.custom_element,
             source_map: profile.source_map,
             ssr: profile.ssr,
             runtime_module_name: profile.runtime_module_name.clone(),

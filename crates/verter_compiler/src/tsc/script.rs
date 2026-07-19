@@ -55,6 +55,7 @@ use crate::cursor::position::PositionResolver;
 use crate::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
 use crate::parser::Syntax;
 use crate::template::code_gen::binding::BindingType;
+use crate::template::code_gen::shared::helpers::escape_js_string_into;
 use crate::tokenizer::byte::tokenize_sfc;
 use crate::utils::oxc::vue::{
     extract_options_component_macro_args, parse_script, DefaultExportType, ImportSpecifierKind,
@@ -1674,7 +1675,7 @@ fn collect_local_type_inventory(
 
     for statement in &program.body {
         let statement_dependencies =
-            crate::utils::oxc::script::type_inventory::collect_statement_dependencies(
+            verter_semantic::analysis::decl_dependencies::collect_statement_dependency_names(
                 statement,
                 parser_top_level_owner(owner),
             );
@@ -2694,7 +2695,7 @@ fn parse_raw_attrs_type(type_text: &str, source_range: Span) -> AttrsTypeParseOu
     }
     AttrsTypeParseOutcome::Complete(ParsedAttrsType {
         text: type_text.to_owned(),
-        dependency_paths: crate::utils::oxc::script::type_inventory::collect_type_dependency_paths(
+        dependency_paths: verter_type_expr_oxc::collect_type_dependency_paths(
             &alias.type_annotation,
         )
         .into_iter()
@@ -2795,16 +2796,6 @@ fn authored_props_argument(
         source_start: type_start.saturating_add(content_offset),
         members,
     })
-}
-
-fn model_name_from_span(name_span: Option<Span>, content_str: &str) -> String {
-    name_span
-        .map(|span| {
-            content_str[span.start as usize..span.end as usize]
-                .trim_matches(['\'', '"'])
-                .to_string()
-        })
-        .unwrap_or_else(|| "modelValue".to_string())
 }
 
 fn build_macro_state<'a>(
@@ -2912,6 +2903,7 @@ fn build_macro_state<'a>(
             ScriptMacro::DefineModel {
                 span,
                 type_params,
+                name,
                 name_span,
                 ..
             } => {
@@ -2921,7 +2913,7 @@ fn build_macro_state<'a>(
                         payload_macro_index,
                         effective_macro_index,
                         role: TscSemanticRole::Model {
-                            name: model_name_from_span(*name_span, content_str),
+                            name: name.unwrap_or("modelValue").to_string(),
                         },
                         type_span: absolute_type_span(type_params, content_offset),
                         member_spans: Vec::new(),
@@ -2930,7 +2922,7 @@ fn build_macro_state<'a>(
                         authored_props: None,
                     });
                 } else {
-                    process_model(*span, *name_span, content_str, content_offset, &mut state);
+                    process_model(*span, *name, *name_span, content_offset, &mut state);
                 }
             }
             ScriptMacro::WithDefaults {
@@ -3719,21 +3711,13 @@ fn find_matching_paren(text: &str, open_idx: usize) -> Option<usize> {
 
 fn process_model(
     macro_span: Span,
+    name: Option<&str>,
     name_span: Option<Span>,
-    content_str: &str,
     content_offset: u32,
     state: &mut TscMacroState,
 ) {
-    let model_name = match name_span {
-        Some(ns) => {
-            let s = content_str[ns.start as usize..ns.end as usize].trim();
-            s.trim_matches(|c: char| c == '\'' || c == '"').to_string()
-        }
-        None => "modelValue".to_string(),
-    };
-
     state.models.push(ModelEntry {
-        name: model_name,
+        name: name.unwrap_or("modelValue").to_string(),
         optional: true,
         ts_type: "unknown".to_string(),
         map_span: Some(local_to_sfc_span(
@@ -3875,11 +3859,27 @@ fn render_testing_prop_type(prop: &TestingPropBinding) -> String {
     }
 }
 
+fn js_string_literal(value: &str) -> String {
+    let mut literal = String::with_capacity(value.len().saturating_add(2));
+    literal.push('"');
+    escape_js_string_into(&mut literal, value);
+    literal.push('"');
+    literal
+}
+
+fn js_property_key(value: &str) -> String {
+    if is_simple_ident(value) {
+        value.to_owned()
+    } else {
+        js_string_literal(value)
+    }
+}
+
 fn render_testing_binding_key(name: &str) -> String {
     if is_testing_decl_ident(name) {
         name.to_string()
     } else {
-        format!("'{}'", name.replace('\\', "\\\\").replace('\'', "\\'"))
+        js_string_literal(name)
     }
 }
 
@@ -4407,7 +4407,11 @@ fn generate_testing_code(
         }
         for model in &state.models {
             let ctor = ts_to_constructor(&model.ts_type);
-            out.push_str(&format!("    {}: {},\n", model.name, ctor));
+            out.push_str("    ");
+            out.push_str(&js_property_key(&model.name));
+            out.push_str(": ");
+            out.push_str(ctor);
+            out.push_str(",\n");
         }
         out.push_str("  },\n");
     }
@@ -4417,10 +4421,10 @@ fn generate_testing_code(
         let mut names: Vec<String> = state
             .emits_names
             .iter()
-            .map(|n| format!("'{}'", n))
+            .map(|name| js_string_literal(name))
             .collect();
         for model in &state.models {
-            names.push(format!("'update:{}'", model.name));
+            names.push(js_string_literal(&format!("update:{}", model.name)));
         }
         out.push_str(&format!("  emits: [{}],\n", names.join(", ")));
     }
@@ -4613,7 +4617,11 @@ fn generate_code(
         }
         for model in &state.models {
             let ctor = ts_to_constructor(&model.ts_type);
-            out.push_str(&format!("    {}: {},\n", model.name, ctor));
+            out.push_str("    ");
+            out.push_str(&js_property_key(&model.name));
+            out.push_str(": ");
+            out.push_str(ctor);
+            out.push_str(",\n");
         }
         out.push_str("  },\n");
     }
@@ -4623,10 +4631,10 @@ fn generate_code(
         let mut names: Vec<String> = state
             .emits_names
             .iter()
-            .map(|n| format!("'{}'", n))
+            .map(|name| js_string_literal(name))
             .collect();
         for model in &state.models {
-            names.push(format!("'update:{}'", model.name));
+            names.push(js_string_literal(&format!("update:{}", model.name)));
         }
         out.push_str(&format!("  emits: [{}],\n", names.join(", ")));
     }
@@ -5006,10 +5014,11 @@ fn render_emit_fn_type(
             rendered.push_str(" & ");
         }
         rendered.push_str("((event: ");
+        let event_literal = js_string_literal(&emit.name);
         if let Some(map_span) = emit.map_span {
-            rendered.push_mapped(&format!("'{}'", emit.name), map_span);
+            rendered.push_mapped(&event_literal, map_span);
         } else {
-            rendered.push_str(&format!("'{}'", emit.name));
+            rendered.push_str(&event_literal);
         }
         match &emit.payload {
             EmitPayload::Unknown => rendered.push_str(", ...args: unknown[]) => void)"),
@@ -5031,10 +5040,11 @@ fn render_emit_fn_type(
             rendered.push_str(" & ");
         }
         rendered.push_str("((event: ");
+        let event_literal = js_string_literal(&format!("update:{}", model.name));
         if let Some(map_span) = model.map_span {
-            rendered.push_mapped(&format!("'update:{}'", model.name), map_span);
+            rendered.push_mapped(&event_literal, map_span);
         } else {
-            rendered.push_str(&format!("'update:{}'", model.name));
+            rendered.push_str(&event_literal);
         }
         rendered.push_str(", v: ");
         rendered.push_str(&model.ts_type);
@@ -5059,10 +5069,11 @@ fn render_emits_to_props_type(emits: &[EmitEntry]) -> RenderedText {
             if !first {
                 rendered.push_str("; ");
             }
+            let key_literal = js_string_literal(&key);
             if let Some(map_span) = emit.map_span {
-                rendered.push_mapped(&format!("\"{}\"", key), map_span);
+                rendered.push_mapped(&key_literal, map_span);
             } else {
-                rendered.push_str(&format!("\"{}\"", key));
+                rendered.push_str(&key_literal);
             }
             rendered.push_str("?: ");
             rendered.push_str(&handler);
@@ -5089,7 +5100,7 @@ fn render_props_shape_type(
             } else {
                 let keys = unresolved_defaults
                     .iter()
-                    .map(|name| format!("'{}'", escape_single_quoted_type_key(name)))
+                    .map(|name| js_string_literal(name))
                     .collect::<Vec<_>>()
                     .join(" | ");
                 rendered.push_str("Omit<");
@@ -5215,28 +5226,26 @@ fn authored_props_clone(rendered: &RenderedText) -> RenderedText {
     }
 }
 
-fn escape_single_quoted_type_key(name: &str) -> String {
-    name.replace('\\', "\\\\").replace('\'', "\\'")
-}
-
 fn render_model_props_type(models: &[ModelEntry]) -> Vec<RenderedText> {
     models
         .iter()
         .map(|model| {
             let mut rendered = RenderedText::default();
             rendered.push_str("{ ");
+            let model_literal = js_property_key(&model.name);
             if let Some(map_span) = model.map_span {
-                rendered.push_mapped(&model.name, map_span);
+                rendered.push_mapped(&model_literal, map_span);
             } else {
-                rendered.push_str(&model.name);
+                rendered.push_str(&model_literal);
             }
             rendered.push_str(if model.optional { "?: " } else { ": " });
             rendered.push_str(&model.ts_type);
             rendered.push_str("; ");
+            let update_literal = js_string_literal(&format!("onUpdate:{}", model.name));
             if let Some(map_span) = model.map_span {
-                rendered.push_mapped(&format!("\"onUpdate:{}\"", model.name), map_span);
+                rendered.push_mapped(&update_literal, map_span);
             } else {
-                rendered.push_str(&format!("\"onUpdate:{}\"", model.name));
+                rendered.push_str(&update_literal);
             }
             rendered.push_str("?: (v: ");
             rendered.push_str(&model.ts_type);
@@ -5544,9 +5553,10 @@ fn detect_use_attrs_type_arg_tsc<'a>(
                             if !trimmed.is_empty() {
                                 return Some(ParsedAttrsType {
                                     text: trimmed.to_owned(),
-                                    dependency_paths: crate::utils::oxc::script::type_inventory::collect_type_dependency_paths(param)
-                                        .into_iter()
-                                        .collect(),
+                                    dependency_paths:
+                                        verter_type_expr_oxc::collect_type_dependency_paths(param)
+                                            .into_iter()
+                                            .collect(),
                                 });
                             }
                         }

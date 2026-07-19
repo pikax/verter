@@ -78,6 +78,8 @@ pub type TypeResolutionResult = SemanticNodeId;
 /// `(Option<…>, …)` tuple that collapsed every error to `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeResolutionRequestError {
+    /// The request was cancelled before semantic resolution completed.
+    Cancelled,
     /// A declaration resolved to `= intrinsic` but the active TS SDK
     /// advertises an intrinsic the verter intrinsic registry does not
     /// implement.
@@ -138,6 +140,7 @@ impl TypeResolutionRequestError {
                 name: Arc::clone(name),
             }),
             QueryError::BudgetExceeded(failure) => Some(Self::BudgetExceeded(failure.clone())),
+            QueryError::Cancelled => Some(Self::Cancelled),
             QueryError::UnstableState { attempts } => Some(Self::UnstableState {
                 attempts: *attempts,
             }),

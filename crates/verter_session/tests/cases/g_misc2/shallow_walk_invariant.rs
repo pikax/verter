@@ -38,11 +38,9 @@ fn fact_emission_does_not_invoke_cross_decl_oxc_walks() {
         "oxc_ast::",
         "Parser::new",
         "oxc::parser",
-        // Cross-decl walker entry points in the existing parser
-        // crate — the parse-phase emitter MUST NOT call these.
+        // Parser entry points — the parse-phase emitter MUST NOT call these.
         "parse_module(",
         "parse_script(",
-        "analyze_external_type_program",
         // Internal session resolver entry points — the parse-phase
         // emitter MUST NOT cross into resolve-domain code.
         "resolver_runtime::",

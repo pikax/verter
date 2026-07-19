@@ -122,4 +122,44 @@ export type Props = Pick<Base, 'count' | 'options'> & {
 `,
     },
   },
+  {
+    id: "profile-default-rendering",
+    axes: ["props", "with-defaults", "development", "production", "custom-element"],
+    profiles: [
+      { name: "development", isProd: false, customElement: false },
+      { name: "production", isProd: true, customElement: false },
+      { name: "production-custom-element", isProd: true, customElement: true },
+    ],
+    source: `<script setup lang="ts">
+withDefaults(defineProps<{
+  text: string
+  callable?: () => number
+  method?: () => number
+  enabled?: boolean
+  opaque?: unknown
+  booleanUnknown?: boolean | unknown
+}>(), {
+  text: 'fallback',
+  callable: () => 1,
+  method() { return 2 },
+})
+</script>`,
+  },
+  {
+    id: "complete-imported-extension",
+    axes: ["props", "import", "conditional", "verter-extension"],
+    contract: "verter-complete-extension",
+    extensionPolicy: "refine-only-on-complete",
+    profiles: [{ name: "development", isProd: false, customElement: false }],
+    filename: "/fixtures/complete-imported-extension.vue",
+    source: `<script setup lang="ts">
+import type { RuntimeValue } from './complete-imported-extension-types'
+defineProps<{ payload: RuntimeValue<string> }>()
+</script>`,
+    supportFiles: {
+      "/fixtures/complete-imported-extension-types.ts": `
+export type RuntimeValue<T> = T extends string ? Date : Map<string, string>
+`,
+    },
+  },
 ]);

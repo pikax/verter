@@ -533,6 +533,7 @@ pub(crate) fn semantic_query_error_raw(err: &QueryError) -> String {
         QueryError::Other(text) => text.as_ref().to_string(),
         QueryError::UnsupportedIntrinsic { name } => format!("unsupportedIntrinsic({name})"),
         QueryError::BudgetExceeded(failure) => format!("budgetExceeded({:?})", failure.domain),
+        QueryError::Cancelled => "cancelled".to_string(),
         QueryError::UnstableState { attempts } => format!("unstableState({attempts})"),
         QueryError::AliasCycle { chain } => format!("aliasCycle({})", chain.len()),
         QueryError::RecursiveRef { name } => format!("recursiveRef({name})"),

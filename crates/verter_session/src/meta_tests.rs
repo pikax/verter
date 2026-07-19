@@ -19180,8 +19180,8 @@ const props = defineProps<ButtonProps>()
     );
 }
 
-/// The JSDoc enrichment path for imported props goes through the host-
-/// cached parsed program + cached external type analysis. The
+/// The JSDoc enrichment path for imported props goes through the retained
+/// parsed program and cache-owned declaration facts. The
 /// enrichment path must NOT fall back to a raw-source reparse helper
 /// (which would allocate a fresh oxc arena and reparse dependency
 /// source). That architectural guarantee is enforced statically by

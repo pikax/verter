@@ -34,9 +34,9 @@ use super::carrier::CarrierResolverContext;
 use super::ProjectSemanticDispatch;
 use crate::resolver_core::scope_shadowing::ScopeShadowing;
 use crate::semantic_query::{
-    NodeScopeId, PathSegment, PrimitiveKind, ProjectionMode, ProjectionReductionContext,
-    QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
-    SemanticQueryOutput,
+    NodeScopeId, PartialReasonSet, PathSegment, PrimitiveKind, ProjectionMode,
+    ProjectionReductionContext, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
+    SemanticQueryKey, SemanticQueryOutput, SurfaceProvenanceContext, VueHeritagePolicy,
 };
 use crate::types::HostConfig;
 use crate::{CompileErrorPolicy, FileLanguage, UpsertRequest, VerterHost};
@@ -61,16 +61,40 @@ pub(super) fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
         .unwrap();
 }
 
+fn upsert_vue(host: &VerterHost, id: &str, source: &str) {
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(id.to_owned()),
+            input_id: id.to_owned(),
+            source: Arc::from(source),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("Vue carrier fixture must upsert");
+}
+
 /// The `NodeScopeId::File` for `canonical`, sourced from the host's live
 /// shallow state (so the `whole_hash` matches the eager lowering path's scope).
 pub(super) fn file_scope(dispatch: &ProjectSemanticDispatch<'_>, canonical: &str) -> NodeScopeId {
+    file_scope_in_owner(
+        dispatch,
+        canonical,
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+    )
+}
+
+fn file_scope_in_owner(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    canonical: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
+) -> NodeScopeId {
     let shallow = dispatch
         .ctx
         .shallow_file_state(canonical)
         .expect("file must be indexed in the hermetic host");
     NodeScopeId::File {
         canonical_id: Arc::from(canonical),
-        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        owner,
         whole_hash: shallow.whole_hash,
         local_scope: None,
     }
@@ -1585,5 +1609,251 @@ fn eager_resolvable_ref_head_still_lowers_and_applies_args() {
         value_dbg.contains("argfile2")
             || matches!(value_data.as_deref(), Some(SemanticNodeData::Object(_))),
         "`v`'s value must reference the substituted `ArgT` (from /argfile2.ts); got {value_dbg}"
+    );
+}
+
+#[test]
+fn vue_runtime_carrier_resolves_exact_owner_mapped_body_locator_before_projection() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/src/CarrierOwner.vue";
+    upsert_ts(
+        &host,
+        "/src/carrier-import.ts",
+        r#"export interface ImportedBase { ignored: boolean }
+export interface ImportedProps extends /* @vue-ignore */ ImportedBase {
+  importedOwn: number
+}"#,
+    );
+    upsert_vue(
+        &host,
+        canonical,
+        r#"<script lang="ts">
+type Copy<T> = { moduleOnly: T }
+</script>
+<script setup lang="ts">
+import type { ImportedProps } from './carrier-import'
+type Copy<T> = { [K in keyof T]: T[K] }
+defineProps<Copy<ImportedProps>>()
+</script>"#,
+    );
+
+    let indexed = host
+        .ensure_indexed_ready(canonical)
+        .expect("fixture must publish an indexed artifact");
+    let macro_index = indexed
+        .script_analysis
+        .as_ref()
+        .expect("fixture must publish script analysis")
+        .macros
+        .iter()
+        .position(|mac| mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .expect("fixture must publish defineProps");
+    let mac = &indexed
+        .script_analysis
+        .as_ref()
+        .expect("fixture must publish script analysis")
+        .macros[macro_index];
+    let hot =
+        crate::structural_carrier_producer::macro_type_arg_hot_ref(&host, canonical, macro_index)
+            .expect("macro type argument must have a hot carrier");
+    crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+        let dispatch = ProjectSemanticDispatch::new(ctx);
+        let runtime_context = ProjectionReductionContext::vue_runtime_object_surface(
+            ProjectionMode::Shallow,
+            SurfaceProvenanceContext::MacroTypeArgOwnBody,
+        );
+
+        let resolved = dispatch.resolve_carrier_subject_node(hot.node(), runtime_context);
+        let resolved_data = dispatch
+            .graph()
+            .node_data(resolved)
+            .expect("resolved carrier node must remain addressable");
+        let (base, args) = match resolved_data.as_ref() {
+        SemanticNodeData::InstantiationRef { base, args } => (base.clone(), Arc::clone(args)),
+        other => panic!(
+            "setup `Copy<Source>` must resolve to an exact InstantiationRef before projection; got {other:?}"
+        ),
+    };
+        let setup_owner = verter_type_expr::TopLevelOwnerId::instance(0);
+        assert_eq!(base.canonical_id.as_ref(), canonical);
+        assert_eq!(base.owner, setup_owner, "module-scope `Copy` must not win");
+        assert_eq!(base.decl_name.as_ref(), "Copy");
+        assert_eq!(args.len(), 1);
+
+        let prepared = dispatch
+            .ctx
+            .prepared_type_decl(canonical, setup_owner, "Copy")
+            .expect("exact-owner preparation must not fail")
+            .expect("exact setup `Copy` declaration must be preparable");
+        assert_eq!(prepared.root_identity.owner, setup_owner);
+        assert_eq!(
+            prepared.body_facts.classification,
+            verter_type_expr::facts::TypeBodyClass::Alias
+        );
+        let anchor = &prepared.body_facts.body_slot.anchor;
+        assert_eq!(anchor.canonical_id.as_ref(), canonical);
+        assert_eq!(anchor.owner, setup_owner);
+        assert_eq!(anchor.symbol.as_ref(), "Copy");
+        assert!(prepared.body_facts.body_slot.path.is_empty());
+
+        let transit = runtime_context.into_structural_transit_with_mode(ProjectionMode::Navigate);
+        let instantiate_context = dispatch.instantiate_context_for(canonical, transit);
+        assert_eq!(
+            instantiate_context
+                .projection_reduction()
+                .vue_heritage_policy(),
+            VueHeritagePolicy::SuppressIgnored
+        );
+        let read = dispatch.execute_read(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                dispatch.type_slot_for(
+                    Arc::clone(&base.canonical_id),
+                    base.owner,
+                    Arc::clone(&base.decl_name),
+                ),
+                args,
+                instantiate_context,
+            ),
+        ));
+        assert!(
+            !read.result_is_partial,
+            "exact mapped body must be complete"
+        );
+        assert!(!read.cache_suppress, "exact mapped body must be reusable");
+        let body = match read.value {
+            QueryResult::Value(body) => body,
+            other => panic!("exact mapped Instantiate must produce a node: {other:?}"),
+        };
+        let body_data = dispatch
+            .graph()
+            .node_data(body)
+            .expect("mapped body node must remain addressable");
+        let SemanticNodeData::Mapped { source, .. } = body_data.as_ref() else {
+            panic!("setup `Copy` body must lower to a mapped carrier; got {body_data:?}");
+        };
+        assert!(
+            !matches!(
+                dispatch.graph().node_data(*source).as_deref(),
+                Some(SemanticNodeData::Opaque(_)) | None
+            ),
+            "mapped source must retain the exact imported `ImportedProps` identity"
+        );
+
+        let navigate_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+            base: hot.node(),
+            path: Arc::from([]),
+            context: ProjectionReductionContext::structural_transit_with_mode(
+                ProjectionMode::Navigate,
+            ),
+        });
+        assert!(!navigate_read.result_is_partial);
+        assert!(!navigate_read.cache_suppress);
+        let navigate_node = match navigate_read.value {
+            QueryResult::Value(node) => node,
+            other => panic!("Navigate carrier projection must resolve identity: {other:?}"),
+        };
+        assert!(
+            matches!(
+                dispatch.graph().node_data(navigate_node).as_deref(),
+                Some(SemanticNodeData::InstantiationRef { base, .. })
+                    if base.canonical_id.as_ref() == canonical && base.owner == setup_owner
+            ),
+            "Navigate projection must publish the exact setup-owner carrier identity"
+        );
+
+        let owner =
+            crate::meta_resolve::projectors::build_owner_decl_identity(&host, canonical, mac.owner);
+        let payload_read = dispatch.execute_read(SemanticQueryKey::ResolveMacroPayload {
+            owner: dispatch.type_slot_for(
+                Arc::clone(&owner.canonical_id),
+                owner.owner,
+                Arc::clone(&owner.decl_name),
+            ),
+            macro_index,
+            macro_kind: mac.kind,
+            type_args: Arc::from(vec![hot.node()].into_boxed_slice()),
+            context: dispatch.macro_payload_context_for(canonical, ProjectionMode::Navigate),
+        });
+        assert!(!payload_read.result_is_partial);
+        assert!(!payload_read.cache_suppress);
+        let payload = match payload_read.value {
+            QueryResult::Value(node) => node,
+            other => panic!("macro payload must preserve the hot carrier: {other:?}"),
+        };
+        let payload_surface_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+            base: payload,
+            path: Arc::from([]),
+            context: runtime_context,
+        });
+        assert!(!payload_surface_read.result_is_partial);
+        assert!(!payload_surface_read.cache_suppress);
+        let payload_surface = match payload_surface_read.value {
+            QueryResult::Value(node) => node,
+            other => panic!("resolved macro payload must materialize: {other:?}"),
+        };
+        let payload_surface_data = dispatch
+            .graph()
+            .node_data(payload_surface)
+            .expect("payload surface must remain addressable");
+        let SemanticNodeData::Object(payload_view) = payload_surface_data.as_ref() else {
+            panic!("resolved payload must synthesize an Object; got {payload_surface_data:?}");
+        };
+        assert_eq!(
+            payload_view
+                .members
+                .iter()
+                .map(|member| member.name.as_ref())
+                .collect::<Vec<_>>(),
+            ["importedOwn"],
+            "ResolveMacroPayload must preserve the exact carrier-to-mapped runtime route"
+        );
+    });
+}
+
+#[test]
+fn vue_runtime_unresolved_exact_owner_carrier_is_partial_return_only() {
+    let host = host();
+    let canonical = "/src/CarrierOwnerMiss.vue";
+    upsert_vue(
+        &host,
+        canonical,
+        r#"<script lang="ts">
+type Copy<T> = { moduleOnly: T }
+</script>
+<script setup lang="ts">
+defineProps<{ setupOnly: string }>()
+</script>"#,
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let setup_scope = file_scope_in_owner(
+        &dispatch,
+        canonical,
+        verter_type_expr::TopLevelOwnerId::instance(0),
+    );
+    let carrier = bare_ref_carrier(&dispatch, "Copy", setup_scope, &[PrimitiveKind::String]);
+    let context = ProjectionReductionContext::vue_runtime_object_surface(
+        ProjectionMode::Shallow,
+        SurfaceProvenanceContext::MacroTypeArgOwnBody,
+    );
+    let _completeness = crate::request_context::ColdComputeCompletenessScope::enter();
+    let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+        base: carrier,
+        path: Arc::from([]),
+        context,
+    });
+
+    assert!(
+        read.result_is_partial,
+        "an unresolved exact head is partial"
+    );
+    assert!(
+        read.cache_suppress,
+        "an unresolved exact head is ReturnOnly"
+    );
+    assert!(
+        crate::request_context::current_cold_compute_completeness()
+            .reasons()
+            .contains(PartialReasonSet::SEMANTIC_QUERY_FAULT),
+        "the unresolved exact-head reason must remain typed"
     );
 }

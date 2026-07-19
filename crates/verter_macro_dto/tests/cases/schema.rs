@@ -183,8 +183,8 @@ fn constructors_are_closed_ordered_and_deduplicated_without_bigint() {
 }
 
 #[test]
-fn anchors_are_honest_and_authored_ordinal_is_optional() {
-    let authored_without_ordinal = authored(4, None);
+fn anchors_distinguish_exact_authored_members_from_macro_argument_fallbacks() {
+    let fallback_without_ordinal = authored(4, None);
     let authored_with_ordinal = authored(4, Some(2));
     let macro_argument = MacroAnchor::MacroArgument { macro_index: 4 };
     let synthesized = MacroAnchor::Synthesized {
@@ -192,16 +192,16 @@ fn anchors_are_honest_and_authored_ordinal_is_optional() {
         row: SynthesizedRowKind::ModelModifiersProp,
     };
 
-    assert_ne!(authored_without_ordinal, authored_with_ordinal);
-    assert_ne!(authored_without_ordinal, macro_argument);
+    assert_ne!(fallback_without_ordinal, authored_with_ordinal);
+    assert_eq!(fallback_without_ordinal, macro_argument);
     assert_ne!(macro_argument, synthesized);
-    match authored_without_ordinal {
+    match authored_with_ordinal {
         MacroAnchor::Authored {
             macro_index,
             member_ordinal,
         } => {
             assert_eq!(macro_index, 4);
-            assert_eq!(member_ordinal, None);
+            assert_eq!(member_ordinal, AuthoredMemberOrdinal::new(2));
         }
         MacroAnchor::MacroArgument { .. } | MacroAnchor::Synthesized { .. } => {
             panic!("constructed an authored anchor")

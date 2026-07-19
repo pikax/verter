@@ -182,7 +182,8 @@ pub(super) use crate::semantic_query::index_key::{
 
 /// Encode a [`ProjectionReductionContext`] as a compact u32 bit
 /// pattern used in the mapped-member-materialization
-/// identity tuple. Layout: bits 0–1 (demand tag) and 2+ (mode tag).
+/// identity tuple. Layout: bits 0–1 (demand tag), bit 2 (Vue heritage
+/// policy), and bits 3+ (mode tag).
 #[inline]
 pub(super) fn encode_projection_reduction_context_bits(
     context: crate::semantic_query::ProjectionReductionContext,
@@ -194,15 +195,29 @@ pub(super) fn encode_projection_reduction_context_bits(
         ProjectionMode::Expanded => 3,
         ProjectionMode::Skeleton => 4,
     };
-    // 2-bit demand tag (three demands: Published / StructuralTransit /
-    // MacroObjectSurface). Mode shifts by 2 so the demand axis
-    // stays disjoint in the packed identity.
+    // 2-bit demand tag (four closed demands).
     let demand_tag: u32 = match context.demand {
         ReductionDemand::Published => 0,
         ReductionDemand::StructuralTransit => 1,
         ReductionDemand::MacroObjectSurface => 2,
+        ReductionDemand::VueRuntimeObjectSurface => 3,
     };
-    (mode_tag << 2) | demand_tag
+    let vue_heritage_policy_tag: u32 = match context.vue_heritage_policy {
+        crate::semantic_query::VueHeritagePolicy::RetainAll => 0,
+        crate::semantic_query::VueHeritagePolicy::SuppressIgnored => 1,
+    };
+    // Policy is value-affecting even after runtime publication demotes to
+    // StructuralTransit. Keep it disjoint from both the demand and mode tags.
+    (mode_tag << 3) | (vue_heritage_policy_tag << 2) | demand_tag
+}
+
+/// Test-only visibility bridge for crate-level invariant tests. Production
+/// callers remain confined to the owning dispatch module.
+#[cfg(test)]
+pub(crate) fn encode_projection_reduction_context_bits_for_tests(
+    context: crate::semantic_query::ProjectionReductionContext,
+) -> u32 {
+    encode_projection_reduction_context_bits(context)
 }
 
 // Per-call counter (test-only). Incremented every time
@@ -3527,7 +3542,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 path: Arc::from(Vec::new().into_boxed_slice()),
             },
         );
-        self.lower_located_body_with_provenance(
+        self.lower_located_body_with_vue_heritage_policy(
             locator,
             prepared.kind,
             &prepared.type_parameters,
@@ -3538,6 +3553,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             shadowing,
             substitutions,
             context,
+            &prepared.vue_ignored_heritage,
         )
     }
 
@@ -3638,6 +3654,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
+        self.lower_located_body_with_vue_heritage_policy(
+            locator,
+            decl_kind,
+            type_parameters,
+            name_resolution,
+            env,
+            scope,
+            scope_payload,
+            shadowing,
+            substitutions,
+            context,
+            &[],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_located_body_with_vue_heritage_policy(
+        &self,
+        locator: verter_type_expr::locators::AuthoredBodyLocator,
+        decl_kind: verter_semantic::analysis::type_eval::TypeDeclKind,
+        type_parameters: &[verter_type_expr::facts::NarrowTypeParam],
+        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        env: &FxHashMap<String, SemanticNodeId>,
+        scope: &NodeScopeId,
+        scope_payload: Option<&crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
+        shadowing: &crate::resolver_core::scope_shadowing::ScopeShadowing,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        context: crate::semantic_query::ProjectionReductionContext,
+        vue_ignored_heritage: &[verter_type_expr::facts::VueIgnoredHeritageFact],
+    ) -> SemanticNodeId {
         let owner_symbol = match &locator {
             verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot) => {
                 Arc::clone(&slot.anchor.symbol)
@@ -3660,6 +3706,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             QueryResult::Recursive(_) | QueryResult::Error(_) => {
                 return self.opaque(QueryError::Miss)
             }
+        };
+        let shape = if context.suppresses_vue_ignored_heritage() && !vue_ignored_heritage.is_empty()
+        {
+            self.filter_vue_ignored_heritage(shape, vue_ignored_heritage)
+        } else {
+            shape
         };
 
         // 2. Apply the caller's bindings via semantic type-param
@@ -3699,6 +3751,144 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self.fold_local_partial_completeness(reasons);
         }
         projected.node
+    }
+
+    /// Remove only producer-addressed Vue runtime heritage arms from the
+    /// fixed, role-free declaration shape. Filtering happens before generic
+    /// substitution, carrier resolution, or peer/heritage merge, so an ignored
+    /// imported head creates no nested demand and cannot leak members into the
+    /// runtime surface.
+    fn filter_vue_ignored_heritage(
+        &self,
+        shape: SemanticNodeId,
+        facts: &[verter_type_expr::facts::VueIgnoredHeritageFact],
+    ) -> SemanticNodeId {
+        let mut ignored_by_contributor: FxHashMap<u32, FxHashSet<u32>> = FxHashMap::default();
+        for fact in facts {
+            ignored_by_contributor
+                .entry(fact.contributor_ordinal)
+                .or_default()
+                .insert(fact.intersection_arm_ordinal);
+        }
+
+        let Some(data) = self.graph().node_data(shape) else {
+            return shape;
+        };
+        let SemanticNodeData::MergedDecl { contributors } = data.as_ref() else {
+            let Some(ignored) = ignored_by_contributor.get(&0) else {
+                return shape;
+            };
+            return self.filter_vue_ignored_contributor(shape, ignored);
+        };
+        let contributors = Arc::clone(contributors);
+        drop(data);
+
+        let mut changed = false;
+        let filtered: Vec<_> = contributors
+            .iter()
+            .enumerate()
+            .map(|(ordinal, contributor)| {
+                let Ok(ordinal) = u32::try_from(ordinal) else {
+                    return *contributor;
+                };
+                let Some(ignored) = ignored_by_contributor.get(&ordinal) else {
+                    return *contributor;
+                };
+                let next = self.filter_vue_ignored_contributor(*contributor, ignored);
+                changed |= next != *contributor;
+                next
+            })
+            .collect();
+        if !changed {
+            return shape;
+        }
+        self.graph().intern_preserving_scope(
+            shape,
+            SemanticNodeData::MergedDecl {
+                contributors: Arc::from(filtered.into_boxed_slice()),
+            },
+        )
+    }
+
+    /// Filter the addressed heritage ordinals from one declaration contributor.
+    /// Alias peeling/rebuild is iterative and bounded only by the shared graph;
+    /// there is no syntax rescan or fixed depth escape.
+    fn filter_vue_ignored_contributor(
+        &self,
+        contributor: SemanticNodeId,
+        ignored: &FxHashSet<u32>,
+    ) -> SemanticNodeId {
+        let mut aliases = Vec::new();
+        let mut visited = FxHashSet::default();
+        let mut current = contributor;
+        let arms = loop {
+            if !visited.insert(current) {
+                return contributor;
+            }
+            let Some(data) = self.graph().node_data(current) else {
+                return contributor;
+            };
+            match data.as_ref() {
+                SemanticNodeData::Alias(target) => {
+                    aliases.push(current);
+                    current = *target;
+                }
+                SemanticNodeData::Intersection(arms) => break Arc::clone(arms),
+                _ => return contributor,
+            }
+        };
+
+        let mut heritage_ordinal = 0_u32;
+        let mut changed = false;
+        let mut filtered = Vec::with_capacity(arms.len());
+        for arm in arms.iter().copied() {
+            if self.vue_heritage_arm_is_own_object(arm) {
+                filtered.push(arm);
+                continue;
+            }
+            let suppress = ignored.contains(&heritage_ordinal);
+            heritage_ordinal = heritage_ordinal.saturating_add(1);
+            if suppress {
+                changed = true;
+            } else {
+                filtered.push(arm);
+            }
+        }
+        if !changed || filtered.is_empty() {
+            return contributor;
+        }
+
+        let mut filtered_node = self.graph().intern_preserving_scope(
+            current,
+            SemanticNodeData::Intersection(Arc::from(filtered.into_boxed_slice())),
+        );
+        for alias in aliases.into_iter().rev() {
+            filtered_node = self
+                .graph()
+                .intern_preserving_scope(alias, SemanticNodeData::Alias(filtered_node));
+        }
+        filtered_node
+    }
+
+    /// Whether an interface contributor arm is its authored Object body rather
+    /// than an `extends` carrier. Alias traversal is graph-only and iterative;
+    /// it never resolves the heritage head or observes nested members.
+    fn vue_heritage_arm_is_own_object(&self, arm: SemanticNodeId) -> bool {
+        let mut visited = FxHashSet::default();
+        let mut current = arm;
+        loop {
+            if !visited.insert(current) {
+                return false;
+            }
+            let Some(data) = self.graph().node_data(current) else {
+                return false;
+            };
+            match data.as_ref() {
+                SemanticNodeData::Object(_) => return true,
+                SemanticNodeData::Alias(target) => current = *target,
+                _ => return false,
+            }
+        }
     }
 
     pub(super) fn backfill_member_index_surface(
@@ -3870,8 +4060,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// arm then carries those signatures through (TS semantics: `Omit<T, K>`
     /// filters property names only), where the old `MacroSurfaceView` reader
     /// silently dropped construct / index signatures for a carrier-sourced
-    /// `Omit`.
-    fn object_filter_source_surface(&self, source_resolved: SemanticNodeId) -> Option<SurfaceView> {
+    /// `Omit`. The fresh `Published(Shallow)` demand inherits the caller's
+    /// orthogonal Vue heritage policy, so a runtime Pick/Omit cannot reintroduce
+    /// producer-addressed ignored heritage while ordinary TypeScript callers
+    /// retain it.
+    fn object_filter_source_surface(
+        &self,
+        source_resolved: SemanticNodeId,
+        caller_context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<SurfaceView> {
         match self.graph().node_data(source_resolved).as_deref() {
             Some(SemanticNodeData::Object(view)) => Some(view.clone()),
             Some(
@@ -3899,7 +4096,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     source_resolved,
                     crate::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Shallow,
-                    ),
+                    )
+                    .with_orthogonal_axes_from(caller_context),
                 )
             }
             _ => None,
@@ -4534,7 +4732,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     record_utility_edges(result);
                     return (QueryResult::Value(result), fence, false);
                 }
-                let surface = match self.object_filter_source_surface(source_resolved) {
+                let surface = match self.object_filter_source_surface(source_resolved, context) {
                     Some(view) => view,
                     None => {
                         let result = self.opaque(QueryError::Miss);
@@ -4609,7 +4807,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     record_utility_edges(result);
                     return (QueryResult::Value(result), fence, false);
                 }
-                let surface = match self.object_filter_source_surface(source_resolved) {
+                let surface = match self.object_filter_source_surface(source_resolved, context) {
                     Some(view) => view,
                     None => {
                         let result = self.opaque(QueryError::Miss);
@@ -6218,6 +6416,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn source_members_for_published_projection(
         &self,
         source: SemanticNodeId,
+        caller_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<(Vec<SurfaceMember>, bool)> {
         fn public_members(members: &[SurfaceMember]) -> Vec<SurfaceMember> {
             members
@@ -6231,12 +6430,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return Some((public_members(&view.members), false));
         }
 
+        // Mapped/keyof source enumeration retains ordinary TypeScript
+        // Published(Shallow) intersection semantics. Only the orthogonal Vue
+        // heritage policy crosses this boundary: a runtime source carrier must
+        // suppress its producer-addressed heritage before head resolution,
+        // while all ordinary callers retain the complete source surface.
+        let source_context =
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow)
+                .with_orthogonal_axes_from(caller_context);
         let read = self.execute_read(SemanticQueryKey::ProjectPath {
             base: source,
             path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-            context: crate::semantic_query::ProjectionReductionContext::published(
-                ProjectionMode::Shallow,
-            ),
+            context: source_context,
         });
         crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, &read.dep_signature);
         let read_is_partial = read.result_is_partial;
@@ -6256,13 +6461,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         source: SemanticNodeId,
     ) -> Option<(Vec<Arc<str>>, bool)> {
-        self.source_members_for_published_projection(source)
-            .map(|(members, is_partial)| {
-                (
-                    members.into_iter().map(|member| member.name).collect(),
-                    is_partial,
-                )
-            })
+        self.source_members_for_published_projection(
+            source,
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow),
+        )
+        .map(|(members, is_partial)| {
+            (
+                members.into_iter().map(|member| member.name).collect(),
+                is_partial,
+            )
+        })
     }
 
     /// Mapped-type rewrite.
@@ -6444,7 +6652,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `Value`.
         let mut mapped_is_partial = false;
         let (source_members, source_members_partial): (Vec<SurfaceMember>, bool) = self
-            .source_members_for_published_projection(source)
+            .source_members_for_published_projection(source, context)
             .unwrap_or_default();
         mapped_is_partial |= source_members_partial;
         let source_member_keys = |members: &[SurfaceMember]| {
@@ -7225,23 +7433,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// reentrance check and returns `Recursive`, which surfaces as
     /// `None` here).
     ///
-    /// **`context` parameter**: carries the caller's
-    /// `ProjectionReductionContext` for telemetry / cache scoping
-    /// alignment — the internal dispatch is fixed at
-    /// `Published(Shallow)` per the contract. Callers
-    /// passing a non-Published context to this helper are calling
-    /// out-of-contract; only `synthesise_mapped_surface` (running
-    /// under publication demand) is meant to drive it.
+    /// **`context` parameter**: carries the caller's orthogonal Vue heritage
+    /// policy into the source projection. The internal dispatch remains
+    /// `Published(Shallow)` so mapped key enumeration keeps TypeScript
+    /// intersection semantics; only producer-addressed runtime heritage
+    /// suppression is inherited.
     pub(super) fn mapped_surface_source_members_for_projection(
         &self,
         source: SemanticNodeId,
-        _context: crate::semantic_query::ProjectionReductionContext,
+        context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<(Vec<SurfaceMember>, bool)> {
         // Returns the source surface PLUS the A2 partiality flag of the
         // underlying ProjectPath read so the Shallow walker's
         // `synthesise_mapped_surface` caller can taint its surface when
         // the source projection was genuinely incomplete.
-        self.source_members_for_published_projection(source)
+        self.source_members_for_published_projection(source, context)
     }
 
     /// Per-key Mapped key-remap OUTCOME — shared by

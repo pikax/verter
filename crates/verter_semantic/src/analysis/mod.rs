@@ -23,7 +23,12 @@
 mod build;
 mod classify;
 pub mod component_meta;
+pub mod decl_dependencies;
 pub mod decl_headers;
+
+#[cfg(test)]
+#[path = "decl_dependencies_tests.rs"]
+mod decl_dependencies_tests;
 mod exports;
 mod fact_projection;
 pub mod file_usage;
@@ -32,6 +37,9 @@ pub mod html_intrinsics;
 mod imports;
 pub mod jsdoc;
 mod macros;
+#[cfg(test)]
+#[path = "script_shallow_index_tests.rs"]
+mod script_shallow_index_tests;
 pub use macros::lower_macro_type_argument_at_span;
 pub use macros::{
     lower_macro_field_payload_at, lower_macro_field_payload_at_with_owners,
@@ -42,6 +50,7 @@ pub mod project_index;
 pub mod project_resolver;
 pub mod routes;
 pub mod scope;
+pub mod script_shallow_index;
 pub mod selector_match;
 pub mod style;
 pub mod template;

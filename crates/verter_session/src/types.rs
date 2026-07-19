@@ -1202,6 +1202,9 @@ pub struct CompileProfile {
     pub filename: Option<String>,
     /// Production mode: strips dev-only code (`__file`, HMR).
     pub is_production: bool,
+    /// Compile a Vue SFC as a custom element. This is a script runtime-prop
+    /// policy axis and is independent of template `custom_elements`.
+    pub custom_element: bool,
     /// Server-side rendering mode.
     pub ssr: bool,
     /// SSR asset-collection module id registered on `ssrContext.modules`.
@@ -1282,6 +1285,7 @@ impl Default for CompileProfile {
         Self {
             filename: None,
             is_production: false,
+            custom_element: false,
             ssr: false,
             ssr_module_id: None,
             hmr_strategy: HmrStrategy::None,
@@ -3173,7 +3177,7 @@ pub struct MetaProvenance {
     /// declaration closure; a whole-file env demand (fallthrough /
     /// runtime values) lowers the file's full declaration set once.
     pub decl_bodies_lowered: std::sync::atomic::AtomicU64,
-    /// `ShallowFileState::from_analysis_with_resolver` builds initiated
+    /// `ShallowFileState::from_route_inventory_with_resolver` builds initiated
     /// by host call sites. Exactly 1 per cold canonical build.
     pub shallow_state_builds: std::sync::atomic::AtomicU64,
     /// Cold `IndexedReady` materialisations (base + overlay

@@ -1,13 +1,27 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "provenance": {
     "generatedBy": "scripts/gen-vue-macro-runtime-oracle.mjs",
     "compiler": "@vue/compiler-sfc",
     "version": "3.5.34",
-    "fixtureSha256": "6b9935c3ca4f81cd399d3ad26b3c10e720c181b20af7de49a2e8b96f2b3539cb",
-    "compileOptions": {
-      "isProd": false,
-      "inlineTemplate": false
+    "fixtureSha256": "f4f35825551b2244071c7a58ba9f126d6e4623ed5c5003be46f1f9019efdfc09",
+    "defaultCompileProfile": "development",
+    "profiles": {
+      "development": {
+        "isProd": false,
+        "customElement": false,
+        "inlineTemplate": false
+      },
+      "production": {
+        "isProd": true,
+        "customElement": false,
+        "inlineTemplate": false
+      },
+      "production-custom-element": {
+        "isProd": true,
+        "customElement": true,
+        "inlineTemplate": false
+      }
     }
   },
   "cases": [
@@ -24,70 +38,86 @@
         "props": [
           {
             "name": "text",
+            "typePresent": true,
             "constructors": [
               "String"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "count",
+            "typePresent": true,
             "constructors": [
               "Number"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "enabled",
+            "typePresent": true,
             "constructors": [
               "Boolean"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "token",
+            "typePresent": true,
             "constructors": [
               "Symbol"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "nothing",
+            "typePresent": true,
             "constructors": [],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "literal",
+            "typePresent": true,
             "constructors": [
               "String"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "huge",
+            "typePresent": true,
             "constructors": [],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "hugeLiteral",
+            "typePresent": true,
             "constructors": [
               "Number"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           }
         ],
@@ -108,37 +138,45 @@
         "props": [
           {
             "name": "ordered",
+            "typePresent": true,
             "constructors": [
               "String",
               "Boolean"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "booleanUnknown",
+            "typePresent": true,
             "constructors": [
               "Boolean"
             ],
             "required": true,
             "skipCheck": true,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "functionUnknown",
+            "typePresent": true,
             "constructors": [
               "Function"
             ],
             "required": true,
             "skipCheck": true,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "numberUnknown",
+            "typePresent": true,
             "constructors": [],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           }
         ],
@@ -161,110 +199,134 @@
         "props": [
           {
             "name": "array",
+            "typePresent": true,
             "constructors": [
               "Array"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "tuple",
+            "typePresent": true,
             "constructors": [
               "Array"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "callable",
+            "typePresent": true,
             "constructors": [
               "Function"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "date",
+            "typePresent": true,
             "constructors": [
               "Date"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "map",
+            "typePresent": true,
             "constructors": [
               "Map"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "set",
+            "typePresent": true,
             "constructors": [
               "Set"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "weakMap",
+            "typePresent": true,
             "constructors": [
               "WeakMap"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "weakSet",
+            "typePresent": true,
             "constructors": [
               "WeakSet"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "promise",
+            "typePresent": true,
             "constructors": [
               "Promise"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "error",
+            "typePresent": true,
             "constructors": [
               "Error"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "userClass",
+            "typePresent": true,
             "constructors": [
               "Object"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "userObject",
+            "typePresent": true,
             "constructors": [
               "Object"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           }
         ],
@@ -283,20 +345,24 @@
         "props": [
           {
             "name": "label",
+            "typePresent": true,
             "constructors": [
               "String"
             ],
             "required": false,
             "skipCheck": false,
+            "defaultKind": "property",
             "default": "'fallback'"
           },
           {
             "name": "count",
+            "typePresent": true,
             "constructors": [
               "Number"
             ],
             "required": false,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           }
         ],
@@ -346,34 +412,42 @@
         "props": [
           {
             "name": "modelValue",
+            "typePresent": true,
             "constructors": [
               "String"
             ],
             "required": null,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "modelModifiers",
+            "typePresent": false,
             "constructors": [],
             "required": null,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "count",
+            "typePresent": true,
             "constructors": [
               "Number"
             ],
             "required": null,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "countModifiers",
+            "typePresent": false,
             "constructors": [],
             "required": null,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           }
         ],
@@ -395,11 +469,13 @@
         "props": [
           {
             "name": "own",
+            "typePresent": true,
             "constructors": [
               "Number"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           }
         ],
@@ -421,34 +497,318 @@
         "props": [
           {
             "name": "count",
+            "typePresent": true,
             "constructors": [
               "Number"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "options",
+            "typePresent": true,
             "constructors": [
               "Object"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           },
           {
             "name": "selected",
+            "typePresent": true,
             "constructors": [
               "Object"
             ],
             "required": true,
             "skipCheck": false,
+            "defaultKind": null,
             "default": null
           }
         ],
         "emits": []
       }
+    },
+    {
+      "id": "profile-default-rendering",
+      "axes": [
+        "props",
+        "with-defaults",
+        "development",
+        "production",
+        "custom-element"
+      ],
+      "sourceSha256": "7d953dff2029df268b390dff48904b0093a217a675c72d4ba5f3be879294b657",
+      "profiles": [
+        {
+          "name": "development",
+          "compileOptions": {
+            "isProd": false,
+            "customElement": false,
+            "inlineTemplate": false
+          },
+          "runtime": {
+            "props": [
+              {
+                "name": "text",
+                "typePresent": true,
+                "constructors": [
+                  "String"
+                ],
+                "required": true,
+                "skipCheck": false,
+                "defaultKind": "property",
+                "default": "'fallback'"
+              },
+              {
+                "name": "callable",
+                "typePresent": true,
+                "constructors": [
+                  "Function"
+                ],
+                "required": false,
+                "skipCheck": false,
+                "defaultKind": "property",
+                "default": "() => 1"
+              },
+              {
+                "name": "method",
+                "typePresent": true,
+                "constructors": [
+                  "Function"
+                ],
+                "required": false,
+                "skipCheck": false,
+                "defaultKind": "method",
+                "default": "default() { return 2 }"
+              },
+              {
+                "name": "enabled",
+                "typePresent": true,
+                "constructors": [
+                  "Boolean"
+                ],
+                "required": false,
+                "skipCheck": false,
+                "defaultKind": null,
+                "default": null
+              },
+              {
+                "name": "opaque",
+                "typePresent": true,
+                "constructors": [],
+                "required": false,
+                "skipCheck": false,
+                "defaultKind": null,
+                "default": null
+              },
+              {
+                "name": "booleanUnknown",
+                "typePresent": true,
+                "constructors": [
+                  "Boolean"
+                ],
+                "required": false,
+                "skipCheck": true,
+                "defaultKind": null,
+                "default": null
+              }
+            ],
+            "emits": []
+          }
+        },
+        {
+          "name": "production",
+          "compileOptions": {
+            "isProd": true,
+            "customElement": false,
+            "inlineTemplate": false
+          },
+          "runtime": {
+            "props": [
+              {
+                "name": "text",
+                "typePresent": false,
+                "constructors": [],
+                "required": null,
+                "skipCheck": false,
+                "defaultKind": "property",
+                "default": "'fallback'"
+              },
+              {
+                "name": "callable",
+                "typePresent": true,
+                "constructors": [
+                  "Function"
+                ],
+                "required": null,
+                "skipCheck": false,
+                "defaultKind": "property",
+                "default": "() => 1"
+              },
+              {
+                "name": "method",
+                "typePresent": true,
+                "constructors": [
+                  "Function"
+                ],
+                "required": null,
+                "skipCheck": false,
+                "defaultKind": "method",
+                "default": "default() { return 2 }"
+              },
+              {
+                "name": "enabled",
+                "typePresent": true,
+                "constructors": [
+                  "Boolean"
+                ],
+                "required": null,
+                "skipCheck": false,
+                "defaultKind": null,
+                "default": null
+              },
+              {
+                "name": "opaque",
+                "typePresent": false,
+                "constructors": [],
+                "required": null,
+                "skipCheck": false,
+                "defaultKind": null,
+                "default": null
+              },
+              {
+                "name": "booleanUnknown",
+                "typePresent": true,
+                "constructors": [
+                  "Boolean"
+                ],
+                "required": null,
+                "skipCheck": false,
+                "defaultKind": null,
+                "default": null
+              }
+            ],
+            "emits": []
+          }
+        },
+        {
+          "name": "production-custom-element",
+          "compileOptions": {
+            "isProd": true,
+            "customElement": true,
+            "inlineTemplate": false
+          },
+          "runtime": {
+            "props": [
+              {
+                "name": "text",
+                "typePresent": true,
+                "constructors": [
+                  "String"
+                ],
+                "required": null,
+                "skipCheck": false,
+                "defaultKind": "property",
+                "default": "'fallback'"
+              },
+              {
+                "name": "callable",
+                "typePresent": true,
+                "constructors": [
+                  "Function"
+                ],
+                "required": null,
+                "skipCheck": false,
+                "defaultKind": "property",
+                "default": "() => 1"
+              },
+              {
+                "name": "method",
+                "typePresent": true,
+                "constructors": [
+                  "Function"
+                ],
+                "required": null,
+                "skipCheck": false,
+                "defaultKind": "method",
+                "default": "default() { return 2 }"
+              },
+              {
+                "name": "enabled",
+                "typePresent": true,
+                "constructors": [
+                  "Boolean"
+                ],
+                "required": null,
+                "skipCheck": false,
+                "defaultKind": null,
+                "default": null
+              },
+              {
+                "name": "opaque",
+                "typePresent": true,
+                "constructors": [],
+                "required": null,
+                "skipCheck": false,
+                "defaultKind": null,
+                "default": null
+              },
+              {
+                "name": "booleanUnknown",
+                "typePresent": true,
+                "constructors": [
+                  "Boolean"
+                ],
+                "required": null,
+                "skipCheck": false,
+                "defaultKind": null,
+                "default": null
+              }
+            ],
+            "emits": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "complete-imported-extension",
+      "axes": [
+        "props",
+        "import",
+        "conditional",
+        "verter-extension"
+      ],
+      "sourceSha256": "6bc75d8046c00b62b051742dbc099cafca3201f380b19f040f5131295e008534",
+      "contract": "verter-complete-extension",
+      "extensionPolicy": "refine-only-on-complete",
+      "profiles": [
+        {
+          "name": "development",
+          "compileOptions": {
+            "isProd": false,
+            "customElement": false,
+            "inlineTemplate": false
+          },
+          "runtime": {
+            "props": [
+              {
+                "name": "payload",
+                "typePresent": true,
+                "constructors": [],
+                "required": true,
+                "skipCheck": false,
+                "defaultKind": null,
+                "default": null
+              }
+            ],
+            "emits": []
+          }
+        }
+      ]
     }
   ]
 }

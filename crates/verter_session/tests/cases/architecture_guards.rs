@@ -2758,10 +2758,9 @@ fn no_scheduler_backed_workspace_shim_in_session_src() {
 // Phase 6b's classification of every cache-shaped `VerterHost` field is
 // the binding source of truth. Each `legitimate-authority` field is
 // recorded in `phase_8_allow_list()` with the §6b sub-plan citation and
-// the architectural rationale. Each `mirror`-classified field (F3
-// routes/imported_roots, F6 external_type_analysis_cache, F7
-// route_owned_shallow_cache) was already deleted by Phase 6b — this
-// guard verifies their continued absence.
+// the architectural rationale. The `mirror`-classified route fields (F3
+// routes/imported_roots and F7 route_owned_shallow_cache) were already
+// deleted by Phase 6b — this guard verifies their continued absence.
 //
 // Body design (per §8.1 of the cutover plan):
 //   1. Parse `crates/verter_session/src/lib.rs` via `syn::parse_file`.
@@ -3101,14 +3100,13 @@ fn no_off_store_host_caches() {
     // Verify the source file we're parsing has not had a Phase-6b mirror
     // field re-added by name. This is independent of the syn walk and is
     // a belt-and-suspenders check against re-introducing the deleted
-    // F6/F7 field names.
+    // F7 field name.
     let lib_src = read_workspace_file("crates/verter_session/src/lib.rs");
     for forbidden in [
-        // F6 / F7 — deleted in 6b.D2a commit c6e7fbeb. Doc-comments
+        // F7 — deleted in 6b.D2a commit c6e7fbeb. Doc-comments
         // referencing these names are allowed in this guard's view
         // because the absent-from-struct check below is independently
         // authoritative; the field-declaration grep is the strict gate.
-        "external_type_analysis_cache",
         "route_owned_shallow_cache",
     ] {
         let declaration_pattern = format!("pub(crate) {forbidden}:");
@@ -17224,7 +17222,7 @@ fn parser_type_surface_engine_files_are_absent() {
 // build never read) is deleted, not shimmed; the eval-env fallback that
 // re-parsed the file inside `ShallowFileState` (the retired
 // `from_analysis_inner` name) is likewise gone from every production path
-// — its routing-only successor `from_analysis_with_memo` does no reparse.
+// — its routing-only successor `from_route_inventory_with_memo` does no reparse.
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Byte mask over `body`: `true` for every byte inside a line comment,
@@ -18450,8 +18448,8 @@ fn no_production_parse_and_build_env_in_session() {
 /// `from_analysis_inner` is a RETIRED production-symbol NAME — it was the
 /// eval-env fallback that re-parsed the file inside `ShallowFileState`.
 /// That path is gone; its routing-only successor is named
-/// `from_analysis_with_memo` (no reparse / no `parse_and_build_env` / no
-/// eval-env build — it reads the already-extracted analysis bindings and the
+/// `from_route_inventory_with_memo` (no reparse / no `parse_and_build_env` / no
+/// eval-env build — it reads the already-extracted syntax routes and the
 /// supplied lazy memo). The retired NAME must never reappear in
 /// `verter_session` production source, so a future reconstruction can't
 /// quietly resurrect it under the old identity.
@@ -18463,7 +18461,7 @@ fn from_analysis_inner_name_is_retired_in_session() {
         "`from_analysis_inner` is a retired production-symbol name (the \
          deleted eval-env reparse fallback) — it must not appear in \
          verter_session production source; the routing-only successor is \
-         `from_analysis_with_memo`: {hits:#?}"
+         `from_route_inventory_with_memo`: {hits:#?}"
     );
     // Anti-vacuity: the scanner must actually flag the retired name when it
     // IS present in a production body (no live reference remains after the
@@ -18477,10 +18475,10 @@ fn from_analysis_inner_name_is_retired_in_session() {
          production reference"
     );
     // The current successor name must NOT trip the retired-name needle.
-    let successor = "fn build() {\n    Self::from_analysis_with_memo(h, a, m, r);\n}\n";
+    let successor = "fn build() {\n    Self::from_route_inventory_with_memo(h, routes, m, r);\n}\n";
     assert!(
         ident_hits_in_production_body(successor, &["from_analysis_inner"]).is_empty(),
-        "the routing-only successor `from_analysis_with_memo` must not match \
+        "the routing-only successor `from_route_inventory_with_memo` must not match \
          the retired `from_analysis_inner` needle"
     );
 }

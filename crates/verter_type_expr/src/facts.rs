@@ -454,6 +454,29 @@ pub struct HeritageBaseFact {
     pub base_name_origin: MemberSpansOrigin,
 }
 
+/// One interface heritage arm explicitly suppressed by Vue's runtime macro
+/// projection. Both ordinals address the already-lowered declaration shape:
+/// no source span, comment text, or resolved symbol identity is retained.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub struct VueIgnoredHeritageFact {
+    /// Source-order contributor within a same-owner, same-name declaration
+    /// group.
+    pub contributor_ordinal: u32,
+    /// Source-order arm among heritage expressions accepted by lowering.
+    pub intersection_arm_ordinal: u32,
+}
+
 /// The role a followed body plays in a closedness decision.
 #[derive(
     Debug,

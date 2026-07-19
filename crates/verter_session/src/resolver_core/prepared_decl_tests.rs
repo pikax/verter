@@ -37,6 +37,43 @@ fn prepares_local_exported_type_decl_from_shallow_file_state() {
 }
 
 #[test]
+fn prepared_type_decl_copies_vue_ignored_heritage_fact_from_lowered_decl() {
+    use verter_type_expr::facts::VueIgnoredHeritageFact;
+
+    let source = r#"
+import type { Imported } from './base'
+export interface Props extends /* @vue-ignore */ Imported<string> { own: number }
+"#;
+    let state = ShallowFileState::service_backed_for_test(source);
+    let dep_edges = FxHashMap::from_iter([("./base".to_string(), "/src/base.ts".to_string())]);
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let import_canonicalization = ImportCanonicalization {
+        final_resolution: FxHashMap::from_iter([(
+            verter_type_expr::DeclKey::new(owner, "Imported"),
+            ResolvedRootIdentity::new_in_owner("/src/base.ts", owner, "Imported"),
+        )]),
+    };
+    let prepared = prepare_local_type_decl(
+        "/src/types.ts",
+        &state,
+        "Props",
+        Some(&dep_edges),
+        &import_canonicalization,
+        &test_interner(),
+    )
+    .expect("Props preparation should succeed")
+    .expect("Props should be present");
+
+    assert_eq!(
+        prepared.vue_ignored_heritage.as_ref(),
+        [VueIgnoredHeritageFact {
+            contributor_ordinal: 0,
+            intersection_arm_ordinal: 0,
+        }]
+    );
+}
+
+#[test]
 fn prepares_local_value_decl_from_shallow_file_state() {
     let source = r#"
 export interface Props { label: string }

@@ -324,18 +324,11 @@ pub(crate) fn component_meta_debug(message: impl AsRef<str>) {
 // `component_meta_trace_output_path` / `component_meta_trace_next_span_id` /
 // `component_meta_trace_enabled` helpers have all been removed
 
-#[derive(Clone, Debug)]
-pub(crate) struct ExternalTypeResolutionInputs {
-    pub(crate) analysis:
-        Arc<verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource>,
-    pub(crate) analysis_cache_hit: bool,
-}
-
 // OXC parse arenas never enter host caches or thread-locals: the
 // transient `ParsedEvalProgram` lives and dies on the cold flight's
 // stack inside the `ensure_indexed_ready_serve` materialise closure
 // (the retained `DeclLoweringService` snapshot is the single parser entry), and the
-// arena-free outputs it feeds — the `EvalEnv`, analysis, and shallow
+// arena-free outputs it feeds — the declaration memo, routes, and shallow
 // state — live on `IndexedReady`.
 //
 // Architecture guard: `no_thread_local_oxc_caches` rejects any

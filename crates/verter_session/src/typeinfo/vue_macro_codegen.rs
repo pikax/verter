@@ -2,12 +2,11 @@
 //!
 //! This module is the TypeInfo-owned semantic producer between macro argument
 //! analysis and compiler-facing DTOs. It owns no durable aggregate cache and
-//! submits no scheduler work: one invocation inventories one already-indexed
-//! SFC, reuses the canonical macro payload carrier, and independently fulfills
-//! runtime and TSC demands.
+//! submits exactly one request-scoped scheduler cache-node job per SFC demand:
+//! one invocation inventories one already-indexed SFC, reuses the canonical
+//! macro payload carrier, and independently fulfills runtime and TSC demands.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use verter_macro_dto::{
@@ -27,17 +26,30 @@ use verter_semantic::analysis::{
     AnalyzedMacro, AnalyzedMacroKind, LocalDeclarationKind, ScriptAnalysisSnapshot,
 };
 
+use crate::locator_identity::BroadRuntimeSubjectLocator;
 use crate::meta_resolve::callable_view::CallableNodeView;
 use crate::meta_resolve::projectors::{build_owner_decl_identity, resolve_macro_payload};
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::resolver_core::{FactReadSetFinalise, ResolverContext};
+use crate::resolver_core::{FactReadSetFinalise, ResolverContext, StoreViewCompatToken};
 use crate::semantic_query::{
     BroadRuntimeKind, PartialReasonSet, PathSegment, ProjectionMode, ProjectionReductionContext,
-    QueryResult, ResultCompleteness, SemanticQueryApi, SemanticQueryKey, SemanticQueryValue,
+    QueryResult, ResultCompleteness, SemanticQueryApi, SemanticQueryValue,
     SurfaceProvenanceContext,
 };
 use crate::typeinfo::surface::TypeInfoSurface;
 use crate::VerterHost;
+use verter_scheduler::cache_id::SchedulerCacheId;
+use verter_scheduler::dag::PinId;
+use verter_scheduler::scheduler::{ScopedCacheNodeError, ScopedCacheNodeRequest};
+use verter_scheduler::stage::Priority;
+
+/// Stable scheduler cache family for the request-local Vue macro projection.
+///
+/// This is an admission/singleflight identity only. The scheduler removes the
+/// rendezvous at terminal state; TypeInfo's fact-keyed semantic memos remain
+/// the sole durable cache authority.
+const VUE_MACRO_CODEGEN_CACHE_ID: SchedulerCacheId = SchedulerCacheId(0x5655_454D_4143_5231);
+const VUE_MACRO_CODEGEN_KEY_DOMAIN: &[u8] = b"verter:typeinfo:vue-macro-codegen:v1\0";
 
 /// Which independently materializable handoff bundle the caller demands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +70,71 @@ impl VueMacroCodegenDemand {
     const fn wants_tsc(self) -> bool {
         matches!(self, Self::Tsc | Self::RuntimeAndTsc)
     }
+
+    const fn key_tag(self) -> u8 {
+        match self {
+            Self::Runtime => 0,
+            Self::Tsc => 1,
+            Self::RuntimeAndTsc => 2,
+        }
+    }
+}
+
+/// Snapshot validity lives in the scheduler input pin, never in the semantic
+/// key. This keeps an SFC's key stable across edits while preventing a join
+/// across resolver epochs or validation-equivalence lanes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VueMacroCodegenInputPin {
+    pub(crate) view_epoch: u64,
+    pub(crate) snapshot_pin_id: PinId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VueMacroCodegenScheduleIdentity {
+    pub(crate) key_hash: [u8; 16],
+    pub(crate) input_pin: VueMacroCodegenInputPin,
+}
+
+pub(crate) fn vue_macro_codegen_schedule_identity(
+    ctx: &(dyn ResolverContext + Sync),
+    owner_canonical: &str,
+    demand: VueMacroCodegenDemand,
+) -> VueMacroCodegenScheduleIdentity {
+    let canonical = ctx.normalized_analysis_canonical(owner_canonical);
+    vue_macro_codegen_schedule_identity_from_compat(
+        canonical.as_ref(),
+        demand,
+        ctx.store_view().compat_token(),
+    )
+}
+
+pub(crate) fn vue_macro_codegen_schedule_identity_from_compat(
+    canonical: &str,
+    demand: VueMacroCodegenDemand,
+    compat: StoreViewCompatToken,
+) -> VueMacroCodegenScheduleIdentity {
+    let mut key = Vec::with_capacity(
+        VUE_MACRO_CODEGEN_KEY_DOMAIN.len() + canonical.len() + std::mem::size_of::<u64>() + 3,
+    );
+    key.extend_from_slice(VUE_MACRO_CODEGEN_KEY_DOMAIN);
+    key.extend_from_slice(&(canonical.len() as u64).to_le_bytes());
+    key.extend_from_slice(canonical.as_bytes());
+    key.push(demand.key_tag());
+    match compat.session {
+        Some(session) => {
+            key.push(1);
+            key.extend_from_slice(&session.to_le_bytes());
+        }
+        None => key.push(0),
+    }
+
+    VueMacroCodegenScheduleIdentity {
+        key_hash: crate::hash::hash_16(&key),
+        input_pin: VueMacroCodegenInputPin {
+            view_epoch: compat.epoch,
+            snapshot_pin_id: PinId(compat.validity_fingerprint),
+        },
+    }
 }
 
 /// Deterministic work counters for one producer invocation.
@@ -71,7 +148,7 @@ pub(crate) struct VueMacroCodegenCounters {
     pub runtime_classifier_calls: u32,
     /// Terminal TypeInfo display materializations for TSC.
     pub tsc_materializations: u32,
-    /// Always zero: this producer never submits scheduler work.
+    /// Exactly one scheduler admission attempt for this SFC demand.
     pub scheduler_submissions: u32,
 }
 
@@ -224,6 +301,112 @@ struct ProducerState {
     completeness: ResultCompleteness,
 }
 
+fn cancelled_vue_macro_codegen_output(
+    ctx: &(dyn ResolverContext + Sync),
+    owner_canonical: &str,
+    demand: VueMacroCodegenDemand,
+) -> VueMacroCodegenOutput {
+    terminal_partial_vue_macro_codegen_output(
+        ctx,
+        owner_canonical,
+        demand,
+        PartialReasonSet::CANCELLED,
+        MacroPartialReason::Cancelled,
+    )
+}
+
+/// Build the ReturnOnly handoff for a terminal scheduler failure without
+/// entering semantic classification. Inventory reads are permitted so each
+/// demanded macro retains its stable identity and typed `Partial` outcome;
+/// the result is explicitly non-cacheable and is never published by the
+/// request-scoped scheduler rendezvous.
+fn terminal_partial_vue_macro_codegen_output(
+    ctx: &(dyn ResolverContext + Sync),
+    owner_canonical: &str,
+    demand: VueMacroCodegenDemand,
+    completeness_reason: PartialReasonSet,
+    macro_reason: MacroPartialReason,
+) -> VueMacroCodegenOutput {
+    let completeness = ResultCompleteness::partial(completeness_reason);
+    crate::request_context::fold_result_completeness(completeness);
+
+    let indexed = ctx.indexed_for_current_content(owner_canonical);
+    let base_source = (indexed.is_none() && ctx.active_session_view().is_none())
+        .then(|| {
+            ctx.host_for_fact_tracer_install()
+                .scheduler_source(owner_canonical)
+        })
+        .flatten();
+    let origin_whole_hash = indexed
+        .as_ref()
+        .map(|indexed| indexed.whole_hash)
+        .or_else(|| base_source.as_ref().map(|source| source.whole_hash));
+    let script_analysis = indexed
+        .as_ref()
+        .and_then(|indexed| indexed.script_analysis.as_ref().map(Arc::clone))
+        .or_else(|| {
+            base_source
+                .as_ref()
+                .and_then(|source| source.downcast_data::<crate::host_executor::HostSourceData>())
+                .map(|data| Arc::clone(&data.parse.script_analysis))
+        });
+    let mut runtime_entries = Vec::new();
+    let mut tsc_entries = Vec::new();
+    if let Some(macros) = script_analysis
+        .as_ref()
+        .map(|analysis| analysis.macros.as_slice())
+    {
+        for (payload_index, mac) in macros.iter().enumerate() {
+            if mac.kind == AnalyzedMacroKind::WithDefaults || !mac.is_type_based {
+                continue;
+            }
+            let defaults_index = (mac.kind == AnalyzedMacroKind::DefineProps)
+                .then(|| containing_with_defaults_index(macros, payload_index))
+                .flatten();
+            let effective_index = defaults_index.unwrap_or(payload_index);
+            let syntax_index = top_level_syntax_index(macros, effective_index);
+            let macro_index = macro_index(effective_index);
+
+            if demand.wants_runtime() {
+                runtime_entries.push(MacroRuntimeEntry {
+                    syntax_index,
+                    macro_index,
+                    outcome: MacroRuntimeOutcome::Partial(MacroFailure::new(macro_reason, None)),
+                });
+            }
+            if demand.wants_tsc() && is_codegen_macro(mac.kind) {
+                tsc_entries.push(MacroTscEntry {
+                    syntax_index,
+                    macro_index,
+                    outcome: MacroTscOutcome::Partial(MacroFailure::new(macro_reason, None)),
+                });
+            }
+        }
+    }
+
+    VueMacroCodegenOutput {
+        origin_whole_hash,
+        runtime: demand.wants_runtime().then(|| {
+            Arc::new(MacroRuntimeBundle {
+                entries: runtime_entries,
+            })
+        }),
+        tsc: demand.wants_tsc().then(|| {
+            Arc::new(MacroTscBundle {
+                entries: tsc_entries,
+            })
+        }),
+        transitive_canonicals: Vec::new(),
+        completeness,
+        facts_cacheable: false,
+        counters: VueMacroCodegenCounters {
+            producer_invocations: 1,
+            scheduler_submissions: 1,
+            ..VueMacroCodegenCounters::default()
+        },
+    }
+}
+
 impl VerterHost {
     /// Produce a request-local bundle from one coherent cold-seed view.
     pub(crate) fn produce_vue_macro_codegen(
@@ -246,42 +429,78 @@ impl VerterHost {
     /// memo entries and singleflight behavior.
     pub(crate) fn produce_vue_macro_codegen_with_ctx(
         &self,
-        ctx: &dyn ResolverContext,
+        ctx: &(dyn ResolverContext + Sync),
         owner_canonical: &str,
         demand: VueMacroCodegenDemand,
     ) -> VueMacroCodegenOutput {
-        let scheduler_submissions_before = self
+        let identity = vue_macro_codegen_schedule_identity(ctx, owner_canonical, demand);
+        let request = ScopedCacheNodeRequest {
+            cache_id: VUE_MACRO_CODEGEN_CACHE_ID,
+            key_hash: identity.key_hash,
+            view_epoch: identity.input_pin.view_epoch,
+            snapshot_pin_id: identity.input_pin.snapshot_pin_id,
+            priority: Priority::Interactive,
+            request_context: verter_scheduler::request_context::current_context(),
+        };
+
+        match self
             .scheduler()
-            .counters()
-            .submit_count
-            .load(Ordering::Relaxed);
+            .execute_scoped_cache_node(request, |job_cancellation| {
+                if job_cancellation.is_cancelled() {
+                    crate::request_context::mark_request_result_cancelled();
+                    return cancelled_vue_macro_codegen_output(ctx, owner_canonical, demand);
+                }
+                self.compute_vue_macro_codegen_output(ctx, owner_canonical, demand)
+            }) {
+            Ok(output) => output.as_ref().clone(),
+            Err(ScopedCacheNodeError::Cancelled) => {
+                crate::request_context::mark_request_result_cancelled();
+                cancelled_vue_macro_codegen_output(ctx, owner_canonical, demand)
+            }
+            Err(ScopedCacheNodeError::Shutdown) => terminal_partial_vue_macro_codegen_output(
+                ctx,
+                owner_canonical,
+                demand,
+                PartialReasonSet::UNSTABLE_STATE,
+                MacroPartialReason::UnstableState,
+            ),
+            Err(ScopedCacheNodeError::Panicked | ScopedCacheNodeError::TypeMismatch) => {
+                terminal_partial_vue_macro_codegen_output(
+                    ctx,
+                    owner_canonical,
+                    demand,
+                    PartialReasonSet::SEMANTIC_QUERY_FAULT,
+                    MacroPartialReason::IncompleteTraversal,
+                )
+            }
+        }
+    }
+
+    fn compute_vue_macro_codegen_output(
+        &self,
+        ctx: &(dyn ResolverContext + Sync),
+        owner_canonical: &str,
+        demand: VueMacroCodegenDemand,
+    ) -> VueMacroCodegenOutput {
+        #[cfg(test)]
+        if let Some(rendezvous) = self
+            .test_force
+            .vue_macro_codegen_build_rendezvous
+            .lock()
+            .clone()
+        {
+            rendezvous.0.wait();
+            rendezvous.1.wait();
+        }
         let (mut state, finalise) =
             crate::fact_signature_helpers::install_fact_tracer(self, || {
-                #[cfg(test)]
-                if self
-                    .test_force
-                    .vue_macro_codegen_scheduler_submission_for_tests
-                    .load(Ordering::Relaxed)
-                {
-                    self.scheduler()
-                        .counters()
-                        .submit_count
-                        .fetch_add(1, Ordering::Relaxed);
-                }
                 let _completeness_scope =
                     crate::request_context::ColdComputeCompletenessScope::enter();
                 let mut state = self.produce_vue_macro_codegen_inner(ctx, owner_canonical, demand);
                 state.completeness = crate::request_context::current_cold_compute_completeness();
                 state
             });
-        let scheduler_submissions_after = self
-            .scheduler()
-            .counters()
-            .submit_count
-            .load(Ordering::Relaxed);
-        state.counters.scheduler_submissions =
-            u32::try_from(scheduler_submissions_after.saturating_sub(scheduler_submissions_before))
-                .unwrap_or(u32::MAX);
+        state.counters.scheduler_submissions = 1;
 
         let (transitive_canonicals, facts_cacheable) = fact_footprint(finalise);
         VueMacroCodegenOutput {
@@ -305,7 +524,7 @@ impl VerterHost {
 
     fn produce_vue_macro_codegen_inner(
         &self,
-        ctx: &dyn ResolverContext,
+        ctx: &(dyn ResolverContext + Sync),
         owner_canonical: &str,
         demand: VueMacroCodegenDemand,
     ) -> ProducerState {
@@ -379,6 +598,11 @@ impl VerterHost {
                 continue;
             }
 
+            // Each macro owns one completeness scope, and runtime/TSC are
+            // independently nested below it. A partial demand must taint the
+            // file-level result and cacheability without changing a sibling
+            // macro's typed outcome or the other demand's outcome.
+            let macro_scope = crate::request_context::ColdComputeCompletenessScope::enter();
             let mut diagnostics = Vec::new();
             let payload = resolve_macro_payload(
                 &dispatch,
@@ -390,38 +614,72 @@ impl VerterHost {
                 expansion_kind(mac.kind),
                 &mut diagnostics,
             );
+            let payload_failure =
+                if crate::request_context::current_cold_compute_completeness().is_partial() {
+                    Some(partial_failure())
+                } else if payload.is_none() {
+                    Some(resolution_failure())
+                } else {
+                    None
+                };
 
             if demand.wants_runtime() {
-                let outcome = match payload {
-                    Some(payload) => match mac.kind {
-                        AnalyzedMacroKind::DefineProps => self.project_runtime_props(
-                            ctx,
-                            &dispatch,
-                            payload,
-                            mac,
-                            payload_index,
-                            defaults_index,
-                            &mut state.counters,
-                        ),
-                        AnalyzedMacroKind::DefineEmits => self.project_runtime_emits(
-                            ctx,
-                            &dispatch,
-                            payload,
-                            mac,
-                            payload_index,
-                            effective_index,
-                            &mut state.counters,
-                        ),
-                        AnalyzedMacroKind::DefineModel => self.project_runtime_model(
-                            &dispatch,
-                            payload,
-                            mac,
-                            effective_index,
-                            &mut state.counters,
-                        ),
-                        _ => unreachable!("codegen macro filter is exhaustive"),
-                    },
-                    None => resolution_failure().runtime(),
+                let outcome = {
+                    let _runtime_scope =
+                        crate::request_context::ColdComputeCompletenessScope::enter();
+                    match (payload_failure, payload) {
+                        (Some(failure), _) => failure.runtime(),
+                        (None, Some(payload)) => match mac.kind {
+                            AnalyzedMacroKind::DefineProps => {
+                                match dispatch
+                                    .broad_runtime_subject_for_macro(&owner, payload_index)
+                                {
+                                    Some(subject) => self.project_runtime_props(
+                                        ctx,
+                                        &dispatch,
+                                        payload,
+                                        &subject,
+                                        mac,
+                                        payload_index,
+                                        defaults_index,
+                                        &mut state.counters,
+                                    ),
+                                    None => ProjectionFailure::Unsupported(
+                                        UnsupportedReason::SemanticConstruct,
+                                    )
+                                    .runtime(),
+                                }
+                            }
+                            AnalyzedMacroKind::DefineEmits => self.project_runtime_emits(
+                                ctx,
+                                &dispatch,
+                                payload,
+                                mac,
+                                payload_index,
+                                effective_index,
+                                &mut state.counters,
+                            ),
+                            AnalyzedMacroKind::DefineModel => {
+                                match dispatch
+                                    .broad_runtime_subject_for_macro(&owner, payload_index)
+                                {
+                                    Some(subject) => self.project_runtime_model(
+                                        &dispatch,
+                                        subject,
+                                        mac,
+                                        effective_index,
+                                        &mut state.counters,
+                                    ),
+                                    None => ProjectionFailure::Unsupported(
+                                        UnsupportedReason::SemanticConstruct,
+                                    )
+                                    .runtime(),
+                                }
+                            }
+                            _ => unreachable!("codegen macro filter is exhaustive"),
+                        },
+                        (None, None) => unreachable!("payload failure covers an absent payload"),
+                    }
                 };
                 state.runtime_entries.push(MacroRuntimeEntry {
                     syntax_index,
@@ -431,18 +689,22 @@ impl VerterHost {
             }
 
             if demand.wants_tsc() {
-                let outcome = match payload {
-                    Some(payload) => self.project_tsc_macro(
-                        ctx,
-                        &dispatch,
-                        payload,
-                        mac,
-                        payload_index,
-                        effective_index,
-                        &tsc_scope_inventory,
-                        &mut state.counters,
-                    ),
-                    None => resolution_failure().tsc(),
+                let outcome = {
+                    let _tsc_scope = crate::request_context::ColdComputeCompletenessScope::enter();
+                    match (payload_failure, payload) {
+                        (Some(failure), _) => failure.tsc(),
+                        (None, Some(payload)) => self.project_tsc_macro(
+                            ctx,
+                            &dispatch,
+                            payload,
+                            mac,
+                            payload_index,
+                            effective_index,
+                            &tsc_scope_inventory,
+                            &mut state.counters,
+                        ),
+                        (None, None) => unreachable!("payload failure covers an absent payload"),
+                    }
                 };
                 state.tsc_entries.push(MacroTscEntry {
                     syntax_index,
@@ -450,6 +712,10 @@ impl VerterHost {
                     outcome,
                 });
             }
+
+            let macro_completeness = crate::request_context::current_cold_compute_completeness();
+            macro_scope.discard();
+            crate::request_context::fold_result_completeness(macro_completeness);
         }
 
         state
@@ -467,10 +733,6 @@ impl VerterHost {
         scope_inventory: &TscScopeInventory<'_>,
         counters: &mut VueMacroCodegenCounters,
     ) -> MacroTscOutcome {
-        let scope = match tsc_scope_requirements(mac, scope_inventory) {
-            Ok(scope) => scope,
-            Err(failure) => return failure.tsc(),
-        };
         match mac.kind {
             AnalyzedMacroKind::DefineProps => {
                 if is_definitely_non_object_root(dispatch, payload) {
@@ -512,6 +774,10 @@ impl VerterHost {
                         anchor: member_anchor(mac, payload_index, member.name.as_ref()),
                     });
                 }
+                let scope = match tsc_scope_requirements(mac, scope_inventory) {
+                    Ok(scope) => scope,
+                    Err(failure) => return failure.tsc(),
+                };
                 MacroTscOutcome::Complete(MacroTscProjection::Props(TscPropsProjection {
                     public: TscPublicPropsProjection::AuthoredArgument {
                         anchor: MacroAnchor::MacroArgument {
@@ -556,6 +822,10 @@ impl VerterHost {
                     Ok(events) => events,
                     Err(failure) => return failure.tsc(),
                 };
+                let scope = match tsc_scope_requirements(mac, scope_inventory) {
+                    Ok(scope) => scope,
+                    Err(failure) => return failure.tsc(),
+                };
                 MacroTscOutcome::Complete(MacroTscProjection::Emits(TscEmitsProjection {
                     events,
                     scope,
@@ -571,6 +841,10 @@ impl VerterHost {
                     .prop_fields
                     .first()
                     .is_none_or(|field| field.is_optional);
+                let scope = match tsc_scope_requirements(mac, scope_inventory) {
+                    Ok(scope) => scope,
+                    Err(failure) => return failure.tsc(),
+                };
                 MacroTscOutcome::Complete(MacroTscProjection::Model(TscModelProjection {
                     name,
                     optional,
@@ -592,6 +866,7 @@ impl VerterHost {
         ctx: &dyn ResolverContext,
         dispatch: &ProjectSemanticDispatch<'_>,
         payload: crate::semantic_query::SemanticNodeId,
+        runtime_subject: &BroadRuntimeSubjectLocator,
         mac: &AnalyzedMacro,
         payload_index: usize,
         defaults_index: Option<usize>,
@@ -606,7 +881,7 @@ impl VerterHost {
             dispatch,
             payload,
             Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-            ProjectionReductionContext::macro_object_surface(
+            ProjectionReductionContext::vue_runtime_object_surface(
                 ProjectionMode::Shallow,
                 SurfaceProvenanceContext::MacroTypeArgOwnBody,
             ),
@@ -625,7 +900,11 @@ impl VerterHost {
             .iter()
             .filter(|member| member.visibility.is_public())
         {
-            let type_shape = match classify_runtime(dispatch, member.value, counters) {
+            let type_shape = match classify_runtime(
+                dispatch,
+                runtime_subject.member(Arc::clone(&member.name)),
+                counters,
+            ) {
                 Ok(classification) => RuntimePropType::Resolved {
                     constructors: classification.constructors,
                     skip_check: classification.skip_check,
@@ -663,15 +942,16 @@ impl VerterHost {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         }
         counters.root_shallow_demands += 1;
+        let runtime_context = ProjectionReductionContext::vue_runtime_object_surface(
+            ProjectionMode::Shallow,
+            SurfaceProvenanceContext::Structural,
+        );
         let surface = self.project_shallow_surface_graph_only(
             ctx,
             dispatch,
             payload,
             Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-            ProjectionReductionContext::macro_object_surface(
-                ProjectionMode::Shallow,
-                SurfaceProvenanceContext::Structural,
-            ),
+            runtime_context,
             None,
         );
         if crate::request_context::current_cold_compute_completeness().is_partial() {
@@ -681,7 +961,14 @@ impl VerterHost {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         };
 
-        let emits = emit_rows(dispatch, &surface, mac, payload_index, effective_index);
+        let emits = emit_rows(
+            dispatch,
+            &surface,
+            mac,
+            payload_index,
+            effective_index,
+            runtime_context,
+        );
         if crate::request_context::current_cold_compute_completeness().is_partial() {
             return partial_failure().runtime();
         }
@@ -691,12 +978,12 @@ impl VerterHost {
     fn project_runtime_model(
         &self,
         dispatch: &ProjectSemanticDispatch<'_>,
-        payload: crate::semantic_query::SemanticNodeId,
+        runtime_subject: BroadRuntimeSubjectLocator,
         mac: &AnalyzedMacro,
         effective_index: usize,
         counters: &mut VueMacroCodegenCounters,
     ) -> MacroRuntimeOutcome {
-        let classification = match classify_runtime(dispatch, payload, counters) {
+        let classification = match classify_runtime(dispatch, runtime_subject, counters) {
             Ok(classification) => classification,
             Err(failure) => return failure.runtime(),
         };
@@ -1867,14 +2154,11 @@ struct RuntimeClassification {
 
 fn classify_runtime(
     dispatch: &ProjectSemanticDispatch<'_>,
-    subject: crate::semantic_query::SemanticNodeId,
+    subject: BroadRuntimeSubjectLocator,
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<RuntimeClassification, ProjectionFailure> {
     counters.runtime_classifier_calls += 1;
-    let result = dispatch.execute(SemanticQueryKey::ClassifyBroadRuntime {
-        subject,
-        context: dispatch.broad_runtime_context_for(subject),
-    });
+    let result = dispatch.execute(dispatch.broad_runtime_key_for(subject));
     if crate::request_context::current_cold_compute_completeness().is_partial() {
         return Err(partial_failure());
     }
@@ -1943,18 +2227,18 @@ fn emit_rows(
     mac: &AnalyzedMacro,
     payload_index: usize,
     effective_index: usize,
+    runtime_context: ProjectionReductionContext,
 ) -> Vec<RuntimeEmit> {
     let mut rows = Vec::new();
 
-    for field in &mac.emit_fields {
-        push_emit(
-            &mut rows,
-            field.name.as_str(),
-            authored_emit_anchor(mac, payload_index, effective_index, field.name.as_str()),
-        );
-    }
-
-    let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
+    // The filtered semantic surface is the sole event-membership authority.
+    // `mac.emit_fields` is parser-owned anchor metadata and can include fields
+    // reached through producer-addressed `@vue-ignore` heritage; seeding rows
+    // from it would reintroduce an arm the runtime surface deliberately
+    // removed. Use it only through `authored_emit_anchor` after a semantic
+    // call-signature/member has admitted the event.
+    let context = ProjectionReductionContext::published(ProjectionMode::Navigate)
+        .with_orthogonal_axes_from(runtime_context);
     for signature in surface.call_signatures.iter() {
         let Some(names) = CallableNodeView::new(dispatch, signature.node).event_names(context)
         else {

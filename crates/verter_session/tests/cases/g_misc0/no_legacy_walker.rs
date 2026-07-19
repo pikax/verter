@@ -221,8 +221,7 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // Framework parse-artifact carrier substrate: every production
     // `cached_parse` carrier field — `IndexedReady`,
     // `RouteOwnedShallowEntry`, `HostSourceData`, `CompileInput`,
-    // `EffectiveFileState`, `ContentOverrideWithParse`,
-    // `ExternalTypeResolutionInputs` — plus the producer/threading
+    // `EffectiveFileState`, `ContentOverrideWithParse` — plus the producer/threading
     // locals and the `route_owned_snapshot_cached_parse_hits`
     // provenance-counter family are renamed/replaced by the
     // framework-neutral `framework_parse:

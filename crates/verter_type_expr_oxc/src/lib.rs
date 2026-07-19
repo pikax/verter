@@ -34,6 +34,16 @@ use verter_type_expr::{
     PrimitiveName, TupleElement, TypeExpr, TypeParam, ValueRef,
 };
 
+mod dependency_facts;
+pub use dependency_facts::{
+    collect_class_dependency_facts, collect_interface_dependency_facts,
+    collect_type_alias_dependency_facts, collect_type_dependency_facts,
+    collect_type_dependency_paths, TypeDependencyFacts, UnsupportedValuePositionKind,
+};
+
+#[cfg(test)]
+mod dependency_facts_tests;
+
 /// Lower an OXC `TSType` node into a `TypeExpr`.
 ///
 /// `source` is the full source text, used for extracting raw text

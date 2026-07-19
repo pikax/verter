@@ -71,6 +71,7 @@ assert_fact_carriers!(
     DeclarationOrigin,
     ValueDeclIdentityPart,
     HeritageBaseFact,
+    VueIgnoredHeritageFact,
     ClosednessFollowRole,
     SymbolicBinding,
     SymbolicBindingLocator,
@@ -79,6 +80,44 @@ assert_fact_carriers!(
     KeyDomainClosednessFact,
     KeyDomainFact,
 );
+
+#[test]
+fn vue_ignored_heritage_fact_has_exact_serde_and_hash_identity() {
+    let first_arm = VueIgnoredHeritageFact {
+        contributor_ordinal: 3,
+        intersection_arm_ordinal: 1,
+    };
+    let next_contributor = VueIgnoredHeritageFact {
+        contributor_ordinal: 4,
+        ..first_arm
+    };
+    let next_arm = VueIgnoredHeritageFact {
+        intersection_arm_ordinal: 2,
+        ..first_arm
+    };
+
+    assert_ne!(first_arm, next_contributor);
+    assert_ne!(first_arm, next_arm);
+    assert_ne!(
+        hash_input_stream(&first_arm),
+        hash_input_stream(&next_contributor),
+        "contributor identity must participate in the cache key"
+    );
+    assert_ne!(
+        hash_input_stream(&first_arm),
+        hash_input_stream(&next_arm),
+        "lowered heritage-arm identity must participate in the cache key"
+    );
+
+    let json = serde_json::to_string(&first_arm).expect("serialize ignore fact");
+    assert_eq!(
+        json, r#"{"contributor_ordinal":3,"intersection_arm_ordinal":1}"#,
+        "the persisted field names and order are an explicit schema contract"
+    );
+    let round_trip: VueIgnoredHeritageFact =
+        serde_json::from_str(&json).expect("deserialize ignore fact");
+    assert_eq!(round_trip, first_arm);
+}
 
 // --- Surface B ---
 assert_fact_carriers!(

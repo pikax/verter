@@ -22,7 +22,7 @@ use verter_type_expr::facts::{
     PreparedKeyRemapShapeFact, PreparedMemberFact, PreparedProjectionClassFact,
     PreparedSurfaceModifiersFact, PreparedTypeBodyFacts, PreparedValueMemberFact,
     PreparedValueRuleShapeFact, PreparedWrapperKindFact, PreparedWrapperShapeFact, TypeBodyClass,
-    ValueAnnotationClass, ValueTypeAnnotationFact,
+    ValueAnnotationClass, ValueTypeAnnotationFact, VueIgnoredHeritageFact,
 };
 use verter_type_expr::locators::{
     AuthoredAnchor, LocatorSymbolSpace, TypeArgLocator, TypeBodyPathStep, TypeBodySlot,
@@ -132,6 +132,11 @@ pub struct PreparedTypeDecl {
     /// content-free locators of the authored bound positions, never embedded
     /// bodies.
     pub type_parameters: Vec<NarrowTypeParam>,
+
+    /// Exact authored interface heritage arms suppressed only by Vue runtime
+    /// props/emits projection. All ordinary semantic projections preserve
+    /// these arms.
+    pub vue_ignored_heritage: Arc<[VueIgnoredHeritageFact]>,
 
     /// The narrowed body FACTS: classification + the content-free body slot
     /// locator + ordered merged-contributor slots. The authored body is NOT
@@ -464,6 +469,7 @@ impl PreparedTypeDecl {
             exported_name: None,
             kind,
             type_parameters: Vec::new(),
+            vue_ignored_heritage: Arc::from([]),
             body_facts,
             member_index: FxHashMap::default(),
             local_deps: Vec::new(),

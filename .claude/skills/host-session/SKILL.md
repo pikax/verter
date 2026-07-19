@@ -39,15 +39,35 @@ expansion.
 
 The output is request-local and is not retained as an aggregate graph-id cache.
 Underlying semantic queries keep their canonical memo/singleflight behavior.
-The producer submits no scheduler work, records one fact footprint, returns
-typed completeness/cacheability, and reports the sorted transitive canonicals
-observed by that request. Compile entry points call it once per SFC/request for
-the target's combined demand, pass `output.compiler_input()` to the compiler,
-and unconditionally replace the semantic transitive-dependency axis with the
-returned canonical set. Public-API rendering requests one TSC bundle; runtime
-rendering requests one runtime bundle. Audited compilation invokes the producer
-inside the request observer scope so its semantic reads are attributed to the
-same audit record.
+The producer submits exactly one interactive scoped cache-node job per
+`(canonical SFC, exact demand, session)` request. The semantic key is
+content-free; resolver epoch and external-validity fingerprint live only in the
+job's input pin, so an edit preserves the key while moving the pin. Every macro,
+member, owner, runtime classifier, and TSC materialization stays inside that one
+scheduled closure. The scoped rendezvous disappears at terminal state and is
+not a second cache authority.
+
+The producer records one fact footprint, returns typed
+completeness/cacheability, and reports the sorted transitive canonicals observed
+by that request. Cancellation returns only typed `Partial(Cancelled)` entries,
+marks the result non-cacheable, and never publishes the cancelled aggregate; a
+live dedup sibling may still complete and publish to that sibling. Compile entry
+points call the producer once per SFC/request for the target's combined demand,
+pass `output.compiler_input()` to the compiler, and unconditionally replace the
+semantic transitive-dependency axis with the returned canonical set. Public-API
+rendering requests one TSC bundle; runtime rendering requests one runtime
+bundle. Audited compilation invokes the producer inside the request observer
+scope so its semantic reads are attributed to the same audit record.
+
+Vue custom-element script policy is an explicit compile-profile axis:
+`CompileProfile.custom_element` (host/NAPI `customElement`) defaults to `false`,
+participates in the derived profile hash, and threads through
+`RuntimeCompileOptions` to `CodegenOptions.custom_element`. The batch-render
+lane carries the same axis as required
+`CompileBatchRenderProfile.custom_element`; callers must set it explicitly.
+Never infer it from template `custom_elements`, whose only responsibility is
+custom-tag parsing. The standard dev/prod profiles remain non-custom-element
+unless the caller selects this axis.
 
 ## Language Server Architecture
 

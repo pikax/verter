@@ -79,6 +79,49 @@ fn resolve_decl_misses_for_unknown_name() {
     }
 }
 
+#[test]
+fn cancelled_dispatch_is_typed_return_only_and_cold_retry_succeeds() {
+    let host = host();
+    upsert_ts(&host, "/w/cancel.ts", "export type Foo = string");
+    let key = SemanticQueryKey::ResolveDecl(resolve_decl_key(
+        "/w/cancel.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "Foo",
+    ));
+
+    let cancelled =
+        crate::request_context::RequestContext::new(70_001, Arc::from("/w/cancel.ts"), false, None);
+    cancelled.cancel();
+    {
+        let _guard = crate::request_context::RequestContextGuard::install(cancelled);
+        let _completeness = crate::request_context::ColdComputeCompletenessScope::enter();
+        let read = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
+        assert!(matches!(
+            read.value,
+            QueryResult::Error(QueryError::Cancelled)
+        ));
+        assert!(read.cache_suppress, "cancelled reads are ReturnOnly");
+        assert!(
+            read.result_is_partial,
+            "cancelled reads are structurally partial"
+        );
+        assert!(
+            crate::request_context::current_cold_compute_completeness()
+                .reasons()
+                .contains(crate::semantic_query::PartialReasonSet::CANCELLED),
+            "the exact cancellation reason must survive the dispatch boundary"
+        );
+    }
+
+    let retry =
+        crate::request_context::RequestContext::new(70_002, Arc::from("/w/cancel.ts"), false, None);
+    let _guard = crate::request_context::RequestContextGuard::install(retry);
+    let first = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
+    assert!(matches!(first.value, QueryResult::Value(_)));
+    let warm = ProjectSemanticDispatch::new(&host).execute_read(key);
+    assert!(matches!(warm.value, QueryResult::Value(_)));
+}
+
 /// A dispatch `ResolveDecl` for an ambient rune name (`$state`) RESOLVES in a
 /// Svelte rune module and MISSES in a plain `.ts` — the dispatch presence
 /// determination routes through the CENTRALIZED `effective_*_header_present`

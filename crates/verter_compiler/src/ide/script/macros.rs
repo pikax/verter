@@ -59,7 +59,6 @@ pub(super) struct ModelBindingEntry {
 /// `process_standard_macro`, `process_define_model`, and `process_with_defaults`.
 pub(super) struct MacroSourceCtx<'a, 'alloc> {
     pub(super) source: &'a str,
-    pub(super) content_str: &'a str,
     pub(super) content_start: u32,
     pub(super) out: &'a mut CodeGenOutput<'alloc>,
     pub(super) is_jsx: bool,
@@ -204,14 +203,15 @@ fn process_single_macro(
             span,
             declarator,
             type_params,
-            name_span,
+            name,
+            name_span: _,
             options_span: _,
         } => {
             process_define_model(
                 *span,
                 declarator.as_ref(),
                 type_params.as_ref(),
-                *name_span,
+                *name,
                 ctx,
                 state,
             );
@@ -340,21 +340,26 @@ fn process_define_model(
     call_span: Span,
     declarator: Option<&MacroDeclarator<'_>>,
     type_params: Option<&MacroTypeParams>,
-    name_span: Option<Span>,
+    name: Option<&str>,
     ctx: &mut MacroSourceCtx<'_, '_>,
     state: &mut TsxMacroState,
 ) {
-    // Determine model name
-    let model_name = if let Some(ns) = name_span {
-        let name_text = &ctx.content_str[ns.start as usize..ns.end as usize];
-        name_text.trim_matches('\'').trim_matches('"').to_string()
+    let model_name = name.unwrap_or("modelValue").to_owned();
+    let internal_suffix = if !model_name.is_empty()
+        && model_name.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphabetic()
+                || byte == b'_'
+                || byte == b'$'
+                || (index > 0 && byte.is_ascii_digit())
+        }) {
+        model_name.clone()
     } else {
-        "modelValue".to_string()
+        format!("at_{}", call_span.start)
     };
 
-    let prepend = format!("{}_", model_name);
+    let prepend = format!("{}_", internal_suffix);
     let type_name_str = format!("{}{}defineModel_Type", PREFIX, prepend);
-    let auto_var_name = format!("{}models_{}", PREFIX, model_name);
+    let auto_var_name = format!("{}models_{}", PREFIX, internal_suffix);
 
     let has_type_params = type_params.is_some();
 

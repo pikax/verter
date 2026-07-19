@@ -909,7 +909,7 @@ mod tests {
             },
         };
         let broad_runtime = SemanticQueryKey::ClassifyBroadRuntime {
-            subject: dummy_node,
+            subject: crate::locator_identity::BroadRuntimeSubjectLocator::payload(slot.clone(), 0),
             context: crate::semantic_query::BroadRuntimeContext {
                 resolve_env_hash: Default::default(),
                 type_env_hash: Default::default(),

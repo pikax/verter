@@ -70,6 +70,7 @@ pub struct FfiHostConfig {
 pub struct FfiCompileProfile {
     pub filename: Option<String>,
     pub is_production: Option<bool>,
+    pub custom_element: Option<bool>,
     pub ssr: Option<bool>,
     pub hmr_strategy: Option<String>,
     pub component_id: Option<String>,

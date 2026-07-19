@@ -3923,8 +3923,10 @@ dependencies = [
  "verter_language",
  "verter_macro_dto",
  "verter_parser",
+ "verter_semantic",
  "verter_span",
  "verter_type_expr",
+ "verter_type_expr_oxc",
  "web-time",
 ]
 
@@ -4418,6 +4420,7 @@ dependencies = [
  "oxc_ast",
  "oxc_parser",
  "oxc_span",
+ "serde",
  "verter_span",
  "verter_type_expr",
 ]

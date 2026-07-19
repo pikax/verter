@@ -11,13 +11,15 @@
 use rustc_hash::FxHashMap;
 use verter_macro_dto::{
     MacroRuntimeBundle, MacroRuntimeOutcome, MacroRuntimeShape, ModelRuntimeShape,
-    PropsDefaultsAssociation, PropsRuntimeShape, RuntimeConstructor, RuntimeProp,
+    PropsRuntimeShape, RuntimeConstructor, RuntimeProp,
 };
 
 use super::prepared::PreparedCompanion;
 use crate::template::code_gen::binding::BindingType;
+use crate::template::code_gen::shared::helpers::escape_js_string_into;
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::template::code_gen::vdom::props::needs_quoted_key;
+use crate::utils::oxc::vue::{MacroObjectArg, MacroProperty};
 use crate::utils::oxc::vue::{ScriptItem, ScriptMacro};
 
 use super::ScriptContext;
@@ -25,16 +27,21 @@ use super::ScriptContext;
 /// Emit a runtime props object key, quoting when the name is not a bare JS
 /// identifier (e.g. `onUpdate:visible`, `aria-label`). Unquoted colon keys
 /// are a parse error in the generated module (element-plus tooltip, etc.).
-fn push_runtime_prop_key(buf: &mut String, name: &str) {
+pub(super) fn push_js_string_literal(buf: &mut String, value: &str) {
+    buf.push('"');
+    escape_js_string_into(buf, value);
+    buf.push('"');
+}
+
+pub(super) fn js_string_literal(value: &str) -> String {
+    let mut literal = String::with_capacity(value.len().saturating_add(2));
+    push_js_string_literal(&mut literal, value);
+    literal
+}
+
+pub(super) fn push_runtime_prop_key(buf: &mut String, name: &str) {
     if needs_quoted_key(name) {
-        buf.push('"');
-        for c in name.chars() {
-            if c == '\\' || c == '"' {
-                buf.push('\\');
-            }
-            buf.push(c);
-        }
-        buf.push('"');
+        push_js_string_literal(buf, name);
     } else {
         buf.push_str(name);
     }
@@ -57,16 +64,19 @@ fn runtime_shape(
     }
 }
 
-fn render_runtime_prop_options(
-    prop: &RuntimeProp,
+#[derive(Clone, Copy)]
+struct RuntimePropProfile {
     is_production: bool,
-    retain_function_in_production: bool,
-) -> String {
+    custom_element: bool,
+}
+
+fn runtime_type_expression(prop: &RuntimeProp) -> (Vec<RuntimeConstructor>, String) {
     let constructors = prop
         .type_shape
         .constructors()
         .map(verter_macro_dto::OrderedRuntimeConstructors::as_slice)
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .to_vec();
     let runtime_expressions: Vec<&str> = constructors
         .iter()
         .filter_map(|constructor| constructor.as_runtime_expression())
@@ -76,43 +86,70 @@ fn render_runtime_prop_options(
         [constructor] => (*constructor).to_string(),
         constructors => format!("[{}]", constructors.join(", ")),
     };
+    (constructors, runtime_type)
+}
 
-    if is_production {
+fn render_runtime_prop_options(
+    prop: &RuntimeProp,
+    profile: RuntimePropProfile,
+    retain_function_in_production: bool,
+    static_default: Option<&str>,
+) -> String {
+    let (constructors, runtime_type) = runtime_type_expression(prop);
+
+    if profile.is_production {
         let retains_type = constructors.contains(&RuntimeConstructor::Boolean)
             || (retain_function_in_production
                 && constructors.contains(&RuntimeConstructor::Function));
-        return if retains_type {
-            format!("{{ type: {runtime_type} }}")
-        } else {
-            "{}".to_string()
-        };
+        if retains_type {
+            let mut fields = vec![format!("type: {runtime_type}")];
+            fields.extend(static_default.map(str::to_owned));
+            return format!("{{ {} }}", fields.join(", "));
+        }
+        if profile.custom_element {
+            let mut fields = Vec::with_capacity(2);
+            fields.extend(static_default.map(str::to_owned));
+            fields.push(format!("type: {runtime_type}"));
+            return format!("{{ {} }}", fields.join(", "));
+        }
+        return static_default
+            .map(|default| format!("{{ {default} }}"))
+            .unwrap_or_else(|| "{}".to_owned());
     }
 
-    let mut options = format!("{{ type: {runtime_type}");
+    let mut fields = vec![format!("type: {runtime_type}")];
+    fields.push(format!("required: {}", !prop.optional));
     if prop.type_shape.skip_check() {
-        options.push_str(", skipCheck: true");
+        fields.push("skipCheck: true".to_owned());
     }
-    if !prop.optional {
-        options.push_str(", required: true");
-    }
-    options.push_str(" }");
-    options
+    fields.extend(static_default.map(str::to_owned));
+    format!("{{ {} }}", fields.join(", "))
 }
 
-fn render_runtime_props(shape: &PropsRuntimeShape, is_production: bool) -> String {
+#[derive(Default)]
+struct StaticPropDefaults {
+    by_name: FxHashMap<String, String>,
+}
+
+fn render_runtime_props(
+    shape: &PropsRuntimeShape,
+    profile: RuntimePropProfile,
+    static_defaults: Option<&StaticPropDefaults>,
+) -> String {
     let mut out = String::from("{\n");
-    let retain_function = !matches!(
-        shape.defaults,
-        PropsDefaultsAssociation::WithDefaults { .. }
-    );
     for prop in &shape.props {
+        let static_default = static_defaults.and_then(|defaults| defaults.by_name.get(&prop.name));
+        // Official Vue retains Function in production when defaults are
+        // dynamic, or when this exact statically-defaulted row has a default.
+        let retain_function = static_defaults.is_none() || static_default.is_some();
         out.push_str("    ");
         push_runtime_prop_key(&mut out, &prop.name);
         out.push_str(": ");
         out.push_str(&render_runtime_prop_options(
             prop,
-            is_production,
+            profile,
             retain_function,
+            static_default.map(String::as_str),
         ));
         out.push_str(",\n");
     }
@@ -132,7 +169,28 @@ fn render_model_options(
     syntax_options: Option<&str>,
     is_production: bool,
 ) -> String {
-    let base = render_runtime_prop_options(&model.prop, is_production, syntax_options.is_some());
+    let (_, runtime_type) = runtime_type_expression(&model.prop);
+    let constructors = model
+        .prop
+        .type_shape
+        .constructors()
+        .map(verter_macro_dto::OrderedRuntimeConstructors::as_slice)
+        .unwrap_or_default();
+    let keep_type = !is_production
+        || constructors.contains(&RuntimeConstructor::Boolean)
+        || (syntax_options.is_some() && constructors.contains(&RuntimeConstructor::Function));
+    let mut type_fields = Vec::new();
+    if keep_type {
+        type_fields.push(format!("type: {runtime_type}"));
+        if !is_production && model.prop.type_shape.skip_check() {
+            type_fields.push("skipCheck: true".to_owned());
+        }
+    }
+    let base = if type_fields.is_empty() {
+        "{}".to_owned()
+    } else {
+        format!("{{ {} }}", type_fields.join(", "))
+    };
     match syntax_options {
         Some(options) if base == "{}" => options.to_owned(),
         Some(options) => {
@@ -145,6 +203,60 @@ fn render_model_options(
         }
         None => base,
     }
+}
+
+fn render_static_defaults(
+    defaults: &MacroObjectArg<'_>,
+    content_str: &str,
+    stripped: Option<&StrippedSections>,
+) -> Option<StaticPropDefaults> {
+    if !defaults.static_eligibility.is_eligible() {
+        return None;
+    }
+    let mut rendered = StaticPropDefaults::default();
+    for property in &defaults.properties {
+        let value = render_static_default(property, content_str, stripped)?;
+        // Official Vue selects the first matching default property.
+        rendered
+            .by_name
+            .entry(property.name.to_owned())
+            .or_insert(value);
+    }
+    Some(rendered)
+}
+
+fn render_static_default(
+    property: &MacroProperty<'_>,
+    content_str: &str,
+    stripped: Option<&StrippedSections>,
+) -> Option<String> {
+    if !property.is_method {
+        let value = match property.value_span {
+            Some(span) => section_text(span.start, span.end, content_str, stripped),
+            None => section_text(
+                property.name_span.start,
+                property.name_span.end,
+                content_str,
+                stripped,
+            ),
+        };
+        return Some(format!("default: {value}"));
+    }
+
+    let value_span = property.value_span?;
+    if property.property_span.start > property.name_span.start
+        || property.name_span.end > value_span.start
+        || value_span.end > property.property_span.end
+    {
+        return None;
+    }
+    let prefix = content_str
+        .get(property.property_span.start as usize..property.name_span.start as usize)?;
+    let between = content_str.get(property.name_span.end as usize..value_span.start as usize)?;
+    let function = section_text(value_span.start, value_span.end, content_str, stripped);
+    // A quoted key is valid for every object-method kind (`async`, getter,
+    // setter, generator) and avoids reinterpreting computed-key punctuation.
+    Some(format!("{prefix}\"default\"{between}{function}"))
 }
 
 /// Force-js-stripped text for a macro-argument expression, keyed by its
@@ -237,7 +349,12 @@ pub(super) fn process_macro_item<'a>(
     stripped: Option<&StrippedSections>,
     runtime_bundle: Option<&MacroRuntimeBundle>,
     is_production: bool,
+    custom_element: bool,
 ) {
+    let runtime_profile = RuntimePropProfile {
+        is_production,
+        custom_element,
+    };
     match mac {
         ScriptMacro::DefineExpose { span, .. } => {
             state.has_expose = true;
@@ -293,7 +410,7 @@ pub(super) fn process_macro_item<'a>(
                 state.props_section = match runtime_shape(runtime_bundle, syntax_index) {
                     Some(MacroRuntimeShape::Props(shape)) => {
                         register_runtime_props(shape, ctx);
-                        Some(render_runtime_props(shape, is_production))
+                        Some(render_runtime_props(shape, runtime_profile, None))
                     }
                     _ => None,
                 };
@@ -336,7 +453,7 @@ pub(super) fn process_macro_item<'a>(
                         "[{}]",
                         emits
                             .iter()
-                            .map(|emit| format!("\"{}\"", emit.name))
+                            .map(|emit| js_string_literal(&emit.name))
                             .collect::<Vec<_>>()
                             .join(", ")
                     )),
@@ -383,21 +500,16 @@ pub(super) fn process_macro_item<'a>(
         ScriptMacro::DefineModel {
             span,
             type_params,
-            name_span,
+            name,
             options_span,
             ..
         } => {
             let abs_start = content_start + span.start;
             let abs_end = content_start + span.end;
 
-            // Get model name (default: 'modelValue').
-            // OXC StringLiteral span includes surrounding quotes, so strip them.
-            let model_name = name_span
-                .map(|ns| {
-                    let raw = &content_str[ns.start as usize..ns.end as usize];
-                    raw.trim_matches(|c| c == '\'' || c == '"')
-                })
-                .unwrap_or("modelValue");
+            // Public semantics use OXC's decoded string value. The authored
+            // span is retained independently for diagnostics and source maps.
+            let model_name = name.unwrap_or("modelValue");
 
             let options_src =
                 options_span.map(|span| section_text(span.start, span.end, content_str, stripped));
@@ -428,8 +540,7 @@ pub(super) fn process_macro_item<'a>(
                 });
             }
 
-            // Replace with _useModel(__props, 'name')
-            let replacement = format!("_useModel(__props, '{}')", model_name);
+            let replacement = format!("_useModel(__props, {})", js_string_literal(model_name));
             ctx.out.overwrite(abs_start, abs_end, &replacement);
 
             ctx.imports.push("_useModel");
@@ -439,6 +550,7 @@ pub(super) fn process_macro_item<'a>(
             span,
             declarator,
             define_props_type_params,
+            defaults,
             defaults_arg_span,
             ..
         } => {
@@ -452,18 +564,28 @@ pub(super) fn process_macro_item<'a>(
                 ) {
                     (Some(MacroRuntimeShape::Props(shape)), Some(defaults_span)) => {
                         register_runtime_props(shape, ctx);
-                        let defaults = section_text(
-                            defaults_span.start,
-                            defaults_span.end,
-                            content_str,
-                            stripped,
-                        );
-                        ctx.imports.push("_mergeDefaults");
-                        Some(format!(
-                            "_mergeDefaults({}, {})",
-                            render_runtime_props(shape, is_production),
-                            defaults
-                        ))
+                        if let Some(static_defaults) = defaults.as_ref().and_then(|defaults| {
+                            render_static_defaults(defaults, content_str, stripped)
+                        }) {
+                            Some(render_runtime_props(
+                                shape,
+                                runtime_profile,
+                                Some(&static_defaults),
+                            ))
+                        } else {
+                            let defaults = section_text(
+                                defaults_span.start,
+                                defaults_span.end,
+                                content_str,
+                                stripped,
+                            );
+                            ctx.imports.push("_mergeDefaults");
+                            Some(format!(
+                                "_mergeDefaults({}, {})",
+                                render_runtime_props(shape, runtime_profile, None),
+                                defaults
+                            ))
+                        }
                     }
                     _ => None,
                 };

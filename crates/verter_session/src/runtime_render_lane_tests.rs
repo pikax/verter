@@ -110,6 +110,7 @@ fn render_profile(
 ) -> crate::host_compile::CompileBatchRenderProfile {
     crate::host_compile::CompileBatchRenderProfile {
         is_production,
+        custom_element: false,
         ssr,
         force_js,
         force_vapor: false,
@@ -197,6 +198,7 @@ fn get_virtual_file_profile(
     let mut profile = CompileProfile {
         filename: rp.filename.clone(),
         is_production: rp.is_production,
+        custom_element: rp.custom_element,
         ssr: rp.ssr,
         force_js: rp.force_js,
         force_vapor: rp.force_vapor,
@@ -777,6 +779,56 @@ fn runtime_render_honors_render_profile_dev_vs_prod() {
         prod.code.as_ref(),
         prod_hb.as_ref(),
         "prod RuntimeRender must byte-match getVirtualFile(prod profile)"
+    );
+}
+
+/// The custom-element script profile is independent from template custom-tag
+/// matching, changes Vue's production runtime-prop retention, and remains
+/// byte-identical across the RuntimeRender and HostBacked lanes.
+#[test]
+fn runtime_render_honors_vue_custom_element_script_profile() {
+    let canonical = "/proj/CustomElementProfile.vue";
+    let src =
+        "<script setup lang=\"ts\">\ndefineProps<{ text: string; opaque: unknown }>()\n</script>\n";
+    let regular = render_profile(true, false, false, crate::types::HmrStrategy::None);
+    let mut custom_element = regular.clone();
+    custom_element.custom_element = true;
+
+    let regular_render = render_with_profile(&new_host(), canonical, src, regular, None);
+    let custom_render =
+        render_with_profile(&new_host(), canonical, src, custom_element.clone(), None);
+    assert!(
+        regular_render.errors.is_empty(),
+        "regular render errors: {:?}",
+        regular_render.errors
+    );
+    assert!(
+        custom_render.errors.is_empty(),
+        "custom-element render errors: {:?}",
+        custom_render.errors
+    );
+    assert!(
+        regular_render.code.contains("text: {}") && regular_render.code.contains("opaque: {}"),
+        "ordinary production must strip non-Boolean runtime types: {}",
+        regular_render.code
+    );
+    assert!(
+        custom_render.code.contains("text: { type: String }")
+            && custom_render.code.contains("opaque: { type: null }"),
+        "custom-element production must retain every runtime type field: {}",
+        custom_render.code
+    );
+
+    let (host_backed, _, _) = host_backed_main_via_get_virtual_file(
+        &new_host(),
+        canonical,
+        src,
+        &get_virtual_file_profile(custom_element, None),
+    );
+    assert_eq!(
+        custom_render.code.as_ref(),
+        host_backed.as_ref(),
+        "custom-element RuntimeRender must byte-match HostBacked"
     );
 }
 

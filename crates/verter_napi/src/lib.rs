@@ -247,6 +247,7 @@ impl From<NapiHostConfig> for FfiHostConfig {
 pub struct NapiCompileProfile {
     pub filename: Option<String>,
     pub isProduction: Option<bool>,
+    pub customElement: Option<bool>,
     pub ssr: Option<bool>,
     pub hmrStrategy: Option<String>,
     pub componentId: Option<String>,
@@ -272,6 +273,7 @@ impl From<NapiCompileProfile> for FfiCompileProfile {
         Self {
             filename: n.filename,
             is_production: n.isProduction,
+            custom_element: n.customElement,
             ssr: n.ssr,
             hmr_strategy: n.hmrStrategy,
             component_id: n.componentId,
@@ -2317,6 +2319,7 @@ impl NapiVerterHost {
                     profile: host_compile::CompileBatchRenderProfile {
                         filename: p.filename,
                         is_production: p.isProduction,
+                        custom_element: p.customElement,
                         ssr: p.ssr,
                         force_js: p.forceJs,
                         force_vapor: p.forceVapor,
@@ -3082,6 +3085,8 @@ pub struct NapiCompileBatchRenderProfile {
     /// canonical id — same semantics as `HostCompileProfile.filename`.
     pub filename: Option<String>,
     pub isProduction: bool,
+    /// Vue custom-element script policy. Independent of `customElements`.
+    pub customElement: bool,
     pub ssr: bool,
     pub forceJs: bool,
     pub forceVapor: bool,

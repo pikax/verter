@@ -192,8 +192,31 @@ syntax facts.
 A target that encounters a typed macro without its required bundle, with a
 degraded entry, or with a projection for the wrong macro role fails closed at
 the authored macro/type anchor using `XMissingMacroSemanticBundle` or
-`XUnavailableMacroSemanticResult`. `withDefaults` remains syntax-owned and
-emits exactly one `_mergeDefaults` around the DTO-derived props object.
+`XUnavailableMacroSemanticResult`. Before runtime codegen, the compiler
+structurally validates the whole bundle: syntax/effective macro identities,
+roles, `withDefaults` association, public names, authored-member ordinals, and
+synthesized model-row anchors must all match parser-owned syntax. Any invalid
+row suppresses the entire runtime bundle; a `Complete` row with a degraded
+member remains usable, emits `type: null`, and reports the typed reason/detail
+at the exact authored key (or model-name/type) span.
+
+Parser model-name facts carry both an OXC-decoded semantic value and the exact
+authored literal span. Runtime/TSC joins compare the decoded value, retain the
+span only for mappings and diagnostics, and serialize typed emit/model public
+names with the canonical JavaScript string escaper.
+
+`withDefaults` syntax remains parser-owned. A statically eligible object
+(supported keys, no spread) is folded into each DTO-derived prop row, preserving
+the first duplicate and method/default expression syntax. Dynamic, spread, or
+unsupported-key defaults preserve the whole authored expression and emit
+exactly one `_mergeDefaults`. Runtime prop rendering follows three independent
+profiles: development emits `type`, `required: true|false`, `skipCheck`, then a
+static default; production retains only Vue-required Boolean/Function types and
+defaults; production custom-element mode retains every `type` field, including
+`type: null`. `CodegenOptions.custom_element` selects the script policy and is
+independent of template tag matching in `custom_elements`. Model props use
+Vue's separate model policy (no synthesized `required`; custom-element mode
+does not widen production model types).
 
 ## IDE Prefixed-Expression Emit Substrate (`ide/template/emit.rs`)
 

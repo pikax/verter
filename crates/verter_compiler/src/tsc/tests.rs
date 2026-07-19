@@ -187,15 +187,6 @@ fn emits_fixture_identity<'a>(
     }
 }
 
-fn emits_root_fixture_at<'a>(
-    syntax_index: u32,
-    events: &[FixtureEmitRow<'a>],
-    imports: &'a [&'a str],
-    declarations: &'a [(&'a str, &'a str)],
-) -> TscFixture<'a> {
-    emits_fixture_identity(syntax_index, syntax_index, events, imports, declarations)
-}
-
 fn model_fixture<'a>(name: &'a str, value_type: &'a str) -> TscFixture<'a> {
     model_fixture_at(0, name, value_type, &[], &[])
 }
@@ -1532,20 +1523,6 @@ fn gen_tsc_output(sfc: &str) -> super::script::TscOutput {
         MacroTscInput::NotRequired,
     )
     .expect("fixture has no typed codegen macro")
-}
-
-fn gen_tsc_narrowing(sfc: &str) -> String {
-    generate_tsc_output_with_options(
-        sfc,
-        "TestComp",
-        &TscGenOptions {
-            conditional_root_narrowing: true,
-            ..Default::default()
-        },
-        MacroTscInput::NotRequired,
-    )
-    .expect("fixture has no typed codegen macro")
-    .code
 }
 
 fn gen_tsc_narrowing_with(sfc: &str, fixtures: &[TscFixture<'_>]) -> String {
@@ -4022,7 +3999,7 @@ defineEmits<{ (e: 'click', event: MouseEvent): void }>()
         "type-based emits should inline handler props with preserved payload types: {r}"
     );
     assert!(
-        r.contains("((event: 'click', event: MouseEvent) => void)"),
+        r.contains(r#"((event: "click", event: MouseEvent) => void)"#),
         "type-based emits should inline $emit overloads: {r}"
     );
 }

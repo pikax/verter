@@ -14,7 +14,6 @@ use crate::VerterHost;
 
 use super::{
     component_meta_trace_custom, is_raw_import_specifier_id, read_analysis_source_result_detail,
-    ExternalTypeResolutionInputs,
 };
 
 impl VerterHost {
@@ -85,7 +84,7 @@ impl VerterHost {
     /// **position-preserving** script-only source: each script block's content
     /// sits at its RAW carrier byte offsets and every other byte is
     /// whitespace-blanked (line terminators preserved), so every OXC-produced
-    /// span — eval-env decls, external-type analysis, member/signature spans —
+    /// span — eval-env decls, shallow-index facts, member/signature spans —
     /// is carrier-absolute by construction. The blanking is CARRIER-NEUTRAL: it
     /// reads the neutral `FrameworkParseCommon.script_regions` the carrier's
     /// producer populated (BOTH the instance and module script blocks), so a new
@@ -420,115 +419,5 @@ impl VerterHost {
         }
 
         self.ws().file_exists(canonical_id)
-    }
-
-    pub(super) fn external_type_resolution_inputs(
-        &self,
-        canonical_id: &str,
-    ) -> Option<ExternalTypeResolutionInputs> {
-        self.external_type_resolution_inputs_with_view(canonical_id, None)
-    }
-
-    /// View-aware variant of [`Self::external_type_resolution_inputs`].
-    ///
-    /// When the active session view carries parse artifacts for `canonical_id`
-    /// (i.e. an overlay candidate has been published into FileArtifactStore
-    /// under the overlay content hash), the inputs are read from the view's
-    /// artifacts so the session-bearing cold compute sees overlay-rooted
-    /// shallow state and analysis. Base callers (`view = None`) read the
-    /// content-pinned `FileArtifactStore` fast path and fall through to
-    /// the singleflighted `ensure_indexed_ready_serve` cold build.
-    pub(super) fn external_type_resolution_inputs_with_view(
-        &self,
-        canonical_id: &str,
-        view: Option<&dyn crate::session_view::SessionView>,
-    ) -> Option<ExternalTypeResolutionInputs> {
-        // Two-identity split. `canonical_id` is the RAW dependency
-        // canonical the caller requested; `identity` carries it
-        // alongside `analysis_canonical` (the `normalized_analysis_canonical`
-        // rewrite). The overlay-artifact read below MUST go through the
-        // raw owner (the `SessionView` overlay maps + the overlay-set
-        // discriminator are raw-keyed) while resolving to the
-        // normalised `FileArtifactStore` identity; the project-global
-        // fast path and the `ensure_indexed_ready_serve` fall-through below
-        // key on the normalised analysis canonical (the artifact /
-        // type-context cache identity).
-        let identity = self.overlay_artifact_identity(canonical_id);
-        let canonical_id = identity.analysis_canonical();
-
-        // Overlay-priority: when the session view carries the published
-        // overlay artifact for this canonical, return it so the session
-        // path sees the overlay content. `lookup_overlay_artifacts`
-        // builds the exact `overlay_scoped` key the overlay materialiser
-        // published under — raw-owner hash + discriminator, normalised
-        // `FileArtifactKey.canonical` — so it reaches the candidate even
-        // when `normalize(raw) != raw`.
-        if let Some(view) = view {
-            if view
-                .overlay_content_hash_for(identity.raw_overlay_owner())
-                .is_some()
-            {
-                // GENUINELY OVERLAID canonical: route through the gated overlay
-                // materialiser so an edge-stale wildcard `export *` surface
-                // re-resolves from the OVERLAY source (never the base surface).
-                if let Some(indexed) = self
-                    .materialize_overlay_indexed_ready_serve_with_view(
-                        identity.raw_overlay_owner(),
-                        view,
-                    )
-                    .map(|serve| serve.indexed)
-                {
-                    return Some(ExternalTypeResolutionInputs {
-                        analysis: Arc::clone(&indexed.external_type_analysis),
-                        analysis_cache_hit: true,
-                    });
-                }
-            }
-            // Unmasked (non-overlaid) canonical: fall through to the base
-            // accessor below (`current_content_pinned_indexed`), which is
-            // edge-gated and re-indexes a stale wildcard surface.
-        }
-
-        // Project-global `FileArtifactStore` fast path. The read is
-        // **current-content-pinned** — never the content-agnostic
-        // `get_any`. `ExternalTypeResolutionInputs` carries the dep's
-        // `external_type_analysis`; that analysis feeds
-        // cross-file macro-type resolution (`defineProps<Foo>` etc.) and
-        // the observed `whole_hash` roots the consumer's
-        // `fact_dep_signature`. With the own-canonical drain retired, a
-        // `get_any` read would surface a stale pre-edit `IndexedReady`
-        // after a same-canonical edit, so the consumer would resolve the
-        // stale `Foo` body and root its signature on the stale hash.
-        // `current_content_pinned_indexed` serves only a content-current
-        // artifact for a scheduler-tracked canonical;
-        // `artifact_current_indexed` answers for a genuinely artifact-only
-        // canonical (foreign source / test seed). A stale older-content
-        // artifact for a live scope misses both — the singleflighted
-        // `ensure_indexed_ready_serve` build below rematerialises from
-        // current content.
-        let cached_facts = self
-            .current_content_pinned_indexed(canonical_id)
-            .or_else(|| self.artifact_current_indexed(canonical_id));
-        if let Some(facts) = cached_facts {
-            let inputs = ExternalTypeResolutionInputs {
-                analysis: Arc::clone(&facts.external_type_analysis),
-                analysis_cache_hit: true,
-            };
-            return Some(inputs);
-        }
-
-        // Cold fall-through: JOIN the canonical `IndexedReady` build —
-        // external-type analysis is built exactly once per
-        // `(canonical, whole_hash)` on the single materialise path and
-        // shared with every other reader.
-        let indexed = self.ensure_indexed_ready_serve(canonical_id)?.indexed;
-        let inputs = ExternalTypeResolutionInputs {
-            analysis: Arc::clone(&indexed.external_type_analysis),
-            // The materialiser publishes once per content generation; warm
-            // hits return the same artifact through the fast path. Treat
-            // warm hits as cache hits for telemetry.
-            analysis_cache_hit: true,
-        };
-        Some(inputs)
     }
 }

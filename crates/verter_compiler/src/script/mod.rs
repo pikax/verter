@@ -29,6 +29,9 @@ pub struct ScriptCodeGenOptions<'a> {
     pub macro_runtime: Option<&'a verter_macro_dto::MacroRuntimeBundle>,
     /// Vue production policy for runtime prop/model declarations.
     pub is_production: bool,
+    /// Vue custom-element runtime-prop policy. Independent of template
+    /// custom-element tag matching.
+    pub custom_element: bool,
     /// Component name (used in `__name` property).
     pub component_name: &'a str,
     /// Scoped style ID (e.g., `"data-v-abc123"`).

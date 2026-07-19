@@ -379,6 +379,109 @@ interface Merged { b: number }
 }
 
 #[test]
+fn vue_ignore_requires_exact_attached_block_directive_and_uses_lowered_arm_ordinals() {
+    use verter_type_expr::facts::VueIgnoredHeritageFact;
+
+    let source = r#"
+interface Exact extends Namespace.Base, /* before @vue-ignore after */ Ignored<string>, Kept {}
+/* @vue-ignore */ interface Nearby extends Wrong {}
+interface Suffix extends /* @vue-ignore-next */ WrongSuffix {}
+interface Prefix extends /* x@vue-ignore */ WrongPrefix {}
+interface Line extends // @vue-ignore
+  WrongLine {}
+interface Trailing extends WrongTrailing /* @vue-ignore */ {}
+"#;
+    let index = index_for(source);
+
+    assert_eq!(
+        index
+            .type_header("Exact")
+            .expect("Exact header")
+            .vue_ignored_heritage
+            .as_ref(),
+        [VueIgnoredHeritageFact {
+            contributor_ordinal: 0,
+            // Namespace.Base is lowerable and therefore occupies arm zero.
+            intersection_arm_ordinal: 1,
+        }]
+    );
+    for name in ["Nearby", "Suffix", "Prefix", "Line", "Trailing"] {
+        assert!(
+            index
+                .type_header(name)
+                .unwrap_or_else(|| panic!("{name} header"))
+                .vue_ignored_heritage
+                .is_empty(),
+            "{name} must not inherit an inexact or unattached directive"
+        );
+    }
+}
+
+#[test]
+fn vue_ignore_facts_are_scoped_to_exact_merged_contributor_and_lexical_owner() {
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+    use verter_type_expr::facts::VueIgnoredHeritageFact;
+    use verter_type_expr::{DeclKey, TopLevelOwnerId};
+
+    let source = r#"
+interface Shared extends /* @vue-ignore */ Imported<string>, Kept {}
+interface Shared extends OtherOwnerBase {}
+interface Shared extends First, /* @vue-ignore */ Pick<Model, 'id'> {}
+interface Child extends Shared {}
+"#;
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+    assert!(!parsed.panicked, "fixture must parse");
+    let module = TopLevelOwnerId::module(0);
+    let instance = TopLevelOwnerId::instance(0);
+    let owners = TopLevelOwnerTable::try_from_statement_owners(
+        parsed.program.body.len(),
+        [module, instance, module, module],
+    )
+    .expect("validated owner table");
+
+    let index = build_decl_header_index_with_owners(&parsed.program, source, &owners);
+    assert_eq!(
+        index
+            .type_headers
+            .get(&DeclKey::new(module, "Shared"))
+            .expect("module Shared")
+            .vue_ignored_heritage
+            .as_ref(),
+        [
+            VueIgnoredHeritageFact {
+                contributor_ordinal: 0,
+                intersection_arm_ordinal: 0,
+            },
+            VueIgnoredHeritageFact {
+                contributor_ordinal: 1,
+                intersection_arm_ordinal: 1,
+            },
+        ]
+    );
+    assert!(
+        index
+            .type_headers
+            .get(&DeclKey::new(instance, "Shared"))
+            .expect("instance Shared")
+            .vue_ignored_heritage
+            .is_empty(),
+        "same-name declarations in another owner must not share ignore facts"
+    );
+    assert!(
+        index
+            .type_header_in(module, "Child")
+            .expect("Child")
+            .vue_ignored_heritage
+            .is_empty(),
+        "ignore metadata is authored on the direct heritage arm, never inherited"
+    );
+}
+
+#[test]
 fn namespace_qualified_names_match_env_walk() {
     assert_name_parity(
         r#"

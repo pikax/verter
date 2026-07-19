@@ -13,7 +13,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use verter_no_typeexpr::NoTypeExpr;
 use verter_span::Span;
-use verter_type_expr::{DeclKey, TopLevelOwnerId};
+use verter_type_expr::{DeclKey, TopLevelOwnerId, TopLevelOwnerKind};
 
 #[inline]
 pub(crate) fn checked_authored_ordinal(index: usize) -> Option<u32> {
@@ -331,6 +331,32 @@ impl TopLevelOwnerTable {
         &self.statements
     }
 
+    /// Return the sole validated lexical owner of `kind`.
+    ///
+    /// Owners are sourced only from this table's validated statement/region
+    /// coordinates (plus the explicit ordinary-file fallback). Repeated
+    /// coordinates for the same owner are deduplicated; two distinct owners of
+    /// the requested kind are ambiguous and fail closed.
+    #[must_use]
+    pub fn unique_owner_of_kind(&self, kind: TopLevelOwnerKind) -> Option<TopLevelOwnerId> {
+        let mut unique = None;
+        for owner in self
+            .statements
+            .iter()
+            .map(|statement| statement.owner)
+            .chain(self.regions.iter().map(|region| region.owner))
+            .chain(self.fallback_owner)
+            .filter(|owner| owner.kind() == kind)
+        {
+            match unique {
+                None => unique = Some(owner),
+                Some(existing) if existing == owner => {}
+                Some(_) => return None,
+            }
+        }
+        unique
+    }
+
     #[must_use]
     pub fn regions(&self) -> &[TopLevelOwnerRegion] {
         &self.regions
@@ -462,6 +488,32 @@ mod tests {
                 (instance, 1),
                 (module, 2),
             ]
+        );
+    }
+
+    #[test]
+    fn unique_owner_kind_deduplicates_coordinates_and_rejects_ambiguity() {
+        let module = TopLevelOwnerId::module(0);
+        let instance = TopLevelOwnerId::instance(0);
+        let unique =
+            TopLevelOwnerTable::try_from_statement_owners(3, [module, instance, module]).unwrap();
+        assert_eq!(
+            unique.unique_owner_of_kind(TopLevelOwnerKind::Module),
+            Some(module)
+        );
+        assert_eq!(
+            unique.unique_owner_of_kind(TopLevelOwnerKind::Instance),
+            Some(instance)
+        );
+
+        let ambiguous = TopLevelOwnerTable::try_from_statement_owners(
+            3,
+            [module, TopLevelOwnerId::module(1), instance],
+        )
+        .unwrap();
+        assert_eq!(
+            ambiguous.unique_owner_of_kind(TopLevelOwnerKind::Module),
+            None
         );
     }
 

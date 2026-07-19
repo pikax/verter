@@ -25,13 +25,6 @@ use crate::project_type_store::IndexedReady;
 use crate::resolver_core::shallow_file_state::{ShallowFileState, ShallowImportResolver};
 use crate::types::MetaProvenance;
 
-fn empty_external(
-) -> Arc<verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource> {
-    Arc::new(
-        verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource::default(),
-    )
-}
-
 /// A no-op import resolver — these fixtures declare no cross-file edges.
 struct NoopResolver;
 impl ShallowImportResolver for NoopResolver {
@@ -48,9 +41,12 @@ fn indexed_for(source: &str) -> Arc<IndexedReady> {
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, SourceType::ts()).parse();
     assert!(!parsed.panicked, "fixture must parse: {source}");
-    let header_index = Arc::new(
-        verter_semantic::analysis::decl_headers::build_decl_header_index(&parsed.program, source),
+    let shallow_index = verter_semantic::analysis::script_shallow_index::build_script_shallow_index(
+        &parsed.program,
+        source,
     );
+    let header_index = Arc::new(shallow_index.declaration_headers);
+    let route_inventory = Arc::new(shallow_index.routes);
     let memo = DeclBodyMemo::new(
         SnapshotKey {
             canonical: Arc::from("/ws/fixture.ts"),
@@ -69,9 +65,9 @@ fn indexed_for(source: &str) -> Arc<IndexedReady> {
         Arc::new(MetaProvenance::default()),
         None,
     );
-    let shallow = ShallowFileState::from_analysis_with_resolver(
+    let shallow = ShallowFileState::from_route_inventory_with_resolver(
         [7u8; 16],
-        empty_external(),
+        route_inventory,
         Arc::new(memo),
         &NoopResolver,
     );
@@ -80,7 +76,6 @@ fn indexed_for(source: &str) -> Arc<IndexedReady> {
         Arc::new(shallow),
         Arc::clone(&eval_source),
         eval_source,
-        empty_external(),
     ))
 }
 

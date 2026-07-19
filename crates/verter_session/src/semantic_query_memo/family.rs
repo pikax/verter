@@ -15,7 +15,7 @@ use crate::semantic_query::demand::{
 use crate::semantic_query::{
     DepSignature, IndexKey, MapperKey, PathSegment, ProjectionMode, ProjectionReductionContext,
     QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeId, SemanticQueryKey,
-    SemanticQueryValue,
+    SemanticQueryValue, VueHeritagePolicy,
 };
 
 #[derive(Clone)]
@@ -174,6 +174,10 @@ pub(super) enum FamilyKey {
         /// members carry distinct merge roles), so they MUST NOT collide on
         /// one family slot. Orthogonal to `provenance`.
         merge_role: crate::semantic_query::MemberMergeRole,
+        /// Orthogonal Vue heritage policy. Runtime carrier unwraps use the
+        /// same StructuralTransit slot as ordinary unwraps, so this
+        /// value-affecting axis must remain on the family identity.
+        vue_heritage_policy: VueHeritagePolicy,
     },
     ProjectMember {
         base: SemanticNodeId,
@@ -194,6 +198,9 @@ pub(super) enum FamilyKey {
         /// can observe different member precedence and metadata, so they are
         /// part of the family identity rather than the mode slot.
         merge_role: crate::semantic_query::MemberMergeRole,
+        /// Runtime heritage filtering is value-affecting even after demand
+        /// demotion to StructuralTransit.
+        vue_heritage_policy: VueHeritagePolicy,
     },
     MappedType {
         source: SemanticNodeId,
@@ -205,6 +212,9 @@ pub(super) enum FamilyKey {
         /// Member-merge role dimension. Produced members and nested reductions
         /// depend on the merge-role regime and must not warm-hit across it.
         merge_role: crate::semantic_query::MemberMergeRole,
+        /// Runtime heritage filtering is value-affecting even after demand
+        /// demotion to StructuralTransit.
+        vue_heritage_policy: VueHeritagePolicy,
     },
     Conditional {
         check: SemanticNodeId,
@@ -234,6 +244,9 @@ pub(super) enum FamilyKey {
         /// nested reductions depend on the merge-role regime and must not
         /// warm-hit across it.
         merge_role: crate::semantic_query::MemberMergeRole,
+        /// Runtime heritage filtering is value-affecting even after demand
+        /// demotion to StructuralTransit.
+        vue_heritage_policy: VueHeritagePolicy,
     },
     NormalizeUnion {
         members: Arc<[SemanticNodeId]>,
@@ -257,6 +270,9 @@ pub(super) enum FamilyKey {
         /// distinct surface from a structural projection of the same
         /// `(base, path)`, so they MUST NOT collide on one family slot.
         merge_role: crate::semantic_query::MemberMergeRole,
+        /// Runtime heritage filtering is value-affecting even after demand
+        /// demotion to StructuralTransit.
+        vue_heritage_policy: VueHeritagePolicy,
     },
     /// Mode-erased ResolveMacroPayload identity. `owner` is the
     /// env-bearing, content-free
@@ -334,7 +350,7 @@ pub(super) enum FamilyKey {
         resolve_env_hash: crate::semantic_query::HashValue,
     },
     ClassifyBroadRuntime {
-        subject: SemanticNodeId,
+        subject: crate::locator_identity::BroadRuntimeSubjectLocator,
         context: crate::semantic_query::BroadRuntimeContext,
     },
     /// DEDICATED, non-aliasing `Relate` family identity carrying the FULL
@@ -553,6 +569,11 @@ pub(super) enum ModeSlot {
     /// Does NOT backfill / is NOT backfilled by any other slot (the union
     /// surface is a different evaluation).
     MacroSurfaceShallow,
+    /// Vue runtime props/emits object-surface publication slot. This evaluates
+    /// at Shallow depth like [`Self::MacroSurfaceShallow`], but applies typed
+    /// `@vue-ignore` heritage suppression and therefore never shares or
+    /// backfills the unfiltered macro slot.
+    VueRuntimeSurfaceShallow,
 }
 
 /// Per-slot candidate cap.
@@ -637,6 +658,10 @@ pub(super) struct FamilySlots {
     /// Vue macro object-surface publication slot. Independent of
     /// the publication + transit slots; no backfill in either direction.
     macro_surface_shallow: CandidateList,
+    /// Vue runtime props/emits object-surface slot. Independent of the
+    /// unfiltered macro surface so ignored heritage cannot cross-serve TSC or
+    /// component-meta demand.
+    vue_runtime_surface_shallow: CandidateList,
 }
 
 /// Discriminant identity used for in-place replacement on
@@ -668,6 +693,7 @@ impl FamilySlots {
             ModeSlot::TransitExpanded => &self.transit_expanded,
             ModeSlot::TransitSkeleton => &self.transit_skeleton,
             ModeSlot::MacroSurfaceShallow => &self.macro_surface_shallow,
+            ModeSlot::VueRuntimeSurfaceShallow => &self.vue_runtime_surface_shallow,
         }
     }
 
@@ -685,6 +711,7 @@ impl FamilySlots {
             ModeSlot::TransitExpanded => &mut self.transit_expanded,
             ModeSlot::TransitSkeleton => &mut self.transit_skeleton,
             ModeSlot::MacroSurfaceShallow => &mut self.macro_surface_shallow,
+            ModeSlot::VueRuntimeSurfaceShallow => &mut self.vue_runtime_surface_shallow,
         }
     }
 
@@ -862,6 +889,7 @@ impl FamilySlots {
             &self.transit_expanded,
             &self.transit_skeleton,
             &self.macro_surface_shallow,
+            &self.vue_runtime_surface_shallow,
         ]
         .iter()
         .filter(|list| !list.is_empty())
@@ -922,6 +950,9 @@ impl FamilySlots {
         }
         if let Some(e) = self.macro_surface_shallow.first() {
             out.push(("macro_surface_shallow", e));
+        }
+        if let Some(e) = self.vue_runtime_surface_shallow.first() {
+            out.push(("vue_runtime_surface_shallow", e));
         }
         out
     }
@@ -992,6 +1023,9 @@ impl FamilySlots {
         for e in &self.macro_surface_shallow {
             out.push((ModeSlot::MacroSurfaceShallow, e));
         }
+        for e in &self.vue_runtime_surface_shallow {
+            out.push((ModeSlot::VueRuntimeSurfaceShallow, e));
+        }
         out
     }
 }
@@ -1042,8 +1076,9 @@ pub struct AuditEagerKeyRow {
 /// the `warm_publish_one` `debug_assert!` plus
 /// `super::tests::warm_publish_one_debug_asserts_against_sub_slot_mode_terminal`.
 ///
-/// `Skeleton`, `TransitSkeleton`, `MacroSurfaceShallow`, and `Single` are
-/// independent evaluations with no backfill in either direction.
+/// `Skeleton`, `TransitSkeleton`, `MacroSurfaceShallow`,
+/// `VueRuntimeSurfaceShallow`, and `Single` are independent evaluations with
+/// no backfill in either direction.
 pub(super) fn slot_domain_siblings(slot: ModeSlot) -> &'static [ModeSlot] {
     match slot {
         ModeSlot::Single => &[],
@@ -1062,6 +1097,7 @@ pub(super) fn slot_domain_siblings(slot: ModeSlot) -> &'static [ModeSlot] {
         ],
         ModeSlot::TransitSkeleton => &[],
         ModeSlot::MacroSurfaceShallow => &[],
+        ModeSlot::VueRuntimeSurfaceShallow => &[],
     }
 }
 
@@ -1074,9 +1110,10 @@ fn mode_of_slot(slot: ModeSlot) -> Option<ProjectionMode> {
     match slot {
         ModeSlot::Identity | ModeSlot::TransitIdentity => Some(ProjectionMode::Identity),
         ModeSlot::Navigate | ModeSlot::TransitNavigate => Some(ProjectionMode::Navigate),
-        ModeSlot::Shallow | ModeSlot::TransitShallow | ModeSlot::MacroSurfaceShallow => {
-            Some(ProjectionMode::Shallow)
-        }
+        ModeSlot::Shallow
+        | ModeSlot::TransitShallow
+        | ModeSlot::MacroSurfaceShallow
+        | ModeSlot::VueRuntimeSurfaceShallow => Some(ProjectionMode::Shallow),
         ModeSlot::Expanded | ModeSlot::TransitExpanded => Some(ProjectionMode::Expanded),
         ModeSlot::Skeleton | ModeSlot::TransitSkeleton => Some(ProjectionMode::Skeleton),
         // Modeless families (`ResolveDecl` / `Conditional` /
@@ -1116,7 +1153,8 @@ pub(super) fn mode_to_slot(mode: ProjectionMode) -> ModeSlot {
 /// Map a [`ProjectionReductionContext`] to the matching [`ModeSlot`].
 /// Publication contexts use the standard
 /// Identity/Navigate/Shallow/Expanded/Skeleton slots; transit contexts
-/// use the `Transit*` mirrors.
+/// use the `Transit*` mirrors. The unfiltered and runtime-filtered Vue macro
+/// demands use separate shallow slots because their heritage policies differ.
 pub(super) fn context_to_slot(ctx: ProjectionReductionContext) -> ModeSlot {
     match ctx.demand {
         ReductionDemand::Published => mode_to_slot(ctx.mode),
@@ -1141,6 +1179,11 @@ pub(super) fn context_to_slot(ctx: ProjectionReductionContext) -> ModeSlot {
         // slots so the union surface never collides with an ordinary
         // `Published` read of the same node.
         ReductionDemand::MacroObjectSurface => ModeSlot::MacroSurfaceShallow,
+        // Runtime props/emits uses the same shallow union surface as the
+        // ordinary macro demand, but applies typed `@vue-ignore` filtering.
+        // Keeping it isolated prevents a filtered value from warm-serving a
+        // TSC/component-meta query (and vice versa).
+        ReductionDemand::VueRuntimeObjectSurface => ModeSlot::VueRuntimeSurfaceShallow,
     }
 }
 
@@ -1162,6 +1205,7 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
                     body_source: k.body_source(),
                     provenance: prc.provenance,
                     merge_role: prc.merge_role,
+                    vue_heritage_policy: prc.vue_heritage_policy,
                 },
                 context_to_slot(prc),
             )
@@ -1185,6 +1229,7 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
                 base: *base,
                 provenance: context.provenance,
                 merge_role: context.merge_role,
+                vue_heritage_policy: context.vue_heritage_policy,
             },
             context_to_slot(*context),
         ),
@@ -1198,6 +1243,7 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
                 mapper: mapper.clone(),
                 provenance: context.provenance,
                 merge_role: context.merge_role,
+                vue_heritage_policy: context.vue_heritage_policy,
             },
             context_to_slot(*context),
         ),
@@ -1226,6 +1272,7 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
                 resolve_env_hash: context.resolve_env_hash,
                 provenance: context.projection_reduction.provenance,
                 merge_role: context.projection_reduction.merge_role,
+                vue_heritage_policy: context.projection_reduction.vue_heritage_policy,
             },
             context_to_slot(context.projection_reduction),
         ),
@@ -1251,6 +1298,7 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
                 path: Arc::clone(path),
                 provenance: context.provenance,
                 merge_role: context.merge_role,
+                vue_heritage_policy: context.vue_heritage_policy,
             },
             context_to_slot(*context),
         ),
@@ -1380,7 +1428,7 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
         ),
         SemanticQueryKey::ClassifyBroadRuntime { subject, context } => (
             FamilyKey::ClassifyBroadRuntime {
-                subject: *subject,
+                subject: subject.clone(),
                 context: *context,
             },
             ModeSlot::Single,
@@ -1557,4 +1605,5 @@ pub(super) const ALL_MODE_SLOTS: &[ModeSlot] = &[
     ModeSlot::TransitExpanded,
     ModeSlot::TransitSkeleton,
     ModeSlot::MacroSurfaceShallow,
+    ModeSlot::VueRuntimeSurfaceShallow,
 ];

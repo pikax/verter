@@ -34,7 +34,6 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource;
 use verter_semantic::analysis::type_eval::DeclarationId;
 use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 use verter_workspace::{AmbientSymbolHit, ProjectStableKey};
@@ -276,14 +275,6 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
             self.complete_canonical(canonical_id);
         }
         loaded
-    }
-
-    #[inline]
-    fn external_type_analysis(
-        &self,
-        canonical_id: &str,
-    ) -> Option<Arc<AnalyzedExternalTypeSource>> {
-        ResolverContext::external_type_analysis(self.inner, canonical_id)
     }
 
     #[inline]

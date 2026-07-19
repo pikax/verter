@@ -72,6 +72,7 @@ export interface HostSelectorMatchResult {
 interface HostCompileProfile {
   filename?: string;
   isProduction?: boolean;
+  customElement?: boolean;
   ssr?: boolean;
   hmrStrategy?: "none" | "vite" | "webpack";
   forceJs?: boolean;
@@ -282,6 +283,7 @@ function toHostProfile(file: File, options?: CompilerOptions): HostCompileProfil
   return {
     filename: file.filename,
     isProduction: options?.isProduction ?? false,
+    customElement: false,
     ssr: options?.ssr ?? false,
     hmrStrategy: "none",
     forceJs: true,

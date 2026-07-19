@@ -1,12 +1,10 @@
 use oxc_ast::{Comment, CommentContent};
 
-use verter_parser::utils::oxc::script::type_inventory::{
-    collect_type_dependency_facts, DeclDependencyNames,
-};
 use verter_span::Span;
 use verter_type_expr::facts::TypeDependencyPathFact;
 use verter_type_expr::TypeExpr;
 
+use super::decl_dependencies::{collect_type_dependency_facts, DeclDependencyNames};
 use crate::analysis::types::JsdocTag;
 
 /// Parse a JSDoc `{Type}` tag-type payload string into a [`TypeExpr`].

@@ -41,9 +41,9 @@ use crate::resolver_core::bare_name_resolve::{
 };
 use crate::resolver_core::scope_shadowing::ScopeShadowing;
 use crate::semantic_query::{
-    DeclIdentity, HashValue, NodeScopeId, PathSegment, ProjectionMode, ProjectionReductionContext,
-    QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId,
-    SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+    DeclIdentity, HashValue, NodeScopeId, PartialReasonSet, PathSegment, ProjectionMode,
+    ProjectionReductionContext, QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData,
+    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
 };
 
 /// Read-only, value-side resolution context for resolving a graph carrier
@@ -715,7 +715,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 match self.execute_type_node(SemanticQueryKey::ProjectPath {
                     base: namespace,
                     path,
-                    context: ProjectionReductionContext::published(ProjectionMode::Navigate),
+                    context: ProjectionReductionContext::published(ProjectionMode::Navigate)
+                        .with_orthogonal_axes_from(reduction_context),
                 }) {
                     QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     _ => self.opaque(QueryError::Miss),
@@ -792,7 +793,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             match self.execute_type_node(SemanticQueryKey::ProjectPath {
                 base: head_node,
                 path,
-                context: ProjectionReductionContext::published(ProjectionMode::Navigate),
+                context: ProjectionReductionContext::published(ProjectionMode::Navigate)
+                    .with_orthogonal_axes_from(reduction_context),
             }) {
                 QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                 _ => self.opaque(QueryError::Miss),
@@ -1005,7 +1007,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let path_read = self.execute_read(SemanticQueryKey::ProjectPath {
                     base: resolved,
                     path: projection_path,
-                    context: ProjectionReductionContext::published(ProjectionMode::Navigate),
+                    context: ProjectionReductionContext::published(ProjectionMode::Navigate)
+                        .with_orthogonal_axes_from(context),
                 });
                 crate::request_context::observe_component_meta_read_suppress(&path_read);
                 resolved = match path_read.value {
@@ -1187,21 +1190,76 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     context,
                 }
             }
-            SemanticQueryKey::ClassifyBroadRuntime { subject, context } => {
-                let subject = self.resolve_carrier_subject_node(
-                    subject,
-                    ProjectionReductionContext::structural_transit_with_mode(
-                        ProjectionMode::Navigate,
-                    ),
-                );
-                SemanticQueryKey::ClassifyBroadRuntime { subject, context }
-            }
             // Every other key carries no `SemanticNodeId` subject that could be a
             // carrier (or carries content-free slot identities) — return
             // verbatim. Nested carriers inside Intersection / Union / heritage
             // surfaces re-enter THIS normalization through the shallow-synthesis
             // worklist's re-dispatch (not resolved here).
             other => other,
+        }
+    }
+
+    /// Classify a failed carrier rewrite at the Vue runtime publication
+    /// boundary.
+    ///
+    /// Ordinary `Navigate`/`Shallow` demands may preserve an unresolved
+    /// authored reference as a complete identity carrier: downstream TSC and
+    /// diagnostics still need that authored head. Vue runtime publication is
+    /// different. It is about to synthesize a concrete props/emits object, so
+    /// a carrier whose exact scoped head did not resolve cannot be published
+    /// as a complete empty object. Return a typed partial reason and let the
+    /// carrier-normalization prelude force ReturnOnly admission.
+    ///
+    /// The non-empty-path `TypeOf` case is deliberately excluded: its
+    /// resolve/project/apply chain belongs to the path walker, so retaining the
+    /// carrier at entry is not a failed normalization.
+    pub(super) fn carrier_normalization_partial_reasons(
+        &self,
+        key: &SemanticQueryKey,
+    ) -> PartialReasonSet {
+        let (subject, context, deferred_typeof) = match key {
+            SemanticQueryKey::ProjectPath {
+                base,
+                path,
+                context,
+            } => (*base, *context, !path.is_empty()),
+            SemanticQueryKey::KeyOf { base, context } => (*base, *context, false),
+            SemanticQueryKey::MappedType {
+                source, context, ..
+            } => (*source, *context, false),
+            _ => return PartialReasonSet::empty(),
+        };
+        if !context.suppresses_vue_ignored_heritage() {
+            return PartialReasonSet::empty();
+        }
+
+        let Some(data) = self.graph().node_data(subject) else {
+            return PartialReasonSet::MISSING_SEMANTIC_NODE_DATA;
+        };
+        if deferred_typeof && data.typeof_head().is_some() {
+            return PartialReasonSet::empty();
+        }
+        if data.bare_ref_head().is_some()
+            || data.import_type_head().is_some()
+            || data.typeof_head().is_some()
+        {
+            return PartialReasonSet::SEMANTIC_QUERY_FAULT;
+        }
+        match data.as_ref() {
+            SemanticNodeData::Opaque(QueryError::BudgetExceeded(_)) => {
+                PartialReasonSet::BUDGET_EXCEEDED
+            }
+            SemanticNodeData::Opaque(QueryError::Cancelled) => PartialReasonSet::CANCELLED,
+            SemanticNodeData::Opaque(QueryError::UnstableState { .. }) => {
+                PartialReasonSet::UNSTABLE_STATE
+            }
+            SemanticNodeData::Opaque(
+                QueryError::RecursiveRef { .. }
+                | QueryError::AliasCycle { .. }
+                | QueryError::TypeParamCycle,
+            ) => PartialReasonSet::SAME_PATH_RECURSION,
+            SemanticNodeData::Opaque(_) => PartialReasonSet::SEMANTIC_QUERY_FAULT,
+            _ => PartialReasonSet::empty(),
         }
     }
 
@@ -1219,7 +1277,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticQueryKey::IndexedAccess { base, .. }
             | SemanticQueryKey::KeyOf { base, .. } => *base,
             SemanticQueryKey::MappedType { source, .. } => *source,
-            SemanticQueryKey::ClassifyBroadRuntime { subject, .. } => *subject,
             _ => return false,
         };
         let graph = self.graph();

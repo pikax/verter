@@ -61,6 +61,21 @@ pub enum Submission {
     /// per-item dispatch (and any wait) still happens outside the lock,
     /// preserving the pump discipline.
     NewRequestBatch { requests: Vec<QueuedRequest> },
+    /// One request joining a synchronous, borrowed cache-node producer.
+    /// The closure itself never enters the inbox (and therefore need not be
+    /// `'static`); the shared flight is admitted through the normal DAG and
+    /// signalled at dispatch so exactly one waiting caller executes it on the
+    /// scheduler CPU pool.
+    ScopedCacheNode {
+        /// Full typed cache-node identity used by DAG deduplication.
+        identity: crate::dag::WorkNodeIdentity,
+        /// Effective request priority.
+        priority: Priority,
+        /// Shared terminal/result rendezvous for overlapping callers.
+        flight: std::sync::Arc<crate::scheduler::ScopedCacheFlight>,
+        /// First-arrived request context candidate for dispatch attribution.
+        request_context: Option<crate::request_context::OpaqueRequestContext>,
+    },
     /// A stage completed for a file. The driver advances the file's
     /// pipeline (admit Analysis after Source, admit Artifact after
     /// Analysis when dep gates clear) and propagates the completion

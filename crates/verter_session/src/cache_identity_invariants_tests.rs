@@ -665,8 +665,7 @@ fn augmentation_probe_rejects_stale_artifact_the_authority_gate_rejects() {
             rustc_hash::FxHashSet::default(),
             FxHashMap::default(),
             StdArc::new(
-                verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource::default(
-                ),
+                verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory::default(),
             ),
         );
     let indexed = crate::project_type_store::IndexedReady::new_for_test_with_state(
@@ -674,10 +673,6 @@ fn augmentation_probe_rejects_stale_artifact_the_authority_gate_rejects() {
         StdArc::new(shallow),
         Arc::from("export * from \"./real_aug\";\n"),
         Arc::from("export * from \"./real_aug\";\n"),
-        StdArc::new(
-            verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource::default(
-            ),
-        ),
     );
     host.project_type_store()
         .indexed()

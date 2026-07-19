@@ -3368,7 +3368,7 @@ fn ax_hybrid_userland_mypick_follows_same_carrier_stop_as_builtin_pick() {
 
 #[test]
 fn ax_hybrid_may_reduce_operator_predicate_is_purely_structural() {
-    // AX-hybrid amended predicate: `Published` (any mode) reduces;
+    // AX-hybrid amended predicate: publication demands (any mode) reduce;
     // `StructuralTransit` (any mode) carrier-stops. The spec's
     // original `&& mode == Expanded` restriction was over-restrictive
     // for the macro projector's `Published + Navigate` publication
@@ -3385,6 +3385,16 @@ fn ax_hybrid_may_reduce_operator_predicate_is_purely_structural() {
         (ReductionDemand::Published, ProjectionMode::Shallow, true),
         (ReductionDemand::Published, ProjectionMode::Expanded, true),
         (ReductionDemand::Published, ProjectionMode::Skeleton, true),
+        (
+            ReductionDemand::MacroObjectSurface,
+            ProjectionMode::Shallow,
+            true,
+        ),
+        (
+            ReductionDemand::VueRuntimeObjectSurface,
+            ProjectionMode::Shallow,
+            true,
+        ),
         (
             ReductionDemand::StructuralTransit,
             ProjectionMode::Identity,
@@ -3411,12 +3421,16 @@ fn ax_hybrid_may_reduce_operator_predicate_is_purely_structural() {
             false,
         ),
     ];
+    // Mutation recipe: remove either macro demand from
+    // `may_reduce_operator`; its corresponding row must fail while
+    // `StructuralTransit` remains carrier-stopped.
     for (demand, mode, expected) in cases {
         let ctx = ProjectionReductionContext {
             mode,
             demand,
             provenance: crate::semantic_query::SurfaceProvenanceContext::Structural,
             merge_role: crate::semantic_query::MemberMergeRole::Authored,
+            vue_heritage_policy: crate::semantic_query::VueHeritagePolicy::RetainAll,
         };
         assert_eq!(
             may_reduce_operator(ctx),
@@ -3426,4 +3440,102 @@ fn ax_hybrid_may_reduce_operator_predicate_is_purely_structural() {
             mode,
         );
     }
+}
+
+#[test]
+fn vue_heritage_policy_survives_every_context_template_and_mapped_identity_encoding() {
+    use crate::semantic_query::{
+        may_reduce_operator, MemberMergeRole, ProjectionMode, ProjectionReductionContext,
+        ReductionDemand, SurfaceProvenanceContext, VueHeritagePolicy,
+    };
+
+    let runtime = ProjectionReductionContext::vue_runtime_object_surface(
+        ProjectionMode::Shallow,
+        SurfaceProvenanceContext::Structural,
+    );
+    let ordinary_parent = ProjectionReductionContext::macro_object_surface(
+        ProjectionMode::Shallow,
+        SurfaceProvenanceContext::MacroTypeArgOwnBody,
+    );
+    let demoted = runtime.into_structural_transit_with_mode(ProjectionMode::Navigate);
+    let ordinary =
+        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
+
+    assert_eq!(demoted.demand, ReductionDemand::StructuralTransit);
+    assert_eq!(demoted.mode, ProjectionMode::Navigate);
+    assert_eq!(
+        demoted.vue_heritage_policy,
+        VueHeritagePolicy::SuppressIgnored,
+        "runtime heritage policy must survive the carrier-stop demotion"
+    );
+    assert_eq!(
+        ordinary.vue_heritage_policy,
+        VueHeritagePolicy::RetainAll,
+        "ordinary transit must retain the complete TypeScript surface"
+    );
+    assert!(!may_reduce_operator(demoted));
+
+    let modes = [
+        ProjectionMode::Identity,
+        ProjectionMode::Navigate,
+        ProjectionMode::Shallow,
+        ProjectionMode::Expanded,
+        ProjectionMode::Skeleton,
+    ];
+    for mode in modes {
+        let templates = [
+            ProjectionReductionContext::published(mode),
+            ProjectionReductionContext::published_macro_type_arg_body(mode),
+            ProjectionReductionContext::macro_object_surface(
+                mode,
+                SurfaceProvenanceContext::Structural,
+            ),
+            ProjectionReductionContext::macro_object_surface(
+                mode,
+                SurfaceProvenanceContext::MacroTypeArgOwnBody,
+            )
+            .with_merge_role(MemberMergeRole::Heritage),
+            ProjectionReductionContext::structural_transit_with_mode(mode),
+        ];
+        for template in templates {
+            let filtered = template.with_orthogonal_axes_from(runtime);
+            let unfiltered = template.with_orthogonal_axes_from(ordinary_parent);
+
+            for derived in [filtered, unfiltered] {
+                assert_eq!(derived.mode, template.mode);
+                assert_eq!(derived.demand, template.demand);
+                assert_eq!(derived.provenance, template.provenance);
+                assert_eq!(derived.merge_role, template.merge_role);
+            }
+            assert_eq!(
+                filtered.vue_heritage_policy,
+                VueHeritagePolicy::SuppressIgnored,
+                "every fresh {:?}/{:?}/{:?}/{:?} template must inherit runtime policy",
+                template.mode,
+                template.demand,
+                template.provenance,
+                template.merge_role,
+            );
+            assert_eq!(
+                unfiltered.vue_heritage_policy,
+                VueHeritagePolicy::RetainAll,
+                "ordinary TypeScript demand must remain unfiltered"
+            );
+        }
+    }
+
+    assert_ne!(
+        crate::project_semantic_dispatch::build::encode_projection_reduction_context_bits_for_tests(
+            demoted,
+        ),
+        crate::project_semantic_dispatch::build::encode_projection_reduction_context_bits_for_tests(
+            ordinary,
+        ),
+        "mapped-member identity must distinguish filtered and unfiltered transit"
+    );
+
+    // Mutation recipe: bypass `with_orthogonal_axes_from` at any fresh-context
+    // transition, rebuild the demoted context from a default constructor, or
+    // omit the policy bit from the packed identity. The corresponding table,
+    // preservation, or encoding assertion fails.
 }

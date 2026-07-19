@@ -868,7 +868,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 node: index_node,
                                 context: ProjectionReductionContext::published(
                                     ProjectionMode::Expanded,
-                                ),
+                                )
+                                .with_orthogonal_axes_from(frame.context),
                             }
                         }
                         index => {
@@ -981,7 +982,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                                     path: projection_path,
                                                     context: ProjectionReductionContext::published(
                                                         ProjectionMode::Navigate,
-                                                    ),
+                                                    )
+                                                    .with_orthogonal_axes_from(context),
                                                 });
                                             let frame =
                                                 frames.last_mut().expect("active evaluator frame");
@@ -1074,12 +1076,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 self.deferred_read_action(frame, read, fallback)
                             }
                             SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_) => {
+                                let context = frames
+                                    .last()
+                                    .expect("active evaluator frame")
+                                    .context
+                                    .into_structural_transit_with_mode(ProjectionMode::Navigate);
                                 let (resolved, observed) = self
                                     .resolve_carrier_subject_node_capturing_suppress(
-                                        current,
-                                        ProjectionReductionContext::structural_transit_with_mode(
-                                            ProjectionMode::Navigate,
-                                        ),
+                                        current, context,
                                     );
                                 let frame = frames.last_mut().expect("active evaluator frame");
                                 frame.completeness = frame.completeness.or_partial_if(

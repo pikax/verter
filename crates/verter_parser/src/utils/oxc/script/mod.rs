@@ -2,8 +2,9 @@
 //!
 //! Owns the script-analysis substrate that is independent of any UI
 //! framework: the raw pre-lowering statement surface ([`raw_surface`]),
-//! the routing/declaration inventory ([`type_inventory`]), and the generic
-//! import/declaration binding inventory ([`bindings`]).
+//! the syntax-only routing inventory ([`route_inventory`]), and the generic
+//! import/declaration binding inventory ([`bindings`]). Declaration headers
+//! and dependency projection are semantic-layer responsibilities.
 //!
 //! Everything here is LOCAL OXC-to-owned surface capture over a single
 //! parsed program — no host-backed query resolution, no cross-file
@@ -14,4 +15,8 @@
 
 pub mod bindings;
 pub mod raw_surface;
-pub mod type_inventory;
+pub mod route_inventory;
+
+#[cfg(test)]
+#[path = "route_inventory_tests.rs"]
+mod route_inventory_tests;

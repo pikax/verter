@@ -299,11 +299,13 @@ fn compile_inner(
     // Clone diagnostics — this is the only clone needed from ParsedSfc.
     let mut all_diagnostics = parsed.clone_diagnostics();
     let has_parse_errors = parsed.has_errors();
-    all_diagnostics.extend(collect_macro_semantic_diagnostics(
-        &prepared_script,
-        options.target,
-        macro_semantics,
-    ));
+    let macro_validation =
+        collect_macro_semantic_diagnostics(&prepared_script, options.target, macro_semantics);
+    all_diagnostics.extend(macro_validation.diagnostics);
+    let validated_runtime = macro_validation
+        .runtime_valid
+        .then(|| macro_semantics.runtime())
+        .flatten();
 
     // ── 2. Extract metadata ───────────────────────────────────────
     let component_name = options
@@ -498,8 +500,9 @@ fn compile_inner(
         };
 
         let script_options = ScriptCodeGenOptions {
-            macro_runtime: macro_semantics.runtime(),
+            macro_runtime: validated_runtime,
             is_production: options.is_production,
+            custom_element: options.custom_element,
             component_name: &component_name,
             scope_id: &scope_id_full,
             keep_ts_types: !verter_options.force_js,

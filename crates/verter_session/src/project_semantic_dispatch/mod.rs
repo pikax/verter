@@ -470,6 +470,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.connected_query_depth_limit(),
             );
         }
+        if self.ctx.is_cancelled() {
+            state.tripped.set(
+                state
+                    .tripped
+                    .get()
+                    .union(crate::semantic_query::PartialReasonSet::CANCELLED),
+            );
+        }
         let mut entered_query_depth = false;
         let tripped = state.tripped.get();
         let trip = if !tripped.is_empty() {
@@ -504,6 +512,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             state.active.get(),
             "connected work must be charged inside a connected-demand guard"
         );
+        if self.ctx.is_cancelled() {
+            return Err(
+                self.trip_connected_demand(crate::semantic_query::PartialReasonSet::CANCELLED)
+            );
+        }
         let tripped = state.tripped.get();
         if !tripped.is_empty() {
             return Err(tripped);
@@ -531,6 +544,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             state.active.get(),
             "connected work must be observed inside a connected-demand guard"
         );
+        if self.ctx.is_cancelled() {
+            return Err(
+                self.trip_connected_demand(crate::semantic_query::PartialReasonSet::CANCELLED)
+            );
+        }
         let tripped = state.tripped.get();
         if !tripped.is_empty() {
             return Err(tripped);
@@ -657,12 +675,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         key: &SemanticQueryKey,
         reasons: crate::semantic_query::PartialReasonSet,
     ) -> CacheRead<QueryResult<SemanticNodeId>> {
-        let carrier = self.connected_limit_carrier(key, reasons);
+        let cancelled = reasons.contains(crate::semantic_query::PartialReasonSet::CANCELLED);
+        let carrier = (!cancelled).then(|| self.connected_limit_carrier(key, reasons));
         self.fold_local_partial_completeness(reasons);
         CacheRead {
-            value: QueryResult::Value(carrier),
+            value: match carrier {
+                Some(carrier) => QueryResult::Value(carrier),
+                None => QueryResult::Error(QueryError::Cancelled),
+            },
             dep_signature: empty_signature(),
-            walker_diagnostics: self.connected_limit_diagnostics(carrier, reasons),
+            walker_diagnostics: carrier
+                .map(|carrier| self.connected_limit_diagnostics(carrier, reasons))
+                .unwrap_or_else(|| Arc::from([])),
             cache_suppress: true,
             result_is_partial: true,
         }
@@ -871,28 +895,55 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Derive the exact modeless `{R,T,L,J}` identity for a broad-runtime
-    /// classification from the subject's owning file, or the workspace-global
-    /// environment for a rootless structural subject.
+    /// classification from its content-free owning canonical.
     #[must_use]
-    #[allow(dead_code)]
-    pub(crate) fn broad_runtime_context_for(
+    fn broad_runtime_context_for_canonical(
         &self,
-        subject: SemanticNodeId,
+        canonical: &str,
     ) -> crate::semantic_query::BroadRuntimeContext {
-        let canonical = match self.graph().node_scope(subject) {
-            Some(NodeScopeId::File { canonical_id, .. }) => canonical_id,
-            _ => Arc::from("__builtin__"),
-        };
         let host = self.ctx.host_for_fact_tracer_install();
-        let env = host.host_view_env_hashes_for(canonical.as_ref());
+        let env = host.host_view_env_hashes_for(canonical);
         crate::semantic_query::BroadRuntimeContext {
             resolve_env_hash: env.resolve_env_hash,
             type_env_hash: env.type_env_hash,
             lib_env_hash: env.lib_env_hash,
-            project_identity: host
-                .host_view_project_identity_for(canonical.as_ref())
-                .fold_u32(),
+            project_identity: host.host_view_project_identity_for(canonical).fold_u32(),
         }
+    }
+
+    /// Build the content-free canonical root route for one analyzed macro.
+    /// Returns `None` only when the source-order index cannot fit the closed
+    /// locator schema.
+    #[must_use]
+    pub(crate) fn broad_runtime_subject_for_macro(
+        &self,
+        owner: &crate::semantic_query::DeclIdentity,
+        macro_index: usize,
+    ) -> Option<crate::locator_identity::BroadRuntimeSubjectLocator> {
+        let macro_index = u32::try_from(macro_index).ok()?;
+        Some(
+            crate::locator_identity::BroadRuntimeSubjectLocator::payload(
+                self.type_slot_for(
+                    Arc::clone(&owner.canonical_id),
+                    owner.owner,
+                    Arc::clone(&owner.decl_name),
+                ),
+                macro_index,
+            ),
+        )
+    }
+
+    /// Build the sole durable broad-runtime query key. The key carries only
+    /// the content-free root route plus env dimensions; the live graph node is
+    /// re-sourced by the classifier build.
+    #[must_use]
+    pub(crate) fn broad_runtime_key_for(
+        &self,
+        subject: crate::locator_identity::BroadRuntimeSubjectLocator,
+    ) -> SemanticQueryKey {
+        let context =
+            self.broad_runtime_context_for_canonical(subject.owner().defining_canonical.as_ref());
+        SemanticQueryKey::ClassifyBroadRuntime { subject, context }
     }
 
     /// Build the [`InstantiateContext`](crate::semantic_query::InstantiateContext)
@@ -1715,9 +1766,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return (key, CarrierNormalizationPrelude::none());
         }
         let host = self.ctx.host_for_fact_tracer_install();
-        let (normalized, finalise) =
+        let ((normalized, partial_reasons), finalise) =
             crate::fact_signature_helpers::install_fact_tracer(host, || {
                 let normalized = self.normalize_carrier_subject_key(key);
+                let partial_reasons = self.carrier_normalization_partial_reasons(&normalized);
                 // Test-only: force a fenced (ReturnOnly) serve observation onto
                 // the prelude tracer so the suppress wiring is exercisable
                 // without a superseded-artifact fixture. Zero-cost when unset.
@@ -1731,7 +1783,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
                     );
                 }
-                normalized
+                (normalized, partial_reasons)
             });
         let prelude = match finalise {
             crate::resolver_core::FactReadSetFinalise::Ok(facts) => CarrierNormalizationPrelude {
@@ -1741,11 +1793,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // from a served-without-publication artifact — refuse warm
                 // admission of any enclosing entry that rode this rewrite.
                 cache_suppress: false,
+                partial_reasons,
             },
             crate::resolver_core::FactReadSetFinalise::NonCacheable(facts) => {
                 CarrierNormalizationPrelude {
                     facts: Some(facts),
                     cache_suppress: true,
+                    partial_reasons,
                 }
             }
             crate::resolver_core::FactReadSetFinalise::Overflow => CarrierNormalizationPrelude {
@@ -1754,6 +1808,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // flows; the memo refuses).
                 facts: None,
                 cache_suppress: true,
+                partial_reasons,
             },
         };
         (normalized, prelude)
@@ -1865,6 +1920,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         let exact_same_path = self.graph().is_same_path_inflight_on_current_thread(&key);
         let mut query_depth_guard = None;
+        if preexisting_trip.is_some_and(|reasons| {
+            reasons.contains(crate::semantic_query::PartialReasonSet::CANCELLED)
+        }) {
+            return widen_node_cache_read(
+                self.connected_limit_read(&key, preexisting_trip.expect("checked as Some")),
+            );
+        }
         if !exact_same_path {
             if let Some(reasons) = preexisting_trip {
                 return widen_node_cache_read(self.connected_limit_read(&key, reasons));
@@ -2000,7 +2062,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticQueryValue,
         > {
             if let SemanticQueryKey::ClassifyBroadRuntime { subject, .. } = &key_for_build {
-                return self.build_classify_broad_runtime(*subject);
+                return self.build_classify_broad_runtime(subject);
             }
             let build_node = || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
             if matches!(&key_for_build, SemanticQueryKey::Instantiate(_)) {
@@ -2391,6 +2453,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if carrier_prelude.cache_suppress() {
             cache_read.cache_suppress = true;
         }
+        if carrier_prelude.is_partial() {
+            cache_read.result_is_partial = true;
+            cache_read.cache_suppress = true;
+            crate::request_context::fold_result_completeness(
+                crate::semantic_query::ResultCompleteness::partial(
+                    carrier_prelude.partial_reasons(),
+                ),
+            );
+        }
         if connected_guard.is_root() {
             if let Some(reasons) = self.connected_demand_trip() {
                 self.append_connected_limit_diagnostics(&key, reasons, &mut cache_read);
@@ -2437,6 +2508,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 struct CarrierNormalizationPrelude {
     facts: Option<Arc<[crate::resolver_core::FactVersionRef]>>,
     cache_suppress: bool,
+    partial_reasons: crate::semantic_query::PartialReasonSet,
 }
 
 impl CarrierNormalizationPrelude {
@@ -2445,6 +2517,7 @@ impl CarrierNormalizationPrelude {
         Self {
             facts: None,
             cache_suppress: false,
+            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
         }
     }
 
@@ -2452,6 +2525,17 @@ impl CarrierNormalizationPrelude {
     /// overflowed or fenced-serve carrier rewrite).
     fn cache_suppress(&self) -> bool {
         self.cache_suppress
+    }
+
+    /// Whether exact runtime carrier normalization failed to produce a
+    /// resolved semantic subject.
+    fn is_partial(&self) -> bool {
+        !self.partial_reasons.is_empty()
+    }
+
+    /// Typed incompleteness observed before cooperative admission.
+    fn partial_reasons(&self) -> crate::semantic_query::PartialReasonSet {
+        self.partial_reasons
     }
 }
 
@@ -2463,6 +2547,13 @@ fn finalise_traced_build_output<T>(
     carrier_prelude: &CarrierNormalizationPrelude,
 ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput<T> {
     let mut output = output;
+    if carrier_prelude.is_partial() {
+        output.result_is_partial = true;
+        output.cache_suppress = true;
+        crate::request_context::fold_result_completeness(
+            crate::semantic_query::ResultCompleteness::partial(carrier_prelude.partial_reasons()),
+        );
+    }
     // The carrier-normalization prelude can independently suppress caching (an
     // overflowed / fenced-serve carrier rewrite) regardless of the build's own
     // finalise arm.

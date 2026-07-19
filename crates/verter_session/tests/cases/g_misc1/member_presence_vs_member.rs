@@ -30,13 +30,6 @@ use verter_session::project_type_store::IndexedReady;
 use verter_session::resolver_core::shallow_file_state::ShallowFileState;
 use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr};
 
-fn empty_external(
-) -> Arc<verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource> {
-    Arc::new(
-        verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource::default(),
-    )
-}
-
 /// Build a `Foo` interface from a member list `[(name, type-text)]`
 /// through the production-shaped service-backed construction path: the
 /// authored members become the declaration's DIRECT member-header facts
@@ -55,7 +48,6 @@ fn build_foo(members: Vec<(&str, &str)>) -> Arc<IndexedReady> {
         shallow,
         Arc::from(source.as_str()),
         Arc::from(source.as_str()),
-        empty_external(),
     ))
 }
 

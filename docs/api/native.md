@@ -433,6 +433,8 @@ interface HostCompileProfile {
   filename?: string;
   /** Production mode optimizations */
   isProduction?: boolean;
+  /** Vue custom-element script policy; independent of customElements */
+  customElement?: boolean;
   /** Server-side rendering mode */
   ssr?: boolean;
   /** HMR strategy: "none", "vite", or "webpack" */

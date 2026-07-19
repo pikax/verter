@@ -975,6 +975,21 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         self.context.mode
     }
 
+    /// The only constructor for a fresh reduction context inside the walker.
+    ///
+    /// `template` owns the local mode/demand/provenance/merge semantics;
+    /// orthogonal request policy is inherited from the walker's entry context.
+    /// Carrier demotions that intentionally retain every axis use
+    /// [`ProjectionReductionContext::into_structural_transit_with_mode`]
+    /// directly instead.
+    #[inline]
+    fn context_from_template(
+        &self,
+        template: crate::semantic_query::ProjectionReductionContext,
+    ) -> crate::semantic_query::ProjectionReductionContext {
+        template.with_orthogonal_axes_from(self.context)
+    }
+
     /// Surface-provenance accessor (by design). The macro
     /// type-argument own-body entry context flows from the
     /// `ProjectPath`'s context onto the walker; the `DeclPlaceholder`
@@ -1532,16 +1547,20 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         self.execute_read_folding_partial(SemanticQueryKey::ProjectPath {
                             base: true_branch,
                             path: Arc::clone(&rest_path),
-                            context: crate::semantic_query::ProjectionReductionContext::published(
-                                self.mode(),
+                            context: self.context_from_template(
+                                crate::semantic_query::ProjectionReductionContext::published(
+                                    self.mode(),
+                                ),
                             ),
                         });
                     let false_projection =
                         self.execute_read_folding_partial(SemanticQueryKey::ProjectPath {
                             base: false_branch,
                             path: rest_path,
-                            context: crate::semantic_query::ProjectionReductionContext::published(
-                                self.mode(),
+                            context: self.context_from_template(
+                                crate::semantic_query::ProjectionReductionContext::published(
+                                    self.mode(),
+                                ),
                             ),
                         });
                     let true_id = match true_projection {
@@ -1582,8 +1601,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     let resolved =
                         match self.execute_read_folding_partial(SemanticQueryKey::KeyOf {
                             base,
-                            context: crate::semantic_query::ProjectionReductionContext::published(
-                                key_mode,
+                            context: self.context_from_template(
+                                crate::semantic_query::ProjectionReductionContext::published(
+                                    key_mode,
+                                ),
                             ),
                         }) {
                             QueryResult::Value(id) => id,
@@ -1974,8 +1995,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                     .materialize_selected_key_mapped_value_with_node(
                                     mapper,
                                     key_arg,
-                                    crate::semantic_query::ProjectionReductionContext::published(
-                                        self.mode(),
+                                    self.context_from_template(
+                                        crate::semantic_query::ProjectionReductionContext::published(
+                                            self.mode(),
+                                        ),
                                     ),
                                 )
                             };
@@ -2028,8 +2051,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         match self.execute_read_folding_partial(SemanticQueryKey::MappedType {
                             source,
                             mapper,
-                            context: crate::semantic_query::ProjectionReductionContext::published(
-                                mapped_mode,
+                            context: self.context_from_template(
+                                crate::semantic_query::ProjectionReductionContext::published(
+                                    mapped_mode,
+                                ),
                             ),
                         }) {
                             QueryResult::Value(id) => id,
@@ -2090,10 +2115,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         // outer mode (`typeof_context`). The TERMINAL/outer
                         // demand stays the caller's; only this typeof-internal
                         // path projection is Navigate.
-                        let internal_path_context =
+                        let internal_path_context = self.context_from_template(
                             crate::semantic_query::ProjectionReductionContext::published(
                                 ProjectionMode::Navigate,
-                            );
+                            ),
+                        );
                         #[cfg(test)]
                         LAST_WALK_TYPEOF_INTERNAL_PATH_MODE
                             .with(|c| c.set(Some(internal_path_context.mode)));
@@ -2197,7 +2223,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     );
                     let inst_ctx = self.dispatch.instantiate_context_for(
                         canonical_id,
-                        crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                        self.context.into_structural_transit_with_mode(
+                            ProjectionMode::Shallow,
+                        ),
                     );
                     drop(data);
                     let expanded =
@@ -2311,9 +2339,14 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // cause of the ChatMessages `outputSchema|execute`
                     // 62-edge leak in `compute_evaluated_types`.
                     let unwrap_context = if still_more_path {
-                        crate::semantic_query::ProjectionReductionContext::structural_transit()
+                        self.context
+                            .into_structural_transit_with_mode(ProjectionMode::Shallow)
                     } else {
-                        crate::semantic_query::ProjectionReductionContext::published(self.mode())
+                        self.context_from_template(
+                            crate::semantic_query::ProjectionReductionContext::published(
+                                self.mode(),
+                            ),
+                        )
                     };
                     let inst_context = self
                         .dispatch
@@ -2428,7 +2461,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     drop(data);
                     let resolved = self.dispatch.resolve_carrier_subject_node(
                         current,
-                        crate::semantic_query::ProjectionReductionContext::published(self.mode()),
+                        self.context_from_template(
+                            crate::semantic_query::ProjectionReductionContext::published(
+                                self.mode(),
+                            ),
+                        ),
                     );
                     if resolved == current {
                         // Genuinely-unresolvable carrier — honest terminal miss.
@@ -2574,7 +2611,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 );
                 let inst_context = self.dispatch.instantiate_context_for(
                     &identity.canonical_id,
-                    crate::semantic_query::ProjectionReductionContext::published(carrier_mode),
+                    self.context_from_template(
+                        crate::semantic_query::ProjectionReductionContext::published(carrier_mode),
+                    ),
                 );
                 match self.execute_read_folding_partial(SemanticQueryKey::Instantiate(
                     crate::semantic_query::InstantiateKey::new(inst_base, args_clone, inst_context),
@@ -2603,7 +2642,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 drop(data);
                 let resolved = self.dispatch.resolve_carrier_subject_node(
                     node,
-                    crate::semantic_query::ProjectionReductionContext::published(self.mode()),
+                    self.context_from_template(
+                        crate::semantic_query::ProjectionReductionContext::published(self.mode()),
+                    ),
                 );
                 // A resolved `DeclPlaceholder` is PROGRESS, not failure: the
                 // head resolved to a declaration identity whose body the
@@ -2654,7 +2695,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         }
         let resolved = self.dispatch.resolve_carrier_subject_node(
             node,
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Navigate),
+            self.context_from_template(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Navigate,
+                ),
+            ),
         );
         if resolved == node
             || matches!(
@@ -2784,8 +2829,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             MemberShape::Unresolved => {
                 let resolved = self.dispatch.resolve_carrier_subject_node(
                     value,
-                    crate::semantic_query::ProjectionReductionContext::published(
-                        ProjectionMode::Navigate,
+                    self.context_from_template(
+                        crate::semantic_query::ProjectionReductionContext::published(
+                            ProjectionMode::Navigate,
+                        ),
                     ),
                 );
                 let identity = match self.graph().node_data(resolved).as_deref() {
@@ -3010,8 +3057,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // `false`.
                 let inst_context = self.dispatch.instantiate_context_for(
                     &identity.defining_canonical,
-                    crate::semantic_query::ProjectionReductionContext::published(self.mode())
-                        .with_provenance(self.provenance()),
+                    self.context_from_template(
+                        crate::semantic_query::ProjectionReductionContext::published(self.mode())
+                            .with_provenance(self.provenance()),
+                    ),
                 );
                 let expanded = match self.execute_read_folding_partial(
                     SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
@@ -3059,8 +3108,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     match self.execute_read_folding_partial(SemanticQueryKey::MappedType {
                         source,
                         mapper,
-                        context: crate::semantic_query::ProjectionReductionContext::published(
-                            mapped_mode,
+                        context: self.context_from_template(
+                            crate::semantic_query::ProjectionReductionContext::published(
+                                mapped_mode,
+                            ),
                         ),
                     }) {
                         QueryResult::Value(id) => id,
@@ -3712,9 +3763,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         Arc::clone(&identity.decl_name),
                     ), args_clone, self.dispatch.instantiate_context_for(
                         &identity.canonical_id,
-                        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                            ProjectionMode::Navigate,
-                        )
+                        self.context
+                        .into_structural_transit_with_mode(ProjectionMode::Navigate)
                         .with_provenance(self.effective_provenance(provenance_override)),
                     )))) {
                     QueryResult::Value(SemanticQueryOutput { value: body, .. }) => {
@@ -3833,8 +3883,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // `MacroTypeArgOwnBody` walker stamps the unwrapped
                 // declaration's OWN-body members `declared_in_macro_type_arg
                 // = true`. A bare `structural_transit_with_mode(Navigate)`
-                // here drops the provenance and the macro-T-root own-body
-                // members all report `false`.
+                // here drops both provenance and the orthogonal Vue heritage
+                // policy: macro-T-root own-body members all report `false`,
+                // and a runtime `@vue-ignore` carrier unwrap retains ignored
+                // heritage. Demoting FROM `self.context` preserves both axes
+                // while keeping carrier-stop operator semantics.
                 //
                 // Transparent-carrier provenance downgrade: when this
                 // DeclPlaceholder was reached THROUGH a transparent carrier
@@ -3849,9 +3902,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         Arc::clone(&identity.decl_name),
                     ), Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()), self.dispatch.instantiate_context_for(
                         &identity.canonical_id,
-                        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                            ProjectionMode::Navigate,
-                        )
+                        self.context
+                        .into_structural_transit_with_mode(ProjectionMode::Navigate)
                         .with_provenance(self.effective_provenance(provenance_override)),
                     )))) {
                     QueryResult::Value(SemanticQueryOutput { value: body, .. }) => {
@@ -4190,7 +4242,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 });
                 let resolved = self.dispatch.resolve_carrier_subject_node(
                     cur,
-                    crate::semantic_query::ProjectionReductionContext::published(self.mode()),
+                    self.context_from_template(
+                        crate::semantic_query::ProjectionReductionContext::published(self.mode()),
+                    ),
                 );
                 // The head resolving to ITSELF (the shared resolver
                 // re-interned the same unresolved carrier) or to an `Opaque`
@@ -4667,10 +4721,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         // reduces to a `Function` node, while unrelated `keyof` /
         // `Mapped` carriers in the body never expand their member
         // surfaces.
-        let materialise_context =
+        let materialise_context = self.context_from_template(
             crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                 ProjectionMode::Navigate,
-            );
+            ),
+        );
         let optionality = mapper.optionality;
         let readonly_mod = mapper.readonly;
         // Identity-mapper fast path detection.

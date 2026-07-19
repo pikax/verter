@@ -527,6 +527,29 @@ insertion-order (FIFO) on write only.** No LRU bookkeeping on read; warm reads
 are `&self` shared borrows with zero atomic write or lock contention.
 Concurrent sessions never overwrite each other's results.
 
+Vue runtime props/emits heritage filtering stays inside this same
+`SemanticGraphStore` family memo. `VueRuntimeSurfaceShallow` is an internal
+slot selected by `ReductionDemand::VueRuntimeObjectSurface`, isolated from the
+unfiltered `MacroSurfaceShallow` slot with no cross-backfill. The runtime
+constructor additionally sets the orthogonal content-free
+`VueHeritagePolicy::SuppressIgnored`; default contexts retain all heritage.
+Every `ProjectionReductionContext`-bearing family and mapped-member identity
+encoding carries this policy because a declaration-carrier unwrap demotes the
+demand to `StructuralTransit` while retaining runtime filtering. Thus filtered
+and unfiltered transit computations remain distinct even though they select the
+same transit mode slot. Fresh-context transitions inherit the policy only via
+the exhaustive `ProjectionReductionContext::with_orthogonal_axes_from`
+adapter; adding a context field fails its no-`..` witness until ownership is
+classified. This is not a new durable cache or a new
+`ProjectionMode`; version state remains exclusively on each candidate's
+prepared-declaration/LowerLocator read set and file self-roots per R6/R20.
+The associated `ClassifyBroadRuntime` family is likewise keyed by a
+content-free canonical macro payload/member locator plus split env dimensions,
+never by its transient `SemanticNodeId`. Each cold build rehydrates the live
+carrier from the indexed owner and publishes its exact value-side read set;
+anonymous graph-instance classifications are ReturnOnly and have no family
+entry.
+
 **Bounded query-identity retention substrate.** Every durable query-identity
 cache accumulates concurrent content-version CANDIDATES in its content-free
 slots — the version state lives on each candidate's value-side carrier (per R6),

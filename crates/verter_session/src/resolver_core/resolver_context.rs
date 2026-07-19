@@ -61,7 +61,6 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource;
 use verter_semantic::analysis::type_eval::DeclarationId;
 use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 use verter_workspace::{AmbientSymbolHit, ProjectStableKey};
@@ -181,6 +180,28 @@ pub(crate) trait ResolverContext: sealed::Sealed {
         false
     }
 
+    /// Cancellation authority for the current semantic execution. A
+    /// scheduler-owned aggregate token with registered owners takes precedence
+    /// over the request token so cancelling one singleflight waiter never
+    /// poisons a live sibling's shared compute. Ordinary ownerless DAG stages
+    /// fall back to their installed request token.
+    fn cancellation_token(&self) -> Option<verter_scheduler::cancellation::CancellationToken> {
+        let job = verter_scheduler::cancellation::current_job_cancellation_token();
+        if job
+            .as_ref()
+            .is_some_and(|token| token.has_registered_owners())
+        {
+            return job;
+        }
+        crate::request_context::current_request_cancellation_token().or(job)
+    }
+
+    /// Cheap cancellation checkpoint used at semantic dispatch/work charges.
+    fn is_cancelled(&self) -> bool {
+        self.cancellation_token()
+            .is_some_and(|token| token.is_cancelled())
+    }
+
     // -------- Cache accessors --------------------------------------
 
     fn prepared_decl_bundle(&self, canonical_id: &str) -> Option<Arc<PreparedDeclBundle>>;
@@ -243,9 +264,6 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe>;
 
     fn ensure_loaded(&self, canonical_id: &str) -> bool;
-
-    fn external_type_analysis(&self, canonical_id: &str)
-        -> Option<Arc<AnalyzedExternalTypeSource>>;
 
     fn shallow_file_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>>;
 
@@ -868,14 +886,6 @@ impl ResolverContext for crate::VerterHost {
     #[inline]
     fn ensure_loaded(&self, canonical_id: &str) -> bool {
         crate::VerterHost::ensure_loaded(self, canonical_id)
-    }
-
-    #[inline]
-    fn external_type_analysis(
-        &self,
-        canonical_id: &str,
-    ) -> Option<Arc<AnalyzedExternalTypeSource>> {
-        crate::VerterHost::external_type_analysis(self, canonical_id)
     }
 
     #[inline]

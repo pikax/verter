@@ -188,6 +188,32 @@ fn merged_interface_demand_folds_all_contributors() {
 }
 
 #[test]
+fn demanded_type_decl_copies_exact_vue_ignored_heritage_facts_from_headers() {
+    use verter_type_expr::facts::VueIgnoredHeritageFact;
+
+    let (memo, _) = memo_for(
+        "interface Props extends /* @vue-ignore */ Imported<string>, Kept { own: number }\n\
+         interface Props extends First, /* @vue-ignore */ Pick<Model, 'id'> {}\n",
+    );
+    let decl = memo.type_decl("Props").expect("Props exists");
+
+    assert_eq!(
+        decl.vue_ignored_heritage.as_ref(),
+        [
+            VueIgnoredHeritageFact {
+                contributor_ordinal: 0,
+                intersection_arm_ordinal: 0,
+            },
+            VueIgnoredHeritageFact {
+                contributor_ordinal: 1,
+                intersection_arm_ordinal: 1,
+            },
+        ],
+        "lazy lowering must copy the typed header fact without rescanning comments"
+    );
+}
+
+#[test]
 fn class_statement_backfills_its_value_sibling() {
     let (memo, provenance) = memo_for("class K { a: number }\ntype Other = { o: 1 };\n");
     let type_side = memo.type_decl("K").expect("class type side");
@@ -709,8 +735,6 @@ fn raw_surfaces_merge_overload_groups_for_the_demanded_name() {
 /// `lowered_type_decl_from_group` (see `seeded_non_enum_merged_type_cell_fails_loudly`).
 fn seeded_memo_for(source: &str) -> DeclBodyMemo {
     let env = verter_semantic::analysis::type_eval_build::parse_and_build_env(source);
-    let analysis =
-        verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource::default();
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
     let header_index = Arc::new(
@@ -723,7 +747,6 @@ fn seeded_memo_for(source: &str) -> DeclBodyMemo {
             parse_env_hash: [0u8; 16],
         },
         &env,
-        &analysis,
         header_index,
     )
 }

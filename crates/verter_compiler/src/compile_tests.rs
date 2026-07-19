@@ -153,7 +153,7 @@ fn vmrs_runtime_bundle_is_the_only_type_based_props_authority() {
         ..Default::default()
     };
     let result = compile(
-        r#"<script setup lang="ts">defineProps<{ ignored: string }>()</script>"#,
+        r#"<script setup lang="ts">defineProps<{ authoritative: string }>()</script>"#,
         &options,
         &verter_options,
         &semantics,
@@ -162,8 +162,8 @@ fn vmrs_runtime_bundle_is_the_only_type_based_props_authority() {
 
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     let code = result.script.expect("script").code;
-    assert!(code.contains("authoritative: { type: Boolean, skipCheck: true, required: true }"));
-    assert!(!code.contains("ignored: { type: String"));
+    assert!(code.contains("authoritative: { type: Boolean, required: true, skipCheck: true }"));
+    assert!(!code.contains("authoritative: { type: String"));
 }
 
 #[test]
@@ -367,7 +367,10 @@ fn vmrs_member_degradation_warns_and_renders_null_without_conflating_unknown() {
         warnings[0]
     );
     let code = result.script.expect("script").code;
-    assert!(code.contains("knownUnknown: { type: null }"), "{code}");
+    assert!(
+        code.contains("knownUnknown: { type: null, required: false }"),
+        "{code}"
+    );
     assert!(
         code.contains("missingMember: { type: null, required: true }"),
         "{code}"
@@ -460,7 +463,7 @@ defineModel<string>('subtitle')
 }
 
 #[test]
-fn vmrs_with_defaults_performs_one_syntax_owned_merge() {
+fn vmrs_dynamic_with_defaults_performs_one_syntax_owned_merge() {
     use std::sync::Arc;
     use verter_macro_dto::{
         MacroAnchor, MacroRuntimeBundle, MacroRuntimeEntry, MacroRuntimeOutcome, MacroRuntimeShape,
@@ -493,7 +496,10 @@ fn vmrs_with_defaults_performs_one_syntax_owned_merge() {
     }));
     let alloc = Allocator::new();
     let result = compile(
-        r#"<script setup lang="ts">withDefaults(defineProps<{ label?: string }>(), { label: 'ok' })</script>"#,
+        r#"<script setup lang="ts">
+import { defaults } from './defaults'
+withDefaults(defineProps<{ label?: string }>(), defaults)
+</script>"#,
         &CodegenOptions::default(),
         &VerterCompileOptions {
             force_js: true,
@@ -506,7 +512,508 @@ fn vmrs_with_defaults_performs_one_syntax_owned_merge() {
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     let code = result.script.expect("script").code;
     assert_eq!(code.matches("_mergeDefaults(").count(), 1, "{code}");
-    assert!(code.contains("{ label: 'ok' }"), "{code}");
+    assert!(code.contains(", defaults)"), "{code}");
+}
+
+#[test]
+fn vmrs_static_defaults_follow_dev_prod_and_custom_element_profiles() {
+    use std::sync::Arc;
+    use verter_macro_dto::{
+        AuthoredMemberOrdinal, MacroAnchor, MacroRuntimeBundle, MacroRuntimeEntry,
+        MacroRuntimeOutcome, MacroRuntimeShape, OrderedRuntimeConstructors,
+        PropsDefaultsAssociation, PropsRuntimeShape, RuntimeConstructor, RuntimeProp,
+        RuntimePropType,
+    };
+
+    let prop = |name: &str, optional: bool, constructors, ordinal| RuntimeProp {
+        name: name.to_owned(),
+        optional,
+        type_shape: RuntimePropType::Resolved {
+            constructors: OrderedRuntimeConstructors::from_ordered(constructors),
+            skip_check: false,
+        },
+        anchor: MacroAnchor::Authored {
+            macro_index: 0,
+            member_ordinal: AuthoredMemberOrdinal::new(ordinal),
+        },
+    };
+    let semantics = VueMacroSemanticInput::Runtime(Arc::new(MacroRuntimeBundle {
+        entries: vec![MacroRuntimeEntry {
+            syntax_index: 0,
+            macro_index: 1,
+            outcome: MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(PropsRuntimeShape {
+                defaults: PropsDefaultsAssociation::WithDefaults {
+                    payload_macro_index: 0,
+                    defaults_macro_index: 1,
+                },
+                props: vec![
+                    prop("text", false, vec![RuntimeConstructor::String], 0),
+                    prop("callable", true, vec![RuntimeConstructor::Function], 1),
+                    prop("enabled", true, vec![RuntimeConstructor::Boolean], 2),
+                    prop("opaque", true, Vec::new(), 3),
+                    prop("method", true, vec![RuntimeConstructor::Function], 4),
+                ],
+            })),
+        }],
+    }));
+    let source = r#"<script setup lang="ts">
+withDefaults(defineProps<{
+  text: string
+  callable?: () => number
+  enabled?: boolean
+  opaque?: unknown
+  method?: () => number
+}>(), { text: 'fallback', callable: () => 1, method() { return 2 } })
+</script>"#;
+    let compile_profile = |is_production, custom_element| {
+        compile(
+            source,
+            &CodegenOptions {
+                is_production,
+                custom_element,
+                ..Default::default()
+            },
+            &VerterCompileOptions {
+                force_js: true,
+                ..Default::default()
+            },
+            &semantics,
+            &Allocator::new(),
+        )
+    };
+
+    let dev = compile_profile(false, false);
+    assert!(dev.errors.is_empty(), "{:?}", dev.errors);
+    let dev = dev.script.expect("dev script").code;
+    assert!(
+        !dev.contains("_mergeDefaults("),
+        "static defaults are embedded: {dev}"
+    );
+    assert!(
+        dev.contains("text: { type: String, required: true, default: 'fallback' }"),
+        "{dev}"
+    );
+    assert!(
+        dev.contains("callable: { type: Function, required: false, default: () => 1 }"),
+        "{dev}"
+    );
+    assert!(
+        dev.contains("enabled: { type: Boolean, required: false }"),
+        "{dev}"
+    );
+    assert!(
+        dev.contains("opaque: { type: null, required: false }"),
+        "{dev}"
+    );
+    assert!(
+        dev.contains("method: { type: Function, required: false, \"default\"() { return 2 } }"),
+        "{dev}"
+    );
+
+    let prod = compile_profile(true, false);
+    assert!(prod.errors.is_empty(), "{:?}", prod.errors);
+    let prod = prod.script.expect("prod script").code;
+    assert!(prod.contains("text: { default: 'fallback' }"), "{prod}");
+    assert!(
+        prod.contains("callable: { type: Function, default: () => 1 }"),
+        "{prod}"
+    );
+    assert!(prod.contains("enabled: { type: Boolean }"), "{prod}");
+    assert!(prod.contains("opaque: {}"), "{prod}");
+    assert!(
+        prod.contains("method: { type: Function, \"default\"() { return 2 } }"),
+        "{prod}"
+    );
+    assert!(!prod.contains("required:"), "{prod}");
+
+    let custom_element = compile_profile(true, true);
+    assert!(
+        custom_element.errors.is_empty(),
+        "{:?}",
+        custom_element.errors
+    );
+    let custom_element = custom_element.script.expect("custom-element script").code;
+    assert!(
+        custom_element.contains("text: { default: 'fallback', type: String }"),
+        "{custom_element}"
+    );
+    assert!(
+        custom_element.contains("callable: { type: Function, default: () => 1 }"),
+        "{custom_element}"
+    );
+    assert!(
+        custom_element.contains("opaque: { type: null }"),
+        "{custom_element}"
+    );
+    assert!(
+        custom_element.contains("method: { type: Function, \"default\"() { return 2 } }"),
+        "{custom_element}"
+    );
+}
+
+#[test]
+fn vmrs_runtime_failures_preserve_typed_reason_detail_and_absolute_anchor() {
+    use std::sync::Arc;
+    use verter_macro_dto::{
+        MacroFailure, MacroInvalidReason, MacroPartialReason, MacroRuntimeBundle,
+        MacroRuntimeEntry, MacroRuntimeOutcome, UnresolvedReason, UnsupportedReason,
+    };
+
+    let source = r#"<script setup lang="ts">
+defineProps<{ value: string }>()
+</script>"#;
+    let type_text = "{ value: string }";
+    let type_start = source.find(type_text).expect("type argument") as u32;
+    let outcomes = [
+        (
+            MacroRuntimeOutcome::Partial(MacroFailure::new(
+                MacroPartialReason::BudgetExceeded,
+                Some("projection work budget exhausted".to_owned()),
+            )),
+            "XUnavailableMacroSemanticResult",
+            "partial",
+            "budget-exceeded",
+            "projection work budget exhausted",
+        ),
+        (
+            MacroRuntimeOutcome::Unresolved(MacroFailure::new(
+                UnresolvedReason::MissingDependency,
+                Some("dependency was unavailable".to_owned()),
+            )),
+            "XUnavailableMacroSemanticResult",
+            "unresolved",
+            "missing-dependency",
+            "dependency was unavailable",
+        ),
+        (
+            MacroRuntimeOutcome::Unsupported(MacroFailure::new(
+                UnsupportedReason::SemanticConstruct,
+                Some("construct is outside the runtime projection".to_owned()),
+            )),
+            "XUnavailableMacroSemanticResult",
+            "unsupported",
+            "semantic-construct",
+            "construct is outside the runtime projection",
+        ),
+        (
+            MacroRuntimeOutcome::Invalid(MacroFailure::new(
+                MacroInvalidReason::NonObjectRoot,
+                Some("resolved root is not object-like".to_owned()),
+            )),
+            "XInvalidMacroType",
+            "invalid",
+            "non-object-root",
+            "resolved root is not object-like",
+        ),
+    ];
+    for (outcome, code, kind, reason, detail) in outcomes {
+        let semantics = VueMacroSemanticInput::Runtime(Arc::new(MacroRuntimeBundle {
+            entries: vec![MacroRuntimeEntry {
+                syntax_index: 0,
+                macro_index: 0,
+                outcome,
+            }],
+        }));
+        let result = compile(
+            source,
+            &CodegenOptions::default(),
+            &VerterCompileOptions {
+                force_js: true,
+                ..Default::default()
+            },
+            &semantics,
+            &Allocator::new(),
+        );
+        let diagnostic = result
+            .errors
+            .iter()
+            .find(|diagnostic| diagnostic.code == code)
+            .expect("typed unavailable diagnostic");
+        assert!(diagnostic.message.contains(kind), "{diagnostic:?}");
+        assert!(diagnostic.message.contains(reason), "{diagnostic:?}");
+        assert!(diagnostic.message.contains(detail), "{diagnostic:?}");
+        assert_eq!(
+            diagnostic.span,
+            Some(crate::common::Span::new(
+                type_start,
+                type_start + type_text.len() as u32
+            )),
+            "runtime diagnostics use SFC-absolute parser geometry"
+        );
+        assert!(
+            !result
+                .script
+                .expect("script")
+                .code
+                .contains("value: { type:"),
+            "unavailable roots fail closed"
+        );
+    }
+}
+
+#[test]
+fn vmrs_degraded_member_uses_honest_authored_anchor_and_exact_payload() {
+    use std::sync::Arc;
+    use verter_macro_dto::{
+        AuthoredMemberOrdinal, MacroAnchor, MacroFailure, MacroMemberReason, MacroRuntimeBundle,
+        MacroRuntimeEntry, MacroRuntimeOutcome, MacroRuntimeShape, OrderedRuntimeConstructors,
+        PropsDefaultsAssociation, PropsRuntimeShape, RuntimeConstructor, RuntimeProp,
+        RuntimePropType, UnresolvedReason,
+    };
+
+    let source = r#"<script setup lang="ts">
+defineProps<{ first: string; second: Missing }>()
+</script>"#;
+    let semantics = VueMacroSemanticInput::Runtime(Arc::new(MacroRuntimeBundle {
+        entries: vec![MacroRuntimeEntry {
+            syntax_index: 0,
+            macro_index: 0,
+            outcome: MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(PropsRuntimeShape {
+                defaults: PropsDefaultsAssociation::None,
+                props: vec![
+                    RuntimeProp {
+                        name: "first".to_owned(),
+                        optional: false,
+                        type_shape: RuntimePropType::Resolved {
+                            constructors: OrderedRuntimeConstructors::from_ordered([
+                                RuntimeConstructor::String,
+                            ]),
+                            skip_check: false,
+                        },
+                        anchor: MacroAnchor::Authored {
+                            macro_index: 0,
+                            member_ordinal: AuthoredMemberOrdinal::new(0),
+                        },
+                    },
+                    RuntimeProp {
+                        name: "second".to_owned(),
+                        optional: false,
+                        type_shape: RuntimePropType::Degraded(MacroFailure::new(
+                            MacroMemberReason::Unresolved(UnresolvedReason::MissingDependency),
+                            Some("dependency ./missing.ts was unavailable".to_owned()),
+                        )),
+                        anchor: MacroAnchor::Authored {
+                            macro_index: 0,
+                            member_ordinal: AuthoredMemberOrdinal::new(1),
+                        },
+                    },
+                ],
+            })),
+        }],
+    }));
+    let result = compile(
+        source,
+        &CodegenOptions::default(),
+        &VerterCompileOptions {
+            force_js: true,
+            ..Default::default()
+        },
+        &semantics,
+        &Allocator::new(),
+    );
+    let diagnostic = result
+        .errors
+        .iter()
+        .find(|diagnostic| diagnostic.code == "XUnresolvedImportedMacroType")
+        .expect("degraded member warning");
+    assert!(diagnostic.message.contains("unresolved"), "{diagnostic:?}");
+    assert!(
+        diagnostic.message.contains("missing-dependency"),
+        "{diagnostic:?}"
+    );
+    assert!(
+        diagnostic
+            .message
+            .contains("dependency ./missing.ts was unavailable"),
+        "{diagnostic:?}"
+    );
+    let second_start = source.find("second").expect("second key") as u32;
+    assert_eq!(
+        diagnostic.span,
+        Some(crate::common::Span::new(second_start, second_start + 6))
+    );
+}
+
+#[test]
+fn vmrs_duplicate_entries_and_invalid_anchors_fail_closed() {
+    use std::sync::Arc;
+    use verter_macro_dto::{
+        AuthoredMemberOrdinal, MacroAnchor, MacroRuntimeBundle, MacroRuntimeEntry,
+        MacroRuntimeOutcome, MacroRuntimeShape, OrderedRuntimeConstructors,
+        PropsDefaultsAssociation, PropsRuntimeShape, RuntimeConstructor, RuntimeProp,
+        RuntimePropType,
+    };
+
+    let entry = MacroRuntimeEntry {
+        syntax_index: 0,
+        macro_index: 0,
+        outcome: MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(PropsRuntimeShape {
+            defaults: PropsDefaultsAssociation::None,
+            props: vec![RuntimeProp {
+                name: "value".to_owned(),
+                optional: false,
+                type_shape: RuntimePropType::Resolved {
+                    constructors: OrderedRuntimeConstructors::from_ordered([
+                        RuntimeConstructor::String,
+                    ]),
+                    skip_check: false,
+                },
+                anchor: MacroAnchor::Authored {
+                    macro_index: 0,
+                    member_ordinal: AuthoredMemberOrdinal::new(9),
+                },
+            }],
+        })),
+    };
+    for entries in [vec![entry.clone()], vec![entry.clone(), entry.clone()]] {
+        let semantics = VueMacroSemanticInput::Runtime(Arc::new(MacroRuntimeBundle { entries }));
+        let result = compile(
+            r#"<script setup lang="ts">defineProps<{ value: string }>()</script>"#,
+            &CodegenOptions::default(),
+            &VerterCompileOptions {
+                force_js: true,
+                ..Default::default()
+            },
+            &semantics,
+            &Allocator::new(),
+        );
+        assert!(
+            result.errors.iter().any(|diagnostic| {
+                diagnostic.code == "XUnavailableMacroSemanticResult"
+                    && (diagnostic
+                        .message
+                        .contains("invalid-authored-member-ordinal")
+                        || diagnostic.message.contains("duplicate-entry"))
+            }),
+            "invalid authoritative bundle must be explicit: {:?}",
+            result.errors
+        );
+        assert!(
+            !result
+                .script
+                .expect("script")
+                .code
+                .contains("value: { type: String"),
+            "invalid bundle must not drive codegen"
+        );
+    }
+}
+
+#[test]
+fn vmrs_escaped_public_names_are_decoded_quoted_and_token_stable() {
+    use std::sync::Arc;
+    use verter_macro_dto::{
+        MacroAnchor, MacroRuntimeBundle, MacroRuntimeEntry, MacroRuntimeOutcome, MacroRuntimeShape,
+        ModelRuntimeShape, OrderedRuntimeConstructors, RuntimeConstructor, RuntimeEmit,
+        RuntimeProp, RuntimePropType, SynthesizedRowKind,
+    };
+
+    let emitted_name = "line\n\"\\event";
+    let model_name = "model\n\"\\name";
+    let update_name = format!("update:{model_name}");
+    let modifiers_name = format!("{model_name}Modifiers");
+    let semantics = VueMacroSemanticInput::Runtime(Arc::new(MacroRuntimeBundle {
+        entries: vec![
+            MacroRuntimeEntry {
+                syntax_index: 0,
+                macro_index: 0,
+                outcome: MacroRuntimeOutcome::Complete(MacroRuntimeShape::Emits(vec![
+                    RuntimeEmit {
+                        name: emitted_name.to_owned(),
+                        anchor: MacroAnchor::MacroArgument { macro_index: 0 },
+                    },
+                ])),
+            },
+            MacroRuntimeEntry {
+                syntax_index: 1,
+                macro_index: 1,
+                outcome: MacroRuntimeOutcome::Complete(MacroRuntimeShape::Model(
+                    ModelRuntimeShape {
+                        prop: RuntimeProp {
+                            name: model_name.to_owned(),
+                            optional: true,
+                            type_shape: RuntimePropType::Resolved {
+                                constructors: OrderedRuntimeConstructors::from_ordered([
+                                    RuntimeConstructor::String,
+                                ]),
+                                skip_check: false,
+                            },
+                            anchor: MacroAnchor::Synthesized {
+                                macro_index: 1,
+                                row: SynthesizedRowKind::ModelProp,
+                            },
+                        },
+                        update_event: RuntimeEmit {
+                            name: update_name.clone(),
+                            anchor: MacroAnchor::Synthesized {
+                                macro_index: 1,
+                                row: SynthesizedRowKind::ModelUpdateEvent,
+                            },
+                        },
+                        modifiers_prop: RuntimeProp {
+                            name: modifiers_name.clone(),
+                            optional: true,
+                            type_shape: RuntimePropType::Resolved {
+                                constructors: OrderedRuntimeConstructors::default(),
+                                skip_check: false,
+                            },
+                            anchor: MacroAnchor::Synthesized {
+                                macro_index: 1,
+                                row: SynthesizedRowKind::ModelModifiersProp,
+                            },
+                        },
+                    },
+                )),
+            },
+        ],
+    }));
+    let source = r#"<script setup lang="ts">
+defineEmits<{ (event: 'line\n"\\event'): void }>()
+defineModel<string>('model\n"\\name')
+</script>"#;
+    let result = compile(
+        source,
+        &CodegenOptions::default(),
+        &VerterCompileOptions {
+            force_js: true,
+            ..Default::default()
+        },
+        &semantics,
+        &Allocator::new(),
+    );
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    let code = result.script.expect("script").code;
+    let alloc = Allocator::new();
+    let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::mjs()).parse();
+    assert!(
+        !parsed.panicked && parsed.errors.is_empty(),
+        "escaped public names must produce valid JavaScript: {:?}\n{code}",
+        parsed.errors
+    );
+
+    use oxc_ast::ast::StringLiteral;
+    use oxc_ast_visit::Visit;
+    #[derive(Default)]
+    struct StringValues(Vec<String>);
+    impl<'a> Visit<'a> for StringValues {
+        fn visit_string_literal(&mut self, literal: &StringLiteral<'a>) {
+            self.0.push(literal.value.to_string());
+        }
+    }
+    let mut values = StringValues::default();
+    values.visit_program(&parsed.program);
+    for expected in [
+        emitted_name,
+        model_name,
+        update_name.as_str(),
+        modifiers_name.as_str(),
+    ] {
+        assert!(
+            values.0.iter().any(|value| value == expected),
+            "decoded public string {expected:?} must survive token normalization: {:?}\n{code}",
+            values.0
+        );
+    }
 }
 
 #[test]
@@ -5694,7 +6201,9 @@ const x = computed(() => 1)
     assert!(
         type_pos < wrapper_pos,
         "export type should be hoisted before const __sfc__.\ntype_pos={}, wrapper_pos={}\ncode:\n{}",
-        type_pos, wrapper_pos, script.code
+        type_pos,
+        wrapper_pos,
+        script.code
     );
     // Must NOT appear inside setup() body
     let setup_start = script.code.find("setup(").expect("setup function");
@@ -11321,10 +11830,10 @@ if ( 1 === 2 ) {
         );
         let token = token.unwrap();
         assert!(
-                token.get_source_id().is_some(),
-                "[{label}] Token at TSX {tsx_line}:{tsx_col} has no source mapping (unmapped)\nTSX:\n{}",
-                tsx.code
-            );
+            token.get_source_id().is_some(),
+            "[{label}] Token at TSX {tsx_line}:{tsx_col} has no source mapping (unmapped)\nTSX:\n{}",
+            tsx.code
+        );
 
         // Compute the mapped-back Vue position using the same interpolation as tsx_to_vue
         let vue_line = token.get_src_line();
@@ -11334,15 +11843,15 @@ if ( 1 === 2 ) {
         }
 
         assert_eq!(
-                vue_line, expected_vue_line,
-                "[{label}] TSX {tsx_line}:{tsx_col} mapped to Vue line {vue_line}, expected {expected_vue_line}\nTSX:\n{}",
-                tsx.code
-            );
+            vue_line, expected_vue_line,
+            "[{label}] TSX {tsx_line}:{tsx_col} mapped to Vue line {vue_line}, expected {expected_vue_line}\nTSX:\n{}",
+            tsx.code
+        );
         assert_eq!(
-                vue_col, expected_vue_col,
-                "[{label}] TSX {tsx_line}:{tsx_col} mapped to Vue col {vue_col}, expected {expected_vue_col}\nTSX:\n{}",
-                tsx.code
-            );
+            vue_col, expected_vue_col,
+            "[{label}] TSX {tsx_line}:{tsx_col} mapped to Vue col {vue_col}, expected {expected_vue_col}\nTSX:\n{}",
+            tsx.code
+        );
     };
 
     // ── Script body positions (should map to original Vue positions) ──

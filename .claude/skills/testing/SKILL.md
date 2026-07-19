@@ -111,6 +111,33 @@ Extracted file contains module contents directly — `use super::*;`, helpers, a
 3. Run relevant tests, verify pass
 4. Refactor while keeping tests green
 
+### Pinned Vue Macro Runtime Oracle
+
+The official Vue macro baseline is generated only from the repository-pinned
+local `@vue/compiler-sfc@3.5.34`; tests must not fetch compiler output from the
+network. `scripts/vue-macro-runtime-oracle/oracle-lib.mjs` parses compiled
+JavaScript and compares normalized runtime facts instead of carrier formatting.
+Schema v2 records compiler/profile provenance, constructor order, `skipCheck`,
+literal-safe defaults/`defaultKind`, and `typePresent` so an omitted type cannot
+collapse with explicit `type: null`. Profile fixtures cover development,
+production, and production custom-element output. A
+`verter-complete-extension` row records the official
+Unknown baseline and may be refined only by a canonical `Complete` Verter
+result.
+
+Regenerate and verify with:
+
+```bash
+node scripts/gen-vue-macro-runtime-oracle.mjs
+node scripts/gen-vue-macro-runtime-oracle.mjs --check
+node --test scripts/vue-macro-runtime-oracle/oracle.test.mjs
+```
+
+Never hand-edit
+`crates/verter_session/tests/fixtures/vue_macro_runtime_oracle.json`; the
+generator owns it. The canonical gate runs both drift verification and the
+oracle unit tests.
+
 ### End-of-change Checks
 
 Outside the orchestration landing-train lifecycle — a local change NOT driven as a train — run the canonical Rust pair after the change, per the repo End-of-change Checks. The full workspace suite is the canonical completeness gate.

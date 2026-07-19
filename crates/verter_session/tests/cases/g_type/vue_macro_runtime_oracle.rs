@@ -23,10 +23,28 @@ fn prop<'a>(case: &'a Value, name: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("oracle prop {name:?} must exist"))
 }
 
+fn profile<'a>(case: &'a Value, name: &str) -> &'a Value {
+    case["profiles"]
+        .as_array()
+        .expect("oracle profiles must be an array")
+        .iter()
+        .find(|profile| profile["name"] == name)
+        .unwrap_or_else(|| panic!("oracle profile {name:?} must exist"))
+}
+
+fn profile_prop<'a>(case: &'a Value, profile_name: &str, prop_name: &str) -> &'a Value {
+    profile(case, profile_name)["runtime"]["props"]
+        .as_array()
+        .expect("profile runtime props must be an array")
+        .iter()
+        .find(|prop| prop["name"] == prop_name)
+        .unwrap_or_else(|| panic!("oracle prop {prop_name:?} must exist"))
+}
+
 #[test]
 fn pinned_vue_macro_oracle_carries_provenance_and_discriminating_runtime_facts() {
     let oracle = oracle();
-    assert_eq!(oracle["schemaVersion"], 1);
+    assert_eq!(oracle["schemaVersion"], 2);
     assert_eq!(oracle["provenance"]["compiler"], "@vue/compiler-sfc");
     assert_eq!(oracle["provenance"]["version"], "3.5.34");
     assert_eq!(
@@ -113,5 +131,60 @@ fn pinned_vue_macro_oracle_carries_provenance_and_discriminating_runtime_facts()
     assert_eq!(
         prop(imported, "selected")["constructors"],
         serde_json::json!(["Object"])
+    );
+
+    let profiles = case(&oracle, "profile-default-rendering");
+    assert_eq!(
+        profile_prop(profiles, "development", "text"),
+        &serde_json::json!({
+            "name": "text",
+            "typePresent": true,
+            "constructors": ["String"],
+            "required": true,
+            "skipCheck": false,
+            "defaultKind": "property",
+            "default": "'fallback'"
+        })
+    );
+    assert_eq!(
+        profile_prop(profiles, "production", "text")["constructors"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        profile_prop(profiles, "production-custom-element", "text")["constructors"],
+        serde_json::json!(["String"])
+    );
+    assert_eq!(
+        profile_prop(profiles, "production", "enabled")["constructors"],
+        serde_json::json!(["Boolean"])
+    );
+    assert_eq!(
+        profile_prop(profiles, "production-custom-element", "opaque")["constructors"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        profile_prop(profiles, "production", "opaque")["typePresent"],
+        false,
+        "production strips the Unknown runtime type field"
+    );
+    assert_eq!(
+        profile_prop(profiles, "production-custom-element", "opaque")["typePresent"],
+        true,
+        "custom-element production retains the explicit type: null field"
+    );
+    for profile_name in ["development", "production", "production-custom-element"] {
+        let method = profile_prop(profiles, profile_name, "method");
+        assert_eq!(method["defaultKind"], "method");
+        assert_eq!(method["default"], "default() { return 2 }");
+        assert_eq!(method["constructors"], serde_json::json!(["Function"]));
+    }
+
+    let extension = case(&oracle, "complete-imported-extension");
+    assert_eq!(extension["contract"], "verter-complete-extension");
+    assert_eq!(extension["extensionPolicy"], "refine-only-on-complete");
+    assert_eq!(
+        profile_prop(extension, "development", "payload")["constructors"],
+        serde_json::json!([]),
+        "the official baseline is Unknown; Verter may refine only after a complete canonical result"
     );
 }

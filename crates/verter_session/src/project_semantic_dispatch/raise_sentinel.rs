@@ -108,6 +108,7 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_unmaterialized_sentin
         QueryError::Miss
         | QueryError::UnsupportedIntrinsic { .. }
         | QueryError::BudgetExceeded(_)
+        | QueryError::Cancelled
         | QueryError::UnstableState { .. }
         | QueryError::AliasCycle { .. }
         | QueryError::RaiseAliasCycle
@@ -196,6 +197,7 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_semantic_miss_sentine
         QueryError::DeclPlaceholder { .. } => false,
         QueryError::UnsupportedIntrinsic { .. }
         | QueryError::BudgetExceeded(_)
+        | QueryError::Cancelled
         | QueryError::UnstableState { .. }
         | QueryError::AliasCycle { .. }
         | QueryError::RecursiveRef { .. }
@@ -224,6 +226,7 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_object_surface_sentin
         QueryError::Miss
         | QueryError::UnsupportedIntrinsic { .. }
         | QueryError::BudgetExceeded(_)
+        | QueryError::Cancelled
         | QueryError::UnstableState { .. }
         | QueryError::AliasCycle { .. }
         | QueryError::RecursiveRef { .. }

@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use verter_scheduler::cancellation::CancellationToken;
 use verter_scheduler::request_context::{
     CacheEventKind, OpaqueContextGuard, OpaqueRequestContext, RequestContextLike, TlsUninstall,
 };
@@ -36,6 +37,12 @@ pub use crate::request_budget::RequestBudget;
 #[must_use]
 pub fn current_request_budget() -> Option<Arc<RequestBudget>> {
     current_request_context().map(|ctx| Arc::clone(&ctx.projection_budget))
+}
+
+/// Return the stable cancellation token carried by the active request.
+#[must_use]
+pub fn current_request_cancellation_token() -> Option<CancellationToken> {
+    current_request_context().map(|ctx| ctx.cancellation_token())
 }
 
 use crate::semantic_query::{PartialReasonSet, ResultCompleteness};
@@ -174,6 +181,11 @@ pub fn mark_request_result_partial() {
 /// deterministically.
 pub(crate) fn mark_request_result_inference_budget_exceeded() {
     mark_request_result_partial_with(PartialReasonSet::BUDGET_EXCEEDED);
+}
+
+/// Mark the active result partial for the exact cancellation reason.
+pub(crate) fn mark_request_result_cancelled() {
+    mark_request_result_partial_with(PartialReasonSet::CANCELLED);
 }
 
 fn mark_request_result_partial_with(reasons: PartialReasonSet) {
@@ -469,6 +481,9 @@ pub fn bump_bare_engine_construction() {
 pub struct RequestContext {
     /// Monotonic request id. Non-zero by construction.
     pub request_id: u64,
+    /// Stable one-shot cancellation token for this request. Created once per
+    /// request and propagated unchanged across scheduler workers.
+    cancellation: CancellationToken,
     /// Per-request trace identifier — a stable string token that
     /// propagates through tracing spans the request opens. Wired into
     /// the tracing instrumentation so log scrapers can correlate
@@ -1127,6 +1142,7 @@ impl RequestContext {
         let trace_id = uuid::Uuid::new_v4().to_string();
         Arc::new(Self {
             request_id,
+            cancellation: CancellationToken::new(),
             trace_id,
             canonical_id,
             kind,
@@ -1267,6 +1283,24 @@ impl RequestContext {
     #[must_use]
     pub fn kind(&self) -> verter_audit::RequestKind {
         self.kind.clone()
+    }
+
+    /// Cancel this request. Idempotent and sibling-safe: every request owns a
+    /// distinct token unless the caller deliberately shares its context.
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    /// Whether this request has been cancelled.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+
+    /// Clone the stable token carried by this request.
+    #[must_use]
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancellation.clone()
     }
 
     /// Bump the `type_resolution_hops` counter by one. Called by the
@@ -1473,6 +1507,9 @@ impl RequestContextLike for RequestContext {
     }
     fn timing_enabled(&self) -> bool {
         self.timing_capture
+    }
+    fn cancellation_token(&self) -> Option<CancellationToken> {
+        Some(self.cancellation_token())
     }
     fn on_dedup_joiner(
         &self,
@@ -2199,6 +2236,26 @@ mod tests {
         assert_eq!(current_request_context().unwrap().request_id, 10);
         drop(g1);
         assert!(current_request_context().is_none());
+    }
+
+    #[test]
+    fn request_cancellation_is_per_context_and_tls_visible() {
+        let first = make_ctx(30, false);
+        let sibling = make_ctx(31, false);
+
+        assert!(!first.is_cancelled());
+        assert!(!sibling.is_cancelled());
+        first.cancel();
+        assert!(first.is_cancelled());
+        assert!(
+            !sibling.is_cancelled(),
+            "cancelling one request must not cancel a sibling request"
+        );
+
+        let _guard = RequestContextGuard::install(Arc::clone(&first));
+        assert!(current_request_cancellation_token()
+            .expect("installed request exposes its token")
+            .is_cancelled());
     }
 
     #[test]

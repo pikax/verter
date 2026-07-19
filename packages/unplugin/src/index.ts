@@ -120,6 +120,7 @@ function renderMainRuntime(
         // silently drop it from the build).
         filename: profile.filename,
         isProduction: profile.isProduction ?? false,
+        customElement: profile.customElement ?? false,
         ssr: profile.ssr ?? false,
         ssrModuleId: profile.ssrModuleId,
         forceJs: profile.forceJs ?? false,
@@ -562,6 +563,7 @@ function createFrameworkFactory(
             const ssr = viteConfig ? Boolean(viteConfig.build?.ssr) : false;
             return {
               isProduction: isProd,
+              customElement: false,
               ssr,
               hmrStrategy: (isProd ? "none" : hmrStrategy) as HostCompileProfile["hmrStrategy"],
             };
@@ -624,6 +626,7 @@ function createFrameworkFactory(
 
           const profile: HostCompileProfile = {
             filename,
+            customElement: false,
             ssr,
             ssrModuleId: ssrModuleIdFor(ssr, projectRoot, filename),
             isProduction: isProd,
@@ -783,6 +786,7 @@ function createFrameworkFactory(
           const componentId = componentIdFn(filename, code, isProd, viteConfig?.root);
           const profile: HostCompileProfile = {
             filename,
+            customElement: false,
             ssr,
             isProduction: isProd,
             componentId,
@@ -873,6 +877,7 @@ function createFrameworkFactory(
 
         const profile: HostCompileProfile = {
           filename,
+          customElement: false,
           ssr,
           ssrModuleId: ssrModuleIdFor(ssr, projectRoot, filename),
           isProduction: isProd,

@@ -141,6 +141,10 @@ pub struct CodegenOptions {
     pub filename: Option<String>,
     /// Production mode — affects component ID generation and optimizations.
     pub is_production: bool,
+    /// Compile the SFC as a Vue custom element. This is an explicit script
+    /// runtime-prop policy axis and is unrelated to template tag matching in
+    /// [`Self::custom_elements`].
+    pub custom_element: bool,
     /// Custom component ID (overrides auto-generation from filename).
     pub component_id: Option<String>,
     /// Controls which compilation steps run.
@@ -203,6 +207,12 @@ impl CodegenOptions {
 
     pub fn with_production(mut self, is_production: bool) -> Self {
         self.is_production = is_production;
+        self
+    }
+
+    /// Select Vue's custom-element runtime-prop policy explicitly.
+    pub fn with_custom_element(mut self, custom_element: bool) -> Self {
+        self.custom_element = custom_element;
         self
     }
 

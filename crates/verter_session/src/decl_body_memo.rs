@@ -32,15 +32,13 @@ use std::sync::{Arc, OnceLock};
 use dashmap::DashMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-#[cfg(any(test, feature = "test-support"))]
-use crate::resolver_core::shallow_file_state::AnalyzedExternalTypeSource;
 use verter_parser::utils::oxc::script::raw_surface::{
     capture_statement_surfaces, merge_overload_groups, RawSourceSurface, SymbolSpace,
 };
-use verter_parser::utils::oxc::script::type_inventory::{
-    collect_statement_dependencies, DeclarationPath,
+use verter_semantic::analysis::decl_dependencies::{
+    collect_statement_dependency_names, DeclDependencyNames, DeclarationPath,
 };
-use verter_semantic::analysis::decl_headers::DeclHeaderIndex;
+use verter_semantic::analysis::decl_headers::{build_decl_header_index, DeclHeaderIndex};
 use verter_semantic::analysis::framework_facts::svelte::{
     lower_props_annotation_at_with_owners, lower_svelte_type_argument_at_with_owners,
     PropsAnnotationLowering, SvelteTypeArgumentLowering,
@@ -67,7 +65,7 @@ use verter_type_expr::facts::{
     EnumMemberFact, EnumMemberNamesFact, EnumScalar, HeritageBaseFact, KeyDomainClosednessFact,
     NarrowTypeParam, ObjectShapeFact, PreparedMemberFact, PreparedProjectionClassFact,
     PreparedWrapperShapeFact, ShallowRouteFacts, TypeDependencyPathFact, ValueAnnotationClass,
-    ValueTypeAnnotationFact,
+    ValueTypeAnnotationFact, VueIgnoredHeritageFact,
 };
 use verter_type_expr::locators::{TypeBodyPathStep, TypeBodySlot};
 use verter_type_expr::span_origins::DeclContributorAnchor;
@@ -104,8 +102,8 @@ pub struct LoweredTypeDecl {
     /// Generic type parameters, unioned across contributors in source
     /// order.
     pub type_parameters: Vec<TypeParam>,
-    /// Parser-owned dependency segment identities. The root local binding and
-    /// member path remain separate through classification.
+    /// Semantic declaration-dependency segment identities. The root local
+    /// binding and member path remain separate through classification.
     pub dependency_paths: FxHashSet<TypeDependencyPathFact>,
     pub structural_dependency_paths: FxHashSet<TypeDependencyPathFact>,
     /// Complete declaration carrier, including positions intentionally omitted
@@ -126,6 +124,10 @@ pub struct LoweredTypeDecl {
     /// order — the fact mirror of [`type_parameters`](Self::type_parameters)
     /// the prepared-decl builder copies (`PreparedTypeDecl.type_parameters`).
     pub narrow_type_parameters: Vec<NarrowTypeParam>,
+    /// Exact typed `@vue-ignore` heritage identities copied from the shallow
+    /// declaration header. Consumers apply them only under an explicit Vue
+    /// runtime projection policy; ordinary inheritance remains unchanged.
+    pub vue_ignored_heritage: Arc<[VueIgnoredHeritageFact]>,
     /// The prepared MEMBER-INDEX facts (name → header flags + content-free
     /// member-value locator + span-recovery origin), classified ONCE at this
     /// lazy lowering from the same transient contributor bodies through the
@@ -425,10 +427,7 @@ struct DeclDependencyFacts {
 }
 
 impl DeclDependencyFacts {
-    fn extend(
-        &mut self,
-        dependencies: verter_parser::utils::oxc::script::type_inventory::DeclDependencyNames,
-    ) {
+    fn extend(&mut self, dependencies: DeclDependencyNames) {
         self.full.extend(dependencies.dependency_paths);
         self.structural
             .extend(dependencies.structural_dependency_paths);
@@ -590,7 +589,6 @@ impl DeclBodyMemo {
     pub(crate) fn seeded_from_env(
         key: SnapshotKey,
         env: &EvalEnv,
-        analysis: &AnalyzedExternalTypeSource,
         header_index: Arc<DeclHeaderIndex>,
     ) -> Self {
         let memo = Self {
@@ -615,17 +613,7 @@ impl DeclBodyMemo {
         };
 
         for (name, group) in &env.type_symbols {
-            let dependencies = analysis
-                .local_type_symbol(&DeclarationPath::root(name.clone()))
-                .map(|symbol| DeclDependencyFacts {
-                    full: symbol.dependency_paths.iter().cloned().collect(),
-                    structural: symbol.structural_dependency_paths.iter().cloned().collect(),
-                    declaration_carrier: symbol.declaration_carrier_paths.iter().cloned().collect(),
-                    value_queries: symbol.value_query_paths.iter().cloned().collect(),
-                    value_positions: symbol.value_position_paths.iter().cloned().collect(),
-                    has_unroutable_value_position: !symbol.unsupported_value_positions.is_empty(),
-                })
-                .unwrap_or_default();
+            let dependencies = DeclDependencyFacts::default();
             let enum_type_arms = env
                 .value_symbols
                 .get(name)
@@ -643,6 +631,10 @@ impl DeclBodyMemo {
                 &dependencies,
                 enum_type_arms,
                 &RetainedTypeTransients::default(),
+                memo.header_index
+                    .type_headers
+                    .get(name)
+                    .map_or(&[], |header| header.vue_ignored_heritage.as_slice()),
                 &UnresolvedLens,
                 &EmptyRouteFactLens,
             );
@@ -675,6 +667,11 @@ impl DeclBodyMemo {
                 &DeclDependencyFacts::default(),
                 None,
                 &RetainedTypeTransients::default(),
+                memo.header_index
+                    .augmentation_type_headers
+                    .get(scope)
+                    .and_then(|headers| headers.get(name))
+                    .map_or(&[], |header| header.vue_ignored_heritage.as_slice()),
                 &UnresolvedLens,
                 &EmptyRouteFactLens,
             );
@@ -1320,6 +1317,7 @@ impl DeclBodyMemo {
         let build_ctx = BuildEvalEnvContext::new(Arc::clone(&self.key.canonical));
         let lens = self.shallow_lens();
         let route_lens = self.route_fact_lens();
+        let header_index = Arc::clone(&self.header_index);
         let svelte_component_runes_mode = self.svelte_component_runes_mode;
         let outcome = service.run_leased(&self.key, move |program| {
             let program = program?;
@@ -1415,7 +1413,7 @@ impl DeclBodyMemo {
                     },
                     &mut scratch,
                 );
-                for (declaration, deps) in collect_statement_dependencies(stmt, owner) {
+                for (declaration, deps) in collect_statement_dependency_names(stmt, owner) {
                     dep_records.entry(declaration).or_default().extend(deps);
                 }
             }
@@ -1473,6 +1471,10 @@ impl DeclBodyMemo {
                         &dependencies,
                         enum_type_arms,
                         retained,
+                        header_index
+                            .type_headers
+                            .get(decl_key)
+                            .map_or(&[], |header| header.vue_ignored_heritage.as_slice()),
                         &owned_lens,
                         &owned_route_lens,
                     ),
@@ -1505,6 +1507,11 @@ impl DeclBodyMemo {
                         &DeclDependencyFacts::default(),
                         None,
                         retained,
+                        header_index
+                            .augmentation_type_headers
+                            .get(scope)
+                            .and_then(|headers| headers.get(decl_key))
+                            .map_or(&[], |header| header.vue_ignored_heritage.as_slice()),
                         &owned_lens,
                         &owned_route_lens,
                     ),
@@ -2263,6 +2270,7 @@ pub(crate) fn lowered_decls_from_env_and_program(
     source: &str,
 ) -> LoweredDeclGroups {
     let owner = TopLevelOwnerId::ordinary_file();
+    let header_index = build_decl_header_index(program, source);
     let mut retained_types: FxHashMap<DeclKey, RetainedTypeTransients> = FxHashMap::default();
     let mut retained_values: FxHashMap<DeclKey, RetainedValueTransients> = FxHashMap::default();
     let mut dep_records: FxHashMap<DeclarationPath, DeclDependencyFacts> = FxHashMap::default();
@@ -2299,7 +2307,7 @@ pub(crate) fn lowered_decls_from_env_and_program(
                     .extend_from(retained);
             }
         }
-        for (declaration, dependencies) in collect_statement_dependencies(stmt, owner) {
+        for (declaration, dependencies) in collect_statement_dependency_names(stmt, owner) {
             dep_records
                 .entry(declaration)
                 .or_default()
@@ -2326,6 +2334,10 @@ pub(crate) fn lowered_decls_from_env_and_program(
                     &dependencies,
                     enum_type_arms,
                     retained_types.get(key).unwrap_or(&empty_retained),
+                    header_index
+                        .type_headers
+                        .get(key)
+                        .map_or(&[], |header| header.vue_ignored_heritage.as_slice()),
                     &UnresolvedLens,
                     &EmptyRouteFactLens,
                 ),
@@ -2366,6 +2378,7 @@ fn lowered_type_decl_from_group(
     dependencies: &DeclDependencyFacts,
     enum_type_arms: Option<Vec<EnumScalar>>,
     retained: &RetainedTypeTransients,
+    vue_ignored_heritage: &[VueIgnoredHeritageFact],
     lens: &dyn CrossDeclLens,
     route_lens: &dyn RouteFactLens,
 ) -> LoweredTypeDecl {
@@ -2588,6 +2601,7 @@ fn lowered_type_decl_from_group(
         route_facts,
         typeof_root_names,
         narrow_type_parameters,
+        vue_ignored_heritage: Arc::from(vue_ignored_heritage),
         member_index: scratch.member_index,
         wrapper_shape: scratch.wrapper_shape,
         projection_class: scratch.projection_class,

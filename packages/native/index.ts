@@ -230,6 +230,8 @@ export interface CompileBatchRenderProfile {
    */
   filename?: string;
   isProduction: boolean;
+  /** Vue custom-element script policy; unrelated to template `customElements`. */
+  customElement: boolean;
   ssr: boolean;
   forceJs: boolean;
   forceVapor: boolean;

@@ -12,8 +12,8 @@ use oxc_span::GetSpan;
 
 use super::macros::{
     detect_macro_kind, is_define_component, MacroArrayArg, MacroArrayElement, MacroDeclarator,
-    MacroObjectArg, MacroProperty, MacroTypeParams, MacroTypePropMember, RuntimeConstructorSyntax,
-    ScriptMacro, VueMacroKind,
+    MacroObjectArg, MacroObjectStaticEligibility, MacroProperty, MacroTypeParams,
+    MacroTypePropMember, RuntimeConstructorSyntax, ScriptMacro, VueMacroKind,
 };
 use super::shared::ScriptParseContext;
 use super::types::{
@@ -26,8 +26,8 @@ use super::usage::{
     SyncContextUsage, TemplateUtilUsage, UsageCollector, VueApiCategory, VueApiKind, WatcherUsage,
 };
 use crate::common::Span;
-use crate::utils::oxc::script::type_inventory::collect_type_dependency_paths;
 use verter_type_expr::facts::TypeDependencyPathFact;
+use verter_type_expr_oxc::collect_type_dependency_paths;
 
 /// Context for setup script parsing
 pub struct SetupContext {
@@ -675,16 +675,19 @@ pub fn parse_macro_call<'a>(
         }
         VueMacroKind::DefineModel => {
             // defineModel(name?, options?)
-            let name_span = call.arguments.first().and_then(|arg| {
-                if let Some(Expression::StringLiteral(s)) = arg.as_expression() {
-                    Some(Span::from(s.span))
-                } else {
-                    None
-                }
-            });
+            let (name, name_span) = call
+                .arguments
+                .first()
+                .and_then(|arg| {
+                    let Expression::StringLiteral(literal) = arg.as_expression()? else {
+                        return None;
+                    };
+                    Some((literal.value.as_str(), Span::from(literal.span)))
+                })
+                .map_or((None, None), |(name, span)| (Some(name), Some(span)));
 
             // Options is second arg if first is string, or first arg if no string
-            let options_idx = if name_span.is_some() { 1 } else { 0 };
+            let options_idx = if name.is_some() { 1 } else { 0 };
             let options_span = call.arguments.get(options_idx).and_then(|arg| {
                 if let Some(Expression::ObjectExpression(obj)) = arg.as_expression() {
                     Some(Span::from(obj.span))
@@ -697,6 +700,7 @@ pub fn parse_macro_call<'a>(
                 span,
                 declarator,
                 type_params,
+                name,
                 name_span,
                 options_span,
             })
@@ -1128,6 +1132,7 @@ fn extract_object_arg<'a>(
     // object non-static: codegen routes the whole object expression
     // through `_mergeDefaults` at runtime.
     let mut has_spread = false;
+    let mut has_unsupported_key = false;
 
     for prop in &obj.properties {
         match prop {
@@ -1179,6 +1184,7 @@ fn extract_object_arg<'a>(
                     properties.push(MacroProperty {
                         name,
                         name_span,
+                        property_span: Span::from(p.span),
                         value_span,
                         is_method: p.method,
                         required,
@@ -1187,6 +1193,8 @@ fn extract_object_arg<'a>(
                         prop_type_annotation,
                         type_dependency_paths,
                     });
+                } else {
+                    has_unsupported_key = true;
                 }
             }
             ObjectPropertyKind::SpreadProperty(_) => {
@@ -1199,6 +1207,10 @@ fn extract_object_arg<'a>(
         span: Span::from(obj.span),
         properties,
         has_spread,
+        static_eligibility: MacroObjectStaticEligibility::from_shape(
+            has_spread,
+            has_unsupported_key,
+        ),
     }
 }
 

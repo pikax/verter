@@ -874,26 +874,28 @@ mod tests {
         }
     }
 
-    fn make_analysis(
+    fn make_routes(
         source: &str,
-    ) -> Arc<verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource> {
+    ) -> Arc<verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory> {
         let alloc = oxc_allocator::Allocator::new();
+        let parsed = oxc_parser::Parser::new(&alloc, source, oxc_span::SourceType::ts()).parse();
+        assert!(!parsed.panicked, "route fixture must parse");
         Arc::new(
-            verter_parser::utils::oxc::script::type_inventory::analyze_external_type_source(
-                source, &alloc,
+            verter_parser::utils::oxc::script::route_inventory::build_script_route_inventory(
+                &parsed.program,
             ),
         )
     }
 
     fn make_state(source: &str) -> ShallowFileState {
-        ShallowFileState::header_routing_only_for_test(Hash16::default(), make_analysis(source))
+        ShallowFileState::header_routing_only_for_test(Hash16::default(), make_routes(source))
     }
 
     fn make_state_resolved(source: &str, resolutions: &[(&str, &str)]) -> ShallowFileState {
         let resolver = MapResolver::from_pairs(resolutions);
         ShallowFileState::header_routing_only_with_resolver_for_test(
             Hash16::default(),
-            make_analysis(source),
+            make_routes(source),
             &resolver,
         )
     }

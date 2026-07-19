@@ -142,6 +142,17 @@ fn narrow_cache_read(
     }
 }
 
+fn cancelled_cache_read() -> CacheRead<QueryResult<SemanticQueryValue>> {
+    crate::request_context::mark_request_result_cancelled();
+    CacheRead {
+        value: QueryResult::Error(QueryError::Cancelled),
+        dep_signature: empty_signature(),
+        walker_diagnostics: Arc::from([]),
+        cache_suppress: true,
+        result_is_partial: true,
+    }
+}
+
 /// Test-only: `std::mem::size_of::<FamilyKey>()`. Lets the size-discipline
 /// guard pin that the hot single-node `FamilyKey → FamilySlots` keyspace is NOT
 /// inflated by embedding the ~130B `RelateMemoKey` by value — without exposing
@@ -2324,6 +2335,13 @@ impl SemanticGraphStore {
         crate::loop5_instrumentation::EXECUTE_COOPERATIVE_CALLS
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+        // Request cancellation is a typed ReturnOnly terminal and must be
+        // observed before even a warm probe: canceled requests do not consume
+        // shared semantic work or reuse a value as if they completed normally.
+        if ctx.is_cancelled() {
+            return cancelled_cache_read();
+        }
+
         // Prepare the query token ONCE per execute: one
         // `family_and_slot` projection, one requested-point build, one
         // key hash — shared (behind one `Arc`) by the warm probe, the
@@ -2349,7 +2367,11 @@ impl SemanticGraphStore {
         // owns same-path recursion, in-flight admission, and cold-build
         // publish.
         if let Some(hit) = self.try_warm_value_hit_fast_path(ctx, &prepared) {
-            return hit;
+            return if ctx.is_cancelled() {
+                cancelled_cache_read()
+            } else {
+                hit
+            };
         }
 
         // Slow path — cooperative-admission flow. Handles same-path
@@ -2556,6 +2578,9 @@ impl SemanticGraphStore {
         );
 
         let inflight = loop {
+            if ctx.is_cancelled() {
+                return cancelled_cache_read();
+            }
             // 1. Warm memo hit. Reaches here only on the rare race
             //    where another thread published between our fast-path
             //    check and now (or on retry after an abort sweep). The
@@ -2638,9 +2663,15 @@ impl SemanticGraphStore {
                 // production behaviour change (gated out of release builds).
                 #[cfg(any(test, feature = "test-support"))]
                 self.joiner_on_condvar_count.fetch_add(1, Ordering::SeqCst);
-                inflight
-                    .ready
-                    .wait_while(&mut state, |s| s.completed.is_none() && !s.aborted);
+                while state.completed.is_none() && !state.aborted && !ctx.is_cancelled() {
+                    // Timed parking is the cancellation observation rail. A
+                    // canceled joiner detaches by returning from this call; it
+                    // never marks the shared flight aborted and therefore
+                    // cannot disturb an uncancelled winner or sibling.
+                    inflight
+                        .ready
+                        .wait_for(&mut state, std::time::Duration::from_millis(2));
+                }
                 self.stats
                     .waits_ms
                     .fetch_add(wait_start.elapsed().as_millis() as u64, Ordering::Relaxed);
@@ -2652,6 +2683,10 @@ impl SemanticGraphStore {
                     ctx.0.record_cache_event(
                         verter_scheduler::request_context::CacheEventKind::JoinedWait,
                     );
+                }
+                if ctx.is_cancelled() {
+                    drop(state);
+                    return cancelled_cache_read();
                 }
                 if state.aborted && retries < MAX_INFLIGHT_RETRIES {
                     // The (family, slot) this entry was serving was swept
@@ -2893,6 +2928,15 @@ impl SemanticGraphStore {
         crate::loop5_instrumentation::EXECUTE_COOPERATIVE_BUILD_NS_TOTAL
             .fetch_add(build_held_ns, std::sync::atomic::Ordering::Relaxed);
 
+        // A canceled leader owns no publish right. Abort this exact flight,
+        // wake live followers, and remove the admission so an uncancelled
+        // follower retries as a fresh cold owner. The computed value is
+        // intentionally discarded and can never enter the warm memo.
+        if ctx.is_cancelled() {
+            self.abort_inflight_for_cancellation(&prepared, &inflight);
+            return cancelled_cache_read();
+        }
+
         // 5. Warm-publish only successful values; errors and recursion
         // sentinels never become shared-cache entries ( cache
         //    population). Successful results land in the requested
@@ -2967,6 +3011,10 @@ impl SemanticGraphStore {
             } else {
                 Some(&broadcast_carrier)
             };
+        if ctx.is_cancelled() {
+            self.abort_inflight_for_cancellation(&prepared, &inflight);
+            return cancelled_cache_read();
+        }
         if let Some(carrier) = publish_carrier {
             let published = self.warm_publish_one(
                 ctx,
@@ -3038,6 +3086,10 @@ impl SemanticGraphStore {
             if let Some(ctx) = crate::request_context::current_request_context() {
                 ctx.memo_publish_suppressed.fetch_add(1, Ordering::Relaxed);
             }
+        }
+        if ctx.is_cancelled() {
+            self.abort_inflight_for_cancellation(&prepared, &inflight);
+            return cancelled_cache_read();
         }
         {
             // Bubble the build's carrier fact rail into this winner
@@ -3155,6 +3207,35 @@ impl SemanticGraphStore {
         }
     }
 
+    /// Abort and retire one canceled cold owner without publishing a result.
+    /// Joiners observe `aborted`, wake, and re-enter admission with their own
+    /// still-unconsumed build closure. Removal is pointer-guarded so a follower
+    /// that already installed a replacement flight cannot be evicted here.
+    fn abort_inflight_for_cancellation(
+        &self,
+        prepared: &PreparedKeyHandle,
+        inflight: &Arc<InflightEntry>,
+    ) {
+        {
+            let mut state = inflight.state.lock();
+            state.aborted = true;
+            state.completed = None;
+            state.dep_signature = None;
+            state.graph_carrier = None;
+            state.walker_diagnostics = None;
+            state.cache_suppress = true;
+            state.result_is_partial = true;
+        }
+        inflight.ready.notify_all();
+        let mut table = self.inflight.lock();
+        if table
+            .get(prepared)
+            .is_some_and(|entry| Arc::ptr_eq(entry, inflight))
+        {
+            table.remove(prepared);
+        }
+    }
+
     /// Cold-winner publish path. Extracted from
     /// [`Self::execute_cooperative`] step 5 (refactor — pure
     /// extraction, no behaviour change). Skips publish when the result is
@@ -3242,6 +3323,10 @@ impl SemanticGraphStore {
         // Atomic re-check under the entries lock — `state` is briefly
         // locked nested inside `entries`; no AB-BA deadlock risk because
         // no path holds `state` then acquires `entries`.
+        let cancelled = ctx.is_cancelled();
+        if cancelled {
+            inflight.state.lock().aborted = true;
+        }
         let aborted = inflight.state.lock().aborted;
         if aborted {
             drop(entries);
@@ -4055,5 +4140,7 @@ fn record_cold_abort_swept(stats: &AtomicSemanticGraphStats) {
     }
 }
 
+#[cfg(test)]
+mod cancellation_tests;
 #[cfg(test)]
 mod tests;

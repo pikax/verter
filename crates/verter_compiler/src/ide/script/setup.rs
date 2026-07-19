@@ -315,7 +315,6 @@ pub(super) fn process_tsx_script_setup<'alloc>(
     // register their bindings below). No macro spans are ever "damaged" anymore.
     let mut macro_ctx = MacroSourceCtx {
         source,
-        content_str,
         content_start,
         out,
         is_jsx: options.is_jsx,

@@ -273,7 +273,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     result = match self.execute_type_node(SemanticQueryKey::ProjectPath {
                         base: result,
                         path: segments,
-                        context: ProjectionReductionContext::published(ProjectionMode::Navigate),
+                        context: ProjectionReductionContext::published(ProjectionMode::Navigate)
+                            .with_orthogonal_axes_from(context),
                     }) {
                         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
                         _ => {
@@ -595,6 +596,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         context
                     } else {
                         ProjectionReductionContext::structural_transit_with_mode(context.mode)
+                            .with_orthogonal_axes_from(context)
                     };
                     let SemanticNodeData::Conditional { extends, .. } = data.as_ref() else {
                         unreachable!("conditional staging frame must carry a conditional")

@@ -54,15 +54,6 @@ fn expected_imported_root_tuple(
     (canonical_id.to_string(), owner, symbol_name.to_string())
 }
 
-fn declaration_path(
-    owner: verter_type_expr::TopLevelOwnerId,
-    name: &str,
-) -> verter_parser::utils::oxc::script::type_inventory::DeclarationPath {
-    verter_parser::utils::oxc::script::type_inventory::DeclarationPath::root(
-        verter_type_expr::DeclKey::new(owner, name),
-    )
-}
-
 fn upsert_vue(host: &VerterHost, id: &str, src: &str) {
     let _ = host
         .upsert(UpsertRequest {
@@ -627,6 +618,84 @@ export interface CheckboxProps {
         Some(("/workspace/.nuxt/ui/checkbox.ts", "default")),
         "prepared decl caches must rebuild when dependency resolutions improve so later typeof/name-resolution walks do not reopen the raw alias path",
     );
+}
+
+#[test]
+fn prepared_vue_ignore_facts_survive_sfc_and_imported_file_indexing() {
+    use verter_type_expr::facts::VueIgnoredHeritageFact;
+
+    let host = make_host();
+    upsert_vue(
+        &host,
+        "/src/VueIgnore.vue",
+        r#"<script setup lang="ts">
+interface IgnoredProps { ignored: string }
+interface KeptProps { kept: boolean }
+interface Props extends /* @vue-ignore */ IgnoredProps, KeptProps { own: number }
+
+interface IgnoredEmits { ignoredEvent: [value: string] }
+interface KeptEmits { keptEvent: [value: boolean] }
+interface Emits extends /* @vue-ignore */ IgnoredEmits, KeptEmits { ownEvent: [] }
+</script>"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/imported-ignore.ts",
+        r#"
+export interface ImportedBase { importedIgnored: string }
+export interface ImportedProps extends /* @vue-ignore */ ImportedBase {
+  importedOwn: number
+}
+"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/VueIgnoreEdit.vue",
+        r#"<script setup lang="ts">
+interface Base { ignored: string }
+interface Props extends /* @vue-ignore */ Base { own: number }
+defineProps<Props>()
+</script>"#,
+    );
+
+    let expected = [VueIgnoredHeritageFact {
+        contributor_ordinal: 0,
+        intersection_arm_ordinal: 0,
+    }];
+    for (canonical, owner, name) in [
+        (
+            "/src/VueIgnore.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            "Props",
+        ),
+        (
+            "/src/VueIgnore.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            "Emits",
+        ),
+        (
+            "/src/VueIgnoreEdit.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            "Props",
+        ),
+        (
+            "/src/imported-ignore.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "ImportedProps",
+        ),
+    ] {
+        let prepared = crate::resolver_core::ResolverContext::prepared_type_decl(
+            &host, canonical, owner, name,
+        )
+        .expect("exact-owner preparation should succeed")
+        .unwrap_or_else(|| panic!("{canonical}#{name} should prepare"));
+        assert_eq!(prepared.root_identity.owner, owner);
+        assert_eq!(
+            prepared.vue_ignored_heritage.as_ref(),
+            expected,
+            "{canonical}#{name} must retain the exact producer ordinal"
+        );
+    }
 }
 
 #[test]
@@ -2057,15 +2126,9 @@ fn store_view_imported_seed_reuses_cached_source_for_snapshot_and_env() {
     let entry = host
         .ensure_indexed_ready(canonical_id)
         .expect("explicit shallow seeding should load imported dependency state");
-    // external_type_analysis is Arc<AnalyzedExternalTypeSource> (non-optional in IndexedReady);
-    // verify it was populated by checking the analysis has content.
     assert!(
-        entry
-            .external_type_analysis
-            .stats()
-            .top_level_statement_count
-            > 0,
-        "explicit shallow seeding should build external type analysis",
+        entry.route_inventory.counts.top_level_statement_count > 0,
+        "explicit shallow seeding should build the route inventory",
     );
     assert_eq!(
         ws.read_count(canonical_id),
@@ -2217,22 +2280,17 @@ fn store_view_indexed_imported_seed_reuses_cached_source_for_snapshot_and_env() 
         "snapshot materialization should not reread the imported file once indexed state is cached",
     );
 
-    let analysis = host
-        .external_type_analysis(canonical_id)
-        .expect("external type analysis should reuse the indexed imported source");
+    let shallow = host
+        .shallow_file_state(canonical_id)
+        .expect("shallow state should reuse the indexed imported source");
     assert!(
-        analysis
-            .local_type_symbol(&declaration_path(
-                verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                "Alpha",
-            ))
-            .is_some(),
-        "external type analysis should still expose the imported declaration symbol",
+        shallow.has_type_symbol("Alpha"),
+        "memo-owned headers should expose the imported declaration symbol",
     );
     assert_eq!(
         ws.read_count(canonical_id),
         1,
-        "external type analysis should not reread the imported file once indexed state is cached",
+        "shallow state should not reread the imported file once indexed state is cached",
     );
 
     let env = host
@@ -2299,7 +2357,7 @@ fn cached_import_route_resolution_reuses_untracked_current_version_across_epoch_
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn store_view_external_type_analysis_materializes_tracked_imported_dependency_indexed_ready() {
+fn store_view_shallow_state_materializes_tracked_imported_dependency_indexed_ready() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/workspace/src/Consumer.vue",
@@ -2358,9 +2416,9 @@ const emit = defineEmits<PackageEmits>()
     );
 
     assert!(
-        host.external_type_analysis("/workspace/node_modules/pkg/dist/index3.d.ts")
-            .is_some(),
-        "tracked imported declarations should expose external type analysis from the shallow source path",
+        host.shallow_file_state("/workspace/node_modules/pkg/dist/index3.d.ts")
+            .is_some_and(|state| state.has_type_symbol("PackageEmits")),
+        "tracked imported declarations should expose memo-owned shallow headers",
     );
     assert!(
         host.project_type_store.indexed().get_any("/workspace/node_modules/pkg/dist/index3.d.ts")
@@ -2464,10 +2522,9 @@ const answer: string = '42'
     );
     // In the new IndexedReady model, ensure_indexed_ready eagerly builds a
     // full snapshot, so we just verify the facts are present and well-formed.
-    // external_type_analysis is Arc (non-optional) in IndexedReady; verify it has content.
     assert!(
-        promoted.external_type_analysis.stats().top_level_statement_count > 0,
-        "type-resolution reads should seed shallow external type analysis alongside the eval source",
+        promoted.route_inventory.counts.top_level_statement_count > 0,
+        "type-resolution reads should seed routes alongside the eval source",
     );
 }
 
@@ -2516,15 +2573,14 @@ export interface Props extends Base {
         first.script_analysis.is_some() && first.export_signatures.is_some(),
         "cached Vue imported dependency entry should retain script facts alongside the full snapshot for later export-graph reuse",
     );
-    // external_type_analysis is Arc (non-optional) in IndexedReady; verify it has content.
     assert!(
-        first.external_type_analysis.stats().top_level_statement_count > 0,
-        "cached Vue imported dependency entry should eagerly retain external type analysis so later resolver lookups do not reparse",
+        first.route_inventory.counts.top_level_statement_count > 0,
+        "cached Vue imported dependency entry should retain routes so later resolver lookups do not reparse",
     );
 }
 
 #[test]
-fn ensure_indexed_ready_populates_external_type_analysis_for_non_sfc() {
+fn ensure_indexed_ready_populates_routes_for_non_sfc() {
     let host = make_host();
     upsert_non_sfc(
         &host,
@@ -2555,10 +2611,9 @@ fn ensure_indexed_ready_populates_external_type_analysis_for_non_sfc() {
         entry.script_analysis.is_some() && entry.export_signatures.is_some(),
         "non-SFC imported dependency state should retain script facts alongside the full snapshot for later export-graph reuse",
     );
-    // external_type_analysis is Arc (non-optional) in IndexedReady; verify it has content.
     assert!(
-        entry.external_type_analysis.stats().top_level_statement_count > 0,
-        "non-SFC imported dependency state should eagerly retain external type analysis so later resolver lookups stay on cache",
+        entry.route_inventory.counts.top_level_statement_count > 0,
+        "non-SFC imported dependency state should retain routes so later resolver lookups stay on cache",
     );
 }
 
@@ -5644,7 +5699,7 @@ fn resolved_dependency_targets_uses_effective_target() {
 }
 
 #[test]
-fn external_type_analysis_reuses_cached_analysis_for_same_dependency() {
+fn route_inventory_reuses_cached_artifact_for_same_dependency() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/types.ts",
@@ -5662,15 +5717,19 @@ fn external_type_analysis_reuses_cached_analysis_for_same_dependency() {
 
     ws.reset_reads();
     let first = host
-        .external_type_analysis("/src/types.ts")
-        .expect("first analysis should load and cache the dependency");
+        .ensure_indexed_ready("/src/types.ts")
+        .expect("first read should load and cache the dependency");
     let second = host
-        .external_type_analysis("/src/types.ts")
-        .expect("second analysis should reuse the cached dependency analysis");
+        .ensure_indexed_ready("/src/types.ts")
+        .expect("second read should reuse the cached dependency artifact");
 
     assert!(
-        Arc::ptr_eq(&first, &second),
-        "repeated dependency analysis should reuse the cached analysis object",
+        Arc::ptr_eq(&first.route_inventory, &second.route_inventory),
+        "repeated dependency reads should reuse the cached route inventory",
+    );
+    assert!(
+        Arc::ptr_eq(&first.route_inventory, &first.shallow_state.route_inventory),
+        "the artifact and shallow state must share one canonical route inventory",
     );
     assert_eq!(
         ws.read_count("/src/types.ts"),
@@ -5680,7 +5739,41 @@ fn external_type_analysis_reuses_cached_analysis_for_same_dependency() {
 }
 
 #[test]
-fn external_type_analysis_prefers_declaration_companion_for_runtime_js_dependencies() {
+fn route_inventory_is_replaced_atomically_after_content_edit() {
+    let host = make_host();
+    let canonical = "/src/routes.ts";
+    upsert_non_sfc(
+        &host,
+        canonical,
+        "import type { A } from './a'; export type Public = A;\n",
+    );
+    let before = host
+        .ensure_indexed_ready(canonical)
+        .expect("initial route artifact must materialize");
+    assert_eq!(before.route_inventory.imports[0].source, "./a");
+
+    upsert_non_sfc(
+        &host,
+        canonical,
+        "import type { B } from './b'; export type Public = B;\n",
+    );
+    let after = host
+        .ensure_indexed_ready(canonical)
+        .expect("edited route artifact must rematerialize");
+
+    assert!(!Arc::ptr_eq(
+        &before.route_inventory,
+        &after.route_inventory
+    ));
+    assert_eq!(after.route_inventory.imports[0].source, "./b");
+    assert!(Arc::ptr_eq(
+        &after.route_inventory,
+        &after.shallow_state.route_inventory
+    ));
+}
+
+#[test]
+fn shallow_state_prefers_declaration_companion_for_runtime_js_dependencies() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -5695,18 +5788,13 @@ fn external_type_analysis_prefers_declaration_companion_for_runtime_js_dependenc
 
     let host = VerterHost::new(HostConfig::default(), ws);
 
-    let analysis = host
-        .external_type_analysis("/workspace/node_modules/pkg/dist/index.js")
-        .expect("runtime-script analysis requests should prefer the declaration companion");
+    let state = host
+        .shallow_file_state("/workspace/node_modules/pkg/dist/index.js")
+        .expect("runtime-script shallow requests should prefer the declaration companion");
 
     assert!(
-        analysis
-            .local_symbol_span(&declaration_path(
-                verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                "Props",
-            ))
-            .is_some(),
-        "the declaration companion analysis should expose declaration symbols",
+        state.has_type_symbol("Props"),
+        "the declaration companion headers should expose declaration symbols",
     );
 
     // In the new IndexedReady DB, ensure_indexed_ready normalizes .js → .d.ts
@@ -5715,14 +5803,13 @@ fn external_type_analysis_prefers_declaration_companion_for_runtime_js_dependenc
     let declaration_entry = host
         .ensure_indexed_ready("/workspace/node_modules/pkg/dist/index.d.ts")
         .expect("the declaration companion should own the cached analysis");
-    // external_type_analysis is Arc (non-optional) in IndexedReady; verify it has content.
     assert!(
         declaration_entry
-            .external_type_analysis
-            .stats()
+            .route_inventory
+            .counts
             .top_level_statement_count
             > 0,
-        "the declaration companion should cache the analysis surface",
+        "the declaration companion should cache its route inventory",
     );
 }
 
@@ -6769,7 +6856,9 @@ fn non_wildcard_route_fact_retargets_via_edge_refresh_on_warm_host() {
     let warm = VerterHost::new(HostConfig::default(), ws.clone());
 
     // FORCE the indexed surface: bakes `./runtime → runtime/index.ts`.
-    let _ = warm.ensure_indexed_ready(index);
+    let before_refresh = warm
+        .ensure_indexed_ready(index)
+        .expect("initial route artifact must materialize");
     let r1 = warm.resolve_named_type_export_target(index, "Runtime");
     assert_eq!(
         r1,
@@ -6812,6 +6901,20 @@ fn non_wildcard_route_fact_retargets_via_edge_refresh_on_warm_host() {
          edge-refresh (route surface rebuilt, content payload reused; got {})",
         provenance.indexed_ready_edge_refreshes
     );
+    let after_refresh = warm
+        .ensure_indexed_ready(index)
+        .expect("edge-refreshed route artifact must remain published");
+    assert!(
+        Arc::ptr_eq(
+            &before_refresh.route_inventory,
+            &after_refresh.route_inventory
+        ),
+        "edge refresh must reuse the content-addressed route inventory",
+    );
+    assert!(Arc::ptr_eq(
+        &after_refresh.route_inventory,
+        &after_refresh.shallow_state.route_inventory
+    ));
 }
 
 /// Regression pin (dependency APPEARANCE on a NON-wildcard reexport edge):
@@ -6886,9 +6989,8 @@ fn edge_currency_oracle_stales_wildcard_surface_after_generation_advance() {
         ImportRouteOnly,
     }
     let make_artifact = |shape: EdgeShape| {
-        let analysis = Arc::new(
-            verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource::default(
-            ),
+        let routes = Arc::new(
+            verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory::default(),
         );
         let mut exports = FxHashMap::default();
         let mut wildcard_reexports = Vec::new();
@@ -6940,14 +7042,13 @@ fn edge_currency_oracle_stales_wildcard_surface_after_generation_advance() {
             wildcard_reexports,
             FxHashSet::default(),
             import_targets,
-            Arc::clone(&analysis),
+            Arc::clone(&routes),
         );
         let mut artifact = crate::project_type_store::IndexedReady::new_for_test_with_state(
             [7u8; 16],
             Arc::new(shallow),
             Arc::from(""),
             Arc::from(""),
-            analysis,
         );
         artifact.import_routes = Arc::new(import_routes);
         artifact.edge_generation = baked;
@@ -7222,6 +7323,12 @@ fn overlay_materializer_esm_fallback_normalizes_like_shared_route_edge_policy() 
         .materialize_overlay_indexed_ready_with_view(barrel, &view)
         .expect("overlay materialiser produces an IndexedReady for the overlaid barrel");
 
+    assert!(Arc::ptr_eq(
+        &overlay.route_inventory,
+        &overlay.shallow_state.route_inventory
+    ));
+    assert_eq!(overlay.route_inventory.wildcard_reexports.len(), 1);
+
     let recorded = overlay
         .import_routes
         .get("runtimedep")
@@ -7288,6 +7395,10 @@ fn overlay_materializer_wildcard_reuse_retargets_after_base_file_set_change() {
     let first = host
         .materialize_overlay_indexed_ready_with_view(barrel, &view)
         .expect("overlay materialiser produces an IndexedReady");
+    assert!(Arc::ptr_eq(
+        &first.route_inventory,
+        &first.shallow_state.route_inventory
+    ));
     assert_eq!(
         first
             .import_routes
@@ -7326,6 +7437,10 @@ fn overlay_materializer_wildcard_reuse_retargets_after_base_file_set_change() {
     let warm = host
         .materialize_overlay_indexed_ready_with_view(barrel, &view)
         .expect("warm overlay materialiser produces an IndexedReady");
+    assert!(Arc::ptr_eq(
+        &warm.route_inventory,
+        &warm.shallow_state.route_inventory
+    ));
     let warm_target = warm
         .import_routes
         .get("./runtime")
@@ -8083,7 +8198,7 @@ fn read_analysis_source_and_current_eval_state_ignore_raw_import_specifiers() {
 }
 
 #[test]
-fn external_type_analysis_uses_eval_source_for_vue_dependencies() {
+fn shallow_index_uses_eval_source_for_vue_dependencies() {
     let host = make_host();
     upsert_non_sfc(
         &host,
@@ -8107,51 +8222,39 @@ export interface Props extends Base {
         vec![exact_dependency("./base", "/src/base.ts")],
     );
 
-    let analysis = host
-        .external_type_analysis("/src/types.vue")
-        .expect("vue dependency analysis should be built from the script/eval source");
+    let indexed = host
+        .ensure_indexed_ready("/src/types.vue")
+        .expect("vue shallow index should be built from the script/eval source");
 
     assert!(
-        analysis
-            .local_symbol_span(&declaration_path(
-                verter_type_expr::TopLevelOwnerId::module(0),
-                "Props",
-            ))
-            .is_some(),
-        "vue dependency analysis should see local type symbols in the script block",
+        indexed
+            .shallow_state
+            .has_type_symbol_in(verter_type_expr::TopLevelOwnerId::module(0), "Props"),
+        "vue shallow headers should see local type symbols in the script block",
     );
-    let base_binding = analysis
-        .local_import_symbol_target(&verter_type_expr::DeclKey::new(
-            verter_type_expr::TopLevelOwnerId::module(0),
-            "Base",
-        ))
+    let base_binding = indexed
+        .shallow_state
+        .import_target_in(verter_type_expr::TopLevelOwnerId::module(0), "Base")
         .expect("the module script import must retain its exact owner-qualified binding");
-    assert_eq!(base_binding.source, "./base");
+    assert_eq!(base_binding.source_specifier, "./base");
     assert_eq!(
-        base_binding.imported,
-        verter_parser::utils::oxc::script::type_inventory::ImportedExportPath::Symbol(
-            verter_type_expr::facts::TypeDependencyPathFact::from_segments(["Base"])
-                .expect("Base is a valid dependency path"),
-        ),
-        "vue dependency analysis should keep the exact imported export path",
+        base_binding.imported_name, "Base",
+        "vue shallow routes should keep the exact imported export name",
     );
     // Required imported names are a BODY-dependent product: they
     // demand-walk through the artifact's shallow state (lazy
     // declaration-body memo), still over the script/eval source.
-    let indexed = host
-        .ensure_indexed_ready("/src/types.vue")
-        .expect("vue artifact must materialise");
     assert!(
         indexed
             .shallow_state
-            .required_import_names("Props")
+            .required_import_names_in(verter_type_expr::TopLevelOwnerId::module(0), "Props")
             .contains("Base"),
         "vue dependency demand-walk should compute required imported names from the script block",
     );
 }
 
 #[test]
-fn external_type_analysis_preserves_vue_tsx_source_type() {
+fn shallow_index_preserves_vue_tsx_source_type() {
     let host = make_host();
     upsert_vue(
         &host,
@@ -8166,43 +8269,33 @@ export type Props = {
 <template><div /></template>"#,
     );
 
-    let analysis = host
-        .external_type_analysis("/src/types.vue")
-        .expect("tsx vue dependency analysis should be built from the script block");
+    let indexed = host
+        .ensure_indexed_ready("/src/types.vue")
+        .expect("tsx vue shallow index should be built from the script block");
+    let state = &indexed.shallow_state;
 
     assert!(
-        analysis
-            .local_symbol_span(&declaration_path(
-                verter_type_expr::TopLevelOwnerId::module(0),
-                "Props",
-            ))
-            .is_some(),
+        state.has_type_symbol_in(verter_type_expr::TopLevelOwnerId::module(0), "Props"),
         "tsx shallow analysis should retain exported type symbols from the script block",
     );
     assert!(
-        analysis
-            .local_import_symbol_target(&verter_type_expr::DeclKey::new(
-                verter_type_expr::TopLevelOwnerId::module(0),
-                "Button",
-            ))
+        state
+            .import_target_in(verter_type_expr::TopLevelOwnerId::module(0), "Button")
             .is_none(),
         "tsx shallow analysis should not invent import targets for local JSX-bearing bindings",
     );
     assert!(
-        analysis
-            .direct_reexport_target(&verter_type_expr::DeclKey::new(
-                verter_type_expr::TopLevelOwnerId::module(0),
-                "Props",
-            ))
-            .is_none(),
+        matches!(
+            state.export_target("Props"),
+            Some(crate::resolver_core::ExportTarget::Local { owner, symbol_name })
+                if *owner == verter_type_expr::TopLevelOwnerId::module(0)
+                    && symbol_name == "Props"
+        ),
         "local tsx exports should stay local instead of being routed through synthetic reexport edges",
     );
     assert!(
-        analysis
-            .required_import_bindings(&declaration_path(
-                verter_type_expr::TopLevelOwnerId::module(0),
-                "Props",
-            ))
+        state
+            .required_import_names_in(verter_type_expr::TopLevelOwnerId::module(0), "Props")
             .is_empty(),
         "local tsx-only types should not invent import dependencies",
     );
@@ -8413,22 +8506,21 @@ fn resolve_named_type_export_target_seeds_shallow_dependency_state_without_snaps
         .ensure_indexed_ready("/src/types.ts")
         .expect("target file should be cached after routing");
 
-    // external_type_analysis is Arc (non-optional) in IndexedReady; verify it has content.
     assert!(
         barrel_entry
-            .external_type_analysis
-            .stats()
+            .route_inventory
+            .counts
             .top_level_statement_count
             > 0,
-        "barrel routing should seed shallow external type analysis for the imported barrel file",
+        "barrel routing should seed routes for the imported barrel file",
     );
     assert!(
         target_entry
-            .external_type_analysis
-            .stats()
+            .route_inventory
+            .counts
             .top_level_statement_count
             > 0,
-        "barrel routing should seed shallow external type analysis for the resolved target file",
+        "barrel routing should seed routes for the resolved target file",
     );
     // In the new IndexedReady DB, ensure_indexed_ready eagerly builds
     // full snapshots. The shallowness constraint applies to the internal routing,
@@ -9608,24 +9700,16 @@ export interface LinkProps {
         .ensure_indexed_ready("/src/types.ts")
         .expect("barrel should be cached after routing");
     assert!(
-        barrel
-            .external_type_analysis
-            .stats()
-            .top_level_statement_count
-            > 0,
-        "barrel routing should keep only shallow external type analysis in cache",
+        barrel.route_inventory.counts.top_level_statement_count > 0,
+        "barrel routing should keep shallow routes in cache",
     );
 
     let child = host
         .ensure_indexed_ready("/src/Link.vue")
         .expect("matched child should be cached after routing");
     assert!(
-        child
-            .external_type_analysis
-            .stats()
-            .top_level_statement_count
-            > 0,
-        "matched child should be cached through shallow external type analysis",
+        child.route_inventory.counts.top_level_statement_count > 0,
+        "matched child should be cached through the shallow index",
     );
 }
 

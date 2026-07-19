@@ -31,13 +31,6 @@ use verter_session::file_artifact_store::InternedSpecifier;
 use verter_session::project_type_store::IndexedReady;
 use verter_session::resolver_core::shallow_file_state::ShallowFileState;
 
-fn empty_external(
-) -> Arc<verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource> {
-    Arc::new(
-        verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource::default(),
-    )
-}
-
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -71,7 +64,6 @@ fn build_indexed_with_source(raw: &str) -> Arc<IndexedReady> {
         shallow,
         Arc::from(raw),
         Arc::from(raw),
-        empty_external(),
     ))
 }
 

@@ -768,6 +768,72 @@ pub struct SessionDemandIdentity {
     pub route: SessionDemandRoute,
 }
 
+/// Content-free root route for one broad-runtime classification.
+///
+/// The route starts at the owning SFC's macro hot-mirror slot and either
+/// classifies the payload itself (`defineModel`) or one named public member of
+/// the runtime props surface. It contains no graph handle, content hash, span,
+/// or rendered/source text. The live carrier is re-sourced from the owning
+/// artifact when [`SemanticQueryKey::ClassifyBroadRuntime`](crate::semantic_query::SemanticQueryKey::ClassifyBroadRuntime)
+/// executes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BroadRuntimeSubjectLocator {
+    owner: ResolvedDeclSlotIdentity,
+    macro_index: u32,
+    route: BroadRuntimeSubjectRoute,
+}
+
+/// Typed terminal below a [`BroadRuntimeSubjectLocator`]'s macro payload.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BroadRuntimeSubjectRoute {
+    /// Classify the effective macro payload itself.
+    Payload,
+    /// Classify one exact public runtime-props member.
+    Member(Arc<str>),
+}
+
+impl BroadRuntimeSubjectLocator {
+    /// Construct a macro-payload root route. `owner` is the env-bearing,
+    /// content-free SFC setup slot; `macro_index` is the analyzed macro's
+    /// source-order ordinal.
+    #[must_use]
+    pub(crate) fn payload(owner: ResolvedDeclSlotIdentity, macro_index: u32) -> Self {
+        Self {
+            owner,
+            macro_index,
+            route: BroadRuntimeSubjectRoute::Payload,
+        }
+    }
+
+    /// Derive an exact member route from this payload root.
+    #[must_use]
+    pub(crate) fn member(&self, name: Arc<str>) -> Self {
+        Self {
+            owner: self.owner.clone(),
+            macro_index: self.macro_index,
+            route: BroadRuntimeSubjectRoute::Member(name),
+        }
+    }
+
+    /// The env-bearing, content-free macro owner slot.
+    #[must_use]
+    pub(crate) fn owner(&self) -> &ResolvedDeclSlotIdentity {
+        &self.owner
+    }
+
+    /// Source-order analyzed macro ordinal.
+    #[must_use]
+    pub(crate) const fn macro_index(&self) -> u32 {
+        self.macro_index
+    }
+
+    /// Typed terminal below the macro payload.
+    #[must_use]
+    pub(crate) fn route(&self) -> &BroadRuntimeSubjectRoute {
+        &self.route
+    }
+}
+
 // `SessionDemandIdentity` is content-free / env-free / session-only. It does NOT
 // lower via `LocatorLoweringKey`, but it IS still a keyable identity, so it gets
 // the same exhaustive-destructure R6-key-safe witnesses (each stamp bound to its
@@ -776,6 +842,8 @@ impl_r6_key_safe!(
     SessionDemandOwner => w_session_demand_owner,
     SessionDemandRoute => w_session_demand_route,
     SessionDemandIdentity => w_session_demand_identity,
+    BroadRuntimeSubjectRoute => w_broad_runtime_subject_route,
+    BroadRuntimeSubjectLocator => w_broad_runtime_subject_locator,
 );
 
 fn w_session_demand_owner(o: &SessionDemandOwner) {
@@ -804,6 +872,24 @@ fn w_session_demand_identity(d: &SessionDemandIdentity) {
     key_safe(route);
 }
 
+fn w_broad_runtime_subject_route(route: &BroadRuntimeSubjectRoute) {
+    match route {
+        BroadRuntimeSubjectRoute::Payload => {}
+        BroadRuntimeSubjectRoute::Member(name) => key_safe(name),
+    }
+}
+
+fn w_broad_runtime_subject_locator(locator: &BroadRuntimeSubjectLocator) {
+    let BroadRuntimeSubjectLocator {
+        owner,
+        macro_index,
+        route,
+    } = locator;
+    key_safe(owner);
+    key_safe(macro_index);
+    key_safe(route);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -823,6 +909,7 @@ mod tests {
         // key-safe. (A forbidden dimension — standalone or nested — fails these
         // bounds; that negative is proven by the trybuild compile-fail fixtures.)
         assert_r6_key_safe::<LocatorLoweringKey>();
+        assert_r6_key_safe::<BroadRuntimeSubjectLocator>();
         assert_r6_key_safe::<AuthoredBodyLocator>();
         assert_r6_key_safe::<TopLevelOwnerId>();
         assert_r6_key_safe::<TypeParamBoundPosition>();

@@ -174,6 +174,9 @@ pub struct CompileBatchRenderProfile {
     pub filename: Option<String>,
     /// Production codegen — strips dev-only code (`__file`, HMR).
     pub is_production: bool,
+    /// Vue custom-element script policy. Required explicitly on the render
+    /// lane and independent of template `custom_elements`.
+    pub custom_element: bool,
     /// Server-side render function selection.
     pub ssr: bool,
     /// TS type-stripping (plain-JS output).
@@ -256,14 +259,13 @@ pub enum CompileManyTarget {
 }
 
 /// Bundler-default compile profile preset: production codegen, no SSR, no
-/// HMR. This is the EXPLICIT fallback the `RuntimeRender` lane uses when
-/// [`CompileBatchOptions::render_profile`] is `None` — it is NOT hidden
-/// policy for every `compile_many` call. When a caller supplies a
-/// [`CompileBatchRenderProfile`], the lane builds its profile from that
-/// instead (see [`render_base_profile`]).
+/// HMR, and non-custom-element script policy. The HostBacked batch lane uses
+/// this explicit preset. RuntimeRender instead requires and projects a
+/// [`CompileBatchRenderProfile`] through [`render_base_profile`].
 pub fn compile_profile_for_bundler() -> CompileProfile {
     CompileProfile {
         is_production: true,
+        custom_element: false,
         ssr: false,
         ..CompileProfile::default()
     }
@@ -293,6 +295,7 @@ fn render_base_profile(rp: &CompileBatchRenderProfile) -> CompileProfile {
     let mut profile = CompileProfile {
         filename: rp.filename.clone(),
         is_production: rp.is_production,
+        custom_element: rp.custom_element,
         ssr: rp.ssr,
         force_js: rp.force_js,
         force_vapor: rp.force_vapor,

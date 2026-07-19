@@ -454,6 +454,7 @@ impl CarrierCompiler for VueCarrierCompiler {
         let core_opts = CodegenOptions {
             filename: opts.filename.clone(),
             is_production: opts.is_production,
+            custom_element: opts.custom_element,
             // The host always assembles a standalone `function render()` via
             // its main-module assembly, so inline mode is off (otherwise the
             // template emits bare identifiers missing the `$setup.` prefix).

@@ -25,8 +25,8 @@ use oxc_ast::ast::Program;
 
 pub use macros::{
     detect_macro_kind, is_define_component, MacroArrayArg, MacroArrayElement, MacroDeclarator,
-    MacroObjectArg, MacroProperty, MacroTypeParams, RuntimeConstructorSyntax, ScriptMacro,
-    VueMacroKind,
+    MacroObjectArg, MacroObjectStaticEligibility, MacroProperty, MacroTypeParams,
+    RuntimeConstructorSyntax, ScriptMacro, VueMacroKind,
 };
 pub use setup::{extract_options_component_macro_args, OptionsComponentMacroArgs};
 pub use shared::ScriptParseContext;

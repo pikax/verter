@@ -18,7 +18,10 @@ use crate::script::prepared::{PreparedCompanion, PreparedScript};
 use crate::template::code_gen::binding::BindingType;
 use crate::utils::oxc::vue::{AsyncKind, ImportSpecifierKind, ScriptImport, ScriptItem};
 
-use super::macros::{process_companion_script, process_macro_item, MacroState, StrippedSections};
+use super::macros::{
+    js_string_literal, process_companion_script, process_macro_item, push_runtime_prop_key,
+    MacroState, StrippedSections,
+};
 use super::{ScriptCodeGenOptions, ScriptContext};
 
 /// Determine OXC SourceType from a script block's `lang` attribute.
@@ -176,6 +179,7 @@ pub fn process_script_setup<'alloc>(
                     stripped_sections.as_ref(),
                     options.macro_runtime,
                     options.is_production,
+                    options.custom_element,
                 );
                 macro_syntax_index = macro_syntax_index.saturating_add(1);
             }
@@ -274,11 +278,11 @@ pub fn process_script_setup<'alloc>(
                 model_props_obj.push_str(",\n");
             }
             model_props_obj.push_str("    ");
-            model_props_obj.push_str(&model.prop_name);
+            push_runtime_prop_key(&mut model_props_obj, &model.prop_name);
             model_props_obj.push_str(": ");
             model_props_obj.push_str(&model.prop_options);
             model_props_obj.push_str(",\n    ");
-            model_props_obj.push_str(&model.modifiers_name);
+            push_runtime_prop_key(&mut model_props_obj, &model.modifiers_name);
             model_props_obj.push_str(": {}");
         }
         model_props_obj.push_str("\n  }");
@@ -302,7 +306,7 @@ pub fn process_script_setup<'alloc>(
         let model_emits: Vec<String> = macro_state
             .models
             .iter()
-            .map(|model| format!("\"{}\"", model.update_event))
+            .map(|model| js_string_literal(&model.update_event))
             .collect();
         let model_emits_arr = format!("[{}]", model_emits.join(", "));
 

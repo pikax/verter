@@ -16,9 +16,11 @@
 #[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct TestForceKnobs {
-    /// Injects one scheduler-counter increment inside the Vue macro-codegen
-    /// request scope so the scheduling witness is mutation-discriminating.
-    pub(crate) vue_macro_codegen_scheduler_submission_for_tests: std::sync::atomic::AtomicBool,
+    /// Deterministic entry/release rendezvous for the once-per-SFC Vue macro
+    /// scheduled closure. The first barrier reports that the winner entered;
+    /// the second holds it while a sibling joins and the winner is cancelled.
+    pub(crate) vue_macro_codegen_build_rendezvous:
+        parking_lot::Mutex<Option<std::sync::Arc<(std::sync::Barrier, std::sync::Barrier)>>>,
     /// Observations of the session-wrapper operations that runtime-render
     /// compilation must bypass. Host-backed compilation is the firing control.
     pub(crate) wrapper_source_clone_count: std::sync::atomic::AtomicUsize,

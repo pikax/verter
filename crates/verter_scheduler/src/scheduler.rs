@@ -4,6 +4,8 @@
 //! requests via [`submit_request`](Scheduler::submit_request), which returns
 //! a [`CompletionHandle`] that resolves when the target stage is reached.
 
+use std::any::Any;
+use std::collections::HashMap;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -14,12 +16,12 @@ use std::time::Instant;
 use web_time::Instant;
 
 use dashmap::DashMap;
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 
-use crate::cancellation::CancellationToken;
+use crate::cancellation::{CancellationOwner, CancellationToken};
 use crate::dag::{
     profile_hash_from_bytes, profile_hash_to_bytes, DagCapacityBudget, DedupJoinerEvent, DepKey,
-    FileStageKey, ReadyJob, SchedulerDag, WorkKind, WorkNodeIdentity,
+    FileStageKey, Hash16, PinId, ReadyJob, SchedulerDag, WorkKind, WorkNodeIdentity,
 };
 use crate::driver::{QueuedRequest, Submission, SubmissionInbox};
 use crate::edges::EdgeManager;
@@ -191,6 +193,8 @@ fn dispatch_ready_job_to_executor(
     dag: Arc<Mutex<SchedulerDag>>,
     cancellation: &CancellationToken,
 ) {
+    let _cancellation_guard =
+        crate::cancellation::JobCancellationGuard::install(cancellation.clone());
     match (&job.kind, &job.identity) {
         // Cache-node work routes straight to the cache-materialisation hook,
         // taking the full identity directly: `cache_id` + `key_hash` ride the
@@ -573,6 +577,220 @@ pub struct Request {
     pub request_context: Option<crate::request_context::OpaqueRequestContext>,
 }
 
+/// Typed admission parameters for one synchronous borrowed cache-node
+/// producer. The four identity fields are the complete DAG dedup key; callers
+/// must use a cache id whose value type is stable for that identity domain.
+#[derive(Clone, Debug)]
+pub struct ScopedCacheNodeRequest {
+    /// Session-owned cache family discriminator.
+    pub cache_id: crate::cache_id::SchedulerCacheId,
+    /// Stable hash of the semantic producer key.
+    pub key_hash: Hash16,
+    /// Resolver/view epoch observed by the producer.
+    pub view_epoch: u64,
+    /// Snapshot pin that prevents cross-snapshot joins.
+    pub snapshot_pin_id: PinId,
+    /// Scheduling priority used by normal DAG lane admission.
+    pub priority: Priority,
+    /// Optional per-request context used for cancellation and TLS attribution.
+    pub request_context: Option<crate::request_context::OpaqueRequestContext>,
+}
+
+impl ScopedCacheNodeRequest {
+    fn identity(&self) -> WorkNodeIdentity {
+        WorkNodeIdentity::CacheNode {
+            cache_id: self.cache_id,
+            key_hash: self.key_hash,
+            view_epoch: self.view_epoch,
+            snapshot_pin_id: self.snapshot_pin_id,
+        }
+    }
+}
+
+/// Terminal failures from [`Scheduler::execute_scoped_cache_node`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScopedCacheNodeError {
+    /// This request was cancelled, or every owner of the shared job left.
+    Cancelled,
+    /// The scheduler shut down or reset before publication.
+    Shutdown,
+    /// The producer panicked. The unwind is contained at the scheduler rail.
+    Panicked,
+    /// The same typed identity was used concurrently for different value types.
+    TypeMismatch,
+}
+
+#[derive(Clone)]
+enum ScopedCacheTerminal {
+    Value(Arc<dyn Any + Send + Sync>),
+    Cancelled,
+    Shutdown,
+    Panicked,
+}
+
+struct ScopedFlightOwner {
+    request: Option<CancellationToken>,
+    aggregate_registration: Option<CancellationOwner>,
+}
+
+#[derive(Default)]
+struct ScopedCacheFlightState {
+    owners: HashMap<u64, ScopedFlightOwner>,
+    aggregate: Option<CancellationToken>,
+    dispatched: bool,
+    builder_claimed: bool,
+    terminal: Option<ScopedCacheTerminal>,
+}
+
+/// Shared scheduler-side rendezvous for one overlapping scoped cache-node
+/// flight. The borrowed producer closure never lives here; exactly one waiting
+/// caller claims execution after the DAG dispatches this flight.
+#[doc(hidden)]
+pub struct ScopedCacheFlight {
+    state: Mutex<ScopedCacheFlightState>,
+    changed: Condvar,
+}
+
+impl ScopedCacheFlight {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(ScopedCacheFlightState::default()),
+            changed: Condvar::new(),
+        }
+    }
+
+    /// Attach an owner before its inbox submission. Returns `false` only when
+    /// this flight is already terminal (including an aggregate token that has
+    /// latched cancellation); the caller must retry against a fresh flight.
+    fn try_add_owner(&self, owner_id: u64, request: Option<CancellationToken>) -> bool {
+        let mut state = self.state.lock();
+        if state.terminal.is_some() {
+            return false;
+        }
+        let aggregate_registration = match state.aggregate.as_ref() {
+            Some(aggregate) => match aggregate.register_owner(request.clone()) {
+                Some(registration) => Some(registration),
+                None => {
+                    state.terminal = Some(ScopedCacheTerminal::Cancelled);
+                    state.owners.clear();
+                    self.changed.notify_all();
+                    return false;
+                }
+            },
+            None => None,
+        };
+        let prior = state.owners.insert(
+            owner_id,
+            ScopedFlightOwner {
+                request,
+                aggregate_registration,
+            },
+        );
+        debug_assert!(prior.is_none(), "scoped owner ids are process-unique");
+        true
+    }
+
+    /// Bind the DAG node's aggregate token to every owner that arrived before
+    /// admission. Later owners register directly in [`Self::try_add_owner`].
+    fn attach_aggregate(&self, aggregate: CancellationToken) -> bool {
+        let mut state = self.state.lock();
+        if state.terminal.is_some() {
+            return false;
+        }
+        if state.aggregate.is_some() {
+            return true;
+        }
+        for owner in state.owners.values_mut() {
+            let Some(registration) = aggregate.register_owner(owner.request.clone()) else {
+                state.terminal = Some(ScopedCacheTerminal::Cancelled);
+                state.owners.clear();
+                self.changed.notify_all();
+                return false;
+            };
+            owner.aggregate_registration = Some(registration);
+        }
+        state.aggregate = Some(aggregate);
+        true
+    }
+
+    /// Remove one request owner. Returns `true` when this transition made the
+    /// flight terminal-cancelled and its DAG node must be cancelled.
+    fn detach_owner(&self, owner_id: u64) -> bool {
+        let mut state = self.state.lock();
+        state.owners.remove(&owner_id);
+        if state.terminal.is_some() {
+            return false;
+        }
+        let no_live_owner = state.owners.is_empty()
+            || state
+                .aggregate
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled);
+        if !no_live_owner {
+            return false;
+        }
+        state.terminal = Some(ScopedCacheTerminal::Cancelled);
+        state.owners.clear();
+        self.changed.notify_all();
+        true
+    }
+
+    /// Signal that normal DAG dispatch selected this flight. No closure runs on
+    /// the driver; one waiting caller claims it and executes on the CPU pool.
+    fn mark_dispatched(&self, aggregate: CancellationToken) -> bool {
+        let mut state = self.state.lock();
+        if state.terminal.is_some() || aggregate.is_cancelled() {
+            if state.terminal.is_none() {
+                state.terminal = Some(ScopedCacheTerminal::Cancelled);
+                state.owners.clear();
+                self.changed.notify_all();
+            }
+            return false;
+        }
+        state.aggregate.get_or_insert(aggregate);
+        state.dispatched = true;
+        self.changed.notify_all();
+        true
+    }
+
+    fn try_claim_builder(&self) -> Option<CancellationToken> {
+        let mut state = self.state.lock();
+        if state.terminal.is_some() || !state.dispatched || state.builder_claimed {
+            return None;
+        }
+        let aggregate = state.aggregate.clone()?;
+        state.builder_claimed = true;
+        Some(aggregate)
+    }
+
+    fn terminal(&self) -> Option<ScopedCacheTerminal> {
+        self.state.lock().terminal.clone()
+    }
+
+    fn set_terminal(&self, terminal: ScopedCacheTerminal) -> bool {
+        let mut state = self.state.lock();
+        if state.terminal.is_some() {
+            return false;
+        }
+        state.terminal = Some(terminal);
+        state.owners.clear();
+        self.changed.notify_all();
+        true
+    }
+
+    fn wait_for_change(&self, timeout: std::time::Duration) {
+        let mut state = self.state.lock();
+        if state.terminal.is_none() && !(state.dispatched && !state.builder_claimed) {
+            self.changed.wait_for(&mut state, timeout);
+        }
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    fn owner_count(&self) -> usize {
+        self.state.lock().owners.len()
+    }
+}
+
 /// Typed result of a submission attempt.
 ///
 /// Generic over the success-handle type `T` (the handle the submission
@@ -732,6 +950,9 @@ pub(crate) enum DispatchOutcome {
     SubmittedToPool,
     /// The job ran inline on the calling thread.
     ExecutedInline,
+    /// A scoped borrowed cache-node flight was selected by the DAG. The
+    /// driver signalled its waiting callers; one of them executes the closure.
+    DeferredScoped,
     /// The job was skipped (defensive cases: CacheNode, removed
     /// node, generation mismatch).
     Skipped,
@@ -753,6 +974,15 @@ pub struct Scheduler {
     /// Wrapped in `Arc` so worker closures can clone a handle for
     /// completion signalling without holding `&self`.
     pub(crate) dag: Arc<Mutex<SchedulerDag>>,
+    /// Overlapping borrowed cache-node calls keyed by their full DAG identity.
+    /// Values are request-scoped rendezvous only, never durable cache entries.
+    scoped_cache_flights: DashMap<WorkNodeIdentity, Arc<ScopedCacheFlight>>,
+    /// Serializes scoped-flight registry replacement with DAG admission and
+    /// terminal removal, preventing a stale inbox item from joining/cancelling
+    /// a newer flight that reused the same identity.
+    scoped_cache_gate: Mutex<()>,
+    /// Process-local owner id source for aggregate job-liveness registrations.
+    next_scoped_owner_id: AtomicU64,
     /// Lock-free inbox for submissions.
     pub(crate) inbox: SubmissionInbox,
     /// Current resolver snapshot (atomically swappable).
@@ -1004,6 +1234,9 @@ impl Scheduler {
             dag: Arc::new(Mutex::new(SchedulerDag::with_budget(
                 config.resolved_dag_budget(),
             ))),
+            scoped_cache_flights: DashMap::new(),
+            scoped_cache_gate: Mutex::new(()),
+            next_scoped_owner_id: AtomicU64::new(1),
             inbox: SubmissionInbox::new(),
             overlay: Arc::new(OverlayMap::new()),
             source_loader,
@@ -1090,6 +1323,9 @@ impl Scheduler {
             dag: Arc::new(Mutex::new(SchedulerDag::with_budget(
                 config.resolved_dag_budget(),
             ))),
+            scoped_cache_flights: DashMap::new(),
+            scoped_cache_gate: Mutex::new(()),
+            next_scoped_owner_id: AtomicU64::new(1),
             inbox: SubmissionInbox::new(),
             overlay: Arc::new(OverlayMap::new()),
             source_loader,
@@ -1211,6 +1447,274 @@ impl Scheduler {
     }
 
     // ── Request Submission ──
+
+    /// Execute one request-scoped borrowed producer through normal cache-node
+    /// DAG admission, deduplicating overlapping calls by the request's full
+    /// typed identity.
+    ///
+    /// The closure is intentionally synchronous and need not be `'static`:
+    /// after DAG dispatch, exactly one waiting caller runs its closure on the
+    /// scheduler CPU pool via a scoped `install`; every overlapping caller
+    /// receives the same `Arc<T>`. The rendezvous is removed at terminal state,
+    /// so this API never becomes a second durable cache authority.
+    pub fn execute_scoped_cache_node<T, F>(
+        self: &Arc<Self>,
+        request: ScopedCacheNodeRequest,
+        build: F,
+    ) -> Result<Arc<T>, ScopedCacheNodeError>
+    where
+        T: Send + Sync + 'static,
+        F: FnOnce(&CancellationToken) -> T + Send,
+    {
+        let request_token = request
+            .request_context
+            .as_ref()
+            .and_then(|context| context.0.cancellation_token());
+        if request_token
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(ScopedCacheNodeError::Cancelled);
+        }
+
+        let identity = request.identity();
+        let owner_id = self.next_scoped_owner_id.fetch_add(1, Ordering::Relaxed);
+        let flight = {
+            let _gate = self.scoped_cache_gate.lock();
+            loop {
+                let candidate = match self.scoped_cache_flights.entry(identity.clone()) {
+                    dashmap::mapref::entry::Entry::Occupied(entry) => Arc::clone(entry.get()),
+                    dashmap::mapref::entry::Entry::Vacant(entry) => {
+                        let flight = Arc::new(ScopedCacheFlight::new());
+                        entry.insert(Arc::clone(&flight));
+                        flight
+                    }
+                };
+                if candidate.try_add_owner(owner_id, request_token.clone()) {
+                    break candidate;
+                }
+                // A terminal/latched flight cannot accept a new owner. Remove
+                // only that exact incarnation, cancel any stale DAG identity,
+                // and retry against a fresh rendezvous.
+                let _ = self.dag.lock().cancel(&identity);
+                self.remove_scoped_flight_locked(&identity, &candidate);
+            }
+        };
+
+        let submission = Submission::ScopedCacheNode {
+            identity: identity.clone(),
+            priority: request.priority,
+            flight: Arc::clone(&flight),
+            request_context: request.request_context.clone(),
+        };
+        if self.inbox.sender.send(submission).is_err() {
+            self.terminalize_scoped_cache_flight(
+                &identity,
+                &flight,
+                ScopedCacheTerminal::Shutdown,
+                false,
+            );
+        } else {
+            self.counters.submit_count.fetch_add(1, Ordering::Relaxed);
+            self.counters
+                .inbox_depth_max
+                .fetch_max(self.inbox.sender.len() as u64, Ordering::Relaxed);
+        }
+
+        let result = self.wait_for_scoped_cache_node(
+            &identity,
+            &flight,
+            request.request_context,
+            request_token.clone(),
+            build,
+        );
+        self.detach_scoped_cache_owner(&identity, &flight, owner_id);
+        if request_token
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            Err(ScopedCacheNodeError::Cancelled)
+        } else {
+            result
+        }
+    }
+
+    fn wait_for_scoped_cache_node<T, F>(
+        self: &Arc<Self>,
+        identity: &WorkNodeIdentity,
+        flight: &Arc<ScopedCacheFlight>,
+        request_context: Option<crate::request_context::OpaqueRequestContext>,
+        request_token: Option<CancellationToken>,
+        build: F,
+    ) -> Result<Arc<T>, ScopedCacheNodeError>
+    where
+        T: Send + Sync + 'static,
+        F: FnOnce(&CancellationToken) -> T + Send,
+    {
+        let mut build = Some(build);
+        loop {
+            if request_token
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+            {
+                return Err(ScopedCacheNodeError::Cancelled);
+            }
+            if self.shutdown.load(Ordering::Acquire) {
+                self.terminalize_scoped_cache_flight(
+                    identity,
+                    flight,
+                    ScopedCacheTerminal::Shutdown,
+                    false,
+                );
+            }
+
+            if let Some(terminal) = flight.terminal() {
+                return match terminal {
+                    ScopedCacheTerminal::Value(value) => {
+                        Arc::downcast::<T>(value).map_err(|_| ScopedCacheNodeError::TypeMismatch)
+                    }
+                    ScopedCacheTerminal::Cancelled => Err(ScopedCacheNodeError::Cancelled),
+                    ScopedCacheTerminal::Shutdown => Err(ScopedCacheNodeError::Shutdown),
+                    ScopedCacheTerminal::Panicked => Err(ScopedCacheNodeError::Panicked),
+                };
+            }
+
+            if let Some(aggregate) = flight.try_claim_builder() {
+                let operation = build
+                    .take()
+                    .expect("only the caller that supplied this closure can claim it once");
+                let identity_for_path = identity.clone();
+                let context_for_worker = request_context.clone();
+                let aggregate_for_worker = aggregate.clone();
+                let run = move || {
+                    let _request_guard =
+                        context_for_worker.map(|context| Arc::clone(&context.0).install_tls());
+                    let _job_guard = crate::cancellation::JobCancellationGuard::install(
+                        aggregate_for_worker.clone(),
+                    );
+                    crate::caller_kind::with_active_path(identity_for_path, || {
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            operation(&aggregate_for_worker)
+                        }))
+                    })
+                };
+                #[cfg(not(target_arch = "wasm32"))]
+                let outcome = self.cpu_pool.install(run);
+                #[cfg(target_arch = "wasm32")]
+                let outcome = run();
+
+                match outcome {
+                    Ok(value) => {
+                        let value: Arc<dyn Any + Send + Sync> = Arc::new(value);
+                        let terminal = if aggregate.is_cancelled() {
+                            ScopedCacheTerminal::Cancelled
+                        } else {
+                            ScopedCacheTerminal::Value(value)
+                        };
+                        let success = matches!(terminal, ScopedCacheTerminal::Value(_));
+                        self.terminalize_scoped_cache_flight(identity, flight, terminal, success);
+                    }
+                    Err(_) => self.terminalize_scoped_cache_flight(
+                        identity,
+                        flight,
+                        ScopedCacheTerminal::Panicked,
+                        false,
+                    ),
+                }
+                continue;
+            }
+
+            // Cooperatively admit/dispatch for sync schedulers while remaining
+            // safe with the native driver: the DAG lock is the sole dequeue
+            // authority, so concurrent pumps cannot dispatch the same node.
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let _ = self.pump_ready(
+                    PumpReason::WaitOrDrive,
+                    crate::caller_kind::CallerKind::current(),
+                );
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = self.drive_one();
+            }
+            flight.wait_for_change(std::time::Duration::from_millis(2));
+        }
+    }
+
+    fn detach_scoped_cache_owner(
+        &self,
+        identity: &WorkNodeIdentity,
+        flight: &Arc<ScopedCacheFlight>,
+        owner_id: u64,
+    ) {
+        let _gate = self.scoped_cache_gate.lock();
+        let lost_all_owners = flight.detach_owner(owner_id);
+        if lost_all_owners || flight.terminal().is_some() {
+            let _ = self.dag.lock().cancel(identity);
+            self.remove_scoped_flight_locked(identity, flight);
+        }
+    }
+
+    /// Terminalize a flight and its DAG node under one incarnation gate.
+    /// `success` is permitted only for a live aggregate job; cancellation
+    /// discovered at this final publication rail always wins.
+    fn terminalize_scoped_cache_flight(
+        &self,
+        identity: &WorkNodeIdentity,
+        flight: &Arc<ScopedCacheFlight>,
+        terminal: ScopedCacheTerminal,
+        success: bool,
+    ) {
+        let _gate = self.scoped_cache_gate.lock();
+        if flight.terminal().is_some() {
+            let _ = self.dag.lock().cancel(identity);
+            self.remove_scoped_flight_locked(identity, flight);
+            return;
+        }
+        let aggregate_cancelled = self
+            .dag
+            .lock()
+            .cancellation_for(identity)
+            .is_some_and(|token| token.is_cancelled());
+        if success && !aggregate_cancelled {
+            let _ = self.dag.lock().complete(identity);
+            let _ = flight.set_terminal(terminal);
+        } else {
+            let _ = self.dag.lock().cancel(identity);
+            let effective = if aggregate_cancelled {
+                ScopedCacheTerminal::Cancelled
+            } else {
+                terminal
+            };
+            let _ = flight.set_terminal(effective);
+        }
+        self.remove_scoped_flight_locked(identity, flight);
+    }
+
+    /// Remove only `flight`'s registry incarnation. Caller holds
+    /// `scoped_cache_gate`, which serializes replacement with stale inbox work.
+    fn remove_scoped_flight_locked(
+        &self,
+        identity: &WorkNodeIdentity,
+        flight: &Arc<ScopedCacheFlight>,
+    ) {
+        if let dashmap::mapref::entry::Entry::Occupied(entry) =
+            self.scoped_cache_flights.entry(identity.clone())
+        {
+            if Arc::ptr_eq(entry.get(), flight) {
+                entry.remove();
+            }
+        }
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn test_scoped_cache_owner_count(&self, identity: &WorkNodeIdentity) -> usize {
+        self.scoped_cache_flights
+            .get(identity)
+            .map_or(0, |flight| flight.owner_count())
+    }
 
     /// Submit a request. Returns a handle that resolves when the target stage is reached.
     pub fn submit_request(&self, request: Request) -> CompletionHandle<RequestResult> {
@@ -1457,6 +1961,7 @@ impl Scheduler {
         while let Ok(submission) = self.inbox.receiver.try_recv() {
             Self::shutdown_drained_submission(submission);
         }
+        self.shutdown_all_scoped_cache_flights();
 
         // 3. Remove all nodes, recording generation floors so re-added
         //    files start above any prior incarnation's generation.
@@ -1547,8 +2052,19 @@ impl Scheduler {
                     req.sender.send(CompletionState::Shutdown);
                 }
             }
+            Submission::ScopedCacheNode { flight, .. } => {
+                let _ = flight.set_terminal(ScopedCacheTerminal::Shutdown);
+            }
             Submission::Wake | Submission::StageComplete { .. } => {}
         }
+    }
+
+    fn shutdown_all_scoped_cache_flights(&self) {
+        let _gate = self.scoped_cache_gate.lock();
+        for flight in self.scoped_cache_flights.iter() {
+            let _ = flight.set_terminal(ScopedCacheTerminal::Shutdown);
+        }
+        self.scoped_cache_flights.clear();
     }
 
     // ── Edge Management ──
@@ -2391,6 +2907,19 @@ impl Scheduler {
             Submission::NewRequestBatch { requests } => {
                 self.handle_new_request_batch(requests);
             }
+            Submission::ScopedCacheNode {
+                identity,
+                priority,
+                flight,
+                request_context,
+            } => {
+                self.handle_scoped_cache_node_submission(
+                    identity,
+                    priority,
+                    flight,
+                    request_context,
+                );
+            }
             Submission::StageComplete {
                 file_id,
                 generation,
@@ -2398,6 +2927,39 @@ impl Scheduler {
             } => {
                 self.handle_stage_complete(&file_id, generation, task_kind);
             }
+        }
+    }
+
+    fn handle_scoped_cache_node_submission(
+        &self,
+        identity: WorkNodeIdentity,
+        priority: Priority,
+        flight: Arc<ScopedCacheFlight>,
+        request_context: Option<crate::request_context::OpaqueRequestContext>,
+    ) {
+        let _gate = self.scoped_cache_gate.lock();
+        let is_current = self
+            .scoped_cache_flights
+            .get(&identity)
+            .is_some_and(|current| Arc::ptr_eq(current.value(), &flight));
+        if !is_current || flight.terminal().is_some() {
+            return;
+        }
+        let aggregate = {
+            let mut dag = self.dag.lock();
+            dag.submit(
+                identity.clone(),
+                WorkKind::CacheNode,
+                priority,
+                Vec::new(),
+                request_context,
+            );
+            dag.cancellation_for(&identity)
+                .expect("fresh or deduplicated scoped cache node must own a token")
+        };
+        if !flight.attach_aggregate(aggregate) {
+            let _ = self.dag.lock().cancel(&identity);
+            self.remove_scoped_flight_locked(&identity, &flight);
         }
     }
 
@@ -3710,6 +4272,7 @@ impl Scheduler {
             match self.dispatch_ready_job(job, reason, caller_kind, queue_depth_pre_dequeue) {
                 DispatchOutcome::SubmittedToPool => stats.dispatched += 1,
                 DispatchOutcome::ExecutedInline => stats.executed_inline += 1,
+                DispatchOutcome::DeferredScoped => stats.dispatched += 1,
                 DispatchOutcome::Skipped => {}
             }
 
@@ -3767,6 +4330,22 @@ impl Scheduler {
         // and releases the dispatched node's parked reservation. There is no
         // file-stage routing for it (no node lookup, no generation guard).
         if matches!(job.identity, WorkNodeIdentity::CacheNode { .. }) {
+            if let Some(flight) = self
+                .scoped_cache_flights
+                .get(&job.identity)
+                .map(|entry| Arc::clone(entry.value()))
+            {
+                if flight.mark_dispatched(job.cancellation.clone()) {
+                    return DispatchOutcome::DeferredScoped;
+                }
+                self.terminalize_scoped_cache_flight(
+                    &job.identity,
+                    &flight,
+                    ScopedCacheTerminal::Cancelled,
+                    false,
+                );
+                return DispatchOutcome::Skipped;
+            }
             let executor_for_cache = Arc::clone(&self.executor);
             let source_loader_for_cache = Arc::clone(&self.source_loader);
             let inbox_for_cache = inbox_sender.clone();
@@ -3775,7 +4354,7 @@ impl Scheduler {
             // `job` moves into the pool closure below.
             let cache_identity = job.identity.clone();
             let task: crate::pool::SchedulerPoolTask = Box::new(move || {
-                let cancellation = CancellationToken::new();
+                let cancellation = job.cancellation.clone();
                 dispatch_ready_job_to_executor(
                     &job,
                     None,
@@ -3978,7 +4557,7 @@ impl Scheduler {
                     queue_dwell_ms,
                 );
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let cancellation = CancellationToken::new();
+                    let cancellation = job.cancellation.clone();
                     dispatch_ready_job_to_executor(
                         &job,
                         Some(&node),
@@ -4033,7 +4612,7 @@ impl Scheduler {
                 );
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     crate::caller_kind::with_active_path(identity, || {
-                        let cancellation = CancellationToken::new();
+                        let cancellation = job.cancellation.clone();
                         dispatch_ready_job_to_executor(
                             &job,
                             Some(&node),
@@ -4088,7 +4667,7 @@ impl Scheduler {
                 );
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     crate::caller_kind::with_active_path(identity, || {
-                        let cancellation = CancellationToken::new();
+                        let cancellation = job.cancellation.clone();
                         dispatch_ready_job_to_executor(
                             &job,
                             Some(&node),
@@ -4444,9 +5023,24 @@ impl Scheduler {
         // releases the dispatched node's parked reservation. No file-stage
         // node lookup or generation guard applies.
         if matches!(job.identity, WorkNodeIdentity::CacheNode { .. }) {
+            if let Some(flight) = self
+                .scoped_cache_flights
+                .get(&job.identity)
+                .map(|entry| Arc::clone(entry.value()))
+            {
+                if !flight.mark_dispatched(job.cancellation.clone()) {
+                    self.terminalize_scoped_cache_flight(
+                        &job.identity,
+                        &flight,
+                        ScopedCacheTerminal::Cancelled,
+                        false,
+                    );
+                }
+                return;
+            }
             let identity = job.identity.clone();
             crate::caller_kind::with_active_path(identity, || {
-                let cancellation = CancellationToken::new();
+                let cancellation = job.cancellation.clone();
                 dispatch_ready_job_to_executor(
                     &job,
                     None,
@@ -4517,7 +5111,7 @@ impl Scheduler {
         let identity = job.identity.clone();
         let failed_blocker_deps = job.failed_blocker_deps.clone();
         crate::caller_kind::with_active_path(identity, || {
-            let cancellation = CancellationToken::new();
+            let cancellation = job.cancellation.clone();
             dispatch_ready_job_to_executor(
                 &job,
                 Some(&node),
@@ -5637,6 +6231,7 @@ impl Drop for Scheduler {
         // Set shutdown flag
         self.shutdown.store(true, Ordering::Release);
         let _ = self.inbox.sender.send(Submission::Wake);
+        self.shutdown_all_scoped_cache_flights();
 
         // Close inbox (causes driver recv to return Disconnected)
         // Drop the sender to close the channel
@@ -5663,6 +6258,73 @@ mod tests {
     use super::*;
     use crate::source_loader::MemorySourceLoader;
 
+    #[cfg(not(target_arch = "wasm32"))]
+    struct ScopedTestContext {
+        id: u64,
+        cancellation: CancellationToken,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl crate::request_context::RequestContextLike for ScopedTestContext {
+        fn request_id(&self) -> u64 {
+            self.id
+        }
+
+        fn capture_enabled(&self) -> bool {
+            false
+        }
+
+        fn cancellation_token(&self) -> Option<CancellationToken> {
+            Some(self.cancellation.clone())
+        }
+
+        fn on_dedup_joiner(&self, _: Arc<str>, _: u64, _: bool) {}
+
+        fn record_cache_event(&self, _: crate::request_context::CacheEventKind) {}
+
+        fn install_tls(self: Arc<Self>) -> Box<dyn crate::request_context::TlsUninstall + Send> {
+            struct Noop;
+            impl crate::request_context::TlsUninstall for Noop {
+                fn uninstall(self: Box<Self>) {}
+            }
+            Box::new(Noop)
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn scoped_test_context(
+        id: u64,
+    ) -> (
+        crate::request_context::OpaqueRequestContext,
+        CancellationToken,
+    ) {
+        let cancellation = CancellationToken::new();
+        let context = Arc::new(ScopedTestContext {
+            id,
+            cancellation: cancellation.clone(),
+        });
+        (
+            crate::request_context::OpaqueRequestContext(
+                context as Arc<dyn crate::request_context::RequestContextLike>,
+            ),
+            cancellation,
+        )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn scoped_test_request(
+        request_context: crate::request_context::OpaqueRequestContext,
+    ) -> ScopedCacheNodeRequest {
+        ScopedCacheNodeRequest {
+            cache_id: crate::cache_id::SchedulerCacheId(0x51FC),
+            key_hash: [0xA5; 16],
+            view_epoch: 7,
+            snapshot_pin_id: PinId(11),
+            priority: Priority::Interactive,
+            request_context: Some(request_context),
+        }
+    }
+
     fn _test_scheduler() -> Arc<Scheduler> {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("<template>hi</template>"));
@@ -5672,6 +6334,139 @@ mod tests {
 
     fn test_scheduler_with_loader(loader: Arc<MemorySourceLoader>) -> Arc<Scheduler> {
         Scheduler::test_new_sync(SchedulerConfig::default(), loader)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn scoped_cache_cancelled_winner_does_not_abort_live_sibling() {
+        let scheduler = Scheduler::test_new(
+            SchedulerConfig {
+                cpu_threads: 2,
+                ..SchedulerConfig::default()
+            },
+            Arc::new(MemorySourceLoader::new()),
+        );
+        let (leader_context, leader_token) = scoped_test_context(1);
+        let (sibling_context, _sibling_token) = scoped_test_context(2);
+        let leader_request = scoped_test_request(leader_context);
+        let sibling_request = scoped_test_request(sibling_context);
+        let identity = leader_request.identity();
+        let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        let leader = {
+            let scheduler = Arc::clone(&scheduler);
+            let builds = Arc::clone(&builds);
+            std::thread::spawn(move || {
+                scheduler.execute_scoped_cache_node(leader_request, move |_| {
+                    builds.fetch_add(1, Ordering::SeqCst);
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    41_u64
+                })
+            })
+        };
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("leader must enter the scoped producer");
+
+        let sibling = {
+            let scheduler = Arc::clone(&scheduler);
+            std::thread::spawn(move || {
+                scheduler.execute_scoped_cache_node(sibling_request, |_| -> u64 {
+                    panic!("deduplicated sibling must not execute its closure")
+                })
+            })
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while scheduler.test_scoped_cache_owner_count(&identity) != 2
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
+        assert_eq!(scheduler.test_scoped_cache_owner_count(&identity), 2);
+
+        leader_token.cancel();
+        release_tx.send(()).unwrap();
+
+        assert_eq!(
+            leader.join().unwrap(),
+            Err(ScopedCacheNodeError::Cancelled),
+            "the cancelled caller observes its own cancellation"
+        );
+        assert_eq!(
+            *sibling
+                .join()
+                .unwrap()
+                .expect("live sibling receives result"),
+            41
+        );
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            scheduler.dag.lock().cache_node_terminal_counts(),
+            crate::dag::CacheNodeTerminalCounts {
+                completed: 1,
+                cancelled: 0,
+            }
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn sole_cancelled_scoped_cache_build_never_publishes_and_cold_retry_runs() {
+        let scheduler = Scheduler::test_new(
+            SchedulerConfig {
+                cpu_threads: 2,
+                ..SchedulerConfig::default()
+            },
+            Arc::new(MemorySourceLoader::new()),
+        );
+        let (cancelled_context, cancelled_token) = scoped_test_context(3);
+        let request = scoped_test_request(cancelled_context);
+        let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+
+        let first = {
+            let scheduler = Arc::clone(&scheduler);
+            let builds = Arc::clone(&builds);
+            std::thread::spawn(move || {
+                scheduler.execute_scoped_cache_node(request, move |job_cancellation| {
+                    builds.fetch_add(1, Ordering::SeqCst);
+                    entered_tx.send(()).unwrap();
+                    while !job_cancellation.is_cancelled() {
+                        std::thread::yield_now();
+                    }
+                    7_u64
+                })
+            })
+        };
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("first producer must start");
+        cancelled_token.cancel();
+        assert_eq!(first.join().unwrap(), Err(ScopedCacheNodeError::Cancelled));
+
+        let (retry_context, _retry_token) = scoped_test_context(4);
+        let retry_request = scoped_test_request(retry_context);
+        let retry = scheduler
+            .execute_scoped_cache_node(retry_request, {
+                let builds = Arc::clone(&builds);
+                move |_| {
+                    builds.fetch_add(1, Ordering::SeqCst);
+                    9_u64
+                }
+            })
+            .expect("an uncancelled retry must start a fresh flight");
+        assert_eq!(*retry, 9);
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            scheduler.dag.lock().cache_node_terminal_counts(),
+            crate::dag::CacheNodeTerminalCounts {
+                completed: 1,
+                cancelled: 1,
+            }
+        );
     }
 
     // ── Basic Pipeline ──

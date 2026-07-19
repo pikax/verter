@@ -155,10 +155,10 @@ pub(crate) fn resolve_bare_name_in_scope(
     // Identity mints below go through the store-owned intern pool so a
     // repeated `(scope, name)` resolution reuses one shared allocation.
     let interner = ctx.project_type_store().identity_interner();
-    let mint_in_scope = || {
+    let mint_in_owner = |owner| {
         ResolvedRootIdentity::new_in_owner(
             interner.intern(scope_canonical_id),
-            scope_owner,
+            owner,
             interner.intern(name),
         )
     };
@@ -174,7 +174,7 @@ pub(crate) fn resolve_bare_name_in_scope(
             && (payload.scope_type_names().contains(name)
                 || payload.scope_value_names().contains(name));
         if setup_binding_visible || ordinary_bundle_surface {
-            return Some(mint_in_scope());
+            return Some(mint_in_owner(scope_owner));
         }
     }
 
@@ -186,18 +186,18 @@ pub(crate) fn resolve_bare_name_in_scope(
     // Structurally read-only: the resolved identity feeds enclosing
     // builds whose admission gates consume the fenced-serve chokepoint
     // flag, so the serve status is not re-checked here.
-    if let Some(entry) = ctx
+    let indexed = ctx
         .ensure_indexed_ready_serve(scope_canonical_id)
-        .map(|serve| serve.indexed)
-    {
-        if symbol_exists_in_facts(&entry, scope_owner, name) {
-            return Some(mint_in_scope());
+        .map(|serve| serve.indexed);
+    if let Some(entry) = indexed.as_ref() {
+        if symbol_exists_in_facts(entry.as_ref(), scope_owner, name) {
+            return Some(mint_in_owner(scope_owner));
         }
         if matches!(
             entry.shallow_state.export_target(name),
             Some(crate::resolver_core::ExportTarget::Local { owner, .. }) if *owner == scope_owner
         ) {
-            return Some(mint_in_scope());
+            return Some(mint_in_owner(scope_owner));
         }
         // A `declare global { interface Name { ... } }` declaration in this
         // file is not a file-surface symbol, but the name resolves to the
@@ -205,7 +205,7 @@ pub(crate) fn resolve_bare_name_in_scope(
         // both fall back to the global augmentation inventory under the same
         // `(canonical, name)` identity.
         if entry.shallow_state.has_global_augmentation(name) {
-            return Some(mint_in_scope());
+            return Some(mint_in_owner(scope_owner));
         }
     }
 
@@ -227,11 +227,42 @@ pub(crate) fn resolve_bare_name_in_scope(
         return Some(resolved);
     }
 
-    // 5. Cross-owner export target.
+    // 5. Canonical SFC lexical-owner chain. An Instance/setup owner may see
+    // exactly one validated Module/companion owner after every exact local
+    // declaration/import route has missed. The reverse edge does not exist.
+    // Re-entering this resolver with the exact parent owner preserves normal
+    // module declaration/import rules and threads that owner into the returned
+    // DeclKey identity; an absent or ambiguous parent fails closed.
+    if let Some(parent_owner) = indexed.as_ref().and_then(|entry| {
+        entry
+            .shallow_state
+            .validated_lexical_parent_owner(scope_owner)
+    }) {
+        let parent_payload = ctx
+            .prepared_decl_bundle(scope_canonical_id)
+            .map(|bundle| DeclarationScopePayload::from_bundle(&bundle, parent_owner));
+        if let Some(resolved) = resolve_bare_name_in_scope(
+            ctx,
+            scope_canonical_id,
+            parent_owner,
+            parent_payload.as_ref(),
+            name,
+        ) {
+            return Some(resolved);
+        }
+    }
+
+    // 6. Cross-file export target. Same-file cross-owner visibility is owned
+    // exclusively by the validated lexical-parent chain above; accepting it
+    // here would recreate an arbitrary name-based owner rematch and let Module
+    // scope see Instance declarations.
     let (resolved, route_facts) =
         ctx.resolve_imported_type_root_with_facts(scope_canonical_id, name);
     ctx.observe_borrowed_signature(&route_facts);
     if let Some(resolved) = resolved {
+        if resolved.canonical_id.as_ref() == scope_canonical_id && resolved.owner != scope_owner {
+            return None;
+        }
         return Some(resolved);
     }
 

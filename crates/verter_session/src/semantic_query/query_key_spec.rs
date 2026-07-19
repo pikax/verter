@@ -62,17 +62,24 @@
 //! - `allowed_demand` is a [`DemandAxis`]-vocabulary mask and does NOT capture
 //!   the `ReductionDemand` slot-selection dimension. A key carrying a
 //!   `ProjectionReductionContext` (`Instantiate` / `KeyOf` / `MappedType` /
-//!   `ProjectPath`) also branches on `ReductionDemand`
-//!   (`Published` / `StructuralTransit` / `MacroObjectSurface`), but that is a
-//!   3-way MEMO-SLOT-SELECTION dimension resolved by `context_to_slot`
+//!   `TypeOf` / `ProjectPath`) also branches on `ReductionDemand`
+//!   (`Published` / `StructuralTransit` / `MacroObjectSurface` /
+//!   `VueRuntimeObjectSurface`), but that is a four-way MEMO-SLOT-SELECTION
+//!   dimension resolved by `context_to_slot`
 //!   (`semantic_query_memo::family`) — `StructuralTransit` routes to the
 //!   `Transit*` slot mirrors and `MacroObjectSurface` to `MacroSurfaceShallow`,
-//!   entirely separate from the `Demand.policy.carrier_stop` field the
+//!   while `VueRuntimeObjectSurface` routes to its isolated runtime-filtered
+//!   shallow slot. This is entirely separate from the
+//!   `Demand.policy.carrier_stop` field the
 //!   [`CarrierStop`](DemandAxis::CarrierStop) axis governs (`MacroObjectSurface`
 //!   even reduces operators exactly like `Published`). Because the isolation
 //!   lives in the slot layer OUTSIDE the `DemandAxis` vocabulary, it is
 //!   correctly absent from `allowed_demand`; this column does not — and should
-//!   not — express it. Beyond that structural exclusion, `allowed_demand` is a
+//!   not — express it. The context's orthogonal `VueHeritagePolicy` is likewise
+//!   a content-free family-identity axis, not a field of `Demand`, so it is
+//!   intentionally outside the `DemandAxis` mask while remaining explicit on
+//!   every context-bearing `FamilyKey`. Beyond those structural exclusions,
+//!   `allowed_demand` is a
 //!   hand-classification of the [`DemandAxis`] fields a family's MEMO IDENTITY
 //!   branches on, NOT yet a test-guarded reflection of the live `FamilyKey`
 //!   axis set: the diff-test enforces freshness / enum-equality / per-row
@@ -487,31 +494,38 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
     // family branches on the UNION of the axes those rungs differ on.
     let mode_axes = mode_demand_axes();
     // `ProjectionReductionContext` carries `mode` PLUS `provenance` +
-    // `merge_role` + `demand` (verified on `ProjectionReductionContext`).
-    // provenance + merge_role are family-identity
+    // `merge_role` + `demand` + `vue_heritage_policy` (verified on
+    // `ProjectionReductionContext`). provenance + merge_role +
+    // vue_heritage_policy are family-identity
     // discriminators (which merge arm / provenance regime this reduction
     // answers), so the family branches on them via `DemandAxis::Provenance` /
     // `DemandAxis::MergeRole` below.
     //
     // This applies to every `ProjectionReductionContext`-carrying family:
-    // `Instantiate`, `KeyOf`, `MappedType`, and `ProjectPath` all carry
-    // provenance + merge_role on their `FamilyKey` identity, while
-    // `context_to_slot` keeps the orthogonal demand/mode slot selection.
+    // `Instantiate`, `KeyOf`, `MappedType`, `TypeOf`, and `ProjectPath` all
+    // carry provenance + merge_role + vue_heritage_policy on their
+    // `FamilyKey` identity, while `context_to_slot` keeps the orthogonal
+    // demand/mode slot selection. `VueHeritagePolicy` is not a `Demand` field,
+    // so it has no `DemandAxis` bit despite being explicit family identity.
     //
     // The `demand` field (`ReductionDemand::Published` / `StructuralTransit` /
-    // `MacroObjectSurface`) is DELIBERATELY ABSENT from this `DemandAxis` mask:
-    // it is a 3-way memo-SLOT-SELECTION dimension, not a `DemandAxis`. The
+    // `MacroObjectSurface` / `VueRuntimeObjectSurface`) is DELIBERATELY ABSENT
+    // from this `DemandAxis` mask: it is a closed memo-SLOT-SELECTION dimension,
+    // not a `DemandAxis`. The
     // family separates its outputs by routing each `demand` to a distinct memo
     // slot in `context_to_slot` (`semantic_query_memo::family`) —
     // `StructuralTransit` to the `Transit*` slot mirrors, `MacroObjectSurface`
-    // to `MacroSurfaceShallow` — NOT by setting any `Demand` axis. It is
+    // to `MacroSurfaceShallow`, and `VueRuntimeObjectSurface` to its isolated
+    // runtime-filtered shallow slot — NOT by setting any `Demand` axis. It is
     // independent of the `CarrierStop` axis: that axis governs the
     // `Demand.policy.carrier_stop` operator-reduction field, whereas
     // `MacroObjectSurface` reduces operators exactly like `Published`
     // (`carrier_stop = Continue`) and differs only in the union-arm merge rule.
     // Because `ReductionDemand` isolation lives in the slot layer OUTSIDE the
     // `DemandAxis` vocabulary, the `allowed_demand` column cannot and must not
-    // express it.
+    // express it. `VueHeritagePolicy` is likewise outside this mask because it
+    // is not a `Demand` field; every PRC-bearing `FamilyKey` carries it
+    // directly.
     let reduction_axes = mode_axes
         .with(DemandAxis::Provenance)
         .with(DemandAxis::MergeRole);
@@ -558,7 +572,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
                 non_file: env_resolve(),
             },
             allowed_demand: reduction_axes,
-            cross_context_guard: "instantiate_same_base_different_env_or_context_do_not_warm_hit, decl_self_type_or_lib_env_change_produces_distinct_instantiate_key",
+            cross_context_guard: "instantiate_same_base_different_env_or_context_do_not_warm_hit, decl_self_type_or_lib_env_change_produces_distinct_instantiate_key, vue_heritage_policy_is_family_identity_for_every_projection_reduction_family",
             admission: AdmissionSpec::Singleflight,
         },
         // ProjectMember { base, member, mode } — structural projection over an
@@ -588,8 +602,9 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
         },
         // KeyOf { base, context } — structural keyspace reduction over an
         // already-resolved node. Its memo identity is
-        // `FamilyKey::KeyOf { base, provenance, merge_role }`; demand/mode
-        // selection still routes through `context_to_slot`.
+        // `FamilyKey::KeyOf { base, provenance, merge_role,
+        // vue_heritage_policy }`; demand/mode selection still routes through
+        // `context_to_slot`.
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::KeyOf,
             lifecycle: KeyLifecycle::Live,
@@ -597,13 +612,14 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             value_domain: SemanticQueryValueTag::TypeNode,
             env_dims: EnvDimSpec::Static(env_structural()),
             allowed_demand: reduction_axes,
-            cross_context_guard: "keyof_queries_differing_only_by_provenance_do_not_warm_hit, keyof_and_mapped_type_context_axes_do_not_alias_family_identity",
+            cross_context_guard: "keyof_queries_differing_only_by_provenance_do_not_warm_hit, keyof_and_mapped_type_context_axes_do_not_alias_family_identity, vue_heritage_policy_is_family_identity_for_every_projection_reduction_family",
             admission: AdmissionSpec::Singleflight,
         },
         // MappedType { source, mapper, context } — structural mapped-type
         // rewrite over an already-resolved source. Its memo identity is
-        // `FamilyKey::MappedType { source, mapper, provenance, merge_role }`;
-        // demand/mode selection still routes through `context_to_slot`.
+        // `FamilyKey::MappedType { source, mapper, provenance, merge_role,
+        // vue_heritage_policy }`; demand/mode selection still routes through
+        // `context_to_slot`.
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::MappedType,
             lifecycle: KeyLifecycle::Live,
@@ -611,7 +627,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             value_domain: SemanticQueryValueTag::TypeNode,
             env_dims: EnvDimSpec::Static(env_structural()),
             allowed_demand: reduction_axes,
-            cross_context_guard: "mapped_type_queries_differing_only_by_merge_role_do_not_warm_hit, keyof_and_mapped_type_context_axes_do_not_alias_family_identity",
+            cross_context_guard: "mapped_type_queries_differing_only_by_merge_role_do_not_warm_hit, keyof_and_mapped_type_context_axes_do_not_alias_family_identity, vue_heritage_policy_is_family_identity_for_every_projection_reduction_family",
             admission: AdmissionSpec::Singleflight,
         },
         // Conditional { check, extends, true, false, distributive } —
@@ -645,7 +661,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             value_domain: SemanticQueryValueTag::TypeNode,
             env_dims: EnvDimSpec::Static(env_resolve()),
             allowed_demand: reduction_axes,
-            cross_context_guard: "typeof_same_root_different_env_or_context_do_not_warm_hit, typeof_queries_differing_only_by_provenance_do_not_warm_hit, typeof_published_and_transit_contexts_do_not_warm_hit",
+            cross_context_guard: "typeof_same_root_different_env_or_context_do_not_warm_hit, typeof_queries_differing_only_by_provenance_do_not_warm_hit, typeof_published_and_transit_contexts_do_not_warm_hit, vue_heritage_policy_is_family_identity_for_every_projection_reduction_family",
             admission: AdmissionSpec::Singleflight,
         },
         // NormalizeUnion { members } — structural union normalization over
@@ -682,7 +698,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             value_domain: SemanticQueryValueTag::TypeNode,
             env_dims: EnvDimSpec::Static(env_structural()),
             allowed_demand: project_path_axes,
-            cross_context_guard: "",
+            cross_context_guard: "vue_heritage_policy_is_family_identity_for_every_projection_reduction_family",
             admission: AdmissionSpec::Singleflight,
         },
         // Relate { source, target, relation, policy, source_freshness,

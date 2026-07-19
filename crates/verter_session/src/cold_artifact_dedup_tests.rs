@@ -977,7 +977,7 @@ fn moved_parse_env_forces_full_rematerialise_not_edge_refresh() {
         script_analysis: built.script_analysis.clone(),
         export_signatures: built.export_signatures.clone(),
         snapshot: Arc::clone(&built.snapshot),
-        external_type_analysis: Arc::clone(&built.external_type_analysis),
+        route_inventory: Arc::clone(&built.route_inventory),
         declares_interface_app_config: built.declares_interface_app_config,
         macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
     };

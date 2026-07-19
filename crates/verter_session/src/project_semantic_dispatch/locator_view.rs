@@ -493,9 +493,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 }
                                 other => other,
                             };
-                            arm_ctx =
-                                ProjectionReductionContext::structural_transit_with_mode(mode)
-                                    .with_merge_role(arm_ctx.merge_role);
+                            arm_ctx = arm_ctx.into_structural_transit_with_mode(mode);
                         }
                         self.project_view_node(
                             *arm,

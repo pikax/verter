@@ -54,12 +54,45 @@ pub struct MacroTypePropMember {
     pub optional: bool,
 }
 
+/// Closed syntax-only eligibility for statically emitting an object macro
+/// argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MacroObjectStaticEligibility {
+    /// Every property has an exact compile-time public name and no spread is
+    /// present.
+    Eligible,
+    /// At least one spread is present; every non-spread key is representable.
+    ContainsSpread,
+    /// At least one property key is not representable as an exact public
+    /// name; no spread is present.
+    ContainsUnsupportedKey,
+    /// Both unsupported property keys and spreads are present.
+    ContainsSpreadAndUnsupportedKey,
+}
+
+impl MacroObjectStaticEligibility {
+    #[must_use]
+    pub const fn from_shape(has_spread: bool, has_unsupported_key: bool) -> Self {
+        match (has_spread, has_unsupported_key) {
+            (false, false) => Self::Eligible,
+            (true, false) => Self::ContainsSpread,
+            (false, true) => Self::ContainsUnsupportedKey,
+            (true, true) => Self::ContainsSpreadAndUnsupportedKey,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_eligible(self) -> bool {
+        matches!(self, Self::Eligible)
+    }
+}
+
 /// Object argument info: defineProps({ foo: String })
 #[derive(Debug)]
 pub struct MacroObjectArg<'a> {
     /// Span of the entire object `{ ... }`
     pub span: Span,
-    /// Property spans (name spans only)
+    /// Supported properties with exact name, value, and full-property spans.
     pub properties: Vec<MacroProperty<'a>>,
     /// Whether the object contains ANY spread (`...expr`, identifier or
     /// not). A withDefaults defaults object with a spread is not
@@ -67,6 +100,10 @@ pub struct MacroObjectArg<'a> {
     /// `_mergeDefaults` at runtime (official plugin-vue shape), which
     /// preserves the user's key precedence via JS spread evaluation.
     pub has_spread: bool,
+    /// Closed parser-owned verdict for static defaults emission. This is
+    /// derived solely from object-property syntax; consumers never rescan
+    /// source text or infer semantic key values.
+    pub static_eligibility: MacroObjectStaticEligibility,
 }
 
 /// A property in a macro object argument.
@@ -79,6 +116,9 @@ pub struct MacroProperty<'a> {
     pub name: &'a str,
     /// Span of the property name
     pub name_span: Span,
+    /// Span of the complete authored `ObjectProperty`, including a computed
+    /// key, method modifiers/prefix, value, and method body.
+    pub property_span: Span,
     /// Span of the value (Some for { foo: String }, None for shorthand)
     pub value_span: Option<Span>,
     /// Whether this property uses method shorthand (e.g., `foo() { ... }`)
@@ -193,7 +233,9 @@ pub enum ScriptMacro<'a> {
         span: Span,
         declarator: Option<MacroDeclarator<'a>>,
         type_params: Option<MacroTypeParams>,
-        /// First string arg if present (model name)
+        /// OXC-decoded first string argument, if present.
+        name: Option<&'a str>,
+        /// Exact authored string-literal span, including quotes and escapes.
         name_span: Option<Span>,
         /// Second object arg if present (options)
         options_span: Option<Span>,

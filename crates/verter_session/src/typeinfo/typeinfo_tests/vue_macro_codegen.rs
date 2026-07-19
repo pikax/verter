@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use verter_macro_dto::{
-    MacroAnchor, MacroRuntimeOutcome, MacroRuntimeShape, MacroTscOutcome, MacroTscProjection,
-    PropsDefaultsAssociation, RuntimeConstructor, RuntimeProp, SynthesizedRowKind,
-    TscDeclarationFailureReason, TscInferredClassTypePosition, TscScriptOwner,
+    MacroAnchor, MacroPartialReason, MacroRuntimeOutcome, MacroRuntimeShape, MacroTscOutcome,
+    MacroTscProjection, PropsDefaultsAssociation, RuntimeConstructor, RuntimeProp,
+    SynthesizedRowKind, TscDeclarationFailureReason, TscInferredClassTypePosition, TscScriptOwner,
     TscSemanticInferenceUnavailableReason, UnsupportedReason,
 };
 
@@ -20,6 +20,18 @@ fn upsert(host: &VerterHost, canonical_id: &str, source: &str) {
             aliases: Vec::new(),
         })
         .expect("Vue fixture must upsert");
+}
+
+fn upsert_ts(host: &VerterHost, canonical_id: &str, source: &str) {
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(canonical_id.to_owned()),
+            input_id: canonical_id.to_owned(),
+            source: Arc::from(source),
+            file_language: crate::FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("TypeScript fixture must upsert");
 }
 
 fn produce(
@@ -53,7 +65,7 @@ fn props_projection(
 #[test]
 fn tsc_class_scope_carries_declaration_dependencies_and_contextual_inference() {
     let host = VerterHost::new_standalone(HostConfig::default());
-    upsert(
+    upsert_ts(
         &host,
         "/src/external.ts",
         "export interface External { value: string }",
@@ -201,6 +213,199 @@ defineProps<{ payload: Payload }>()
         [(false, "number"), (true, "string")],
         "same-name methods must select return-inference facts from their exact instance/static surface",
     );
+}
+
+#[test]
+fn tsc_value_dependency_fixture_preserves_exact_shallow_boundary_facts() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/src/ValuesBoundary.vue";
+    upsert(
+        &host,
+        canonical,
+        r#"<script setup lang="ts">
+const seed = { value: "x" }
+class Base {}
+type Props = { seed: typeof seed; ctor: typeof Base }
+defineProps<Props>()
+</script>"#,
+    );
+
+    let indexed = host
+        .ensure_indexed_ready(canonical)
+        .expect("fixture must publish an indexed artifact");
+    let analysis = indexed
+        .script_analysis
+        .as_ref()
+        .expect("fixture must publish script analysis");
+    let (macro_index, mac) = analysis
+        .macros
+        .iter()
+        .enumerate()
+        .find(|(_, mac)| mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .expect("fixture must publish defineProps");
+    let owner = verter_type_expr::TopLevelOwnerId::instance(0);
+    assert_eq!(mac.owner, owner);
+    assert!(indexed.route_inventory.imports.is_empty());
+    assert!(indexed.route_inventory.reexports.is_empty());
+    assert!(indexed.shallow_state.has_type_symbol_in(owner, "Props"));
+    assert!(indexed.shallow_state.has_type_symbol_in(owner, "Base"));
+    assert!(indexed.shallow_state.has_value_symbol_in(owner, "Base"));
+    assert!(indexed.shallow_state.has_value_symbol_in(owner, "seed"));
+    let resolved = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+        &host, canonical, owner, None, "Props",
+    )
+    .expect("exact-owner header facts must resolve the local Props root");
+    assert_eq!(resolved.canonical_id.as_ref(), canonical);
+    assert_eq!(resolved.owner, owner);
+    assert_eq!(resolved.symbol_name.as_ref(), "Props");
+
+    let deps = indexed
+        .shallow_state
+        .type_deps_in(owner, "Props")
+        .expect("memo-backed Props dependency facts must be present");
+    assert_eq!(deps.owner_value_deps, ["seed"]);
+    assert_eq!(deps.retained_value_carrier_deps, ["Base"]);
+
+    let hot =
+        crate::structural_carrier_producer::macro_type_arg_hot_ref(&host, canonical, macro_index)
+            .expect("macro payload carrier must be present");
+    let data = crate::project_semantic_dispatch::node_data_for(&host, hot.node())
+        .expect("macro payload carrier node must be interned");
+    let (name, scope) = data
+        .bare_ref_head()
+        .expect("defineProps<Props> must preserve its unresolved bare carrier");
+    assert_eq!(name.as_ref(), "Props");
+    assert!(matches!(
+        scope,
+        crate::semantic_query::NodeScopeId::File {
+            canonical_id,
+            owner: scope_owner,
+            ..
+        } if canonical_id.as_ref() == canonical && *scope_owner == owner
+    ));
+
+    crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+        let resolved = dispatch.resolve_carrier_subject_node(
+            hot.node(),
+            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                crate::semantic_query::ProjectionMode::Navigate,
+            ),
+        );
+        let data = crate::project_semantic_dispatch::node_data_for(ctx, resolved)
+            .expect("direct carrier resolution must preserve exact declaration identity");
+        let crate::semantic_query::SemanticNodeData::DeclRef { identity } = data.as_ref() else {
+            panic!("local Props carrier must resolve to an exact DeclRef: {data:?}");
+        };
+        assert_eq!(identity.canonical_id.as_ref(), canonical);
+        assert_eq!(identity.owner, owner);
+        assert_eq!(identity.decl_name.as_ref(), "Props");
+    });
+}
+
+#[test]
+fn sfc_setup_scope_resolves_unique_companion_owner_without_reverse_visibility() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/src/OwnerChain.vue";
+    upsert(
+        &host,
+        canonical,
+        r#"<script lang="ts">
+type CompanionOnly = { companion: true }
+type Shared = { source: "companion" }
+</script>
+<script setup lang="ts">
+export type SetupOnly = { setup: true }
+type Shared = { source: "setup" }
+defineProps<CompanionOnly & Shared>()
+</script>"#,
+    );
+
+    let module = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let instance = verter_type_expr::TopLevelOwnerId::instance(0);
+    crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+        let companion = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+            ctx,
+            canonical,
+            instance,
+            None,
+            "CompanionOnly",
+        )
+        .expect("setup must see the unique validated companion owner");
+        assert_eq!(companion.owner, module);
+        assert_eq!(companion.symbol_name.as_ref(), "CompanionOnly");
+
+        let shadowed = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+            ctx, canonical, instance, None, "Shared",
+        )
+        .expect("the exact setup declaration must win before companion lookup");
+        assert_eq!(shadowed.owner, instance);
+
+        assert!(
+            crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+                ctx,
+                canonical,
+                module,
+                None,
+                "SetupOnly",
+            )
+            .is_none(),
+            "module scope must never see instance declarations"
+        );
+    });
+}
+
+#[test]
+fn sfc_setup_companion_owner_resolution_warms_and_invalidates_on_exact_header_edit() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/src/OwnerChainEdit.vue";
+    upsert(
+        &host,
+        canonical,
+        r#"<script lang="ts">
+type Before = { value: string }
+</script>
+<script setup lang="ts">
+defineProps<Before>()
+</script>"#,
+    );
+
+    let module = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let instance = verter_type_expr::TopLevelOwnerId::instance(0);
+    crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+        for _ in 0..2 {
+            let resolved = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+                ctx, canonical, instance, None, "Before",
+            )
+            .expect("cold and warm lookup must retain the exact companion owner");
+            assert_eq!(resolved.owner, module);
+        }
+    });
+
+    upsert(
+        &host,
+        canonical,
+        r#"<script lang="ts">
+type After = { value: number }
+</script>
+<script setup lang="ts">
+defineProps<After>()
+</script>"#,
+    );
+    crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+        assert!(
+            crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+                ctx, canonical, instance, None, "Before",
+            )
+            .is_none(),
+            "the removed companion header must not survive the edit"
+        );
+        let resolved = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+            ctx, canonical, instance, None, "After",
+        )
+        .expect("the replacement companion header must resolve after invalidation");
+        assert_eq!(resolved.owner, module);
+    });
 }
 
 #[test]
@@ -464,6 +669,60 @@ defineProps<Payload>()
 }
 
 #[test]
+fn tsc_inference_partial_is_entry_scoped_and_complete_sibling_continues() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let mut inferred = "0".to_owned();
+    for _ in 0..80 {
+        inferred = format!("[{inferred}]");
+    }
+    upsert(
+        &host,
+        "/src/InferenceBudgetSibling.vue",
+        &format!(
+            r#"<script setup lang="ts">
+class Payload {{ method() {{ return {inferred} }} }}
+defineProps<{{ payload: Payload }}>()
+defineModel<string>('selected')
+</script>"#
+        ),
+    );
+
+    let output = produce(
+        &host,
+        "/src/InferenceBudgetSibling.vue",
+        VueMacroCodegenDemand::Tsc,
+    );
+    let bundle = output.tsc.as_ref().expect("TSC bundle");
+    assert_eq!(bundle.entries.len(), 2);
+
+    let MacroTscOutcome::Complete(MacroTscProjection::Props(props)) = &bundle.entries[0].outcome
+    else {
+        panic!("budgeted props projection must retain its typed declaration: {bundle:?}");
+    };
+    let payload = props
+        .scope
+        .dependency_declarations
+        .iter()
+        .find(|dependency| dependency.name == "Payload")
+        .expect("Payload dependency");
+    assert_eq!(
+        payload.declaration_failure,
+        Some(TscDeclarationFailureReason::SemanticInferenceUnavailable(
+            TscSemanticInferenceUnavailableReason::DepthBudgetExceeded,
+        ))
+    );
+
+    let MacroTscOutcome::Complete(MacroTscProjection::Model(model)) = &bundle.entries[1].outcome
+    else {
+        panic!("independent model projection must continue after a partial sibling: {bundle:?}");
+    };
+    assert_eq!(model.name, "selected");
+    assert_eq!(model.value_type.as_str(), "string");
+    assert!(output.completeness.is_partial());
+    assert!(!output.facts_cacheable);
+}
+
+#[test]
 fn producer_origin_hash_tracks_each_exact_snapshot_across_aba_edits() {
     let host = VerterHost::new_standalone(HostConfig::default());
     const FILE: &str = "/src/Revision.vue";
@@ -501,6 +760,91 @@ fn producer_origin_hash_tracks_each_exact_snapshot_across_aba_edits() {
 }
 
 #[test]
+fn scheduler_key_is_content_free_but_input_pin_moves_across_edit() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    const FILE: &str = "/src/SchedulerIdentity.vue";
+    upsert(
+        &host,
+        FILE,
+        r#"<script setup lang="ts">defineProps<{ value: string }>()</script>"#,
+    );
+    let first = crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+        crate::typeinfo::vue_macro_codegen::vue_macro_codegen_schedule_identity(
+            ctx,
+            FILE,
+            VueMacroCodegenDemand::Runtime,
+        )
+    });
+
+    upsert(
+        &host,
+        FILE,
+        r#"<script setup lang="ts">defineProps<{ value: number }>()</script>"#,
+    );
+    let edited = crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+        crate::typeinfo::vue_macro_codegen::vue_macro_codegen_schedule_identity(
+            ctx,
+            FILE,
+            VueMacroCodegenDemand::Runtime,
+        )
+    });
+
+    assert_eq!(
+        first.key_hash, edited.key_hash,
+        "content, version, graph, and node hashes must not enter the R6 semantic key"
+    );
+    assert_ne!(
+        first.input_pin, edited.input_pin,
+        "an edit must move the epoch/validity input pin even though the semantic key stays stable"
+    );
+}
+
+#[test]
+fn scheduler_identity_isolates_exact_demand_and_session() {
+    use crate::resolver_core::StoreViewCompatToken;
+
+    let base = StoreViewCompatToken {
+        epoch: 7,
+        session: Some(41),
+        validity_fingerprint: 11,
+    };
+    let identity = |demand, compat| {
+        crate::typeinfo::vue_macro_codegen::vue_macro_codegen_schedule_identity_from_compat(
+            "/src/Isolation.vue",
+            demand,
+            compat,
+        )
+    };
+    let runtime = identity(VueMacroCodegenDemand::Runtime, base);
+    let tsc = identity(VueMacroCodegenDemand::Tsc, base);
+    let both = identity(VueMacroCodegenDemand::RuntimeAndTsc, base);
+    assert_ne!(runtime.key_hash, tsc.key_hash);
+    assert_ne!(runtime.key_hash, both.key_hash);
+    assert_ne!(tsc.key_hash, both.key_hash);
+    assert_eq!(runtime.input_pin, tsc.input_pin);
+
+    let other_session = identity(
+        VueMacroCodegenDemand::Runtime,
+        StoreViewCompatToken {
+            session: Some(42),
+            ..base
+        },
+    );
+    assert_ne!(runtime.key_hash, other_session.key_hash);
+
+    let overlay_edit = identity(
+        VueMacroCodegenDemand::Runtime,
+        StoreViewCompatToken {
+            epoch: 8,
+            validity_fingerprint: 12,
+            ..base
+        },
+    );
+    assert_eq!(runtime.key_hash, overlay_edit.key_hash);
+    assert_ne!(runtime.input_pin, overlay_edit.input_pin);
+}
+
+#[test]
 fn runtime_props_are_one_level_and_classified_once_per_public_member() {
     let host = VerterHost::new_standalone(HostConfig::default());
     upsert(
@@ -531,7 +875,7 @@ defineProps<{
     assert_eq!(output.counters.root_shallow_demands, 1);
     assert_eq!(output.counters.runtime_classifier_calls, 5);
     assert_eq!(output.counters.tsc_materializations, 0);
-    assert_eq!(output.counters.scheduler_submissions, 0);
+    assert_eq!(output.counters.scheduler_submissions, 1);
     assert!(
         output
             .transitive_canonicals
@@ -571,6 +915,279 @@ defineProps<{
     assert_eq!(
         constructors(&props.props[4]),
         &[RuntimeConstructor::Function]
+    );
+}
+
+/// Mutation recipe: route runtime props/emits through ordinary
+/// `MacroObjectSurface`, or suppress every heritage arm once any directive is
+/// present. The ignored names then leak into runtime (or the non-ignored names
+/// disappear), while TSC no longer preserves the full TypeScript surface.
+#[test]
+fn vue_ignore_suppresses_only_selected_runtime_heritage_and_preserves_tsc() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert(
+        &host,
+        "/src/VueIgnore.vue",
+        r#"<script setup lang="ts">
+interface IgnoredProps { ignored: string }
+interface KeptProps { kept: boolean }
+interface Props extends /* @vue-ignore */ IgnoredProps, KeptProps { own: number }
+
+interface IgnoredEmits { ignoredEvent: [value: string] }
+interface KeptEmits { keptEvent: [value: boolean] }
+interface Emits extends /* @vue-ignore */ IgnoredEmits, KeptEmits { ownEvent: [] }
+
+defineProps<Props>()
+defineEmits<Emits>()
+</script>"#,
+    );
+
+    let output = produce(
+        &host,
+        "/src/VueIgnore.vue",
+        VueMacroCodegenDemand::RuntimeAndTsc,
+    );
+    assert_eq!(
+        output.completeness,
+        crate::semantic_query::ResultCompleteness::Complete
+    );
+
+    let runtime = output.runtime.as_ref().expect("runtime bundle");
+    let MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(props)) =
+        &runtime.entries[0].outcome
+    else {
+        panic!("expected complete props runtime shape: {runtime:?}");
+    };
+    assert_eq!(
+        props
+            .props
+            .iter()
+            .map(|prop| prop.name.as_str())
+            .collect::<Vec<_>>(),
+        ["kept", "own"]
+    );
+    let MacroRuntimeOutcome::Complete(MacroRuntimeShape::Emits(emits)) =
+        &runtime.entries[1].outcome
+    else {
+        panic!("expected complete emits runtime shape: {runtime:?}");
+    };
+    assert_eq!(
+        emits
+            .iter()
+            .map(|event| event.name.as_str())
+            .collect::<Vec<_>>(),
+        ["keptEvent", "ownEvent"]
+    );
+
+    let tsc = output.tsc.as_ref().expect("TSC bundle");
+    let MacroTscOutcome::Complete(MacroTscProjection::Props(tsc_props)) = &tsc.entries[0].outcome
+    else {
+        panic!("expected complete props TSC projection: {tsc:?}");
+    };
+    let mut tsc_prop_names: Vec<_> = tsc_props
+        .testing_rows
+        .iter()
+        .map(|row| row.name.as_str())
+        .collect();
+    tsc_prop_names.sort_unstable();
+    assert_eq!(tsc_prop_names, ["ignored", "kept", "own"]);
+    let MacroTscOutcome::Complete(MacroTscProjection::Emits(tsc_emits)) = &tsc.entries[1].outcome
+    else {
+        panic!("expected complete emits TSC projection: {tsc:?}");
+    };
+    let mut tsc_emit_names: Vec<_> = tsc_emits
+        .events
+        .iter()
+        .map(|event| event.name.as_str())
+        .collect();
+    tsc_emit_names.sort_unstable();
+    assert_eq!(tsc_emit_names, ["ignoredEvent", "keptEvent", "ownEvent"]);
+}
+
+/// Mutation recipe: omit the prepared declaration's file fact from the
+/// runtime-filtered candidate, or admit the filtered value outside the shared
+/// fact-validated family memo. Removing only the directive then reuses the old
+/// filtered surface and `base` remains absent after the edit.
+#[test]
+fn vue_ignore_runtime_surface_invalidates_when_only_the_directive_changes() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/src/VueIgnoreEdit.vue";
+    upsert(
+        &host,
+        canonical,
+        r#"<script setup lang="ts">
+interface Base { base: string }
+interface Props extends /* @vue-ignore */ Base { own: number }
+defineProps<Props>()
+</script>"#,
+    );
+
+    let filtered = produce(&host, canonical, VueMacroCodegenDemand::RuntimeAndTsc);
+    assert_eq!(
+        filtered.completeness,
+        crate::semantic_query::ResultCompleteness::Complete
+    );
+    assert!(filtered.facts_cacheable);
+    let filtered_hash = filtered.origin_whole_hash.expect("first content hash");
+    let filtered_runtime = filtered.runtime.as_ref().expect("runtime bundle");
+    let MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(filtered_props)) =
+        &filtered_runtime.entries[0].outcome
+    else {
+        panic!("expected filtered runtime props: {filtered_runtime:?}");
+    };
+    assert_eq!(
+        filtered_props
+            .props
+            .iter()
+            .map(|prop| prop.name.as_str())
+            .collect::<Vec<_>>(),
+        ["own"]
+    );
+    let filtered_tsc = filtered.tsc.as_ref().expect("TSC bundle");
+    let MacroTscOutcome::Complete(MacroTscProjection::Props(filtered_tsc_props)) =
+        &filtered_tsc.entries[0].outcome
+    else {
+        panic!("expected complete TSC props: {filtered_tsc:?}");
+    };
+    let mut filtered_tsc_names: Vec<_> = filtered_tsc_props
+        .testing_rows
+        .iter()
+        .map(|row| row.name.as_str())
+        .collect();
+    filtered_tsc_names.sort_unstable();
+    assert_eq!(filtered_tsc_names, ["base", "own"]);
+
+    // The declaration topology is unchanged; only the producer fact vanishes.
+    upsert(
+        &host,
+        canonical,
+        r#"<script setup lang="ts">
+interface Base { base: string }
+interface Props extends Base { own: number }
+defineProps<Props>()
+</script>"#,
+    );
+    let unfiltered = produce(&host, canonical, VueMacroCodegenDemand::RuntimeAndTsc);
+    assert_ne!(
+        unfiltered.origin_whole_hash,
+        Some(filtered_hash),
+        "the edit must advance the value-side file version"
+    );
+    assert_eq!(
+        unfiltered.completeness,
+        crate::semantic_query::ResultCompleteness::Complete
+    );
+    assert!(unfiltered.facts_cacheable);
+    let unfiltered_runtime = unfiltered.runtime.as_ref().expect("runtime bundle");
+    let MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(unfiltered_props)) =
+        &unfiltered_runtime.entries[0].outcome
+    else {
+        panic!("expected unfiltered runtime props: {unfiltered_runtime:?}");
+    };
+    let mut unfiltered_names: Vec<_> = unfiltered_props
+        .props
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
+    unfiltered_names.sort_unstable();
+    assert_eq!(unfiltered_names, ["base", "own"]);
+}
+
+/// Mutation recipe: address ignore facts by declaration name without the
+/// prepared declaration's exact owner. The module-side `Props` directive then
+/// suppresses setup-side `Props` heritage despite the two owner scopes being
+/// distinct.
+#[test]
+fn vue_ignore_facts_do_not_cross_same_name_owner_scopes() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert(
+        &host,
+        "/src/VueIgnoreOwners.vue",
+        r#"<script lang="ts">
+interface ModuleBase { moduleInherited: string }
+interface Props extends /* @vue-ignore */ ModuleBase { moduleOwn: number }
+</script>
+<script setup lang="ts">
+interface SetupBase { setupInherited: boolean }
+interface Props extends SetupBase { setupOwn: number }
+defineProps<Props>()
+</script>"#,
+    );
+
+    let output = produce(
+        &host,
+        "/src/VueIgnoreOwners.vue",
+        VueMacroCodegenDemand::Runtime,
+    );
+    assert_eq!(
+        output.completeness,
+        crate::semantic_query::ResultCompleteness::Complete
+    );
+    let runtime = output.runtime.expect("runtime bundle");
+    let MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(props)) =
+        &runtime.entries[0].outcome
+    else {
+        panic!("expected complete setup props: {runtime:?}");
+    };
+    assert_eq!(
+        props
+            .props
+            .iter()
+            .map(|prop| prop.name.as_str())
+            .collect::<Vec<_>>(),
+        ["setupInherited", "setupOwn"]
+    );
+}
+
+/// Mutation recipe: apply the ignore filter after mapped/intersection heritage
+/// has already resolved and merged, or fail to propagate the runtime demand
+/// through the imported generic carrier. `importedIgnored` then survives in
+/// the runtime props surface instead of being cut off at its heritage head.
+#[test]
+fn imported_vue_ignore_survives_mapped_runtime_projection() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_ts(
+        &host,
+        "/src/imported-ignore.ts",
+        r#"
+export interface ImportedBase { importedIgnored: string }
+export interface ImportedProps extends /* @vue-ignore */ ImportedBase {
+  importedOwn: number
+}
+"#,
+    );
+    upsert(
+        &host,
+        "/src/VueIgnoreImported.vue",
+        r#"<script setup lang="ts">
+import type { ImportedProps } from './imported-ignore'
+type Copy<T> = { [K in keyof T]: T[K] }
+defineProps<Copy<ImportedProps>>()
+</script>"#,
+    );
+
+    let output = produce(
+        &host,
+        "/src/VueIgnoreImported.vue",
+        VueMacroCodegenDemand::Runtime,
+    );
+    assert_eq!(
+        output.completeness,
+        crate::semantic_query::ResultCompleteness::Complete
+    );
+    let runtime = output.runtime.expect("runtime bundle");
+    let MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(props)) =
+        &runtime.entries[0].outcome
+    else {
+        panic!("expected complete imported props: {runtime:?}");
+    };
+    assert_eq!(
+        props
+            .props
+            .iter()
+            .map(|prop| prop.name.as_str())
+            .collect::<Vec<_>>(),
+        ["importedOwn"]
     );
 }
 
@@ -656,7 +1273,10 @@ defineProps<{ name: string; config: { enabled: boolean } }>()
     let tsc_bundle = tsc.tsc.expect("TSC demand must produce a bundle");
     assert_eq!(tsc.counters.root_shallow_demands, 1);
     assert_eq!(tsc.counters.runtime_classifier_calls, 0);
-    assert_eq!(tsc.counters.tsc_materializations, 3);
+    assert_eq!(
+        tsc.counters.tsc_materializations, 2,
+        "only the two testing rows are terminally materialized; public props syntax is compiler-owned"
+    );
     let MacroTscOutcome::Complete(MacroTscProjection::Props(props)) =
         &tsc_bundle.entries[0].outcome
     else {
@@ -689,7 +1309,10 @@ defineProps<{ name: string; config: { enabled: boolean } }>()
     assert!(both.runtime.is_some() && both.tsc.is_some());
     assert_eq!(both.counters.root_shallow_demands, 2);
     assert_eq!(both.counters.runtime_classifier_calls, 2);
-    assert_eq!(both.counters.tsc_materializations, 3);
+    assert_eq!(
+        both.counters.tsc_materializations, 2,
+        "runtime demand must not add TSC materializations"
+    );
 }
 
 #[test]
@@ -753,7 +1376,7 @@ defineModel<string>('title')
 #[test]
 fn tsc_emits_models_and_scope_are_explicit_role_rows() {
     let host = VerterHost::new_standalone(HostConfig::default());
-    upsert(
+    upsert_ts(
         &host,
         "/src/types.ts",
         "export interface Payload { id: number }",
@@ -914,26 +1537,202 @@ defineProps<{ value: number | bigint }>()
 }
 
 #[test]
-fn scheduler_submission_counter_is_a_request_scoped_witness() {
-    use std::sync::atomic::Ordering;
-
+fn scheduler_submits_once_for_multi_macro_sfc_without_member_fanout() {
     let host = VerterHost::new_standalone(HostConfig::default());
     upsert(
         &host,
         "/src/SchedulerWitness.vue",
-        r#"<script setup lang="ts">defineProps<{ value: string }>()</script>"#,
+        r#"<script lang="ts">
+export interface CompanionProps { companion: string }
+</script>
+<script setup lang="ts">
+defineProps<{
+  first: string
+  second?: number
+  third: boolean
+}>()
+defineEmits<{
+  save: [value: string]
+  cancel: []
+}>()
+defineModel<string>('selected')
+</script>"#,
     );
-    host.test_force
-        .vue_macro_codegen_scheduler_submission_for_tests
-        .store(true, Ordering::Relaxed);
 
+    let submissions_before = host
+        .scheduler()
+        .counters()
+        .submit_count
+        .load(std::sync::atomic::Ordering::Relaxed);
     let output = produce(
         &host,
         "/src/SchedulerWitness.vue",
-        VueMacroCodegenDemand::Runtime,
+        VueMacroCodegenDemand::RuntimeAndTsc,
     );
+    let submissions_after = host
+        .scheduler()
+        .counters()
+        .submit_count
+        .load(std::sync::atomic::Ordering::Relaxed);
+
     assert_eq!(
         output.counters.scheduler_submissions, 1,
-        "the producer counter must report submissions occurring inside its request scope"
+        "one SFC demand must report exactly one scoped scheduler submission"
     );
+    assert_eq!(
+        submissions_after - submissions_before,
+        1,
+        "props, emits, models, companion scope, and public members must remain inside one scheduled closure"
+    );
+    assert_eq!(
+        output
+            .runtime
+            .as_ref()
+            .expect("runtime bundle")
+            .entries
+            .len(),
+        3
+    );
+    assert_eq!(output.tsc.as_ref().expect("TSC bundle").entries.len(), 3);
+}
+
+fn assert_cancelled_macro_output(
+    output: &crate::typeinfo::vue_macro_codegen::VueMacroCodegenOutput,
+) {
+    assert!(output
+        .completeness
+        .reasons()
+        .contains(crate::semantic_query::PartialReasonSet::CANCELLED));
+    assert!(!output.facts_cacheable);
+    let runtime = output.runtime.as_ref().expect("runtime bundle");
+    assert!(!runtime.entries.is_empty());
+    assert!(runtime.entries.iter().all(|entry| matches!(
+        entry.outcome,
+        MacroRuntimeOutcome::Partial(ref failure)
+            if failure.reason == MacroPartialReason::Cancelled
+    )));
+    let tsc = output.tsc.as_ref().expect("TSC bundle");
+    assert!(!tsc.entries.is_empty());
+    assert!(tsc.entries.iter().all(|entry| matches!(
+        entry.outcome,
+        MacroTscOutcome::Partial(ref failure)
+            if failure.reason == MacroPartialReason::Cancelled
+    )));
+}
+
+#[test]
+fn cancelled_request_returns_typed_partial_and_uncancelled_retry_completes() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    const FILE: &str = "/src/CancelledRetry.vue";
+    upsert(
+        &host,
+        FILE,
+        r#"<script setup lang="ts">defineProps<{ value: string }>()</script>"#,
+    );
+
+    let cancelled = crate::request_context::RequestContext::new(7001, Arc::from(FILE), false, None);
+    cancelled.cancel();
+    let cancelled_output = {
+        let _guard = crate::request_context::RequestContextGuard::install(cancelled);
+        produce(&host, FILE, VueMacroCodegenDemand::RuntimeAndTsc)
+    };
+    assert_cancelled_macro_output(&cancelled_output);
+
+    let retry = produce(&host, FILE, VueMacroCodegenDemand::RuntimeAndTsc);
+    assert_eq!(
+        retry.completeness,
+        crate::semantic_query::ResultCompleteness::Complete
+    );
+    assert!(retry.facts_cacheable);
+    assert!(matches!(
+        retry.runtime.as_ref().expect("runtime bundle").entries[0].outcome,
+        MacroRuntimeOutcome::Complete(_)
+    ));
+    assert!(matches!(
+        retry.tsc.as_ref().expect("TSC bundle").entries[0].outcome,
+        MacroTscOutcome::Complete(_)
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn cancelled_winner_does_not_abort_live_sibling() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    const FILE: &str = "/src/CancelledWinner.vue";
+    upsert(
+        host.as_ref(),
+        FILE,
+        r#"<script setup lang="ts">defineProps<{ value: string }>()</script>"#,
+    );
+    let rendezvous = Arc::new((std::sync::Barrier::new(2), std::sync::Barrier::new(2)));
+    *host.test_force.vue_macro_codegen_build_rendezvous.lock() = Some(Arc::clone(&rendezvous));
+    let submissions_before = host
+        .scheduler()
+        .counters()
+        .submit_count
+        .load(std::sync::atomic::Ordering::Acquire);
+
+    let winner_context =
+        crate::request_context::RequestContext::new(7002, Arc::from(FILE), false, None);
+    let winner = {
+        let host = Arc::clone(&host);
+        let winner_context = Arc::clone(&winner_context);
+        std::thread::spawn(move || {
+            let _guard = crate::request_context::RequestContextGuard::install(winner_context);
+            produce(host.as_ref(), FILE, VueMacroCodegenDemand::RuntimeAndTsc)
+        })
+    };
+    rendezvous.0.wait();
+
+    let sibling = {
+        let host = Arc::clone(&host);
+        std::thread::spawn(move || {
+            let context =
+                crate::request_context::RequestContext::new(7003, Arc::from(FILE), false, None);
+            let _guard = crate::request_context::RequestContextGuard::install(context);
+            produce(host.as_ref(), FILE, VueMacroCodegenDemand::RuntimeAndTsc)
+        })
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while host
+        .scheduler()
+        .counters()
+        .submit_count
+        .load(std::sync::atomic::Ordering::Acquire)
+        < submissions_before + 2
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        host.scheduler()
+            .counters()
+            .submit_count
+            .load(std::sync::atomic::Ordering::Acquire),
+        submissions_before + 2,
+        "the sibling must join the scoped flight before the winner is cancelled"
+    );
+    winner_context.cancel();
+    rendezvous.1.wait();
+
+    let winner_output = winner.join().expect("winner thread");
+    let sibling_output = sibling.join().expect("sibling thread");
+    *host.test_force.vue_macro_codegen_build_rendezvous.lock() = None;
+
+    assert_cancelled_macro_output(&winner_output);
+    assert_eq!(
+        sibling_output.completeness,
+        crate::semantic_query::ResultCompleteness::Complete
+    );
+    assert!(sibling_output.facts_cacheable);
+    assert!(matches!(
+        sibling_output
+            .runtime
+            .as_ref()
+            .expect("runtime bundle")
+            .entries[0]
+            .outcome,
+        MacroRuntimeOutcome::Complete(_)
+    ));
 }

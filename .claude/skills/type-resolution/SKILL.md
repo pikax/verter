@@ -29,7 +29,7 @@ Dep-signature semantics: every reusable cache read returns a `CacheRead<T>` carr
 Host-backed type/import resolution must treat the canonical file ID as cache identity. Contract:
 
 - Load a dependency source at most once per canonical ID per workspace content generation. Parse immediately and cache raw source, parsed/OXC snapshot, and reusable eval/build state right away.
-- On a cold miss materializing an imported dependency, derive the AST-backed bundle from that single parse and cache together: file snapshot, the shallow declaration index plus lazy declaration-body memo, header-only external-type analysis, symbol/export lookup tables, and any other reusable per-file analysis. Do not let later resolver stages trigger a second parse of the same canonical file just to build another artifact.
+- On a cold miss materializing an imported dependency, derive the AST-backed bundle from that single parse and cache together: file snapshot, semantic `ScriptShallowIndex`, lazy declaration-body memo, and any other reusable per-file analysis. Do not let later resolver stages trigger a second parse of the same canonical file just to build another artifact.
 - Host-owned imported-file caches are long-lived for the `VerterHost` lifetime. Distinct queries on the same host reuse the same cached canonical file state until that file's content hash or workspace generation changes.
 - Cache named declarations from that parsed file by name, not just exported entrypoints. Internal named types/interfaces/aliases still matter because exported declarations in the same file may depend on them later.
 - Treat named-node discovery as local symbol lookup. Once a file is parsed for a canonical ID/version, future lookups hit cached symbol/export maps instead of rewalking the full AST to rediscover names.
@@ -154,6 +154,49 @@ Architectural target for the project-global cache cutover:
 Concrete expectation:
 
 - If one larger expression references `C`, `C['foo']`, `C['bar']`, and `B`, and `B` itself references `C` again, the resolver should converge those onto one shared semantic query graph rather than recomputing each path ad hoc.
+
+### Vue Runtime Surface And Broad Runtime Classification
+
+Vue runtime props/emits uses the canonical semantic-query graph, never a
+request-local aggregate cache. Its internal
+`ReductionDemand::VueRuntimeObjectSurface` is an internal demand/memo-slot
+selector, not a sixth `ProjectionMode` and not a wire API. Its constructor also
+sets the orthogonal content-free
+`VueHeritagePolicy::SuppressIgnored`; TSC, component-meta, slots, and every
+ordinary context default to `RetainAll`. The runtime demand has the same
+Shallow union-of-members and operator-reduction semantics as
+`MacroObjectSurface`, while the policy removes only producer-addressed
+`PreparedTypeDecl.vue_ignored_heritage` arms before substitution, heritage-head
+resolution, or merging. Declaration-carrier unwraps demote the demand to
+`StructuralTransit` to retain carrier-stop semantics but MUST preserve the
+policy. Any reducer that intentionally creates fresh mode/demand/provenance/
+merge-role semantics from an active context MUST use
+`ProjectionReductionContext::with_orthogonal_axes_from`; this is the sole
+policy-inheritance adapter and exhaustively classifies every context field.
+PathWalker routes every fresh context through one template constructor;
+full-axis carrier demotions use `into_structural_transit_with_mode`. Mapped-source
+enumeration remains ordinary `Published(Shallow)` (TS intersection semantics)
+and inherits only the policy. Every
+`ProjectionReductionContext`-bearing family and mapped-member context encoding
+carries the policy, so filtered/unfiltered transit values cannot cross-serve;
+the two publication demands additionally occupy independent non-backfilling
+slots. Versioning remains the existing value-side `FileWholeHash`/read-set
+validation, overlay candidates, and singleflight.
+
+`ClassifyBroadRuntime` is the sole broad constructor classifier. It traverses
+aliases/unions/intersections iteratively in source order, recognizes nominal
+builtins before structural expansion, and treats Object/Function/Array as
+terminal broad facts without enumerating members, sibling declarations, or
+nested object bodies. Missing graph data, recursion, cancellation/work-budget
+exhaustion, unstable state, and non-Miss query faults return typed `Partial`
+with explicit `Unknown` and `ReturnOnly`; honest semantic unknown/Miss remains
+distinct and may be `Complete`. Only content-free canonical macro
+payload/member locator subjects may warm the shared family memo;
+the build re-sources the live node from the current indexed artifact and
+value-side read set. Anonymous graph-instance subjects use the explicit
+transient path and remain ReturnOnly even when a descendant is file-rooted.
+`SemanticNodeId`, content hashes, spans, and source/rendered text are forbidden
+in the durable classifier family identity.
 
 ## Semantic Heuristic Prevention (CRITICAL)
 
@@ -285,7 +328,7 @@ R6-registry guards for the publication surface: `chatmessages_resolvable_barrel_
 
 Path projection is the default shape of every semantic query. Whole-surface expansion is a degenerate case of projecting the empty path; single-hop `ProjectMember` / `IndexedAccess` are sugar for `ProjectPath` with length 1.
 
-- **Path queries are first-class semantic queries.** `SemanticQueryKey::ProjectPath { base, path, context }` is the canonical form (`context` is a `ProjectionReductionContext { mode, demand, provenance, merge_role }` — `provenance` is a `SurfaceProvenanceContext` and `merge_role` is a `MemberMergeRole`, both folded into `FamilyKey` for every context-bearing projection-reduction family; the terminal projection mode rides on `context.mode`).
+- **Path queries are first-class semantic queries.** `SemanticQueryKey::ProjectPath { base, path, context }` is the canonical form (`context` is a `ProjectionReductionContext { mode, demand, provenance, merge_role, vue_heritage_policy }` — `provenance`, `merge_role`, and the content-free Vue heritage policy are folded into `FamilyKey` for every context-bearing projection-reduction family; the terminal projection mode rides on `context.mode`).
 - **Materialize only subpaths needed for the requested path.** Sibling members and unrelated branches are not touched.
 - **Mode cascades along the path.** Intermediate hops run in `Navigate`; only the terminal hop runs in the caller's requested mode (`Shallow`, `Expanded`, or `Identity`).
 - **Intersection contribution rule.** When projecting a path through `A & B`, only arms that contribute to the next path segment are projected; non-contributing arms are ignored for that path (not rewritten to `never`). If multiple arms contribute, the projected results of the contributing arms are intersected. Zero contributors is a projection miss.
@@ -579,12 +622,15 @@ All surrogate encodings are retired: `Alias(KeyOf(source))` (replaced by canonic
 | `key_names_from_base_node` / `_keyspace_node` | `KeyEnumeration::Unresolvable` | no (Rust-local) | Caller publishes canonical `Mapped` shell |
 | `relate_nodes` | `RelationResult::Unknown` | yes (cache-with-fence) | `RelationMemo` entry with dep-fence |
 
-**Parser → semantic graph integration.** Parser output is syntax/index
-inventory only. `type_inventory.rs` records imports, exports, declaration
-headers, and per-statement dependency names. The indexed lowering service
-converts authored declaration bodies into owned typed IR on demand; semantic
-queries then enter `ProjectSemanticDispatch::execute`. No parser cache adapter
-stores or returns resolved type surfaces.
+**Parser → semantic graph integration.** Parser output is syntax-only route
+inventory. `route_inventory.rs` records authored imports, exports, reexports,
+and export assignments. From the same retained program and exact owner table,
+semantic `ScriptShallowIndex` pairs those routes with `DeclHeaderIndex`, while
+semantic `decl_dependencies` produces per-declaration dependency names on
+demand. The indexed lowering service converts authored declaration bodies into
+owned typed IR on demand; semantic queries then enter
+`ProjectSemanticDispatch::execute`. No parser cache adapter stores or returns
+resolved type surfaces.
 
 **Authority-uniqueness contract** (normative, mechanically enforced by §6.5 gate tests):
 
@@ -626,10 +672,11 @@ locators for ordered type/value contributor groups and augmentation scopes. It
 stores no `TypeExpr` and performs no evaluation. Authored bodies are lowered
 on demand by the shared semantic dispatch.
 
-The parser's `type_inventory` module is a syntax/index boundary. It records
-route/declaration facts and structural dependency names; it performs no type
-evaluation and exposes no resolved-element carrier. Query-time finite types
-are governed by the shared semantic-dispatch contract above.
+The parser's `route_inventory` module owns authored syntax routes only. The
+semantic `ScriptShallowIndex` joins those routes with declaration headers, and
+semantic `decl_dependencies` owns structural dependency names. These layers
+perform no type evaluation and expose no resolved-element carrier. Query-time
+finite types are governed by the shared semantic-dispatch contract above.
 
 ## Declaration Merging (CRITICAL)
 

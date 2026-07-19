@@ -837,7 +837,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::KeyOf { base } => {
                 stack.push(ReduceFrame::descend(
                     *base,
-                    ProjectionReductionContext::structural_transit(),
+                    structural_operand_context(parent_context),
                 ));
             }
             SemanticNodeData::IndexedAccess { object, index } => {
@@ -846,7 +846,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if let IndexKey::TypeNode(n) = index {
                     stack.push(ReduceFrame::descend(
                         *n,
-                        ProjectionReductionContext::structural_transit(),
+                        structural_operand_context(parent_context),
                     ));
                 }
             }
@@ -858,7 +858,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // build.rs:1817 / 1852).
                 stack.push(ReduceFrame::descend(
                     *source,
-                    ProjectionReductionContext::structural_transit(),
+                    structural_operand_context(parent_context),
                 ));
             }
             SemanticNodeData::Conditional { check, extends, .. } => {
@@ -868,11 +868,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // SELECTED branch is reduced (via the dispatch result).
                 stack.push(ReduceFrame::descend(
                     *check,
-                    ProjectionReductionContext::structural_transit(),
+                    structural_operand_context(parent_context),
                 ));
                 stack.push(ReduceFrame::descend(
                     *extends,
-                    ProjectionReductionContext::structural_transit(),
+                    structural_operand_context(parent_context),
                 ));
             }
             SemanticNodeData::TypeParam {
@@ -1105,7 +1105,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             }
             SemanticNodeData::KeyOf { base } => {
-                let base_context = ProjectionReductionContext::structural_transit();
+                let base_context = structural_operand_context(context);
                 let base = state
                     .mapping
                     .get(&(*base, base_context))
@@ -1131,7 +1131,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 false_branch_ref,
                 distributive,
             } => {
-                let operand_context = ProjectionReductionContext::structural_transit();
+                let operand_context = structural_operand_context(context);
                 let check = state
                     .mapping
                     .get(&(*check, operand_context))
@@ -1197,7 +1197,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 reduced
             }
             SemanticNodeData::Mapped { source, mapper } => {
-                let source_context = ProjectionReductionContext::structural_transit();
+                let source_context = structural_operand_context(context);
                 let source = state
                     .mapping
                     .get(&(*source, source_context))
@@ -1264,7 +1264,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let path_read = self.execute_read(SemanticQueryKey::ProjectPath {
                         base: root,
                         path: projection_path,
-                        context: ProjectionReductionContext::published(ProjectionMode::Navigate),
+                        context: ProjectionReductionContext::published(ProjectionMode::Navigate)
+                            .with_orthogonal_axes_from(context),
                     });
                     state.merge_dep_signature(&path_read.dep_signature);
                     if path_read.result_is_partial {
@@ -1432,6 +1433,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // keep the caller-context-derived instantiate demand.
                 let inst_projection = if state.observation.is_some() {
                     ProjectionReductionContext::published(ProjectionMode::Shallow)
+                        .with_orthogonal_axes_from(context)
                 } else {
                     context
                 };
@@ -1721,7 +1723,10 @@ fn is_whole_surface_published(ctx: ProjectionReductionContext) -> bool {
 /// shallow-by-default violation this demotion fixes.
 ///
 /// Under `StructuralTransit` parent → `StructuralTransit` (the transit
-/// walk observes the object structurally without materialising it).
+/// walk observes the object structurally without materialising it). Every
+/// operand demotion preserves the orthogonal Vue heritage policy so a runtime
+/// declaration carrier still filters producer-addressed heritage before it
+/// resolves.
 #[allow(dead_code)] // wired by push_demand_children + reduce_one IndexedAccess.
 #[inline]
 fn indexed_access_object_context(
@@ -1730,8 +1735,19 @@ fn indexed_access_object_context(
     if matches!(parent_context.demand, ReductionDemand::Published) {
         parent_context.with_mode(ProjectionMode::Navigate)
     } else {
-        ProjectionReductionContext::structural_transit()
+        structural_operand_context(parent_context)
     }
+}
+
+/// Structural operand context: retain the reducer's historical structural
+/// provenance/merge defaults while preserving the orthogonal runtime heritage
+/// policy. Operand lowering must carrier-stop, but it cannot erase the policy
+/// before an imported declaration head is instantiated.
+#[inline]
+fn structural_operand_context(
+    parent_context: ProjectionReductionContext,
+) -> ProjectionReductionContext {
+    ProjectionReductionContext::structural_transit().with_orthogonal_axes_from(parent_context)
 }
 
 /// Re-key a `MapperKey` using `mapping` (substituting any reduced
@@ -4580,7 +4596,43 @@ mod tests {
     use crate::VerterHost;
     use verter_type_expr::TypeExpr;
 
-    use super::ProjectSemanticDispatch;
+    use super::{indexed_access_object_context, ProjectSemanticDispatch};
+
+    #[test]
+    fn indexed_access_object_demotion_preserves_vue_heritage_policy() {
+        use crate::semantic_query::{
+            ProjectionMode, ProjectionReductionContext, ReductionDemand, SurfaceProvenanceContext,
+            VueHeritagePolicy,
+        };
+
+        let filtered_parent = ProjectionReductionContext::vue_runtime_object_surface(
+            ProjectionMode::Shallow,
+            SurfaceProvenanceContext::Structural,
+        );
+        let unfiltered_parent = ProjectionReductionContext::macro_object_surface(
+            ProjectionMode::Shallow,
+            SurfaceProvenanceContext::Structural,
+        );
+        let filtered = indexed_access_object_context(filtered_parent);
+        let unfiltered = indexed_access_object_context(unfiltered_parent);
+
+        assert_eq!(filtered.demand, ReductionDemand::StructuralTransit);
+        assert_eq!(filtered.mode, ProjectionMode::Shallow);
+        assert_eq!(
+            filtered.vue_heritage_policy,
+            VueHeritagePolicy::SuppressIgnored,
+            "indexed-access operand demotion must not erase runtime filtering"
+        );
+        assert_eq!(unfiltered.vue_heritage_policy, VueHeritagePolicy::RetainAll);
+        assert_ne!(
+            filtered, unfiltered,
+            "filtered/unfiltered operands must enter distinct PRC family identities"
+        );
+
+        // Mutation recipe: restore the fresh `structural_transit()` fallback
+        // in `indexed_access_object_context`; `filtered` becomes RetainAll and
+        // both operand contexts collapse.
+    }
 
     #[test]
     fn raise_node_to_type_expr_preserves_number_index_key_values() {

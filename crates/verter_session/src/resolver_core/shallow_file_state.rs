@@ -19,10 +19,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::route_demand::RouteDemand;
 use crate::decl_body_memo::{DemandOutcome, LoweredTypeDecl, LoweredValueDecl};
-pub(crate) use verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource;
-use verter_parser::utils::oxc::script::type_inventory::{
-    DeclarationPath, ExportTarget as AnalyzedExportTarget, ImportBindingForm, ImportedExportPath,
-    SyntaxCapability,
+use verter_parser::utils::oxc::script::route_inventory::{
+    RouteCapability, RouteImportForm, RouteImportedName, ScriptRouteInventory,
 };
 use verter_semantic::analysis::decl_headers::{TypeDeclHeader, ValueDeclHeader};
 use verter_semantic::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
@@ -65,11 +63,10 @@ pub struct ShallowFileState {
     /// table above is the ordinary-file compatibility projection only.
     pub(crate) owner_import_targets: FxHashMap<DeclKey, ImportTarget>,
 
-    /// The HEADER-ONLY analyzed source: import/export/reexport tables plus
-    /// the local type-symbol NAME inventory (kind + span, no dependency
-    /// names). Body-derived data lives behind the lazy declaration-body
-    /// memo.
-    pub analysis: Arc<AnalyzedExternalTypeSource>,
+    /// Parser-authored import/export route inventory from the retained
+    /// program. Declaration headers and bodies remain owned by
+    /// [`Self::decl_bodies`]; this carrier contains no semantic analysis.
+    pub route_inventory: Arc<ScriptRouteInventory>,
 
     /// The lazy declaration-body memo this state materialises symbols
     /// from — the SOLE body authority. Shared (`Arc`) across route-only
@@ -372,13 +369,6 @@ pub(crate) fn external_canonical(target: &ImportTarget) -> Option<Arc<str>> {
     (!target.canonical_id.is_empty()).then(|| Arc::<str>::from(target.canonical_id.as_str()))
 }
 
-fn imported_export_root_name(exported: &ImportedExportPath, namespace_fallback: &str) -> String {
-    match exported {
-        ImportedExportPath::NamespaceRoot => namespace_fallback.to_string(),
-        ImportedExportPath::Symbol(path) => path.root().to_string(),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Budget and failure contract
 // ---------------------------------------------------------------------------
@@ -527,8 +517,8 @@ impl ShallowImportResolver for NullResolver {
 
 impl ShallowFileState {
     /// Test-only HEADER/ROUTING-ONLY constructor: build the routing tables
-    /// (exports / imports / wildcard reexports) from an existing
-    /// `AnalyzedExternalTypeSource` with a null resolver — canonical IDs on
+    /// (exports / imports / wildcard reexports) from an existing route
+    /// inventory with a null resolver — canonical IDs on
     /// cross-file edges stay empty. The declaration-body memo is EMPTY and
     /// serviceless: NO symbol inventory, NO bodies, and any body demand is a
     /// genuine miss — callers must provably never demand a declaration body
@@ -539,10 +529,10 @@ impl ShallowFileState {
     #[cfg(any(test, feature = "test-support"))]
     pub fn header_routing_only_for_test(
         whole_hash: Hash16,
-        analysis: Arc<AnalyzedExternalTypeSource>,
+        route_inventory: Arc<ScriptRouteInventory>,
     ) -> Self {
-        let memo = Self::empty_header_only_memo(whole_hash, analysis.as_ref());
-        Self::from_analysis_with_memo(whole_hash, analysis, memo, &NullResolver)
+        let memo = Self::empty_header_only_memo(whole_hash);
+        Self::from_route_inventory_with_memo(whole_hash, route_inventory, memo, &NullResolver)
     }
 
     /// [`Self::header_routing_only_for_test`] resolving cross-file edges
@@ -553,21 +543,18 @@ impl ShallowFileState {
     #[cfg(any(test, feature = "test-support"))]
     pub fn header_routing_only_with_resolver_for_test(
         whole_hash: Hash16,
-        analysis: Arc<AnalyzedExternalTypeSource>,
+        route_inventory: Arc<ScriptRouteInventory>,
         resolver: &dyn ShallowImportResolver,
     ) -> Self {
-        let memo = Self::empty_header_only_memo(whole_hash, analysis.as_ref());
-        Self::from_analysis_with_memo(whole_hash, analysis, memo, resolver)
+        let memo = Self::empty_header_only_memo(whole_hash);
+        Self::from_route_inventory_with_memo(whole_hash, route_inventory, memo, resolver)
     }
 
     /// The EMPTY serviceless memo backing the header/routing-only test
     /// constructors: no symbol inventory, no bodies, every body demand a
     /// genuine miss. Same gate as [`Self::header_routing_only_for_test`].
     #[cfg(any(test, feature = "test-support"))]
-    fn empty_header_only_memo(
-        whole_hash: Hash16,
-        analysis: &AnalyzedExternalTypeSource,
-    ) -> Arc<crate::decl_body_memo::DeclBodyMemo> {
+    fn empty_header_only_memo(whole_hash: Hash16) -> Arc<crate::decl_body_memo::DeclBodyMemo> {
         let env = verter_semantic::analysis::type_eval::EvalEnv::default();
         let header_index =
             Arc::new(verter_semantic::analysis::decl_headers::DeclHeaderIndex::from_eval_env(&env));
@@ -578,7 +565,6 @@ impl ShallowFileState {
                 parse_env_hash: [0u8; 16],
             },
             &env,
-            analysis,
             header_index,
         ))
     }
@@ -691,23 +677,15 @@ impl ShallowFileState {
                 parsed.program.body.len(),
             ),
         });
-        let header_index = Arc::new(
-            verter_semantic::analysis::decl_headers::build_decl_header_index_with_owners(
+        let shallow_index =
+            verter_semantic::analysis::script_shallow_index::build_script_shallow_index_with_owners(
                 &parsed.program,
                 source,
                 owner_table.as_ref(),
-            ),
-        );
-        let analysis = Arc::new(match statement_owners {
-            Some(owners) => verter_parser::utils::oxc::script::type_inventory::analyze_external_type_program_with_owner_table(
-                &parsed.program,
-                owners,
             )
-            .expect("service-backed test owner table must cover every statement"),
-            None => verter_parser::utils::oxc::script::type_inventory::analyze_external_type_program(
-                &parsed.program,
-            ),
-        });
+            .expect("service-backed test owner table must cover every statement");
+        let header_index = Arc::new(shallow_index.declaration_headers);
+        let route_inventory = Arc::new(shallow_index.routes);
         let eval_source: Arc<str> = Arc::from(source);
         let whole_hash = whole_hash.unwrap_or_else(|| crate::hash::hash_16(source.as_bytes()));
         let provenance = Arc::new(crate::types::MetaProvenance::default());
@@ -728,8 +706,11 @@ impl ShallowFileState {
             None,
         ));
         (
-            Arc::new(Self::from_analysis_with_resolver(
-                whole_hash, analysis, memo, resolver,
+            Arc::new(Self::from_route_inventory_with_resolver(
+                whole_hash,
+                route_inventory,
+                memo,
+                resolver,
             )),
             provenance,
         )
@@ -749,11 +730,15 @@ impl ShallowFileState {
         wildcard_reexports: Vec<WildcardReexport>,
         import_locals: FxHashSet<String>,
         import_targets: FxHashMap<String, ImportTarget>,
-        analysis: Arc<AnalyzedExternalTypeSource>,
+        route_inventory: Arc<ScriptRouteInventory>,
     ) -> Self {
-        let memo = Self::empty_header_only_memo(whole_hash, analysis.as_ref());
-        let mut state =
-            Self::assemble_from_analysis_with_memo(whole_hash, analysis, memo, &NullResolver);
+        let memo = Self::empty_header_only_memo(whole_hash);
+        let mut state = Self::assemble_from_route_inventory_with_memo(
+            whole_hash,
+            route_inventory,
+            memo,
+            &NullResolver,
+        );
         state.exports = exports;
         state.wildcard_reexports = wildcard_reexports;
         state.import_locals = import_locals;
@@ -780,39 +765,40 @@ impl ShallowFileState {
         state
     }
 
-    /// Build from the header-only analysis + the lazy declaration-body
+    /// Build from the syntax-only route inventory + the lazy declaration-body
     /// memo, with a resolver that canonicalizes all cross-file edges.
     ///
     /// This is the production construction path: HEADER work only —
     /// export/import routing tables, no body lowering. Symbol bodies
     /// materialise on first demand through the memo.
-    pub fn from_analysis_with_resolver(
+    pub fn from_route_inventory_with_resolver(
         whole_hash: Hash16,
-        analysis: Arc<AnalyzedExternalTypeSource>,
+        route_inventory: Arc<ScriptRouteInventory>,
         decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
         resolver: &dyn ShallowImportResolver,
     ) -> Self {
-        Self::from_analysis_with_memo(whole_hash, analysis, decl_bodies, resolver)
+        Self::from_route_inventory_with_memo(whole_hash, route_inventory, decl_bodies, resolver)
     }
 
     /// Shared routing-table builder for every `ShallowFileState`
-    /// constructor: it reads the ALREADY-extracted `analysis` bindings and
+    /// constructor: it reads the ALREADY-extracted route inventory and
     /// the SUPPLIED lazy declaration-body `decl_bodies` memo, canonicalizes
     /// cross-file edges through `resolver`, and assembles the
     /// export/import/wildcard routing tables. It performs NO reparse, NO
     /// `parse_and_build_env`, and NO eval-env build — every body materialises
-    /// later on demand through the supplied memo. (This is the routing-only
-    /// successor to the retired `from_analysis_inner` eval-env fallback, which
-    /// re-parsed the file; the retired name is banned in production by the
-    /// `from_analysis_inner_name_is_retired_in_session` guard.)
-    fn from_analysis_with_memo(
+    /// later on demand through the supplied memo.
+    fn from_route_inventory_with_memo(
         whole_hash: Hash16,
-        analysis: Arc<AnalyzedExternalTypeSource>,
+        route_inventory: Arc<ScriptRouteInventory>,
         decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
         resolver: &dyn ShallowImportResolver,
     ) -> Self {
-        let state =
-            Self::assemble_from_analysis_with_memo(whole_hash, analysis, decl_bodies, resolver);
+        let state = Self::assemble_from_route_inventory_with_memo(
+            whole_hash,
+            route_inventory,
+            decl_bodies,
+            resolver,
+        );
         state.install_shallow_lens_from_final_state();
         state
     }
@@ -820,13 +806,13 @@ impl ShallowFileState {
     /// Assemble the routing tables WITHOUT installing the memo's shared
     /// shallow lens. Every constructor finishes by calling
     /// [`Self::install_shallow_lens_from_final_state`] exactly once on its
-    /// FINISHED state — [`Self::from_analysis_with_memo`] immediately after
+    /// FINISHED state — [`Self::from_route_inventory_with_memo`] immediately after
     /// assembly, [`Self::routing_tables_only_for_test`] after its routing-table
     /// mutation — so the one shared lens always derives from the final
     /// routed state.
-    fn assemble_from_analysis_with_memo(
+    fn assemble_from_route_inventory_with_memo(
         whole_hash: Hash16,
-        analysis: Arc<AnalyzedExternalTypeSource>,
+        route_inventory: Arc<ScriptRouteInventory>,
         decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
         resolver: &dyn ShallowImportResolver,
     ) -> Self {
@@ -834,92 +820,99 @@ impl ShallowFileState {
         // walks, no allocation); `entry` collisions across the export sources
         // only ever shrink the final size.
         let ordinary_owner = TopLevelOwnerId::ordinary_file();
-        let binding_count = analysis
-            .extracted
-            .bindings
+        let binding_count = route_inventory
+            .imports
             .iter()
-            .filter(|binding| binding.local.owner == ordinary_owner)
+            .filter(|binding| binding.owner == ordinary_owner)
             .count();
-        let export_bound = analysis.direct_reexport_entries().count()
-            + analysis.exported_symbol_keys().count()
-            + 1; // the implicit `default` local-export probe
+        let export_bound = route_inventory.reexports.len()
+            + route_inventory.local_exports.len()
+            + route_inventory
+                .wildcard_reexports
+                .iter()
+                .filter(|route| route.exported_namespace.is_some())
+                .count();
         let mut exports = FxHashMap::with_capacity_and_hasher(export_bound, Default::default());
         let mut ambiguous_exports = FxHashSet::default();
-        let mut wildcard_reexports = Vec::with_capacity(analysis.wildcard_reexports().len());
+        let mut wildcard_reexports = Vec::with_capacity(route_inventory.wildcard_reexports.len());
         let mut import_locals =
             FxHashSet::with_capacity_and_hasher(binding_count, Default::default());
         let mut import_targets: FxHashMap<String, ImportTarget> =
             FxHashMap::with_capacity_and_hasher(binding_count, Default::default());
         let mut owner_import_targets: FxHashMap<DeclKey, ImportTarget> =
-            FxHashMap::with_capacity_and_hasher(
-                analysis.extracted.bindings.len(),
-                Default::default(),
-            );
+            FxHashMap::with_capacity_and_hasher(route_inventory.imports.len(), Default::default());
+        let mut ambiguous_imports = FxHashSet::default();
 
-        // Populate exports from the extracted bindings
-        // Direct reexports
-        for (exported, target) in analysis.direct_reexport_entries() {
-            let exported_name = exported.name.to_string();
-            if ambiguous_exports.contains(&exported_name) {
-                continue;
-            }
+        let insert_export =
+            |exported_name: String,
+             route: ExportTarget,
+             exports: &mut FxHashMap<String, ExportTarget>,
+             ambiguous_exports: &mut FxHashSet<String>| {
+                if ambiguous_exports.contains(&exported_name) {
+                    return;
+                }
+                if exports
+                    .get(&exported_name)
+                    .is_some_and(|existing| existing == &route)
+                {
+                    return;
+                }
+                if exports.insert(exported_name.clone(), route).is_some() {
+                    exports.remove(&exported_name);
+                    ambiguous_exports.insert(exported_name);
+                }
+            };
+
+        for target in &route_inventory.reexports {
             let canonical_id = resolver
                 .resolve_canonical(&target.source)
                 .unwrap_or_default();
-            let original_name = imported_export_root_name(&target.exported, exported.name.as_ref());
-            let is_type = matches!(target.capability, SyntaxCapability::TypeOnly)
-                || resolver.is_type_reexport(exported.name.as_ref(), &target.source);
+            let is_type = matches!(target.capability, RouteCapability::TypeOnly)
+                || resolver.is_type_reexport(&target.exported, &target.source);
             let route = ExportTarget::Reexport {
                 source_specifier: target.source.clone(),
-                original_name,
+                original_name: target.imported.clone(),
                 canonical_id,
                 is_type,
             };
-            if exports.insert(exported_name.clone(), route).is_some() {
-                exports.remove(&exported_name);
-                ambiguous_exports.insert(exported_name);
-            }
+            insert_export(
+                target.exported.clone(),
+                route,
+                &mut exports,
+                &mut ambiguous_exports,
+            );
         }
 
-        for exported in analysis.exported_symbol_keys() {
-            let exported_name = exported.name.to_string();
-            if ambiguous_exports.contains(&exported_name) {
-                continue;
-            }
-            let Some(target) = analysis.export_target(exported) else {
-                continue;
-            };
-            let (owner, symbol_name) = match target {
-                AnalyzedExportTarget::LocalDeclaration { declaration, .. } => {
-                    (declaration.root.owner, declaration.root.name.to_string())
-                }
-                AnalyzedExportTarget::LocalBinding { binding, .. } => {
-                    (binding.owner, binding.name.to_string())
-                }
-                AnalyzedExportTarget::External(_) => continue,
-            };
-            let target = ExportTarget::Local { owner, symbol_name };
-            if exports.insert(exported_name.clone(), target).is_some() {
-                exports.remove(&exported_name);
-                ambiguous_exports.insert(exported_name);
-            }
-        }
-
-        let default_declaration = DeclarationPath::root(DeclKey::new(ordinary_owner, "default"));
-        if analysis.local_symbol_span(&default_declaration).is_some() {
-            exports
-                .entry("default".to_string())
-                .or_insert_with(|| ExportTarget::Local {
-                    owner: ordinary_owner,
-                    symbol_name: "default".to_string(),
-                });
+        for target in &route_inventory.local_exports {
+            insert_export(
+                target.exported.clone(),
+                ExportTarget::Local {
+                    owner: target.owner,
+                    symbol_name: target.local.clone(),
+                },
+                &mut exports,
+                &mut ambiguous_exports,
+            );
         }
 
         // Wildcard reexport sources (in declaration order) with canonical targets
-        for wildcard in analysis.wildcard_reexports() {
+        for wildcard in &route_inventory.wildcard_reexports {
             let canonical_id = resolver
                 .resolve_canonical(&wildcard.source)
                 .unwrap_or_default();
+            if let Some(exported_namespace) = &wildcard.exported_namespace {
+                insert_export(
+                    exported_namespace.clone(),
+                    ExportTarget::Reexport {
+                        source_specifier: wildcard.source.clone(),
+                        original_name: exported_namespace.clone(),
+                        canonical_id: canonical_id.clone(),
+                        is_type: matches!(wildcard.capability, RouteCapability::TypeOnly),
+                    },
+                    &mut exports,
+                    &mut ambiguous_exports,
+                );
+            }
             wildcard_reexports.push(WildcardReexport {
                 owner: wildcard.owner,
                 source_specifier: wildcard.source.clone(),
@@ -928,38 +921,60 @@ impl ShallowFileState {
         }
 
         // Import locals and targets
-        for binding in &analysis.extracted.bindings {
+        for binding in &route_inventory.imports {
             let canonical_id = resolver
                 .resolve_canonical(&binding.source)
                 .unwrap_or_default();
             let target = ImportTarget {
                 source_specifier: binding.source.clone(),
-                imported_name: imported_export_root_name(
-                    &binding.imported,
-                    binding.local.name.as_ref(),
-                ),
-                is_namespace: matches!(binding.form, ImportBindingForm::Namespace),
+                imported_name: match &binding.imported {
+                    RouteImportedName::Namespace => binding.local.clone(),
+                    RouteImportedName::Name(name) => name.clone(),
+                },
+                is_namespace: matches!(binding.form, RouteImportForm::Namespace),
                 canonical_id,
             };
-            owner_import_targets.insert(binding.local.clone(), target.clone());
-            if binding.local.owner == ordinary_owner {
-                let local_name = binding.local.name.to_string();
+            let key = DeclKey::new(binding.owner, binding.local.as_str());
+            if ambiguous_imports.contains(&key) {
+                continue;
+            }
+            if owner_import_targets
+                .insert(key.clone(), target.clone())
+                .is_some()
+            {
+                owner_import_targets.remove(&key);
+                ambiguous_imports.insert(key);
+                if binding.owner == ordinary_owner {
+                    import_locals.remove(&binding.local);
+                    import_targets.remove(&binding.local);
+                }
+                continue;
+            }
+            if binding.owner == ordinary_owner {
+                let local_name = binding.local.clone();
                 import_locals.insert(local_name.clone());
                 import_targets.insert(local_name, target);
             }
         }
+
+        let mut ordinary_export_assignments = route_inventory
+            .export_assignments
+            .iter()
+            .filter(|assignment| assignment.owner == ordinary_owner);
+        let export_assignment = ordinary_export_assignments
+            .next()
+            .filter(|_| ordinary_export_assignments.next().is_none())
+            .map(|assignment| assignment.local.clone());
 
         Self {
             whole_hash,
             exports,
             wildcard_reexports,
             import_locals,
-            export_assignment: analysis
-                .export_assignment_target(ordinary_owner)
-                .map(|target| target.name.to_string()),
+            export_assignment,
             import_targets,
             owner_import_targets,
-            analysis,
+            route_inventory,
             decl_bodies,
             type_deps_cache: dashmap::DashMap::default(),
             synthesised_value_symbols: FxHashMap::default(),
@@ -1233,6 +1248,24 @@ impl ShallowFileState {
                 && self.synthesised_value_symbols.contains_key(name))
     }
 
+    /// Canonical one-way lexical parent for a carrier instance owner.
+    ///
+    /// The relation is derived exclusively from the validated owner table. An
+    /// instance sees a sole module owner; module/frontmatter owners have no
+    /// parent, and multiple module owners are ambiguous and fail closed.
+    pub(crate) fn validated_lexical_parent_owner(
+        &self,
+        owner: TopLevelOwnerId,
+    ) -> Option<TopLevelOwnerId> {
+        (owner.kind() == verter_type_expr::TopLevelOwnerKind::Instance)
+            .then(|| {
+                self.decl_bodies
+                    .owner_table()
+                    .unique_owner_of_kind(verter_type_expr::TopLevelOwnerKind::Module)
+            })
+            .flatten()
+    }
+
     /// Every `(scope, name)` key in the augmentation-scope TYPE inventory
     /// (header-level).
     pub fn augmentation_type_keys(
@@ -1326,7 +1359,7 @@ impl ShallowFileState {
     /// DEPENDENCY file set (not this file's own content). Bindingless
     /// imports carry no local binding (so they never enter
     /// `import_targets`) yet still resolve into
-    /// `IndexedReady.import_routes`; the retained analysis inventory is
+    /// `IndexedReady.import_routes`; the retained route inventory is
     /// the single authoritative source for them.
     ///
     /// This is a COMPONENT predicate, not an edge-currency authority: an
@@ -1343,7 +1376,7 @@ impl ShallowFileState {
     pub fn has_shallow_cross_file_edges(&self) -> bool {
         !self.import_targets.is_empty()
             || self.has_wildcard_reexports()
-            || !self.analysis.extracted.bindingless_imports.is_empty()
+            || !self.route_inventory.bindingless_imports.is_empty()
             || self
                 .exports
                 .values()
@@ -1357,6 +1390,19 @@ impl ShallowFileState {
             .header_index()
             .type_header(name)
             .map(|header| Arc::new(ShallowTypeSymbol::from_header(header)))
+    }
+
+    /// Read the kind and span of an exact owner-qualified TYPE symbol without
+    /// allocating a full [`ShallowTypeSymbol`] view.
+    pub(crate) fn type_symbol_metadata_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<(TypeDeclKind, Span)> {
+        self.decl_bodies
+            .header_index()
+            .type_header_in(owner, name)
+            .map(|header| (header.kind, header.span))
     }
 
     /// Look up the slim HEADER view of a local VALUE symbol by name —
@@ -1728,11 +1774,7 @@ impl ShallowFileState {
                 continue;
             }
 
-            let declaration = DeclarationPath::root(DeclKey::new(declaration_owner, root));
-            if root != declaration_name
-                && (self.analysis.local_type_symbol(&declaration).is_some()
-                    || self.has_type_symbol_in(declaration_owner, root))
-            {
+            if root != declaration_name && self.has_type_symbol_in(declaration_owner, root) {
                 local.insert(root.to_string());
             }
         }
@@ -1944,12 +1986,12 @@ impl ShallowFileState {
         let mut visited = FxHashSet::default();
         let mut pending = vec![type_name.to_string()];
 
-        // Import membership mirrors the analyzer's `import_locals` set
-        // (named + default bindings; namespace bindings are NOT members),
-        // so the walk agrees with the historical whole-analysis product.
+        // Import membership is exact-owner and includes named, default, and
+        // namespace bindings. Namespace roots are required carriers when a
+        // declaration references a member path such as `NS.Payload`.
         let is_import_local = |name: &str| -> bool {
-            self.analysis
-                .local_import_symbol_target(&DeclKey::new(owner, name))
+            self.owner_import_targets
+                .get(&DeclKey::new(owner, name))
                 .is_some()
         };
 
@@ -1963,14 +2005,7 @@ impl ShallowFileState {
                 continue;
             }
 
-            // Header-index membership too: namespaced / default-aliased /
-            // JSDoc-`@typedef` symbols are not in the analyzer table but
-            // ARE shallow type symbols whose structural dep graph must be
-            // walked for the required-import closure.
-            let declaration = DeclarationPath::root(DeclKey::new(owner, current.as_str()));
-            if self.analysis.local_type_symbol(&declaration).is_some()
-                || self.has_type_symbol_in(owner, &current)
-            {
+            if self.has_type_symbol_in(owner, &current) {
                 let Some(lowered) = self.decl_bodies.type_decl_in(owner, &current) else {
                     continue;
                 };
@@ -2555,6 +2590,98 @@ mod tests {
     use verter_semantic::analysis::type_eval::ValueDeclKind;
 
     #[test]
+    fn route_inventory_preserves_same_name_bindings_across_exact_owners() {
+        let source = concat!(
+            "import type { A as Payload } from './module';\n",
+            "import type { B as Payload } from './instance';\n",
+            "export type { Payload as ModulePayload };\n",
+            "export type { Payload as InstancePayload };\n",
+        );
+        let owners = [
+            TopLevelOwnerId::module(0),
+            TopLevelOwnerId::instance(0),
+            TopLevelOwnerId::module(0),
+            TopLevelOwnerId::instance(0),
+        ];
+        let allocator = oxc_allocator::Allocator::default();
+        let parsed =
+            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+        assert!(!parsed.panicked, "owner-qualified route fixture must parse");
+        let owner_table = verter_semantic::analysis::TopLevelOwnerTable::try_from_statement_owners(
+            parsed.program.body.len(),
+            owners,
+        )
+        .expect("owner table exactly covers the route fixture");
+        let index = verter_semantic::analysis::script_shallow_index::build_script_shallow_index_with_owners(
+            &parsed.program,
+            source,
+            &owner_table,
+        )
+        .expect("route inventory accepts the validated owner table");
+        let memo_state = ShallowFileState::service_backed_for_test_with_statement_owners(
+            "/ws/owners.ts",
+            source,
+            &owners,
+        );
+        let state = ShallowFileState::from_route_inventory_with_resolver(
+            memo_state.whole_hash,
+            Arc::new(index.routes),
+            Arc::clone(memo_state.decl_bodies()),
+            &NullResolver,
+        );
+
+        assert_eq!(
+            state
+                .import_target_in(TopLevelOwnerId::module(0), "Payload")
+                .map(|target| target.source_specifier.as_str()),
+            Some("./module"),
+        );
+        assert_eq!(
+            state
+                .import_target_in(TopLevelOwnerId::instance(0), "Payload")
+                .map(|target| target.source_specifier.as_str()),
+            Some("./instance"),
+        );
+        assert_eq!(
+            state.export_target("ModulePayload"),
+            Some(&ExportTarget::Local {
+                owner: TopLevelOwnerId::module(0),
+                symbol_name: "Payload".to_string(),
+            }),
+        );
+        assert_eq!(
+            state.export_target("InstancePayload"),
+            Some(&ExportTarget::Local {
+                owner: TopLevelOwnerId::instance(0),
+                symbol_name: "Payload".to_string(),
+            }),
+        );
+    }
+
+    #[test]
+    fn lexical_parent_owner_is_one_way_unique_and_ambiguity_safe() {
+        let module = TopLevelOwnerId::module(0);
+        let instance = TopLevelOwnerId::instance(0);
+        let unique = ShallowFileState::service_backed_for_test_with_statement_owners(
+            "/ws/unique-owner.ts",
+            "type Module = {}; type Setup = {};",
+            &[module, instance],
+        );
+        assert_eq!(
+            unique.validated_lexical_parent_owner(instance),
+            Some(module)
+        );
+        assert_eq!(unique.validated_lexical_parent_owner(module), None);
+
+        let ambiguous = ShallowFileState::service_backed_for_test_with_statement_owners(
+            "/ws/ambiguous-owner.ts",
+            "type First = {}; type Second = {}; type Setup = {};",
+            &[module, TopLevelOwnerId::module(1), instance],
+        );
+        assert_eq!(ambiguous.validated_lexical_parent_owner(instance), None);
+    }
+
+    #[test]
     fn deep_inference_type_tree_fails_with_typed_budget_without_recursion() {
         let mut expr = TypeExpr::Primitive(verter_type_expr::PrimitiveName::String);
         for _ in 0..=SEMANTIC_INFERENCE_TRAVERSAL_BUDGET {
@@ -2581,19 +2708,21 @@ mod tests {
         std::mem::forget(expr);
     }
 
-    fn make_analysis(source: &str) -> Arc<AnalyzedExternalTypeSource> {
+    fn make_routes(source: &str) -> Arc<ScriptRouteInventory> {
         let alloc = oxc_allocator::Allocator::new();
+        let parsed = oxc_parser::Parser::new(&alloc, source, oxc_span::SourceType::ts()).parse();
+        assert!(!parsed.panicked, "route fixture must parse");
         Arc::new(
-            verter_parser::utils::oxc::script::type_inventory::analyze_external_type_source(
-                source, &alloc,
+            verter_parser::utils::oxc::script::route_inventory::build_script_route_inventory(
+                &parsed.program,
             ),
         )
     }
 
     #[test]
     fn simple_interface_produces_local_export() {
-        let analysis = make_analysis("export interface Props { label: string }");
-        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), analysis);
+        let routes = make_routes("export interface Props { label: string }");
+        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), routes);
 
         assert!(
             state.export_target("Props").is_some(),
@@ -2612,9 +2741,27 @@ mod tests {
     }
 
     #[test]
+    fn merged_exported_interfaces_preserve_one_idempotent_local_route() {
+        let routes = make_routes(
+            "export interface Props { label: string }\n\
+             export interface Props { count: number }\n",
+        );
+        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), routes);
+
+        assert_eq!(
+            state.export_target("Props"),
+            Some(&ExportTarget::Local {
+                owner: TopLevelOwnerId::ordinary_file(),
+                symbol_name: "Props".to_string(),
+            }),
+            "identical routes from legal declaration merging are idempotent, not ambiguous",
+        );
+    }
+
+    #[test]
     fn reexport_produces_reexport_target() {
-        let analysis = make_analysis(r#"export { Foo } from "./inner""#);
-        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), analysis);
+        let routes = make_routes(r#"export { Foo } from "./inner""#);
+        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), routes);
 
         match state.export_target("Foo") {
             Some(ExportTarget::Reexport {
@@ -2631,9 +2778,8 @@ mod tests {
 
     #[test]
     fn wildcard_reexport_captured_in_order() {
-        let analysis =
-            make_analysis("export * from './a'\nexport * from './b'\nexport * from './c'\n");
-        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), analysis);
+        let routes = make_routes("export * from './a'\nexport * from './b'\nexport * from './c'\n");
+        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), routes);
 
         let specifiers: Vec<&str> = state
             .wildcard_reexports
@@ -2647,20 +2793,20 @@ mod tests {
         );
     }
 
-    // NOTE: local_closure tests require eval_env to populate symbols.
-    // Analysis-only construction produces empty symbols, so closure tests
-    // use the eval-env path.  We test export routing and import targets
-    // with analysis-only, and closure with eval-env below.
+    // NOTE: local_closure tests require declaration headers to populate
+    // symbols. Routing-only construction produces empty symbols, so closure
+    // tests use the service-backed path. We test export and import routing
+    // with routing-only state, and closure with memo headers below.
 
     #[test]
-    fn analysis_only_has_no_symbols() {
-        let analysis = make_analysis("export interface Props { label: string }\n");
-        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), analysis);
+    fn routing_only_has_no_symbols() {
+        let routes = make_routes("export interface Props { label: string }\n");
+        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), routes);
 
         // Symbols require eval_env
         assert!(
             state.type_symbol_names().next().is_none(),
-            "analysis-only construction should produce no symbols"
+            "routing-only construction should produce no symbols"
         );
         // But exports should still be populated
         assert!(state.export_target("Props").is_some());
@@ -2693,9 +2839,8 @@ export const defaults: Props = { label: 'ok' }
 
     /// A type that references a JSDoc-`@typedef` name must classify that
     /// reference as a LOCAL dep — the typedef lives in the shallow header
-    /// index but NOT the analyzer's `local_type_symbol` table, so local
-    /// classification must consult the header index. Pre-fix the `Alias`
-    /// hop is dropped (neither local nor external → a phantom/lost edge).
+    /// index, while the syntax route inventory intentionally contains no
+    /// declarations, so local classification must consult the header index.
     #[test]
     fn jsdoc_typedef_reference_classifies_as_local_dep() {
         let source = r#"
@@ -2705,8 +2850,7 @@ export type X = Alias
 "#;
         let state = ShallowFileState::service_backed_for_test(source);
 
-        // `Alias` is a shallow type symbol (header index) even though the
-        // analyzer never tracked it.
+        // `Alias` is a shallow type symbol owned by the declaration headers.
         assert!(
             state.has_type_symbol("Alias"),
             "the JSDoc typedef must be a shallow type symbol"
@@ -2834,13 +2978,13 @@ export interface Props { value: NS.Value.Inner; named: F.Bar }
 
     #[test]
     fn direct_export_takes_precedence_over_wildcard_route() {
-        let analysis = make_analysis(
+        let routes = make_routes(
             r#"
 export { Foo } from './direct'
 export * from './wildcard'
 "#,
         );
-        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), analysis);
+        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), routes);
 
         // Foo should resolve through the direct reexport, not the wildcard
         match state.export_target("Foo") {
@@ -2867,14 +3011,14 @@ export * from './wildcard'
 
     #[test]
     fn import_target_lookup() {
-        let analysis = make_analysis(
+        let routes = make_routes(
             r#"
 import type { Alpha } from './a'
 import type { Beta as B } from './b'
 export interface Props extends Alpha { beta: B }
 "#,
         );
-        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), analysis);
+        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), routes);
 
         assert!(state.is_import_local("Alpha"));
         let alpha_target = state.import_target("Alpha").unwrap();
@@ -2889,13 +3033,13 @@ export interface Props extends Alpha { beta: B }
 
     #[test]
     fn local_export_alias_preserves_underlying_local_target() {
-        let analysis = make_analysis(
+        let routes = make_routes(
             r#"
 import Foo from './dep'
 export { Foo as Bar }
 "#,
         );
-        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), analysis);
+        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), routes);
 
         assert!(state.is_import_local("Foo"));
         assert!(
@@ -2920,14 +3064,14 @@ export { Foo as Bar }
 
     #[test]
     fn default_exported_class_is_published_as_default() {
-        let analysis = make_analysis(
+        let routes = make_routes(
             r#"
 export default class Props {
   label!: string
 }
 "#,
         );
-        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), analysis);
+        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), routes);
 
         assert!(
             state.export_target("Props").is_none(),
@@ -3002,8 +3146,8 @@ export const defaults: Props = { label: 'ok' }
 export interface Props { label: string }
 export const defaults: Props = { label: 'ok' }
 "#;
-        let analysis = make_analysis(source);
-        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), analysis);
+        let routes = make_routes(source);
+        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), routes);
 
         match state.export_target("defaults") {
             Some(ExportTarget::Local { symbol_name, .. }) => assert_eq!(symbol_name, "defaults"),

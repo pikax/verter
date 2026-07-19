@@ -8414,6 +8414,127 @@ mod env_scoped_key_identity_guards {
         )
     }
 
+    /// `VueHeritagePolicy` remains value-affecting after the runtime
+    /// publication demand demotes to `StructuralTransit`: both contexts use
+    /// the same transit mode slot, so every PRC-bearing family must carry the
+    /// policy in its family identity. The final ProjectPath exercise proves
+    /// this is real warm-read isolation, not only derived-key inequality.
+    #[test]
+    fn vue_heritage_policy_is_family_identity_for_every_projection_reduction_family() {
+        let host = super::ctx_host();
+        let store = super::SemanticGraphStore::new();
+        let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let mapper = mapper_key(base);
+        let retained =
+            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
+        let suppressed = ProjectionReductionContext::vue_runtime_object_surface(
+            ProjectionMode::Shallow,
+            SurfaceProvenanceContext::Structural,
+        )
+        .into_structural_transit_with_mode(ProjectionMode::Navigate);
+
+        assert_eq!(retained.mode, suppressed.mode);
+        assert_eq!(retained.demand, suppressed.demand);
+        assert_eq!(retained.provenance, suppressed.provenance);
+        assert_eq!(retained.merge_role, suppressed.merge_role);
+        assert_ne!(
+            retained.vue_heritage_policy, suppressed.vue_heritage_policy,
+            "the demotion must preserve runtime heritage suppression as an orthogonal axis"
+        );
+
+        let canonical: Arc<str> = Arc::from("/vue-policy/source.ts");
+        let symbol: Arc<str> = Arc::from("Source");
+        let decl_slot = ResolvedDeclSlotIdentity::type_slot_unscoped(
+            Arc::clone(&canonical),
+            TopLevelOwnerId::ordinary_file(),
+            Arc::clone(&symbol),
+        );
+        let instantiate = |context| {
+            SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                decl_slot.clone(),
+                empty_args(),
+                InstantiateContext::non_file(
+                    context,
+                    [0; 16],
+                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                ),
+            ))
+        };
+
+        let keyof = |context| SemanticQueryKey::KeyOf { base, context };
+        let mapped = |context| SemanticQueryKey::MappedType {
+            source: base,
+            mapper: mapper.clone(),
+            context,
+        };
+        let value_slot = value_root_slot(&canonical, &symbol, 0, [0; 16], [0; 16]);
+        let type_of = |context| typeof_key(value_slot.clone(), [0; 16], context);
+        let project_path = |context| SemanticQueryKey::ProjectPath {
+            base,
+            path: super::family_test_path(),
+            context,
+        };
+
+        let pairs = [
+            (instantiate(retained), instantiate(suppressed)),
+            (keyof(retained), keyof(suppressed)),
+            (mapped(retained), mapped(suppressed)),
+            (type_of(retained), type_of(suppressed)),
+            (project_path(retained), project_path(suppressed)),
+        ];
+        for (unfiltered, filtered) in &pairs {
+            let (unfiltered_family, unfiltered_slot) = family_and_slot(unfiltered);
+            let (filtered_family, filtered_slot) = family_and_slot(filtered);
+            assert_eq!(
+                unfiltered_slot, filtered_slot,
+                "policy must not invent another reduction-demand slot"
+            );
+            assert_ne!(
+                unfiltered_family, filtered_family,
+                "every PRC-bearing family must retain VueHeritagePolicy identity"
+            );
+        }
+
+        let unfiltered_key = project_path(retained);
+        let filtered_key = project_path(suppressed);
+        let unfiltered_value =
+            store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let filtered_value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+        let first = store.execute_cooperative(
+            &host,
+            unfiltered_key,
+            || store.intern_node(SemanticNodeData::Opaque(super::QueryError::Miss)),
+            || {
+                (
+                    QueryResult::Value(unfiltered_value),
+                    super::empty_signature(),
+                )
+            },
+        );
+        assert_value_node(first.value, unfiltered_value);
+
+        let mut filtered_build_ran = false;
+        let second = store.execute_cooperative(
+            &host,
+            filtered_key,
+            || store.intern_node(SemanticNodeData::Opaque(super::QueryError::Miss)),
+            || {
+                filtered_build_ran = true;
+                (QueryResult::Value(filtered_value), super::empty_signature())
+            },
+        );
+        assert!(
+            filtered_build_ran,
+            "filtered StructuralTransit must not warm-hit the unfiltered family"
+        );
+        assert_value_node(second.value, filtered_value);
+
+        // Mutation recipe: remove `vue_heritage_policy` from any FamilyKey
+        // variant or rebuild a demoted context from the default transit
+        // constructor; the corresponding equality/preservation assertion
+        // fails, and ProjectPath cross-serves the first warm value.
+    }
+
     /// Two `TypeOf` queries over the SAME value root `(canonical, name)`
     /// that differ ONLY in an env dim — slot `type_env_hash` /
     /// `lib_env_hash` / `project_identity`, or the context
@@ -9015,6 +9136,99 @@ fn transit_skeleton_warm_does_not_serve_published_skeleton_request() {
     );
 }
 
+/// Runtime-filtered Vue macro surfaces and ordinary macro/TSC surfaces are
+/// distinct evaluations. Publication demand selects dedicated non-backfilling
+/// slots, while the orthogonal policy also distinguishes their family identity
+/// so a later StructuralTransit demotion remains isolated.
+#[test]
+fn vue_runtime_surface_warm_never_serves_unfiltered_macro_surface() {
+    use super::family::{context_to_slot, slot_domain_siblings};
+    use crate::semantic_query::{ProjectionReductionContext, SurfaceProvenanceContext};
+
+    let runtime_context = ProjectionReductionContext::vue_runtime_object_surface(
+        ProjectionMode::Shallow,
+        SurfaceProvenanceContext::Structural,
+    );
+    let unfiltered_context = ProjectionReductionContext::macro_object_surface(
+        ProjectionMode::Shallow,
+        SurfaceProvenanceContext::Structural,
+    );
+    let runtime_slot = context_to_slot(runtime_context);
+    let unfiltered_slot = context_to_slot(unfiltered_context);
+    assert_ne!(
+        runtime_slot, unfiltered_slot,
+        "runtime-filtered and unfiltered macro demands must use distinct memo slots"
+    );
+    assert!(
+        slot_domain_siblings(runtime_slot).is_empty()
+            && slot_domain_siblings(unfiltered_slot).is_empty(),
+        "neither policy slot may backfill the other"
+    );
+
+    let key_for =
+        |base: SemanticNodeId, context: ProjectionReductionContext| SemanticQueryKey::ProjectPath {
+            base,
+            path: family_test_path(),
+            context,
+        };
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+
+    let runtime_base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let runtime_value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let runtime_key = key_for(runtime_base, runtime_context);
+    let unfiltered_peer = key_for(runtime_base, unfiltered_context);
+    let runtime_read = store.execute_cooperative(
+        &host,
+        runtime_key.clone(),
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || {
+            (
+                QueryResult::Value(runtime_value),
+                family_test_dep_signature(),
+            )
+        },
+    );
+    assert!(matches!(
+        runtime_read.value,
+        QueryResult::Value(id) if id == runtime_value
+    ));
+    assert!(store.get_unvalidated(&runtime_key).is_some());
+    assert!(
+        store.get_unvalidated(&unfiltered_peer).is_none(),
+        "a filtered runtime value must not warm-serve TSC/component-meta"
+    );
+
+    let unfiltered_base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+    let unfiltered_value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let unfiltered_key = key_for(unfiltered_base, unfiltered_context);
+    let runtime_peer = key_for(unfiltered_base, runtime_context);
+    let unfiltered_read = store.execute_cooperative(
+        &host,
+        unfiltered_key.clone(),
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || {
+            (
+                QueryResult::Value(unfiltered_value),
+                family_test_dep_signature(),
+            )
+        },
+    );
+    assert!(matches!(
+        unfiltered_read.value,
+        QueryResult::Value(id) if id == unfiltered_value
+    ));
+    assert!(store.get_unvalidated(&unfiltered_key).is_some());
+    assert!(
+        store.get_unvalidated(&runtime_peer).is_none(),
+        "an unfiltered macro value must not warm-serve runtime props/emits"
+    );
+
+    // Mutation recipe: route `VueRuntimeObjectSurface` to
+    // `MacroSurfaceShallow` (or add either slot as the other's sibling); the
+    // slot or warm-isolation assertion must fail.
+}
+
 /// Prepared-identity bijection guards (HARD CONDITION for the prepared
 /// dispatch token).
 ///
@@ -9395,7 +9609,10 @@ mod prepared_identity_bijection {
             ),
             SemanticQueryKeyTag::ClassifyBroadRuntime => (
                 SemanticQueryKey::ClassifyBroadRuntime {
-                    subject: node(1),
+                    subject: crate::locator_identity::BroadRuntimeSubjectLocator::payload(
+                        type_slot("__sfc"),
+                        0,
+                    ),
                     context: BroadRuntimeContext {
                         resolve_env_hash: h16(0),
                         type_env_hash: h16(0),
@@ -9404,7 +9621,10 @@ mod prepared_identity_bijection {
                     },
                 },
                 SemanticQueryKey::ClassifyBroadRuntime {
-                    subject: node(2),
+                    subject: crate::locator_identity::BroadRuntimeSubjectLocator::payload(
+                        type_slot("__sfc"),
+                        1,
+                    ),
                     context: BroadRuntimeContext {
                         resolve_env_hash: h16(0),
                         type_env_hash: h16(0),

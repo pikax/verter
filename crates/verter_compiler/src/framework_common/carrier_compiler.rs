@@ -133,6 +133,9 @@ pub struct RuntimeCompileOptions {
     pub filename: Option<String>,
     /// Production mode: strips dev-only code (`__file`, HMR, dev instrumentation).
     pub is_production: bool,
+    /// Compile the carrier as a custom element. This does not classify
+    /// template tags; each carrier maps it to its explicit compile-option axis.
+    pub custom_element: bool,
     /// Generate source maps for the produced runtime output.
     pub source_map: bool,
     /// Server-side rendering mode (the carrier emits its SSR backend).

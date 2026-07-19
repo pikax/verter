@@ -1105,6 +1105,44 @@ pub enum ReductionDemand {
     /// `ProjectPath` / `keyof` keep `Published` (intersection is correct
     /// there).
     MacroObjectSurface,
+    /// Vue runtime props/emits object-surface publication.
+    ///
+    /// This has the same operator-reduction and union-of-members semantics as
+    /// [`Self::MacroObjectSurface`], plus one explicit policy: heritage arms
+    /// carrying producer-minted `@vue-ignore` facts are removed before their
+    /// heads resolve or merge. The policy is runtime-only. TSC, component-meta,
+    /// slots, and ordinary macro surfaces retain [`Self::MacroObjectSurface`]
+    /// and therefore preserve the complete TypeScript heritage surface.
+    ///
+    /// It is a distinct cache identity so a runtime-filtered surface can never
+    /// warm-serve an unfiltered macro/TSC query over the same graph node.
+    VueRuntimeObjectSurface,
+}
+
+/// Vue heritage publication policy — an orthogonal, content-free reduction
+/// context axis.
+///
+/// [`ReductionDemand`] answers whether operator materialisation is publication
+/// work or structural transit work. This axis answers a different question:
+/// whether producer-addressed `@vue-ignore` heritage arms are retained while a
+/// declaration body is lowered. Keeping the policy independent lets an
+/// internal carrier unwrap demote `VueRuntimeObjectSurface` to
+/// `StructuralTransit` (preserving carrier-stop semantics) without losing the
+/// runtime-only heritage filter.
+///
+/// The axis is folded into every `ProjectionReductionContext`-bearing memo
+/// family and mapped-member context encoding. It contains no content/version
+/// state; prepared-declaration facts and file self-roots remain the sole value
+/// versioning rail (R6).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
+pub enum VueHeritagePolicy {
+    /// Retain the complete TypeScript heritage surface. This is the default
+    /// for TSC, component-meta, slots, and every non-runtime query.
+    #[default]
+    RetainAll,
+    /// Remove only producer-addressed `@vue-ignore` heritage arms before
+    /// substitution, head resolution, and surface merging.
+    SuppressIgnored,
 }
 
 /// Surface-provenance axis — by design.
@@ -1286,8 +1324,9 @@ impl PartialEq<MemberMergeRole> for MergeRoleStamp {
     }
 }
 
-/// Projection reduction context — the `(mode, demand, provenance, merge_role)`
-/// tuple threaded through every operator dispatch (`Instantiate` /
+/// Projection reduction context — the
+/// `(mode, demand, provenance, merge_role, vue_heritage_policy)` tuple
+/// threaded through every operator dispatch (`Instantiate` /
 /// `KeyOf` / `MappedType` and the builtin-utility dispatch that
 /// composes them).
 ///
@@ -1318,6 +1357,12 @@ pub struct ProjectionReductionContext {
     /// heritage-arm surface and a structural surface of the same node cache
     /// distinctly.
     pub merge_role: MemberMergeRole,
+    /// Runtime-only Vue heritage policy. Orthogonal to [`Self::demand`]: an
+    /// internal carrier unwrap may require `StructuralTransit` operator
+    /// semantics while still suppressing producer-addressed ignored heritage.
+    /// Folded into every context-bearing family identity so filtered and
+    /// unfiltered structural-transit reductions cannot cross-serve.
+    pub vue_heritage_policy: VueHeritagePolicy,
 }
 
 impl ProjectionReductionContext {
@@ -1333,6 +1378,7 @@ impl ProjectionReductionContext {
             demand: ReductionDemand::Published,
             provenance: SurfaceProvenanceContext::Structural,
             merge_role: MemberMergeRole::Authored,
+            vue_heritage_policy: VueHeritagePolicy::RetainAll,
         }
     }
 
@@ -1352,6 +1398,7 @@ impl ProjectionReductionContext {
             demand: ReductionDemand::Published,
             provenance: SurfaceProvenanceContext::MacroTypeArgOwnBody,
             merge_role: MemberMergeRole::Authored,
+            vue_heritage_policy: VueHeritagePolicy::RetainAll,
         }
     }
 
@@ -1373,6 +1420,26 @@ impl ProjectionReductionContext {
             demand: ReductionDemand::MacroObjectSurface,
             provenance,
             merge_role: MemberMergeRole::Authored,
+            vue_heritage_policy: VueHeritagePolicy::RetainAll,
+        }
+    }
+
+    /// Construct the Vue runtime props/emits object-surface demand.
+    ///
+    /// This is the only constructor that enables typed `@vue-ignore`
+    /// heritage suppression. It remains a `Shallow` publication demand, not a
+    /// projection mode, and carries the same provenance axis as
+    /// [`Self::macro_object_surface`].
+    pub const fn vue_runtime_object_surface(
+        mode: ProjectionMode,
+        provenance: SurfaceProvenanceContext,
+    ) -> Self {
+        Self {
+            mode,
+            demand: ReductionDemand::VueRuntimeObjectSurface,
+            provenance,
+            merge_role: MemberMergeRole::Authored,
+            vue_heritage_policy: VueHeritagePolicy::SuppressIgnored,
         }
     }
 
@@ -1381,7 +1448,17 @@ impl ProjectionReductionContext {
     /// union-of-members over the common-member intersection.
     #[must_use]
     pub const fn is_macro_object_surface(self) -> bool {
-        matches!(self.demand, ReductionDemand::MacroObjectSurface)
+        matches!(
+            self.demand,
+            ReductionDemand::MacroObjectSurface | ReductionDemand::VueRuntimeObjectSurface
+        )
+    }
+
+    /// Whether this demand suppresses producer-identified `@vue-ignore`
+    /// heritage arms before semantic resolution.
+    #[must_use]
+    pub const fn suppresses_vue_ignored_heritage(self) -> bool {
+        matches!(self.vue_heritage_policy, VueHeritagePolicy::SuppressIgnored)
     }
 
     /// Construct a `StructuralTransit` context — used by the relation
@@ -1395,6 +1472,7 @@ impl ProjectionReductionContext {
             demand: ReductionDemand::StructuralTransit,
             provenance: SurfaceProvenanceContext::Structural,
             merge_role: MemberMergeRole::Authored,
+            vue_heritage_policy: VueHeritagePolicy::RetainAll,
         }
     }
 
@@ -1417,6 +1495,25 @@ impl ProjectionReductionContext {
             demand: ReductionDemand::StructuralTransit,
             provenance: SurfaceProvenanceContext::Structural,
             merge_role: MemberMergeRole::Authored,
+            vue_heritage_policy: VueHeritagePolicy::RetainAll,
+        }
+    }
+
+    /// Demote this context to structural transit at `mode` while preserving
+    /// every orthogonal value-affecting axis.
+    ///
+    /// The empty-path Shallow walker uses this at declaration-carrier unwraps:
+    /// operator dispatch must carrier-stop, but macro provenance, merge role,
+    /// and the Vue heritage policy still describe the declaration surface
+    /// being requested.
+    #[must_use]
+    pub const fn into_structural_transit_with_mode(self, mode: ProjectionMode) -> Self {
+        Self {
+            mode,
+            demand: ReductionDemand::StructuralTransit,
+            provenance: self.provenance,
+            merge_role: self.merge_role,
+            vue_heritage_policy: self.vue_heritage_policy,
         }
     }
 
@@ -1439,6 +1536,7 @@ impl ProjectionReductionContext {
             demand: self.demand,
             provenance: SurfaceProvenanceContext::Structural,
             merge_role: self.merge_role,
+            vue_heritage_policy: self.vue_heritage_policy,
         }
     }
 
@@ -1456,6 +1554,7 @@ impl ProjectionReductionContext {
             demand: self.demand,
             provenance: self.provenance,
             merge_role: self.merge_role,
+            vue_heritage_policy: self.vue_heritage_policy,
         }
     }
 
@@ -1470,6 +1569,7 @@ impl ProjectionReductionContext {
             demand: self.demand,
             provenance,
             merge_role: self.merge_role,
+            vue_heritage_policy: self.vue_heritage_policy,
         }
     }
 
@@ -1486,7 +1586,52 @@ impl ProjectionReductionContext {
             demand: self.demand,
             provenance: self.provenance,
             merge_role,
+            vue_heritage_policy: self.vue_heritage_policy,
         }
+    }
+
+    /// Derive a context from `self` while inheriting every orthogonal axis
+    /// from `source`.
+    ///
+    /// This is the single adapter for sites that intentionally choose fresh
+    /// mode/demand/provenance/merge-role semantics but remain inside the same
+    /// runtime request. In particular, Vue ignored-heritage suppression must
+    /// survive those semantic transitions. Both destructures are exhaustive:
+    /// adding a field to [`ProjectionReductionContext`] fails compilation here
+    /// until it is explicitly classified as template-owned or inherited.
+    ///
+    /// Kept crate-local so [`Self::vue_runtime_object_surface`] remains the
+    /// only producer of [`VueHeritagePolicy::SuppressIgnored`]; downstream
+    /// reducers may propagate that value but cannot mint it directly.
+    #[must_use]
+    pub(crate) const fn with_orthogonal_axes_from(self, source: Self) -> Self {
+        let Self {
+            mode,
+            demand,
+            provenance,
+            merge_role,
+            vue_heritage_policy: _,
+        } = self;
+        let Self {
+            mode: _,
+            demand: _,
+            provenance: _,
+            merge_role: _,
+            vue_heritage_policy,
+        } = source;
+        Self {
+            mode,
+            demand,
+            provenance,
+            merge_role,
+            vue_heritage_policy,
+        }
+    }
+
+    /// The orthogonal Vue heritage policy carried by this reduction.
+    #[must_use]
+    pub const fn vue_heritage_policy(self) -> VueHeritagePolicy {
+        self.vue_heritage_policy
     }
 
     /// Whether this context is entering the macro type-argument's own
@@ -1598,8 +1743,8 @@ pub(crate) fn is_non_file_base(canonical: &str) -> bool {
 /// resolve imported type-argument references, and the
 /// [`InstantiateBodySource`] source-kind axis (`FileBacked(P)` /
 /// `NonFile`) — alongside the embedded [`ProjectionReductionContext`]
-/// (the `mode` / `demand` / `provenance` / `merge_role`
-/// projection-demand identity).
+/// (the `mode` / `demand` / `provenance` / `merge_role` /
+/// `vue_heritage_policy` projection-demand identity).
 ///
 /// **Per-key context, not shared global (parity §2.6):** the env dims
 /// ride on this dedicated `Instantiate` context — NOT on the shared
@@ -1636,7 +1781,7 @@ pub(crate) fn is_non_file_base(canonical: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InstantiateContext {
     /// Embedded projection-demand identity (`mode` / `demand` /
-    /// `provenance` / `merge_role`). The shared
+    /// `provenance` / `merge_role` / `vue_heritage_policy`). The shared
     /// [`ProjectionReductionContext`] stays a pure projection identity;
     /// the env dims live on this wrapper, never inside it.
     projection_reduction: ProjectionReductionContext,
@@ -1764,6 +1909,7 @@ fn w_projection_reduction_context(context: &ProjectionReductionContext) {
         demand,
         provenance,
         merge_role,
+        vue_heritage_policy,
     } = context;
     match mode {
         ProjectionMode::Identity
@@ -1775,13 +1921,17 @@ fn w_projection_reduction_context(context: &ProjectionReductionContext) {
     match demand {
         ReductionDemand::Published
         | ReductionDemand::StructuralTransit
-        | ReductionDemand::MacroObjectSurface => {}
+        | ReductionDemand::MacroObjectSurface
+        | ReductionDemand::VueRuntimeObjectSurface => {}
     }
     match provenance {
         SurfaceProvenanceContext::Structural | SurfaceProvenanceContext::MacroTypeArgOwnBody => {}
     }
     match merge_role {
         MemberMergeRole::Authored | MemberMergeRole::OwnBody | MemberMergeRole::Heritage => {}
+    }
+    match vue_heritage_policy {
+        VueHeritagePolicy::RetainAll | VueHeritagePolicy::SuppressIgnored => {}
     }
 }
 
@@ -1953,7 +2103,8 @@ impl MacroPayloadContext {
 /// `resolve_env_hash` (`R`), because `build_typeof` resolves the value
 /// name through the owning file's name resolution / export tables —
 /// alongside the embedded [`ProjectionReductionContext`] (the `mode` /
-/// `demand` / `provenance` / `merge_role` projection-demand identity).
+/// `demand` / `provenance` / `merge_role` / `vue_heritage_policy`
+/// projection-demand identity).
 ///
 /// **Per-key context, not shared global (parity with
 /// [`InstantiateContext`]):** the env dim rides on this dedicated
@@ -1972,7 +2123,7 @@ impl MacroPayloadContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeOfContext {
     /// Embedded projection-demand identity (`mode` / `demand` /
-    /// `provenance` / `merge_role`). The shared
+    /// `provenance` / `merge_role` / `vue_heritage_policy`). The shared
     /// [`ProjectionReductionContext`] stays a pure projection identity;
     /// the env dim lives on this wrapper, never inside it.
     pub projection_reduction: ProjectionReductionContext,
@@ -2040,12 +2191,14 @@ impl TypeOfContext {
 /// follows the same code path as the builtin `Pick<T,K>` and obeys
 /// the SAME predicate.
 pub const fn may_reduce_operator(ctx: ProjectionReductionContext) -> bool {
-    // `MacroObjectSurface` is a publication demand: operators reduce
-    // exactly like `Published`. The two demands differ ONLY in the
-    // union-arm merge rule at the empty-path Shallow terminal surface.
+    // Both macro object-surface demands are publication demands: operators
+    // reduce exactly like `Published`. Their policy differences live at the
+    // empty-path surface/heritage boundary, never in operator reduction.
     matches!(
         ctx.demand,
-        ReductionDemand::Published | ReductionDemand::MacroObjectSurface
+        ReductionDemand::Published
+            | ReductionDemand::MacroObjectSurface
+            | ReductionDemand::VueRuntimeObjectSurface
     )
 }
 
@@ -2664,6 +2817,10 @@ pub enum QueryError {
     UnsupportedIntrinsic { name: Arc<str> },
     /// The resolver hit one of its structured safety rails.
     BudgetExceeded(BudgetExceededFailure),
+    /// The request (or its aggregate scheduler job after all owners detached)
+    /// was cancelled. Cancellation is a typed partial/ReturnOnly outcome and
+    /// is never eligible for shared memo publication.
+    Cancelled,
     /// The completion fence exhausted its retry budget (default: 3).
     UnstableState { attempts: u8 },
     /// The path walker re-entered an alias it had already visited on the
@@ -2769,6 +2926,7 @@ impl QueryError {
             | QueryError::ValueDomainMismatch { .. } => true,
             QueryError::Miss
             | QueryError::BudgetExceeded(_)
+            | QueryError::Cancelled
             | QueryError::UnstableState { .. }
             | QueryError::AliasCycle { .. }
             | QueryError::RecursiveRef { .. }
@@ -2801,6 +2959,7 @@ impl PartialEq for QueryError {
                 a == b
             }
             (Self::BudgetExceeded(_), Self::BudgetExceeded(_)) => true,
+            (Self::Cancelled, Self::Cancelled) => true,
             (Self::UnstableState { attempts: a }, Self::UnstableState { attempts: b }) => a == b,
             (Self::AliasCycle { chain: a }, Self::AliasCycle { chain: b }) => a == b,
             (Self::RecursiveRef { name: a }, Self::RecursiveRef { name: b }) => a == b,
@@ -2855,6 +3014,9 @@ impl std::hash::Hash for QueryError {
             }
             Self::BudgetExceeded(_) => {
                 2u8.hash(state);
+            }
+            Self::Cancelled => {
+                14u8.hash(state);
             }
             Self::UnstableState { attempts } => {
                 3u8.hash(state);
@@ -3649,9 +3811,10 @@ pub struct OverloadSetContext {
 
 /// Environment a modeless broad-runtime classification depends on.
 ///
-/// The subject node carries substitution identity. Classification may settle
-/// unresolved carrier heads and global nominal types, so the key includes the
-/// complete `{R,T,L,J}` environment and no projection-mode axis.
+/// The content-free subject locator carries the owning macro slot and exact
+/// payload/member route. Classification re-sources its live graph carrier and
+/// may settle unresolved heads and global nominal types, so the key includes
+/// the complete `{R,T,L,J}` environment and no projection-mode axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BroadRuntimeContext {
     pub resolve_env_hash: HashValue,
@@ -4659,11 +4822,16 @@ pub enum SemanticQueryKey {
         type_args: Arc<[SemanticNodeId]>,
         context: OverloadSetContext,
     },
-    /// Classify a semantic subject into Vue-compatible broad runtime kinds.
-    /// Modeless and terminal: the reducer follows semantic carriers and union
-    /// arms but never enumerates object members.
+    /// Classify a canonical macro payload/member route into Vue-compatible
+    /// broad runtime kinds. Modeless and terminal: the reducer re-sources the
+    /// live carrier from the content-free locator, follows semantic carriers
+    /// and union arms, but never enumerates nested object members.
+    ///
+    /// `subject` contains no `SemanticNodeId`, content hash, or span. Anonymous
+    /// graph subjects use the dispatch's explicit transient ReturnOnly path and
+    /// never enter this durable family.
     ClassifyBroadRuntime {
-        subject: SemanticNodeId,
+        subject: crate::locator_identity::BroadRuntimeSubjectLocator,
         context: BroadRuntimeContext,
     },
     /// Resolve the APPARENT type of `base` — the member surface a value of

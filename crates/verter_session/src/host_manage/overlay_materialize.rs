@@ -20,6 +20,8 @@
 
 use std::sync::Arc;
 
+use verter_semantic::analysis::script_shallow_index::build_script_shallow_index_with_owners;
+
 use crate::types::{DependencyResolution, Hash16};
 use crate::VerterHost;
 
@@ -619,7 +621,8 @@ impl VerterHost {
         };
         struct ColdIndexProducts {
             header_index: verter_semantic::analysis::decl_headers::DeclHeaderIndex,
-            analysis: verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource,
+            route_inventory:
+                verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory,
             snapshot: Option<crate::types::FileAnalysisSnapshot>,
             svelte_component_runes_mode: bool,
             owner_table: Arc<verter_semantic::analysis::TopLevelOwnerTable>,
@@ -664,26 +667,21 @@ impl VerterHost {
                         )
                     })
                 });
-                let (header_index, analysis) = match program {
+                let (header_index, route_inventory) = match program {
                     Some(parsed) => {
                         let body = parsed.borrow_dependent();
-                        let parser_owners = owner_table
-                            .statements()
-                            .iter()
-                            .map(|statement| statement.owner)
-                            .collect::<Vec<_>>();
-                        (
-                            verter_semantic::analysis::decl_headers::build_decl_header_index_with_owners(
-                                body,
-                                parsed.source_str(),
-                                &owner_table,
-                            ),
-                            verter_parser::utils::oxc::script::type_inventory::analyze_external_type_program_headers_with_owner_table(body, &parser_owners)
-                                .map_err(|error| crate::parse::ScriptOwnerIndexError::ParserTable {
-                                    statement_count: error.statement_count(),
-                                    owner_count: error.owner_count(),
-                                })?,
+                        let index = build_script_shallow_index_with_owners(
+                            body,
+                            parsed.source_str(),
+                            &owner_table,
                         )
+                        .map_err(|error| {
+                            crate::parse::ScriptOwnerIndexError::ParserTable {
+                                statement_count: error.statement_count(),
+                                owner_count: error.owner_count(),
+                            }
+                        })?;
+                        (index.declaration_headers, index.routes)
                     }
                     None => Default::default(),
                 };
@@ -697,10 +695,7 @@ impl VerterHost {
                         job_scope,
                         parsed_sfc,
                         &job_provenance,
-                        VerterHost::vue_flight_script_program(
-                            eval_is_extracted_script,
-                            program,
-                        ),
+                        VerterHost::vue_flight_script_program(eval_is_extracted_script, program),
                         Some(&owner_table),
                     );
                     Some(VerterHost::build_snapshot_from_parse(parse))
@@ -740,7 +735,7 @@ impl VerterHost {
                 };
                 Ok::<_, crate::parse::ScriptOwnerIndexError>(ColdIndexProducts {
                     header_index,
-                    analysis,
+                    route_inventory,
                     snapshot,
                     svelte_component_runes_mode,
                     owner_table,
@@ -773,7 +768,7 @@ impl VerterHost {
             }
         };
         let snapshot = Arc::new(products.snapshot.unwrap_or_default());
-        let external_type_analysis = Arc::new(products.analysis);
+        let route_inventory = Arc::new(products.route_inventory);
 
         // The OVERLAY artifact's own declaration-body memo — a fresh
         // instance per overlay materialise, so overlay bodies are
@@ -938,7 +933,7 @@ impl VerterHost {
         // companion), so the overlay wildcard `canonical_id`s agree with the
         // base `IndexedReady` route surface. An unresolvable source leaves
         // the loop-baked known-miss in place.
-        for wildcard in external_type_analysis.wildcard_reexports() {
+        for wildcard in &route_inventory.wildcard_reexports {
             let source = wildcard.source.as_str();
             if let Some(resolved) = self.resolve_route_edge_canonical(analysis_canonical_id, source)
             {
@@ -963,9 +958,9 @@ impl VerterHost {
             .shallow_state_builds
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut shallow_state_inner =
-            crate::resolver_core::ShallowFileState::from_analysis_with_resolver(
+            crate::resolver_core::ShallowFileState::from_route_inventory_with_resolver(
                 whole_hash,
-                Arc::clone(&external_type_analysis),
+                Arc::clone(&route_inventory),
                 Arc::clone(&decl_bodies),
                 &resolver,
             );
@@ -1016,7 +1011,7 @@ impl VerterHost {
             script_analysis,
             export_signatures,
             snapshot,
-            external_type_analysis: Arc::clone(&external_type_analysis),
+            route_inventory: Arc::clone(&route_inventory),
             declares_interface_app_config,
             macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
         });

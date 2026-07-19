@@ -480,6 +480,7 @@ fn prepare_type_decl_from_lowered(
             })?;
     }
     prepared.type_parameters = lowered.narrow_type_parameters.clone();
+    prepared.vue_ignored_heritage = Arc::clone(&lowered.vue_ignored_heritage);
     let empty_deps = ClassifiedTypeDeps::default();
     let deps = deps.unwrap_or(&empty_deps);
     prepared.local_deps = deps.local_deps.clone();

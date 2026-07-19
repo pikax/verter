@@ -131,26 +131,20 @@ impl crate::resolver_core::DeclarationMetadataResolver
         owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
     ) -> Option<crate::resolver_core::ResolvedLocalTypeSymbolMetadata> {
-        let analysis = self.host.external_type_analysis(canonical_source)?;
-        let declaration = verter_parser::utils::oxc::script::type_inventory::DeclarationPath::root(
-            verter_type_expr::DeclKey::new(owner, resolved_name),
-        );
-        let symbol = analysis.local_type_symbol(&declaration)?;
-        let kind = match symbol.kind {
-            verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSymbolKind::TypeAlias => {
+        let state = self.host.shallow_file_state(canonical_source)?;
+        let (symbol_kind, span) = state.type_symbol_metadata_in(owner, resolved_name)?;
+        let kind = match symbol_kind {
+            verter_semantic::analysis::type_eval::TypeDeclKind::Alias => {
                 crate::resolver_core::ResolvedDeclarationKind::TypeAlias
             }
-            verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSymbolKind::Interface => {
+            verter_semantic::analysis::type_eval::TypeDeclKind::Interface => {
                 crate::resolver_core::ResolvedDeclarationKind::Interface
             }
-            verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSymbolKind::Class => {
+            verter_semantic::analysis::type_eval::TypeDeclKind::Class => {
                 crate::resolver_core::ResolvedDeclarationKind::Class
             }
         };
-        Some(crate::resolver_core::ResolvedLocalTypeSymbolMetadata {
-            kind,
-            span: symbol.span,
-        })
+        Some(crate::resolver_core::ResolvedLocalTypeSymbolMetadata { kind, span })
     }
 }
 

@@ -20,11 +20,17 @@ test("the canonical gate owns both Vue macro oracle verification steps", () => {
 });
 
 test("extractRuntimeShape is formatting-insensitive but preserves runtime semantics", () => {
-  const compact = `export default defineComponent({props:{value:{type:[Boolean,String],required:true,skipCheck:true}},emits:["change"]})`;
+  const compact = `export default defineComponent({props:{value:{type:[Boolean,String],required:true,skipCheck:true,default:"a  b"},method:{type:Function,required:false,default() { return "x  y"; }}},emits:["change"]})`;
   const formatted = `
     export default defineComponent({
       props: {
-        value: { type: [Boolean, String], required: true, skipCheck: true },
+        value: {
+          type: [Boolean, String],
+          required: true,
+          skipCheck: true,
+          default: "a  b",
+        },
+        method: { type: Function, required: false, default() { return "x  y"; } },
       },
       emits: ["change"],
     });
@@ -35,10 +41,21 @@ test("extractRuntimeShape is formatting-insensitive but preserves runtime semant
     props: [
       {
         name: "value",
+        typePresent: true,
         constructors: ["Boolean", "String"],
         required: true,
         skipCheck: true,
-        default: null,
+        defaultKind: "property",
+        default: '"a  b"',
+      },
+      {
+        name: "method",
+        typePresent: true,
+        constructors: ["Function"],
+        required: false,
+        skipCheck: false,
+        defaultKind: "method",
+        default: 'default() { return "x  y"; }',
       },
     ],
     emits: ["change"],
@@ -95,8 +112,75 @@ test("the pinned compiler generates the complete deterministic fixture matrix", 
       "define-model-default-and-named",
       "vue-ignore",
       "imported-utility-and-indexed",
+      "profile-default-rendering",
+      "complete-imported-extension",
     ],
   );
+
+  const profiles = first.cases.find(({ id }) => id === "profile-default-rendering");
+  assert.deepEqual(
+    profiles.profiles.map(({ name }) => name),
+    ["development", "production", "production-custom-element"],
+  );
+  const development = profiles.profiles.find(({ name }) => name === "development").runtime;
+  const production = profiles.profiles.find(({ name }) => name === "production").runtime;
+  const customElement = profiles.profiles.find(
+    ({ name }) => name === "production-custom-element",
+  ).runtime;
+  assert.deepEqual(
+    development.props.find(({ name }) => name === "text"),
+    {
+      name: "text",
+      typePresent: true,
+      constructors: ["String"],
+      required: true,
+      skipCheck: false,
+      defaultKind: "property",
+      default: "'fallback'",
+    },
+  );
+  assert.deepEqual(
+    production.props.find(({ name }) => name === "text"),
+    {
+      name: "text",
+      typePresent: false,
+      constructors: [],
+      required: null,
+      skipCheck: false,
+      defaultKind: "property",
+      default: "'fallback'",
+    },
+  );
+  assert.deepEqual(
+    customElement.props.find(({ name }) => name === "text"),
+    {
+      name: "text",
+      typePresent: true,
+      constructors: ["String"],
+      required: null,
+      skipCheck: false,
+      defaultKind: "property",
+      default: "'fallback'",
+    },
+  );
+  assert.deepEqual(production.props.find(({ name }) => name === "enabled").constructors, [
+    "Boolean",
+  ]);
+  assert.deepEqual(customElement.props.find(({ name }) => name === "opaque").constructors, []);
+  for (const runtime of [development, production, customElement]) {
+    assert.equal(runtime.props.find(({ name }) => name === "method").defaultKind, "method");
+    assert.match(
+      runtime.props.find(({ name }) => name === "method").default,
+      /^default\(\) \{ return 2 \}$/,
+    );
+  }
+  assert.equal(production.props.find(({ name }) => name === "opaque").typePresent, false);
+  assert.equal(customElement.props.find(({ name }) => name === "opaque").typePresent, true);
+
+  const extension = first.cases.find(({ id }) => id === "complete-imported-extension");
+  assert.equal(extension.contract, "verter-complete-extension");
+  assert.equal(extension.extensionPolicy, "refine-only-on-complete");
+  assert.deepEqual(extension.profiles[0].runtime.props[0].constructors, []);
 
   const nominal = first.cases.find(({ id }) => id === "containers-callables-and-nominals");
   assert.deepEqual(
