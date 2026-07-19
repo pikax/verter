@@ -2,7 +2,7 @@
   "name": "Svelte",
   "scopeName": "source.svelte",
   "fileTypes": ["svelte"],
-  "uuid": "7f9e1c3b-2a64-4f08-9c15-svelte-verter",
+  "uuid": "7f9e1c3b-2a64-4f08-9c15-8a51e7c3d2f4",
   "information_for_contributors": [
     "Clean-room Svelte grammar authored for Verter, following the structure of",
     "the sibling Vue grammar (vue.yaml / vue-generated.json): script/style tags",
@@ -40,7 +40,7 @@
       }
     },
     "script-ts": {
-      "begin": "(<)(script)\\b(?=[^>]*lang=('ts'|\"ts\"))(?![^/>]*/>\\s*$)",
+      "begin": "(<)(script)\\b(?=[^>]*(?<![\\w-])lang\\s*=\\s*(?:'(?:ts|typescript)'|\"(?:ts|typescript)\"|(?:ts|typescript)(?=[\\s/>])))(?![^/>]*/>\\s*$)",
       "beginCaptures": {
         "1": { "name": "punctuation.definition.tag.begin.svelte" },
         "2": { "name": "entity.name.tag.script.svelte" }
@@ -90,7 +90,7 @@
       ]
     },
     "style-scss": {
-      "begin": "(<)(style)\\b(?=[^>]*lang=('scss'|\"scss\"))(?![^/>]*/>\\s*$)",
+      "begin": "(<)(style)\\b(?=[^>]*(?<![\\w-])lang\\s*=\\s*(?:'scss'|\"scss\"|scss(?=[\\s/>])))(?![^/>]*/>\\s*$)",
       "beginCaptures": {
         "1": { "name": "punctuation.definition.tag.begin.svelte" },
         "2": { "name": "entity.name.tag.style.svelte" }
@@ -115,7 +115,7 @@
       ]
     },
     "style-less": {
-      "begin": "(<)(style)\\b(?=[^>]*lang=('less'|\"less\"))(?![^/>]*/>\\s*$)",
+      "begin": "(<)(style)\\b(?=[^>]*(?<![\\w-])lang\\s*=\\s*(?:'less'|\"less\"|less(?=[\\s/>])))(?![^/>]*/>\\s*$)",
       "beginCaptures": {
         "1": { "name": "punctuation.definition.tag.begin.svelte" },
         "2": { "name": "entity.name.tag.style.svelte" }
@@ -140,7 +140,7 @@
       ]
     },
     "style-sass": {
-      "begin": "(<)(style)\\b(?=[^>]*lang=('sass'|\"sass\"))(?![^/>]*/>\\s*$)",
+      "begin": "(<)(style)\\b(?=[^>]*(?<![\\w-])lang\\s*=\\s*(?:'sass'|\"sass\"|sass(?=[\\s/>])))(?![^/>]*/>\\s*$)",
       "beginCaptures": {
         "1": { "name": "punctuation.definition.tag.begin.svelte" },
         "2": { "name": "entity.name.tag.style.svelte" }
@@ -165,7 +165,7 @@
       ]
     },
     "style-stylus": {
-      "begin": "(<)(style)\\b(?=[^>]*lang=('stylus'|\"stylus\"))(?![^/>]*/>\\s*$)",
+      "begin": "(<)(style)\\b(?=[^>]*(?<![\\w-])lang\\s*=\\s*(?:'stylus'|\"stylus\"|stylus(?=[\\s/>])))(?![^/>]*/>\\s*$)",
       "beginCaptures": {
         "1": { "name": "punctuation.definition.tag.begin.svelte" },
         "2": { "name": "entity.name.tag.style.svelte" }
@@ -190,7 +190,7 @@
       ]
     },
     "style-postcss": {
-      "begin": "(<)(style)\\b(?=[^>]*lang=('postcss'|\"postcss\"))(?![^/>]*/>\\s*$)",
+      "begin": "(<)(style)\\b(?=[^>]*(?<![\\w-])lang\\s*=\\s*(?:'postcss'|\"postcss\"|postcss(?=[\\s/>])))(?![^/>]*/>\\s*$)",
       "beginCaptures": {
         "1": { "name": "punctuation.definition.tag.begin.svelte" },
         "2": { "name": "entity.name.tag.style.svelte" }

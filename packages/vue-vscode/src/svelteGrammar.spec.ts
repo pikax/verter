@@ -30,6 +30,14 @@ function grammarPathFromManifest(): string {
   return path.join(extensionDir, entry.path);
 }
 
+// `loadWASM` may only run once per process — share one grammar across suites.
+let grammarPromise: Promise<IGrammar> | undefined;
+
+function getSvelteGrammar(): Promise<IGrammar> {
+  grammarPromise ??= loadSvelteGrammar();
+  return grammarPromise;
+}
+
 async function loadSvelteGrammar(): Promise<IGrammar> {
   const wasmPath = require.resolve("vscode-oniguruma/release/onig.wasm");
   await oniguruma.loadWASM(readFileSync(wasmPath).buffer as ArrayBuffer);
@@ -109,6 +117,11 @@ const FIXTURE = `<script lang="ts">
   {@render row(1)}
   {@html rawHtml}
   {@const doubled = count * 2}
+  {#key count}
+    <span>rekeyed</span>
+  {/key}
+  {@debug count}
+  <SvelteChild let:row={r} />
 </main>
 
 <style lang="scss">
@@ -134,7 +147,7 @@ describe("svelte TextMate grammar smoke (tokenizes the contributed grammar file)
   let all: Token[][];
 
   beforeAll(async () => {
-    const grammar = await loadSvelteGrammar();
+    const grammar = await getSvelteGrammar();
     all = tokenize(grammar, FIXTURE);
   });
 
@@ -193,6 +206,20 @@ describe("svelte TextMate grammar smoke (tokenizes the contributed grammar file)
   it("scopes {@html} and {@const}", () => {
     expect(hasScope(all, "@html", /^keyword\.control/)).toBe(true);
     expect(hasScope(all, "@const", /^keyword\.control/)).toBe(true);
+  });
+
+  it("scopes {#key} / {/key} block keywords", () => {
+    expect(hasScope(all, "#key", /^keyword\.control/)).toBe(true);
+    expect(hasScope(all, "/key", /^keyword\.control/)).toBe(true);
+  });
+
+  it("scopes {@debug}", () => {
+    expect(hasScope(all, "@debug", /^keyword\.control/)).toBe(true);
+  });
+
+  it("scopes the let: directive with its bound name", () => {
+    expect(hasScope(all, "let", /^entity\.other\.attribute-name\.directive/)).toBe(true);
+    expect(hasScope(all, "row", /^entity\.other\.attribute-name\.svelte$/)).toBe(true);
   });
 
   it("scopes {expression} interpolations as embedded expressions", () => {
@@ -259,5 +286,56 @@ describe("svelte TextMate grammar smoke (tokenizes the contributed grammar file)
 
   it("closes the script region at </script> (negative: style is not source.ts)", () => {
     expect(hasScope(all, "color: red", "source.ts")).toBe(false);
+  });
+});
+
+// Every authored `lang` form must select the right embedded scope: double-quoted,
+// single-quoted, and UNQUOTED values, plus the long-form aliases (`typescript`,
+// `javascript`). Each case asserts the wanted scope AND the absence of the
+// competing scope (a TS block mis-tokenized as source.js must fail).
+describe("svelte TextMate grammar lang attribute forms", () => {
+  let grammar: IGrammar;
+
+  beforeAll(async () => {
+    grammar = await getSvelteGrammar();
+  });
+
+  const scriptForms: Array<{ open: string; want: string; notWant: string }> = [
+    { open: '<script lang="ts">', want: "source.ts", notWant: "source.js" },
+    { open: "<script lang='ts'>", want: "source.ts", notWant: "source.js" },
+    { open: "<script lang=ts>", want: "source.ts", notWant: "source.js" },
+    { open: '<script lang="typescript">', want: "source.ts", notWant: "source.js" },
+    { open: "<script lang='typescript'>", want: "source.ts", notWant: "source.js" },
+    { open: "<script lang=typescript>", want: "source.ts", notWant: "source.js" },
+    { open: "<script module lang=ts>", want: "source.ts", notWant: "source.js" },
+    { open: '<script lang="js">', want: "source.js", notWant: "source.ts" },
+    { open: "<script lang=js>", want: "source.js", notWant: "source.ts" },
+    { open: '<script lang="javascript">', want: "source.js", notWant: "source.ts" },
+    { open: "<script lang=javascript>", want: "source.js", notWant: "source.ts" },
+    { open: "<script>", want: "source.js", notWant: "source.ts" },
+  ];
+
+  it.each(scriptForms)("embeds $open content as $want", ({ open, want, notWant }) => {
+    const all = tokenize(grammar, `${open}\n  const marker = 1;\n</script>\n`);
+    expect(hasScope(all, "const marker", want)).toBe(true);
+    expect(hasScope(all, "const marker", notWant)).toBe(false);
+  });
+
+  const styleForms: Array<{ open: string; want: string }> = [
+    { open: "<style lang=scss>", want: "source.css.scss" },
+    { open: "<style lang='less'>", want: "source.css.less" },
+    { open: "<style lang=postcss>", want: "source.css.postcss" },
+  ];
+
+  it.each(styleForms)("embeds $open content as $want", ({ open, want }) => {
+    const all = tokenize(grammar, `${open}\n  .wrap { color: red; }\n</style>\n`);
+    expect(hasScope(all, "color: red", want)).toBe(true);
+    // Exact-scope negative: the generic css fallback must NOT have claimed it.
+    expect(hasScope(all, "color: red", "source.css")).toBe(false);
+  });
+
+  it("does not activate TS embedding for lang values that merely start with ts (negative)", () => {
+    const all = tokenize(grammar, `<script lang=tsx>\n  const marker = 1;\n</script>\n`);
+    expect(hasScope(all, "const marker", "source.ts")).toBe(false);
   });
 });
