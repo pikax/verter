@@ -1,10 +1,11 @@
 //! Restart-interleaving coverage for the single-writer
 //! [`ResilientProvider`](super::ResilientProvider).
 //!
-//! Every test drives the REAL production path — `ResilientProvider::new` spawns
-//! the actor + crash monitor, a crash is tripped through the public crash-notify
-//! handle, and the respawn is gated through a real [`ResilientBackend`]. The
-//! tests are fully deterministic and contain NO wall-clock sleep:
+//! The mock interleaving tests drive the REAL production path —
+//! `ResilientProvider::new` spawns the actor + crash monitor, a crash is tripped
+//! through the public crash-notify handle, and the respawn is gated through a
+//! real [`ResilientBackend`]. Those tests are deterministic and contain no
+//! wall-clock sleep:
 //!
 //! * the crash is tripped with `Notify::notify_one` (lossless — it stores a
 //!   permit if the monitor has not parked yet);
@@ -27,6 +28,7 @@ use tokio::sync::{mpsc, Notify, Semaphore};
 use super::{ResilientBackend, ResilientProvider, TracingNotifier};
 use crate::protocol::*;
 use crate::traits::{ProviderFuture, TypeProvider};
+use crate::tsserver::TsserverTypeProvider;
 
 /// A recorded provider call.
 #[derive(Debug, Clone, PartialEq)]
@@ -350,6 +352,579 @@ async fn await_down(provider: &ResilientProvider<MockProvider, TestBackend>) {
         tokio::task::yield_now().await;
     }
     panic!("inner provider never reported down after a crash");
+}
+
+pub(crate) struct RecoveryCarrierFixture {
+    pub(crate) source_path: &'static str,
+    pub(crate) companion_path: &'static str,
+    pub(crate) content: &'static str,
+    /// Deliberately disagrees with `content`: a typed success must come from the
+    /// plugin store, never an accidental ordinary disk/open-file fallback.
+    pub(crate) stale_disk_content: &'static str,
+    pub(crate) hover_offset: u32,
+    pub(crate) expected_hover: &'static str,
+}
+
+pub(crate) const RECOVERY_CARRIERS: [RecoveryCarrierFixture; 2] = [
+    RecoveryCarrierFixture {
+        source_path: "/project/src/Recovery.vue",
+        companion_path: "/project/src/Recovery.vue.tsx",
+        content: "export const vueRecoveryValue: string = 'vue';\nvueRecoveryValue;\n",
+        stale_disk_content: "export const vueRecoveryValue = null;\nvueRecoveryValue;\n",
+        hover_offset: 13,
+        expected_hover: "const vueRecoveryValue: string",
+    },
+    RecoveryCarrierFixture {
+        source_path: "/project/src/Recovery.svelte",
+        companion_path: "/project/src/Recovery.svelte.tsx",
+        content: "export const svelteRecoveryValue: number = 42;\nsvelteRecoveryValue;\n",
+        stale_disk_content: "export const svelteRecoveryValue = null;\nsvelteRecoveryValue;\n",
+        hover_offset: 13,
+        expected_hover: "const svelteRecoveryValue: number",
+    },
+];
+
+async fn register_recovery_carriers<P: TypeProvider>(provider: &P) {
+    for fixture in &RECOVERY_CARRIERS {
+        provider
+            .register_carrier_member(
+                fixture.source_path,
+                fixture.companion_path,
+                fixture.content,
+                "/project/tsconfig.json",
+            )
+            .await
+            .expect("recovery carrier registration must succeed");
+    }
+}
+
+struct MaterializedRecoveryCarrier {
+    source_path: String,
+    companion_path: String,
+    content: &'static str,
+    hover_offset: u32,
+    expected_hover: &'static str,
+}
+
+struct RealTsserverBackend {
+    node_path: String,
+    tsserver_path: String,
+    workspace_root: String,
+    plugin_path: String,
+    carrier_store_dir: String,
+    failures_before_success: Arc<AtomicUsize>,
+    spawn_attempts: Arc<AtomicUsize>,
+}
+
+impl ResilientBackend<TsserverTypeProvider> for RealTsserverBackend {
+    fn log_name(&self) -> &'static str {
+        "real-tsserver"
+    }
+
+    fn user_label(&self) -> &'static str {
+        "tsserver"
+    }
+
+    fn restarting_error(&self) -> &'static str {
+        "real tsserver is restarting"
+    }
+
+    fn spawn<'a>(
+        &'a self,
+        crash_notify: Arc<Notify>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<TsserverTypeProvider, TypeProviderError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        self.spawn_attempts.fetch_add(1, Ordering::SeqCst);
+        let fail = self
+            .failures_before_success
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok();
+        if fail {
+            return Box::pin(async { Err(TypeProviderError::new("spawn failed (test)")) });
+        }
+
+        let node_path = self.node_path.clone();
+        let tsserver_path = self.tsserver_path.clone();
+        let workspace_root = self.workspace_root.clone();
+        let plugin_path = self.plugin_path.clone();
+        let carrier_store_dir = self.carrier_store_dir.clone();
+        Box::pin(async move {
+            TsserverTypeProvider::spawn(
+                &node_path,
+                &tsserver_path,
+                &workspace_root,
+                Some(&plugin_path),
+                Some(&carrier_store_dir),
+                false,
+                Some(crash_notify),
+            )
+            .await
+        })
+    }
+}
+
+pub(crate) struct RealRecoveryHarness {
+    _project: tempfile::TempDir,
+    provider: ResilientProvider<TsserverTypeProvider, RealTsserverBackend>,
+    crash_notify: Arc<Notify>,
+    spawn_attempts: Arc<AtomicUsize>,
+    carriers: Vec<MaterializedRecoveryCarrier>,
+    project_file_name: String,
+}
+
+pub(crate) fn real_tsserver_path(repo_root: &std::path::Path) -> std::path::PathBuf {
+    let root = repo_root.to_string_lossy();
+    if let Some(path) = crate::discovery::find_tsserver(None, Some(&root)) {
+        return path;
+    }
+
+    let pnpm_store = repo_root.join("node_modules/.pnpm");
+    let mut candidates = std::fs::read_dir(&pnpm_store)
+        .unwrap_or_else(|error| panic!("read {}: {error}", pnpm_store.display()))
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("typescript@")
+        })
+        .map(|entry| entry.path().join("node_modules/typescript/lib/tsserver.js"))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates
+        .pop()
+        .expect("real recovery tests require the workspace tsserver.js")
+}
+
+pub(crate) async fn build_real_tsserver_plugin(
+    repo_root: &std::path::Path,
+    fixture_root: &std::path::Path,
+    node_path: &str,
+) -> std::path::PathBuf {
+    let plugin_probe = fixture_root.join("plugin-probe").join("node_modules");
+    let plugin_package = plugin_probe.join("@verter").join("typescript-plugin");
+    let plugin_entry = plugin_package.join("dist").join("index.js");
+    assert!(
+        !plugin_entry.exists(),
+        "source-built plugin fixture must start without a dist artifact"
+    );
+    std::fs::create_dir_all(plugin_entry.parent().expect("plugin dist parent"))
+        .expect("create source-built plugin package");
+    std::fs::write(
+        plugin_package.join("package.json"),
+        r#"{"name":"@verter/typescript-plugin","version":"0.0.0-test","type":"commonjs","main":"dist/index.js"}"#,
+    )
+    .expect("write source-built plugin package.json");
+
+    // Preserve normal Node package resolution for optional workspace dependencies
+    // (notably `@verter/svelte-jsx`) from the unique temporary plugin package.
+    let dependency_link = plugin_package.join("node_modules");
+    let workspace_dependencies = std::fs::canonicalize(
+        repo_root
+            .join("packages")
+            .join("typescript-plugin")
+            .join("node_modules"),
+    )
+    .expect("canonical workspace plugin dependencies");
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&dependency_link)
+            .arg(&workspace_dependencies)
+            .output()
+            .expect("create plugin dependency junction");
+        assert!(
+            output.status.success(),
+            "create plugin dependency junction: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    #[cfg(not(windows))]
+    std::os::unix::fs::symlink(&workspace_dependencies, &dependency_link)
+        .expect("create plugin dependency symlink");
+
+    let esbuild = repo_root.join("node_modules/esbuild/bin/esbuild");
+    let plugin_source = repo_root.join("packages/typescript-plugin/src/index.ts");
+    let language_shared_source = repo_root.join("packages/language-shared/src/index.ts");
+    let alias = format!(
+        "--alias:@verter/language-shared={}",
+        language_shared_source.to_string_lossy().replace('\\', "/")
+    );
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio::process::Command::new(node_path)
+            .arg(esbuild)
+            .arg(plugin_source)
+            .args([
+                "--bundle",
+                "--platform=node",
+                "--format=cjs",
+                "--target=node18",
+            ])
+            .arg(alias)
+            .arg(format!("--outfile={}", plugin_entry.to_string_lossy()))
+            .output(),
+    )
+    .await
+    .expect("source plugin build exceeded 30 seconds")
+    .expect("run workspace esbuild");
+    assert!(
+        output.status.success(),
+        "build production plugin source: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        plugin_entry.is_file(),
+        "source plugin build emitted no entry"
+    );
+    plugin_probe
+}
+
+pub(crate) fn publish_recovery_carrier_store<'a>(
+    store_dir: &std::path::Path,
+    project_file_name: &str,
+    epoch: u64,
+    version: u64,
+    carriers: impl IntoIterator<Item = (&'a str, &'a str, &'a str)>,
+) {
+    // Exact `@verter/typescript-plugin` manifest/blob wire contract. Keeping the
+    // store inside the fixture TempDir makes the external-process test isolated.
+    let blobs_dir = store_dir.join("blobs");
+    std::fs::create_dir_all(&blobs_dir).expect("create recovery carrier blob store");
+    std::fs::create_dir_all(store_dir.join("maps")).expect("create recovery carrier map store");
+
+    let mut owned_sources = Vec::new();
+    let mut ready_files = serde_json::Map::new();
+    for (source_path, companion_path, content) in carriers {
+        let digest = blake3::hash(content.as_bytes());
+        let content_hash = digest.as_bytes()[..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let blob_name = format!("blake3-{content_hash}.tsx");
+        std::fs::write(blobs_dir.join(&blob_name), content).expect("publish recovery carrier blob");
+        owned_sources.push(serde_json::json!({
+            "source_uri": source_path,
+            "provider_uri": companion_path,
+            "role": "CarrierIde",
+            "script_kind": "TSX",
+        }));
+        ready_files.insert(
+            companion_path.to_string(),
+            serde_json::json!({
+                "content_hash": content_hash,
+                "version": version,
+                "script_kind": "TSX",
+                "role": "CarrierIde",
+                "map_hash": "00000000000000000000000000000000",
+                "blob_rel": format!("blobs/{blob_name}"),
+            }),
+        );
+    }
+
+    let mut projects = serde_json::Map::new();
+    projects.insert(
+        project_file_name.to_string(),
+        serde_json::json!({
+            "owned_sources": owned_sources,
+            "ready_files": ready_files,
+        }),
+    );
+    let manifest = serde_json::json!({
+        "epoch": epoch,
+        "host_version": "real-recovery-test",
+        "projects": projects,
+    });
+    std::fs::write(
+        store_dir.join("manifest.json"),
+        serde_json::to_vec(&manifest).expect("serialize recovery carrier manifest"),
+    )
+    .expect("publish recovery carrier manifest");
+}
+
+pub(crate) fn publish_unready_recovery_carrier_store<'a>(
+    store_dir: &std::path::Path,
+    project_file_name: &str,
+    epoch: u64,
+    carriers: impl IntoIterator<Item = (&'a str, &'a str)>,
+) {
+    std::fs::create_dir_all(store_dir.join("blobs"))
+        .expect("create unready recovery carrier blob store");
+    std::fs::create_dir_all(store_dir.join("maps"))
+        .expect("create unready recovery carrier map store");
+    let owned_sources = carriers
+        .into_iter()
+        .map(|(source_path, companion_path)| {
+            serde_json::json!({
+                "source_uri": source_path,
+                "provider_uri": companion_path,
+                "role": "CarrierIde",
+                "script_kind": "TSX",
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut projects = serde_json::Map::new();
+    projects.insert(
+        project_file_name.to_string(),
+        serde_json::json!({
+            "owned_sources": owned_sources,
+            "ready_files": {},
+        }),
+    );
+    std::fs::write(
+        store_dir.join("manifest.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "epoch": epoch,
+            "host_version": "real-recovery-test",
+            "projects": projects,
+        }))
+        .expect("serialize unready recovery carrier manifest"),
+    )
+    .expect("publish unready recovery carrier manifest");
+}
+
+#[test]
+fn real_recovery_store_uses_production_blake3_wire_identity() {
+    let store = tempfile::tempdir().expect("create wire-identity store");
+    let content = "export const exactIdentity: string = 'ok';\n";
+    publish_recovery_carrier_store(
+        store.path(),
+        "/w/tsconfig.json",
+        7,
+        9,
+        [("/w/Exact.vue", "/w/Exact.vue.tsx", content)],
+    );
+
+    let digest = blake3::hash(content.as_bytes());
+    let hash = digest.as_bytes()[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let blob_rel = format!("blobs/blake3-{hash}.tsx");
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(store.path().join("manifest.json")).expect("read exact manifest"),
+    )
+    .expect("parse exact manifest");
+    let ready = &manifest["projects"]["/w/tsconfig.json"]["ready_files"]["/w/Exact.vue.tsx"];
+    assert_eq!(ready["content_hash"], hash);
+    assert_eq!(ready["blob_rel"], blob_rel);
+    assert_eq!(ready["version"], 9);
+    assert_eq!(
+        std::fs::read_to_string(store.path().join(blob_rel)).expect("read exact blob"),
+        content
+    );
+}
+
+impl RealRecoveryHarness {
+    pub(crate) async fn new(failures_before_success: usize) -> Self {
+        let project = tempfile::tempdir().expect("create real recovery project");
+        std::fs::write(
+            project.path().join("tsconfig.json"),
+            r#"{"compilerOptions":{"strict":true,"jsx":"preserve"},"include":["*.tsx"]}"#,
+        )
+        .expect("write real recovery tsconfig");
+
+        let carriers: Vec<MaterializedRecoveryCarrier> = RECOVERY_CARRIERS
+            .iter()
+            .map(|fixture| {
+                let source_name = std::path::Path::new(fixture.source_path)
+                    .file_name()
+                    .expect("fixture source file name");
+                let companion_name = std::path::Path::new(fixture.companion_path)
+                    .file_name()
+                    .expect("fixture companion file name");
+                let source_path = project.path().join(source_name);
+                let companion_path = project.path().join(companion_name);
+                std::fs::write(&companion_path, fixture.stale_disk_content)
+                    .expect("write stale recovery carrier bytes");
+                MaterializedRecoveryCarrier {
+                    source_path: source_path.to_string_lossy().replace('\\', "/"),
+                    companion_path: companion_path.to_string_lossy().replace('\\', "/"),
+                    content: fixture.content,
+                    hover_offset: fixture.hover_offset,
+                    expected_hover: fixture.expected_hover,
+                }
+            })
+            .collect();
+
+        let workspace_root = project.path().to_string_lossy().replace('\\', "/");
+        let project_file_name = project
+            .path()
+            .join("tsconfig.json")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let carrier_store_dir = project.path().join("carrier-store");
+        publish_recovery_carrier_store(
+            &carrier_store_dir,
+            &project_file_name,
+            1,
+            1,
+            carriers.iter().map(|carrier| {
+                (
+                    carrier.source_path.as_str(),
+                    carrier.companion_path.as_str(),
+                    carrier.content,
+                )
+            }),
+        );
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root above crates/");
+        let node_path = crate::discovery::find_node()
+            .expect("real recovery tests require the workspace Node.js runtime");
+        let tsserver_path = real_tsserver_path(repo_root).to_string_lossy().into_owned();
+        let plugin_path = build_real_tsserver_plugin(repo_root, project.path(), &node_path)
+            .await
+            .to_string_lossy()
+            .into_owned();
+        let carrier_store_dir = carrier_store_dir.to_string_lossy().into_owned();
+
+        let crash_notify = Arc::new(Notify::new());
+        let initial = TsserverTypeProvider::spawn(
+            &node_path,
+            &tsserver_path,
+            &workspace_root,
+            Some(&plugin_path),
+            Some(&carrier_store_dir),
+            false,
+            Some(Arc::clone(&crash_notify)),
+        )
+        .await
+        .expect("spawn initial real tsserver");
+        let spawn_attempts = Arc::new(AtomicUsize::new(0));
+        let provider = ResilientProvider::new(
+            initial,
+            Arc::clone(&crash_notify),
+            RealTsserverBackend {
+                node_path,
+                tsserver_path,
+                workspace_root,
+                plugin_path,
+                carrier_store_dir,
+                failures_before_success: Arc::new(AtomicUsize::new(failures_before_success)),
+                spawn_attempts: Arc::clone(&spawn_attempts),
+            },
+            Arc::new(TracingNotifier),
+            3,
+        );
+
+        Self {
+            _project: project,
+            provider,
+            crash_notify,
+            spawn_attempts,
+            carriers,
+            project_file_name,
+        }
+    }
+
+    pub(crate) fn crash_notify(&self) -> Arc<Notify> {
+        Arc::clone(&self.crash_notify)
+    }
+
+    pub(crate) fn spawn_attempts(&self) -> usize {
+        self.spawn_attempts.load(Ordering::SeqCst)
+    }
+
+    pub(crate) async fn register_carriers(&self) {
+        for carrier in &self.carriers {
+            // Production carrier membership is contentless at the tsserver seam:
+            // `content` hydrates Rust's position cache, while the plugin remains
+            // the engine's sole byte authority. An ordinary `open_file` here
+            // would bypass the replay behavior this regression must prove.
+            self.provider
+                .register_carrier_member(
+                    &carrier.source_path,
+                    &carrier.companion_path,
+                    carrier.content,
+                    &self.project_file_name,
+                )
+                .await
+                .expect("register real recovery carrier");
+        }
+    }
+
+    pub(crate) async fn await_down(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if self
+                    .provider
+                    .get_hover(
+                        &self.carriers[0].companion_path,
+                        self.carriers[0].hover_offset,
+                    )
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("real provider did not enter restarting state");
+    }
+
+    pub(crate) async fn assert_carriers_answer_typed(&self) {
+        for carrier in &self.carriers {
+            let mut last = None;
+            for delay_ms in [0u64, 250, 500, 1000, 2000, 4000, 2000] {
+                if delay_ms != 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
+                last = match self
+                    .provider
+                    .get_hover(&carrier.companion_path, carrier.hover_offset)
+                    .await
+                {
+                    Ok(hover) => hover,
+                    Err(_) => continue,
+                };
+                if let Some(hover) = &last {
+                    if hover.contents.contains(carrier.expected_hover)
+                        && !hover.contents.contains(": any")
+                    {
+                        break;
+                    }
+                }
+            }
+            let hover = last.unwrap_or_else(|| {
+                panic!(
+                    "real tsserver returned no hover for recovered carrier {}",
+                    carrier.source_path
+                )
+            });
+            assert!(
+                hover.contents.contains(carrier.expected_hover),
+                "real tsserver must derive {} from replayed bytes, got {}",
+                carrier.expected_hover,
+                hover.contents
+            );
+            assert!(
+                !hover.contents.contains(": any"),
+                "recovered typed carrier must not degrade to any: {}",
+                hover.contents
+            );
+        }
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        self.provider
+            .shutdown()
+            .await
+            .expect("shutdown real recovery provider");
+    }
 }
 
 /// Drain every replay call from the tap. The first call uses a generous
@@ -895,32 +1470,20 @@ async fn spin_until(provider: &ResilientProvider<MockProvider, FlakyBackend>, up
 /// D2: a TRANSIENT respawn failure must NOT leave the provider dead for the rest
 /// of the session — the crash monitor retries within the same restart budget and
 /// the provider recovers, so the next query answers.
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn failed_respawn_retries_within_budget_and_recovers() {
-    let initial = MockProvider::new("tsserver");
-    let replacement = MockProvider::new("tsserver");
-    // Fail the first two respawns; the third succeeds (within max_restarts = 3).
-    let (provider, crash_notify, spawn_attempts) = make_flaky(initial, replacement, 2);
+    let harness = RealRecoveryHarness::new(2).await;
+    harness.register_carriers().await;
 
-    provider
-        .open_file("/project/src/App.vue.tsx", "const a = 1;")
-        .await
-        .unwrap();
-
-    crash_notify.notify_one();
-    assert!(
-        spin_until(&provider, false).await,
-        "the live cell must be cleared after a crash"
-    );
-    assert!(
-        spin_until(&provider, true).await,
-        "a transient respawn failure must be retried — the provider must recover"
-    );
+    harness.crash_notify.notify_one();
+    harness.await_down().await;
+    harness.assert_carriers_answer_typed().await;
     assert_eq!(
-        spawn_attempts.load(Ordering::Relaxed),
+        harness.spawn_attempts(),
         3,
-        "two failed respawns + one successful respawn"
+        "two failed respawns + one successful real-tsserver respawn"
     );
+    harness.shutdown().await;
 }
 
 /// D2 bound: a PERSISTENTLY failing respawn exhausts the shared restart budget
@@ -930,7 +1493,9 @@ async fn persistently_failing_respawn_exhausts_budget_and_stays_down() {
     let initial = MockProvider::new("tsserver");
     let replacement = MockProvider::new("tsserver");
     let (provider, crash_notify, spawn_attempts) =
-        make_flaky(initial, replacement, usize::MAX >> 1);
+        make_flaky(initial, replacement.clone(), usize::MAX >> 1);
+
+    register_recovery_carriers(&provider).await;
 
     crash_notify.notify_one();
     assert!(
@@ -956,5 +1521,25 @@ async fn persistently_failing_respawn_exhausts_budget_and_stays_down() {
         spawn_attempts.load(Ordering::Relaxed),
         attempts_after_budget,
         "no further respawn attempts after the budget is exhausted"
+    );
+    for fixture in &RECOVERY_CARRIERS {
+        assert!(
+            provider
+                .get_hover(fixture.companion_path, fixture.hover_offset)
+                .await
+                .is_err(),
+            "a persistently failed respawn must fail closed for {} typed queries",
+            fixture.source_path
+        );
+    }
+    assert!(
+        !replacement.calls().iter().any(|call| matches!(
+            call,
+            MockCall::RegisterCarrierMember { companion_path, .. }
+                if RECOVERY_CARRIERS
+                    .iter()
+                    .any(|fixture| fixture.companion_path == companion_path)
+        )),
+        "a provider that never spawned successfully must receive no carrier replay"
     );
 }

@@ -4417,6 +4417,7 @@ dependencies = [
 name = "verter_type_runtime"
 version = "0.0.1-beta.1"
 dependencies = [
+ "blake3",
  "parking_lot",
  "serde",
  "serde_json",

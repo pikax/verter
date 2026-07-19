@@ -1119,4 +1119,4 @@ where
 
 #[cfg(test)]
 #[path = "resilient_tests.rs"]
-mod resilient_tests;
+pub(crate) mod resilient_tests;
