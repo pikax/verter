@@ -1019,6 +1019,7 @@ async fn apply_owner_resolved_carrier_sync(
                 kinds.push(ProviderPathKind::Ide);
             }
             if carrier_coordinator.admit_owned(
+                documents.host(),
                 provider_sync_states,
                 canonical_id,
                 committed_state,
@@ -1125,6 +1126,7 @@ async fn apply_owner_resolved_carrier_sync(
                     .and_then(|path| sync.synced_tsx_surface(path));
                 let receipt = pending.confirm_opened_with_ide_surface(&synced, ide_surface);
                 if carrier_coordinator.admit_owned(
+                    documents.host(),
                     provider_sync_states,
                     canonical_id,
                     committed_state,
@@ -1325,6 +1327,7 @@ pub(super) async fn sync_api_to_provider_background_task(
         // barrier) requeues the source and closes NOTHING — the computed stale paths may be
         // the newer transaction's LIVE buffers. Only an admitted commit closes them.
         if carrier_coordinator.admit_owned(
+            host.as_ref(),
             &provider_sync_states,
             &canonical_id,
             committed_state,

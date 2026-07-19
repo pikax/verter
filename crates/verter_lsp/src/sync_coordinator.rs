@@ -280,6 +280,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
         } => {
             // The plugin serves both store-resident companions: no buffer I/O.
             if deps.carrier_transaction_coordinator.admit_owned(
+                deps.documents.host(),
                 &deps.provider_sync_states,
                 canonical_id,
                 committed_state,
@@ -396,6 +397,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                 // the provider-surface store so a closed `{carrier}.ts` is never later
                 // vouched as current by a rename).
                 if deps.carrier_transaction_coordinator.admit_owned(
+                    deps.documents.host(),
                     &deps.provider_sync_states,
                     canonical_id,
                     committed_state,

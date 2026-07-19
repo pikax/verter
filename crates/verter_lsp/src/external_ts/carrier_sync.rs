@@ -897,11 +897,15 @@ impl CarrierTransactionCoordinator {
     ///   it reproduces the identical committed artifact (the same receipt-attested IDE
     ///   surface). An equal-key commit carrying a DIFFERENT artifact is refused, so a
     ///   torn/superseded production sharing a revision can never overwrite the committed
-    ///   surface. KNOWN LIMITATION (tracked for the carrier-sync-concurrency hardening
-    ///   block): this differing-artifact refusal keys on generation/revision, so an ingress
-    ///   that resyncs a watched file WITHOUT advancing the revision (e.g. a watched-file
-    ///   resync) can leave a genuinely-newer artifact refused at the equal key and admit the
-    ///   stale surface until an ingress advances the revision.
+    ///   surface. That refusal also PROVES the revision rail under-counted (two genuine
+    ///   artifacts share one key — e.g. same source bytes compiled under a changed context,
+    ///   or an ingress that resynced without advancing the rail), so the gate RECORDS a
+    ///   content transition for the source through the workspace authority before returning:
+    ///   the caller's requeue then mints a strictly-newer key and admits the live artifact
+    ///   instead of livelocking on the equal key until an unrelated edit advances the rail
+    ///   (the previously tracked known limitation — the interactive definition/hover
+    ///   divergence under edit churn where a stale committed mapper was served while the
+    ///   provider text was already current).
     ///
     /// Returns [`AdmitOutcome::Superseded`] (never overwriting) on any refusal; the caller
     /// must requeue. The primary interactive paths requeue on `Superseded`; the
@@ -909,6 +913,7 @@ impl CarrierTransactionCoordinator {
     /// the carrier-sync-concurrency hardening block.
     pub(crate) fn admit_owned(
         &self,
+        host: &VerterHost,
         states: &DashMap<String, ProviderSyncState>,
         source: &str,
         mut state: ProviderSyncState,
@@ -988,7 +993,11 @@ impl CarrierTransactionCoordinator {
                     // Equal generation/revision at the SAME path is idempotent ONLY for the
                     // identical surface: a same-path DIFFERENT artifact is a torn/superseded
                     // production sharing a source revision and is refused, so it can never
-                    // overwrite the committed surface.
+                    // overwrite the committed surface. The conflict also proves the source's
+                    // freshness rail under-counted (two genuine artifacts share one key), so
+                    // the rail is advanced through the workspace authority — the caller's
+                    // requeue mints a strictly-newer key and admits the live artifact instead
+                    // of livelocking on the equal key.
                     if incoming.is_same_key(&current)
                         && same_ide_path
                         && next_ide_surface != prior_ide_surface
@@ -998,10 +1007,11 @@ impl CarrierTransactionCoordinator {
                              receipt carries the committed generation/revision (generation {:?}, \
                              revision {}) but a DIFFERENT artifact at the SAME IDE path — an \
                              equal-key commit is idempotent only for the identical surface; not \
-                             overwriting",
+                             overwriting (recorded a content transition to heal the rail)",
                             incoming.ownership_generation,
                             incoming.source_revision,
                         );
+                        host.record_content_transition(source);
                         return AdmitOutcome::Superseded;
                     }
                 }

@@ -904,8 +904,13 @@ async fn sync_file_to_provider(
             // `Superseded` commit (a newer transaction reclaimed the source, or an owner-loss
             // advanced the barrier) is re-queued for a fresh transaction — never a
             // requeue-less drop.
-            if carrier_coordinator.admit_owned(sync_states, canonical_id, committed_state, &receipt)
-                == crate::external_ts::AdmitOutcome::Superseded
+            if carrier_coordinator.admit_owned(
+                host,
+                sync_states,
+                canonical_id,
+                committed_state,
+                &receipt,
+            ) == crate::external_ts::AdmitOutcome::Superseded
             {
                 if let Some(requeue) = requeue {
                     requeue.insert(canonical_id.to_string());
@@ -1015,6 +1020,7 @@ async fn sync_file_to_provider(
                 // the computed stale paths may be the newer transaction's LIVE buffers. Only
                 // an admitted commit closes them.
                 if carrier_coordinator.admit_owned(
+                    host,
                     sync_states,
                     canonical_id,
                     committed_state,

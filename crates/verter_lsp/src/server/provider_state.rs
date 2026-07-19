@@ -330,6 +330,7 @@ impl VerterLanguageServer {
         receipt: &crate::external_ts::ProviderReadyReceipt,
     ) {
         if self.carrier_transaction_coordinator.admit_owned(
+            self.documents.host(),
             &self.provider_sync_states,
             canonical_id,
             state,
@@ -509,6 +510,7 @@ impl VerterLanguageServer {
         // and closes NOTHING — the computed stale paths may be the newer transaction's LIVE
         // buffers. Only an admitted commit closes them.
         if self.carrier_transaction_coordinator.admit_owned(
+            self.documents.host(),
             &self.provider_sync_states,
             canonical_id,
             committed_state,

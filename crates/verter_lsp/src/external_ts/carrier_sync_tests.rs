@@ -58,6 +58,17 @@ fn owned_carrier_state() -> ProviderSyncState {
     }
 }
 
+/// A minimal live host over an in-memory workspace — the admission gate's equal-key
+/// differing-artifact refusal records the healing content transition through it.
+fn test_host() -> VerterHost {
+    let workspace: Arc<dyn verter_workspace::WorkspaceAccess> =
+        Arc::new(MemoryWorkspace::new(MemoryOptions {
+            roots: vec!["/workspace".to_string()],
+            default_resolve_extensions: None,
+        }));
+    VerterHost::new(HostConfig::default(), workspace)
+}
+
 /// Admit a carrier state through a FRESH coordinator (owner-loss barrier at 0). The
 /// single-commit tests below do not exercise the owner-loss barrier or a superseding peer;
 /// the F1 equal-key and F5 vacant-resurrection tests use an explicit SHARED coordinator so
@@ -68,7 +79,13 @@ fn commit_carrier_provider_state(
     state: ProviderSyncState,
     receipt: &ProviderReadyReceipt,
 ) {
-    let _ = CarrierTransactionCoordinator::new().admit_owned(states, canonical_id, state, receipt);
+    let _ = CarrierTransactionCoordinator::new().admit_owned(
+        &test_host(),
+        states,
+        canonical_id,
+        state,
+        receipt,
+    );
 }
 
 /// A resolved `ProjectBinding` (test-only seam) — the structural token a
@@ -1428,6 +1445,7 @@ fn admit_refuses_equal_key_commit_carrying_a_different_artifact() {
     // surface, flipping both the outcome and the surface assertion.
     let states: DashMap<String, ProviderSyncState> = DashMap::new();
     let coord = CarrierTransactionCoordinator::new();
+    let host = test_host();
     let source = "/workspace/src/App.vue";
     let ide_uri = "/workspace/src/App.vue.tsx";
     let tsconfig = "/workspace/tsconfig.json";
@@ -1442,7 +1460,7 @@ fn admit_refuses_equal_key_commit_carrying_a_different_artifact() {
     )
     .confirm_opened(&[ProviderPathKind::Ide]);
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &r1),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &r1),
         AdmitOutcome::Admitted,
         "the first commit installs artifact A"
     );
@@ -1468,7 +1486,7 @@ fn admit_refuses_equal_key_commit_carrying_a_different_artifact() {
     )
     .confirm_opened(&[ProviderPathKind::Ide]);
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &r2),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &r2),
         AdmitOutcome::Superseded,
         "an equal-key commit carrying a DIFFERENT artifact must be REFUSED (idempotent only \
          for the identical surface)"
@@ -1486,12 +1504,95 @@ fn admit_refuses_equal_key_commit_carrying_a_different_artifact() {
 }
 
 #[test]
+fn equal_key_differing_artifact_refusal_heals_the_revision_rail_for_the_requeue() {
+    // The equal-key differing-artifact refusal proves the source's freshness rail
+    // under-counted (two genuine artifacts share one key — e.g. identical source bytes
+    // compiled under a changed context). The gate must RECORD a content transition through
+    // the workspace authority, so the caller's requeue mints a strictly-newer key and
+    // admits the live artifact instead of livelocking on the equal key (the interactive
+    // definition/hover divergence under edit churn: a stale committed mapper was served
+    // while the provider text was already current, because every requeue re-minted the
+    // refused key).
+    //
+    // DISCRIMINATING: without the heal the rail never advances (the second assert fails)
+    // and the re-minted commit at the SAME key is refused again (the third assert fails).
+    let states: DashMap<String, ProviderSyncState> = DashMap::new();
+    let coord = CarrierTransactionCoordinator::new();
+    let host = test_host();
+    let source = "/workspace/src/App.vue";
+    let ide_uri = "/workspace/src/App.vue.tsx";
+    let tsconfig = "/workspace/tsconfig.json";
+
+    // Seed the live rail: the content transition advances it, and every mint below
+    // uses the rail value (the production mint authority).
+    host.notify_upsert(
+        source,
+        Arc::<str>::from("<script setup>const appHeading = 'corpus';</script>"),
+    );
+    let rev = host.last_content_transition_generation(source);
+    assert!(rev > 0, "the seed upsert advances the freshness rail");
+
+    // Artifact A commits at (generation 1, the live rail).
+    let r1 = PendingProviderReady::authorize(
+        &test_binding_gen(tsconfig, 1),
+        rev,
+        0,
+        "tsgo",
+        &[ide_companion(ide_uri, "IDE ARTIFACT A\n", None, rev)],
+    )
+    .confirm_opened(&[ProviderPathKind::Ide]);
+    assert_eq!(
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &r1),
+        AdmitOutcome::Admitted,
+        "the first commit installs artifact A"
+    );
+
+    // A DIFFERENT artifact B at the SAME key is refused...
+    let rail_before = host.last_content_transition_generation(source);
+    let r2 = PendingProviderReady::authorize(
+        &test_binding_gen(tsconfig, 1),
+        rev,
+        0,
+        "tsgo",
+        &[ide_companion(ide_uri, "IDE ARTIFACT B (live)\n", None, rev)],
+    )
+    .confirm_opened(&[ProviderPathKind::Ide]);
+    assert_eq!(
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &r2),
+        AdmitOutcome::Superseded,
+        "the equal-key differing artifact is still refused (never overwrites)"
+    );
+    // ...and the refusal ADVANCES the source's content-transition rail...
+    let rail_after = host.last_content_transition_generation(source);
+    assert!(
+        rail_after > rail_before,
+        "the equal-key refusal must heal the freshness rail ({rail_before} -> {rail_after})"
+    );
+
+    // ...so the requeue, minted at the healed rail, ADMITS the live artifact.
+    let r3 = PendingProviderReady::authorize(
+        &test_binding_gen(tsconfig, 1),
+        rail_after,
+        0,
+        "tsgo",
+        &[ide_companion(ide_uri, "IDE ARTIFACT B (live)\n", None, rev)],
+    )
+    .confirm_opened(&[ProviderPathKind::Ide]);
+    assert_eq!(
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &r3),
+        AdmitOutcome::Admitted,
+        "the requeued transaction mints a strictly-newer key and admits the live artifact"
+    );
+}
+
+#[test]
 fn admit_idempotent_for_the_identical_artifact_at_an_equal_key() {
     // The negative companion to F1: re-committing the IDENTICAL artifact at the same
     // (generation, revision) is admitted (idempotent). The equal-key gate refuses only a
     // DIFFERENT artifact, never a duplicate of the committed one.
     let states: DashMap<String, ProviderSyncState> = DashMap::new();
     let coord = CarrierTransactionCoordinator::new();
+    let host = test_host();
     let source = "/workspace/src/App.vue";
     let ide_uri = "/workspace/src/App.vue.tsx";
     let make = || {
@@ -1505,11 +1606,11 @@ fn admit_idempotent_for_the_identical_artifact_at_an_equal_key() {
         .confirm_opened(&[ProviderPathKind::Ide])
     };
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &make()),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &make()),
         AdmitOutcome::Admitted
     );
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &make()),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &make()),
         AdmitOutcome::Admitted,
         "re-committing the identical artifact at the equal key is idempotent"
     );
@@ -1525,6 +1626,7 @@ fn admit_refuses_a_late_token_after_owner_loss_advanced_the_barrier() {
     // watermark and admits the obsolete owned receipt, resurrecting the old owner.
     let states: DashMap<String, ProviderSyncState> = DashMap::new();
     let coord = CarrierTransactionCoordinator::new();
+    let host = test_host();
     let source = "/workspace/src/App.vue";
     let ide_uri = "/workspace/src/App.vue.tsx";
     let tsconfig = "/workspace/tsconfig.json";
@@ -1545,7 +1647,7 @@ fn admit_refuses_a_late_token_after_owner_loss_advanced_the_barrier() {
 
     // The late token commits into a VACANT slot; it must be REFUSED (no resurrection).
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &late),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &late),
         AdmitOutcome::Superseded,
         "a token captured before an owner-loss must be refused even into a vacant slot"
     );
@@ -1564,7 +1666,7 @@ fn admit_refuses_a_late_token_after_owner_loss_advanced_the_barrier() {
     )
     .confirm_opened(&[ProviderPathKind::Ide]);
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &fresh),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &fresh),
         AdmitOutcome::Admitted,
         "a token authorized at the CURRENT barrier admits normally after the loss"
     );
@@ -1645,6 +1747,7 @@ fn admit_admits_equal_key_path_rebind_as_a_legitimate_flip() {
     // and drops a live path change in the content-decoupled case — tracked as a follow-up.)
     let states: DashMap<String, ProviderSyncState> = DashMap::new();
     let coord = CarrierTransactionCoordinator::new();
+    let host = test_host();
     let source = "/workspace/src/App.vue";
     let tsconfig = "/workspace/tsconfig.json";
 
@@ -1659,7 +1762,7 @@ fn admit_admits_equal_key_path_rebind_as_a_legitimate_flip() {
     )
     .confirm_opened(&[ProviderPathKind::Ide]);
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &r1),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &r1),
         AdmitOutcome::Admitted,
     );
 
@@ -1677,7 +1780,7 @@ fn admit_admits_equal_key_path_rebind_as_a_legitimate_flip() {
     )
     .confirm_opened(&[ProviderPathKind::Ide]);
     assert_eq!(
-        coord.admit_owned(&states, source, jsx_state, &r2),
+        coord.admit_owned(&host, &states, source, jsx_state, &r2),
         AdmitOutcome::Admitted,
         "a same-key commit at a DIFFERENT IDE path is a legitimate rebind and must ADMIT"
     );
@@ -1695,6 +1798,7 @@ fn admit_admits_a_jsx_tsx_flip_that_advances_the_revision() {
     // path and rebinds the committed IDE path.
     let states: DashMap<String, ProviderSyncState> = DashMap::new();
     let coord = CarrierTransactionCoordinator::new();
+    let host = test_host();
     let source = "/workspace/src/App.vue";
     let tsconfig = "/workspace/tsconfig.json";
 
@@ -1709,7 +1813,7 @@ fn admit_admits_a_jsx_tsx_flip_that_advances_the_revision() {
     )
     .confirm_opened(&[ProviderPathKind::Ide]);
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &r1),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &r1),
         AdmitOutcome::Admitted,
     );
 
@@ -1727,7 +1831,7 @@ fn admit_admits_a_jsx_tsx_flip_that_advances_the_revision() {
     )
     .confirm_opened(&[ProviderPathKind::Ide]);
     assert_eq!(
-        coord.admit_owned(&states, source, jsx_state, &r2),
+        coord.admit_owned(&host, &states, source, jsx_state, &r2),
         AdmitOutcome::Admitted,
         "a jsx↔tsx flip that advances the revision admits through the strictly-newer path"
     );
@@ -1748,6 +1852,7 @@ fn advance_barrier_and_remove_refuses_a_late_owner_token_into_the_vacated_slot()
     // late token (old epoch) could admit into the vacated slot before the barrier advanced.
     let states: DashMap<String, ProviderSyncState> = DashMap::new();
     let coord = CarrierTransactionCoordinator::new();
+    let host = test_host();
     let source = "/workspace/src/App.vue";
     let tsx_uri = "/workspace/src/App.vue.tsx";
     let tsconfig = "/workspace/tsconfig.json";
@@ -1762,7 +1867,7 @@ fn advance_barrier_and_remove_refuses_a_late_owner_token_into_the_vacated_slot()
     )
     .confirm_opened(&[ProviderPathKind::Ide]);
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &r1),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &r1),
         AdmitOutcome::Admitted,
     );
     let late = PendingProviderReady::authorize(
@@ -1781,7 +1886,7 @@ fn advance_barrier_and_remove_refuses_a_late_owner_token_into_the_vacated_slot()
 
     // The late token (captured before the removal) is REFUSED into the vacated slot.
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &late),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &late),
         AdmitOutcome::Superseded,
         "a token captured before the advance-before-remove must be refused into the vacated slot"
     );
@@ -1824,6 +1929,7 @@ fn convert_to_unresolved_advances_barrier_clears_token_and_refuses_late_owner() 
     // state and never advanced the barrier, so a late owned token could resurrect the owner.
     let states: DashMap<String, ProviderSyncState> = DashMap::new();
     let coord = CarrierTransactionCoordinator::new();
+    let host = test_host();
     let source = "/workspace/src/App.vue";
     let tsx_uri = "/workspace/src/App.vue.tsx";
     let tsconfig = "/workspace/tsconfig.json";
@@ -1838,7 +1944,7 @@ fn convert_to_unresolved_advances_barrier_clears_token_and_refuses_late_owner() 
     )
     .confirm_opened(&[ProviderPathKind::Ide]);
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &r1),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &r1),
         AdmitOutcome::Admitted,
     );
     let late = PendingProviderReady::authorize(
@@ -1869,7 +1975,7 @@ fn convert_to_unresolved_advances_barrier_clears_token_and_refuses_late_owner() 
 
     // A late owned token captured before the conversion is refused (the barrier advanced).
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &late),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &late),
         AdmitOutcome::Superseded,
         "a late owned token captured before the owned→unresolved conversion is refused"
     );

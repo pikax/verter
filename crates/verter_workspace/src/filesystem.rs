@@ -470,6 +470,10 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         self.engine.last_content_transition_generation(canonical_id)
     }
 
+    fn record_content_transition(&self, canonical_id: &str) {
+        self.engine.record_content_transition(canonical_id);
+    }
+
     fn vfs_provenance_snapshot(&self) -> crate::types::VfsProvenanceSnapshot {
         FilesystemWorkspace::vfs_provenance_snapshot(self)
     }

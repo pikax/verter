@@ -131,6 +131,16 @@ impl VerterHost {
         self.ws().last_content_transition_generation(canonical_id)
     }
 
+    /// Record a content transition for `canonical_id` at the current generation
+    /// WITHOUT a byte change — delegated to the same workspace authority as
+    /// [`Self::last_content_transition_generation`]. Used by the carrier-sync
+    /// admission gate's equal-key differing-artifact refusal: the conflict
+    /// proves the artifact rail under-counted, so the refused source's rail is
+    /// advanced and the requeued transaction mints a strictly-newer key.
+    pub fn record_content_transition(&self, canonical_id: &str) {
+        self.ws().record_content_transition(canonical_id);
+    }
+
     pub(crate) fn current_store_view_epoch(&self) -> u64 {
         self.store_view_epoch
             .load(std::sync::atomic::Ordering::Relaxed)

@@ -1215,6 +1215,7 @@ impl VerterLanguageServer {
                     // the source, or an owner-loss advanced the barrier) requeues and closes
                     // NOTHING — the prior IDE path may be that newer transaction's live buffer.
                     if self.carrier_transaction_coordinator.admit_owned(
+                        self.documents.host(),
                         &self.provider_sync_states,
                         &canonical_id,
                         state,
