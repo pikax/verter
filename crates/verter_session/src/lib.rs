@@ -374,7 +374,6 @@ pub mod tests;
 // `mod tests`; absent from every ordinary production build profile.
 #[cfg(any(test, feature = "test-support"))]
 pub mod for_tests;
-
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub mod projection_bench_support {

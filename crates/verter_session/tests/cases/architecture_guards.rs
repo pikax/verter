@@ -5528,6 +5528,12 @@ mod foundations_guards {
         // methods to verify the cohort's eviction invariant.
         "pub mod cache_schema",
         // verter_lsp::features::hover_provenance,
+        // `assemble_vue_main_module` — re-exported so the Vue conformance
+        // seed harness (`verter_vue_conformance/tests/cases/seed_conformance.rs`)
+        // and session assembly tests drive the GENUINE shipped runtime-Main
+        // assembly (compile → bundle → assemble) instead of a hand copy.
+        // Test-support public API (consumer: verter_vue_conformance dev-dep).
+        "pub use compile::assemble_vue_main_module",
         // verter_napi::meta, verter_wasm::tests::audit
         "pub mod component_meta_audit",
         // verter_napi::meta
