@@ -79,6 +79,23 @@ pub struct TemplateAnalysisSnapshot {
     /// All CSS variable names set in template inline styles (static + dynamic, deduped).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub css_var_names: Vec<String>,
+
+    /// Svelte `{#snippet name(params)}` declarations in this component's
+    /// template (empty for Vue). Powers `{@render |}` callee completion (D5).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub snippet_definitions: Vec<SnippetDefinition>,
+}
+
+/// A Svelte `{#snippet name(params)}` declaration (typed template IR).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SnippetDefinition {
+    /// Snippet name (`"row"`, `"header"`).
+    pub name: String,
+    /// SFC-absolute byte span of the snippet name.
+    pub span: Span,
+    /// The `(params)` text without the parens, when present (e.g. `"item: number"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params_text: Option<String>,
 }
 
 // =============================================================================

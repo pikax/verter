@@ -59,6 +59,46 @@ pub fn collect_component_usages(nodes: &[SvelteNode], source: &str, data: &mut R
     }
 }
 
+/// Collect every `{#snippet name(params)}` declaration from a template node
+/// run into `data` (D5 — powers `{@render |}` callee completion with the
+/// component's in-scope snippet names). Recurses element children, block
+/// children, and each block clause's children, mirroring
+/// [`collect_component_usages`]; expression text is span-sliced from source.
+pub fn collect_snippet_definitions(nodes: &[SvelteNode], source: &str, data: &mut RawTemplateData) {
+    for node in nodes {
+        match node {
+            SvelteNode::Element(element) => {
+                collect_snippet_definitions(&element.children, source, data);
+            }
+            SvelteNode::Block(block) => {
+                if let SvelteBlockKind::Snippet {
+                    name,
+                    name_text,
+                    params,
+                } = &block.kind
+                {
+                    data.snippet_definitions
+                        .push(crate::compile::RawSnippetDef {
+                            name: name_text.clone(),
+                            name_span: *name,
+                            params_text: params.map(|span| {
+                                source
+                                    .get(span.start as usize..span.end as usize)
+                                    .unwrap_or("")
+                                    .to_string()
+                            }),
+                        });
+                }
+                collect_snippet_definitions(&block.children, source, data);
+                for clause in &block.clauses {
+                    collect_snippet_definitions(&clause.children, source, data);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Whether this element is a child-component usage, and if so, its kind.
 enum UsageClass {
     /// A static component (`<Button>`), `is_dynamic = false`.

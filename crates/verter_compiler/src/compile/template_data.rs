@@ -24,7 +24,19 @@ pub struct RawTemplateData {
     pub v_model_directives: Vec<RawVModelData>,
     pub if_chains: Vec<RawIfChain>,
     pub comment_directives: Vec<RawCommentDirective>,
+    /// Svelte `{#snippet name(params)}` declarations (empty for Vue).
+    pub snippet_definitions: Vec<RawSnippetDef>,
     pub max_nesting_depth: u16,
+}
+
+/// A Svelte `{#snippet name(params)}` declaration.
+#[derive(Debug, Clone)]
+pub struct RawSnippetDef {
+    pub name: String,
+    /// SFC-absolute byte span of the snippet name.
+    pub name_span: Span,
+    /// The `(params)` text without the parens, when present.
+    pub params_text: Option<String>,
 }
 
 /// A component usage in the template.
