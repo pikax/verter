@@ -395,7 +395,7 @@ mod route_surface_hash {
             import_locals,
             import_targets,
             Arc::new(
-                verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
+                verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource::default(),
             ),
         )
     }

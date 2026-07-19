@@ -26,7 +26,9 @@ use verter_span::Span;
 use verter_parser::parser::types::ParsedSfc;
 use verter_parser::types::NodeProp;
 
-use crate::compile::types::{CodegenOptions, CompileTarget, VerterCompileOptions};
+use crate::compile::types::{
+    CodegenOptions, CompileTarget, VerterCompileOptions, VueMacroSemanticInput,
+};
 use crate::compile::{compile_from_parsed, parse_sfc};
 use crate::framework_common::carrier_compiler::{
     CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput, ParseOptions,
@@ -229,21 +231,15 @@ pub fn build_vue_parse_artifact(
 /// [`RuntimeCompileOptions::framework_extras`](crate::framework_common::RuntimeCompileOptions::framework_extras)
 /// and downcast here.
 ///
-/// These are the host-resolved cross-file inputs the Vue runtime compile
-/// consumes: `external_types` (the resolved macro-type surface for
-/// `defineProps<ExternalType>()`), `prop_constness_overrides`, and
+/// These are the host-resolved inputs the Vue runtime compile consumes:
+/// authoritative macro runtime semantics, `prop_constness_overrides`, and
 /// `style_v_bind_vars`. They live HERE (the Vue module) rather than on the
-/// neutral [`RuntimeCompileOptions`] so Vue's eager type-surface output type
-/// never enters the cross-framework carrier contract — a non-Vue carrier never
-/// names or sees it.
+/// neutral [`RuntimeCompileOptions`] so Vue's typed macro DTO never enters the
+/// cross-framework carrier contract — a non-Vue carrier never names or sees it.
 #[derive(Debug, Default)]
 pub struct VueRuntimeCompileExtras {
-    /// Pre-resolved external macro types, keyed by type name. The host resolves
-    /// these before the compile; the Vue codegen merges them into its
-    /// type-resolution context.
-    pub external_types: Option<
-        rustc_hash::FxHashMap<String, crate::utils::oxc::script::type_surface::ResolvedElements>,
-    >,
+    /// Authoritative runtime projection produced once by the session.
+    pub macro_runtime: Option<std::sync::Arc<verter_macro_dto::MacroRuntimeBundle>>,
     /// Props known const across all call sites (cross-file analysis).
     pub prop_constness_overrides: Option<rustc_hash::FxHashSet<String>>,
     /// Binding names referenced in style `v-bind()` expressions.
@@ -377,7 +373,14 @@ impl CarrierCompiler for VueCarrierCompiler {
             ..Default::default()
         };
         let alloc = oxc_allocator::Allocator::new();
-        let result = compile_from_parsed(source, parsed, &core_opts, &verter_opts, &alloc);
+        let result = compile_from_parsed(
+            source,
+            parsed,
+            &core_opts,
+            &verter_opts,
+            &VueMacroSemanticInput::Unavailable,
+            &alloc,
+        );
 
         match result.tsx {
             Some(tsx) => Ok(IdeOutput {
@@ -409,7 +412,14 @@ impl CarrierCompiler for VueCarrierCompiler {
             ..Default::default()
         };
         let alloc = oxc_allocator::Allocator::new();
-        let result = compile_from_parsed(source, parsed, &core_opts, &verter_opts, &alloc);
+        let result = compile_from_parsed(
+            source,
+            parsed,
+            &core_opts,
+            &verter_opts,
+            &VueMacroSemanticInput::Unavailable,
+            &alloc,
+        );
         TemplateFacts {
             data: result.template_data.unwrap_or_default(),
         }
@@ -472,7 +482,6 @@ impl CarrierCompiler for VueCarrierCompiler {
             force_js: opts.force_js,
             source_map: opts.source_map,
             ssr: opts.ssr,
-            external_types: extras.and_then(|e| e.external_types.clone()),
             extract_template_data: opts.want_template_data,
             prop_constness_overrides: extras.and_then(|e| e.prop_constness_overrides.clone()),
             style_v_bind_vars: extras
@@ -483,7 +492,18 @@ impl CarrierCompiler for VueCarrierCompiler {
         // Vue uses `VerterCompileResult` INTERNALLY here; the returned bundle
         // re-expresses every field neutrally so session assembly never sees
         // the Vue-shaped result.
-        let result = compile_from_parsed(source, parsed, &core_opts, &verter_opts, alloc);
+        let macro_semantics = extras
+            .and_then(|extras| extras.macro_runtime.clone())
+            .map(VueMacroSemanticInput::Runtime)
+            .unwrap_or_default();
+        let result = compile_from_parsed(
+            source,
+            parsed,
+            &core_opts,
+            &verter_opts,
+            &macro_semantics,
+            alloc,
+        );
 
         Ok(vue_result_to_runtime_bundle(result))
     }

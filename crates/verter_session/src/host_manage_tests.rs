@@ -6838,7 +6838,8 @@ fn edge_currency_oracle_stales_wildcard_surface_after_generation_advance() {
     }
     let make_artifact = |shape: EdgeShape| {
         let analysis = Arc::new(
-            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
+            verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource::default(
+            ),
         );
         let mut exports = FxHashMap::default();
         let mut wildcard_reexports = Vec::new();
@@ -8123,7 +8124,7 @@ export type Props = {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn resolve_external_type_from_loaded_files_skips_leaf_imported_prop_companions() {
+fn component_meta_native_projection_skips_leaf_imported_prop_companions() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/App.vue",
@@ -8243,7 +8244,7 @@ export interface ChipProps {
     );
     assert!(
         ws.read_count("/src/Avatar.vue") <= 1,
-        "frontier-ordered barrel BFS should skip unmatched siblings when the target is found earlier (got {} reads)",
+        "routed native projection should skip unmatched siblings when the target is found earlier (got {} reads)",
         ws.read_count("/src/Avatar.vue"),
     );
     assert_eq!(
@@ -8405,7 +8406,6 @@ fn route_and_root_resolution_do_not_fall_back_through_frontier() {
         ws,
     );
 
-    let _guard = crate::host_resolve::forbid_route_frontier_for_tests();
     let route = host.resolve_named_type_export_target("/src/index.ts", "Props");
     assert_eq!(
         route,

@@ -22,7 +22,13 @@ fn compile_with_sourcemap(source: &str) -> VerterCompileResult {
         source_map: true,
         ..Default::default()
     };
-    compile(source, &options, &verter_opts, &alloc)
+    compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    )
 }
 
 fn compile_tsx_with_sourcemap(source: &str) -> VerterCompileResult {
@@ -36,7 +42,13 @@ fn compile_tsx_with_sourcemap(source: &str) -> VerterCompileResult {
         source_map: true,
         ..Default::default()
     };
-    compile(source, &options, &verter_opts, &alloc)
+    compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    )
 }
 
 // ── Position conversion helpers ────────────────────────────────────

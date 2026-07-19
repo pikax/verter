@@ -33,6 +33,7 @@ fn test_dev_function_render() {
         r#"<template><div>hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -60,6 +61,7 @@ fn test_prod_render_fn() {
         r#"<template><div>hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -85,6 +87,7 @@ const msg = 'hi'
 <template><div>{{ msg }}</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -108,6 +111,7 @@ fn test_template_empty_returns_null() {
         r#"<template></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -136,6 +140,7 @@ fn test_element_simple_div_text() {
         r#"<template><div>hello</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -166,6 +171,7 @@ fn test_element_self_closing_br() {
         r#"<template><br/></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -189,6 +195,7 @@ fn test_element_void_input() {
         r#"<template><input></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -212,6 +219,7 @@ fn test_element_empty_div() {
         r#"<template><div></div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -236,6 +244,7 @@ fn test_element_nested() {
         r#"<template><div><span>inner</span></div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -267,6 +276,7 @@ fn test_element_deeply_nested() {
         r#"<template><div><span><em>deep</em></span></div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -298,6 +308,7 @@ fn test_block_root_simple() {
         r#"<template><div>hello</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -327,6 +338,7 @@ fn test_block_root_nested_child_is_vnode() {
         r#"<template><div><span>inner</span></div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -361,6 +373,7 @@ fn test_props_static_id() {
         r#"<template><div id="app">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -385,6 +398,7 @@ fn test_props_static_class() {
         r#"<template><div class="foo bar">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -408,6 +422,7 @@ fn test_props_static_style() {
         r#"<template><div style="color: red">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -431,6 +446,7 @@ fn test_props_null_when_empty() {
         r#"<template><div>hello</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -459,6 +475,7 @@ fn test_props_bound_id() {
         r#"<template><div :id="myId">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -482,6 +499,7 @@ fn test_props_class_normalize() {
         r#"<template><div :class="cls">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -510,6 +528,7 @@ fn test_props_style_normalize() {
         r#"<template><div :style="sty">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -538,6 +557,7 @@ fn test_props_mixed_static_bound() {
         r#"<template><div id="s" :title="d">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -566,6 +586,7 @@ fn test_props_class_style_combined() {
         r#"<template><div :class="c" :style="s">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -603,6 +624,7 @@ fn test_class_style_no_patch_props_on_plain_element() {
         r#"<template><div :class="c" :style="s">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -635,6 +657,7 @@ fn test_class_style_in_dynamic_props_on_component() {
 <script setup>import MyComp from './MyComp.vue'</script>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -659,6 +682,7 @@ fn test_props_no_pf_for_static() {
         r#"<template><div id="app">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -690,6 +714,7 @@ fn test_hoist_static_props() {
         r#"<template><div class="app">{{ msg }}</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -721,6 +746,7 @@ fn test_hoist_multiple_props() {
         r#"<template><div><span class="inner">{{ a }}</span><p id="footer">{{ b }}</p></div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -750,6 +776,7 @@ fn test_hoist_mixed_props_not_hoisted() {
         r#"<template><div class="app" :id="myId">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -773,6 +800,7 @@ fn test_hoist_event_prevents_hoisting() {
         r#"<template><button class="btn" @click="go">hi</button></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -801,6 +829,7 @@ fn test_hoist_no_props() {
         r#"<template><div>hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -824,6 +853,7 @@ fn test_hoist_component_not_hoisted() {
         r#"<template><MyComponent class="app">hi</MyComponent></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -847,6 +877,7 @@ fn test_hoist_placement_before_render() {
         r#"<template><div id="app">{{ msg }}</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -876,6 +907,7 @@ fn test_hoist_multiple_attrs() {
         r#"<template><div id="app" class="main" style="color:red">{{ msg }}</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -912,6 +944,7 @@ fn test_hoist_production_mode() {
         r#"<template><div class="app">{{ msg }}</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -942,6 +975,7 @@ fn test_props_hyphenated_bound() {
         r#"<template><div :initial-foo="val">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -965,6 +999,7 @@ fn test_props_hyphenated_bound_component() {
         r#"<template><SplitPane :initial-foo="50"/></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -988,6 +1023,7 @@ fn test_props_hyphenated_static_non_hoisted() {
         r#"<template><div data-id="x" :title="t">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1011,6 +1047,7 @@ fn test_props_hyphenated_static_hoisted() {
         r#"<template><div data-foo="bar">{{ msg }}</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1034,6 +1071,7 @@ fn test_props_hyphenated_mixed_with_normal() {
         r#"<template><div :id="myId" :initial-foo="val">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1067,6 +1105,7 @@ fn test_event_hyphenated_camelize() {
         r#"<template><div @initial-split="handler">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1090,6 +1129,7 @@ fn test_event_hyphenated_component() {
         r#"<template><Comp @my-custom-event="handler"/></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1119,6 +1159,7 @@ fn test_vmodel_hyphenated_component() {
         r#"<template><Comp v-model:my-value="val"/></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1152,6 +1193,7 @@ fn test_event_click() {
         r#"<template><button @click="handler">click</button></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1185,6 +1227,7 @@ fn test_event_multiple() {
         r#"<template><button @click="a" @mouseover="b">hi</button></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1223,6 +1266,7 @@ fn test_event_props_patch_flag() {
         r#"<template><button @click="handler">click</button></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1256,6 +1300,7 @@ fn test_text_in_quotes() {
         r#"<template><div>hello</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1279,6 +1324,7 @@ fn test_text_escaped_quotes() {
         r#"<template><div>say "hello"</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1308,6 +1354,7 @@ fn test_interp_simple() {
         r#"<template><div>{{ msg }}</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1331,6 +1378,7 @@ fn test_interp_expr() {
         r#"<template><div>{{ a + b }}</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1354,6 +1402,7 @@ fn test_interp_ternary() {
         r#"<template><div>{{ a ? b : c }}</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1382,6 +1431,7 @@ fn test_interp_method_call() {
         r#"<template><div>{{ foo() }}</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1409,6 +1459,7 @@ const msg = ref('hello')
 <template><div>{{ msg }}</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1443,6 +1494,7 @@ function increment() { count.value++ }
 <template><button @click="increment">Count: {{ count }}</button></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1476,6 +1528,7 @@ const myId = ref('app')
 <template><div :id="myId">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1508,6 +1561,7 @@ const cls = ref('active')
 <template><div :class="cls">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1535,6 +1589,7 @@ const sty = ref({ color: 'red' })
 <template><div :style="sty">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1569,6 +1624,7 @@ function increment() { count.value++ }
 </template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1616,6 +1672,7 @@ fn test_children_text_interp_concat() {
         r#"<template><div>hello {{ msg }}</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1644,6 +1701,7 @@ fn test_children_text_interp_text_concat() {
         r#"<template><div>hello {{ msg }} world</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1672,6 +1730,7 @@ fn test_children_multiple_interp_concat() {
         r#"<template><div>{{ a }}{{ b }}</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1707,6 +1766,7 @@ fn test_children_multiple_elements_array() {
         r#"<template><div><span>a</span><span>b</span></div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1734,6 +1794,7 @@ fn test_children_single_element() {
         r#"<template><div><span>inner</span></div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1765,6 +1826,7 @@ fn test_comment_basic() {
         r#"<template><div><!-- my comment --></div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1790,6 +1852,7 @@ fn test_comment_empty() {
         r#"<template><div><!----></div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1813,6 +1876,7 @@ fn test_comment_only_child() {
         r#"<template><div><!-- only --></div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1842,6 +1906,7 @@ fn test_v_if_ternary() {
         r#"<template><div v-if="show">yes</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1872,6 +1937,7 @@ fn test_v_if_else() {
         r#"<template><div v-if="show">yes</div><div v-else>no</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1905,6 +1971,7 @@ fn test_v_if_else_if_else() {
         r#"<template><div v-if="a">A</div><div v-else-if="b">B</div><div v-else>C</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1933,6 +2000,7 @@ fn test_v_if_with_class() {
         r#"<template><div v-if="show" class="foo">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1956,6 +2024,7 @@ fn test_v_if_removes_directive() {
         r#"<template><div v-if="show">yes</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -1981,6 +2050,7 @@ fn test_v_if_block_treatment() {
         r#"<template><div v-if="show">yes</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2006,6 +2076,7 @@ fn test_v_if_key_injection() {
         r#"<template><div v-if="show">yes</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2039,6 +2110,7 @@ fn test_v_if_prod_empty_comment() {
         r#"<template><div v-if="show">yes</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2070,6 +2142,7 @@ fn test_v_for_render_list() {
         r#"<template><div v-for="item in items">{{ item }}</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2103,6 +2176,7 @@ fn test_v_for_keyed_fragment() {
         r#"<template><div v-for="item in items" :key="item">{{ item }}</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2126,6 +2200,7 @@ fn test_v_for_with_index() {
         r#"<template><div v-for="(item, index) in items" :key="index">{{ item }}</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2154,6 +2229,7 @@ fn test_v_for_renderlist_iterable_only() {
         r#"<template><div v-for="(item, index) in items" :key="index">{{ item }}</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2180,6 +2256,7 @@ fn test_v_for_renderlist_simple() {
         r#"<template><div v-for="item in items">{{ item }}</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2204,6 +2281,7 @@ fn test_v_for_removes_directive() {
         r#"<template><div v-for="item in items">{{ item }}</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2227,6 +2305,7 @@ fn test_v_for_nested() {
         r#"<template><div v-for="g in groups"><span v-for="i in g">{{ i }}</span></div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2260,6 +2339,7 @@ fn test_v_once_cache_pattern() {
         r#"<template><div v-once>static</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2289,6 +2369,7 @@ fn test_v_once_with_dynamic() {
         r#"<template><div v-once :id="foo">content</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2318,6 +2399,7 @@ fn test_v_once_cache_index() {
         r#"<template><div v-once>static</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2342,6 +2424,7 @@ fn test_v_once_self_closing() {
         r#"<template><br v-once/></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2366,6 +2449,7 @@ fn test_v_once_returns_cache() {
         r#"<template><div v-once>static</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2395,6 +2479,7 @@ fn test_pf_props() {
         r#"<template><div :id="myId">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2418,6 +2503,7 @@ fn test_pf_class() {
         r#"<template><div :class="cls">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2441,6 +2527,7 @@ fn test_pf_style() {
         r#"<template><div :style="sty">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2466,6 +2553,7 @@ fn test_pf_prod_no_comments() {
         r#"<template><div :class="cls">hi</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2494,6 +2582,7 @@ fn test_pf_text() {
         r#"<template><div>{{ msg }}</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2519,7 +2608,13 @@ fn test_v_if_condition_source_mapped() {
         ..Default::default()
     };
     let source = r#"<template><div v-if="show">hello</div></template>"#;
-    let result = compile(source, &options, &verter_opts, &allocator);
+    let result = compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let template = result.template.as_ref().expect("should have template");
     assert!(
         template.code.contains("(_ctx.show) ?"),
@@ -2578,7 +2673,13 @@ fn test_v_else_if_condition_source_mapped() {
     //                  0         1         2         3         4         5         6         7
     //                  0123456789012345678901234567890123456789012345678901234567890123456789012345678
     let source = r#"<template><div v-if="a">x</div><div v-else-if="b">y</div></template>"#;
-    let result = compile(source, &options, &verter_opts, &allocator);
+    let result = compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let template = result.template.as_ref().expect("should have template");
 
     let sm = oxc_sourcemap::SourceMap::from_json_string(&template.source_map)
@@ -2633,7 +2734,13 @@ fn test_v_for_iterable_source_offset() {
         ..Default::default()
     };
     let source = r#"<template><div v-for="item in items" :key="item">{{ item }}</div></template>"#;
-    let result = compile(source, &options, &verter_opts, &allocator);
+    let result = compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let template = result.template.as_ref().expect("should have template");
     assert!(
         template.code.contains("_renderList("),
@@ -2664,6 +2771,7 @@ fn v_for_key_not_hoisted() {
         r#"<template><div v-for="(item, i) in items" :key="i" class="card">{{ item }}</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2698,6 +2806,7 @@ fn v_for_child_props_not_hoisted() {
         r#"<template><ul><li v-for="item in items" :key="item.id"><span :title="item.name">text</span></li></ul></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2734,6 +2843,7 @@ fn v_slot_props_not_hoisted() {
         r#"<template><Comp v-slot="{ item }"><div :class="item.cls">text</div></Comp></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");
@@ -2758,6 +2868,7 @@ fn static_props_still_hoisted() {
         r#"<template><div class="app">{{ msg }}</div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &allocator,
     );
     let template = result.template.as_ref().expect("should have template");

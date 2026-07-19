@@ -42,12 +42,13 @@ use verter_audit::{
 };
 use verter_compiler::compile::{
     compile as compile_sfc, CodegenOptions, CompileTarget, VerterCompileOptions,
-    VerterCompileResult,
+    VerterCompileResult, VueMacroSemanticInput,
 };
 
 use crate::component_meta_audit::{RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit};
 use crate::instant::Instant;
 use crate::request_context::{RequestContext, RequestContextGuard};
+use crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand;
 use crate::VerterHost;
 
 /// Map a `CompileTarget` bitset to the audit's stringly tag. The tag
@@ -242,7 +243,14 @@ impl VerterHost {
         //    The carrier still carries a cheap default-filled record
         //    marked `AuditDisabled`.
         if !self.config.audit_enabled {
-            let result = compile_sfc(source, &codegen_options, &verter_options, &allocator);
+            let macro_semantics = self.vue_macro_compile_input(canonical_id, target);
+            let result = compile_sfc(
+                source,
+                &codegen_options,
+                &verter_options,
+                &macro_semantics,
+                &allocator,
+            );
             let request_id = self.next_request_id();
             let parent_request_id =
                 verter_scheduler::request_context::current_request_id().map(|id| id.to_string());
@@ -305,7 +313,14 @@ impl VerterHost {
             crate::host_audit_runtime::AuditRequestRegistration::Noop
         ) {
             let _noop_guard = verter_audit::install_noop_observer();
-            let result = compile_sfc(source, &codegen_options, &verter_options, &allocator);
+            let macro_semantics = self.vue_macro_compile_input(canonical_id, target);
+            let result = compile_sfc(
+                source,
+                &codegen_options,
+                &verter_options,
+                &macro_semantics,
+                &allocator,
+            );
             let record = noop_compile_record(
                 request_id,
                 canonical_id,
@@ -324,7 +339,14 @@ impl VerterHost {
         //    + `record_event(CompileCodeTransformOp)` while this
         //    block runs.
         let total_start = Instant::now();
-        let result = compile_sfc(source, &codegen_options, &verter_options, &allocator);
+        let macro_semantics = self.vue_macro_compile_input(canonical_id, target);
+        let result = compile_sfc(
+            source,
+            &codegen_options,
+            &verter_options,
+            &macro_semantics,
+            &allocator,
+        );
         let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
 
         // 10. Read accumulators off the active request context.
@@ -360,6 +382,25 @@ impl VerterHost {
         registration.finalize(record.clone());
         drop(_ctx_guard);
         AuditedResult::ok(result, record)
+    }
+
+    fn vue_macro_compile_input(
+        &self,
+        canonical_id: &str,
+        target: CompileTarget,
+    ) -> VueMacroSemanticInput {
+        let demand = match (target.needs_script(), target.needs_tsc()) {
+            (true, true) => Some(VueMacroCodegenDemand::RuntimeAndTsc),
+            (true, false) => Some(VueMacroCodegenDemand::Runtime),
+            (false, true) => Some(VueMacroCodegenDemand::Tsc),
+            (false, false) => None,
+        };
+        demand
+            .map(|demand| {
+                self.produce_vue_macro_codegen(canonical_id, demand)
+                    .compiler_input()
+            })
+            .unwrap_or(VueMacroSemanticInput::Unavailable)
     }
 
     fn assemble_compile_payload(

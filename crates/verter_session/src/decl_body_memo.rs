@@ -37,7 +37,7 @@ use crate::resolver_core::shallow_file_state::AnalyzedExternalTypeSource;
 use verter_parser::utils::oxc::script::raw_surface::{
     capture_statement_surfaces, merge_overload_groups, RawSourceSurface, SymbolSpace,
 };
-use verter_parser::utils::oxc::script::type_surface::collect_statement_dependency_names;
+use verter_parser::utils::oxc::script::type_inventory::collect_statement_dependency_names;
 use verter_semantic::analysis::decl_headers::DeclHeaderIndex;
 use verter_semantic::analysis::framework_facts::svelte::{
     lower_props_annotation_at, lower_svelte_type_argument_at, PropsAnnotationLowering,

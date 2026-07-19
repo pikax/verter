@@ -35,7 +35,9 @@
 //! codegen path and would fail if recovery regressed.
 
 use oxc_allocator::Allocator;
-use verter_compiler::compile::{compile, CodegenOptions, CompileTarget, VerterCompileOptions};
+use verter_compiler::compile::{
+    compile, CodegenOptions, CompileTarget, VerterCompileOptions, VueMacroSemanticInput,
+};
 
 /// Compile an SFC to IDE (`CompileTarget::IDE`) TSX — the exact target the LSP
 /// uses (`CompileProfile { target: CompileTarget::IDE, .. }`).
@@ -47,7 +49,13 @@ fn ide_tsx(source: &str) -> String {
         ..Default::default()
     };
     let verter_opts = VerterCompileOptions::default();
-    let result = compile(source, &options, &verter_opts, &alloc);
+    let result = compile(
+        source,
+        &options,
+        &verter_opts,
+        &VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     result
         .tsx
         .as_ref()

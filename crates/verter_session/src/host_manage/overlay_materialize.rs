@@ -619,7 +619,7 @@ impl VerterHost {
         };
         struct ColdIndexProducts {
             header_index: verter_semantic::analysis::decl_headers::DeclHeaderIndex,
-            analysis: verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource,
+            analysis: verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource,
             snapshot: Option<crate::types::FileAnalysisSnapshot>,
             svelte_component_runes_mode: bool,
         }
@@ -664,7 +664,7 @@ impl VerterHost {
                                 body,
                                 parsed.source_str(),
                             ),
-                            verter_parser::utils::oxc::script::type_surface::analyze_external_type_program_headers(body),
+                            verter_parser::utils::oxc::script::type_inventory::analyze_external_type_program_headers(body),
                         )
                     }
                     None => Default::default(),

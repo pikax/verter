@@ -127,6 +127,10 @@ withDefaults(defineProps<{ label?: string; count: number }>(), { label: 'ok' })
         runtime.entries[0].macro_index, 1,
         "outer withDefaults owns identity"
     );
+    assert_eq!(
+        runtime.entries[0].syntax_index, 0,
+        "nested analyzer rows must join the single top-level compiler macro"
+    );
     let MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(props)) =
         &runtime.entries[0].outcome
     else {

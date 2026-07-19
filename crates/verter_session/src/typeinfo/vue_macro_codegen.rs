@@ -85,6 +85,26 @@ pub(crate) struct VueMacroCodegenOutput {
     pub counters: VueMacroCodegenCounters,
 }
 
+impl VueMacroCodegenOutput {
+    pub(crate) fn compiler_input(&self) -> verter_compiler::compile::VueMacroSemanticInput {
+        match (&self.runtime, &self.tsc) {
+            (Some(runtime), Some(tsc)) => {
+                verter_compiler::compile::VueMacroSemanticInput::RuntimeAndTsc {
+                    runtime: Arc::clone(runtime),
+                    tsc: Arc::clone(tsc),
+                }
+            }
+            (Some(runtime), None) => {
+                verter_compiler::compile::VueMacroSemanticInput::Runtime(Arc::clone(runtime))
+            }
+            (None, Some(tsc)) => {
+                verter_compiler::compile::VueMacroSemanticInput::Tsc(Arc::clone(tsc))
+            }
+            (None, None) => verter_compiler::compile::VueMacroSemanticInput::Unavailable,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ProjectionFailure {
     Partial(MacroPartialReason),
@@ -126,6 +146,19 @@ struct ProducerState {
 }
 
 impl VerterHost {
+    /// Produce a request-local bundle from one coherent cold-seed view.
+    pub(crate) fn produce_vue_macro_codegen(
+        &self,
+        owner_canonical: &str,
+        demand: VueMacroCodegenDemand,
+    ) -> VueMacroCodegenOutput {
+        let cold_seed = self.resolver_store_view_read().into_cold_seed_view();
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx =
+            crate::resolver_core::HostResolverContext::from_cold_seed(self, &cold_seed, overlay);
+        self.produce_vue_macro_codegen_with_ctx(&ctx, owner_canonical, demand)
+    }
+
     /// Produce the requested Vue macro codegen bundle from one request-bound
     /// resolver context.
     ///
@@ -225,11 +258,13 @@ impl VerterHost {
                 .then(|| containing_with_defaults_index(macros, payload_index))
                 .flatten();
             let effective_index = defaults_index.unwrap_or(payload_index);
+            let syntax_index = top_level_syntax_index(macros, effective_index);
             let macro_index = macro_index(effective_index);
 
             if !is_codegen_macro(mac.kind) {
                 if demand.wants_runtime() {
                     state.runtime_entries.push(MacroRuntimeEntry {
+                        syntax_index,
                         macro_index,
                         outcome: ProjectionFailure::Unsupported(UnsupportedReason::MacroKind)
                             .runtime(),
@@ -237,6 +272,7 @@ impl VerterHost {
                 }
                 if demand.wants_tsc() {
                     state.tsc_entries.push(MacroTscEntry {
+                        syntax_index,
                         macro_index,
                         outcome: ProjectionFailure::Unsupported(UnsupportedReason::MacroKind).tsc(),
                     });
@@ -248,12 +284,14 @@ impl VerterHost {
                 let failure = ProjectionFailure::Unresolved(UnresolvedReason::MissingTypeArgument);
                 if demand.wants_runtime() {
                     state.runtime_entries.push(MacroRuntimeEntry {
+                        syntax_index,
                         macro_index,
                         outcome: failure.runtime(),
                     });
                 }
                 if demand.wants_tsc() {
                     state.tsc_entries.push(MacroTscEntry {
+                        syntax_index,
                         macro_index,
                         outcome: failure.tsc(),
                     });
@@ -306,6 +344,7 @@ impl VerterHost {
                     None => resolution_failure().runtime(),
                 };
                 state.runtime_entries.push(MacroRuntimeEntry {
+                    syntax_index,
                     macro_index,
                     outcome,
                 });
@@ -344,6 +383,7 @@ impl VerterHost {
                     None => resolution_failure().tsc(),
                 };
                 state.tsc_entries.push(MacroTscEntry {
+                    syntax_index,
                     macro_index,
                     outcome,
                 });
@@ -691,6 +731,31 @@ fn containing_with_defaults_index(macros: &[AnalyzedMacro], inner_index: usize) 
         .filter(|(_, outer)| outer.span.start < inner.span.start && inner.span.end < outer.span.end)
         .min_by_key(|(_, outer)| outer.span.end.saturating_sub(outer.span.start))
         .map(|(index, _)| index)
+}
+
+fn top_level_syntax_index(macros: &[AnalyzedMacro], effective_index: usize) -> u32 {
+    let effective = &macros[effective_index];
+    debug_assert!(is_top_level_macro(macros, effective_index));
+
+    let preceding = macros
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| is_top_level_macro(macros, *index))
+        .filter(|(index, mac)| {
+            (mac.span.start, mac.span.end, *index)
+                < (effective.span.start, effective.span.end, effective_index)
+        })
+        .count();
+    u32::try_from(preceding).unwrap_or(u32::MAX)
+}
+
+fn is_top_level_macro(macros: &[AnalyzedMacro], candidate_index: usize) -> bool {
+    let candidate = &macros[candidate_index];
+    !macros.iter().enumerate().any(|(index, outer)| {
+        index != candidate_index
+            && outer.span.start < candidate.span.start
+            && candidate.span.end < outer.span.end
+    })
 }
 
 fn is_codegen_macro(kind: AnalyzedMacroKind) -> bool {

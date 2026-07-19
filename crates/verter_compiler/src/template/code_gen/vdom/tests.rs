@@ -376,7 +376,13 @@ fn gen_vdom_template(source: &str) -> String {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(source, &options, &verter_opts, &alloc);
+    let result = compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     assert!(
         result.errors.is_empty(),
         "compile errors: {:?}",

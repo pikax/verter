@@ -46,8 +46,10 @@ fn fixture(name: &str) -> String {
 }
 
 fn empty_external(
-) -> Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
-    Arc::new(verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default())
+) -> Arc<verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource> {
+    Arc::new(
+        verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource::default(),
+    )
 }
 
 fn build_indexed_with_source(

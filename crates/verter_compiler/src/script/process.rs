@@ -112,7 +112,10 @@ pub fn process_script_setup<'alloc>(
     let stripped_sections = (!options.keep_ts_types)
         .then(|| collect_stripped_macro_sections(prepared_setup.program(), content_str));
 
-    // Process items
+    // Process items. The source-order top-level macro index is the stable DTO
+    // join key; nested analyzer rows (notably withDefaults/defineProps) never
+    // participate in this compiler inventory.
+    let mut macro_syntax_index = 0_u32;
     for item in &parse_result.items {
         match item {
             ScriptItem::Import(imp) => {
@@ -165,12 +168,15 @@ pub fn process_script_setup<'alloc>(
             ScriptItem::Macro(mac) => {
                 process_macro_item(
                     mac,
+                    macro_syntax_index,
                     content_start,
                     content_str,
                     ctx,
                     &mut macro_state,
                     stripped_sections.as_ref(),
+                    options.macro_runtime,
                 );
+                macro_syntax_index = macro_syntax_index.saturating_add(1);
             }
             // Transform `await <arg>` → _withAsyncContext wrapper.
             // Vue wraps each top-level await to preserve component instance context.
@@ -258,32 +264,21 @@ pub fn process_script_setup<'alloc>(
     // defineProps/defineEmits with those from defineModel. This avoids brittle
     // string-level insertion (rfind) that breaks on non-object-literal props
     // sections (e.g., IIFE from withDefaults with runtime variable).
-    if !macro_state.model_names.is_empty() {
-        // Build model props object: { name: { type: T, default: v }, nameModifiers: {} }
+    if !macro_state.models.is_empty() {
+        // Build model props from the authoritative semantic rows, merging only
+        // the compiler-owned options expression captured from syntax.
         let mut model_props_obj = String::from("{\n");
-        for (i, (name, options)) in macro_state.model_names.iter().enumerate() {
+        for (i, model) in macro_state.models.iter().enumerate() {
             if i > 0 {
                 model_props_obj.push_str(",\n");
             }
             model_props_obj.push_str("    ");
-            model_props_obj.push_str(name);
-            // Forward defineModel options (type, default, etc.) if provided
-            match options {
-                Some(opts) => {
-                    model_props_obj.push_str(": ");
-                    model_props_obj.push_str(opts);
-                }
-                None => {
-                    model_props_obj.push_str(": {}");
-                }
-            }
+            model_props_obj.push_str(&model.prop_name);
+            model_props_obj.push_str(": ");
+            model_props_obj.push_str(&model.prop_options);
             model_props_obj.push_str(",\n    ");
-            if name == "modelValue" {
-                model_props_obj.push_str("modelModifiers: {}");
-            } else {
-                model_props_obj.push_str(name);
-                model_props_obj.push_str("Modifiers: {}");
-            }
+            model_props_obj.push_str(&model.modifiers_name);
+            model_props_obj.push_str(": {}");
         }
         model_props_obj.push_str("\n  }");
 
@@ -304,9 +299,9 @@ pub fn process_script_setup<'alloc>(
 
         // Build model emit entries
         let model_emits: Vec<String> = macro_state
-            .model_names
+            .models
             .iter()
-            .map(|(name, _)| format!("\"update:{}\"", name))
+            .map(|model| format!("\"{}\"", model.update_event))
             .collect();
         let model_emits_arr = format!("[{}]", model_emits.join(", "));
 

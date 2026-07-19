@@ -18,7 +18,13 @@ fn compile_sfc(source: &str) -> VerterCompileResult {
         force_js: true,
         ..Default::default()
     };
-    compile(source, &options, &verter_opts, &alloc)
+    compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    )
 }
 
 /// Assert that at least one diagnostic has the given code string.

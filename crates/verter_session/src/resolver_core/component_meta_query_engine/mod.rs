@@ -1001,13 +1001,13 @@ fn local_type_symbol_metadata_for_known_source(
     let analysis = ctx.external_type_analysis(canonical_source)?;
     let symbol = analysis.local_type_symbol(resolved_name)?;
     let kind = match symbol.kind {
-        verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::TypeAlias => {
+        verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSymbolKind::TypeAlias => {
             ResolvedDeclarationKind::TypeAlias
         }
-        verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::Interface => {
+        verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSymbolKind::Interface => {
             ResolvedDeclarationKind::Interface
         }
-        verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::Class => {
+        verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSymbolKind::Class => {
             ResolvedDeclarationKind::Class
         }
     };

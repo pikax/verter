@@ -38,7 +38,7 @@ fn indexed_from_source(source: &str) -> Arc<IndexedReady> {
         ShallowFileState::service_backed_for_test_with_hash("/dual-space.ts", source, [0u8; 16]);
 
     let empty_external = Arc::new(
-        verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
+        verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource::default(),
     );
 
     Arc::new(IndexedReady::new_for_test_with_state(

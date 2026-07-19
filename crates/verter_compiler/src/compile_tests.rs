@@ -40,7 +40,13 @@ fn compile_sfc(source: &str) -> VerterCompileResult {
         force_js: true,
         ..Default::default()
     };
-    compile(source, &options, &verter_opts, &alloc)
+    compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    )
 }
 
 fn compile_sfc_no_hoist(source: &str) -> VerterCompileResult {
@@ -54,7 +60,13 @@ fn compile_sfc_no_hoist(source: &str) -> VerterCompileResult {
         force_js: true,
         ..Default::default()
     };
-    compile(source, &options, &verter_opts, &alloc)
+    compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    )
 }
 
 fn compile_sfc_vapor(source: &str) -> VerterCompileResult {
@@ -68,7 +80,175 @@ fn compile_sfc_vapor(source: &str) -> VerterCompileResult {
         force_vapor: true,
         ..Default::default()
     };
-    compile(source, &options, &verter_opts, &alloc)
+    compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    )
+}
+
+#[test]
+fn vmrs_boundary_missing_runtime_semantic_bundle_fails_closed() {
+    let result = compile_sfc(
+        r#"<script setup lang="ts">
+const props = defineProps<{ title: string }>()
+</script>"#,
+    );
+
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|diagnostic| diagnostic.code == "XMissingMacroSemanticBundle"),
+        "missing semantic input must be explicit: {:?}",
+        result.errors
+    );
+    let script = result.script.expect("script output").code;
+    assert!(
+        !script.contains("type: String"),
+        "compiler-local type inference must fail closed without a runtime bundle: {script}"
+    );
+}
+
+#[test]
+fn vmrs_runtime_bundle_is_the_only_type_based_props_authority() {
+    use std::sync::Arc;
+    use verter_macro_dto::{
+        AuthoredMemberOrdinal, MacroAnchor, MacroRuntimeBundle, MacroRuntimeEntry,
+        MacroRuntimeOutcome, MacroRuntimeShape, OrderedRuntimeConstructors,
+        PropsDefaultsAssociation, PropsRuntimeShape, RuntimeConstructor, RuntimeProp,
+        RuntimeRootShape,
+    };
+
+    let semantics = VueMacroSemanticInput::Runtime(Arc::new(MacroRuntimeBundle {
+        entries: vec![MacroRuntimeEntry {
+            syntax_index: 0,
+            macro_index: 0,
+            outcome: MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(PropsRuntimeShape {
+                root_shape: RuntimeRootShape::ObjectLike,
+                defaults: PropsDefaultsAssociation::None,
+                props: vec![RuntimeProp {
+                    name: "authoritative".to_string(),
+                    optional: false,
+                    constructors: OrderedRuntimeConstructors::from_ordered([
+                        RuntimeConstructor::Boolean,
+                        RuntimeConstructor::Unknown,
+                    ]),
+                    skip_check: true,
+                    anchor: MacroAnchor::Authored {
+                        macro_index: 0,
+                        member_ordinal: Some(AuthoredMemberOrdinal::new(0)),
+                    },
+                }],
+            })),
+        }],
+    }));
+    let alloc = Allocator::new();
+    let options = CodegenOptions::default();
+    let verter_options = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    let result = compile(
+        r#"<script setup lang="ts">defineProps<{ ignored: string }>()</script>"#,
+        &options,
+        &verter_options,
+        &semantics,
+        &alloc,
+    );
+
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    let code = result.script.expect("script").code;
+    assert!(code.contains("authoritative: { type: Boolean, skipCheck: true, required: true }"));
+    assert!(!code.contains("ignored: { type: String"));
+}
+
+#[test]
+fn vmrs_with_defaults_performs_one_syntax_owned_merge() {
+    use std::sync::Arc;
+    use verter_macro_dto::{
+        MacroAnchor, MacroRuntimeBundle, MacroRuntimeEntry, MacroRuntimeOutcome, MacroRuntimeShape,
+        OrderedRuntimeConstructors, PropsDefaultsAssociation, PropsRuntimeShape,
+        RuntimeConstructor, RuntimeProp, RuntimeRootShape,
+    };
+
+    let semantics = VueMacroSemanticInput::Runtime(Arc::new(MacroRuntimeBundle {
+        entries: vec![MacroRuntimeEntry {
+            syntax_index: 0,
+            macro_index: 1,
+            outcome: MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(PropsRuntimeShape {
+                root_shape: RuntimeRootShape::ObjectLike,
+                defaults: PropsDefaultsAssociation::WithDefaults {
+                    payload_macro_index: 0,
+                    defaults_macro_index: 1,
+                },
+                props: vec![RuntimeProp {
+                    name: "label".to_string(),
+                    optional: true,
+                    constructors: OrderedRuntimeConstructors::from_ordered([
+                        RuntimeConstructor::String,
+                    ]),
+                    skip_check: false,
+                    anchor: MacroAnchor::MacroArgument { macro_index: 0 },
+                }],
+            })),
+        }],
+    }));
+    let alloc = Allocator::new();
+    let result = compile(
+        r#"<script setup lang="ts">withDefaults(defineProps<{ label?: string }>(), { label: 'ok' })</script>"#,
+        &CodegenOptions::default(),
+        &VerterCompileOptions {
+            force_js: true,
+            ..Default::default()
+        },
+        &semantics,
+        &alloc,
+    );
+
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    let code = result.script.expect("script").code;
+    assert_eq!(code.matches("_mergeDefaults(").count(), 1, "{code}");
+    assert!(code.contains("{ label: 'ok' }"), "{code}");
+}
+
+#[test]
+fn vmrs_tsc_consumes_terminal_splice_without_source_type_fallback() {
+    use std::sync::Arc;
+    use verter_macro_dto::{
+        MacroTscBundle, MacroTscEntry, MacroTscOutcome, MacroTscProjection, TscSpliceText,
+    };
+
+    let semantics = VueMacroSemanticInput::Tsc(Arc::new(MacroTscBundle {
+        entries: vec![MacroTscEntry {
+            syntax_index: 0,
+            macro_index: 0,
+            outcome: MacroTscOutcome::Complete(MacroTscProjection::Props {
+                splice: TscSpliceText::new("{ authoritative: string; count?: number }"),
+            }),
+        }],
+    }));
+    let alloc = Allocator::new();
+    let result = compile(
+        r#"<script setup lang="ts">defineProps<{ ignored: boolean }>()</script>"#,
+        &CodegenOptions {
+            target: CompileTarget::TSC,
+            ..Default::default()
+        },
+        &VerterCompileOptions::default(),
+        &semantics,
+        &alloc,
+    );
+
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    let code = result.tsc.expect("TSC output").code;
+    assert!(
+        code.contains("{ authoritative: string; count?: number }"),
+        "{code}"
+    );
+    assert!(!code.contains("ignored: boolean"), "{code}");
 }
 
 fn compile_and_validate_vapor_template(source: &str) -> String {
@@ -271,6 +451,7 @@ const msg = 'hello'
 "#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &alloc,
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -1259,6 +1440,7 @@ fn self_referencing_component_uses_maybe_self_reference() {
 <script setup>const x = 1;</script>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &alloc,
     );
     let tpl = result.template.as_ref().expect("template block");
@@ -1286,6 +1468,7 @@ fn self_referencing_component_kebab_case() {
 <script setup>const x = 1;</script>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &alloc,
     );
     let tpl = result.template.as_ref().expect("template block");
@@ -1488,6 +1671,7 @@ const myValue = ref<string | number>('')
 </script>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &alloc,
     );
     assert!(
@@ -2510,7 +2694,13 @@ fn compile_sfc_with_const_props(source: &str, const_props: &[&str]) -> VerterCom
         prop_constness_overrides: Some(const_props.iter().map(|s| s.to_string()).collect()),
         ..Default::default()
     };
-    compile(source, &options, &verter_opts, &alloc)
+    compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    )
 }
 
 fn compile_sfc_vapor_with_const_props(source: &str, const_props: &[&str]) -> VerterCompileResult {
@@ -2525,7 +2715,13 @@ fn compile_sfc_vapor_with_const_props(source: &str, const_props: &[&str]) -> Ver
         prop_constness_overrides: Some(const_props.iter().map(|s| s.to_string()).collect()),
         ..Default::default()
     };
-    compile(source, &options, &verter_opts, &alloc)
+    compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    )
 }
 
 /// @ai-generated - Cross-file const prop is excluded from dynamicProps
@@ -3776,6 +3972,7 @@ class="h-full"
 "#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &alloc,
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -3825,6 +4022,7 @@ onMounted(() => {
 "#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &alloc,
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -3919,6 +4117,7 @@ onMounted(() => {
 "#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &alloc,
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -4014,6 +4213,7 @@ scroll-to-active
 "#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &alloc,
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -4675,6 +4875,7 @@ fn comment_between_v_if_branches_does_not_leak_in_prod() {
         r#"<template><div><span v-if="a">A</span><!-- interstitial --><span v-else-if="b">B</span><!-- another --><span v-else>C</span></div></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &alloc,
     );
     assert!(
@@ -4709,6 +4910,7 @@ fn comment_between_v_if_branches_does_not_leak_in_prod() {
         r#"<template><span v-if="a">A</span><!-- root interstitial --><span v-else-if="b">B</span><!-- root another --><span v-else>C</span></template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &alloc2,
     );
     assert!(
@@ -5037,7 +5239,13 @@ fn compile_sfc_keep_ts(source: &str) -> VerterCompileResult {
         force_js: false,
         ..Default::default()
     };
-    compile(source, &options, &verter_opts, &alloc)
+    compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    )
 }
 
 /// @ai-generated - export type is hoisted outside setup wrapper when keeping TS types
@@ -6673,7 +6881,13 @@ fn compile_tsx(source: &str) -> VerterCompileResult {
         source_map: true,
         ..Default::default()
     };
-    compile(source, &options, &verter_opts, &alloc)
+    compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    )
 }
 
 fn compile_tsx_with_force_js(source: &str, force_js: bool) -> VerterCompileResult {
@@ -6688,7 +6902,13 @@ fn compile_tsx_with_force_js(source: &str, force_js: bool) -> VerterCompileResul
         force_js,
         ..Default::default()
     };
-    compile(source, &options, &verter_opts, &alloc)
+    compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    )
 }
 
 #[test]
@@ -9949,6 +10169,7 @@ const props = defineProps({ msg: String, count: Number })
 </template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &alloc,
     );
     assert!(
@@ -10000,6 +10221,7 @@ const props = defineProps({ msg: String, count: Number })
 </template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &alloc,
     );
     assert!(
@@ -10246,7 +10468,13 @@ fn compile_tsx_with_source_map(source: &str) -> VerterCompileResult {
         source_map: true,
         ..Default::default()
     };
-    compile(source, &options, &verter_opts, &alloc)
+    compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    )
 }
 
 fn compile_tsx_with_template_data(source: &str) -> VerterCompileResult {
@@ -10260,7 +10488,13 @@ fn compile_tsx_with_template_data(source: &str) -> VerterCompileResult {
         extract_template_data: true,
         ..Default::default()
     };
-    compile(source, &options, &verter_opts, &alloc)
+    compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    )
 }
 
 /// Verify that every source map token in the TSX output maps back to valid
@@ -11012,7 +11246,13 @@ fn tsx_custom_types_module_in_output() {
     };
     let verter_opts = VerterCompileOptions::default();
     let source = r#"<script setup>const x = 1</script><template><div/></template>"#;
-    let result = compile(source, &options, &verter_opts, &alloc);
+    let result = compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     let tsx = result.tsx.expect("tsx block");
     assert!(
         tsx.code.contains(r#"from "@my/types""#),
@@ -11128,7 +11368,13 @@ fn compile_and_validate_hoisted(source: &str) -> String {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(source, &options, &verter_opts, &alloc);
+    let result = compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     assert!(
         result.errors.is_empty(),
         "compile errors: {:?}",
@@ -11166,7 +11412,13 @@ fn compile_and_validate_no_hoist(source: &str) -> String {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(source, &options, &verter_opts, &alloc);
+    let result = compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     assert!(
         result.errors.is_empty(),
         "compile errors: {:?}",
@@ -13747,6 +13999,7 @@ import PageContent from './PageContent.vue'
 </template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &alloc,
     );
 
@@ -13805,6 +14058,7 @@ import MyComp from './MyComp.vue'
 </template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &alloc,
     );
 
@@ -13850,6 +14104,7 @@ import MyComp from './MyComp.vue'
 </template>"#,
         &options,
         &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
         &alloc,
     );
 
@@ -14090,7 +14345,13 @@ fn compile_tsx_strict_slots(source: &str) -> VerterCompileResult {
         source_map: true,
         ..Default::default()
     };
-    compile(source, &options, &verter_opts, &alloc)
+    compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    )
 }
 
 #[test]
@@ -14640,7 +14901,13 @@ const arrowPos = ref({})
     </div>
   </Popup>
 </template>"#;
-    let result = compile(source, &options, &verter_opts, &alloc);
+    let result = compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     assert!(
         result.errors.is_empty(),
         "compile errors: {:?}",
@@ -14695,7 +14962,13 @@ const arrowPos = ref({})
     <slot name="reference" />
   </span>
 </template>"#;
-    let result = compile(source, &options, &verter_opts, &alloc);
+    let result = compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     assert!(
         result.errors.is_empty(),
         "compile errors: {:?}",
@@ -14764,7 +15037,13 @@ fn compile_with_target(source: &str, target: CompileTarget, force_js: bool) -> V
         force_js,
         ..Default::default()
     };
-    compile(source, &options, &verter_opts, &alloc)
+    compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    )
 }
 
 const TS_OVERLAY_SFC: &str = r#"<script setup lang="ts">
@@ -16038,77 +16317,4 @@ export { type Foo as Baz }
         "type-only export specifiers must go: {code}"
     );
     assert!(code.contains("ref(0)"), "runtime value remains: {code}");
-}
-
-/// Local empty-body interface extends an imported props surface supplied via
-/// external_types (radix Separator pattern). Runtime props must expand heritage,
-/// and force_js must still strip the dual-script TS.
-#[test]
-fn force_js_local_empty_interface_extends_external_expands_props() {
-    use rustc_hash::FxHashMap;
-    use verter_parser::utils::oxc::script::type_surface::{
-        resolve_external_type, ResolvedElements,
-    };
-
-    let alloc = Allocator::new();
-    let base_src = r#"
-export interface PrimitiveProps { asChild?: boolean; as?: string }
-export interface BaseSeparatorProps extends PrimitiveProps {
-  orientation?: string
-  decorative?: boolean
-}
-"#;
-    let base_resolved = resolve_external_type("BaseSeparatorProps", base_src, &alloc)
-        .expect("BaseSeparatorProps resolves");
-    assert!(
-        base_resolved.props.len() >= 4,
-        "precondition: base has heritage members, got {}",
-        base_resolved.props.len()
-    );
-
-    let mut external_types: FxHashMap<String, ResolvedElements> = FxHashMap::default();
-    external_types.insert("BaseSeparatorProps".to_string(), base_resolved);
-
-    let source = r#"
-<script lang="ts">
-import type { BaseSeparatorProps } from './BaseSeparator.vue'
-export interface SeparatorProps extends BaseSeparatorProps {}
-</script>
-<script setup lang="ts">
-const props = withDefaults(defineProps<SeparatorProps>(), {
-  orientation: 'horizontal',
-})
-</script>
-<template><div /></template>
-"#;
-    let options = CodegenOptions {
-        filename: Some("Separator.vue".to_string()),
-        ..Default::default()
-    };
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        external_types: Some(external_types),
-        ..Default::default()
-    };
-    let result = compile(source, &options, &verter_opts, &alloc);
-    let script = result.script.as_ref().expect("script");
-    let code = &script.code;
-    assert!(
-        code.contains("asChild"),
-        "must emit asChild heritage prop: {code}"
-    );
-    assert!(
-        code.contains("orientation"),
-        "must emit orientation: {code}"
-    );
-    assert!(code.contains("decorative"), "must emit decorative: {code}");
-    assert!(
-        !code.contains("interface SeparatorProps"),
-        "interface must go: {code}"
-    );
-    assert!(!code.contains("import type"), "import type must go: {code}");
-    assert!(
-        !code.contains("defineProps<"),
-        "defineProps type arg must go: {code}"
-    );
 }

@@ -1223,6 +1223,16 @@ bridge-truncated, and cancelled results may be returned to a caller, but they
 must be marked non-cacheable or cached only in a typed degraded-result cache
 whose callers cannot mistake them for exact answers.
 
+**Vue macro compiler DTOs are request-local projections, not cache entries.**
+`produce_vue_macro_codegen` may fulfill runtime and TSC demand together in one
+SFC inventory pass, but it must not admit the aggregate
+`MacroRuntimeBundle`/`MacroTscBundle` under a graph-instance id, raw source
+slice, or whole-file semantic hash. The producer reuses the canonical
+`SemanticGraphStore` query memos underneath it, returns the request's typed
+completeness and fact footprint, and hands the DTOs directly to the compiler.
+Only a future cache family with a complete typed policy identity and normal
+read-side fact validation could retain such an aggregate.
+
 ## Cache layer key composition
 
 See `docs/arch/fact-based-cache.md` for the canonical per-cache-layer key

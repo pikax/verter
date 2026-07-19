@@ -518,11 +518,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             // Object arm of an intersection literal) the
                             // member is author-declared in the macro T.
                             // Otherwise (`Structural`) it is `false`.
-                            // This is the canonical typed-IR producer of
-                            // the bit; the parser-side `ResolvedProp`
-                            // chain and the prepared-surface walker are
-                            // the other producers the shared resolver
-                            // consolidates onto this path.
+                            // This is the canonical typed-IR producer of the
+                            // macro-root provenance bit consumed by terminal
+                            // projections.
                             members.push(SurfaceMember {
                                 name: Arc::from(prop.name.as_str()),
                                 value,

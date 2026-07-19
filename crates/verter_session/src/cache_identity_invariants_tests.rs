@@ -663,7 +663,7 @@ fn augmentation_probe_rejects_stale_artifact_the_authority_gate_rejects() {
             rustc_hash::FxHashSet::default(),
             FxHashMap::default(),
             StdArc::new(
-                verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
+                verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource::default(
                 ),
             ),
         );
@@ -673,7 +673,8 @@ fn augmentation_probe_rejects_stale_artifact_the_authority_gate_rejects() {
         Arc::from("export * from \"./real_aug\";\n"),
         Arc::from("export * from \"./real_aug\";\n"),
         StdArc::new(
-            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
+            verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource::default(
+            ),
         ),
     );
     host.project_type_store()

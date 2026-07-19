@@ -326,7 +326,7 @@ pub(crate) fn component_meta_debug(message: impl AsRef<str>) {
 #[derive(Clone, Debug)]
 pub(crate) struct ExternalTypeResolutionInputs {
     pub(crate) analysis:
-        Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource>,
+        Arc<verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource>,
     pub(crate) analysis_cache_hit: bool,
 }
 

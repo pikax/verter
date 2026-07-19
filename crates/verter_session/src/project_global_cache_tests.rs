@@ -866,16 +866,8 @@ fn request_view_is_absent_from_crate_sources() {
             include_str!("host_resolve/dependency_resolution.rs"),
         ),
         (
-            "host_resolve/external_macro_collector.rs",
-            include_str!("host_resolve/external_macro_collector.rs"),
-        ),
-        (
             "host_resolve/external_type_resolution.rs",
             include_str!("host_resolve/external_type_resolution.rs"),
-        ),
-        (
-            "host_resolve/frontier_adapter.rs",
-            include_str!("host_resolve/frontier_adapter.rs"),
         ),
         (
             "host_resolve/frontier_engine.rs",
@@ -889,10 +881,6 @@ fn request_view_is_absent_from_crate_sources() {
         (
             "host_resolve/route_surface.rs",
             include_str!("host_resolve/route_surface.rs"),
-        ),
-        (
-            "host_resolve/test_guards.rs",
-            include_str!("host_resolve/test_guards.rs"),
         ),
         (
             "host_resolve/virtual_file_pipeline.rs",

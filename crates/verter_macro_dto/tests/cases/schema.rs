@@ -33,6 +33,7 @@ fn prop(name: &str, constructors: Vec<RuntimeConstructor>) -> RuntimeProp {
 fn runtime_and_tsc_bundles_are_independent_contracts() {
     let runtime = MacroRuntimeBundle {
         entries: vec![MacroRuntimeEntry {
+            syntax_index: 0,
             macro_index: 0,
             outcome: MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(PropsRuntimeShape {
                 root_shape: RuntimeRootShape::ObjectLike,
@@ -46,6 +47,7 @@ fn runtime_and_tsc_bundles_are_independent_contracts() {
     };
     let tsc = MacroTscBundle {
         entries: vec![MacroTscEntry {
+            syntax_index: 0,
             macro_index: 0,
             outcome: MacroTscOutcome::Complete(MacroTscProjection::Props {
                 splice: TscSpliceText::new("{ enabled: boolean }"),
@@ -57,17 +59,21 @@ fn runtime_and_tsc_bundles_are_independent_contracts() {
     assert_eq!(tsc.entries.len(), 1);
     let MacroRuntimeBundle { entries } = runtime;
     let MacroRuntimeEntry {
+        syntax_index,
         macro_index,
         outcome,
     } = &entries[0];
+    assert_eq!(*syntax_index, 0);
     assert_eq!(*macro_index, 0);
     assert!(matches!(outcome, MacroRuntimeOutcome::Complete(_)));
 
     let MacroTscBundle { entries } = tsc;
     let MacroTscEntry {
+        syntax_index,
         macro_index,
         outcome,
     } = &entries[0];
+    assert_eq!(*syntax_index, 0);
     assert_eq!(*macro_index, 0);
     assert!(matches!(outcome, MacroTscOutcome::Complete(_)));
 }

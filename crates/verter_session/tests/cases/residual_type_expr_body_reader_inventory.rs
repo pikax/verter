@@ -12,13 +12,10 @@
 //! RESOLVED / GENERATED class — DTOs the resolver PRODUCES at query time
 //! (`type_expand`/`ExpandedField`, the `component_meta.rs *Analysis` carriers,
 //! the `html_intrinsics` catalog, `svelte_default_synth`, the
-//! `mapper_binder_registry` structural fingerprint, etc.). The
-//! below-`verter_semantic` graph-persisted parser DTO class (the former
-//! `verter_parser` `ResolvedProp`/`ResolvedNamedCallSignature.type_expr`
-//! carriers) is DELETED: `ResolvedElements` carries no typed-IR sidecar and no
-//! `SemanticNodeData` carrier persists it. The COMPLETE
-//! semantic-`TypeExpr` terminal-completeness census (≈96 semantic surfaces)
-//! lives in
+//! `mapper_binder_registry` structural fingerprint, etc.). Parser inventories
+//! contain syntax, routing, and dependency facts only; no parser DTO persists
+//! a typed-IR sidecar. The COMPLETE semantic-`TypeExpr`
+//! terminal-completeness census (≈96 semantic surfaces) lives in
 //! `docs/arch/stage10-typeexpr-terminal-removal-design.md` §3.6, and the
 //! `type_expand` three-surface handle-native sub-design is §5.7. That
 //! resolved/generated class is enforced STRUCTURALLY at its owning surfaces

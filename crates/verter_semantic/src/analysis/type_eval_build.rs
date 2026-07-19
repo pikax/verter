@@ -1782,11 +1782,9 @@ fn collect_class(decl: &Class<'_>, source: &str, out: &mut LoweredStatementParts
     // base is lowered as a `Ref` (resolved later through the shared
     // resolver), with its `super_type_arguments` lowered as generic args
     // (`class C extends Base<string>`). Without this fold the class body
-    // carried only its own members and the cross-file heritage was dropped
-    // by every body-driven surface reader (the eager OXC rail folds class
-    // heritage separately via `resolve_class_with_heritage_ctx_ref` in
-    // `verter_parser`'s `utils/oxc/script/type_surface/decl.rs`; this
-    // is the typed-IR producer parity).
+    // carried only its own members and every body-driven surface reader
+    // dropped the cross-file heritage. Folding it here gives every terminal
+    // projection the same typed-IR declaration shape.
     let own_body = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: members,
     }));

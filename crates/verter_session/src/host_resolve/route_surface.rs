@@ -11,16 +11,11 @@
 //! - `resolve_named_type_export_target` — the production wrapper around
 //!   the route-DB cooperative resolve that also runs `ensure_indexed_ready_serve`
 //!   on the resolved target.
-//! - `read_dep_source_for_type_resolution` — effective-source reader for
-//!   external type resolution.
-//! - `collect_external_types_from_loaded_files` — adapter that drives the
-//!   `HostExternalMacroTypeCollector` over a file's macro-type deps.
+//! - `read_dep_source_for_type_resolution` — test-only effective-source reader.
 
 #[cfg(test)]
 use std::sync::Arc;
 
-use super::external_macro_collector::HostExternalMacroTypeCollector;
-use super::frontier_helpers::ResolvedExternalTypes;
 use crate::host_manage::component_meta_trace_custom;
 use crate::types::*;
 use crate::VerterHost;
@@ -361,102 +356,5 @@ impl VerterHost {
             )
         );
         Some(eval_source.to_string())
-    }
-
-    pub(super) fn collect_external_types_from_loaded_files(
-        &self,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        owner_canonical: &str,
-        macro_type_deps: &[verter_semantic::analysis::MacroTypeDep],
-        script_imports: &[verter_semantic::analysis::AnalyzedImport],
-        profile_hash: Option<u64>,
-    ) -> (
-        Option<ResolvedExternalTypes>,
-        Vec<HostDiagnostic>,
-        std::collections::BTreeSet<String>,
-    ) {
-        self.collect_external_types_from_loaded_files_with_view(
-            ctx,
-            owner_canonical,
-            macro_type_deps,
-            script_imports,
-            profile_hash,
-            None,
-        )
-    }
-
-    /// Test-only driver that exercises the PRODUCTION external-macro collector
-    /// ([`HostExternalMacroTypeCollector`] — the sole legacy `ResolvedElements`
-    /// caller) through a bare-host ctx, without reaching for the full IDE
-    /// virtual-file pipeline.
-    #[cfg(test)]
-    pub(crate) fn collect_external_types_from_loaded_files_for_test(
-        &self,
-        owner_canonical: &str,
-        macro_type_deps: &[verter_semantic::analysis::MacroTypeDep],
-        script_imports: &[verter_semantic::analysis::AnalyzedImport],
-        profile_hash: Option<u64>,
-    ) -> (
-        Option<ResolvedExternalTypes>,
-        Vec<HostDiagnostic>,
-        std::collections::BTreeSet<String>,
-    ) {
-        crate::resolver_core::with_bare_host_ctx_for_test(self, |ctx| {
-            self.collect_external_types_from_loaded_files(
-                ctx,
-                owner_canonical,
-                macro_type_deps,
-                script_imports,
-                profile_hash,
-            )
-        })
-    }
-
-    /// View-aware variant of [`Self::collect_external_types_from_loaded_files`].
-    ///
-    /// Plumbs `view` into the [`HostExternalMacroTypeCollector`] so the
-    /// per-macro-type-dep loop routes through the session-aware type-resolution
-    /// path. Base callers (`view = None`) get the historical behaviour.
-    pub(super) fn collect_external_types_from_loaded_files_with_view(
-        &self,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        owner_canonical: &str,
-        macro_type_deps: &[verter_semantic::analysis::MacroTypeDep],
-        script_imports: &[verter_semantic::analysis::AnalyzedImport],
-        profile_hash: Option<u64>,
-        view: Option<&dyn crate::session_view::SessionView>,
-    ) -> (
-        Option<ResolvedExternalTypes>,
-        Vec<HostDiagnostic>,
-        std::collections::BTreeSet<String>,
-    ) {
-        let collected = crate::resolver_core::collect_external_macro_types(
-            &HostExternalMacroTypeCollector {
-                host: self,
-                view,
-                ctx,
-            },
-            owner_canonical,
-            macro_type_deps,
-            script_imports,
-            profile_hash,
-        );
-
-        (
-            collected.resolved,
-            collected
-                .diagnostics
-                .into_iter()
-                .map(|diag| HostDiagnostic {
-                    // The collector tiers severity by the dep's structural
-                    // position (surface miss = error, member miss = warning).
-                    severity: diag.severity,
-                    code: diag.code,
-                    message: diag.message,
-                    span: diag.span,
-                })
-                .collect(),
-            collected.tracked_dependencies,
-        )
     }
 }

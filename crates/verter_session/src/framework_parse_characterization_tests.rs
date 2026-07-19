@@ -367,7 +367,7 @@ fn component_meta_props_surface_is_stable() {
 #[test]
 fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
     use verter_compiler::compile::types::{CodegenOptions, CompileTarget, VerterCompileOptions};
-    use verter_compiler::compile::{compile, compile_from_parsed};
+    use verter_compiler::compile::{compile, compile_from_parsed, VueMacroSemanticInput};
 
     // A spread of fixture SFCs covering script-setup, plain script,
     // template, styles, and JS dialect.
@@ -391,7 +391,13 @@ fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
 
         // Direct path: the compiler's untouched public `compile()`.
         let alloc_a = oxc_allocator::Allocator::new();
-        let direct = compile(source, &core_opts, &verter_opts, &alloc_a);
+        let direct = compile(
+            source,
+            &core_opts,
+            &verter_opts,
+            &VueMacroSemanticInput::Unavailable,
+            &alloc_a,
+        );
 
         // Rehoused path: the session's carrier dispatch produces the
         // framework-neutral artifact, the host reaches its parsed SFC back
@@ -407,7 +413,14 @@ fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
         let parsed = crate::typeinfo::adapters::vue::vue_parse(&artifact)
             .expect("the rehoused Vue artifact carries a ParsedSfc");
         let alloc_b = oxc_allocator::Allocator::new();
-        let rehoused = compile_from_parsed(source, parsed, &core_opts, &verter_opts, &alloc_b);
+        let rehoused = compile_from_parsed(
+            source,
+            parsed,
+            &core_opts,
+            &verter_opts,
+            &VueMacroSemanticInput::Unavailable,
+            &alloc_b,
+        );
 
         assert_eq!(
             direct.tsx.as_ref().map(|t| &t.code),

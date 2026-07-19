@@ -24,6 +24,11 @@ pub struct MacroRuntimeBundle {
 /// Runtime outcome for one effective macro identity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
 pub struct MacroRuntimeEntry {
+    /// Source-order identity among top-level compiler-macro syntax items.
+    /// This is the compiler join key and is distinct from analyzer inventory
+    /// identity because `withDefaults(defineProps())` has two analyzer rows but
+    /// one top-level compiler syntax item.
+    pub syntax_index: u32,
     /// Content-free source-order identity of the effective macro call.
     pub macro_index: u32,
     /// Authoritative result or typed failure.
@@ -305,6 +310,8 @@ pub struct MacroTscBundle {
 /// TSC result for one effective macro identity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
 pub struct MacroTscEntry {
+    /// Source-order identity among top-level compiler-macro syntax items.
+    pub syntax_index: u32,
     pub macro_index: u32,
     pub outcome: MacroTscOutcome,
 }

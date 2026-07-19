@@ -8,7 +8,21 @@
 use oxc_ast::ast::{Argument, Expression, Program, Statement, TSType};
 
 use crate::common::Span;
-use crate::utils::oxc::script::type_surface::{ResolvedElements, RuntimeType};
+
+/// Runtime constructors authored in object-form macro syntax.
+///
+/// This is syntax inventory, not semantic type inference. Typed macro
+/// semantics are owned by TypeInfo and cross the compiler boundary as DTOs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeConstructorSyntax {
+    String,
+    Number,
+    Boolean,
+    Object,
+    Array,
+    Function,
+    Symbol,
+}
 
 /// Type parameters info: defineProps<Props>() or defineEmits<{ (e: 'change'): void }>()
 #[derive(Debug)]
@@ -19,13 +33,6 @@ pub struct MacroTypeParams {
     pub type_span: Span,
     /// Span of the `>` token
     pub gt_span: Span,
-    /// Resolved type information from the type parameter (for type literals)
-    pub resolved: ResolvedElements,
-    /// Inferred runtime types for the root type parameter (for simple types like `string`)
-    pub runtime_types: Vec<RuntimeType>,
-    /// Whether the type parameter was a type reference (e.g., `Props` in `defineProps<Props>()`)
-    /// that could not be resolved. Used to emit "Unresolvable type reference" diagnostics.
-    pub unresolved_type_ref: bool,
 }
 
 /// Object argument info: defineProps({ foo: String })
@@ -64,11 +71,10 @@ pub struct MacroProperty<'a> {
     /// Extracted from the OXC AST (not string parsing).
     pub has_default: bool,
     /// Runtime constructor types extracted from the AST.
-    /// - `title: String` → `[RuntimeType::String]`
-    /// - `value: [String, Number]` → `[RuntimeType::String, RuntimeType::Number]`
-    /// - `{ type: Number }` → `[RuntimeType::Number]`
-    /// - `{ type: [String, Number] }` → `[RuntimeType::String, RuntimeType::Number]`
-    pub runtime_types: Vec<RuntimeType>,
+    /// - `title: String` → `[RuntimeConstructorSyntax::String]`
+    /// - `value: [String, Number]` → two constructor entries
+    /// - `{ type: Number }` → `[RuntimeConstructorSyntax::Number]`
+    pub runtime_types: Vec<RuntimeConstructorSyntax>,
     /// Span of the TypeScript type annotation from `as PropType<T>`, if present.
     /// Points to `T` inside `PropType<T>`.
     /// - `Array as PropType<string[]>` → span of `string[]`

@@ -1427,7 +1427,7 @@ fn step8_route_hash_pure_content_derived() {
     use verter_semantic::analysis::Hash16;
 
     let analysis = Arc::new(
-        verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
+        verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource::default(),
     );
     let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), analysis);
 

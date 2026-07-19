@@ -15,8 +15,6 @@ pub mod component_meta_registry;
 mod component_meta_request;
 mod declaration_metadata;
 mod export_graph;
-mod external_macro_types;
-mod external_type_body;
 pub mod external_type_frontier;
 mod fallthrough;
 pub mod fallthrough_override_key;
@@ -113,13 +111,6 @@ pub use export_graph::{
     get_export_span_follow_reexports_from_graph, resolve_exports_from_graph,
     resolve_exports_from_graph_best_effort, resolve_named_export_from_graph, ExportGraphResolver,
     ExportSurface, ResolvedGraphExport,
-};
-pub use external_macro_types::{
-    collect_external_macro_types, ExternalMacroTypeCollection, ExternalMacroTypeCollectorHost,
-    ExternalMacroTypeDiagnostic,
-};
-pub use external_type_body::{
-    resolve_external_type_from_source_body, ExternalTypeBodyCache, ExternalTypeBodyResolver,
 };
 pub use external_type_frontier::{
     ExternalTypeFrontier, FrontierHost, PendingExternalSymbol, ResolvedRouteProvenance,

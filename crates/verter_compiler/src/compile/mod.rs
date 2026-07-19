@@ -15,7 +15,7 @@
 //! - [`CompileTarget::ANALYSIS`] — script + template data (MCP static analysis)
 
 mod helpers;
-mod macro_type_diagnostics;
+mod macro_semantic_diagnostics;
 pub(crate) mod style_usage;
 pub mod template_data;
 pub(crate) mod template_expr_overlay;
@@ -58,7 +58,7 @@ use crate::tokenizer::byte::{tokenize_sfc, tokenize_sfc_with_delimiters};
 use crate::tsc;
 
 use helpers::{empty_sfc_script_block, extract_attrs, extract_block_ranges};
-use macro_type_diagnostics::collect_invalid_macro_type_diagnostics;
+use macro_semantic_diagnostics::collect_macro_semantic_diagnostics;
 
 // ── Orchestrator ───────────────────────────────────────────────────
 
@@ -215,6 +215,7 @@ pub fn compile(
     input: &str,
     options: &CodegenOptions,
     verter_options: &VerterCompileOptions,
+    macro_semantics: &VueMacroSemanticInput,
     allocator: &Allocator,
 ) -> VerterCompileResult {
     let parse_start = Instant::now();
@@ -235,6 +236,7 @@ pub fn compile(
         &parsed,
         options,
         verter_options,
+        macro_semantics,
         allocator,
         parse_duration_ms,
     )
@@ -251,9 +253,18 @@ pub fn compile_from_parsed(
     parsed: &ParsedSfc,
     options: &CodegenOptions,
     verter_options: &VerterCompileOptions,
+    macro_semantics: &VueMacroSemanticInput,
     allocator: &Allocator,
 ) -> VerterCompileResult {
-    compile_inner(input, parsed, options, verter_options, allocator, 0.0)
+    compile_inner(
+        input,
+        parsed,
+        options,
+        verter_options,
+        macro_semantics,
+        allocator,
+        0.0,
+    )
 }
 
 /// Internal compilation driver. Borrows a pre-parsed [`ParsedSfc`] — no cloning
@@ -264,6 +275,7 @@ fn compile_inner(
     parsed: &ParsedSfc,
     options: &CodegenOptions,
     verter_options: &VerterCompileOptions,
+    macro_semantics: &VueMacroSemanticInput,
     allocator: &Allocator,
     parse_duration_ms: f64,
 ) -> VerterCompileResult {
@@ -280,21 +292,18 @@ fn compile_inner(
     let options = &*options;
 
     // Prepare the setup + companion script blocks once. This single parse backs
-    // the invalid-macro-type diagnostics (below, on every target), the script
-    // codegen macro surfaces and bindings, and the force-js type-stripping
-    // inputs — replacing the per-consumer re-parses that ran here before.
-    let prepared_script = PreparedScript::build(
-        input,
-        parsed.script(),
-        parsed.script_setup(),
-        allocator,
-        verter_options.external_types.as_ref(),
-    );
+    // script codegen syntax ownership, bindings, and force-js type stripping.
+    let prepared_script =
+        PreparedScript::build(input, parsed.script(), parsed.script_setup(), allocator);
 
     // Clone diagnostics — this is the only clone needed from ParsedSfc.
     let mut all_diagnostics = parsed.clone_diagnostics();
     let has_parse_errors = parsed.has_errors();
-    all_diagnostics.extend(collect_invalid_macro_type_diagnostics(&prepared_script));
+    all_diagnostics.extend(collect_macro_semantic_diagnostics(
+        &prepared_script,
+        options.target,
+        macro_semantics,
+    ));
 
     // ── 2. Extract metadata ───────────────────────────────────────
     let component_name = options
@@ -489,6 +498,7 @@ fn compile_inner(
         };
 
         let script_options = ScriptCodeGenOptions {
+            macro_runtime: macro_semantics.runtime(),
             component_name: &component_name,
             scope_id: &scope_id_full,
             keep_ts_types: !verter_options.force_js,
@@ -1243,9 +1253,9 @@ fn compile_inner(
             &tsc::TscGenOptions {
                 conditional_root_narrowing: options.conditional_root_narrowing,
                 filename: options.filename.clone(),
-                external_types: verter_options.external_types.clone(),
                 mode: tsc::TscMode::Public,
             },
+            macro_semantics.tsc(),
         );
         let tsc_dur = tsc_start.elapsed().as_secs_f64() * 1000.0;
         if let Some(observer) = verter_audit::current_observer() {
@@ -1301,6 +1311,3 @@ mod tests;
 #[cfg(test)]
 #[path = "../compile_template_error_tests.rs"]
 mod compile_template_error_tests;
-
-#[cfg(test)]
-mod script_preparation_tests;

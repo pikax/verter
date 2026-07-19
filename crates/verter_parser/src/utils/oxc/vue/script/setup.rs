@@ -12,7 +12,8 @@ use oxc_span::GetSpan;
 
 use super::macros::{
     detect_macro_kind, is_define_component, MacroArrayArg, MacroArrayElement, MacroDeclarator,
-    MacroObjectArg, MacroProperty, MacroTypeParams, ScriptMacro, VueMacroKind,
+    MacroObjectArg, MacroProperty, MacroTypeParams, RuntimeConstructorSyntax, ScriptMacro,
+    VueMacroKind,
 };
 use super::shared::ScriptParseContext;
 use super::types::{
@@ -25,10 +26,6 @@ use super::usage::{
     SyncContextUsage, TemplateUtilUsage, UsageCollector, VueApiCategory, VueApiKind, WatcherUsage,
 };
 use crate::common::Span;
-use crate::utils::oxc::script::type_surface::{
-    infer_runtime_type, resolve_type_elements_with_ctx_ref, ResolvedElements, RuntimeType,
-    TypeResolutionContext,
-};
 
 /// Context for setup script parsing
 pub struct SetupContext {
@@ -85,13 +82,12 @@ impl SetupContext {
 pub fn process_setup_statements<'a>(
     statements: &'a [Statement<'a>],
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'a, 'a>,
     setup_ctx: &mut SetupContext,
     items: &mut Vec<ScriptItem<'a>>,
     errors: &mut Vec<ScriptError>,
 ) {
     for stmt in statements {
-        process_setup_statement(stmt, ctx, type_ctx, setup_ctx, items, errors);
+        process_setup_statement(stmt, ctx, setup_ctx, items, errors);
     }
 }
 
@@ -99,7 +95,6 @@ pub fn process_setup_statements<'a>(
 pub fn process_setup_statement<'a>(
     stmt: &'a Statement<'a>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'a, 'a>,
     setup_ctx: &mut SetupContext,
     items: &mut Vec<ScriptItem<'a>>,
     errors: &mut Vec<ScriptError>,
@@ -122,7 +117,7 @@ pub fn process_setup_statement<'a>(
                     kind: TypeDeclarationKind::TypeAlias,
                 }));
             } else {
-                process_variable_declaration(var_decl, ctx, type_ctx, setup_ctx, items);
+                process_variable_declaration(var_decl, ctx, setup_ctx, items);
             }
         }
 
@@ -166,13 +161,13 @@ pub fn process_setup_statement<'a>(
 
         // Expression statements (may contain macro calls, await, etc.)
         Statement::ExpressionStatement(expr_stmt) => {
-            process_expression_statement(expr_stmt, ctx, type_ctx, setup_ctx, items);
+            process_expression_statement(expr_stmt, ctx, setup_ctx, items);
         }
 
         // Block statements that prevent declaration tracking
         Statement::BlockStatement(block) => {
             setup_ctx.enter_block();
-            process_setup_statements(&block.body, ctx, type_ctx, setup_ctx, items, errors);
+            process_setup_statements(&block.body, ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
         }
 
@@ -181,25 +176,25 @@ pub fn process_setup_statement<'a>(
             check_expression_for_async(&if_stmt.test, setup_ctx, items);
 
             setup_ctx.enter_block();
-            process_setup_statement(&if_stmt.consequent, ctx, type_ctx, setup_ctx, items, errors);
+            process_setup_statement(&if_stmt.consequent, ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
 
             if let Some(alt) = &if_stmt.alternate {
                 setup_ctx.enter_block();
-                process_setup_statement(alt, ctx, type_ctx, setup_ctx, items, errors);
+                process_setup_statement(alt, ctx, setup_ctx, items, errors);
                 setup_ctx.leave_block();
             }
         }
 
         Statement::ForStatement(for_stmt) => {
             setup_ctx.enter_block();
-            process_setup_statement(&for_stmt.body, ctx, type_ctx, setup_ctx, items, errors);
+            process_setup_statement(&for_stmt.body, ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
         }
 
         Statement::ForInStatement(for_in) => {
             setup_ctx.enter_block();
-            process_setup_statement(&for_in.body, ctx, type_ctx, setup_ctx, items, errors);
+            process_setup_statement(&for_in.body, ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
         }
 
@@ -214,19 +209,19 @@ pub fn process_setup_statement<'a>(
                 }));
             }
             setup_ctx.enter_block();
-            process_setup_statement(&for_of.body, ctx, type_ctx, setup_ctx, items, errors);
+            process_setup_statement(&for_of.body, ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
         }
 
         Statement::WhileStatement(while_stmt) => {
             setup_ctx.enter_block();
-            process_setup_statement(&while_stmt.body, ctx, type_ctx, setup_ctx, items, errors);
+            process_setup_statement(&while_stmt.body, ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
         }
 
         Statement::DoWhileStatement(do_while) => {
             setup_ctx.enter_block();
-            process_setup_statement(&do_while.body, ctx, type_ctx, setup_ctx, items, errors);
+            process_setup_statement(&do_while.body, ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
         }
 
@@ -234,7 +229,7 @@ pub fn process_setup_statement<'a>(
             setup_ctx.enter_block();
             for case in &switch_stmt.cases {
                 for stmt in &case.consequent {
-                    process_setup_statement(stmt, ctx, type_ctx, setup_ctx, items, errors);
+                    process_setup_statement(stmt, ctx, setup_ctx, items, errors);
                 }
             }
             setup_ctx.leave_block();
@@ -242,32 +237,18 @@ pub fn process_setup_statement<'a>(
 
         Statement::TryStatement(try_stmt) => {
             setup_ctx.enter_block();
-            process_setup_statements(
-                &try_stmt.block.body,
-                ctx,
-                type_ctx,
-                setup_ctx,
-                items,
-                errors,
-            );
+            process_setup_statements(&try_stmt.block.body, ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
 
             if let Some(handler) = &try_stmt.handler {
                 setup_ctx.enter_block();
-                process_setup_statements(
-                    &handler.body.body,
-                    ctx,
-                    type_ctx,
-                    setup_ctx,
-                    items,
-                    errors,
-                );
+                process_setup_statements(&handler.body.body, ctx, setup_ctx, items, errors);
                 setup_ctx.leave_block();
             }
 
             if let Some(finalizer) = &try_stmt.finalizer {
                 setup_ctx.enter_block();
-                process_setup_statements(&finalizer.body, ctx, type_ctx, setup_ctx, items, errors);
+                process_setup_statements(&finalizer.body, ctx, setup_ctx, items, errors);
                 setup_ctx.leave_block();
             }
         }
@@ -381,7 +362,6 @@ fn is_ref_creating_call(init: &Expression<'_>) -> bool {
 fn process_variable_declaration<'a>(
     var_decl: &'a VariableDeclaration<'a>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'a, 'a>,
     setup_ctx: &mut SetupContext,
     items: &mut Vec<ScriptItem<'a>>,
 ) {
@@ -422,9 +402,7 @@ fn process_variable_declaration<'a>(
             });
 
             // Check if init is a macro call
-            if let Some(macro_item) =
-                try_parse_macro_from_expression(init, ctx, type_ctx, macro_declarator)
-            {
+            if let Some(macro_item) = try_parse_macro_from_expression(init, ctx, macro_declarator) {
                 items.push(ScriptItem::Macro(macro_item));
             }
         }
@@ -478,7 +456,6 @@ fn process_function_declaration<'a>(
 fn process_expression_statement<'a>(
     expr_stmt: &'a ExpressionStatement<'a>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'a, 'a>,
     setup_ctx: &mut SetupContext,
     items: &mut Vec<ScriptItem<'a>>,
 ) {
@@ -486,9 +463,7 @@ fn process_expression_statement<'a>(
     check_expression_for_async(&expr_stmt.expression, setup_ctx, items);
 
     // Check for macro calls at expression level (no declarator for standalone expressions)
-    if let Some(macro_item) =
-        try_parse_macro_from_expression(&expr_stmt.expression, ctx, type_ctx, None)
-    {
+    if let Some(macro_item) = try_parse_macro_from_expression(&expr_stmt.expression, ctx, None) {
         items.push(ScriptItem::Macro(macro_item));
     }
 }
@@ -627,11 +602,10 @@ fn check_expression_for_async<'a>(
 fn try_parse_macro_from_expression<'a>(
     expr: &'a Expression<'a>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'a, 'a>,
     declarator: Option<MacroDeclarator<'a>>,
 ) -> Option<ScriptMacro<'a>> {
     match expr {
-        Expression::CallExpression(call) => parse_macro_call(call, ctx, type_ctx, declarator),
+        Expression::CallExpression(call) => parse_macro_call(call, ctx, declarator),
         _ => None,
     }
 }
@@ -640,7 +614,6 @@ fn try_parse_macro_from_expression<'a>(
 pub fn parse_macro_call<'a>(
     call: &'a CallExpression<'a>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'a, 'a>,
     declarator: Option<MacroDeclarator<'a>>,
 ) -> Option<ScriptMacro<'a>> {
     // Get callee name as bytes
@@ -656,7 +629,7 @@ pub fn parse_macro_call<'a>(
     let type_params = call
         .type_arguments
         .as_ref()
-        .map(|tp| extract_type_params(tp, ctx, type_ctx, kind));
+        .map(|tp| extract_type_params(tp, ctx));
 
     match kind {
         VueMacroKind::DefineProps => {
@@ -741,14 +714,10 @@ pub fn parse_macro_call<'a>(
                         // Verify it's defineProps
                         if let Expression::Identifier(id) = &inner.callee {
                             if id.name.as_bytes() == b"defineProps" {
-                                let inner_type_params = inner.type_arguments.as_ref().map(|tp| {
-                                    extract_type_params(
-                                        tp,
-                                        ctx,
-                                        type_ctx,
-                                        VueMacroKind::DefineProps,
-                                    )
-                                });
+                                let inner_type_params = inner
+                                    .type_arguments
+                                    .as_ref()
+                                    .map(|tp| extract_type_params(tp, ctx));
                                 return Some((Some(Span::from(inner.span)), inner_type_params));
                             }
                         }
@@ -779,33 +748,10 @@ pub fn parse_macro_call<'a>(
     }
 }
 
-/// The resolution surface a Vue macro's first type argument feeds.
-///
-/// Whether a macro's first type argument feeds a PROPS surface
-/// (`defineProps` / `withDefaults` / `defineModel`). On a props surface a
-/// tuple-shaped member value stays a prop instead of being reclassified as
-/// the emit shorthand; every other macro resolves unqualified. The surface
-/// enum itself stays encapsulated in the resolver
-/// (`TypeResolutionContext::as_props_surface`).
-fn macro_feeds_props_surface(kind: VueMacroKind) -> bool {
-    matches!(
-        kind,
-        VueMacroKind::DefineProps | VueMacroKind::WithDefaults | VueMacroKind::DefineModel
-    )
-}
-
 /// Extract type parameters from a TSTypeParameterInstantiation.
-///
-/// Uses the `TypeResolutionContext` to resolve type references (interfaces, type aliases)
-/// declared in the same SFC. Unresolvable external types produce empty results.
-///
-/// `kind` selects the resolution surface so the resolver can discriminate
-/// props vs emits (see [`macro_feeds_props_surface`]).
 fn extract_type_params<'a>(
     tp: &'a TSTypeParameterInstantiation<'a>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'a, 'a>,
-    kind: VueMacroKind,
 ) -> MacroTypeParams {
     let full_span = tp.span;
     let offset = ctx.content_offset;
@@ -822,60 +768,10 @@ fn extract_type_params<'a>(
     // The type content is between < and >
     let type_span = Span::new(full_span.start + 1 + offset, full_span.end - 1 + offset);
 
-    // Resolve the type from the first type parameter using the type context
-    // This enables resolution of SFC-local interfaces and type aliases.
-    //
-    // Vue setup-script macros that flow through this helper
-    // (`defineProps<T>()`, `defineEmits<T>()`, `defineSlots<T>()`,
-    // `withDefaults`, etc.) are top-level macro entries: `T` IS the
-    // macro T's own body, so members reached through it get
-    // `declared_in_macro_type_arg = true` (subject to the heritage
-    // flip semantics inside the resolver).
-    // On a props macro, resolve through a props-surface view so tuple-shaped
-    // member values are not misclassified as emits; other macros resolve on
-    // the base context. The surface view is a per-macro clone owned here.
-    let props_surface_ctx = macro_feeds_props_surface(kind).then(|| type_ctx.as_props_surface());
-    let resolve_ctx = props_surface_ctx.as_ref().unwrap_or(type_ctx);
-    let resolved = tp
-        .params
-        .first()
-        .map(|ts_type| {
-            resolve_type_elements_with_ctx_ref(ts_type, ctx.content_offset, resolve_ctx, true)
-        })
-        .unwrap_or_default();
-
-    // Detect unresolvable type references: the first type param is a TSTypeReference
-    // (e.g., `Props` in `defineProps<Props>()`) but resolution produced empty results.
-    // This distinguishes `defineProps<{}>()` (empty type literal, no error) from
-    // `defineProps<ExternalProps>()` (unresolvable reference, should warn).
-    let is_type_reference = tp
-        .params
-        .first()
-        .is_some_and(|ts_type| matches!(ts_type, TSType::TSTypeReference(_)));
-    let has_resolved_root_runtime = resolved
-        .root_runtime_types
-        .iter()
-        .any(|ty| !matches!(ty, RuntimeType::Unknown));
-    let unresolved_type_ref = is_type_reference
-        && resolved.props.is_empty()
-        && resolved.call_signatures.is_empty()
-        && !resolved.has_call_signature
-        && !has_resolved_root_runtime;
-
-    // Infer runtime types from the root type (for simple types like `string`, `number`)
-    let runtime_types = tp
-        .params
-        .first()
-        .map(|ts_type| infer_runtime_type(ts_type))
-        .unwrap_or_default();
-
     MacroTypeParams {
         lt_span,
         type_span,
         gt_span,
-        resolved,
-        runtime_types,
-        unresolved_type_ref,
     }
 }
 
@@ -944,16 +840,16 @@ fn extract_array_arg_from_call<'a>(
     })
 }
 
-/// Map a JS constructor identifier name to a `RuntimeType`.
-fn constructor_ident_to_runtime_type(name: &str) -> Option<RuntimeType> {
+/// Map a JS constructor identifier name to syntax inventory.
+fn constructor_ident_to_runtime_type(name: &str) -> Option<RuntimeConstructorSyntax> {
     match name {
-        "String" => Some(RuntimeType::String),
-        "Number" => Some(RuntimeType::Number),
-        "Boolean" => Some(RuntimeType::Boolean),
-        "Object" => Some(RuntimeType::Object),
-        "Array" => Some(RuntimeType::Array),
-        "Function" => Some(RuntimeType::Function),
-        "Symbol" => Some(RuntimeType::Symbol),
+        "String" => Some(RuntimeConstructorSyntax::String),
+        "Number" => Some(RuntimeConstructorSyntax::Number),
+        "Boolean" => Some(RuntimeConstructorSyntax::Boolean),
+        "Object" => Some(RuntimeConstructorSyntax::Object),
+        "Array" => Some(RuntimeConstructorSyntax::Array),
+        "Function" => Some(RuntimeConstructorSyntax::Function),
+        "Symbol" => Some(RuntimeConstructorSyntax::Symbol),
         _ => None,
     }
 }
@@ -961,10 +857,7 @@ fn constructor_ident_to_runtime_type(name: &str) -> Option<RuntimeType> {
 /// Extract runtime types from an AST expression.
 ///
 /// Handles:
-/// - `String` → `[RuntimeType::String]`
-/// - `[String, Number]` → `[RuntimeType::String, RuntimeType::Number]`
-/// - `Number as PropType<number[]>` → `[RuntimeType::Number]` (uses the constructor before `as`)
-fn extract_runtime_types_from_expr(expr: &Expression<'_>) -> Vec<RuntimeType> {
+fn extract_runtime_types_from_expr(expr: &Expression<'_>) -> Vec<RuntimeConstructorSyntax> {
     match expr {
         Expression::Identifier(id) => {
             if let Some(rt) = constructor_ident_to_runtime_type(id.name.as_str()) {
@@ -1020,7 +913,7 @@ fn extract_prop_type_annotation(expr: &Expression<'_>) -> Option<Span> {
 /// Returns `(required, has_default, runtime_types, prop_type_annotation)`.
 fn extract_prop_object_metadata(
     obj: &ObjectExpression<'_>,
-) -> (bool, bool, Vec<RuntimeType>, Option<Span>) {
+) -> (bool, bool, Vec<RuntimeConstructorSyntax>, Option<Span>) {
     let mut required = false;
     let mut has_default = false;
     let mut runtime_types = Vec::new();

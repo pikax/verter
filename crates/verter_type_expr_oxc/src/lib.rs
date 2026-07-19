@@ -261,8 +261,7 @@ fn lower_literal(literal: &oxc_ast::ast::TSLiteral<'_>, source: &str) -> TypeExp
             // wrong literal `-1n`). Lowering it to a `BigInt` literal (rather than
             // the `Unknown` fallback) keeps it a first-class bigint literal so the
             // Vue runtime-constructor reducer maps it to `Number` exactly like a
-            // positive bigint literal — matching legacy `infer_runtime_type`'s
-            // unary-bigint -> Number rule (`type_surface/infer.rs`).
+            // positive bigint literal.
             Expression::BigIntLiteral(b) => match unary.operator {
                 UnaryOperator::UnaryNegation => TypeExpr::Literal(
                     verter_type_expr::LiteralValue::BigInt(format!("-{}", b.value)),

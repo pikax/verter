@@ -83,7 +83,7 @@ code_transform/
 utils/
 +-- oxc/                  # OXC parser utilities
 |   +-- bindings/         # Expression binding extraction
-|   +-- vue/              # Vue-specific OXC helpers (macros, type resolution, v-for, v-slot)
+|   +-- vue/              # Vue-specific OXC helpers (macro syntax, v-for, v-slot)
 +-- vue/                  # Vue runtime helpers (tag detection, patch flags)
 ```
 
@@ -153,6 +153,40 @@ Private component-call checks may map only byte-identical authored tokens. Synth
 2. Bindings passed to `template/code_gen/` via `generate_template()` parameter
 3. `BindingResolver` determines correct accessor prefix (`_ctx.`, `$setup.`, `__props.`) and suffix (`.value` for refs)
 4. Binding patches accumulated in `CodeGenOutput`, batch-applied to `CodeTransform`
+
+## Vue Macro Semantic Boundary (CRITICAL)
+
+The compiler owns Vue macro syntax and code emission, not typed macro
+resolution. Parser macro facts are limited to authored spans, runtime
+object/array constructors, defaults-object shape, model names/options, and
+other syntax needed to preserve the source. Typed `defineProps`,
+`defineEmits`, and `defineModel` surfaces arrive from TypeInfo through the
+explicit `VueMacroSemanticInput` compile argument:
+
+- `Unavailable`
+- `Runtime(Arc<MacroRuntimeBundle>)`
+- `Tsc(Arc<MacroTscBundle>)`
+- `RuntimeAndTsc { runtime, tsc }`
+
+Runtime and TSC are independent demands. Bundler script emission consumes only
+`MacroRuntimeBundle`; declaration emission consumes only `MacroTscBundle`.
+Entries join macro syntax by stable `syntax_index`. Runtime entries contain
+the normalized props/emits/model shapes. TSC entries contain terminal splice
+text and are emitted directly; the compiler does not parse or reinterpret the
+splice.
+
+The compiler must never resolve a typed macro parameter, build a companion
+type environment, accept a compiler-owned external-type map, or merge
+host-resolved types into parser state. `PreparedScript` parses setup and
+companion blocks once for syntax reuse only. Typed prop bindings are registered
+from the runtime DTO; runtime-form object/array bindings remain parser-owned
+syntax facts.
+
+A target that encounters a typed macro without its required bundle, with a
+degraded entry, or with a projection for the wrong macro role fails closed at
+the authored macro/type anchor using `XMissingMacroSemanticBundle` or
+`XUnavailableMacroSemanticResult`. `withDefaults` remains syntax-owned and
+emits exactly one `_mergeDefaults` around the DTO-derived props object.
 
 ## IDE Prefixed-Expression Emit Substrate (`ide/template/emit.rs`)
 

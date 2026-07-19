@@ -236,10 +236,10 @@ pub struct CompileBatchOptions {
 ///   drops the per-file wrapper overhead (source re-clone, cache-mode
 ///   classification, the unconditional dependency/semantic-axis sync, and
 ///   the store-view/overlay/resolver-context construction on simple
-///   files). Cross-file-macro files still resolve `external_types`
-///   through the ONE shared resolver so their render output stays
-///   byte-identical. An unresolved imported macro type degrades to a
-///   warning instead of a fatal error on this lane.
+///   files). Cross-file-macro files still produce request-local semantic
+///   DTOs through the shared TypeInfo dispatch so their render output stays
+///   byte-identical. An unresolved imported macro type degrades to a warning
+///   instead of a fatal error on this lane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileManyTarget {
     /// The full session-wrapper path (`compile_entry`). Byte-for-byte

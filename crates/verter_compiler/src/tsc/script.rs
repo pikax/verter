@@ -33,11 +33,11 @@
 use base64::prelude::*;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{Expression, Statement};
-use oxc_ast::{Comment, CommentContent};
 use oxc_parser::Parser;
 use oxc_sourcemap::SourceMapBuilder;
 use oxc_span::{GetSpan, SourceType};
 use rustc_hash::{FxHashMap, FxHashSet};
+use verter_macro_dto::{MacroTscBundle, MacroTscOutcome, MacroTscProjection};
 
 use crate::common::Span;
 use crate::cursor::position::PositionResolver;
@@ -45,13 +45,10 @@ use crate::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
 use crate::parser::Syntax;
 use crate::template::code_gen::binding::BindingType;
 use crate::tokenizer::byte::tokenize_sfc;
-use crate::utils::oxc::script::type_surface::{
-    extract_companion_types, ResolvedCallPayloadForm, ResolvedElements, ResolvedProp, RuntimeType,
-};
 use crate::utils::oxc::vue::{
-    extract_options_component_macro_args, parse_script, parse_script_with_companion,
-    DefaultExportType, ImportSpecifierKind, MacroArrayArg, MacroObjectArg, MacroTypeParams,
-    OptionsComponentMacroArgs, ScriptItem, ScriptMacro, ScriptMode, ScriptParseContext,
+    extract_options_component_macro_args, parse_script, DefaultExportType, ImportSpecifierKind,
+    MacroArrayArg, MacroObjectArg, MacroTypeParams, OptionsComponentMacroArgs,
+    RuntimeConstructorSyntax, ScriptItem, ScriptMacro, ScriptMode, ScriptParseContext,
 };
 
 /// Macro stub declarations shared between `generate_code` (when expose entries
@@ -68,6 +65,8 @@ declare function defineOptions(options: Record<string, unknown>): void\n\
 declare function defineSlots<Slots extends Record<string, any>>(): Slots\n\
 declare function withDefaults<Props, Defaults extends Partial<Props>>(props: Props, defaults: Defaults): Omit<Props, keyof Defaults> & { [K in keyof Defaults]-?: K extends keyof Props ? Exclude<Props[K], undefined> : never }\n\
 declare function defineModel<Model = unknown>(nameOrOptions?: string | unknown, options?: unknown): import(\"vue\").Ref<Model | undefined>\n";
+
+const TERMINAL_EMITS_TO_PROPS_TYPE: &str = "type __Verter_EmitsToProps<T> = T extends (...args: infer A) => any ? A extends [infer E extends string, ...infer P] ? { [K in E as `on${Capitalize<K>}`]?: (...args: P) => void } : {} : T extends Record<string, any> ? { [K in keyof T as K extends string ? `on${Capitalize<K>}` : never]?: (...args: T[K] extends any[] ? T[K] : T[K] extends (...args: infer P) => any ? P : unknown[]) => void } : {}\n";
 
 /// Output from the tsc codegen.
 pub struct TscOutput {
@@ -101,8 +100,6 @@ pub struct TscGenOptions {
     pub conditional_root_narrowing: bool,
     /// Source filename used in source maps and cross-file type resolution.
     pub filename: Option<String>,
-    /// Pre-resolved external macro types, keyed by imported type name.
-    pub external_types: Option<rustc_hash::FxHashMap<String, ResolvedElements>>,
     /// Public or testing/debug output mode.
     pub mode: TscMode,
 }
@@ -112,12 +109,9 @@ pub struct TscGenOptions {
 /// TypeScript type representation for props (from `defineProps`).
 #[derive(Clone)]
 enum PropsTs {
-    /// Type reference (name only) — from `defineProps<ImportedType>()`.
-    /// The corresponding `import type { ... }` is in `TscMacroState::type_import_stmts`.
-    TypeRef(String),
-    /// Raw TypeScript type text — for unresolved or inline complex types
+    /// Terminal TypeInfo splice for a typed macro surface.
     TypeText(String),
-    /// Resolved property list — from object-syntax or inline type literal
+    /// Syntax-derived property list for runtime object/array forms.
     Inline(Vec<InlinePropEntry>),
 }
 
@@ -141,7 +135,6 @@ struct EmitEntry {
 enum EmitPayload {
     Unknown,
     Call { params_text: String },
-    Tuple { tuple_text: String },
 }
 
 #[derive(Clone)]
@@ -301,6 +294,8 @@ struct TscMacroState {
     emits_names: Vec<String>,
     // defineEmits — TypeScript emit entries
     emits_ts: Vec<EmitEntry>,
+    /// Authoritative terminal emit projection from TypeInfo.
+    terminal_emits_ts: Option<String>,
     // defineModel — each model binding
     models: Vec<ModelEntry>,
 
@@ -327,6 +322,23 @@ struct TscMacroState {
     // them does NOT duplicate the value import the setup body already carries in
     // the non-declaration paths.
     declaration_promoted_type_imports: Vec<String>,
+
+    /// Content-free compiler syntax slots awaiting authoritative TSC splices.
+    semantic_slots: Vec<TscSemanticSlot>,
+}
+
+#[derive(Clone)]
+struct TscSemanticSlot {
+    syntax_index: u32,
+    role: TscSemanticRole,
+    type_span: Option<Span>,
+}
+
+#[derive(Clone)]
+enum TscSemanticRole {
+    Props,
+    Emits,
+    Model { name: String },
 }
 
 // ── Extract + Cache API ──────────────────────────────────────────────────────
@@ -341,8 +353,8 @@ pub struct TscExtractOptions {
 /// Cached intermediate state from SFC macro extraction.
 ///
 /// Captures everything that depends on the SFC source text alone (steps 1–7)
-/// so that code generation can be repeated with different external types or
-/// modes without re-parsing.
+/// so code generation can be repeated with terminal semantic bundles and
+/// different modes without re-parsing.
 pub struct ExtractedTscState {
     // Note: Debug is manually implemented below (fields contain non-Debug internal types).
     macro_state: TscMacroState,
@@ -354,31 +366,19 @@ pub struct ExtractedTscState {
     content_str: String,
     /// Filename for source maps.
     filename: Option<String>,
-    /// Unresolved external props type ref name (e.g. `"ImportedProps"`).
-    pub unresolved_props_ref: Option<String>,
-    /// SFC-absolute span of the defineProps type parameter (for source mapping).
-    unresolved_props_type_span: Option<Span>,
-    /// Unresolved external emits type ref name (e.g. `"ImportedEmits"`).
-    pub unresolved_emits_ref: Option<String>,
-    /// SFC-absolute span of the defineEmits type parameter (for source mapping).
-    unresolved_emits_type_span: Option<Span>,
 }
 
 impl std::fmt::Debug for ExtractedTscState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ExtractedTscState")
-            .field("unresolved_props_ref", &self.unresolved_props_ref)
-            .field("unresolved_emits_ref", &self.unresolved_emits_ref)
-            .finish_non_exhaustive()
+        f.debug_struct("ExtractedTscState").finish_non_exhaustive()
     }
 }
 
 /// Extract intermediate TSC state from an SFC without external types.
 ///
 /// Runs steps 1–7 of the TSC pipeline (SFC tokenization, OXC parsing, macro
-/// extraction, type tracking) using only companion `<script>` block types.
-/// Records which type references were unresolved so that external types can
-/// be bound later via [`generate_tsc_from_state`].
+/// extraction, type tracking) using only syntax-owned facts. Type-based macro
+/// surfaces remain empty until [`generate_tsc_from_state`] applies a bundle.
 ///
 /// Returns `None` if the SFC has no `<script setup>` block.
 pub fn extract_tsc_state(
@@ -404,75 +404,14 @@ pub fn extract_tsc_state(
 
     let content_str = &sfc_source[content_span.start as usize..content_span.end as usize];
 
-    // Collect companion <script> types for same-SFC cross-block resolution (no external types).
-    let companion_types = if let Some(script) = syntax.script() {
-        if let Some(script_content) = script.content {
-            let script_source =
-                &sfc_source[script_content.start as usize..script_content.end as usize];
-            let alloc = Allocator::default();
-            let parse_result = Parser::new(&alloc, script_source, SourceType::ts()).parse();
-            Some(extract_companion_types(
-                &parse_result.program,
-                script_source.as_bytes(),
-                script_content.start,
-            ))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
     // ── 2. OXC-parse script content ───────────────────────────────────
     let alloc = Allocator::default();
     let parse_result = Parser::new(&alloc, content_str, SourceType::ts()).parse();
     let program = parse_result.program;
 
     // ── 3. Extract script items (macros + imports) — NO external types ─
-    let parsed =
-        parse_script_with_companion(&program, ScriptMode::Setup, 0, content_str, companion_types);
+    let parsed = parse_script(&program, ScriptMode::Setup, 0, content_str);
     let test_bindings = collect_test_bindings(&parsed.bindings, content_str, content_span.start);
-
-    // ── 3b. Detect unresolved type refs ────────────────────────────────
-    let mut unresolved_props_ref: Option<String> = None;
-    let mut unresolved_props_type_span: Option<Span> = None;
-    let mut unresolved_emits_ref: Option<String> = None;
-    let mut unresolved_emits_type_span: Option<Span> = None;
-    for item in &parsed.items {
-        if let ScriptItem::Macro(m) = item {
-            match m {
-                ScriptMacro::DefineProps {
-                    type_params: Some(tp),
-                    ..
-                }
-                | ScriptMacro::WithDefaults {
-                    define_props_type_params: Some(tp),
-                    ..
-                } if tp.unresolved_type_ref => {
-                    let type_text =
-                        content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
-                    if looks_like_named_type_reference(type_text) {
-                        unresolved_props_ref = Some(type_text.to_string());
-                        unresolved_props_type_span =
-                            Some(local_to_sfc_span(tp.type_span, content_span.start));
-                    }
-                }
-                ScriptMacro::DefineEmits {
-                    type_params: Some(tp),
-                    ..
-                } if tp.unresolved_type_ref => {
-                    let type_text =
-                        content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
-                    if looks_like_named_type_reference(type_text) {
-                        unresolved_emits_ref = Some(type_text.to_string());
-                        unresolved_emits_type_span =
-                            Some(local_to_sfc_span(tp.type_span, content_span.start));
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
 
     // ── 4. Collect type-only imports ──────────────────────────────────
     let type_imports = collect_type_imports(&parsed.items);
@@ -481,11 +420,9 @@ pub fn extract_tsc_state(
     // ── 5. Build macro state ──────────────────────────────────────────
     let mut state = build_macro_state(
         &parsed.items,
-        sfc_source,
         content_str,
         content_span.start,
         &type_imports,
-        &program.comments,
         &mut type_usage_tracker,
     );
 
@@ -530,48 +467,23 @@ pub fn extract_tsc_state(
         test_bindings,
         content_str: content_str.to_string(),
         filename: options.filename.clone(),
-        unresolved_props_ref,
-        unresolved_props_type_span,
-        unresolved_emits_ref,
-        unresolved_emits_type_span,
     })
 }
 
 /// Generate TSC output from a previously extracted state.
 ///
-/// Clones the cached macro state, binds any freshly-resolved external types,
-/// and calls the appropriate code generation function.
+/// Clones the cached syntax state, applies terminal macro splices, and calls
+/// the appropriate code generation function.
 pub fn generate_tsc_from_state(
     state: &ExtractedTscState,
     sfc_source: &str,
     component_name: &str,
     mode: TscMode,
-    external_types: Option<&FxHashMap<String, ResolvedElements>>,
+    macro_tsc: Option<&MacroTscBundle>,
 ) -> TscOutput {
     let component_name = &sanitize_tsc_component_name(component_name);
     let mut macro_state = state.macro_state.clone();
-
-    // Bind external emits if previously unresolved
-    if let (Some(ref emits_ref), Some(ext)) = (&state.unresolved_emits_ref, external_types) {
-        if let Some(resolved) = ext.get(emits_ref.as_str()) {
-            bind_external_emits(&mut macro_state, resolved, state.unresolved_emits_type_span);
-        }
-    }
-
-    // Bind external props for Testing mode if previously unresolved
-    if matches!(mode, TscMode::Testing) {
-        if let (Some(ref props_ref), Some(ext)) = (&state.unresolved_props_ref, external_types) {
-            if let Some(resolved) = ext.get(props_ref.as_str()) {
-                bind_external_testing_props(
-                    &mut macro_state,
-                    resolved,
-                    sfc_source,
-                    &state.content_str,
-                    state.unresolved_props_type_span,
-                );
-            }
-        }
-    }
+    apply_tsc_bundle(&mut macro_state, macro_tsc);
 
     let generic_params = state.generic_params.as_deref();
     let attrs_type = state.attrs_type.as_deref();
@@ -613,71 +525,6 @@ pub fn generate_tsc_from_state(
     }
 }
 
-/// Populate emits_names and emits_ts from externally-resolved emit signatures.
-fn bind_external_emits(
-    state: &mut TscMacroState,
-    resolved: &ResolvedElements,
-    type_span: Option<Span>,
-) {
-    for emit in &resolved.call_signatures {
-        state.emits_names.push(emit.name.clone());
-        let payload = resolved_emit_payload(&emit.signature);
-        // External emits map back to the defineEmits<T>() type span, mirroring
-        // the direct path behavior (process_emits line 1088: `!emit.map_local` branch).
-        state.emits_ts.push(EmitEntry {
-            name: emit.name.clone(),
-            payload,
-            map_span: type_span,
-        });
-    }
-}
-
-/// Populate testing_props from externally-resolved prop definitions.
-fn bind_external_testing_props(
-    state: &mut TscMacroState,
-    resolved: &ResolvedElements,
-    sfc_source: &str,
-    content_str: &str,
-    type_span: Option<Span>,
-) {
-    // Only populate if testing_props is currently empty (unresolved)
-    if !state.testing_props.is_empty() {
-        return;
-    }
-
-    // Get the props type name for indexed access types (e.g. `ImportedProps["key"]`)
-    let named_root_type = state.props_ts.as_ref().and_then(|pts| match pts {
-        PropsTs::TypeRef(name) | PropsTs::TypeText(name)
-            if looks_like_named_type_reference(name) =>
-        {
-            Some(name.as_str())
-        }
-        _ => None,
-    });
-
-    state.testing_props = resolved
-        .props
-        .iter()
-        .map(|prop| {
-            let name = prop
-                .key_name
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string());
-            let ts_type =
-                render_resolved_prop_ts_type(prop, named_root_type, sfc_source, content_str);
-
-            TestingPropBinding {
-                name,
-                optional: prop.optional,
-                ts_type,
-                // External props map back to the defineProps<T>() type span, mirroring
-                // the direct path (process_props line 881: `!prop.map_local` branch).
-                map_span: type_span,
-            }
-        })
-        .collect();
-}
-
 // ── Public API ───────────────────────────────────────────────────────────────
 
 /// Generate a minimal TypeScript declaration file for a Vue SFC.
@@ -689,7 +536,7 @@ fn bind_external_testing_props(
 /// * `sfc_source` — full SFC source text
 /// * `component_name` — component name used in the `declare const` statement
 pub fn generate_tsc_output(sfc_source: &str, component_name: &str) -> TscOutput {
-    generate_tsc_output_with_options(sfc_source, component_name, &TscGenOptions::default())
+    generate_tsc_output_with_options(sfc_source, component_name, &TscGenOptions::default(), None)
 }
 
 /// Sanitize a component name to be a valid TypeScript identifier.
@@ -733,6 +580,7 @@ pub fn generate_tsc_output_with_options(
     sfc_source: &str,
     component_name: &str,
     tsc_options: &TscGenOptions,
+    macro_tsc: Option<&MacroTscBundle>,
 ) -> TscOutput {
     let component_name = &sanitize_tsc_component_name(component_name);
     // ── 1. Tokenize SFC to locate <script setup> ──────────────────────
@@ -791,25 +639,6 @@ pub fn generate_tsc_output_with_options(
 
     let content_str = &sfc_source[content_span.start as usize..content_span.end as usize];
 
-    // Collect companion <script> types for same-SFC cross-block resolution.
-    let companion_types = if let Some(script) = syntax.script() {
-        if let Some(script_content) = script.content {
-            let script_source =
-                &sfc_source[script_content.start as usize..script_content.end as usize];
-            let alloc = Allocator::default();
-            let parse_result = Parser::new(&alloc, script_source, SourceType::ts()).parse();
-            Some(extract_companion_types(
-                &parse_result.program,
-                script_source.as_bytes(),
-                script_content.start,
-            ))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
     // ── 2. OXC-parse script content ───────────────────────────────────
     let alloc = Allocator::default();
     let parse_result = Parser::new(&alloc, content_str, SourceType::ts()).parse();
@@ -817,19 +646,7 @@ pub fn generate_tsc_output_with_options(
 
     // ── 3. Extract script items (macros + imports) ────────────────────
     // content_offset = 0: all spans are relative to content_str
-    let companion_types = match (companion_types, tsc_options.external_types.as_ref()) {
-        (Some(mut ct), Some(ext)) => {
-            for (k, v) in ext {
-                ct.entry(k.clone()).or_insert_with(|| v.clone());
-            }
-            Some(ct)
-        }
-        (Some(ct), None) => Some(ct),
-        (None, Some(ext)) => Some(ext.clone()),
-        (None, None) => None,
-    };
-    let parsed =
-        parse_script_with_companion(&program, ScriptMode::Setup, 0, content_str, companion_types);
+    let parsed = parse_script(&program, ScriptMode::Setup, 0, content_str);
     let test_bindings = if matches!(tsc_options.mode, TscMode::Testing) {
         collect_test_bindings(&parsed.bindings, content_str, content_span.start)
     } else {
@@ -843,13 +660,12 @@ pub fn generate_tsc_output_with_options(
     // ── 5. Build macro state ──────────────────────────────────────────
     let mut state = build_macro_state(
         &parsed.items,
-        sfc_source,
         content_str,
         content_span.start,
         &type_imports,
-        &program.comments,
         &mut type_usage_tracker,
     );
+    apply_tsc_bundle(&mut state, macro_tsc);
 
     // ── 6. Extract generic params ────────────────────────────────────
     let generic_params = setup
@@ -1294,21 +1110,39 @@ fn is_ident_continue(byte: u8) -> bool {
 
 // ── Step 5: build macro state ─────────────────────────────────────────────────
 
+fn absolute_type_span(type_params: &MacroTypeParams, content_offset: u32) -> Option<Span> {
+    Some(Span::new(
+        type_params.type_span.start.saturating_add(content_offset),
+        type_params.type_span.end.saturating_add(content_offset),
+    ))
+}
+
+fn model_name_from_span(name_span: Option<Span>, content_str: &str) -> String {
+    name_span
+        .map(|span| {
+            content_str[span.start as usize..span.end as usize]
+                .trim_matches(['\'', '"'])
+                .to_string()
+        })
+        .unwrap_or_else(|| "modelValue".to_string())
+}
+
 fn build_macro_state<'a>(
     items: &[ScriptItem<'a>],
-    sfc_source: &'a str,
     content_str: &'a str,
     content_offset: u32,
     type_imports: &FxHashMap<&'a str, TypeImportInfo<'a>>,
-    comments: &[Comment],
     type_usage_tracker: &mut TypeUsageTracker<'a>,
 ) -> TscMacroState {
     let mut state = TscMacroState::default();
+    let mut syntax_index = 0_u32;
 
     for item in items {
         let ScriptItem::Macro(m) = item else {
             continue;
         };
+        let current_syntax_index = syntax_index;
+        syntax_index = syntax_index.saturating_add(1);
         match m {
             ScriptMacro::DefineOptions {
                 object_arg: Some(obj),
@@ -1323,18 +1157,22 @@ fn build_macro_state<'a>(
                 array_arg,
                 ..
             } => {
-                process_props(
-                    type_params.as_ref(),
-                    object_arg.as_ref(),
-                    array_arg.as_ref(),
-                    sfc_source,
-                    content_str,
-                    content_offset,
-                    type_imports,
-                    comments,
-                    type_usage_tracker,
-                    &mut state,
-                );
+                if let Some(type_params) = type_params {
+                    state.semantic_slots.push(TscSemanticSlot {
+                        syntax_index: current_syntax_index,
+                        role: TscSemanticRole::Props,
+                        type_span: absolute_type_span(type_params, content_offset),
+                    });
+                } else {
+                    process_props(
+                        object_arg.as_ref(),
+                        array_arg.as_ref(),
+                        content_str,
+                        content_offset,
+                        type_usage_tracker,
+                        &mut state,
+                    );
+                }
             }
             ScriptMacro::DefineEmits {
                 type_params,
@@ -1342,15 +1180,22 @@ fn build_macro_state<'a>(
                 array_arg,
                 ..
             } => {
-                process_emits(
-                    type_params.as_ref(),
-                    object_arg.as_ref(),
-                    array_arg.as_ref(),
-                    content_str,
-                    content_offset,
-                    type_usage_tracker,
-                    &mut state,
-                );
+                if let Some(type_params) = type_params {
+                    state.semantic_slots.push(TscSemanticSlot {
+                        syntax_index: current_syntax_index,
+                        role: TscSemanticRole::Emits,
+                        type_span: absolute_type_span(type_params, content_offset),
+                    });
+                } else {
+                    process_emits(
+                        object_arg.as_ref(),
+                        array_arg.as_ref(),
+                        content_str,
+                        content_offset,
+                        type_usage_tracker,
+                        &mut state,
+                    );
+                }
             }
             ScriptMacro::DefineModel {
                 span,
@@ -1358,34 +1203,30 @@ fn build_macro_state<'a>(
                 name_span,
                 ..
             } => {
-                process_model(
-                    type_params.as_ref(),
-                    *span,
-                    *name_span,
-                    content_str,
-                    content_offset,
-                    type_usage_tracker,
-                    &mut state,
-                );
+                if let Some(type_params) = type_params {
+                    state.semantic_slots.push(TscSemanticSlot {
+                        syntax_index: current_syntax_index,
+                        role: TscSemanticRole::Model {
+                            name: model_name_from_span(*name_span, content_str),
+                        },
+                        type_span: absolute_type_span(type_params, content_offset),
+                    });
+                } else {
+                    process_model(*span, *name_span, content_str, content_offset, &mut state);
+                }
             }
             ScriptMacro::WithDefaults {
                 define_props_type_params,
                 defaults,
                 ..
             } => {
-                // First, process the inner defineProps (type-only)
-                process_props(
-                    define_props_type_params.as_ref(),
-                    None,
-                    None,
-                    sfc_source,
-                    content_str,
-                    content_offset,
-                    type_imports,
-                    comments,
-                    type_usage_tracker,
-                    &mut state,
-                );
+                if let Some(type_params) = define_props_type_params {
+                    state.semantic_slots.push(TscSemanticSlot {
+                        syntax_index: current_syntax_index,
+                        role: TscSemanticRole::Props,
+                        type_span: absolute_type_span(type_params, content_offset),
+                    });
+                }
                 // Then mark props with defaults as optional
                 if let Some(defaults_obj) = defaults {
                     process_props_with_defaults(defaults_obj, &mut state);
@@ -1417,6 +1258,42 @@ fn build_macro_state<'a>(
     }
 
     state
+}
+
+fn apply_tsc_bundle(state: &mut TscMacroState, bundle: Option<&MacroTscBundle>) {
+    let Some(bundle) = bundle else {
+        return;
+    };
+
+    for slot in state.semantic_slots.clone() {
+        let Some(entry) = bundle
+            .entries
+            .iter()
+            .find(|entry| entry.syntax_index == slot.syntax_index)
+        else {
+            continue;
+        };
+        let MacroTscOutcome::Complete(projection) = &entry.outcome else {
+            continue;
+        };
+
+        match (&slot.role, projection) {
+            (TscSemanticRole::Props, MacroTscProjection::Props { splice }) => {
+                state.props_ts = Some(PropsTs::TypeText(splice.as_str().to_string()));
+            }
+            (TscSemanticRole::Emits, MacroTscProjection::Emits { splice }) => {
+                state.terminal_emits_ts = Some(splice.as_str().to_string());
+            }
+            (TscSemanticRole::Model { name }, MacroTscProjection::Model { splice }) => {
+                state.models.push(ModelEntry {
+                    name: name.clone(),
+                    ts_type: splice.as_str().to_string(),
+                    map_span: slot.type_span,
+                });
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Given a `withDefaults(defineProps<{...}>(), { key1: ..., key2: ... })` defaults
@@ -1486,143 +1363,15 @@ fn local_to_sfc_span(span: Span, content_offset: u32) -> Span {
     )
 }
 
-fn normalize_resolved_span(span: Span, span_is_absolute: bool, content_offset: u32) -> Span {
-    if span_is_absolute {
-        span
-    } else {
-        local_to_sfc_span(span, content_offset)
-    }
-}
-
-fn slice_checked(source: &str, span: Span) -> Option<&str> {
-    source.get(span.start as usize..span.end as usize)
-}
-
-fn resolved_prop_type_text<'a>(
-    prop: &ResolvedProp,
-    sfc_source: &'a str,
-    content_str: &'a str,
-) -> Option<&'a str> {
-    let type_span = prop.type_span?;
-    if prop.span_is_absolute {
-        slice_checked(sfc_source, type_span).map(str::trim)
-    } else if prop.map_local {
-        slice_checked(content_str, type_span).map(str::trim)
-    } else {
-        None
-    }
-}
-
-fn quote_ts_prop_name(name: &str) -> String {
-    format!("'{}'", name.replace('\\', "\\\\").replace('\'', "\\'"))
-}
-
-fn render_resolved_prop_ts_type(
-    prop: &ResolvedProp,
-    root_type_text: Option<&str>,
-    sfc_source: &str,
-    content_str: &str,
-) -> String {
-    if let Some(ts_type) = resolved_prop_type_text(prop, sfc_source, content_str) {
-        return ts_type.to_string();
-    }
-
-    if !prop.map_local {
-        if let Some(root_type_text) = root_type_text {
-            if let Some(name) = prop.key_name.as_deref() {
-                return format!("{}[{}]", root_type_text.trim(), quote_ts_prop_name(name));
-            }
-        }
-    }
-
-    runtime_types_to_ts(&prop.types)
-}
-
-#[allow(clippy::too_many_arguments)]
 fn process_props<'a>(
-    type_params: Option<&MacroTypeParams>,
     object_arg: Option<&MacroObjectArg<'a>>,
     array_arg: Option<&MacroArrayArg<'a>>,
-    sfc_source: &'a str,
     content_str: &'a str,
     content_offset: u32,
-    type_imports: &FxHashMap<&'a str, TypeImportInfo<'a>>,
-    comments: &[Comment],
     type_usage_tracker: &mut TypeUsageTracker<'a>,
     state: &mut TscMacroState,
 ) {
-    if let Some(tp) = type_params {
-        let type_text = content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
-        let named_root_type = looks_like_named_type_reference(type_text).then_some(type_text);
-
-        state.testing_props = tp
-            .resolved
-            .props
-            .iter()
-            .map(|prop| {
-                let name = prop.key_name.clone().unwrap_or_else(|| {
-                    content_str[prop.key.start as usize..prop.key.end as usize].to_string()
-                });
-                let ts_type =
-                    render_resolved_prop_ts_type(prop, named_root_type, sfc_source, content_str);
-
-                TestingPropBinding {
-                    name,
-                    optional: prop.optional,
-                    ts_type,
-                    map_span: Some(if prop.map_local {
-                        normalize_resolved_span(prop.key, prop.span_is_absolute, content_offset)
-                    } else {
-                        local_to_sfc_span(tp.type_span, content_offset)
-                    }),
-                }
-            })
-            .collect();
-
-        if named_root_type.is_some() {
-            if let Some(info) = type_imports.get(type_text) {
-                let _ = info;
-                state.props_ts = Some(PropsTs::TypeRef(type_text.to_string()));
-            } else {
-                state.props_ts = Some(PropsTs::TypeText(type_text.to_string()));
-            }
-            type_usage_tracker.mark_type_text(type_text);
-        } else if !tp.resolved.props.is_empty() {
-            let entries = tp
-                .resolved
-                .props
-                .iter()
-                .map(|prop| {
-                    let name = prop.key_name.clone().unwrap_or_else(|| {
-                        content_str[prop.key.start as usize..prop.key.end as usize].to_string()
-                    });
-                    let ts_type = render_resolved_prop_ts_type(
-                        prop,
-                        named_root_type,
-                        sfc_source,
-                        content_str,
-                    );
-                    let comment = find_leading_jsdoc(comments, prop.key.start, content_str);
-                    type_usage_tracker.mark_type_text(&ts_type);
-                    InlinePropEntry {
-                        name,
-                        optional: prop.optional,
-                        ts_type,
-                        comment,
-                        map_span: Some(if prop.map_local {
-                            normalize_resolved_span(prop.key, prop.span_is_absolute, content_offset)
-                        } else {
-                            local_to_sfc_span(tp.type_span, content_offset)
-                        }),
-                    }
-                })
-                .collect();
-            state.props_ts = Some(PropsTs::Inline(entries));
-        } else {
-            state.props_ts = Some(PropsTs::TypeText(type_text.to_string()));
-            type_usage_tracker.mark_type_text(type_text);
-        }
-    } else if let Some(obj) = object_arg {
+    if let Some(obj) = object_arg {
         // Object-syntax: uses AST-extracted MacroProperty fields exclusively.
         // No string parsing of prop values — all type info comes from the AST.
         let mut entries = Vec::new();
@@ -1737,23 +1486,20 @@ fn build_runtime_prop_value(prop: &crate::utils::oxc::vue::MacroProperty<'_>) ->
     }
 }
 
-/// Map RuntimeType to a JavaScript constructor name for the runtime props section.
-fn runtime_type_to_constructor(rt: &RuntimeType) -> &'static str {
+/// Map authored constructor syntax to the runtime props section.
+fn runtime_type_to_constructor(rt: &RuntimeConstructorSyntax) -> &'static str {
     match rt {
-        RuntimeType::String => "String",
-        RuntimeType::Number => "Number",
-        RuntimeType::Boolean => "Boolean",
-        RuntimeType::Object => "Object",
-        RuntimeType::Array => "Array",
-        RuntimeType::Function => "Function",
-        RuntimeType::Symbol => "Symbol",
-        RuntimeType::Null => "null",
-        RuntimeType::BuiltIn(_) | RuntimeType::Unknown => "Object",
+        RuntimeConstructorSyntax::String => "String",
+        RuntimeConstructorSyntax::Number => "Number",
+        RuntimeConstructorSyntax::Boolean => "Boolean",
+        RuntimeConstructorSyntax::Object => "Object",
+        RuntimeConstructorSyntax::Array => "Array",
+        RuntimeConstructorSyntax::Function => "Function",
+        RuntimeConstructorSyntax::Symbol => "Symbol",
     }
 }
 
 fn process_emits<'a>(
-    type_params: Option<&MacroTypeParams>,
     object_arg: Option<&MacroObjectArg<'a>>,
     array_arg: Option<&MacroArrayArg<'a>>,
     content_str: &str,
@@ -1761,29 +1507,7 @@ fn process_emits<'a>(
     type_usage_tracker: &mut TypeUsageTracker<'a>,
     state: &mut TscMacroState,
 ) {
-    if let Some(tp) = type_params {
-        let type_text = content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
-        type_usage_tracker.mark_type_text(type_text);
-
-        for emit in &tp.resolved.call_signatures {
-            state.emits_names.push(emit.name.clone());
-            let payload = resolved_emit_payload(&emit.signature);
-            mark_emit_payload_types(type_usage_tracker, &payload);
-            state.emits_ts.push(EmitEntry {
-                name: emit.name.clone(),
-                payload,
-                map_span: Some(if emit.map_local {
-                    normalize_resolved_span(
-                        emit.name_span.unwrap_or(emit.span),
-                        emit.span_is_absolute,
-                        content_offset,
-                    )
-                } else {
-                    local_to_sfc_span(tp.type_span, content_offset)
-                }),
-            });
-        }
-    } else if let Some(arr) = array_arg {
+    if let Some(arr) = array_arg {
         // Array syntax names events by string literal; the name is read from the
         // AST (unwrapping any TS wrapper), never sliced off the element span.
         for elem in &arr.elements {
@@ -1818,17 +1542,6 @@ fn process_emits<'a>(
     }
 }
 
-fn resolved_emit_payload(signature: &ResolvedCallPayloadForm) -> EmitPayload {
-    match signature {
-        ResolvedCallPayloadForm::Call { params_text } => EmitPayload::Call {
-            params_text: params_text.clone(),
-        },
-        ResolvedCallPayloadForm::Tuple { tuple_text } => EmitPayload::Tuple {
-            tuple_text: tuple_text.clone(),
-        },
-    }
-}
-
 fn mark_emit_payload_types(type_usage_tracker: &mut TypeUsageTracker<'_>, payload: &EmitPayload) {
     match payload {
         EmitPayload::Unknown => {}
@@ -1837,7 +1550,6 @@ fn mark_emit_payload_types(type_usage_tracker: &mut TypeUsageTracker<'_>, payloa
                 type_usage_tracker.mark_type_text(params_text);
             }
         }
-        EmitPayload::Tuple { tuple_text } => type_usage_tracker.mark_type_text(tuple_text),
     }
 }
 
@@ -1883,12 +1595,10 @@ fn find_matching_paren(text: &str, open_idx: usize) -> Option<usize> {
 }
 
 fn process_model(
-    type_params: Option<&MacroTypeParams>,
     macro_span: Span,
     name_span: Option<Span>,
     content_str: &str,
     content_offset: u32,
-    type_usage_tracker: &mut TypeUsageTracker<'_>,
     state: &mut TscMacroState,
 ) {
     let model_name = match name_span {
@@ -1899,17 +1609,9 @@ fn process_model(
         None => "modelValue".to_string(),
     };
 
-    let ts_type = match type_params {
-        Some(tp) => content_str[tp.type_span.start as usize..tp.type_span.end as usize]
-            .trim()
-            .to_string(),
-        None => "unknown".to_string(),
-    };
-    type_usage_tracker.mark_type_text(&ts_type);
-
     state.models.push(ModelEntry {
         name: model_name,
-        ts_type,
+        ts_type: "unknown".to_string(),
         map_span: Some(local_to_sfc_span(
             name_span.unwrap_or(macro_span),
             content_offset,
@@ -2216,7 +1918,6 @@ fn generate_options_api_declaration(
         options_script_content,
     );
     let type_imports = collect_type_imports(&script.items);
-    let comments: &[Comment] = &parsed.program.comments;
     let mut type_usage_tracker =
         TypeUsageTracker::new(&script.items, options_script_content, &type_imports);
     let mut state = TscMacroState::default();
@@ -2228,14 +1929,10 @@ fn generate_options_api_declaration(
     // `process_props` renders directly).
     if let Some(props_obj) = macro_args.props_object.as_ref() {
         process_props(
-            None,
             Some(props_obj),
             None,
-            sfc_source,
             options_script_content,
             0,
-            &type_imports,
-            comments,
             &mut type_usage_tracker,
             &mut state,
         );
@@ -2261,7 +1958,6 @@ fn generate_options_api_declaration(
     // Emits: both object and array forms populate `emits_ts` via `process_emits`.
     if macro_args.emits_object.is_some() || macro_args.emits_array.is_some() {
         process_emits(
-            None,
             macro_args.emits_object.as_ref(),
             macro_args.emits_array.as_ref(),
             options_script_content,
@@ -2474,6 +2170,9 @@ fn generate_testing_code(
     out.push_str(
         "type __Verter_EmitFn<T> = T extends (...args: any[]) => any ? T : T extends Record<string, any> ? __Verter_UnionToIntersection<{ [K in keyof T]: T[K] extends any[] ? (event: K, ...args: T[K]) => void : T[K] extends (...args: infer A) => any ? (event: K, ...args: A) => void : (event: K, ...args: unknown[]) => void }[keyof T]> : (event: string, ...args: unknown[]) => void\n",
     );
+    if state.terminal_emits_ts.is_some() {
+        out.push_str(TERMINAL_EMITS_TO_PROPS_TYPE);
+    }
     out.push_str(MACRO_STUBS);
 
     if let Some(gp) = generic_params {
@@ -2575,6 +2274,7 @@ fn generate_testing_code(
     let full_props = render_full_props_type(
         &state.props_ts,
         &state.emits_ts,
+        state.terminal_emits_ts.as_deref(),
         &state.models,
         &state.defaulted_prop_names,
         None,
@@ -2599,13 +2299,18 @@ fn generate_testing_code(
     out.append_rendered(render_full_props_type(
         &state.props_ts,
         &state.emits_ts,
+        state.terminal_emits_ts.as_deref(),
         &state.models,
         &state.defaulted_prop_names,
         None,
     ));
     out.push_str(",\n");
     out.push_str("    $emit: ");
-    out.append_rendered(render_emit_fn_type(&state.emits_ts, &state.models));
+    out.append_rendered(render_emit_fn_type(
+        &state.emits_ts,
+        state.terminal_emits_ts.as_deref(),
+        &state.models,
+    ));
     out.push_str(",\n");
     if let Some(ref slots) = state.slots_ts {
         out.push_str(&format!("    $slots: {},\n", slots));
@@ -2660,6 +2365,17 @@ fn generate_code(
     // via a mapped type leaves only the static members (props, emits options)
     // so there is exactly one `new()` — ours — with the correct $props.
     out.push_str("type __OmitNew<T> = { [K in keyof T]: T[K] }\n");
+    if state.terminal_emits_ts.is_some() && !needs_setup_body {
+        out.push_str(
+            "type __Verter_UnionToIntersection<U> = (U extends any ? (value: U) => void : never) extends ((value: infer I) => void) ? I : never\n",
+        );
+        out.push_str(
+            "type __Verter_EmitFn<T> = T extends (...args: any[]) => any ? T : T extends Record<string, any> ? __Verter_UnionToIntersection<{ [K in keyof T]: T[K] extends any[] ? (event: K, ...args: T[K]) => void : T[K] extends (...args: infer A) => any ? (event: K, ...args: A) => void : (event: K, ...args: unknown[]) => void }[keyof T]> : (event: string, ...args: unknown[]) => void\n",
+        );
+    }
+    if state.terminal_emits_ts.is_some() {
+        out.push_str(TERMINAL_EMITS_TO_PROPS_TYPE);
+    }
 
     // ── Type import statements ────────────────────────────────────────
     for stmt in &state.type_import_stmts {
@@ -2844,6 +2560,7 @@ fn render_instance_shape_body(
     out.append_rendered(render_full_props_type(
         &state.props_ts,
         &state.emits_ts,
+        state.terminal_emits_ts.as_deref(),
         &state.models,
         &state.defaulted_prop_names,
         narrowing,
@@ -2854,6 +2571,7 @@ fn render_instance_shape_body(
     out.append_rendered(render_full_props_type(
         &state.props_ts,
         &state.emits_ts,
+        state.terminal_emits_ts.as_deref(),
         &state.models,
         &state.defaulted_prop_names,
         narrowing,
@@ -2861,7 +2579,11 @@ fn render_instance_shape_body(
     out.push_str(",\n");
 
     out.push_str("    $emit: ");
-    out.append_rendered(render_emit_fn_type(&state.emits_ts, &state.models));
+    out.append_rendered(render_emit_fn_type(
+        &state.emits_ts,
+        state.terminal_emits_ts.as_deref(),
+        &state.models,
+    ));
     out.push_str(",\n");
     if let Some(ref slots) = state.slots_ts {
         out.push_str(&format!("    $slots: {},\n", slots));
@@ -3016,6 +2738,16 @@ fn generate_declaration_code(
 ) -> TscOutput {
     let mut out = TscWriter::new(512);
 
+    if state.terminal_emits_ts.is_some() {
+        out.push_str(
+            "type __Verter_UnionToIntersection<U> = (U extends any ? (value: U) => void : never) extends ((value: infer I) => void) ? I : never\n",
+        );
+        out.push_str(
+            "type __Verter_EmitFn<T> = T extends (...args: any[]) => any ? T : T extends Record<string, any> ? __Verter_UnionToIntersection<{ [K in keyof T]: T[K] extends any[] ? (event: K, ...args: T[K]) => void : T[K] extends (...args: infer A) => any ? (event: K, ...args: A) => void : (event: K, ...args: unknown[]) => void }[keyof T]> : (event: string, ...args: unknown[]) => void\n",
+        );
+        out.push_str(TERMINAL_EMITS_TO_PROPS_TYPE);
+    }
+
     // ── Type import statements (declaration-legal `import type …`) ────
     for stmt in &state.type_import_stmts {
         out.push_str(stmt);
@@ -3075,14 +2807,24 @@ fn generate_declaration_code(
 
 // ── Build helpers ─────────────────────────────────────────────────────────────
 
-fn render_emit_fn_type(emits: &[EmitEntry], models: &[ModelEntry]) -> RenderedText {
+fn render_emit_fn_type(
+    emits: &[EmitEntry],
+    terminal_emits: Option<&str>,
+    models: &[ModelEntry],
+) -> RenderedText {
     let mut rendered = RenderedText::default();
-    if emits.is_empty() && models.is_empty() {
+    if emits.is_empty() && terminal_emits.is_none() && models.is_empty() {
         rendered.push_str("(event: string, ...args: unknown[]) => void");
         return rendered;
     }
 
     let mut needs_join = false;
+    if let Some(splice) = terminal_emits {
+        rendered.push_str("__Verter_EmitFn<");
+        rendered.push_str(splice);
+        rendered.push_str(">");
+        needs_join = true;
+    }
     for emit in emits {
         if needs_join {
             rendered.push_str(" & ");
@@ -3103,11 +2845,6 @@ fn render_emit_fn_type(emits: &[EmitEntry], models: &[ModelEntry]) -> RenderedTe
                     rendered.push_str(params_text);
                     rendered.push_str(") => void)");
                 }
-            }
-            EmitPayload::Tuple { tuple_text } => {
-                rendered.push_str(", ...args: ");
-                rendered.push_str(tuple_text);
-                rendered.push_str(") => void)");
             }
         }
         needs_join = true;
@@ -3168,9 +2905,6 @@ fn render_props_shape_type(
     let mut rendered = RenderedText::default();
 
     match props_ts {
-        Some(PropsTs::TypeRef(name)) => {
-            rendered.push_str(&wrap_defaulted_props(name, defaulted_prop_names))
-        }
         Some(PropsTs::TypeText(text)) => {
             rendered.push_str(&wrap_defaulted_props(text, defaulted_prop_names))
         }
@@ -3236,6 +2970,7 @@ fn render_model_props_type(models: &[ModelEntry]) -> Vec<RenderedText> {
 fn render_full_props_type(
     props_ts: &Option<PropsTs>,
     emits: &[EmitEntry],
+    terminal_emits: Option<&str>,
     models: &[ModelEntry],
     defaulted_prop_names: &[String],
     narrowing: Option<&TscNarrowingInfo>,
@@ -3255,6 +2990,13 @@ fn render_full_props_type(
         parts.push(props_part);
     }
     parts.extend(render_model_props_type(models));
+    if let Some(splice) = terminal_emits {
+        let mut terminal = RenderedText::default();
+        terminal.push_str("__Verter_EmitsToProps<__Verter_EmitFn<");
+        terminal.push_str(splice);
+        terminal.push_str(">>");
+        parts.push(terminal);
+    }
     let emits_part = render_emits_to_props_type(emits);
     if !emits_part.is_empty() {
         parts.push(emits_part);
@@ -3288,7 +3030,6 @@ fn emit_handler_type(emit: &EmitEntry) -> String {
                 format!("({}) => void", params_text)
             }
         }
-        EmitPayload::Tuple { tuple_text } => format!("(...args: {}) => void", tuple_text),
     }
 }
 
@@ -3356,36 +3097,6 @@ fn hyphenate_event_name(s: &str) -> String {
     result
 }
 
-fn looks_like_named_type_reference(type_text: &str) -> bool {
-    let trimmed = type_text.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    if matches!(trimmed.as_bytes()[0], b'{' | b'[' | b'(' | b'"' | b'\'') {
-        return false;
-    }
-    if trimmed.contains(['|', '&', ';', ':', '=']) {
-        return false;
-    }
-
-    !matches!(
-        trimmed,
-        "string"
-            | "number"
-            | "boolean"
-            | "symbol"
-            | "bigint"
-            | "any"
-            | "unknown"
-            | "never"
-            | "void"
-            | "null"
-            | "undefined"
-            | "true"
-            | "false"
-    )
-}
-
 fn wrap_defaulted_props(base: &str, defaulted_prop_names: &[String]) -> String {
     if defaulted_prop_names.is_empty() {
         return base.to_string();
@@ -3446,12 +3157,12 @@ fn ts_to_constructor(ts: &str) -> &'static str {
     }
 }
 
-/// Convert `RuntimeType` list to a TypeScript type string.
+/// Convert runtime-constructor syntax to a TypeScript type string.
 ///
 /// When a union contains `Function`, the arrow type is wrapped in parentheses
 /// to avoid TS1385 ("Function type notation must be parenthesized when used
 /// in a union or intersection type").
-fn runtime_types_to_ts(types: &[RuntimeType]) -> String {
+fn runtime_types_to_ts(types: &[RuntimeConstructorSyntax]) -> String {
     if types.is_empty() {
         return "unknown".to_string();
     }
@@ -3459,50 +3170,22 @@ fn runtime_types_to_ts(types: &[RuntimeType]) -> String {
     let ts: Vec<&str> = types
         .iter()
         .map(|t| match t {
-            RuntimeType::String => "string",
-            RuntimeType::Number => "number",
-            RuntimeType::Boolean => "boolean",
-            RuntimeType::Object => "Record<string, unknown>",
-            RuntimeType::Array => "unknown[]",
-            RuntimeType::Function => {
+            RuntimeConstructorSyntax::String => "string",
+            RuntimeConstructorSyntax::Number => "number",
+            RuntimeConstructorSyntax::Boolean => "boolean",
+            RuntimeConstructorSyntax::Object => "Record<string, unknown>",
+            RuntimeConstructorSyntax::Array => "unknown[]",
+            RuntimeConstructorSyntax::Function => {
                 if needs_parens {
                     "((...args: unknown[]) => unknown)"
                 } else {
                     "(...args: unknown[]) => unknown"
                 }
             }
-            RuntimeType::Symbol => "symbol",
-            RuntimeType::BuiltIn(_) => "unknown",
-            RuntimeType::Null => "null",
-            RuntimeType::Unknown => "unknown",
+            RuntimeConstructorSyntax::Symbol => "symbol",
         })
         .collect();
     ts.join(" | ")
-}
-
-/// Find a leading JSDoc comment for a property at the given position.
-///
-/// OXC's `Comment.attached_to` is the byte offset of the token the comment precedes.
-/// We match comments where `attached_to == target_start` and the comment is a JSDoc
-/// block comment (starts with `/**`).
-fn find_leading_jsdoc(
-    comments: &[Comment],
-    target_start: u32,
-    content_str: &str,
-) -> Option<String> {
-    for comment in comments {
-        if comment.attached_to == target_start
-            && comment.is_block()
-            && matches!(
-                comment.content,
-                CommentContent::Jsdoc | CommentContent::JsdocLegal
-            )
-        {
-            let text = &content_str[comment.span.start as usize..comment.span.end as usize];
-            return Some(text.to_string());
-        }
-    }
-    None
 }
 
 fn minimal_source_map() -> String {

@@ -13,7 +13,7 @@ description: "Cross-file type resolution: type solver, ShallowFileState, Externa
 - `AnalysisReadyDb` — scope-parameterised analysis augmentation with bitflag-based satisfaction (`find_satisfying`).
 - `RouteDb` — rehomed barrel/route surface cache, validated against live host facts.
 - `OwnerImportSurfaceDb` — direct-owner-imports cache keyed by `(owner_canonical, owner_whole_hash)`. `VerterHost::owner_import_surface(...)` builds-or-fetches the surface; `resolve_owner_direct_import(owner, local_name)` is the single-call lookup every direct-owner-import caller uses.
-- `SemanticGraphStore` — host-owned memo table + node arena for the `SemanticQueryKey` / `ProjectSemanticDispatch` layer. Every `SemanticQueryKey` variant dispatches through `ProjectSemanticDispatch::execute`; semantic subqueries dedup through `SemanticGraphStore::execute_cooperative` (the one cooperative memo). Same-path recursion returns a sentinel instead of self-awaiting; cross-thread joiners block cooperatively on a per-entry `Condvar`. Also owns Vue macro resolution artifacts (`SemanticNodeData::VueMacroElements`, keyed by `HostResolvedNamedTypeKey` through an internal identity map) — former `ResolvedNamedTypesDb` folded in; the parser's `NamedTypeCache` adapter hits the graph directly on the refcount-only hot path via `get_resolved_named_type` / `insert_resolved_named_type`.
+- `SemanticGraphStore` — host-owned memo table + node arena for the `SemanticQueryKey` / `ProjectSemanticDispatch` layer. Every `SemanticQueryKey` variant dispatches through `ProjectSemanticDispatch::execute`; semantic subqueries dedup through `SemanticGraphStore::execute_cooperative` (the one cooperative memo). Same-path recursion returns a sentinel instead of self-awaiting; cross-thread joiners block cooperatively on a per-entry `Condvar`.
 - `ComponentMetaResultDb<ComponentMetaAnalysis>` — final payload cache for `get_component_meta`. Warm hits revalidate the recorded `ReadSetSignature.facts` fact signature against the live `StoreView` before returning.
 - `IntrinsicRegistry` — authoritative table for `= intrinsic`
   declarations. Intrinsic dispatch routes through
@@ -490,15 +490,13 @@ Populated once through the shared host ensure-path and cached in `FileArtifactSt
 
 When a budget trips, the system returns a structured `BudgetExceededFailure` with domain, limit, actual count, and context -- never silently normalizes.
 
-**Host integration**: `HostFrontierAdapter`
-(`host_resolve/frontier_adapter.rs`) bridges the frontier to the real
-`VerterHost`, resolving through `FileArtifactStore` for per-file facts,
-`RouteDb`/`ImportedRootDb` for cross-file routing, and workspace fallback
-for cold misses. The frontier owns route discovery and dependency facts only.
-Its former parser-side terminal element expander is severed and returns an
-honest miss. Compatibility `ResolvedElements` are thin projections of answers
-resolved by `ProjectSemanticDispatch`; they are not produced by a second
-query-time evaluator.
+**Host integration:** production route resolution enters through the
+request-bound `ResolverContext`. `ImportedRootDb` is the sole routed-target
+authority; `RouteDb` and current `IndexedReady` shallow facts resolve direct,
+named-reexport, and wildcard-barrel hops. Terminal semantic projection starts
+from that routed declaration and executes through `ProjectSemanticDispatch`.
+There is no host adapter that expands parser elements and no second frontier
+after `ImportedRootDb` selects the target.
 
 **Key files:**
 
@@ -506,9 +504,8 @@ query-time evaluator.
 | --- | --- |
 | `crates/verter_session/src/resolver_core/shallow_file_state.rs` | ShallowFileState, ExportTarget, ShallowTypeSymbol, ExternalSymbolRef, ResolutionBudgets, local_closure() |
 | `crates/verter_session/src/resolver_core/external_type_frontier.rs` | ExternalTypeFrontier, FrontierHost trait, PendingExternalSymbol, ResolvedSymbol, RouteKind |
-| `crates/verter_session/src/host_resolve/frontier_adapter.rs` | HostFrontierAdapter |
-| `crates/verter_session/src/host_resolve/external_type_resolution.rs` | Frontier-backed route/dependency orchestration |
-| `crates/verter_session/src/host_resolve/frontier_engine.rs` | BFS closure and the deliberately empty legacy materializer |
+| `crates/verter_session/src/host_resolve/external_type_resolution.rs` | Routed component-meta declaration and native projection entry points |
+| `crates/verter_session/src/host_resolve/frontier_engine.rs` | Named-export routing and route/index fact production |
 | `crates/verter_session/src/frontier_tests.rs` | Behavioral invariant tests (diamond dedup, barrel ordering, cycle termination, budget enforcement, etc.) |
 
 ## Semantic Dispatch (current authority)
@@ -580,7 +577,12 @@ All surrogate encodings are retired: `Alias(KeyOf(source))` (replaced by canonic
 | `key_names_from_base_node` / `_keyspace_node` | `KeyEnumeration::Unresolvable` | no (Rust-local) | Caller publishes canonical `Mapped` shell |
 | `relate_nodes` | `RelationResult::Unknown` | yes (cache-with-fence) | `RelationMemo` entry with dep-fence |
 
-**Parser → semantic graph integration.** No new adapter struct. The existing `HostNamedTypeCacheAdapter` in `crates/verter_session/src/host_manage.rs` (implements `verter_parser`'s `NamedTypeCache` trait) reads/writes `SemanticGraphStore` directly via `get_resolved_named_type` / `insert_resolved_named_type` and drives deep type reduction through `ProjectSemanticDispatch::execute`.
+**Parser → semantic graph integration.** Parser output is syntax/index
+inventory only. `type_inventory.rs` records imports, exports, declaration
+headers, and per-statement dependency names. The indexed lowering service
+converts authored declaration bodies into owned typed IR on demand; semantic
+queries then enter `ProjectSemanticDispatch::execute`. No parser cache adapter
+stores or returns resolved type surfaces.
 
 **Authority-uniqueness contract** (normative, mechanically enforced by §6.5 gate tests):
 
@@ -622,11 +624,10 @@ locators for ordered type/value contributor groups and augmentation scopes. It
 stores no `TypeExpr` and performs no evaluation. Authored bodies are lowered
 on demand by the shared semantic dispatch.
 
-The parser's `TypeResolutionContext` is a syntax-extraction boundary. Its
-`PARSER_SYNTACTIC_DEPTH_LIMIT = 256` protects parser host-stack use and
-records a typed syntax-budget event; it is not a semantic structural-depth
-limit. Query-time deep finite types are governed by the heap-worklist contract
-above.
+The parser's `type_inventory` module is a syntax/index boundary. It records
+route/declaration facts and structural dependency names; it performs no type
+evaluation and exposes no resolved-element carrier. Query-time finite types
+are governed by the shared semantic-dispatch contract above.
 
 ## Declaration Merging (CRITICAL)
 
@@ -673,14 +674,21 @@ Inner declarations NEVER enter file-scope `type_symbols`/`value_symbols`. Parse-
 
 ## Cross-File Type Resolution (Compiler Integration)
 
-External types for macros like `defineProps<ExternalType>()` are pre-resolved by the host:
+Typed Vue macro semantics are projected by the host into compiler-facing DTOs:
 
-1. Host detects type dependencies from imports
-2. Host resolves types from its file store
-3. Host passes resolved types via `VerterCompileOptions::external_types`
-4. `script/process.rs` merges external types with companion `<script>` types
+1. `produce_vue_macro_codegen` inventories one already-indexed SFC under one
+   request-bound resolver context.
+2. It resolves each typed macro root through `ProjectSemanticDispatch` and
+   independently produces runtime and/or terminal TSC entries.
+3. It returns `MacroRuntimeBundle` / `MacroTscBundle` entries keyed by stable
+   macro `syntax_index`, plus the exact transitive canonical footprint.
+4. The compiler consumes the explicit `VueMacroSemanticInput`; it never
+   resolves typed macro parameters or merges companion/external type maps.
 
-The Rust compiler never does file I/O -- all external resolution is the host's responsibility.
+The producer output is request-local. Its aggregate bundle is not a durable
+cache; underlying semantic query nodes retain their normal memo and
+singleflight behavior. The Rust compiler performs no file I/O and is not a
+type-resolution authority.
 
 **Shallow file state and semantic-dispatch integration:**
 `ShallowFileState` (the shallow symbol/export surface per imported file,
@@ -690,15 +698,14 @@ primitives. Local closure runs same-file dependencies iteratively without
 crossing import boundaries. The frontier records route and dependency facts;
 it does not evaluate a terminal type body. See
 `resolver_core/shallow_file_state.rs`,
-`resolver_core/external_type_frontier.rs`, and
-`host_resolve/frontier_adapter.rs`.
+`resolver_core/external_type_frontier.rs`, `host_resolve/frontier_engine.rs`,
+and `resolver_core/imported_root_db.rs`.
 
 All query-time expansion for macro types, component-meta, and imported aliases
-enters through `ProjectSemanticDispatch::execute`. Consumer-specific
-`ResolvedElements` or framework surfaces are output projections of the
-shared graph result. `type_eval.rs` is a content-free declaration inventory,
-and `type_solver/` contains retained DTOs only; neither is an execution
-engine.
+enters through `ProjectSemanticDispatch::execute`. Consumer-specific framework
+surfaces and macro DTOs are terminal projections of the shared graph result.
+`type_eval.rs` is a content-free declaration inventory, and `type_solver/`
+contains retained DTOs only; neither is an execution engine.
 
 ## Macro Type Traversal Rule
 

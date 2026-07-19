@@ -25,6 +25,8 @@ use crate::template::code_gen::types::CodeGenOutput;
 /// Options for script code generation.
 #[derive(Debug, Clone, Default)]
 pub struct ScriptCodeGenOptions<'a> {
+    /// Authoritative runtime macro semantics for type-based codegen.
+    pub macro_runtime: Option<&'a verter_macro_dto::MacroRuntimeBundle>,
     /// Component name (used in `__name` property).
     pub component_name: &'a str,
     /// Scoped style ID (e.g., `"data-v-abc123"`).

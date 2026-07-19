@@ -5123,15 +5123,6 @@ fn type_def_source_files() -> Vec<(String, String)> {
             "../verter_type_expr/src/facts.rs",
             "verter_type_expr::facts",
         ),
-        // `ResolvedElements` / `ResolvedProp` / `ResolvedNamedCallSignature`
-        // (returned by the `vue_exec::imported_elements` DTO builders) are the
-        // legacy display-row DTOs — rendered text + `RuntimeType` rows, no
-        // `TypeExpr` field; reading their home lets the closure classify them
-        // as non-bearing.
-        (
-            "../verter_parser/src/utils/oxc/script/type_surface/mod.rs",
-            "verter_parser::utils::oxc::script::type_surface",
-        ),
     ];
     for (rel, module_base) in EXTERNAL {
         let path = crate_root().join(rel);

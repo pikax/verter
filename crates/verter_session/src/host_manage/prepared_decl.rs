@@ -1398,95 +1398,6 @@ impl VerterHost {
         )
     }
 
-    /// View-aware variant of [`Self::required_import_routes_for_exported_route`].
-    ///
-    /// Threads the session `view` through the routed-shallow read and
-    /// the external-type analysis fall-through so an overlay that changes
-    /// a barrel/re-export surface or class-body imports is reflected in
-    /// the required-import map. Base callers (`view = None`) get identical
-    /// behaviour to the historical body.
-    pub(crate) fn required_import_routes_for_exported_route_with_view(
-        &self,
-        canonical_id: &str,
-        exported_name: &str,
-        route: &crate::resolver_core::RouteDemand,
-        view: Option<&dyn crate::session_view::SessionView>,
-    ) -> rustc_hash::FxHashMap<String, crate::resolver_core::RouteDemand> {
-        use crate::resolver_core::shallow_file_state::ExportTarget;
-        use crate::resolver_core::RouteDemand;
-
-        if let Some(state) = self.routed_shallow_state_with_view(canonical_id, view) {
-            let budget = crate::resolver_core::shallow_file_state::ResolutionBudgets::default()
-                .local_closure_steps;
-            if let Some((symbol_name, _is_alias_export)) = state
-                .export_target(exported_name)
-                .and_then(|target| match target {
-                    ExportTarget::Local { symbol_name } => {
-                        Some((symbol_name.as_str(), symbol_name != exported_name))
-                    }
-                    ExportTarget::Reexport { .. } => None,
-                })
-            {
-                let closure = state.route_closure(symbol_name, route, budget);
-                let mut result = rustc_hash::FxHashMap::default();
-                for ext in &closure.unresolved_external {
-                    result
-                        .entry(ext.local_name.clone())
-                        .and_modify(|existing| {
-                            *existing =
-                                crate::resolver_core::merge_route_demands(existing, &ext.route);
-                        })
-                        .or_insert_with(|| ext.route.clone());
-                }
-                if state.type_symbol_kind(symbol_name).is_some_and(|kind| {
-                    kind == verter_semantic::analysis::type_eval::TypeDeclKind::Class
-                }) {
-                    for required_name in state.required_import_names(exported_name) {
-                        result
-                            .entry(required_name)
-                            .and_modify(|existing| {
-                                *existing = crate::resolver_core::merge_route_demands(
-                                    existing,
-                                    &RouteDemand::Whole,
-                                );
-                            })
-                            .or_insert(RouteDemand::Whole);
-                    }
-                }
-                return result;
-            }
-
-            if !matches!(route, RouteDemand::Whole) {
-                return self.required_import_routes_for_exported_route_with_view(
-                    canonical_id,
-                    exported_name,
-                    &RouteDemand::Whole,
-                    view,
-                );
-            }
-        }
-
-        if matches!(route, RouteDemand::Whole) {
-            return self
-                .routed_shallow_state_with_view(canonical_id, view)
-                .map(|state| {
-                    state
-                        .required_import_names(exported_name)
-                        .into_iter()
-                        .map(|name| (name, RouteDemand::Whole))
-                        .collect()
-                })
-                .unwrap_or_default();
-        }
-
-        self.required_import_routes_for_exported_route_with_view(
-            canonical_id,
-            exported_name,
-            &RouteDemand::Whole,
-            view,
-        )
-    }
-
     #[allow(dead_code)]
     pub(crate) fn required_import_names_for_exported_route(
         &self,
@@ -1632,7 +1543,7 @@ impl VerterHost {
     pub(crate) fn external_type_analysis(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource>>
+    ) -> Option<Arc<verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource>>
     {
         component_meta_trace_custom!(
             "external_type_analysis",
@@ -1675,71 +1586,13 @@ impl VerterHost {
         Some(analysis)
     }
 
-    /// View-aware variant of [`Self::external_type_analysis`].
-    ///
-    /// When `view: Some(...)` carries parse artifacts for `canonical_id`
-    /// (overlay candidate published into FileArtifactStore under the
-    /// overlay content hash), the analysis is read from the view's
-    /// artifacts so the session-bearing cold-compute path observes
-    /// overlay-rooted external-type analysis. Base callers (`view = None`)
-    /// fall through to the content-pinned artifact fast path followed by
-    /// the canonical `ensure_indexed_ready_serve` build, identical to the base
-    /// `external_type_analysis` behaviour.
-    pub(crate) fn external_type_analysis_with_view(
-        &self,
-        canonical_id: &str,
-        view: Option<&dyn crate::session_view::SessionView>,
-    ) -> Option<Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource>>
-    {
-        component_meta_trace_custom!(
-            "external_type_analysis_with_view",
-            format!("owner={} store_view={}", canonical_id, view.is_some()),
-        );
-        let inputs = self.external_type_resolution_inputs_with_view(canonical_id, view)?;
-        let analysis = Arc::clone(&inputs.analysis);
-        let stats = analysis.stats();
-        if inputs.analysis_cache_hit {
-            component_meta_trace_custom!(
-                "external_type_analysis_with_view_cache_hit",
-                format!(
-                    "owner={} statements={} bindings={} reexports={} wildcards={} import_locals={} local_type_symbols={} local_export_symbols={}",
-                    canonical_id,
-                    stats.top_level_statement_count,
-                    stats.binding_count,
-                    stats.direct_reexport_count,
-                    stats.wildcard_reexport_count,
-                    stats.import_local_count,
-                    stats.local_type_symbol_count,
-                    stats.local_export_symbol_count,
-                ),
-            );
-        } else {
-            component_meta_trace_custom!(
-                "external_type_analysis_with_view_built",
-                format!(
-                    "owner={} statements={} bindings={} reexports={} wildcards={} import_locals={} local_type_symbols={} local_export_symbols={}",
-                    canonical_id,
-                    stats.top_level_statement_count,
-                    stats.binding_count,
-                    stats.direct_reexport_count,
-                    stats.wildcard_reexport_count,
-                    stats.import_local_count,
-                    stats.local_type_symbol_count,
-                    stats.local_export_symbol_count,
-                ),
-            );
-        }
-        Some(analysis)
-    }
-
     /// Get or build the canonical shallow type file state for an imported
     /// dependency — the `is_generic_carrier` probe entry. A COLD probe
     /// JOINS the canonical `IndexedReady` build (`ensure_indexed_ready_serve`
     /// via the route-surface accessor): the probe's build IS the build,
     /// so the returned `Arc` is the IndexedReady-owned shallow state.
     ///
-    /// Consumed by the frontier engine (production cache-warming pass in
-    /// `resolve_external_type_from_loaded_files`) and integration tests.
+    /// Consumed by routed TypeInfo queries and integration tests.
     ///
     /// The lookup is **current-content-pinned**: it never reads
     /// `FileArtifactStore` through the content-agnostic `get_any`. With the
@@ -1862,7 +1715,7 @@ impl VerterHost {
         whole_hash: Hash16,
         snapshot: &crate::types::FileAnalysisSnapshot,
         external_type_analysis: &Arc<
-            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource,
+            verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource,
         >,
         decl_bodies: &Arc<crate::decl_body_memo::DeclBodyMemo>,
         eval_source: Option<&str>,
@@ -2576,7 +2429,7 @@ impl VerterHost {
             struct ColdIndexProducts {
                 header_index: verter_semantic::analysis::decl_headers::DeclHeaderIndex,
                 analysis:
-                    verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource,
+                    verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource,
                 snapshot: Option<crate::types::FileAnalysisSnapshot>,
                 svelte_component_runes_mode: bool,
             }
@@ -2629,7 +2482,7 @@ impl VerterHost {
                                     body,
                                     parsed.source_str(),
                                 ),
-                                verter_parser::utils::oxc::script::type_surface::analyze_external_type_program_headers(body),
+                                verter_parser::utils::oxc::script::type_inventory::analyze_external_type_program_headers(body),
                             )
                         }
                         // Fatal parse: empty index, default analysis — no

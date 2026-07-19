@@ -2092,7 +2092,7 @@ pub struct SurfaceMember {
     /// Whether this member was explicitly declared in the macro's type
     /// argument's own body (vs reached via heritage / Omit / intersection
     /// from an external source). See
-    /// [`verter_parser::utils::oxc::script::type_surface::ResolvedProp::declared_in_macro_type_arg`]
+    /// the macro-root `declared_in_macro_type_arg` provenance bit
     /// for the structural definition. Propagated through the prepared-surface
     /// walker and `surface_member_to_expanded_field`. Witness-gated: a
     /// non-neutral value exists only via

@@ -902,7 +902,13 @@ mod tests {
             ..CodegenOptions::default()
         };
         let vopts = VerterCompileOptions::default();
-        let result = compile_sfc(source, &opts, &vopts, &alloc);
+        let result = compile_sfc(
+            source,
+            &opts,
+            &vopts,
+            &verter_compiler::compile::VueMacroSemanticInput::Unavailable,
+            &alloc,
+        );
 
         let script = result.script.expect("should have script output");
         assert!(script.setup, "compiled script should be flagged as setup");
@@ -1012,7 +1018,13 @@ mod tests {
             force_js: true,
             ..Default::default()
         };
-        let result = compile_sfc(source, &opts, &vopts, &alloc);
+        let result = compile_sfc(
+            source,
+            &opts,
+            &vopts,
+            &verter_compiler::compile::VueMacroSemanticInput::Unavailable,
+            &alloc,
+        );
 
         let tpl = result.template.expect("should have template block");
 

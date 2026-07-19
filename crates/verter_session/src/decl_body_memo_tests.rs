@@ -664,7 +664,7 @@ fn raw_surfaces_merge_overload_groups_for_the_demanded_name() {
 fn seeded_memo_for(source: &str) -> DeclBodyMemo {
     let env = verter_semantic::analysis::type_eval_build::parse_and_build_env(source);
     let analysis =
-        verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default();
+        verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource::default();
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
     let header_index = Arc::new(

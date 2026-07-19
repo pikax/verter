@@ -162,8 +162,13 @@ fn generate_all_tsx(vue_files: &[PathBuf], base_dir: &Path) -> Vec<(PathBuf, Str
                 source_map: true,
                 ..Default::default()
             };
-            let result =
-                verter_compiler::compile::compile(&source, &options, &verter_options, &alloc);
+            let result = verter_compiler::compile::compile(
+                &source,
+                &options,
+                &verter_options,
+                &verter_compiler::compile::VueMacroSemanticInput::Unavailable,
+                &alloc,
+            );
 
             let tsx_block = result.tsx?;
 

@@ -11,15 +11,10 @@
 //!
 //! ## Why a separate trait (not super-trait composition)
 //!
-//! Several existing domain traits — `ComponentMetaResolverHost`,
-//! `ComponentMetaRequestHost`, `FallthroughResolverHost`,
-//! `FallthroughComputeHost`, `FallthroughRequestHost`,
-//! `ExternalMacroTypeCollectorHost`, `FrontierHost`,
-//! `DeclarationMetadataResolver` — use **associated types** in method
-//! positions (`Snapshot`, `EvalContext`, `View`, `Mode`, `ChildResolution`,
-//! `Resolution`, `Error`). A trait with non-dyn-compatible super-traits
-//! inherits non-dyn-compatibility, so `&dyn ResolverContext` would not
-//! compile if any of these were super-traits. The cascade concern that
+//! Several domain traits use **associated types** in method positions. A
+//! trait with non-dyn-compatible super-traits inherits non-dyn-compatibility,
+//! so `&dyn ResolverContext` would not compile if any of them were
+//! super-traits. The cascade concern that
 //! motivated super-trait composition was a phantom: every `engine.host` /
 //! `query_engine.host` callsite in the seal scope passes concrete
 //! `&VerterHost` to **concrete-parameter functions** (e.g.,
@@ -66,7 +61,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource;
+use verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource;
 use verter_semantic::analysis::type_eval::DeclarationId;
 use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 use verter_workspace::{AmbientSymbolHit, ProjectStableKey};

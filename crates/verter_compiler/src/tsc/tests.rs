@@ -1,8 +1,5 @@
 use super::script::{generate_tsc_output_with_options, TscGenOptions, TscMode};
-use crate::utils::oxc::script::type_surface::resolve_external_type;
-use oxc_allocator::Allocator;
 use oxc_sourcemap::SourceMap;
-use rustc_hash::FxHashMap;
 
 fn gen_tsc(sfc: &str) -> String {
     gen_tsc_output(sfc).code
@@ -16,41 +13,7 @@ fn gen_tsc_output(sfc: &str) -> super::script::TscOutput {
             filename: Some("/test/TestComp.vue".to_string()),
             ..Default::default()
         },
-    )
-}
-
-fn gen_tsc_with_external_type(sfc: &str, type_name: &str, dep_source: &str) -> String {
-    gen_tsc_output_with_external_type(sfc, type_name, dep_source).code
-}
-
-fn gen_tsc_output_with_external_type(
-    sfc: &str,
-    type_name: &str,
-    dep_source: &str,
-) -> super::script::TscOutput {
-    gen_tsc_output_with_external_type_and_mode(sfc, type_name, dep_source, TscMode::Public)
-}
-
-fn gen_tsc_output_with_external_type_and_mode(
-    sfc: &str,
-    type_name: &str,
-    dep_source: &str,
-    mode: TscMode,
-) -> super::script::TscOutput {
-    let alloc = Allocator::default();
-    let resolved = resolve_external_type(type_name, dep_source, &alloc)
-        .expect("failed to resolve external type");
-    let mut external_types = FxHashMap::default();
-    external_types.insert(type_name.to_string(), resolved);
-    generate_tsc_output_with_options(
-        sfc,
-        "TestComp",
-        &TscGenOptions {
-            filename: Some("/test/TestComp.vue".to_string()),
-            external_types: Some(external_types),
-            mode,
-            ..Default::default()
-        },
+        None,
     )
 }
 
@@ -62,6 +25,7 @@ fn gen_tsc_narrowing(sfc: &str) -> String {
             conditional_root_narrowing: true,
             ..Default::default()
         },
+        None,
     )
     .code
 }
@@ -79,11 +43,8 @@ fn gen_tsc_output_testing(sfc: &str) -> super::script::TscOutput {
             mode: TscMode::Testing,
             ..Default::default()
         },
+        None,
     )
-}
-
-fn gen_tsc_testing_with_external_type(sfc: &str, type_name: &str, dep_source: &str) -> String {
-    gen_tsc_output_with_external_type_and_mode(sfc, type_name, dep_source, TscMode::Testing).code
 }
 
 fn offset_to_zero_based_line_col(text: &str, offset: usize) -> (u32, u32) {
@@ -675,64 +636,6 @@ withDefaults(defineProps<Props>(), { title: 'hello' })
         "defaulted imported props should be wrapped to make keys optional: {r}"
     );
     assert!(!r.contains("withDefaults"), "macro removed");
-}
-
-// @ai-generated - Imported prop types must not slice foreign spans when defaults are present.
-#[test]
-fn tsc_codegen_public_mode_with_defaults_imported_type_does_not_panic() {
-    let r = gen_tsc_with_external_type(
-        r#"<script setup lang="ts">
-import type { Props } from './types'
-withDefaults(defineProps<Props>(), {
-  title: 'hello',
-})
-</script><template><div>{{ title }} {{ count }}</div></template>"#,
-        "Props",
-        r#"
-export interface Props {
-  title: string
-  count: number
-}
-"#,
-    );
-
-    assert!(
-        r.contains("import type { Props } from './types'"),
-        "import type statement should be preserved: {r}"
-    );
-    assert!(
-        r.contains("Omit<Props, 'title'> & Partial<Pick<Props, 'title'>>"),
-        "defaulted imported props should stay wrapped as a named type: {r}"
-    );
-}
-
-// @ai-generated - Testing mode should expose imported props without indexing into foreign source text.
-#[test]
-fn tsc_testing_mode_with_defaults_imported_type_uses_indexed_access_without_panicking() {
-    let r = gen_tsc_testing_with_external_type(
-        r#"<script setup lang="ts">
-import type { Props } from './types'
-withDefaults(defineProps<Props>(), {
-  title: 'hello',
-})
-</script><template><div>{{ title }} {{ count }}</div></template>"#,
-        "Props",
-        r#"
-export interface Props {
-  title: string
-  count: number
-}
-"#,
-    );
-
-    assert!(
-        r.contains("declare const title: Props['title']"),
-        "defaulted imported props should use indexed access in testing mode: {r}"
-    );
-    assert!(
-        r.contains("declare const count: Props['count']"),
-        "non-defaulted imported props should use indexed access in testing mode: {r}"
-    );
 }
 
 // @ai-generated - Companion-script resolved prop spans should be consumed as absolute SFC spans.
@@ -1331,39 +1234,6 @@ defineProps<MyProps>()
         !r.contains("someValue"),
         "should not import the value binding: got {}",
         r
-    );
-}
-
-#[test]
-fn tsc_codegen_define_emits_imported_type_emits_import_statement() {
-    let r = gen_tsc_with_external_type(
-        r#"<script setup lang="ts">
-import type { Emits } from './types'
-defineEmits<Emits>()
-</script><template/>"#,
-        "Emits",
-        "export interface Emits { (e: 'submit', payload: string): void; confirm: [id: number] }",
-    );
-
-    assert!(
-        r.contains("import type { Emits } from './types'"),
-        "defineEmits imported type should emit import type statement: {r}"
-    );
-    assert!(
-        r.contains("((event: 'submit', payload: string) => void)"),
-        "defineEmits imported type should inline call-signature overloads in $emit: {r}"
-    );
-    assert!(
-        r.contains("((event: 'confirm', ...args: [id: number]) => void)"),
-        "defineEmits imported type should inline shorthand overloads in $emit: {r}"
-    );
-    assert!(
-        r.contains(r#""onSubmit"?: (payload: string) => void"#),
-        "defineEmits imported type should inline submit handler props: {r}"
-    );
-    assert!(
-        r.contains(r#""onConfirm"?: (...args: [id: number]) => void"#),
-        "defineEmits imported type should inline confirm handler props: {r}"
     );
 }
 
@@ -2714,129 +2584,6 @@ defineEmits(['click', 'update'])
 }
 
 #[test]
-fn extract_cache_with_external_emits_matches_direct() {
-    let sfc = r#"<script setup lang="ts">
-import type { ImportedEmits } from './types'
-defineEmits<ImportedEmits>()
-</script>
-<template><div /></template>"#;
-
-    let dep_source = r#"
-export interface ImportedEmits {
-    (e: 'save', data: string): void
-    (e: 'cancel'): void
-}
-"#;
-
-    // Extract WITHOUT external types (as cache would)
-    let extracted = extract_tsc_state(
-        sfc,
-        "TestComp",
-        &TscExtractOptions {
-            filename: Some("/test/TestComp.vue".to_string()),
-        },
-    )
-    .expect("should extract");
-
-    // Verify unresolved emits ref is recorded
-    assert!(
-        extracted.unresolved_emits_ref.is_some(),
-        "should record unresolved emits type ref"
-    );
-
-    // Resolve external types
-    let alloc = Allocator::default();
-    let resolved = crate::utils::oxc::script::type_surface::resolve_external_type(
-        "ImportedEmits",
-        dep_source,
-        &alloc,
-    )
-    .expect("resolve external type");
-    let mut external_types = FxHashMap::default();
-    external_types.insert("ImportedEmits".to_string(), resolved);
-
-    // Generate from cache WITH external types
-    let from_cache = generate_tsc_from_state(
-        &extracted,
-        sfc,
-        "TestComp",
-        TscMode::Public,
-        Some(&external_types),
-    );
-
-    // Generate directly with external types
-    let direct = gen_tsc_with_external_type(sfc, "ImportedEmits", dep_source);
-
-    assert_eq!(
-        from_cache.code, direct,
-        "cached + external emits must match direct path"
-    );
-    assert!(
-        !from_cache.code.contains("emits: []"),
-        "should not have empty emits array"
-    );
-}
-
-#[test]
-fn extract_cache_with_external_props_testing_mode() {
-    let sfc = r#"<script setup lang="ts">
-import type { ImportedProps } from './types'
-defineProps<ImportedProps>()
-</script>
-<template><div /></template>"#;
-
-    let dep_source = r#"
-export interface ImportedProps {
-    title: string
-    count?: number
-}
-"#;
-
-    // Extract WITHOUT external types
-    let extracted = extract_tsc_state(
-        sfc,
-        "TestComp",
-        &TscExtractOptions {
-            filename: Some("/test/TestComp.vue".to_string()),
-        },
-    )
-    .expect("should extract");
-
-    assert!(
-        extracted.unresolved_props_ref.is_some(),
-        "should record unresolved props type ref"
-    );
-
-    // Resolve external types
-    let alloc = Allocator::default();
-    let resolved = crate::utils::oxc::script::type_surface::resolve_external_type(
-        "ImportedProps",
-        dep_source,
-        &alloc,
-    )
-    .expect("resolve external type");
-    let mut external_types = FxHashMap::default();
-    external_types.insert("ImportedProps".to_string(), resolved);
-
-    // Generate from cache in Testing mode
-    let from_cache = generate_tsc_from_state(
-        &extracted,
-        sfc,
-        "TestComp",
-        TscMode::Testing,
-        Some(&external_types),
-    );
-
-    // Generate directly in Testing mode
-    let direct = gen_tsc_testing_with_external_type(sfc, "ImportedProps", dep_source);
-
-    assert_eq!(
-        from_cache.code, direct,
-        "cached Testing mode with external props must match direct"
-    );
-}
-
-#[test]
 fn extract_returns_none_without_script_setup() {
     let sfc = r#"<template><div>hello</div></template>"#;
 
@@ -2844,34 +2591,6 @@ fn extract_returns_none_without_script_setup() {
     assert!(
         result.is_none(),
         "should return None for SFC without script setup"
-    );
-}
-
-#[test]
-fn extract_records_unresolved_refs() {
-    let sfc = r#"<script setup lang="ts">
-import type { Ext } from './external'
-defineProps<Ext>()
-</script>
-<template><div /></template>"#;
-
-    let extracted = extract_tsc_state(
-        sfc,
-        "TestComp",
-        &TscExtractOptions {
-            filename: Some("/test/TestComp.vue".to_string()),
-        },
-    )
-    .expect("should extract");
-
-    assert_eq!(
-        extracted.unresolved_props_ref.as_deref(),
-        Some("Ext"),
-        "should record the unresolved props type name"
-    );
-    assert!(
-        extracted.unresolved_emits_ref.is_none(),
-        "should not have unresolved emits ref when no defineEmits"
     );
 }
 
@@ -3330,6 +3049,7 @@ fn reserved_word_component_name_is_prefixed() {
         "<template><div>hello</div></template>",
         "default",
         &TscGenOptions::default(),
+        None,
     )
     .code;
     assert!(
@@ -3350,6 +3070,7 @@ fn digit_prefix_component_name_is_prefixed() {
         "<template><div>not found</div></template>",
         "404",
         &TscGenOptions::default(),
+        None,
     )
     .code;
     assert!(
@@ -3381,6 +3102,7 @@ fn gen_tsc_declaration(sfc: &str) -> String {
             mode: TscMode::Declaration,
             ..Default::default()
         },
+        None,
     )
     .code
 }
@@ -3837,6 +3559,7 @@ defineExpose({ internal })
             mode: TscMode::Public,
             ..Default::default()
         },
+        None,
     )
     .code;
 
@@ -3958,6 +3681,7 @@ defineProps<{ msg: string }>()
             mode: TscMode::Public,
             ..Default::default()
         },
+        None,
     )
     .code;
     let decl = gen_tsc_declaration(sfc);

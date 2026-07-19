@@ -103,17 +103,12 @@ use crate::typeinfo::surface::{CanonicalSpan, TypeInfoSurface, TypeInfoSurfaceMe
 use crate::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
 use crate::VerterHost;
 
-mod imported_elements;
 mod normalize;
 mod normalize_slots;
 
 // The per-surface normalizers live in the `normalize` submodule (file-size
 // split). Re-export the ones the executor below and external consumers reach
 // through the flat `vue_exec::props_from_typeinfo_surface` path.
-pub(crate) use imported_elements::{
-    imported_emits_resolved_elements, imported_named_props_resolved_elements,
-    imported_props_resolved_elements,
-};
 pub(crate) use normalize::{
     emits_from_typeinfo_surface, exposed_from_typeinfo_surface, index_signatures_from_surface,
     object_members_from_typeinfo_surface, props_from_typeinfo_surface,

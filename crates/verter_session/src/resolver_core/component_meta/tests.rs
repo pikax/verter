@@ -1,9 +1,6 @@
 use super::*;
 use crate::resolver_core::declaration_metadata::ResolvedExportTarget;
 use std::collections::BTreeMap;
-use verter_parser::utils::oxc::script::type_surface::{
-    ResolvedElements, ResolvedMemberVisibility, ResolvedProp, RuntimeType,
-};
 use verter_semantic::analysis::type_eval::DeclarationId;
 use verter_semantic::analysis::types::{
     AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro, AnalyzedMacroKind, ImportBindingKind,
@@ -37,7 +34,7 @@ struct TestSnapshot {
 }
 
 struct TestHost {
-    external_macro_elements: BTreeMap<(String, String), ResolvedElements>,
+    native_prop_sources: BTreeMap<(String, String), ()>,
     eval_outputs: ComponentMetaEvalOutputs,
     projectable_owner_local_roots: BTreeSet<String>,
     // Owner-local roots that project to a NON-EMPTY prepared surface. The
@@ -143,7 +140,7 @@ impl ComponentMetaResolverHost for TestHost {
         _resolution_deps: &mut BTreeSet<String>,
         _cache: &mut NativePropProjectionCache,
     ) -> Option<Vec<ResolvedNativeProp>> {
-        self.external_macro_elements
+        self.native_prop_sources
             .get(&(import_source.to_string(), exported_name.to_string()))
             .map(|_| Vec::new())
     }
@@ -733,7 +730,7 @@ fn local_resolved_macro_types_push_authoritative_owner_local_entry() {
     // macro-surface path (covered in `typeinfo_tests::vue_adapter`); this
     // test pins the entry identity + authority the materialiser gates on.
     let host = TestHost {
-        external_macro_elements: BTreeMap::new(),
+        native_prop_sources: BTreeMap::new(),
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::from(["AccordionEmits".to_string()]),
         owner_local_roots_with_surface: BTreeSet::from(["AccordionEmits".to_string()]),
@@ -797,7 +794,7 @@ fn local_resolved_macro_types_push_authoritative_owner_local_entry() {
 #[test]
 fn projectable_local_emit_roots_fill_resolved_macros_without_resolved_local_types() {
     let host = TestHost {
-        external_macro_elements: BTreeMap::new(),
+        native_prop_sources: BTreeMap::new(),
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::from(["AppEmits".to_string()]),
         owner_local_roots_with_surface: BTreeSet::from(["AppEmits".to_string()]),
@@ -864,7 +861,7 @@ interface CalendarSlots {
 defineSlots<CalendarSlots>()
 "#;
     let host = TestHost {
-        external_macro_elements: BTreeMap::new(),
+        native_prop_sources: BTreeMap::new(),
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::from(["CalendarSlots".to_string()]),
         owner_local_roots_with_surface: BTreeSet::from(["CalendarSlots".to_string()]),
@@ -926,47 +923,11 @@ type LocalItem = {
   label?: string
 }
 "#;
-    let mut external_macro_elements = BTreeMap::new();
-    external_macro_elements.insert(
-        ("./types".to_string(), "ImportedBase".to_string()),
-        ResolvedElements {
-            props: vec![ResolvedProp {
-                span: Span::new(0, 0),
-                key: Span::new(0, 0),
-                key_name: Some("href".to_string()),
-                optional: true,
-                types: vec![RuntimeType::String],
-                visibility: ResolvedMemberVisibility::Public,
-                type_span: None,
-                type_text: Some("string".to_string()),
-                map_local: false,
-                span_is_absolute: true,
-                declared_in_macro_type_arg: false,
-            }],
-            ..ResolvedElements::default()
-        },
-    );
-    external_macro_elements.insert(
-        ("./types".to_string(), "ImportedKeys".to_string()),
-        ResolvedElements {
-            props: vec![ResolvedProp {
-                span: Span::new(0, 0),
-                key: Span::new(0, 0),
-                key_name: Some("value".to_string()),
-                optional: true,
-                types: vec![RuntimeType::String],
-                visibility: ResolvedMemberVisibility::Public,
-                type_span: None,
-                type_text: Some("'href' | 'target'".to_string()),
-                map_local: false,
-                span_is_absolute: true,
-                declared_in_macro_type_arg: false,
-            }],
-            ..ResolvedElements::default()
-        },
-    );
+    let mut native_prop_sources = BTreeMap::new();
+    native_prop_sources.insert(("./types".to_string(), "ImportedBase".to_string()), ());
+    native_prop_sources.insert(("./types".to_string(), "ImportedKeys".to_string()), ());
     let host = TestHost {
-        external_macro_elements,
+        native_prop_sources,
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::new(),
         owner_local_roots_with_surface: BTreeSet::new(),
@@ -1049,24 +1010,9 @@ fn resolve_component_meta_parts_skips_transitive_imported_macro_resolution_when_
 type Props = Pick<ImportedBase, 'href'>
 "#;
     let host = TestHost {
-        external_macro_elements: BTreeMap::from([(
+        native_prop_sources: BTreeMap::from([(
             ("./types".to_string(), "ImportedBase".to_string()),
-            ResolvedElements {
-                props: vec![ResolvedProp {
-                    span: Span::new(0, 0),
-                    key: Span::new(0, 0),
-                    key_name: Some("href".to_string()),
-                    optional: true,
-                    types: vec![RuntimeType::String],
-                    visibility: ResolvedMemberVisibility::Public,
-                    type_span: None,
-                    type_text: Some("string".to_string()),
-                    map_local: false,
-                    span_is_absolute: true,
-                    declared_in_macro_type_arg: false,
-                }],
-                ..ResolvedElements::default()
-            },
+            (),
         )]),
         eval_outputs: ComponentMetaEvalOutputs {
             evaluated_types: Some(verter_semantic::analysis::type_expand::ExpandedComponentTypes {
@@ -1177,24 +1123,9 @@ fn resolve_component_meta_parts_skips_transitive_imported_macro_resolution_when_
 type Props = Pick<ImportedBase, 'href'>
 "#;
     let host = TestHost {
-        external_macro_elements: BTreeMap::from([(
+        native_prop_sources: BTreeMap::from([(
             ("./types".to_string(), "ImportedBase".to_string()),
-            ResolvedElements {
-                props: vec![ResolvedProp {
-                    span: Span::new(0, 0),
-                    key: Span::new(0, 0),
-                    key_name: Some("href".to_string()),
-                    optional: true,
-                    types: vec![RuntimeType::String],
-                    visibility: ResolvedMemberVisibility::Public,
-                    type_span: None,
-                    type_text: Some("string".to_string()),
-                    map_local: false,
-                    span_is_absolute: true,
-                    declared_in_macro_type_arg: false,
-                }],
-                ..ResolvedElements::default()
-            },
+            (),
         )]),
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::from(["Props".to_string()]),
@@ -1292,24 +1223,9 @@ type Props = {
 }
 "#;
     let host = TestHost {
-        external_macro_elements: BTreeMap::from([(
+        native_prop_sources: BTreeMap::from([(
             ("./types".to_string(), "ImportedBase".to_string()),
-            ResolvedElements {
-                props: vec![ResolvedProp {
-                    span: Span::new(0, 0),
-                    key: Span::new(0, 0),
-                    key_name: Some("href".to_string()),
-                    optional: true,
-                    types: vec![RuntimeType::String],
-                    visibility: ResolvedMemberVisibility::Public,
-                    type_span: None,
-                    type_text: Some("string".to_string()),
-                    map_local: false,
-                    span_is_absolute: true,
-                    declared_in_macro_type_arg: false,
-                }],
-                ..ResolvedElements::default()
-            },
+            (),
         )]),
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::from(["Props".to_string()]),
@@ -1389,24 +1305,9 @@ type Props = {
 }
 "#;
     let host = TestHost {
-        external_macro_elements: BTreeMap::from([(
+        native_prop_sources: BTreeMap::from([(
             ("./types".to_string(), "ImportedBase".to_string()),
-            ResolvedElements {
-                props: vec![ResolvedProp {
-                    span: Span::new(0, 0),
-                    key: Span::new(0, 0),
-                    key_name: Some("label".to_string()),
-                    optional: true,
-                    types: vec![RuntimeType::String],
-                    visibility: ResolvedMemberVisibility::Public,
-                    type_span: None,
-                    type_text: Some("string".to_string()),
-                    map_local: false,
-                    span_is_absolute: true,
-                    declared_in_macro_type_arg: false,
-                }],
-                ..ResolvedElements::default()
-            },
+            (),
         )]),
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::from(["Props".to_string()]),
@@ -1481,24 +1382,9 @@ fn resolve_component_meta_parts_skips_direct_imported_macro_resolution_when_loca
 type Props = Omit<ImportedBase, 'hidden'>
 "#;
     let host = TestHost {
-        external_macro_elements: BTreeMap::from([(
+        native_prop_sources: BTreeMap::from([(
             ("./types".to_string(), "ImportedBase".to_string()),
-            ResolvedElements {
-                props: vec![ResolvedProp {
-                    span: Span::new(0, 0),
-                    key: Span::new(0, 0),
-                    key_name: Some("label".to_string()),
-                    optional: true,
-                    types: vec![RuntimeType::String],
-                    visibility: ResolvedMemberVisibility::Public,
-                    type_span: None,
-                    type_text: Some("string".to_string()),
-                    map_local: false,
-                    span_is_absolute: true,
-                    declared_in_macro_type_arg: false,
-                }],
-                ..ResolvedElements::default()
-            },
+            (),
         )]),
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::from(["Props".to_string()]),
@@ -1569,24 +1455,9 @@ fn resolve_component_meta_parts_skips_direct_imported_macro_resolution_when_owne
 type Props = Omit<ImportedBase, 'hidden'>
 "#;
     let host = TestHost {
-        external_macro_elements: BTreeMap::from([(
+        native_prop_sources: BTreeMap::from([(
             ("./types".to_string(), "ImportedBase".to_string()),
-            ResolvedElements {
-                props: vec![ResolvedProp {
-                    span: Span::new(0, 0),
-                    key: Span::new(0, 0),
-                    key_name: Some("label".to_string()),
-                    optional: true,
-                    types: vec![RuntimeType::String],
-                    visibility: ResolvedMemberVisibility::Public,
-                    type_span: None,
-                    type_text: Some("string".to_string()),
-                    map_local: false,
-                    span_is_absolute: true,
-                    declared_in_macro_type_arg: false,
-                }],
-                ..ResolvedElements::default()
-            },
+            (),
         )]),
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::from(["Props".to_string()]),
@@ -1658,25 +1529,7 @@ type Props = Omit<ImportedBase, 'hidden'>
 #[test]
 fn resolve_component_meta_parts_keeps_direct_imported_macro_root_seeded() {
     let host = TestHost {
-        external_macro_elements: BTreeMap::from([(
-            ("./types".to_string(), "Props".to_string()),
-            ResolvedElements {
-                props: vec![ResolvedProp {
-                    span: Span::new(0, 0),
-                    key: Span::new(0, 0),
-                    key_name: Some("label".to_string()),
-                    optional: false,
-                    types: vec![RuntimeType::String],
-                    visibility: ResolvedMemberVisibility::Public,
-                    type_span: None,
-                    type_text: Some("string".to_string()),
-                    map_local: false,
-                    span_is_absolute: true,
-                    declared_in_macro_type_arg: false,
-                }],
-                ..ResolvedElements::default()
-            },
-        )]),
+        native_prop_sources: BTreeMap::from([(("./types".to_string(), "Props".to_string()), ())]),
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::new(),
         owner_local_roots_with_surface: BTreeSet::new(),
@@ -1756,39 +1609,9 @@ fn resolve_component_meta_parts_seeds_imported_macro_root_when_graph_metadata_un
     // declaration, NOT by a substring scan of the underlying
     // alias body.
     let host = TestHost {
-        external_macro_elements: BTreeMap::from([(
+        native_prop_sources: BTreeMap::from([(
             ("./types".to_string(), "StringOrVNode".to_string()),
-            ResolvedElements {
-                props: vec![
-                    ResolvedProp {
-                        span: Span::new(0, 0),
-                        key: Span::new(0, 0),
-                        key_name: Some("component".to_string()),
-                        optional: true,
-                        types: vec![RuntimeType::Object],
-                        visibility: ResolvedMemberVisibility::Public,
-                        type_span: None,
-                        type_text: Some("object".to_string()),
-                        map_local: false,
-                        span_is_absolute: true,
-                        declared_in_macro_type_arg: false,
-                    },
-                    ResolvedProp {
-                        span: Span::new(0, 0),
-                        key: Span::new(0, 0),
-                        key_name: Some("children".to_string()),
-                        optional: true,
-                        types: vec![RuntimeType::String],
-                        visibility: ResolvedMemberVisibility::Public,
-                        type_span: None,
-                        type_text: Some("string".to_string()),
-                        map_local: false,
-                        span_is_absolute: true,
-                        declared_in_macro_type_arg: false,
-                    },
-                ],
-                ..ResolvedElements::default()
-            },
+            (),
         )]),
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::new(),
@@ -1860,7 +1683,7 @@ interface Helper {
 }
 "#;
     let host = TestHost {
-        external_macro_elements: BTreeMap::new(),
+        native_prop_sources: BTreeMap::new(),
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::from(["Props".to_string()]),
         owner_local_roots_with_surface: BTreeSet::from(["Props".to_string()]),

@@ -2787,10 +2787,6 @@ pub(crate) struct StyleOverrideWithAnalysis {
 /// Maximum recursion depth for external type resolution.
 ///
 /// Safety net for pathological barrel chains. The barrel resolution cache
-/// and visiting set handle all practical cases; this limit only fires for
-/// truly extreme input (e.g., 130+ nested `export *` chains).
-pub(crate) const MAX_RESOLVE_DEPTH: usize = 128;
-
 /// Maximum distinct `(canonical,type)` external-resolution pairs per request.
 ///
 /// This is a hard safety cap for component-meta and macro type resolution.
@@ -2798,25 +2794,6 @@ pub(crate) const MAX_RESOLVE_DEPTH: usize = 128;
 /// fail explicitly instead of continuing to allocate until the caller runs
 /// out of memory.
 pub(crate) const MAX_EXTERNAL_TYPE_RESOLVE_STEPS: usize = 2_000;
-
-/// Error from [`VerterHost::resolve_external_type_from_loaded_files`].
-#[derive(Debug, Clone)]
-pub enum ExternalTypeResolveError {
-    /// The root dependency could not be resolved.
-    MissingRootDependency,
-    /// Recursion depth exceeded the configured limit.
-    DepthLimitExceeded {
-        limit: usize,
-        type_name: String,
-        last_dep: String,
-    },
-    /// Total distinct external-type resolution steps exceeded the hard limit.
-    StepLimitExceeded {
-        limit: usize,
-        type_name: String,
-        last_dep: String,
-    },
-}
 
 /// Cached host-owned component-meta resolved state.
 ///

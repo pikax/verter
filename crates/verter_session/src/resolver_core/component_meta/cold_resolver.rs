@@ -237,7 +237,7 @@ where
             // dispatch resolution that produced the elements payload:
             // keep-all rows built directly from the one-level
             // `TypeInfoSurface` members (visibility carried verbatim) —
-            // no `ResolvedElements` round-trip, no separate re-resolve.
+            // no parser projection round-trip, no separate re-resolve.
             // The published props/emits/slots/
             // exposed surface is NOT projected here — it is owned by the
             // typeinfo macro-surface path (`vue_macro_dtos`), which

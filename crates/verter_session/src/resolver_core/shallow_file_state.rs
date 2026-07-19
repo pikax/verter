@@ -18,7 +18,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::route_demand::RouteDemand;
 use crate::decl_body_memo::{DemandOutcome, LoweredTypeDecl, LoweredValueDecl};
-pub(crate) use verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource;
+pub(crate) use verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource;
 use verter_semantic::analysis::decl_headers::{TypeDeclHeader, ValueDeclHeader};
 use verter_semantic::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
 use verter_semantic::analysis::Hash16;
@@ -615,7 +615,7 @@ impl ShallowFileState {
             ),
         );
         let analysis = Arc::new(
-            verter_parser::utils::oxc::script::type_surface::analyze_external_type_source(
+            verter_parser::utils::oxc::script::type_inventory::analyze_external_type_source(
                 source, &allocator,
             ),
         );
@@ -2124,7 +2124,7 @@ mod tests {
     fn make_analysis(source: &str) -> Arc<AnalyzedExternalTypeSource> {
         let alloc = oxc_allocator::Allocator::new();
         Arc::new(
-            verter_parser::utils::oxc::script::type_surface::analyze_external_type_source(
+            verter_parser::utils::oxc::script::type_inventory::analyze_external_type_source(
                 source, &alloc,
             ),
         )

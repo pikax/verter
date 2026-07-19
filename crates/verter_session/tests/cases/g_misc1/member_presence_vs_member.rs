@@ -31,8 +31,10 @@ use verter_session::resolver_core::shallow_file_state::ShallowFileState;
 use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr};
 
 fn empty_external(
-) -> Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
-    Arc::new(verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default())
+) -> Arc<verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource> {
+    Arc::new(
+        verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource::default(),
+    )
 }
 
 /// Build a `Foo` interface from a member list `[(name, type-text)]`

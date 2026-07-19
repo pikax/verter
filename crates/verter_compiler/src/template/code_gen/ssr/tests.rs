@@ -18,7 +18,13 @@ fn compile_sfc_ssr(source: &str) -> VerterCompileResult {
         ssr: true,
         ..Default::default()
     };
-    compile(source, &options, &verter_opts, &alloc)
+    compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    )
 }
 
 /// Helper: compile and return the template code, asserting no errors.

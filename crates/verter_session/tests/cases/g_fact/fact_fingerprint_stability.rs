@@ -35,8 +35,10 @@ use verter_session::project_type_store::IndexedReady;
 use verter_session::resolver_core::shallow_file_state::ShallowFileState;
 
 fn empty_external(
-) -> Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
-    Arc::new(verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default())
+) -> Arc<verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource> {
+    Arc::new(
+        verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource::default(),
+    )
 }
 
 /// Build a real `IndexedReady` from authored source through the

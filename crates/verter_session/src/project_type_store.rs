@@ -192,7 +192,7 @@ pub struct IndexedReady {
     /// no dependency names, no raw surfaces — body-derived data lives on
     /// the shallow state's lazy declaration-body memo).
     pub external_type_analysis:
-        Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource>,
+        Arc<verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource>,
     /// Mirror of `script_analysis.flags & DECLARES_INTERFACE_APP_CONFIG`
     /// projected onto `IndexedReady` so the
     /// `AppConfigNoOverrideProofDb` production producer can short-circuit
@@ -253,7 +253,7 @@ impl IndexedReady {
         raw_source: Arc<str>,
         eval_source: Arc<str>,
         external_type_analysis: Arc<
-            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource,
+            verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource,
         >,
     ) -> Self {
         Self {
@@ -289,7 +289,8 @@ impl IndexedReady {
     pub fn new_for_test(whole_hash: Hash16) -> Self {
         use rustc_hash::FxHashMap;
         let analysis = Arc::new(
-            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
+            verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource::default(
+            ),
         );
         let shallow =
             crate::resolver_core::shallow_file_state::ShallowFileState::header_routing_only_for_test(
@@ -1982,7 +1983,8 @@ mod tests {
         let hash_v1 = [1u8; 16];
         let hash_v2 = [2u8; 16];
         let analysis = Arc::new(
-            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
+            verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource::default(
+            ),
         );
         let shallow = Arc::new(
             crate::resolver_core::shallow_file_state::ShallowFileState::header_routing_only_for_test(
@@ -2007,7 +2009,7 @@ mod tests {
                 export_signatures: None,
                 snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
                 external_type_analysis: Arc::new(
-                    verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
+                    verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource::default(),
                 ),
                 declares_interface_app_config: false,
                 macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
@@ -2037,7 +2039,8 @@ mod tests {
     fn indexed_counters_reflect_insertions_and_replacements() {
         let store = ProjectTypeStore::new();
         let analysis = Arc::new(
-            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
+            verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource::default(
+            ),
         );
         let mk_indexed = |hash: Hash16| {
             Arc::new(IndexedReady {

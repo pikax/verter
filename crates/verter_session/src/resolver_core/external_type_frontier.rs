@@ -867,10 +867,10 @@ mod tests {
 
     fn make_analysis(
         source: &str,
-    ) -> Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
+    ) -> Arc<verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource> {
         let alloc = oxc_allocator::Allocator::new();
         Arc::new(
-            verter_parser::utils::oxc::script::type_surface::analyze_external_type_source(
+            verter_parser::utils::oxc::script::type_inventory::analyze_external_type_source(
                 source, &alloc,
             ),
         )
