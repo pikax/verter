@@ -8,8 +8,8 @@ use verter_session::FileAnalysisSnapshot;
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::{parse_opening_tag, SfcBlock};
 use crate::features::cursor_context::{
-    classify_cursor_context, CursorContext, ExpressionKind, StyleCursorContext,
-    TemplateCursorContext,
+    classify_cursor_context_for_language, CarrierTemplateLanguage, CursorContext, ExpressionKind,
+    StyleCursorContext, TemplateCursorContext,
 };
 
 /// Result from completion, including an `is_incomplete` flag for re-query behavior.
@@ -49,15 +49,26 @@ pub fn completions_at_position(
     ssr_context: bool,
 ) -> Option<CompletionResult> {
     let offset = line_index.position_to_offset(position)?;
+    let carrier_language = doc_uri.and_then(CarrierTemplateLanguage::from_uri);
 
     // Classify cursor using AST-based context detection
-    let context = classify_cursor_context(offset, source, blocks, analysis);
+    let context =
+        classify_cursor_context_for_language(offset, source, blocks, analysis, carrier_language);
 
     match context {
-        CursorContext::RootLevel => Some(CompletionResult {
-            items: sfc_root_completions(source, blocks, offset, line_index),
-            is_incomplete: false,
-        }),
+        CursorContext::RootLevel => {
+            // Vue SFC scaffold snippets are invalid at Svelte's markup root.
+            // Until there is a Svelte-native root producer, fail closed and let
+            // the provider/editor supply ordinary markup completions.
+            if carrier_language == Some(CarrierTemplateLanguage::Svelte) {
+                None
+            } else {
+                Some(CompletionResult {
+                    items: sfc_root_completions(source, blocks, offset, line_index),
+                    is_incomplete: false,
+                })
+            }
+        }
         CursorContext::BlockOpeningTag { ref tag_name } => {
             // When cursor is inside a `generic`, `attrs`, or `attributes` attribute
             // value on a <script> tag, return None to let the TypeProvider handle
@@ -140,12 +151,20 @@ pub fn completions_at_position(
                             analysis,
                             resolve_component,
                             existing_attrs,
+                            carrier_language,
                         ) {
                             return Some(CompletionResult {
                                 items,
                                 is_incomplete: false,
                             });
                         }
+                    }
+                    // The generic attribute table below is Vue syntax. Until a
+                    // Svelte-native attribute producer exists, unresolved and
+                    // zero-public-prop Svelte elements fail closed instead of
+                    // leaking `v-*`, `v-model`, and `@click` suggestions.
+                    if carrier_language == Some(CarrierTemplateLanguage::Svelte) {
+                        return None;
                     }
                     Some(CompletionResult {
                         items: attribute_name_completions(),
@@ -1301,23 +1320,42 @@ fn component_prop_completions(
     analysis: &FileAnalysisSnapshot,
     resolve_component: Option<&dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>>,
     existing_attrs: &[String],
+    carrier_language: Option<CarrierTemplateLanguage>,
 ) -> Option<Vec<CompletionItem>> {
     let template = analysis.template.as_deref()?;
 
     // Find which component's opening tag contains the cursor
     let component_name = find_component_at_cursor(offset, source, template)?;
 
-    // Find the component usage to get its import source
+    // Prefer the analyzed component usage. During an incomplete opening tag the
+    // template parser may not retain that usage yet, so fall back to the script
+    // import whose local binding matches the structurally scanned tag name.
     let comp_usage = template
         .components
         .iter()
-        .find(|c| c.name == component_name || to_kebab_case(&c.name) == component_name)?;
-
-    let import_source = comp_usage.import_source.as_ref()?;
+        .find(|c| c.name == component_name || to_kebab_case(&c.name) == component_name);
+    let imported_binding = analysis.imports.iter().find_map(|import| {
+        import
+            .bindings
+            .iter()
+            .find(|binding| {
+                binding.name == component_name || to_kebab_case(&binding.name) == component_name
+            })
+            .map(|binding| (import.source.as_str(), binding.name.as_str()))
+    });
+    let (import_source, resolved_component_name) = if let Some(usage) = comp_usage {
+        (usage.import_source.as_deref()?, usage.name.as_str())
+    } else {
+        imported_binding?
+    };
 
     // Resolve the component's analysis (pass component name for barrel re-export following)
     let resolve_fn = resolve_component?;
-    let child_analysis = resolve_fn(import_source, Some(&comp_usage.name))?;
+    let child_analysis = resolve_fn(import_source, Some(resolved_component_name))?;
+    // Attribute syntax is owned by the PARENT template language. Import
+    // spelling is not a framework discriminator: extensionless resolution and
+    // barrel re-exports can both terminate at a Svelte child.
+    let uses_svelte_syntax = carrier_language == Some(CarrierTemplateLanguage::Svelte);
 
     let mut items = Vec::new();
 
@@ -1335,7 +1373,11 @@ fn component_prop_completions(
 
     if let (true, Some(child_template)) = (has_prop_defs, child_template) {
         for prop_def in &child_template.prop_definitions {
-            let label = to_kebab_case(&prop_def.name);
+            let label = if uses_svelte_syntax {
+                prop_def.name.clone()
+            } else {
+                to_kebab_case(&prop_def.name)
+            };
             if used_props.contains(prop_def.name.as_str()) || used_props.contains(label.as_str()) {
                 continue;
             }
@@ -1352,6 +1394,8 @@ fn component_prop_completions(
 
             let insert_text = if prop_def.is_boolean {
                 Some(label.clone())
+            } else if uses_svelte_syntax {
+                Some(format!("{}={{$1}}", label))
             } else {
                 Some(format!(":{}=\"$1\"", label))
             };
@@ -1375,7 +1419,11 @@ fn component_prop_completions(
         for m in child_analysis.macros.iter() {
             if m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps {
                 for field in &m.prop_fields {
-                    let label = to_kebab_case(&field.name);
+                    let label = if uses_svelte_syntax {
+                        field.name.clone()
+                    } else {
+                        to_kebab_case(&field.name)
+                    };
                     if used_props.contains(field.name.as_str())
                         || used_props.contains(label.as_str())
                     {
@@ -1385,7 +1433,11 @@ fn component_prop_completions(
                         label: label.clone(),
                         kind: Some(CompletionItemKind::PROPERTY),
                         detail: Some("prop".to_string()),
-                        insert_text: Some(format!(":{}=\"$1\"", label)),
+                        insert_text: Some(if uses_svelte_syntax {
+                            format!("{}={{$1}}", label)
+                        } else {
+                            format!(":{}=\"$1\"", label)
+                        }),
                         insert_text_format: Some(InsertTextFormat::SNIPPET),
                         sort_text: Some(format!("0{}", label)),
                         ..Default::default()
@@ -1526,7 +1578,10 @@ fn find_component_at_cursor(
         return Some(tag_name.to_string());
     }
 
-    None
+    // An incomplete opening tag can be absent from the semantic component
+    // inventory. Preserve the structurally recognized name so the caller can
+    // resolve it through the matching script import.
+    Some(tag_name.to_string())
 }
 
 /// Convert PascalCase to kebab-case.

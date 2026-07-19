@@ -1047,6 +1047,43 @@ fn test_root_completions_with_existing_blocks() {
 }
 
 #[test]
+fn svelte_root_whitespace_never_emits_vue_sfc_scaffolds() {
+    let source = "<script lang=\"ts\">const value = 1;</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let position = line_index
+        .offset_to_position(source.len() as u32)
+        .expect("root position");
+
+    let labels = completions_at_position(
+        &position,
+        source,
+        &blocks,
+        None,
+        &line_index,
+        None,
+        None,
+        Some("file:///workspace/App.svelte"),
+        false,
+    )
+    .map(|result| {
+        result
+            .items
+            .into_iter()
+            .map(|item| item.label)
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+
+    for vue_scaffold in ["template", "script setup", "style scoped", "i18n"] {
+        assert!(
+            !labels.contains(&vue_scaffold.to_string()),
+            "Svelte root whitespace must not emit Vue scaffold `{vue_scaffold}`: {labels:?}"
+        );
+    }
+}
+
+#[test]
 fn test_attribute_completions_script() {
     let source = "<script >\nconst x = 1;\n</script>";
     let blocks = scan_sfc_blocks(source);
@@ -2703,6 +2740,106 @@ fn test_component_prop_completions_from_macros() {
     // Verify kind is PROPERTY for props
     let foo_item = items.iter().find(|i| i.label == "foo").unwrap();
     assert_eq!(foo_item.kind, Some(CompletionItemKind::PROPERTY));
+}
+
+fn assert_svelte_parent_prop_syntax_for_resolved_import(import_source: &str) {
+    let source = "<Child ></Child>";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let parent_analysis = FileAnalysisSnapshot {
+        template: Some(
+            (verter_semantic::analysis::TemplateAnalysisSnapshot {
+                components: vec![
+                    verter_semantic::analysis::template::TemplateComponentUsage {
+                        name: "Child".to_string(),
+                        import_source: Some(import_source.to_string()),
+                        is_dynamic: false,
+                        props: vec![],
+                        has_spread: false,
+                        slots_used: vec![],
+                        static_classes: vec![],
+                        has_dynamic_class: false,
+                        dynamic_classes: vec![],
+                        v_models: vec![],
+                        bindings: vec![],
+                        events: vec![],
+                        span: verter_span::Span::new(0, source.len() as u32),
+                    },
+                ],
+                ..Default::default()
+            })
+            .into(),
+        ),
+        ..Default::default()
+    };
+    let child_analysis = FileAnalysisSnapshot {
+        template: Some(
+            (verter_semantic::analysis::TemplateAnalysisSnapshot {
+                prop_definitions: vec![verter_semantic::analysis::AnalyzedPropDefinition {
+                    name: "camelCaseProp".to_string(),
+                    type_annotation: Some("string".to_string()),
+                    has_default: false,
+                    is_required: true,
+                    is_boolean: false,
+                    used_in_template: false,
+                    used_in_script: false,
+                    span: verter_span::Span::new(0, 0),
+                }],
+                ..Default::default()
+            })
+            .into(),
+        ),
+        ..Default::default()
+    };
+    let cursor = source.find("<Child ").unwrap() + "<Child ".len();
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let expected_import = import_source.to_string();
+    let resolve = move |candidate: &str, _component_name: Option<&str>| {
+        (candidate == expected_import).then(|| child_analysis.clone())
+    };
+
+    let items = completions_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&parent_analysis),
+        &line_index,
+        Some(&resolve),
+        None,
+        Some("file:///workspace/App.svelte"),
+        false,
+    )
+    .expect("resolved child props")
+    .items;
+    let item = items
+        .iter()
+        .find(|item| item.label == "camelCaseProp")
+        .unwrap_or_else(|| panic!("Svelte parent must preserve the authored prop key: {items:?}"));
+    assert_eq!(
+        item.insert_text.as_deref(),
+        Some("camelCaseProp={$1}"),
+        "Svelte parent owns prop insertion syntax regardless of import spelling"
+    );
+    assert!(
+        !items.iter().any(|item| {
+            item.label == "camel-case-prop"
+                || item
+                    .insert_text
+                    .as_deref()
+                    .is_some_and(|text| text.starts_with(":camel-case-prop="))
+        }),
+        "resolved Svelte children must never inherit Vue prop syntax: {items:?}"
+    );
+}
+
+#[test]
+fn svelte_extensionless_component_import_uses_parent_prop_syntax() {
+    assert_svelte_parent_prop_syntax_for_resolved_import("./Child");
+}
+
+#[test]
+fn svelte_barrel_component_import_uses_parent_prop_syntax() {
+    assert_svelte_parent_prop_syntax_for_resolved_import("./components");
 }
 
 // ── binding_completion_kind unit tests ──────────────────────────────

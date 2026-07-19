@@ -161,6 +161,109 @@ fn test_root_level_outside_all_blocks() {
 }
 
 #[test]
+fn uppercase_tag_at_vue_root_stays_root_level() {
+    let source = "<template><div></div></template>\n<DraftCard ";
+    let blocks = scan_sfc_blocks(source);
+    let cursor = source.find("<DraftCard ").unwrap() + "<DraftCard ".len();
+
+    let ctx = classify_cursor_context(cursor as u32, source, &blocks, None);
+    assert!(
+        matches!(ctx, CursorContext::RootLevel),
+        "an invalid Vue-root component tag must not be classified as template markup: {ctx:?}"
+    );
+}
+
+#[test]
+fn script_only_vue_does_not_enable_svelte_root_markup() {
+    let source = "<script>export default {}</script>\n<DraftCard ";
+    let blocks = scan_sfc_blocks(source);
+    let cursor = source.len() as u32;
+
+    let ctx = classify_cursor_context_for_language(
+        cursor,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Vue),
+    );
+    assert!(
+        matches!(ctx, CursorContext::RootLevel),
+        "script-only Vue must not classify carrier-root markup as a template: {ctx:?}"
+    );
+}
+
+#[test]
+fn svelte_template_element_does_not_disable_root_markup() {
+    let source = "<template><span>fragment</span></template>\n<DraftCard ";
+    let blocks = scan_sfc_blocks(source);
+    let cursor = source.len() as u32;
+
+    let ctx = classify_cursor_context_for_language(
+        cursor,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Svelte),
+    );
+    assert!(
+        matches!(
+            ctx,
+            CursorContext::Template(TemplateCursorContext::AttributeName {
+                ref tag_name,
+                is_component: true,
+                ..
+            }) if tag_name == "DraftCard"
+        ),
+        "a valid Svelte <template> element must not suppress later root markup: {ctx:?}"
+    );
+}
+
+#[test]
+fn paired_svelte_template_element_opening_and_content_use_template_semantics() {
+    let source = "<template >hello</template>";
+    let blocks = scan_sfc_blocks(source);
+    let mut template = empty_template();
+    template
+        .elements
+        .push(make_element("template", (0, 27), 11, 16));
+    let analysis = analysis_with_template(template);
+
+    let opening = classify_cursor_context_for_language(
+        10,
+        source,
+        &blocks,
+        Some(&analysis),
+        Some(CarrierTemplateLanguage::Svelte),
+    );
+    assert!(
+        matches!(
+            opening,
+            CursorContext::Template(TemplateCursorContext::AttributeName {
+                ref tag_name,
+                is_component: false,
+                ..
+            }) if tag_name == "template"
+        ),
+        "paired Svelte <template> opening must be ordinary markup: {opening:?}"
+    );
+
+    let content = classify_cursor_context_for_language(
+        12,
+        source,
+        &blocks,
+        Some(&analysis),
+        Some(CarrierTemplateLanguage::Svelte),
+    );
+    assert!(
+        matches!(
+            content,
+            CursorContext::Template(TemplateCursorContext::TextContent)
+        ),
+        "paired Svelte <template> content must be ordinary markup: {content:?}"
+    );
+}
+
+#[test]
 fn test_script_block_content() {
     let source = "<script setup>\nconst x = 1\n</script>\n";
     let blocks = scan_sfc_blocks(source);

@@ -119,6 +119,30 @@ pub enum StyleCursorContext {
     General,
 }
 
+/// Framework ownership of root markup. Vue templates live only inside an
+/// explicit `<template>` SFC block; Svelte markup lives at carrier root (where
+/// `<template>` itself is an ordinary element).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CarrierTemplateLanguage {
+    Vue,
+    Svelte,
+}
+
+impl CarrierTemplateLanguage {
+    pub fn from_uri(uri: &str) -> Option<Self> {
+        let language = verter_session::LanguageRegistry::global()
+            .classify_static(uri)
+            .static_resolution();
+        if language.is_svelte() {
+            Some(Self::Svelte)
+        } else if language.is_framework_carrier() {
+            Some(Self::Vue)
+        } else {
+            None
+        }
+    }
+}
+
 // =============================================================================
 // Layer 1: AST-Based Structural Detection
 // =============================================================================
@@ -133,12 +157,53 @@ pub fn classify_cursor_context(
     blocks: &[SfcBlock],
     analysis: Option<&FileAnalysisSnapshot>,
 ) -> CursorContext {
+    classify_cursor_context_for_language(offset, source, blocks, analysis, None)
+}
+
+pub fn classify_cursor_context_for_language(
+    offset: u32,
+    source: &str,
+    blocks: &[SfcBlock],
+    analysis: Option<&FileAnalysisSnapshot>,
+    language: Option<CarrierTemplateLanguage>,
+) -> CursorContext {
+    // Svelte has no Vue-style `<template>` or custom SFC blocks: all paired
+    // root elements/components are ordinary template markup. Only script/style
+    // participate in SFC block classification.
+    let svelte_blocks = (language == Some(CarrierTemplateLanguage::Svelte)).then(|| {
+        blocks
+            .iter()
+            .filter(|block| matches!(block.tag_name.as_str(), "script" | "style"))
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+    let blocks = svelte_blocks.as_deref().unwrap_or(blocks);
+
     // Step 1: SFC block detection using existing scanner
     match classify_cursor(offset, blocks) {
-        SfcCursorContext::RootLevel => return CursorContext::RootLevel,
+        SfcCursorContext::RootLevel => {
+            return classify_root_or_template_context(offset, source, blocks, analysis, language);
+        }
         SfcCursorContext::OpeningTag { block_index } => {
+            let block = &blocks[block_index];
+            let has_explicit_template_block = blocks.iter().any(|item| item.tag_name == "template");
+            let inside_template_content = blocks.iter().any(|item| {
+                let (start, end) = item.content_range();
+                item.tag_name == "template" && offset >= start && offset <= end
+            });
+            if language == Some(CarrierTemplateLanguage::Vue)
+                && has_explicit_template_block
+                && !inside_template_content
+                && block
+                    .tag_name
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|byte| byte.is_ascii_uppercase())
+            {
+                return CursorContext::RootLevel;
+            }
             return CursorContext::BlockOpeningTag {
-                tag_name: blocks[block_index].tag_name.clone(),
+                tag_name: block.tag_name.clone(),
             };
         }
         SfcCursorContext::ClosingTag { .. } => return CursorContext::BlockClosingTag,
@@ -151,7 +216,9 @@ pub fn classify_cursor_context(
         offset >= cs && offset <= ce
     }) {
         Some(b) => b,
-        None => return CursorContext::RootLevel,
+        None => {
+            return classify_root_or_template_context(offset, source, blocks, analysis, language);
+        }
     };
 
     match block.tag_name.as_str() {
@@ -161,6 +228,68 @@ pub fn classify_cursor_context(
         tag_name => CursorContext::CustomBlock {
             tag_name: tag_name.to_string(),
         },
+    }
+}
+
+/// Svelte markup lives at SFC root level rather than inside a `<template>`
+/// block. When semantic analysis places the cursor inside an element, classify
+/// that root span through the normal template path; genuine SFC root positions
+/// remain root-level.
+fn classify_root_or_template_context(
+    offset: u32,
+    source: &str,
+    blocks: &[SfcBlock],
+    analysis: Option<&FileAnalysisSnapshot>,
+    language: Option<CarrierTemplateLanguage>,
+) -> CursorContext {
+    let has_explicit_template_block = blocks.iter().any(|block| block.tag_name == "template");
+    let inside_explicit_template = blocks.iter().any(|block| {
+        let (start, end) = block.content_range();
+        block.tag_name == "template"
+            && offset >= start
+            && (offset < end
+                || (offset == end
+                    && block.close_tag_start == block.close_tag_end
+                    && end as usize == source.len()))
+    });
+    let is_template_position = analysis
+        .and_then(|snapshot| snapshot.template.as_ref())
+        .is_some_and(|template| {
+            find_deepest_element(offset, &template.elements).is_some()
+                || template
+                    .components
+                    .iter()
+                    .any(|component| offset >= component.span.start && offset < component.span.end)
+        });
+    let semantic_position_is_owned = match language {
+        Some(CarrierTemplateLanguage::Vue) => inside_explicit_template,
+        Some(CarrierTemplateLanguage::Svelte) | None => true,
+    };
+    if is_template_position && semantic_position_is_owned {
+        classify_template_context(offset, source, analysis)
+    } else {
+        // Error-tolerant Svelte analysis may not retain an element/component
+        // node for an opening tag that is still being typed. Preserve the
+        // structurally unambiguous uppercase component-tag context from source.
+        let fallback = classify_template_text_fallback(offset, source);
+        let is_incomplete_component = match &fallback {
+            TemplateCursorContext::TagName { partial } => partial
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_uppercase()),
+            TemplateCursorContext::AttributeName { is_component, .. } => *is_component,
+            _ => false,
+        };
+        let source_position_is_owned = match language {
+            Some(CarrierTemplateLanguage::Vue) => inside_explicit_template,
+            Some(CarrierTemplateLanguage::Svelte) => true,
+            None => !has_explicit_template_block || inside_explicit_template,
+        };
+        if is_incomplete_component && source_position_is_owned {
+            CursorContext::Template(fallback)
+        } else {
+            CursorContext::RootLevel
+        }
     }
 }
 
