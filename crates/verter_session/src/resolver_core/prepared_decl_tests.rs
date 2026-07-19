@@ -416,6 +416,7 @@ declare module "ext" { namespace NS { interface Foo { x: GlobalOnly } } }
         &AugmentationScopeKind::Module("ext".into()),
         "NS.Foo",
         None,
+        &ImportCanonicalization::default(),
         &test_interner(),
     )
     .expect("NS.Foo preparation should succeed")
@@ -956,6 +957,7 @@ fn broken_lease_augmentation_prepared_build_surfaces_lease_miss() {
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 "A",
                 None,
+                &ImportCanonicalization::default(),
                 &test_interner(),
             ),
             PreparedDeclOutcome::Ready(Some(_))
@@ -976,6 +978,7 @@ fn broken_lease_augmentation_prepared_build_surfaces_lease_miss() {
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 "B",
                 None,
+                &ImportCanonicalization::default(),
                 &test_interner(),
             ),
             PreparedDeclOutcome::LeaseMiss

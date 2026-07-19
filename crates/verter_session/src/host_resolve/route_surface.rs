@@ -192,7 +192,7 @@ impl VerterHost {
 
     /// host-level re-export chain walking helper.
     ///
-    /// Resolves a bare-name reference in a scope, walking the
+    /// Resolves a bare-name reference in an exact owner scope, walking the
     /// re-export chain to the declaring file. Returns the canonical
     /// `DeclIdentity` describing the declaring file, the resolved
     /// symbol name, and the file's whole-hash.
@@ -202,9 +202,8 @@ impl VerterHost {
     /// 1. `resolve_bare_name_in_scope` → `(canonical_id, symbol_name)`.
     /// 2. `resolve_prepared_decl_target` → final declaring location.
     ///
-    /// Returns `None` only when the bare name cannot be resolved at
-    /// all and the requested scope is itself missing a shallow
-    /// state.
+    /// Returns `None` when the bare name is not visible from that owner. It
+    /// never falls back to another top-level owner in the same file.
     ///
     /// Test-only — exercised by the in-tree
     /// `host_resolve_tests::resolve_decl_in_scope_with_reexport_chain_*`
@@ -215,41 +214,36 @@ impl VerterHost {
     pub(crate) fn resolve_decl_in_scope_with_reexport_chain(
         &self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Option<crate::semantic_query::DeclIdentity> {
         let scope_payload_arc = self.prepared_decl_bundle(scope_canonical_id).map(|bundle| {
             std::sync::Arc::new(
                 crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
                     &bundle,
-                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    scope_owner,
                 ),
             )
         });
         let resolved_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
             self,
             scope_canonical_id,
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            scope_owner,
             scope_payload_arc.as_deref(),
             symbol_name,
-        )
-        .map(|root| (root.canonical_id, root.symbol_name))
-        .unwrap_or_else(|| {
-            let interner = self.project_type_store().identity_interner();
-            (
-                interner.intern(scope_canonical_id),
-                interner.intern(symbol_name),
-            )
-        });
+        )?;
         // Walk the re-export chain to land on the declaring file.
-        let (declaring_canonical, declaring_symbol) =
-            self.resolve_prepared_decl_target(resolved_root.0.as_ref(), resolved_root.1.as_ref());
+        let (declaring_canonical, declaring_symbol) = self.resolve_prepared_decl_target(
+            resolved_root.canonical_id.as_ref(),
+            resolved_root.symbol_name.as_ref(),
+        );
         let whole_hash = self
             .shallow_file_state(declaring_canonical.as_str())
             .map(|s| s.whole_hash)
             .unwrap_or_default();
         Some(crate::semantic_query::DeclIdentity {
             canonical_id: std::sync::Arc::from(declaring_canonical.as_str()),
-            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            owner: resolved_root.owner,
             whole_hash,
             decl_name: std::sync::Arc::from(declaring_symbol.as_str()),
         })

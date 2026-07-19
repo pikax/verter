@@ -574,7 +574,10 @@ impl VerterHost {
         // route resolution.
         let route_canonical_id = identity.analysis_canonical();
         let state = &facts.shallow_state;
-        if !state.has_resolvable_surface() && state.import_targets.is_empty() {
+        if !state.has_resolvable_surface()
+            && state.import_targets.is_empty()
+            && !state.has_augmentation_declarations()
+        {
             return None;
         }
         let (dep_edges, _import_route_hash) =
@@ -861,7 +864,10 @@ impl VerterHost {
         // admission.
         let serve = self.routed_shallow_state_serve(canonical_id)?;
         let state = serve.state;
-        if !state.has_resolvable_surface() && state.import_targets.is_empty() {
+        if !state.has_resolvable_surface()
+            && state.import_targets.is_empty()
+            && !state.has_augmentation_declarations()
+        {
             // Surface-emptiness is a property of the SERVED artifact,
             // not necessarily of live content — carry the serve's
             // publication status so the flight lane can judge the
@@ -1055,7 +1061,10 @@ impl VerterHost {
         let serve = self.ensure_indexed_ready_serve(canonical_id)?;
         let facts = &serve.indexed;
         let state = &facts.shallow_state;
-        if !state.has_resolvable_surface() && state.import_targets.is_empty() {
+        if !state.has_resolvable_surface()
+            && state.import_targets.is_empty()
+            && !state.has_augmentation_declarations()
+        {
             // Surface-emptiness is a property of the SERVED artifact,
             // not necessarily of live content — carry the serve's
             // publication status so the flight lane can judge the

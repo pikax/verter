@@ -334,6 +334,7 @@ fn projection_inputs<'a>(
         name_resolution: names,
         scope_payload: None,
         shadowing,
+        authored_resolution_debt: None,
     }
 }
 

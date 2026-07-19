@@ -29,6 +29,7 @@
 //! from `scope` (the owning canonical) plus the resolver's augmentation
 //! index, exactly as the eager `Ref` path derives it.
 
+use std::cell::Cell;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -71,6 +72,79 @@ pub(crate) struct CarrierResolverContext<'a> {
     /// The reduction-demand axis (`Published` / `StructuralTransit`) plus the
     /// query mode — selects carrier-vs-execute at the demand point.
     reduction_context: ProjectionReductionContext,
+    /// Call-owned unresolved-import debt for the declaration currently being
+    /// instantiated. The reference never escapes that Instantiate call and is
+    /// absent from carrier-subject rehydration and nested Instantiate calls.
+    authored_resolution_debt: Option<&'a AuthoredResolutionDebtFrame>,
+}
+
+/// One call-owned unresolved-import debt created from an
+/// `AuthoredPartial(MissingExternalOwner)` prepared declaration.
+///
+/// Strict preparation cannot assign a file owner to an unresolved import, but
+/// the normal demand-time reference resolver may still resolve the exact local
+/// binding (notably through ambient external-module declarations). This frame
+/// keeps that typed debt provisional until the declaration body has traversed
+/// the normal resolver. It is deliberately local to one Instantiate call: no
+/// dispatcher field, thread-local state, query-key state, or cross-call aliasing.
+/// Nested Instantiate calls construct independent frames.
+///
+/// `finish` must be called on every non-panicking exit. The drop assertion makes
+/// that discipline structural while allowing unwind cleanup to remain inert.
+pub(super) struct AuthoredResolutionDebtFrame {
+    canonical_id: Arc<str>,
+    owner: verter_type_expr::TopLevelOwnerId,
+    local_name: Arc<str>,
+    outstanding: Cell<bool>,
+    finished: Cell<bool>,
+}
+
+impl AuthoredResolutionDebtFrame {
+    pub(super) fn new(root_identity: &ResolvedRootIdentity, local_name: &str) -> Self {
+        Self {
+            canonical_id: Arc::clone(&root_identity.canonical_id),
+            owner: root_identity.owner,
+            local_name: Arc::from(local_name),
+            outstanding: Cell::new(true),
+            finished: Cell::new(false),
+        }
+    }
+
+    fn observe_exact_resolution(&self, scope: &NodeScopeId, local_name: &str) {
+        let NodeScopeId::File {
+            canonical_id,
+            owner,
+            ..
+        } = scope
+        else {
+            return;
+        };
+        if canonical_id.as_ref() == self.canonical_id.as_ref()
+            && *owner == self.owner
+            && local_name == self.local_name.as_ref()
+        {
+            self.outstanding.set(false);
+        }
+    }
+
+    /// Finalize this call-owned frame and report whether unresolved-owner debt
+    /// remains after normal reference resolution.
+    pub(super) fn finish(&self) -> bool {
+        debug_assert!(
+            !self.finished.replace(true),
+            "authored resolution debt must be finalized exactly once"
+        );
+        self.outstanding.get()
+    }
+}
+
+impl Drop for AuthoredResolutionDebtFrame {
+    fn drop(&mut self) {
+        debug_assert!(
+            std::thread::panicking() || self.finished.get(),
+            "authored resolution debt left an Instantiate call without finalization"
+        );
+    }
 }
 
 impl<'a> CarrierResolverContext<'a> {
@@ -93,6 +167,23 @@ impl<'a> CarrierResolverContext<'a> {
             scope_payload,
             shadowing,
             reduction_context,
+            authored_resolution_debt: None,
+        }
+    }
+
+    /// Attach the call-owned unresolved-owner debt of the declaration whose
+    /// body this resolver is traversing.
+    pub(super) fn with_authored_resolution_debt(
+        mut self,
+        debt: Option<&'a AuthoredResolutionDebtFrame>,
+    ) -> Self {
+        self.authored_resolution_debt = debt;
+        self
+    }
+
+    fn observe_exact_owner_resolution(&self, local_name: &str) {
+        if let Some(debt) = self.authored_resolution_debt {
+            debt.observe_exact_resolution(self.scope, local_name);
         }
     }
 
@@ -489,9 +580,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope,
                     reduction_context,
                 ) {
+                    ctx.observe_exact_owner_resolution(name.as_ref());
                     return CarrierResolutionPlan::Ready(merged);
                 }
             }
+        }
+
+        if resolves_to_file {
+            ctx.observe_exact_owner_resolution(name.as_ref());
         }
 
         let Some(resolved_root) = resolved_root else {

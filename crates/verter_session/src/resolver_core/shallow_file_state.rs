@@ -1340,6 +1340,22 @@ impl ShallowFileState {
             .flat_map(|(scope, declarations)| declarations.keys().map(move |key| (scope, key)))
     }
 
+    /// Whether this file owns any type- or value-space ambient augmentation
+    /// declarations. These declarations require a prepared bundle even when
+    /// the ordinary file surface is empty, because the bundle owns their exact
+    /// import canonicalization and dependency facts.
+    pub(crate) fn has_augmentation_declarations(&self) -> bool {
+        let headers = self.decl_bodies.header_index();
+        headers
+            .augmentation_type_headers
+            .values()
+            .any(|declarations| !declarations.is_empty())
+            || headers
+                .augmentation_value_headers
+                .values()
+                .any(|declarations| !declarations.is_empty())
+    }
+
     /// Every `(scope, name)` key in the augmentation-scope VALUE inventory
     /// (header-level).
     pub fn augmentation_value_keys(

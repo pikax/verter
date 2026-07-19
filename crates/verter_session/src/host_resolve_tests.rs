@@ -4666,8 +4666,24 @@ fn resolve_decl_in_scope_with_reexport_chain_returns_declaring_decl_identity() {
         file_language: crate::FileLanguage::script_ts(),
         aliases: Vec::new(),
     });
+    let wrong_owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    assert!(
+        host.resolve_decl_in_scope_with_reexport_chain(
+            "/src/owner.vue",
+            wrong_owner,
+            "ChildProps",
+        )
+        .is_none(),
+        "an ordinary-script lookup must not see a script-setup import from another owner"
+    );
+
+    let script_setup_owner = verter_type_expr::TopLevelOwnerId::instance(0);
     let identity = host
-        .resolve_decl_in_scope_with_reexport_chain("/src/owner.vue", "ChildProps")
+        .resolve_decl_in_scope_with_reexport_chain(
+            "/src/owner.vue",
+            script_setup_owner,
+            "ChildProps",
+        )
         .expect("scope present must yield Some");
     // The declaring file is `/src/lib.ts`, NOT the owner scope.
     assert_eq!(

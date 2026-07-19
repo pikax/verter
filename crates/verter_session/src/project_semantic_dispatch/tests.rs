@@ -16220,6 +16220,7 @@ fn backfill_member_index_surface_carries_prepared_member_spans_and_origin() {
         &shadowing,
         &mut substitutions,
         context,
+        None,
     );
 
     // (4) Read back the appended member and pin the RECOVERED spans + origin

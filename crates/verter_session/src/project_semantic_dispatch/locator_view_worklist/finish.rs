@@ -81,7 +81,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             inputs.scope_payload,
             inputs.shadowing,
             context,
-        );
+        )
+        .with_authored_resolution_debt(inputs.authored_resolution_debt);
         match self.plan_bare_ref_head(&resolver_context, &name, type_args.len()) {
             CarrierResolutionPlan::Ready(value) => ReferenceProjectionPlan::Ready(value),
             CarrierResolutionPlan::NeedsArgs(continuation) => ReferenceProjectionPlan::NeedsArgs {
@@ -117,7 +118,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             inputs.scope_payload,
             inputs.shadowing,
             context,
-        );
+        )
+        .with_authored_resolution_debt(inputs.authored_resolution_debt);
         match self.plan_import_type_head(
             &resolver_context,
             owner_canonical.as_ref(),

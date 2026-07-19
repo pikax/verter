@@ -2517,25 +2517,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
             decl_owner,
             decl_name.as_ref(),
         );
-        let (prepared, authored_partial) = match adapter.resolve_prepared_type_decl(base, &ri) {
-            PreparedTypeDeclResolution::Complete(declaration) => (declaration, false),
+        let (prepared, authored_resolution_debt) = match adapter
+            .resolve_prepared_type_decl(base, &ri)
+        {
+            PreparedTypeDeclResolution::Complete(declaration) => (declaration, None),
             PreparedTypeDeclResolution::AuthoredPartial {
                 root_identity,
                 declaration,
                 failure,
             } => {
                 debug_assert_eq!(root_identity, declaration.root_identity);
-                debug_assert!(matches!(
-                    failure,
-                    crate::resolver_core::prepared_decl::PreparationFailure::MissingExternalOwner { .. }
-                ));
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::PreparationFailure,
-                );
-                self.fold_local_partial_completeness(
-                    crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY,
-                );
-                (declaration, true)
+                let crate::resolver_core::prepared_decl::PreparationFailure::MissingExternalOwner {
+                    local_name,
+                } = failure
+                else {
+                    unreachable!("AuthoredPartial is reserved for unresolved external owners")
+                };
+                let debt =
+                    crate::project_semantic_dispatch::carrier::AuthoredResolutionDebtFrame::new(
+                        &root_identity,
+                        &local_name,
+                    );
+                (declaration, Some(debt))
             }
             PreparedTypeDeclResolution::Missing => {
                 let mut out = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
@@ -2605,7 +2608,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // instantiation survives; provenance downgrades to
                 // structural — a type-parameter default is a substituted
                 // value, not the macro-T own body.
-                self.lower_located_body_with_provenance(
+                self.lower_located_body_with_resolution_debt(
                     verter_type_expr::locators::AuthoredBodyLocator::DeclBody(default.clone()),
                     prepared.kind,
                     &prepared.type_parameters[..index],
@@ -2616,6 +2619,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &shadowing,
                     &mut substitutions,
                     context.into_structural_provenance(),
+                    authored_resolution_debt.as_ref(),
                 )
             } else if body_mode == crate::semantic_query::ProjectionMode::Skeleton {
                 // Skeleton mode preserves open generics.
@@ -2677,13 +2681,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
         );
         let pushed = self.push_instantiate_active(active_identity);
         if !pushed {
-            return (
+            let unresolved_owner_debt = authored_resolution_debt
+                .as_ref()
+                .is_some_and(|debt| debt.finish());
+            if unresolved_owner_debt {
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::PreparationFailure,
+                );
+                self.fold_local_partial_completeness(
+                    crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY,
+                );
+            }
+            let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput<_> = (
                 QueryResult::Value(self.opaque(QueryError::RecursiveRef {
                     name: Arc::clone(decl_name),
                 })),
                 empty_signature(),
             )
                 .into();
+            output.result_is_partial = unresolved_owner_debt;
+            output.cache_suppress = unresolved_owner_debt;
+            return output;
         }
         // Propagate the full
         // `ProjectionReductionContext` through body lowering so a
@@ -2712,6 +2730,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             &shadowing,
             &mut substitutions,
             context,
+            authored_resolution_debt.as_ref(),
         );
         // Member-index overlay (carries the caller's provenance):
         // `member_index` holds the declaration's OWN-body direct members.
@@ -2731,6 +2750,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             &shadowing,
             &mut substitutions,
             context,
+            authored_resolution_debt.as_ref(),
         );
 
         // Cross-file declaration augmentation (`declare module "X"` /
@@ -2837,6 +2857,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 observed_self_roots.push((aug_root.canonical, aug_root.whole_hash));
             }
         }
+        let unresolved_owner_debt = authored_resolution_debt
+            .as_ref()
+            .is_some_and(|debt| debt.finish());
+        if unresolved_owner_debt {
+            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                crate::resolver_core::resolver_context::NonCacheableReadReason::PreparationFailure,
+            );
+            self.fold_local_partial_completeness(
+                crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY,
+            );
+        }
         let mut output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
             QueryResult::Value(result),
             fence,
@@ -2862,7 +2893,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 crate::resolver_core::resolver_context::NonCacheableReadReason::UnobservableSource,
             );
         }
-        if authored_partial {
+        if unresolved_owner_debt {
             output.result_is_partial = true;
             output.cache_suppress = true;
         }
@@ -3059,8 +3090,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 source_env_unobservable = true;
                 continue;
             };
-            let state = &indexed.shallow_state;
-
             // The addressable contribution pointers: each augmenter
             // `ModuleAugmentationFact` that targets THIS decl gives the raw
             // `declare module "<spec>"` specifier under which the typed inner
@@ -3115,8 +3144,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 continue;
             }
 
-            let bundle = self.ctx.prepared_decl_bundle(augmenter_canonical.as_ref());
-            let dep_edges = bundle.as_ref().map(|b| Arc::clone(&b.dep_edges));
+            let Some(bundle) = self.ctx.prepared_decl_bundle(augmenter_canonical.as_ref()) else {
+                source_env_unobservable = true;
+                continue;
+            };
 
             let mut any_contribution = false;
             for (spec, contributor_owner) in &matched_specs {
@@ -3126,28 +3157,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     whole_hash: indexed.whole_hash,
                     local_scope: None,
                 };
-                let aug_scope_payload = bundle.as_ref().map(|bundle| {
+                let aug_scope_payload = Some(
                     crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
-                        bundle,
+                        &bundle,
                         *contributor_owner,
-                    )
-                });
+                    ),
+                );
                 let aug_shadowing =
                     crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
                         aug_scope_payload.as_ref(),
                     );
                 let aug_env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
-                let aug_prepared = match
-                    crate::resolver_core::prepared_decl::prepare_augmentation_type_decl_outcome_in(
-                        augmenter_canonical,
-                        state,
-                        &AugmentationScopeKind::Module(spec.clone()),
-                        *contributor_owner,
-                        decl_name,
-                        dep_edges.as_deref(),
-                        self.ctx.project_type_store().identity_interner(),
-                    )
-                {
+                let aug_prepared = match bundle.prepare_augmentation_type_decl_outcome_in(
+                    &AugmentationScopeKind::Module(spec.clone()),
+                    *contributor_owner,
+                    decl_name,
+                ) {
                     crate::resolver_core::prepared_decl::PreparedDeclOutcome::Ready(Some(
                         prepared,
                     )) => prepared,
@@ -3535,12 +3560,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             PreparedTypeDeclResolution::AuthoredPartial {
                 declaration: prepared,
                 ..
-            } => {
-                self.fold_local_partial_completeness(
-                    crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY,
-                );
-                Some(prepared.kind)
-            }
+            } => Some(prepared.kind),
             PreparedTypeDeclResolution::Missing => None,
             PreparedTypeDeclResolution::Failed { .. } => {
                 crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
@@ -3582,6 +3602,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         shadowing: &crate::resolver_core::scope_shadowing::ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         context: crate::semantic_query::ProjectionReductionContext,
+        authored_resolution_debt: Option<
+            &crate::project_semantic_dispatch::carrier::AuthoredResolutionDebtFrame,
+        >,
     ) -> SemanticNodeId {
         // The declaration's OWN decl-body locator (whole body).
         let canonical: Arc<str> = match scope {
@@ -3610,6 +3633,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             shadowing,
             substitutions,
             context,
+            authored_resolution_debt,
             &prepared.vue_ignored_heritage,
         )
     }
@@ -3711,6 +3735,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
+        self.lower_located_body_with_resolution_debt(
+            locator,
+            decl_kind,
+            type_parameters,
+            name_resolution,
+            env,
+            scope,
+            scope_payload,
+            shadowing,
+            substitutions,
+            context,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_located_body_with_resolution_debt(
+        &self,
+        locator: verter_type_expr::locators::AuthoredBodyLocator,
+        decl_kind: verter_semantic::analysis::type_eval::TypeDeclKind,
+        type_parameters: &[verter_type_expr::facts::NarrowTypeParam],
+        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        env: &FxHashMap<String, SemanticNodeId>,
+        scope: &NodeScopeId,
+        scope_payload: Option<&crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
+        shadowing: &crate::resolver_core::scope_shadowing::ScopeShadowing,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        context: crate::semantic_query::ProjectionReductionContext,
+        authored_resolution_debt: Option<
+            &crate::project_semantic_dispatch::carrier::AuthoredResolutionDebtFrame,
+        >,
+    ) -> SemanticNodeId {
         self.lower_located_body_with_vue_heritage_policy(
             locator,
             decl_kind,
@@ -3722,6 +3778,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             shadowing,
             substitutions,
             context,
+            authored_resolution_debt,
             &[],
         )
     }
@@ -3739,6 +3796,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         shadowing: &crate::resolver_core::scope_shadowing::ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         context: crate::semantic_query::ProjectionReductionContext,
+        authored_resolution_debt: Option<
+            &crate::project_semantic_dispatch::carrier::AuthoredResolutionDebtFrame,
+        >,
         vue_ignored_heritage: &[verter_type_expr::facts::VueIgnoredHeritageFact],
     ) -> SemanticNodeId {
         let owner_symbol = match &locator {
@@ -3800,6 +3860,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             name_resolution,
             scope_payload,
             shadowing,
+            authored_resolution_debt,
         };
         let projected =
             self.project_located_decl_body(substituted, decl_kind, &inputs, substitutions, context);
@@ -3958,6 +4019,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         shadowing: &crate::resolver_core::scope_shadowing::ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         context: crate::semantic_query::ProjectionReductionContext,
+        authored_resolution_debt: Option<
+            &crate::project_semantic_dispatch::carrier::AuthoredResolutionDebtFrame,
+        >,
     ) -> SemanticNodeId {
         let Some(data) = self.graph().node_data(result) else {
             return result;
@@ -4029,7 +4093,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .iter()
             .filter(|(name, _)| !existing.contains(name.as_str()))
             .map(|(name, member)| {
-                let value = self.lower_located_body_with_provenance(
+                let value = self.lower_located_body_with_resolution_debt(
                     verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
                     prepared.kind,
                     &prepared.type_parameters,
@@ -4040,6 +4104,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     shadowing,
                     substitutions,
                     context.into_structural_provenance(),
+                    authored_resolution_debt,
                 );
                 SurfaceMember {
                     name: Arc::from(name.as_str()),

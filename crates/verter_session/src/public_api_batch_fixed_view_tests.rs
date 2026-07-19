@@ -408,9 +408,9 @@ defineEmits<ChildEmits>()
     // cross-SFC `<script>` export. A failed/empty cross-SFC walk would drop it.
     let parent = batch[1].as_ref().expect("Parent renders");
     assert!(
-        parent.code.contains("payload: number") && parent.code.contains("'childEvt'"),
+        parent.code.contains("event: \"childEvt\", payload: number"),
         "Parent must MATERIALIZE the sibling SFC's `ChildEmits` \
-         `(e: 'childEvt', payload: number)` signature; got:\n{}",
+         `(event: \"childEvt\", payload: number)` signature; got:\n{}",
         parent.code,
     );
 }

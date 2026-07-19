@@ -119,6 +119,7 @@ pub(super) struct LocatorViewInputs<'a> {
     pub(super) name_resolution: &'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
     pub(super) scope_payload: Option<&'a DeclarationScopePayload>,
     pub(super) shadowing: &'a ScopeShadowing,
+    pub(super) authored_resolution_debt: Option<&'a super::carrier::AuthoredResolutionDebtFrame>,
 }
 
 /// Per-projection memo so shared sub-graphs project once per context.
@@ -276,6 +277,7 @@ impl<'a> ProjectionBenchHarness<'a> {
             name_resolution: &case.name_resolution,
             scope_payload: case.scope_payload.as_ref(),
             shadowing: &case.shadowing,
+            authored_resolution_debt: None,
         };
         let outcome = self.dispatch.project_view_node_worklist(
             case.root,

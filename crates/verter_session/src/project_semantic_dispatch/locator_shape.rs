@@ -1304,17 +1304,43 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let scope_payload = bundle
             .as_ref()
             .map(|bundle| DeclarationScopePayload::from_bundle(bundle, anchor.owner));
-        let dep_edges = bundle.as_ref().map(|b| Arc::clone(&b.dep_edges));
         let prepared_anchor: Option<AnchorPreparedDecl> = match key.locator() {
             AuthoredBodyLocator::DeclBody(slot) => match slot.anchor.space {
-                verter_type_expr::locators::LocatorSymbolSpace::Type => self
-                    .ctx
-                    .prepared_type_decl_return_only(
-                        canonical.as_ref(),
-                        anchor.owner,
-                        anchor_symbol.as_ref(),
-                    )
-                    .map(AnchorPreparedDecl::Type),
+                verter_type_expr::locators::LocatorSymbolSpace::Type => bundle
+                    .as_ref()
+                    .and_then(|bundle| {
+                        match bundle.prepared_type_decls.get_in_for_projection(
+                            anchor.owner,
+                            anchor_symbol.as_ref(),
+                        ) {
+                            crate::resolver_core::prepared_decl::PreparedTypeDeclResolution::Complete(
+                                prepared,
+                            )
+                            | crate::resolver_core::prepared_decl::PreparedTypeDeclResolution::AuthoredPartial {
+                                declaration: prepared,
+                                ..
+                            } => Some(AnchorPreparedDecl::Type(prepared)),
+                            crate::resolver_core::prepared_decl::PreparedTypeDeclResolution::Missing => {
+                                None
+                            }
+                            crate::resolver_core::prepared_decl::PreparedTypeDeclResolution::Failed {
+                                failure,
+                                ..
+                            } => {
+                                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                                    crate::resolver_core::resolver_context::NonCacheableReadReason::PreparationFailure,
+                                );
+                                tracing::error!(
+                                    ?failure,
+                                    canonical_id = canonical.as_ref(),
+                                    owner = ?anchor.owner,
+                                    symbol = anchor_symbol.as_ref(),
+                                    "locator anchor preparation failed without an authored carrier"
+                                );
+                                None
+                            }
+                        }
+                    }),
                 verter_type_expr::locators::LocatorSymbolSpace::Value => self
                     .ctx
                     .prepared_value_decl(canonical.as_ref(), anchor.owner, anchor_symbol.as_ref())
@@ -1331,18 +1357,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         AugmentationScopeKind::Module(specifier.as_ref().to_string())
                     }
                 };
-                crate::resolver_core::prepared_decl::prepare_augmentation_type_decl_in(
-                    canonical.as_ref(),
-                    &indexed.shallow_state,
-                    &scope_kind,
-                    anchor.owner,
-                    anchor_symbol.as_ref(),
-                    dep_edges.as_deref(),
-                    self.ctx.project_type_store().identity_interner(),
-                )
-                .ok()
-                .flatten()
-                .map(|prepared| AnchorPreparedDecl::Augmentation(Box::new(prepared)))
+                bundle
+                    .as_ref()
+                    .and_then(|bundle| {
+                        bundle
+                            .prepare_augmentation_type_decl_in(
+                                &scope_kind,
+                                anchor.owner,
+                                anchor_symbol.as_ref(),
+                            )
+                            .ok()
+                            .flatten()
+                    })
+                    .map(|prepared| AnchorPreparedDecl::Augmentation(Box::new(prepared)))
             }
             // A JSDoc typedef declares NO header type parameters (its deref
             // returns `type_parameters: Vec::new()`) and its comment-derived

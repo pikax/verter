@@ -77,7 +77,9 @@ pub enum PreparationFailure {
 /// cache. When strict preparation fails solely because an exact authored
 /// declaration references an unresolved import, projection may consume an
 /// ephemeral declaration that retains the known authored shape while carrying
-/// the typed failure. The partial declaration is never written into a slot.
+/// typed unresolved-owner debt. The declaration is never written into a slot;
+/// the projection must run the normal resolver and classify the result partial
+/// only if that exact debt remains unresolved at query exit.
 #[derive(Debug, Clone)]
 pub enum PreparedTypeDeclResolution {
     Complete(Arc<PreparedTypeDecl>),
@@ -374,6 +376,7 @@ pub fn prepare_augmentation_type_decl(
     scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
+    import_canonicalization: &ImportCanonicalization,
     interner: &IdentityInterner,
 ) -> Result<Option<PreparedTypeDecl>, PreparationFailure> {
     prepare_augmentation_type_decl_in(
@@ -383,6 +386,7 @@ pub fn prepare_augmentation_type_decl(
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
         symbol_name,
         dep_edges,
+        import_canonicalization,
         interner,
     )
 }
@@ -394,6 +398,7 @@ pub fn prepare_augmentation_type_decl_in(
     owner: verter_type_expr::TopLevelOwnerId,
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
+    import_canonicalization: &ImportCanonicalization,
     interner: &IdentityInterner,
 ) -> Result<Option<PreparedTypeDecl>, PreparationFailure> {
     prepare_augmentation_type_decl_outcome_in(
@@ -403,6 +408,7 @@ pub fn prepare_augmentation_type_decl_in(
         owner,
         symbol_name,
         dep_edges,
+        import_canonicalization,
         interner,
     )
     .into_result()
@@ -418,6 +424,7 @@ pub(crate) fn prepare_augmentation_type_decl_outcome_in(
     owner: verter_type_expr::TopLevelOwnerId,
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
+    import_canonicalization: &ImportCanonicalization,
     interner: &IdentityInterner,
 ) -> PreparedDeclOutcome<PreparedTypeDecl> {
     let lowered = match state.augmentation_type_decl_outcome_in(scope, owner, symbol_name) {
@@ -425,11 +432,10 @@ pub(crate) fn prepare_augmentation_type_decl_outcome_in(
         DemandOutcome::Ready(None) => return PreparedDeclOutcome::Ready(None),
         DemandOutcome::Ready(Some(lowered)) => lowered,
     };
-    // Augmentation-scope decls are off the barrel-final import path (their
-    // bodies stitch onto another module's surface, not a re-export hop), so the
-    // barrel fallback applies for any import they reference. No shared base:
-    // the stitch prepares one decl per (augmenter, name) demand, and the
-    // default canonicalization differs from the bundle-owned base's.
+    // Augmentation bodies share the containing file's exact import namespace.
+    // The canonicalization must therefore be the one built with the containing
+    // prepared bundle under the active StoreView; an empty/default map would
+    // discard an imported base symbol's authoritative target owner.
     match prepare_type_decl_from_lowered(
         canonical_id,
         state,
@@ -439,7 +445,7 @@ pub(crate) fn prepare_augmentation_type_decl_outcome_in(
         None,
         dep_edges,
         Some(scope),
-        &ImportCanonicalization::default(),
+        import_canonicalization,
         None,
         interner,
     ) {
@@ -1238,6 +1244,24 @@ impl PreparedTypeDeclCache {
         self.slots.is_empty()
     }
 
+    fn prepare_augmentation_type_decl_outcome_in(
+        &self,
+        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol_name: &str,
+    ) -> PreparedDeclOutcome<PreparedTypeDecl> {
+        prepare_augmentation_type_decl_outcome_in(
+            &self.canonical_id,
+            self.state.as_ref(),
+            scope,
+            owner,
+            symbol_name,
+            (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
+            &self.import_canonicalization,
+            &self.interner,
+        )
+    }
+
     pub fn contains_key(&self, symbol_name: &str) -> bool {
         self.contains_key_in(
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -1363,8 +1387,10 @@ impl PreparedTypeDeclCache {
     /// failure as an ephemeral exact-owner authored declaration.
     ///
     /// [`Self::get_in`] remains the strict cache API. This method never commits
-    /// an `AuthoredPartial` value into the write-once slot; callers must mark
-    /// the derived semantic result partial and non-cacheable.
+    /// an `AuthoredPartial` value into the write-once slot. Callers must retain
+    /// the typed unresolved-owner debt through normal reference resolution and
+    /// mark the result partial/non-cacheable only when the debt is still live at
+    /// query exit.
     pub fn get_in_for_projection(
         &self,
         owner: verter_type_expr::TopLevelOwnerId,
@@ -1612,6 +1638,30 @@ impl PreparedDeclBundle {
     #[must_use]
     pub fn owner_scope(&self, owner: TopLevelOwnerId) -> Option<&PreparedOwnerScope> {
         self.owner_scopes.get(&owner)
+    }
+
+    /// Prepare an augmentation contributor against the same pinned state,
+    /// dependency edges, and exact import canonicalization as this bundle.
+    pub(crate) fn prepare_augmentation_type_decl_outcome_in(
+        &self,
+        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        symbol_name: &str,
+    ) -> PreparedDeclOutcome<PreparedTypeDecl> {
+        self.prepared_type_decls
+            .prepare_augmentation_type_decl_outcome_in(scope, owner, symbol_name)
+    }
+
+    /// Plain result-shaped sibling for locator replay. Lease misses retain the
+    /// existing non-cacheability fan-out performed by `into_result`.
+    pub(crate) fn prepare_augmentation_type_decl_in(
+        &self,
+        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        symbol_name: &str,
+    ) -> Result<Option<PreparedTypeDecl>, PreparationFailure> {
+        self.prepare_augmentation_type_decl_outcome_in(scope, owner, symbol_name)
+            .into_result()
     }
 }
 
