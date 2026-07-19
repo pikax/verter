@@ -67,6 +67,28 @@ pub struct TemplateAnalysisSnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub emit_definitions: Vec<AnalyzedEmitDefinition>,
 
+    /// Declared `defineSlots` members with resolved usage (outlet present or
+    /// programmatic access). Populated only when usage can be statically
+    /// bounded — fail-open (empty) otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slot_declarations: Vec<AnalyzedSlotDeclaration>,
+
+    /// True when any template expression failed to parse — the identifier
+    /// inventory is then incomplete and usage-driven diagnostics fail open.
+    #[serde(default)]
+    pub has_expression_errors: bool,
+
+    /// Static member reads on identifier roots inside template expressions
+    /// (`props.title`, `$slots.header`). A root consumed by a member read is
+    /// NOT a whole-object escape; matched against occurrences by root span.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_reads: Vec<TemplateMemberRead>,
+
+    /// A `<slot :name="expr">` dynamic outlet exists — the outlet set cannot
+    /// be statically bounded (suppresses unused-slot diagnostics).
+    #[serde(default)]
+    pub has_dynamic_slot_outlet: bool,
+
     /// Comment directives (`@verter:disable`, `@verter:todo`, etc.).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comment_directives: Vec<CommentDirective>,
@@ -1229,6 +1251,32 @@ pub struct IfChain {
 // =============================================================================
 // Prop & Emit Definitions
 // =============================================================================
+
+/// A static member read on an identifier root inside a template expression.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateMemberRead {
+    /// The root identifier (`props` in `props.title`).
+    pub root: String,
+    /// The literal member name.
+    pub member: String,
+    /// File-absolute span of the root identifier (matches the corresponding
+    /// binding occurrence span).
+    pub root_span: verter_span::Span,
+}
+
+/// A declared `defineSlots` member with resolved usage for the linter.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzedSlotDeclaration {
+    /// Slot name (`"default"`, `"header"`, …).
+    pub name: String,
+    /// SFC-absolute byte span of the slot name in the `defineSlots` declaration.
+    pub span: verter_span::Span,
+    /// Whether an outlet (`<slot>` / `<slot name="x">`, conditional included)
+    /// or a bounded programmatic access uses this slot.
+    pub used: bool,
+}
 
 /// Props analysis enriched for linter.
 #[derive(Debug, Clone, PartialEq, Eq)]

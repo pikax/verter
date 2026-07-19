@@ -1179,6 +1179,8 @@ fn build_script_snapshot(
         dom_query_calls: snapshot.dom_query_calls.to_vec(),
         css_var_manipulations: snapshot.css_var_manipulations.to_vec(),
         script_binding_occurrences: snapshot.script_binding_occurrences.to_vec(),
+        macro_usage: snapshot.macro_usage.clone(),
+        style_vbind_roots: snapshot.style_vbind_roots.clone(),
         store_usages: snapshot.store_usages.to_vec(),
         store_definitions: snapshot.store_definitions.to_vec(),
         first_await_offset: None,

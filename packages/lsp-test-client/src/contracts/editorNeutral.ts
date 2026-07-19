@@ -83,6 +83,16 @@ export interface ProviderAttestation {
   readonly publicKind: "tsserver" | "tsgo" | "editor-tsserver" | "none";
   readonly reason?: string;
   readonly startedKinds: readonly string[];
+  /**
+   * Structured provider recommendation from `$/verter/typeProviderStatus`
+   * (tsgo-preferred model): REQUIRED on tsserver-family serving, FORBIDDEN on
+   * tsgo-family serving.
+   */
+  readonly recommendation?: {
+    readonly preferred: string;
+    readonly reason: string;
+    readonly knownGaps: readonly string[];
+  };
 }
 
 export interface ProviderTopologyAttestation {
@@ -1397,6 +1407,24 @@ export async function executeEditorNeutralContractCase(
         ) {
           throw new Error(`${testCase.id}: tsserver provider was not started/attested`);
         }
+        // tsgo-preferred flip: tsserver-family serving MUST carry the
+        // structured TSGO recommendation with honest, non-empty known gaps
+        // and editor-agnostic wording (no client settings keys server-side).
+        const recommendation = attestation.recommendation;
+        if (!recommendation || recommendation.preferred !== "tsgo") {
+          throw new Error(
+            `${testCase.id}: tsserver serving must recommend tsgo, got ${JSON.stringify(recommendation)}`,
+          );
+        }
+        if (recommendation.knownGaps.length === 0) {
+          throw new Error(`${testCase.id}: recommendation must disclose known gaps honestly`);
+        }
+        const portable = [recommendation.reason, ...recommendation.knownGaps];
+        if (portable.some((text) => text.includes("VS Code") || text.includes("verter."))) {
+          throw new Error(
+            `${testCase.id}: recommendation wording must be editor-agnostic: ${JSON.stringify(portable)}`,
+          );
+        }
       } else if (driver.route === "tsgo") {
         if (attestation.publicKind !== "tsgo" || !attestation.startedKinds.includes("tsgo")) {
           throw new Error(`${testCase.id}: managed tsgo provider was not started/attested`);
@@ -1408,6 +1436,14 @@ export async function executeEditorNeutralContractCase(
       ) {
         throw new Error(
           `${testCase.id}: shared route lacks editor-owned provenance or already started fallback: ${JSON.stringify(attestation)}`,
+        );
+      }
+      // Negative (tsgo-family routes): the server never nags users already on
+      // the preferred provider — no recommendation, and no retired
+      // "known limitations" warning content.
+      if (driver.route !== "tsserver" && attestation.recommendation !== undefined) {
+        throw new Error(
+          `${testCase.id}: tsgo-family serving must carry no recommendation, got ${JSON.stringify(attestation.recommendation)}`,
         );
       }
       return;

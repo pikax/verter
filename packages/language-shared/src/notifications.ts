@@ -111,6 +111,22 @@ export type NotificationParams = {
   [NotificationType.TypeProviderStatus]: {
     kind: "tsgo" | "tsserver" | "editor-tsserver" | "none";
     reason?: string;
+    /**
+     * Present when a different provider is recommended over the active one
+     * (tsgo-preferred model: tsserver-family serving recommends TSGO). The
+     * DECISION is server-owned portable facts; PRESENTATION (notification
+     * style, dismissal persistence, settings affordances) is client-owned.
+     * Mirrors `ProviderRecommendation` in
+     * `crates/verter_lsp/src/protocol_types.rs`.
+     */
+    recommendation?: {
+      /** The recommended provider kind (currently always "tsgo"). */
+      preferred: "tsgo";
+      /** Portable, human-readable rationale naming the active route. */
+      reason: string;
+      /** Honest, tree-evidenced capability gaps of the recommended provider. */
+      knownGaps: string[];
+    };
   };
   [NotificationType.TypeProviderSyncComplete]: {
     gen: number;

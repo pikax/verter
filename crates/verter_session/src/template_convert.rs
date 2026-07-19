@@ -4,15 +4,75 @@
 //! [`RawTemplateData`] during compilation, and this function converts it into
 //! [`TemplateAnalysisSnapshot`] that `verter_session` stores alongside script/style analysis.
 
+use rustc_hash::FxHashSet;
 use verter_compiler::compile::template_data::RawTemplateData;
+use verter_semantic::analysis::macro_usage::MacroUsageFacts;
 use verter_semantic::analysis::template::{
-    BindingUsageKind, CommentDirective, CommentDirectiveKind, DefinedSlot, ElementNamespace,
-    IfChain, PropValueConstness, SnippetDefinition, SvelteDirectiveInfo, TemplateAnalysisSnapshot,
+    AnalyzedEmitDefinition, AnalyzedPropDefinition, AnalyzedSlotDeclaration, BindingUsageKind,
+    CommentDirective, CommentDirectiveKind, DefinedSlot, ElementNamespace, IfChain,
+    PropValueConstness, SnippetDefinition, SvelteDirectiveInfo, TemplateAnalysisSnapshot,
     TemplateAttribute, TemplateBindingOccurrence, TemplateComponentBinding, TemplateComponentEvent,
     TemplateComponentUsage, TemplateComponentVModel, TemplateDirective, TemplateElement,
-    TemplateEventHandler, TemplatePropUsage, TemplateRef, TemplateTextSegment, UnresolvedBinding,
-    VForDirective, VModelDirective,
+    TemplateEventHandler, TemplateMemberRead, TemplatePropUsage, TemplateRef, TemplateTextSegment,
+    UnresolvedBinding, VForDirective, VModelDirective,
 };
+use verter_semantic::analysis::types::{
+    AnalyzedBinding, AnalyzedMacro, AnalyzedMacroKind, VueApiCallSite, VueApiClassification,
+};
+
+/// Declaration + script-usage context for the unused-declaration diagnostics
+/// (`no-unused-props` / `no-unused-emit-declarations` / `no-unused-slots`).
+/// Built from the SAME script analysis snapshot the template conversion pairs
+/// with — one shared population path for all three kinds.
+pub(crate) struct UnusedDeclarationContext<'a> {
+    pub macros: &'a [AnalyzedMacro],
+    pub macro_usage: Option<&'a MacroUsageFacts>,
+    /// A `useSlots()` call exists — slot usage cannot be statically bounded.
+    pub use_slots_called: bool,
+    /// The `defineProps` root binding is referenced from `<style>` `v-bind()` —
+    /// member-level liveness cannot be bounded (suppresses unused-prop).
+    pub props_root_used_in_style: bool,
+    /// Root identifiers referenced by `<style>` `v-bind()` expressions. CSS
+    /// `v-bind()` resolves through the component render context, which
+    /// includes PROPS by bare name — a prop whose name appears here is live
+    /// (per-member fact, not a whole-kind suppression).
+    pub style_vbind_roots: &'a [String],
+}
+
+impl<'a> UnusedDeclarationContext<'a> {
+    pub(crate) fn from_analysis(
+        macros: &'a [AnalyzedMacro],
+        macro_usage: Option<&'a MacroUsageFacts>,
+        vue_api_calls: &[VueApiCallSite],
+        bindings: &[AnalyzedBinding],
+        style_vbind_roots: &'a [String],
+    ) -> Self {
+        let use_slots_called = vue_api_calls
+            .iter()
+            .any(|call| matches!(call.api, VueApiClassification::UseSlots));
+        let props_binding = macros
+            .iter()
+            .find(|m| {
+                matches!(
+                    m.kind,
+                    AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults
+                )
+            })
+            .and_then(|m| m.binding_name.as_deref());
+        let props_root_used_in_style = props_binding.is_some_and(|name| {
+            bindings
+                .iter()
+                .any(|binding| binding.name == name && binding.used_in_style)
+        });
+        Self {
+            macros,
+            macro_usage,
+            use_slots_called,
+            props_root_used_in_style,
+            style_vbind_roots,
+        }
+    }
+}
 
 /// Convert raw template data from `verter_compiler` into `verter_semantic::analysis` types.
 ///
@@ -32,6 +92,7 @@ pub fn convert_raw_to_analysis(
     script_imports: &[(String, String)], // (local_name, source_path)
     binding_class_unions: &[(String, Vec<String>)], // (binding_name, class_names)
     props_binding_name: Option<&str>,
+    unused_declarations: Option<&UnusedDeclarationContext<'_>>,
 ) -> TemplateAnalysisSnapshot {
     let components: Vec<TemplateComponentUsage> = raw
         .components
@@ -476,7 +537,7 @@ pub fn convert_raw_to_analysis(
         names
     };
 
-    TemplateAnalysisSnapshot {
+    let mut snapshot = TemplateAnalysisSnapshot {
         components,
         binding_occurrences,
         unresolved_bindings,
@@ -489,6 +550,17 @@ pub fn convert_raw_to_analysis(
         v_if_v_for_conflicts,
         comment_directives,
         css_var_names,
+        has_expression_errors: raw.has_expression_errors,
+        has_dynamic_slot_outlet: raw.has_dynamic_slot_outlet,
+        member_reads: raw
+            .member_reads
+            .iter()
+            .map(|read| TemplateMemberRead {
+                root: read.root.clone(),
+                member: read.member.clone(),
+                root_span: read.root_span,
+            })
+            .collect(),
         snippet_definitions: raw
             .snippet_definitions
             .iter()
@@ -512,6 +584,240 @@ pub fn convert_raw_to_analysis(
             .collect(),
         // prop/emit definitions and type_enhancements come from script analysis.
         ..Default::default()
+    };
+
+    if let Some(ctx) = unused_declarations {
+        populate_unused_declaration_facts(&mut snapshot, ctx);
+    }
+
+    snapshot
+}
+
+/// Populate the unused-declaration inventories (`prop_definitions`,
+/// `emit_definitions`, `slot_declarations`) from the macro member inventories
+/// crossed with script + template usage facts.
+///
+/// FAIL-OPEN contract: a kind's inventory is populated ONLY when its usage can
+/// be statically bounded — any escape, incompleteness, or dynamic construct
+/// leaves that inventory EMPTY and the corresponding lint rule silent:
+/// - all kinds: any template expression parse error;
+/// - props: script escape (spread/call-arg/alias/computed), destructured
+///   `defineProps` (provider-owned TS6133 — never double-report), style
+///   `v-bind()` on the props root, `$props` referenced in the template;
+/// - emits: script emit escape (aliased/passed/dynamic name), `$emit` OR the
+///   `defineEmits` return binding referenced in the template;
+/// - slots: dynamic outlet `<slot :name="expr">`, `useSlots()` anywhere,
+///   `$slots` referenced in the template.
+///
+/// `defineModel` members are self-consuming: its implicit prop never enters
+/// `prop_fields`, and an explicitly declared `update:<model>` event is skipped.
+///
+/// Name-identity caveat (accepted false-NEGATIVE class, mirror of the
+/// `macro_usage` scope-blindness note): `template_mentions` matches template
+/// occurrences by NAME, not by scope — an unrelated same-named template
+/// binding (a `v-for` item variable or slot-prop shadowing a prop name) marks
+/// that member "used" and the diagnostic is missed. Errs toward silence;
+/// never produces a false positive.
+fn populate_unused_declaration_facts(
+    tpl: &mut TemplateAnalysisSnapshot,
+    ctx: &UnusedDeclarationContext<'_>,
+) {
+    if tpl.has_expression_errors {
+        return;
+    }
+    let Some(usage) = ctx.macro_usage else {
+        return;
+    };
+    let template_mentions = |tpl: &TemplateAnalysisSnapshot, name: &str| -> bool {
+        tpl.binding_occurrences.iter().any(|o| o.name == name)
+            || tpl.unresolved_bindings.iter().any(|u| u.name == name)
+    };
+    // For a tracked ROOT (the props binding, `$props`, `$slots`): the set of
+    // literal members read off it in the template — provided EVERY occurrence
+    // of the root is consumed by a member read. A bare/spread/computed use of
+    // the root leaves an unconsumed occurrence => `None` (whole-object escape).
+    let bounded_member_reads =
+        |tpl: &TemplateAnalysisSnapshot, root: &str| -> Option<FxHashSet<String>> {
+            let consumed: FxHashSet<u32> = tpl
+                .member_reads
+                .iter()
+                .filter(|read| read.root == root)
+                .map(|read| read.root_span.start)
+                .collect();
+            let escaped = tpl
+                .binding_occurrences
+                .iter()
+                .filter(|o| o.name == root)
+                .map(|o| o.span.start)
+                .chain(
+                    tpl.unresolved_bindings
+                        .iter()
+                        .filter(|u| u.name == root)
+                        .map(|u| u.span.start),
+                )
+                .any(|start| !consumed.contains(&start));
+            if escaped {
+                return None;
+            }
+            Some(
+                tpl.member_reads
+                    .iter()
+                    .filter(|read| read.root == root)
+                    .map(|read| read.member.clone())
+                    .collect(),
+            )
+        };
+
+    // ── Props ──
+    let props_root = ctx
+        .macros
+        .iter()
+        .find(|m| {
+            matches!(
+                m.kind,
+                AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults
+            )
+        })
+        .and_then(|m| m.binding_name.as_deref());
+    let props_root_template = match props_root {
+        Some(root) => bounded_member_reads(tpl, root),
+        None => Some(FxHashSet::default()),
+    };
+    let dollar_props_template = bounded_member_reads(tpl, "$props");
+    let props_suppressed = usage.props_escapes
+        || usage.props_destructured
+        || ctx.props_root_used_in_style
+        || props_root_template.is_none()
+        || dollar_props_template.is_none();
+    if !props_suppressed {
+        let props_root_template = props_root_template.unwrap_or_default();
+        let dollar_props_template = dollar_props_template.unwrap_or_default();
+        let reads: FxHashSet<&str> = usage
+            .props_member_reads
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let default_keys: FxHashSet<&str> = ctx
+            .macros
+            .iter()
+            .flat_map(|m| m.default_keys.iter().map(String::as_str))
+            .collect();
+        let mut definitions = Vec::new();
+        for mac in ctx.macros.iter().filter(|m| {
+            matches!(
+                m.kind,
+                AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults
+            )
+        }) {
+            for field in &mac.prop_fields {
+                // Author-local members only: foreign/synthetic spans (heritage,
+                // Pick/Omit, external intersection arms) are not diagnosable
+                // on an authored range — fail open per member.
+                if !field.declared_in_macro_type_arg || field.span.end <= field.span.start {
+                    continue;
+                }
+                let used_in_template = template_mentions(tpl, &field.name)
+                    || props_root_template.contains(field.name.as_str())
+                    || dollar_props_template.contains(field.name.as_str());
+                // `<style>` `v-bind(color)` resolves the prop by bare name
+                // through the render context — a per-member liveness fact
+                // (the whole-kind style suppression above covers only the
+                // props ROOT binding escaping into style).
+                let used_in_style = ctx.style_vbind_roots.iter().any(|root| root == &field.name);
+                definitions.push(AnalyzedPropDefinition {
+                    name: field.name.clone(),
+                    type_annotation: field.type_annotation.clone(),
+                    has_default: default_keys.contains(field.name.as_str()),
+                    is_required: !field.is_optional,
+                    is_boolean: false,
+                    used_in_template,
+                    used_in_script: reads.contains(field.name.as_str()) || used_in_style,
+                    span: field.span,
+                });
+            }
+        }
+        tpl.prop_definitions = definitions;
+    }
+
+    // ── Emits ──
+    // A template occurrence of the `defineEmits` RETURN BINDING
+    // (`@click="emit('close')"`, `:handler="emit"`) is the standard
+    // template-emit pattern: suppress the whole kind on any occurrence
+    // (per-name template call extraction stays deferred — fail-open).
+    let emit_binding = ctx
+        .macros
+        .iter()
+        .find(|m| matches!(m.kind, AnalyzedMacroKind::DefineEmits))
+        .and_then(|m| m.binding_name.as_deref());
+    let emits_suppressed = usage.emit_escapes
+        || template_mentions(tpl, "$emit")
+        || emit_binding.is_some_and(|name| template_mentions(tpl, name));
+    if !emits_suppressed {
+        let model_events: FxHashSet<String> = ctx
+            .macros
+            .iter()
+            .filter(|m| matches!(m.kind, AnalyzedMacroKind::DefineModel))
+            .map(|m| format!("update:{}", m.model_name.as_deref().unwrap_or("modelValue")))
+            .collect();
+        let mut definitions = Vec::new();
+        for mac in ctx
+            .macros
+            .iter()
+            .filter(|m| matches!(m.kind, AnalyzedMacroKind::DefineEmits))
+        {
+            for field in &mac.emit_fields {
+                if field.span.end <= field.span.start {
+                    continue;
+                }
+                // `defineModel('x')` emits `update:x` itself — self-consuming.
+                if model_events.contains(&field.name) {
+                    continue;
+                }
+                let emit_locations: Vec<(u32, u32)> = usage
+                    .emit_literal_calls
+                    .iter()
+                    .filter(|call| call.name == field.name)
+                    .map(|call| (call.span.start, call.span.end))
+                    .collect();
+                definitions.push(AnalyzedEmitDefinition {
+                    event_name: field.name.clone(),
+                    has_validator: false,
+                    is_declared: true,
+                    emit_locations,
+                    span: field.span,
+                });
+            }
+        }
+        tpl.emit_definitions = definitions;
+    }
+
+    // ── Slots ──
+    let dollar_slots_template = bounded_member_reads(tpl, "$slots");
+    let slots_suppressed =
+        tpl.has_dynamic_slot_outlet || ctx.use_slots_called || dollar_slots_template.is_none();
+    if !slots_suppressed {
+        let dollar_slots_template = dollar_slots_template.unwrap_or_default();
+        let outlets: FxHashSet<&str> = tpl.defined_slots.iter().map(|s| s.name.as_str()).collect();
+        let mut declarations = Vec::new();
+        for mac in ctx
+            .macros
+            .iter()
+            .filter(|m| matches!(m.kind, AnalyzedMacroKind::DefineSlots))
+        {
+            for field in &mac.slot_fields {
+                if field.span.end <= field.span.start {
+                    continue;
+                }
+                let used = outlets.contains(field.name.as_str())
+                    || dollar_slots_template.contains(field.name.as_str());
+                declarations.push(AnalyzedSlotDeclaration {
+                    name: field.name.clone(),
+                    span: field.span,
+                    used,
+                });
+            }
+        }
+        tpl.slot_declarations = declarations;
     }
 }
 
@@ -595,7 +901,7 @@ mod tests {
     #[test]
     fn empty_raw_converts_to_empty_snapshot() {
         let raw = RawTemplateData::default();
-        let result = convert_raw_to_analysis(&raw, &[], &[], None);
+        let result = convert_raw_to_analysis(&raw, &[], &[], None, None);
 
         assert!(result.components.is_empty());
         assert!(result.binding_occurrences.is_empty());
@@ -637,7 +943,7 @@ mod tests {
         };
 
         let imports = vec![("Child".to_string(), "./Child.vue".to_string())];
-        let result = convert_raw_to_analysis(&raw, &imports, &[], None);
+        let result = convert_raw_to_analysis(&raw, &imports, &[], None, None);
 
         assert_eq!(result.components.len(), 1);
         assert_eq!(result.components[0].name, "Child");
@@ -672,7 +978,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = convert_raw_to_analysis(&raw, &[], &[], None);
+        let result = convert_raw_to_analysis(&raw, &[], &[], None, None);
         assert!(result.components[0].import_source.is_none());
     }
 
@@ -697,7 +1003,7 @@ mod tests {
         };
 
         let imports = vec![("MyHeader".to_string(), "./MyHeader.vue".to_string())];
-        let result = convert_raw_to_analysis(&raw, &imports, &[], None);
+        let result = convert_raw_to_analysis(&raw, &imports, &[], None, None);
 
         assert_eq!(
             result.components[0].import_source.as_deref(),
@@ -727,7 +1033,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = convert_raw_to_analysis(&raw, &[], &[], None);
+        let result = convert_raw_to_analysis(&raw, &[], &[], None, None);
         assert_eq!(result.binding_occurrences.len(), 1);
         assert_eq!(result.binding_occurrences[0].name, "msg");
         assert_eq!(
@@ -803,7 +1109,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = convert_raw_to_analysis(&raw, &[], &[], None);
+        let result = convert_raw_to_analysis(&raw, &[], &[], None, None);
         let props = &result.components[0].props;
         assert_eq!(props[0].constness, PropValueConstness::Const); // static
         assert_eq!(props[1].constness, PropValueConstness::Const); // bound const
@@ -832,7 +1138,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = convert_raw_to_analysis(&raw, &[], &[], None);
+        let result = convert_raw_to_analysis(&raw, &[], &[], None, None);
         assert_eq!(result.template_refs.len(), 2);
         assert!(!result.template_refs[0].is_dynamic);
         assert!(result.template_refs[1].is_dynamic);
@@ -861,7 +1167,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = convert_raw_to_analysis(&raw, &[], &[], None);
+        let result = convert_raw_to_analysis(&raw, &[], &[], None, None);
         assert_eq!(result.event_handlers.len(), 2);
         assert_eq!(
             result.event_handlers[0].handler_binding.as_deref(),
@@ -893,7 +1199,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = convert_raw_to_analysis(&raw, &[], &[], None);
+        let result = convert_raw_to_analysis(&raw, &[], &[], None, None);
         assert_eq!(result.comment_directives.len(), 2);
         assert_eq!(
             result.comment_directives[0].kind,
@@ -920,7 +1226,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = convert_raw_to_analysis(&raw, &[], &[], None);
+        let result = convert_raw_to_analysis(&raw, &[], &[], None, None);
         assert_eq!(result.if_chains.len(), 1);
         assert_eq!(result.if_chains[0].conditions.len(), 3);
     }
@@ -933,7 +1239,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = convert_raw_to_analysis(&raw, &[], &[], None);
+        let result = convert_raw_to_analysis(&raw, &[], &[], None, None);
         assert_eq!(result.max_nesting_depth, 7);
     }
 
@@ -982,7 +1288,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = convert_raw_to_analysis(&raw, &[], &[], None);
+        let result = convert_raw_to_analysis(&raw, &[], &[], None, None);
         assert_eq!(
             result.binding_occurrences[0].usage_kind,
             BindingUsageKind::Interpolation
@@ -1060,7 +1366,7 @@ mod tests {
             "variant".to_string(),
             vec!["primary".to_string(), "secondary".to_string()],
         )];
-        let result = convert_raw_to_analysis(&raw, &[], &unions, None);
+        let result = convert_raw_to_analysis(&raw, &[], &unions, None, None);
 
         assert_eq!(result.elements.len(), 1);
         assert_eq!(
@@ -1117,7 +1423,7 @@ mod tests {
             "variant".to_string(),
             vec!["primary".to_string(), "secondary".to_string()],
         )];
-        let result = convert_raw_to_analysis(&raw, &[], &unions, None);
+        let result = convert_raw_to_analysis(&raw, &[], &unions, None, None);
 
         assert_eq!(
             result.elements[0].dynamic_classes,
@@ -1169,7 +1475,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = convert_raw_to_analysis(&raw, &[], &[], None);
+        let result = convert_raw_to_analysis(&raw, &[], &[], None, None);
 
         assert_eq!(result.css_var_names, vec!["--theme-color"]);
         assert_eq!(result.elements[0].dynamic_style_vars.len(), 1);
@@ -1190,7 +1496,7 @@ mod tests {
             "variant".to_string(),
             vec!["primary".to_string(), "secondary".to_string()],
         )];
-        let result = convert_raw_to_analysis(&raw, &[], &unions, Some("props"));
+        let result = convert_raw_to_analysis(&raw, &[], &unions, Some("props"), None);
 
         assert_eq!(
             result.elements[0].dynamic_classes,
@@ -1207,7 +1513,7 @@ mod tests {
         };
 
         let unions = vec![("variant".to_string(), vec!["primary".to_string()])];
-        let result = convert_raw_to_analysis(&raw, &[], &unions, None);
+        let result = convert_raw_to_analysis(&raw, &[], &unions, None, None);
 
         assert!(
             result.elements[0].dynamic_classes.is_empty(),
@@ -1225,7 +1531,7 @@ mod tests {
 
         // Even though "active" matches, object syntax should take precedence
         let unions = vec![("active".to_string(), vec!["x".to_string()])];
-        let result = convert_raw_to_analysis(&raw, &[], &unions, None);
+        let result = convert_raw_to_analysis(&raw, &[], &unions, None, None);
 
         assert_eq!(
             result.elements[0].dynamic_classes,
@@ -1257,7 +1563,7 @@ mod tests {
             "variant".to_string(),
             vec!["primary".to_string(), "secondary".to_string()],
         )];
-        let result = convert_raw_to_analysis(&raw, &[], &unions, None);
+        let result = convert_raw_to_analysis(&raw, &[], &unions, None, None);
 
         assert_eq!(
             result.components[0].dynamic_classes,
@@ -1311,7 +1617,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = convert_raw_to_analysis(&raw, &[], &[], None);
+        let result = convert_raw_to_analysis(&raw, &[], &[], None, None);
 
         assert_eq!(result.elements.len(), 1);
         assert_eq!(
@@ -1319,5 +1625,524 @@ mod tests {
             Some(0),
             "component elements should link to the matching TemplateComponentUsage by stable index"
         );
+    }
+
+    // =========================================================================
+    // Unused-declaration population (props / emits / slots)
+    // =========================================================================
+
+    mod unused_declaration_population {
+        use super::*;
+        use verter_semantic::analysis::macro_usage::{MacroUsageCall, MacroUsageFacts};
+        use verter_semantic::analysis::types::{
+            AnalyzedEmitField, AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField,
+            AnalyzedSlotField,
+        };
+
+        fn macro_of(kind: AnalyzedMacroKind) -> AnalyzedMacro {
+            AnalyzedMacro {
+                kind,
+                is_type_based: true,
+                type_references: vec![],
+                binding_name: None,
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: vec![],
+                emit_fields: vec![],
+                slot_fields: vec![],
+                default_keys: vec![],
+                default_values: vec![],
+                expose_fields: vec![],
+                resolved_local_types: vec![],
+                parsed_type_argument: None,
+                parsed_type_argument_scope: None,
+                span: verter_span::Span::new(0, 10),
+            }
+        }
+
+        fn prop_field(name: &str, start: u32) -> AnalyzedPropField {
+            AnalyzedPropField {
+                name: name.to_string(),
+                span: verter_span::Span::new(start, start + name.len() as u32),
+                type_annotation: None,
+                is_optional: false,
+                description: None,
+                tags: vec![],
+                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
+                resolution_error: None,
+                payload: None,
+                type_expr_scope: None,
+                declared_in_macro_type_arg: true,
+            }
+        }
+
+        fn emit_field(name: &str, start: u32) -> AnalyzedEmitField {
+            AnalyzedEmitField {
+                name: name.to_string(),
+                span: verter_span::Span::new(start, start + name.len() as u32),
+                payload_type: None,
+                payload: None,
+                payload_expr_scope: None,
+                description: None,
+                tags: vec![],
+            }
+        }
+
+        fn slot_field(name: &str, start: u32) -> AnalyzedSlotField {
+            AnalyzedSlotField {
+                name: name.to_string(),
+                is_required: false,
+                span: verter_span::Span::new(start, start + name.len() as u32),
+                bindings: vec![],
+                return_type: None,
+                payload: None,
+                return_expr_scope: None,
+                description: None,
+                tags: vec![],
+            }
+        }
+
+        fn ctx<'a>(
+            macros: &'a [AnalyzedMacro],
+            usage: Option<&'a MacroUsageFacts>,
+        ) -> UnusedDeclarationContext<'a> {
+            UnusedDeclarationContext {
+                macros,
+                macro_usage: usage,
+                use_slots_called: false,
+                props_root_used_in_style: false,
+                style_vbind_roots: &[],
+            }
+        }
+
+        fn occurrence(name: &str) -> RawBindingOccurrence {
+            RawBindingOccurrence {
+                name: name.to_string(),
+                span: Span::new(100, 100 + name.len() as u32),
+                is_in_bindings_map: false,
+                usage_kind: 0,
+            }
+        }
+
+        #[test]
+        fn props_populate_with_script_and_template_usage_split() {
+            let mut mac = macro_of(AnalyzedMacroKind::DefineProps);
+            mac.prop_fields = vec![
+                prop_field("a", 10),
+                prop_field("b", 20),
+                prop_field("c", 30),
+            ];
+            let macros = vec![mac];
+            let usage = MacroUsageFacts {
+                props_member_reads: vec!["a".into()],
+                ..Default::default()
+            };
+            let raw = RawTemplateData {
+                binding_occurrences: vec![occurrence("b")],
+                ..Default::default()
+            };
+            let tpl =
+                convert_raw_to_analysis(&raw, &[], &[], None, Some(&ctx(&macros, Some(&usage))));
+            assert_eq!(tpl.prop_definitions.len(), 3);
+            let by_name = |n: &str| tpl.prop_definitions.iter().find(|p| p.name == n).unwrap();
+            assert!(by_name("a").used_in_script && !by_name("a").used_in_template);
+            assert!(!by_name("b").used_in_script && by_name("b").used_in_template);
+            assert!(!by_name("c").used_in_script && !by_name("c").used_in_template);
+            assert_eq!(by_name("c").span, verter_span::Span::new(30, 31));
+        }
+
+        #[test]
+        fn props_fail_open_on_escape_destructure_style_or_dollar_props() {
+            let mut mac = macro_of(AnalyzedMacroKind::DefineProps);
+            mac.prop_fields = vec![prop_field("a", 10)];
+            let macros = vec![mac];
+
+            // Escape.
+            let usage = MacroUsageFacts {
+                props_escapes: true,
+                ..Default::default()
+            };
+            let tpl = convert_raw_to_analysis(
+                &RawTemplateData::default(),
+                &[],
+                &[],
+                None,
+                Some(&ctx(&macros, Some(&usage))),
+            );
+            assert!(tpl.prop_definitions.is_empty(), "escape must suppress");
+
+            // Destructured defineProps — provider-owned TS6133.
+            let usage = MacroUsageFacts {
+                props_destructured: true,
+                ..Default::default()
+            };
+            let tpl = convert_raw_to_analysis(
+                &RawTemplateData::default(),
+                &[],
+                &[],
+                None,
+                Some(&ctx(&macros, Some(&usage))),
+            );
+            assert!(tpl.prop_definitions.is_empty(), "destructure must suppress");
+
+            // Style v-bind on the props root.
+            let usage = MacroUsageFacts::default();
+            let mut c = ctx(&macros, Some(&usage));
+            c.props_root_used_in_style = true;
+            let tpl =
+                convert_raw_to_analysis(&RawTemplateData::default(), &[], &[], None, Some(&c));
+            assert!(tpl.prop_definitions.is_empty(), "style use must suppress");
+
+            // `$props` referenced in the template.
+            let raw = RawTemplateData {
+                binding_occurrences: vec![occurrence("$props")],
+                ..Default::default()
+            };
+            let usage = MacroUsageFacts::default();
+            let tpl =
+                convert_raw_to_analysis(&raw, &[], &[], None, Some(&ctx(&macros, Some(&usage))));
+            assert!(tpl.prop_definitions.is_empty(), "$props must suppress");
+        }
+
+        #[test]
+        fn template_props_member_reads_count_per_member_and_bare_root_escapes() {
+            let mut mac = macro_of(AnalyzedMacroKind::DefineProps);
+            mac.binding_name = Some("props".to_string());
+            mac.prop_fields = vec![prop_field("live", 10), prop_field("dead", 20)];
+            let macros = vec![mac];
+            let usage = MacroUsageFacts::default();
+
+            // `{{ props.live }}`: the root occurrence is consumed by a member
+            // read — `live` is template-used, `dead` stays unused.
+            let raw = RawTemplateData {
+                binding_occurrences: vec![RawBindingOccurrence {
+                    name: "props".to_string(),
+                    span: Span::new(100, 105),
+                    is_in_bindings_map: true,
+                    usage_kind: 0,
+                }],
+                member_reads: vec![RawMemberRead {
+                    root: "props".to_string(),
+                    member: "live".to_string(),
+                    root_span: Span::new(100, 105),
+                }],
+                ..Default::default()
+            };
+            let tpl =
+                convert_raw_to_analysis(&raw, &[], &[], None, Some(&ctx(&macros, Some(&usage))));
+            assert_eq!(tpl.prop_definitions.len(), 2);
+            let by_name = |n: &str| tpl.prop_definitions.iter().find(|p| p.name == n).unwrap();
+            assert!(
+                by_name("live").used_in_template,
+                "props.live is a template read"
+            );
+            assert!(!by_name("dead").used_in_template);
+
+            // Bare `v-bind="props"`: an UNCONSUMED root occurrence is a
+            // whole-object escape — suppress every prop diagnostic.
+            let raw = RawTemplateData {
+                binding_occurrences: vec![RawBindingOccurrence {
+                    name: "props".to_string(),
+                    span: Span::new(200, 205),
+                    is_in_bindings_map: true,
+                    usage_kind: 1,
+                }],
+                ..Default::default()
+            };
+            let tpl =
+                convert_raw_to_analysis(&raw, &[], &[], None, Some(&ctx(&macros, Some(&usage))));
+            assert!(
+                tpl.prop_definitions.is_empty(),
+                "bare template use of the props root must suppress"
+            );
+        }
+
+        #[test]
+        fn template_dollar_slots_member_read_counts_that_slot_used() {
+            let mut mac = macro_of(AnalyzedMacroKind::DefineSlots);
+            mac.slot_fields = vec![slot_field("header", 10), slot_field("footer", 30)];
+            let macros = vec![mac];
+            let usage = MacroUsageFacts::default();
+
+            // `v-if="$slots.header"`: a literal member read marks `header`
+            // used without an outlet; `footer` stays unused.
+            let raw = RawTemplateData {
+                binding_occurrences: vec![RawBindingOccurrence {
+                    name: "$slots".to_string(),
+                    span: Span::new(100, 106),
+                    is_in_bindings_map: false,
+                    usage_kind: 1,
+                }],
+                member_reads: vec![RawMemberRead {
+                    root: "$slots".to_string(),
+                    member: "header".to_string(),
+                    root_span: Span::new(100, 106),
+                }],
+                ..Default::default()
+            };
+            let tpl =
+                convert_raw_to_analysis(&raw, &[], &[], None, Some(&ctx(&macros, Some(&usage))));
+            assert_eq!(tpl.slot_declarations.len(), 2);
+            let by_name = |n: &str| tpl.slot_declarations.iter().find(|s| s.name == n).unwrap();
+            assert!(by_name("header").used);
+            assert!(!by_name("footer").used);
+        }
+
+        #[test]
+        fn non_author_local_prop_members_are_skipped() {
+            let mut mac = macro_of(AnalyzedMacroKind::DefineProps);
+            let mut foreign = prop_field("ext", 40);
+            foreign.declared_in_macro_type_arg = false;
+            mac.prop_fields = vec![prop_field("a", 10), foreign];
+            let macros = vec![mac];
+            let usage = MacroUsageFacts::default();
+            let tpl = convert_raw_to_analysis(
+                &RawTemplateData::default(),
+                &[],
+                &[],
+                None,
+                Some(&ctx(&macros, Some(&usage))),
+            );
+            assert_eq!(tpl.prop_definitions.len(), 1);
+            assert_eq!(tpl.prop_definitions[0].name, "a");
+        }
+
+        #[test]
+        fn emits_populate_with_literal_call_locations() {
+            let mut mac = macro_of(AnalyzedMacroKind::DefineEmits);
+            mac.emit_fields = vec![emit_field("save", 10), emit_field("close", 20)];
+            let macros = vec![mac];
+            let usage = MacroUsageFacts {
+                emit_literal_calls: vec![MacroUsageCall {
+                    name: "save".into(),
+                    span: verter_span::Span::new(60, 72),
+                }],
+                ..Default::default()
+            };
+            let tpl = convert_raw_to_analysis(
+                &RawTemplateData::default(),
+                &[],
+                &[],
+                None,
+                Some(&ctx(&macros, Some(&usage))),
+            );
+            assert_eq!(tpl.emit_definitions.len(), 2);
+            let by_name = |n: &str| {
+                tpl.emit_definitions
+                    .iter()
+                    .find(|e| e.event_name == n)
+                    .unwrap()
+            };
+            assert_eq!(by_name("save").emit_locations, vec![(60, 72)]);
+            assert!(
+                by_name("close").emit_locations.is_empty(),
+                "unused event stays empty"
+            );
+            assert!(by_name("close").is_declared);
+        }
+
+        #[test]
+        fn emits_fail_open_on_escape_or_template_dollar_emit() {
+            let mut mac = macro_of(AnalyzedMacroKind::DefineEmits);
+            mac.emit_fields = vec![emit_field("save", 10)];
+            let macros = vec![mac];
+
+            let usage = MacroUsageFacts {
+                emit_escapes: true,
+                ..Default::default()
+            };
+            let tpl = convert_raw_to_analysis(
+                &RawTemplateData::default(),
+                &[],
+                &[],
+                None,
+                Some(&ctx(&macros, Some(&usage))),
+            );
+            assert!(tpl.emit_definitions.is_empty(), "emit escape must suppress");
+
+            let raw = RawTemplateData {
+                binding_occurrences: vec![occurrence("$emit")],
+                ..Default::default()
+            };
+            let usage = MacroUsageFacts::default();
+            let tpl =
+                convert_raw_to_analysis(&raw, &[], &[], None, Some(&ctx(&macros, Some(&usage))));
+            assert!(
+                tpl.emit_definitions.is_empty(),
+                "template $emit must suppress"
+            );
+        }
+
+        #[test]
+        fn emits_fail_open_on_template_use_of_the_emit_binding() {
+            // `@click="emit('close')"` (or `:handler="emit"`) — the standard
+            // template-emit pattern calls the `defineEmits` RETURN BINDING.
+            // Any template occurrence of that binding name must suppress the
+            // whole kind (per-name template extraction stays deferred).
+            let mut mac = macro_of(AnalyzedMacroKind::DefineEmits);
+            mac.binding_name = Some("emit".to_string());
+            mac.emit_fields = vec![emit_field("close", 10)];
+            let macros = vec![mac];
+            let raw = RawTemplateData {
+                binding_occurrences: vec![occurrence("emit")],
+                ..Default::default()
+            };
+            let usage = MacroUsageFacts::default();
+            let tpl =
+                convert_raw_to_analysis(&raw, &[], &[], None, Some(&ctx(&macros, Some(&usage))));
+            assert!(
+                tpl.emit_definitions.is_empty(),
+                "a template occurrence of the emit binding must suppress unused-emit \
+                 diagnostics (fail-open), got: {:?}",
+                tpl.emit_definitions
+            );
+        }
+
+        #[test]
+        fn style_vbind_root_matching_a_prop_name_marks_that_member_live() {
+            // `<style> .x { color: v-bind(color) } </style>` with
+            // non-destructured `defineProps<{ color; dead }>()`: `color` is
+            // live through the render context; `dead` still surfaces —
+            // a per-member fact, not a whole-kind suppression.
+            let mut mac = macro_of(AnalyzedMacroKind::DefineProps);
+            mac.prop_fields = vec![prop_field("color", 10), prop_field("dead", 20)];
+            let macros = vec![mac];
+            let usage = MacroUsageFacts::default();
+            let mut c = ctx(&macros, Some(&usage));
+            let roots = vec!["color".to_string()];
+            c.style_vbind_roots = &roots;
+            let tpl =
+                convert_raw_to_analysis(&RawTemplateData::default(), &[], &[], None, Some(&c));
+            let by_name = |n: &str| tpl.prop_definitions.iter().find(|p| p.name == n).unwrap();
+            assert!(
+                by_name("color").used_in_script,
+                "style v-bind(color) keeps the prop live"
+            );
+            assert!(
+                !by_name("dead").used_in_script && !by_name("dead").used_in_template,
+                "the style fact is per-member — dead stays flagged"
+            );
+        }
+
+        #[test]
+        fn define_model_update_event_is_self_consuming() {
+            let mut emits = macro_of(AnalyzedMacroKind::DefineEmits);
+            emits.emit_fields = vec![emit_field("update:title", 10), emit_field("save", 30)];
+            let mut model = macro_of(AnalyzedMacroKind::DefineModel);
+            model.model_name = Some("title".into());
+            let macros = vec![emits, model];
+            let usage = MacroUsageFacts::default();
+            let tpl = convert_raw_to_analysis(
+                &RawTemplateData::default(),
+                &[],
+                &[],
+                None,
+                Some(&ctx(&macros, Some(&usage))),
+            );
+            let names: Vec<&str> = tpl
+                .emit_definitions
+                .iter()
+                .map(|e| e.event_name.as_str())
+                .collect();
+            assert_eq!(
+                names,
+                ["save"],
+                "update:title is defineModel-consumed, never flagged"
+            );
+        }
+
+        #[test]
+        fn slots_populate_from_outlets_and_fail_open_on_dynamic_use_slots_or_dollar_slots() {
+            let mut mac = macro_of(AnalyzedMacroKind::DefineSlots);
+            mac.slot_fields = vec![slot_field("default", 10), slot_field("header", 30)];
+            let macros = vec![mac];
+            let usage = MacroUsageFacts::default();
+
+            // Outlet for `default` exists; `header` has none → unused.
+            let raw = RawTemplateData {
+                slot_definitions: vec![RawSlotDef {
+                    name: "default".to_string(),
+                    has_bindings: false,
+                    binding_names: vec![],
+                    binding_expressions: vec![],
+                    binding_value_spans: vec![],
+                    has_fallback_content: false,
+                    span: Span::new(200, 210),
+                }],
+                ..Default::default()
+            };
+            let tpl =
+                convert_raw_to_analysis(&raw, &[], &[], None, Some(&ctx(&macros, Some(&usage))));
+            assert_eq!(tpl.slot_declarations.len(), 2);
+            let by_name = |n: &str| tpl.slot_declarations.iter().find(|s| s.name == n).unwrap();
+            assert!(by_name("default").used);
+            assert!(!by_name("header").used);
+
+            // Dynamic outlet suppresses everything.
+            let raw = RawTemplateData {
+                has_dynamic_slot_outlet: true,
+                ..Default::default()
+            };
+            let tpl =
+                convert_raw_to_analysis(&raw, &[], &[], None, Some(&ctx(&macros, Some(&usage))));
+            assert!(
+                tpl.slot_declarations.is_empty(),
+                "dynamic outlet must suppress"
+            );
+            assert!(tpl.has_dynamic_slot_outlet);
+
+            // useSlots() suppresses everything.
+            let mut c = ctx(&macros, Some(&usage));
+            c.use_slots_called = true;
+            let tpl =
+                convert_raw_to_analysis(&RawTemplateData::default(), &[], &[], None, Some(&c));
+            assert!(tpl.slot_declarations.is_empty(), "useSlots must suppress");
+
+            // `$slots` in the template suppresses everything.
+            let raw = RawTemplateData {
+                binding_occurrences: vec![occurrence("$slots")],
+                ..Default::default()
+            };
+            let tpl =
+                convert_raw_to_analysis(&raw, &[], &[], None, Some(&ctx(&macros, Some(&usage))));
+            assert!(tpl.slot_declarations.is_empty(), "$slots must suppress");
+        }
+
+        #[test]
+        fn expression_errors_fail_open_for_every_kind() {
+            let mut props = macro_of(AnalyzedMacroKind::DefineProps);
+            props.prop_fields = vec![prop_field("a", 10)];
+            let mut emits = macro_of(AnalyzedMacroKind::DefineEmits);
+            emits.emit_fields = vec![emit_field("save", 20)];
+            let mut slots = macro_of(AnalyzedMacroKind::DefineSlots);
+            slots.slot_fields = vec![slot_field("default", 30)];
+            let macros = vec![props, emits, slots];
+            let usage = MacroUsageFacts::default();
+            let raw = RawTemplateData {
+                has_expression_errors: true,
+                ..Default::default()
+            };
+            let tpl =
+                convert_raw_to_analysis(&raw, &[], &[], None, Some(&ctx(&macros, Some(&usage))));
+            assert!(tpl.has_expression_errors);
+            assert!(tpl.prop_definitions.is_empty());
+            assert!(tpl.emit_definitions.is_empty());
+            assert!(tpl.slot_declarations.is_empty());
+        }
+
+        #[test]
+        fn no_usage_facts_populates_nothing() {
+            let mut mac = macro_of(AnalyzedMacroKind::DefineProps);
+            mac.prop_fields = vec![prop_field("a", 10)];
+            let macros = vec![mac];
+            let tpl = convert_raw_to_analysis(
+                &RawTemplateData::default(),
+                &[],
+                &[],
+                None,
+                Some(&ctx(&macros, None)),
+            );
+            assert!(tpl.prop_definitions.is_empty(), "no facts => fail open");
+        }
     }
 }

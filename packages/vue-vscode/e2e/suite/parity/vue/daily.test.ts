@@ -257,4 +257,119 @@ suite(`Vue daily surface [${FIXTURE_NAME}]`, function () {
       );
     }
   });
+
+  test("vue.diagnostics.unused-declared-props-events-slots", async function () {
+    onlyVueParity(this);
+    this.timeout(45_000);
+    const file = "src/diagnostics/UnusedDeclarations.vue";
+    const doc = await openRelative(file);
+    await waitForFileReady(doc);
+    const codeOf = (diagnostic: vscode.Diagnostic): string =>
+      typeof diagnostic.code === "object" && diagnostic.code && "value" in diagnostic.code
+        ? String(diagnostic.code.value)
+        : String(diagnostic.code ?? "");
+    // The merged diagnostics publish rides the debounced provider-sync
+    // coordinator, and this file's readiness probe is hover-based (no bare
+    // mustache identifier) — poll until the Verter-owned hints actually
+    // LAND in the editor instead of settling on a pre-publish empty set.
+    const diagnostics = await pollUntil(
+      `${file} verter unused-declaration hints`,
+      async () => vscode.languages.getDiagnostics(doc.uri),
+      (diags) => diags.some((diagnostic) => codeOf(diagnostic).startsWith("verter/no-unused-")),
+      30_000,
+    );
+
+    const errors = diagnostics.filter(
+      (diagnostic) => diagnostic.severity === vscode.DiagnosticSeverity.Error,
+    );
+    assert.deepEqual(
+      errors.map(
+        (diagnostic) => `${diagnostic.source}:${codeOf(diagnostic)}:${diagnostic.message}`,
+      ),
+      [],
+      `${file} must stay error-clean while carrying its unused-declaration hints`,
+    );
+
+    // One Verter-owned faded hint per unused declared member, mapped to the
+    // authored member name; identical semantics on every provider route.
+    const expectations: ReadonlyArray<{ code: string; member: string }> = [
+      { code: "verter/no-unused-props", member: "deadProp" },
+      { code: "verter/no-unused-emit-declarations", member: "deadEvent" },
+      { code: "verter/no-unused-slots", member: "deadSlot" },
+    ];
+    for (const { code, member } of expectations) {
+      const matches = diagnostics.filter((diagnostic) => codeOf(diagnostic) === code);
+      assert.equal(
+        matches.length,
+        1,
+        `expected exactly one ${code}; got ${matches.map((d) => d.message).join(" | ")}`,
+      );
+      assert.equal(
+        doc.getText(matches[0].range),
+        member,
+        `${code} must map to the authored member name`,
+      );
+      assert.ok(
+        matches[0].tags?.includes(vscode.DiagnosticTag.Unnecessary),
+        `${code} must carry the Unnecessary tag for editor fading`,
+      );
+    }
+
+    // Live members are never flagged, and the provider does not double-report
+    // the macro members (no 6133 in a non-destructured component).
+    for (const live of ["liveProp", "liveEvent", "liveSlot"]) {
+      assert.ok(
+        diagnostics.every((diagnostic) => doc.getText(diagnostic.range) !== live),
+        `${live} is used and must carry no diagnostic`,
+      );
+    }
+    assert.ok(
+      diagnostics.every((diagnostic) => codeOf(diagnostic) !== "6133"),
+      `non-destructured macro members are Verter-owned; the provider must not double-report 6133: ${diagnostics.map((d) => `${codeOf(d)}:${d.message}`).join(" | ")}`,
+    );
+  });
+
+  test("vue.diagnostics.destructured-props-stay-provider-owned", async function () {
+    onlyVueParity(this);
+    this.timeout(45_000);
+    const file = "src/diagnostics/UnusedDestructuredProps.vue";
+    const doc = await openRelative(file);
+    await waitForFileReady(doc);
+    const codeOf = (diagnostic: vscode.Diagnostic): string =>
+      typeof diagnostic.code === "object" && diagnostic.code && "value" in diagnostic.code
+        ? String(diagnostic.code.value)
+        : String(diagnostic.code ?? "");
+    // Poll until the provider's merged 6133 lands (the publish is debounced
+    // behind provider sync), then assert the exact ownership split.
+    const diagnostics = await pollUntil(
+      `${file} provider 6133`,
+      async () => vscode.languages.getDiagnostics(doc.uri),
+      (diags) => diags.some((diagnostic) => codeOf(diagnostic) === "6133"),
+      30_000,
+    );
+
+    // Destructured defineProps liveness is provider-owned TS6133 — exactly
+    // one, on the authored dead binding, faded.
+    const unused = diagnostics.filter((diagnostic) => codeOf(diagnostic) === "6133");
+    assert.equal(
+      unused.length,
+      1,
+      `expected exactly one provider 6133; got ${diagnostics.map((d) => `${codeOf(d)}:${d.message}`).join(" | ")}`,
+    );
+    assert.equal(
+      doc.getText(unused[0].range),
+      "deadOne",
+      "6133 maps to the dead destructured prop",
+    );
+    assert.ok(
+      unused[0].tags?.includes(vscode.DiagnosticTag.Unnecessary),
+      "provider unused hint keeps the Unnecessary tag through the merge",
+    );
+
+    // Verter must NOT double-report the destructured component.
+    assert.ok(
+      diagnostics.every((diagnostic) => !codeOf(diagnostic).startsWith("verter/no-unused-")),
+      `destructured props are provider-owned; verter/no-unused-* must stay silent: ${diagnostics.map((d) => `${codeOf(d)}:${d.message}`).join(" | ")}`,
+    );
+  });
 });

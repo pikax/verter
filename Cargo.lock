@@ -4233,6 +4233,7 @@ dependencies = [
  "hotpath",
  "oxc_allocator",
  "oxc_ast",
+ "oxc_ast_visit",
  "oxc_parser",
  "oxc_span",
  "rustc-hash 2.1.2",

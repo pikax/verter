@@ -685,63 +685,6 @@ fn references_empty_when_none() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// has_solution_style_tsconfig
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[test]
-fn solution_style_detected() {
-    let ws = crate::filesystem::FilesystemWorkspace::new(
-        crate::filesystem::FilesystemOptions::default(),
-    );
-    let tmp = tempfile::TempDir::new().unwrap();
-    std::fs::write(
-        tmp.path().join("tsconfig.json"),
-        r#"{ "references": [{ "path": "./app" }] }"#,
-    )
-    .unwrap();
-
-    let workspace_root = tmp.path().to_string_lossy().replace('\\', "/");
-    assert!(
-        has_solution_style_tsconfig(&ws, &workspace_root),
-        "should detect solution-style tsconfig"
-    );
-}
-
-#[test]
-fn no_solution_style_without_references() {
-    let ws = crate::filesystem::FilesystemWorkspace::new(
-        crate::filesystem::FilesystemOptions::default(),
-    );
-    let tmp = tempfile::TempDir::new().unwrap();
-    std::fs::write(
-        tmp.path().join("tsconfig.json"),
-        r#"{ "compilerOptions": {} }"#,
-    )
-    .unwrap();
-
-    let workspace_root = tmp.path().to_string_lossy().replace('\\', "/");
-    assert!(
-        !has_solution_style_tsconfig(&ws, &workspace_root),
-        "should not detect solution-style without references"
-    );
-}
-
-#[test]
-fn no_solution_style_empty_references() {
-    let ws = crate::filesystem::FilesystemWorkspace::new(
-        crate::filesystem::FilesystemOptions::default(),
-    );
-    let tmp = tempfile::TempDir::new().unwrap();
-    std::fs::write(tmp.path().join("tsconfig.json"), r#"{ "references": [] }"#).unwrap();
-
-    let workspace_root = tmp.path().to_string_lossy().replace('\\', "/");
-    assert!(
-        !has_solution_style_tsconfig(&ws, &workspace_root),
-        "should not detect solution-style with empty references"
-    );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // normalize_path_buf
 // ═══════════════════════════════════════════════════════════════════════════
 

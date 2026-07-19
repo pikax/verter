@@ -245,6 +245,79 @@ describe("editor-neutral fail-closed validation", () => {
     ).rejects.toThrow(/TS7026/);
   });
 
+  it("rejects tsserver serving that carries no tsgo recommendation (tsgo-preferred flip)", async () => {
+    const attestationCase = createEditorNeutralContractInventory().find(
+      (testCase) => testCase.id === "verter.provider-attestation",
+    );
+    expect(attestationCase).toBeDefined();
+    // The default fake driver attests tsserver WITHOUT a recommendation.
+    await expect(
+      executeEditorNeutralContractCase(attestationCase!, fakeDriver([]), new Map()),
+    ).rejects.toThrow(/must recommend tsgo/i);
+  });
+
+  it("rejects a recommendation whose wording is not editor-agnostic", async () => {
+    const attestationCase = createEditorNeutralContractInventory().find(
+      (testCase) => testCase.id === "verter.provider-attestation",
+    );
+    const driver = fakeDriver([]);
+    driver.attestProvider = async () => ({
+      route: "tsserver",
+      publicKind: "tsserver",
+      startedKinds: ["tsserver"],
+      recommendation: {
+        preferred: "tsgo",
+        reason: 'Set verter.typeProvider to "tsgo" in VS Code settings.',
+        knownGaps: ["TS6133 quick fix unported."],
+      },
+    });
+    await expect(
+      executeEditorNeutralContractCase(attestationCase!, driver, new Map()),
+    ).rejects.toThrow(/editor-agnostic/i);
+  });
+
+  it("rejects tsgo-family serving that nags with a recommendation", async () => {
+    const attestationCase = createEditorNeutralContractInventory().find(
+      (testCase) => testCase.id === "verter.provider-attestation",
+    );
+    const driver = fakeDriver([]);
+    driver.route = "tsgo";
+    driver.attestProvider = async () => ({
+      route: "tsgo",
+      publicKind: "tsgo",
+      startedKinds: ["tsgo"],
+      recommendation: {
+        preferred: "tsgo",
+        reason: "TSGO is recommended.",
+        knownGaps: [],
+      },
+    });
+    await expect(
+      executeEditorNeutralContractCase(attestationCase!, driver, new Map()),
+    ).rejects.toThrow(/no recommendation/i);
+  });
+
+  it("accepts tsserver serving that carries the honest tsgo recommendation", async () => {
+    const attestationCase = createEditorNeutralContractInventory().find(
+      (testCase) => testCase.id === "verter.provider-attestation",
+    );
+    const driver = fakeDriver([]);
+    driver.attestProvider = async () => ({
+      route: "tsserver",
+      publicKind: "tsserver",
+      startedKinds: ["tsserver"],
+      recommendation: {
+        preferred: "tsgo",
+        reason:
+          "This workspace is served by a tsserver-family TypeScript service. TSGO is recommended.",
+        knownGaps: ["The 'remove unused declaration' quick fix (TS6133) is not yet available."],
+      },
+    });
+    await expect(
+      executeEditorNeutralContractCase(attestationCase!, driver, new Map()),
+    ).resolves.toBeUndefined();
+  });
+
   it("rejects a shared-tsgo topology that activated managed fallback", async () => {
     const topologyCase = createEditorNeutralContractInventory().find(
       (testCase) => testCase.surface === "provider-topology",

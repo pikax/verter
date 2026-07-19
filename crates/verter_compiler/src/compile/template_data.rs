@@ -18,6 +18,18 @@ pub struct RawTemplateData {
     pub binding_occurrences: Vec<RawBindingOccurrence>,
     pub elements: Vec<RawElementData>,
     pub slot_definitions: Vec<RawSlotDef>,
+    /// True when any template expression failed to parse — the identifier
+    /// inventory in `binding_occurrences` is then incomplete (fail-open gate
+    /// for usage-driven diagnostics).
+    pub has_expression_errors: bool,
+    /// A `<slot :name="expr">` dynamic outlet exists — the outlet set cannot
+    /// be statically bounded (suppresses unused-slot diagnostics).
+    pub has_dynamic_slot_outlet: bool,
+    /// Static member reads on identifier roots inside template expressions
+    /// (`props.title`, `$slots.header`, `$props["x"]`). Roots consumed by a
+    /// member read are NOT whole-object escapes; the unused-declaration
+    /// population matches these against `binding_occurrences` by root span.
+    pub member_reads: Vec<RawMemberRead>,
     pub template_refs: Vec<RawTemplateRef>,
     pub event_handlers: Vec<RawEventHandler>,
     pub v_for_directives: Vec<RawVForData>,
@@ -470,7 +482,7 @@ fn walk_node_for_extraction(
                 }
             }
 
-            extract_binding_occurrences(oxc_data, ctx.bindings, data);
+            extract_binding_occurrences(oxc_data, ctx.bindings, ctx.source, data);
 
             // Recurse into children
             if let Some(ref content) = el.content {
@@ -498,6 +510,7 @@ fn walk_node_for_extraction(
             flush_if_chain(current_if_chain, data);
 
             if let OxcNodeData::Interpolation(ref oxc_expr) = oxc_data {
+                note_expression_completeness(oxc_expr, data);
                 if let Some(ref result) = oxc_expr.bindings {
                     for binding in &result.bindings {
                         if !binding.ignore {
@@ -1179,12 +1192,20 @@ fn extract_slot_def(
             let base = &source[prop.start as usize..prop.name_end as usize];
             // Slot bindings: v-bind / : with an arg (scoped slots pass data via v-bind)
             if base == ":" || base == "v-bind" {
+                // `<slot :[key]="v">` — a DYNAMIC directive ARGUMENT: the
+                // bound attribute name is not statically known (it can be
+                // `name` at runtime), so the outlet inventory cannot be
+                // bounded. Flag it fail-open for unused-slot population;
+                // the definition itself is still extracted as before.
+                if prop.is_dynamic == Some(true) {
+                    data.has_dynamic_slot_outlet = true;
+                }
                 let arg = prop
                     .arg_start
                     .zip(prop.arg_end)
                     .map(|(s, e)| &source[s as usize..e as usize]);
                 if let Some(arg_name) = arg {
-                    if arg_name == "name" {
+                    if arg_name == "name" && prop.is_dynamic != Some(true) {
                         has_dynamic_name = true;
                         continue;
                     }
@@ -1213,6 +1234,9 @@ fn extract_slot_def(
     }
 
     if has_dynamic_name {
+        // `<slot :name="expr">` — the outlet set is not statically bounded;
+        // unused-slot diagnostics must fail open.
+        data.has_dynamic_slot_outlet = true;
         return;
     }
 
@@ -1490,9 +1514,88 @@ fn extract_v_model(
     }
 }
 
+/// A static member read on an identifier root inside a template expression.
+#[derive(Debug, Clone)]
+pub struct RawMemberRead {
+    /// The root identifier (`props` in `props.title`).
+    pub root: String,
+    /// The literal member name (`title` in `props.title` / `props["title"]`).
+    pub member: String,
+    /// File-absolute span of the ROOT identifier — matches the corresponding
+    /// `RawBindingOccurrence.span` for the same reference.
+    pub root_span: Span,
+}
+
+/// Record whether a parsed template expression is complete. Any expression
+/// with parse errors makes the identifier inventory unreliable — consumers
+/// that PROVE non-usage (unused-declaration diagnostics) must fail open.
+/// Also harvests static member reads for the unused-declaration population.
+fn note_expression_completeness(
+    exp: &crate::template::oxc::types::OxcParsedExpression<'_>,
+    data: &mut RawTemplateData,
+) {
+    if exp.errors.is_some() || exp.bindings.as_ref().is_some_and(|b| b.has_errors) {
+        data.has_expression_errors = true;
+    }
+    if let Some(ref expression) = exp.expression {
+        let mut collector = MemberReadCollector {
+            offset: exp.offset,
+            out: &mut data.member_reads,
+        };
+        use oxc_ast_visit::Visit;
+        collector.visit_expression(expression);
+    }
+}
+
+struct MemberReadCollector<'out> {
+    offset: u32,
+    out: &'out mut Vec<RawMemberRead>,
+}
+
+impl<'a> oxc_ast_visit::Visit<'a> for MemberReadCollector<'_> {
+    fn visit_static_member_expression(
+        &mut self,
+        member: &oxc_ast::ast::StaticMemberExpression<'a>,
+    ) {
+        if let oxc_ast::ast::Expression::Identifier(object) = &member.object {
+            self.out.push(RawMemberRead {
+                root: object.name.to_string(),
+                member: member.property.name.to_string(),
+                root_span: Span::new(
+                    object.span.start + self.offset,
+                    object.span.end + self.offset,
+                ),
+            });
+        }
+        oxc_ast_visit::walk::walk_static_member_expression(self, member);
+    }
+
+    fn visit_computed_member_expression(
+        &mut self,
+        member: &oxc_ast::ast::ComputedMemberExpression<'a>,
+    ) {
+        if let (
+            oxc_ast::ast::Expression::Identifier(object),
+            oxc_ast::ast::Expression::StringLiteral(literal),
+        ) = (&member.object, &member.expression)
+        {
+            self.out.push(RawMemberRead {
+                root: object.name.to_string(),
+                member: literal.value.to_string(),
+                root_span: Span::new(
+                    object.span.start + self.offset,
+                    object.span.end + self.offset,
+                ),
+            });
+        }
+        oxc_ast_visit::walk::walk_computed_member_expression(self, member);
+    }
+}
+
 fn extract_binding_occurrences(
     oxc_data: &OxcNodeData<'_>,
     bindings: &FxHashMap<&str, BindingType>,
+    source: &str,
     data: &mut RawTemplateData,
 ) {
     let oxc_el = match oxc_data {
@@ -1502,7 +1605,11 @@ fn extract_binding_occurrences(
 
     // Extract from directive value expressions
     for oxc_prop in &oxc_el.props {
-        if let Some(ref exp) = oxc_prop.exp {
+        for exp in [oxc_prop.exp.as_ref(), oxc_prop.arg.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            note_expression_completeness(exp, data);
             if let Some(ref result) = exp.bindings {
                 for b in &result.bindings {
                     if !b.ignore {
@@ -1520,6 +1627,7 @@ fn extract_binding_occurrences(
 
     // Extract from v-if condition
     if let Some(ref cond) = oxc_el.condition {
+        note_expression_completeness(cond, data);
         if let Some(ref result) = cond.bindings {
             for b in &result.bindings {
                 if !b.ignore {
@@ -1529,6 +1637,55 @@ fn extract_binding_occurrences(
                         is_in_bindings_map: bindings.contains_key(b.name),
                         usage_kind: 1, // directive value
                     });
+                }
+            }
+        }
+    }
+
+    // Extract from the v-for iterable (external references only — locals are
+    // the iteration variables). Usage kind 5 = iterator.
+    if let Some(ref vfor) = oxc_el.v_for {
+        if vfor.parsed.result.has_left_errors() || vfor.parsed.result.has_right_errors() {
+            data.has_expression_errors = true;
+        }
+        if let Some(ref right) = vfor.parsed.result.right {
+            // v-for expression spans are already file-relative
+            // (`parse_vfor_sliced` adjusts them) — no extra offset.
+            let mut collector = MemberReadCollector {
+                offset: 0,
+                out: &mut data.member_reads,
+            };
+            use oxc_ast_visit::Visit;
+            collector.visit_expression(right);
+        }
+        for reference in &vfor.parsed.references {
+            let name = reference.slice(source);
+            if name.is_empty() {
+                continue;
+            }
+            data.binding_occurrences.push(RawBindingOccurrence {
+                name: name.to_string(),
+                span: Span::new(reference.start, reference.end),
+                is_in_bindings_map: bindings.contains_key(name),
+                usage_kind: 5, // iterator
+            });
+        }
+    }
+
+    // Extract from a dynamic v-slot name (`#[expr]` computes in the outer scope).
+    if let Some(ref v_slot) = oxc_el.v_slot {
+        if let Some(ref dynamic_name) = v_slot.dynamic_name {
+            note_expression_completeness(dynamic_name, data);
+            if let Some(ref result) = dynamic_name.bindings {
+                for b in &result.bindings {
+                    if !b.ignore {
+                        data.binding_occurrences.push(RawBindingOccurrence {
+                            name: b.name.to_string(),
+                            span: Span::new(b.pos, b.pos + b.name.len() as u32),
+                            is_in_bindings_map: bindings.contains_key(b.name),
+                            usage_kind: 1, // directive value
+                        });
+                    }
                 }
             }
         }

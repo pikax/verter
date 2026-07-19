@@ -9,10 +9,15 @@
 // @ai-generated
 
 use crate::context::LintContext;
-use crate::diagnostic::{DiagnosticSpanKind, Severity};
+use crate::diagnostic::{DiagnosticSpanKind, DiagnosticTag, Severity};
 use crate::rules::{LintRule, RuleCategory};
 use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
 
+/// `TemplateAnalysisSnapshot::emit_definitions` is populated FAIL-OPEN by the
+/// shared unused-declaration pipeline: members appear only when emission could
+/// be statically bounded (no emit-binding escape, no `$emit` in the template,
+/// no expression parse errors; `defineModel` `update:*` events are
+/// self-consuming and never enter the inventory).
 pub struct NoUnusedEmitDeclarations;
 
 impl LintRule for NoUnusedEmitDeclarations {
@@ -25,7 +30,7 @@ impl LintRule for NoUnusedEmitDeclarations {
     }
 
     fn default_severity(&self) -> Option<Severity> {
-        Some(Severity::Warning)
+        Some(Severity::Hint)
     }
 
     fn check_template(&self, tpl: &TemplateAnalysisSnapshot, ctx: &mut LintContext) {
@@ -36,7 +41,7 @@ impl LintRule for NoUnusedEmitDeclarations {
             }
             // If there are no emit locations, the event is never emitted
             if emit.emit_locations.is_empty() {
-                ctx.report_with_severity(
+                ctx.report_with_tags(
                     self.name(),
                     self.category().as_str(),
                     format!(
@@ -47,6 +52,7 @@ impl LintRule for NoUnusedEmitDeclarations {
                     emit.span.start,
                     emit.span.end,
                     self.default_severity(),
+                    vec![DiagnosticTag::Unnecessary],
                     DiagnosticSpanKind::ScriptCallSite,
                 );
             }
@@ -95,6 +101,13 @@ mod tests {
             !diags.iter().any(|d| d.rule == "no-v-html"),
             "must not trigger unrelated rule"
         );
+        // Faded TS-unused look: Unnecessary tag + hint severity.
+        let diag = diags
+            .iter()
+            .find(|d| d.rule == "no-unused-emit-declarations")
+            .unwrap();
+        assert_eq!(diag.tags, vec![DiagnosticTag::Unnecessary]);
+        assert_eq!(diag.severity, Severity::Hint);
     }
 
     #[test]

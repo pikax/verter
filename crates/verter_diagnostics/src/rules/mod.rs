@@ -239,6 +239,7 @@ fn register_builtin_rules(registry: &mut RuleRegistry) {
     // Vue Recommended
     registry.register(Box::new(vue::NoUnusedComponents));
     registry.register(Box::new(vue::NoUnusedProps));
+    registry.register(Box::new(vue::NoUnusedSlots));
     registry.register(Box::new(vue::MultiWordComponentNames));
     registry.register(Box::new(vue::HtmlSelfClosing));
     registry.register(Box::new(vue::AttributeOrder));

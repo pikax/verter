@@ -624,6 +624,7 @@ fn build_svelte_snapshot_from_eval_source(
                 eval_source,
                 source_type,
                 program.borrow_dependent(),
+                program.had_errors(),
             )
         }
         FrameworkScriptProgram::SharedFatal => fatal_snapshot(),
@@ -648,6 +649,7 @@ fn build_svelte_snapshot_from_eval_source(
                     eval_source,
                     source_type,
                     &result.program,
+                    !result.errors.is_empty(),
                 )
             }
         }
@@ -1229,6 +1231,7 @@ pub(crate) fn build_vue_snapshot_from_parsed(
                 program.borrow_dependent(),
                 /* needs_exports */ true,
                 analysis_scope.needs_script_analysis(),
+                program.had_errors(),
             )
         }
         VueScriptProgram::SharedFatal => VueScriptOutputs {
@@ -1246,8 +1249,11 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     // the snapshot enters host-owned storage.
     absolutize_macro_payload_anchors(&mut script_analysis.macros, canonical_id);
 
-    // Cross-reference: mark script bindings that are referenced by CSS v-bind() in style blocks
-    if !style_analyses.is_empty() && !script_analysis.bindings.is_empty() {
+    // Cross-reference: mark script bindings that are referenced by CSS
+    // v-bind() in style blocks. Runs even with zero script bindings — the
+    // recorded `style_vbind_roots` also carry PROP liveness (style v-bind
+    // resolves props by bare name through the render context).
+    if !style_analyses.is_empty() {
         script_analysis.mark_bindings_used_in_style(&style_analyses);
     }
 
@@ -1566,6 +1572,7 @@ fn vue_script_walks_from_program(
     program: &Program<'_>,
     needs_exports: bool,
     needs_script_analysis: bool,
+    parse_errors: bool,
 ) -> VueScriptOutputs {
     let mut outputs = VueScriptOutputs {
         export_signatures: Vec::new(),
@@ -1599,6 +1606,7 @@ fn vue_script_walks_from_program(
                     source_type,
                     program,
                     verter_semantic::analysis::AnalysisScope::all(),
+                    parse_errors,
                 )
             }),
         );
@@ -1683,6 +1691,7 @@ fn build_vue_script_outputs(
         &parse_result.program,
         needs_exports,
         needs_script_analysis,
+        !parse_result.errors.is_empty(),
     );
     // Keep production diagnostic order: parse first, then the walks.
     let mut panic_diags = outputs.panic_diags;
@@ -1896,6 +1905,7 @@ pub(crate) fn build_non_sfc_snapshot_from_program(
     source: &str,
     source_type: SourceType,
     program: &Program<'_>,
+    parse_errors: bool,
 ) -> ParseSnapshot {
     let whole_hash = hash_16(source.as_bytes());
     let slices = SliceHashes::default();
@@ -1918,6 +1928,7 @@ pub(crate) fn build_non_sfc_snapshot_from_program(
                 | verter_semantic::analysis::AnalysisScope::VUE_API_USAGE
                 | verter_semantic::analysis::AnalysisScope::EXPORT_SIGNATURES
                 | verter_semantic::analysis::AnalysisScope::SCRIPT_USAGES,
+            parse_errors,
         );
     // Producer-side locator absolutization: fill the analyzer's empty-sentinel
     // macro-payload anchors with THIS snapshot's producing canonical before
@@ -1980,7 +1991,13 @@ pub(crate) fn parse_non_sfc_snapshot(
         };
     }
 
-    build_non_sfc_snapshot_from_program(canonical_id, source, source_type, &result.program)
+    build_non_sfc_snapshot_from_program(
+        canonical_id,
+        source,
+        source_type,
+        &result.program,
+        !result.errors.is_empty(),
+    )
 }
 
 #[cfg(test)]

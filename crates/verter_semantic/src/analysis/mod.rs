@@ -34,6 +34,7 @@ pub mod jsdoc;
 mod macros;
 pub use macros::lower_macro_type_argument_at_span;
 pub use macros::{lower_macro_field_payload_at, MacroFieldPayloadLowering};
+pub mod macro_usage;
 mod options;
 pub mod project_index;
 pub mod project_resolver;

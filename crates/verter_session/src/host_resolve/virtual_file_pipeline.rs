@@ -938,6 +938,8 @@ impl VerterHost {
                 script_imports: efs.script_analysis.imports.clone(),
                 script_macros: efs.script_analysis.macros.clone(),
                 script_bindings: efs.script_analysis.bindings.clone(),
+                script_macro_usage: efs.script_analysis.macro_usage.clone(),
+                script_vue_api_calls: efs.script_analysis.vue_api_calls.clone(),
                 framework_parse: efs.framework_parse,
                 style_v_bind_vars,
             }
@@ -1255,6 +1257,8 @@ impl VerterHost {
                     script_imports: efs.script_analysis.imports.clone(),
                     script_macros: efs.script_analysis.macros.clone(),
                     script_bindings: efs.script_analysis.bindings.clone(),
+                    script_macro_usage: efs.script_analysis.macro_usage.clone(),
+                    script_vue_api_calls: efs.script_analysis.vue_api_calls.clone(),
                     framework_parse: efs.framework_parse,
                     style_v_bind_vars: style_analyses
                         .iter()
@@ -2905,11 +2909,22 @@ impl VerterHost {
                 &snapshot.script_macros,
                 &snapshot.script_bindings,
             );
+            let unused_ctx = crate::template_convert::UnusedDeclarationContext::from_analysis(
+                &snapshot.script_macros,
+                snapshot.script_macro_usage.as_ref(),
+                &snapshot.script_vue_api_calls,
+                &snapshot.script_bindings,
+                // The compile input's style v-bind vars are the same ROOT
+                // extraction (`expression.split('.').next()`) the analysis
+                // snapshot records.
+                &snapshot.style_v_bind_vars,
+            );
             crate::template_convert::convert_raw_to_analysis(
                 raw,
                 &all_imports,
                 &binding_class_unions,
                 props_binding_name.as_deref(),
+                Some(&unused_ctx),
             )
         });
 

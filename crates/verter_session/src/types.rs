@@ -1564,6 +1564,17 @@ pub struct FileAnalysisSnapshot {
     pub script_binding_occurrences:
         Arc<Vec<verter_semantic::analysis::types::ScriptBindingOccurrence>>,
 
+    /// Script-side usage facts for macro-declared members (unused-declaration
+    /// diagnostics). `None` for files without Vue macros.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub macro_usage: Option<verter_semantic::analysis::macro_usage::MacroUsageFacts>,
+
+    /// Root identifiers referenced by `<style>` `v-bind()` expressions —
+    /// style `v-bind()` resolves PROPS by bare name, so prop-member liveness
+    /// consumes this set (see `ScriptAnalysisSnapshot::style_vbind_roots`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub style_vbind_roots: Vec<String>,
+
     /// Export signatures extracted from the file's script block.
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
     pub export_signatures: Arc<Vec<verter_semantic::analysis::ExportSignature>>,
@@ -2218,6 +2229,12 @@ pub(crate) struct CompileInput {
     /// Local/exported bindings from the effective script analysis.
     /// Used when converting template compiler metadata into host analysis.
     pub(crate) script_bindings: Vec<verter_semantic::analysis::AnalyzedBinding>,
+    /// Script-side macro-member usage facts from the effective script analysis.
+    /// Feeds the unused-declaration inventories during template conversion.
+    pub(crate) script_macro_usage: Option<verter_semantic::analysis::macro_usage::MacroUsageFacts>,
+    /// Vue API call sites from the effective script analysis (the `useSlots()`
+    /// fail-open gate for unused-slot diagnostics).
+    pub(crate) script_vue_api_calls: Vec<verter_semantic::analysis::types::VueApiCallSite>,
     /// Framework-neutral parse artifact from upsert, reused during
     /// compilation to avoid re-parsing.
     pub(crate) framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,

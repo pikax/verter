@@ -48,7 +48,7 @@ import {
   RequestType,
 } from "@verter/language-shared";
 import type { StatisticsSnapshot, StatisticsSummary } from "@verter/language-shared";
-import { computeStatusBarState } from "./statusBar";
+import { computeProviderRecommendationNotice, computeStatusBarState } from "./statusBar";
 import CompiledCodeContentProvider from "./CompiledCodeContentProvider";
 import { VirtualFileContentProvider } from "./VirtualFileManager";
 import { UnifiedVirtualFilesProvider } from "./UnifiedVirtualFilesProvider";
@@ -939,6 +939,36 @@ export async function activateVueLanguageServer(
   typeProviderStatusBar.show();
   context.subscriptions.push(typeProviderStatusBar);
 
+  // Provider recommendation (tsgo-preferred): the server sends structured
+  // facts on $/verter/typeProviderStatus; this client renders them once per
+  // workspace, dismissible, gated on verter.providerRecommendations.
+  const PROVIDER_RECOMMENDATION_DISMISSED_KEY = "verter.providerRecommendation.dismissed";
+  let providerRecommendationShownThisSession = false;
+  function maybeShowProviderRecommendation(
+    params: NotificationParams[typeof NotificationType.TypeProviderStatus],
+  ) {
+    const notice = computeProviderRecommendationNotice(params, {
+      enabled: workspace.getConfiguration("verter").get<boolean>("providerRecommendations", true),
+      dismissed:
+        providerRecommendationShownThisSession ||
+        context.workspaceState.get<boolean>(PROVIDER_RECOMMENDATION_DISMISSED_KEY, false),
+    });
+    if (!notice) return;
+    providerRecommendationShownThisSession = true;
+    // Logged for observability (and E2E attestation of the route behavior):
+    // the notice fires exactly on tsserver-family serving, never on tsgo.
+    log.info(`Provider recommendation: ${notice.message}`);
+    void window
+      .showInformationMessage(notice.message, "Open Settings", "Don't show again")
+      .then((choice) => {
+        if (choice === "Open Settings") {
+          void commands.executeCommand("workbench.action.openSettings", "verter.typeProvider");
+        } else if (choice === "Don't show again") {
+          void context.workspaceState.update(PROVIDER_RECOMMENDATION_DISMISSED_KEY, true);
+        }
+      });
+  }
+
   function registerTypeProviderStatusHandler(lc: LanguageClient) {
     lc.onNotification(
       NotificationType.TypeProviderStatus,
@@ -955,6 +985,7 @@ export async function activateVueLanguageServer(
         if (params.kind !== "none") {
           startupProbe?.markTypeProviderStarted(params.kind);
         }
+        maybeShowProviderRecommendation(params);
       },
     );
   }

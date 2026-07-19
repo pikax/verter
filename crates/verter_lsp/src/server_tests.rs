@@ -957,7 +957,6 @@ fn make_hover_test_service_with_kind(
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 type_provider_kind: kind,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -1609,7 +1608,6 @@ async fn make_definition_test_server_with_kind(
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 type_provider_kind: kind,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -2775,8 +2773,8 @@ fn did_open_provider_sync_policy_skips_api_sync_for_tsserver_but_not_tsgo() {
     );
 }
 
-#[test]
-fn editor_tsserver_constructs_store_publication_without_a_local_provider() {
+#[tokio::test]
+async fn editor_tsserver_constructs_store_publication_without_a_local_provider() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
@@ -2787,7 +2785,6 @@ fn editor_tsserver_constructs_store_publication_without_a_local_provider() {
                 type_provider: None,
                 project_sync_mode: ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::EditorTsserver,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: Some("attested editor project".into()),
                 suppress_imported_carrier_prewarm: false,
@@ -2798,7 +2795,12 @@ fn editor_tsserver_constructs_store_publication_without_a_local_provider() {
 
     assert!(server.type_provider.is_none());
     assert!(server.project_sync.is_none());
-    assert!(server.sync_coordinator.is_none());
+    // The debounced coordinator is ALWAYS constructed: its publish half
+    // carries Verter-owned diagnostics (lint / unused-declaration hints /
+    // template errors) on every route — the editor-owned tsserver plugin
+    // route has NO in-process provider, yet files opened after init must
+    // still receive Verter-owned pushes (the provider-sync half no-ops).
+    let _always_present: &crate::sync_coordinator::SyncCoordinatorHandle = &server.sync_coordinator;
     assert!(
         server.carrier_publish_coordinator.is_some(),
         "the editor plugin route requires the durable store publisher"
@@ -2819,7 +2821,6 @@ async fn managed_tsgo_constructs_both_direct_provider_sync_and_editor_store_publ
                 type_provider: Some(Arc::clone(&provider_for_server)),
                 project_sync_mode: ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::Tsgo,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: Some("managed tsgo".into()),
                 suppress_imported_carrier_prewarm: false,
@@ -2851,7 +2852,6 @@ async fn editor_tsserver_yields_navigation_and_rename_to_the_editor_plugin() {
                 type_provider: None,
                 project_sync_mode: ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::EditorTsserver,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: Some("attested editor project".into()),
                 suppress_imported_carrier_prewarm: false,
@@ -2962,7 +2962,6 @@ async fn editor_tsserver_live_publish_refreshes_durable_carrier_content() {
                 type_provider: None,
                 project_sync_mode: ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::EditorTsserver,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: Some("attested editor project".into()),
                 suppress_imported_carrier_prewarm: false,
@@ -3032,7 +3031,6 @@ async fn editor_tsserver_completion_yields_member_access_but_keeps_bare_scope() 
                 type_provider: None,
                 project_sync_mode: ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::EditorTsserver,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: Some("attested editor project".into()),
                 suppress_imported_carrier_prewarm: false,
@@ -3246,7 +3244,6 @@ async fn initialized_returns_before_background_configure_paths_completes() {
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -3322,6 +3319,7 @@ fn collect_imported_carrier_priority_ids_keeps_only_resolved_vue_imports() {
         module_references: Vec::new(),
         bindings: Vec::new(),
         macros: Vec::new(),
+        macro_usage: None,
         macro_type_deps: Vec::new(),
         flags: verter_semantic::analysis::AnalysisFlags::empty(),
         exported_functions: Vec::new(),
@@ -3337,6 +3335,7 @@ fn collect_imported_carrier_priority_ids_keeps_only_resolved_vue_imports() {
         nested_macro_calls: Vec::new(),
         is_typescript: false,
         declaration_entries: Vec::new(),
+        style_vbind_roots: Vec::new(),
     };
 
     let ids = collect_imported_carrier_priority_ids(&analysis);
@@ -4368,7 +4367,6 @@ async fn completion_holds_for_in_flight_open_vue_ts_legacy_lane() {
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -8171,7 +8169,6 @@ async fn goto_type_definition_returns_none_without_provider() {
                 type_provider: None,
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -12958,7 +12955,6 @@ defineProps<{ msg: string }>()
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -13702,7 +13698,6 @@ async fn sync_imported_carrier_api_lightweight_opens_snapshot_ide_path_for_tsgo(
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::Tsgo,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -13913,7 +13908,6 @@ async fn sync_imported_carrier_api_lightweight_preserves_open_unowned_state() {
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -14158,7 +14152,6 @@ async fn ensure_current_file_synced_preserves_open_unresolved_carrier_state_when
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -14259,7 +14252,6 @@ async fn ensure_current_file_synced_reconciles_owned_open_vue_on_owner_loss() {
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -14962,7 +14954,6 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
                         type_provider: Some(Arc::clone(&type_provider_for_server)),
                         project_sync_mode: crate::ProjectSyncMode::FullProject,
                         type_provider_kind: crate::TypeProviderKind::Tsserver,
-                        suggest_tsgo: false,
                         mcp_port: None,
                         type_provider_reason: None,
                         suppress_imported_carrier_prewarm: false,
@@ -15111,7 +15102,6 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_immed
                         type_provider: Some(Arc::clone(&type_provider_for_server)),
                         project_sync_mode: crate::ProjectSyncMode::FullProject,
                         type_provider_kind: crate::TypeProviderKind::Tsserver,
-                        suggest_tsgo: false,
                         mcp_port: None,
                         type_provider_reason: None,
                         suppress_imported_carrier_prewarm: false,
@@ -15233,7 +15223,6 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_on_do
                         type_provider: Some(Arc::clone(&type_provider_for_server)),
                         project_sync_mode: crate::ProjectSyncMode::FullProject,
                         type_provider_kind: crate::TypeProviderKind::Tsserver,
-                        suggest_tsgo: false,
                         mcp_port: None,
                         type_provider_reason: None,
                         suppress_imported_carrier_prewarm: false,
@@ -15347,6 +15336,428 @@ fn compute_verter_diagnostics_flags_fixture_fragment_component_data_attr() {
         );
 }
 
+/// Byte offset → LSP position for a plain ASCII test source.
+#[cfg(test)]
+fn ascii_position(source: &str, needle: &str) -> Position {
+    let offset = source.find(needle).expect("needle present");
+    let before = &source[..offset];
+    let line = before.matches('\n').count() as u32;
+    let character = before
+        .rsplit('\n')
+        .next()
+        .map(|tail| tail.len() as u32)
+        .unwrap_or(0);
+    Position { line, character }
+}
+
+/// Public-boundary acceptance: an unused declared prop, event, and slot each
+/// publish ONE Verter-owned diagnostic by default (no lint config), faded via
+/// `Unnecessary`, anchored on the authored member name; used members and the
+/// self-consumed `defineModel` pair stay silent.
+#[test]
+fn unused_declared_props_emits_slots_surface_by_default_with_unnecessary_tag() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script setup lang=\"ts\">\n\
+                  const props = defineProps<{ used: string; unusedProp: number }>();\n\
+                  const emit = defineEmits<{ save: []; unusedEvent: [] }>();\n\
+                  defineSlots<{ header(): unknown; unusedSlot(): unknown }>();\n\
+                  const title = defineModel<string>('title');\n\
+                  console.log(props.used, title.value);\n\
+                  emit('save');\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <div v-if=\"props.used\"><slot name=\"header\" /></div>\n\
+                  </template>\n";
+    let file = dir.path().join("Comp.vue");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+
+    let by_code = |code: &str| {
+        diags
+            .iter()
+            .filter(|diag| {
+                matches!(
+                    diag.code.as_ref(),
+                    Some(NumberOrString::String(c)) if c == code
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // ── Unused prop: exactly one, faded, on the authored member name ──
+    let unused_props = by_code("verter/no-unused-props");
+    assert_eq!(
+        unused_props.len(),
+        1,
+        "unused declared prop must surface by default, got: {diags:?}"
+    );
+    assert!(unused_props[0].message.contains("unusedProp"));
+    assert_eq!(
+        unused_props[0].tags,
+        Some(vec![DiagnosticTag::UNNECESSARY]),
+        "editors need the Unnecessary tag for the faded TS-unused look"
+    );
+    assert_eq!(
+        unused_props[0].range.start,
+        ascii_position(source, "unusedProp"),
+        "diagnostic anchors on the authored declaration member"
+    );
+
+    // ── Unused event ──
+    let unused_emits = by_code("verter/no-unused-emit-declarations");
+    assert_eq!(unused_emits.len(), 1, "got: {diags:?}");
+    assert!(unused_emits[0].message.contains("unusedEvent"));
+    assert_eq!(unused_emits[0].tags, Some(vec![DiagnosticTag::UNNECESSARY]));
+    assert_eq!(
+        unused_emits[0].range.start,
+        ascii_position(source, "unusedEvent")
+    );
+
+    // ── Unused slot ──
+    let unused_slots = by_code("verter/no-unused-slots");
+    assert_eq!(unused_slots.len(), 1, "got: {diags:?}");
+    assert!(unused_slots[0].message.contains("unusedSlot"));
+    assert_eq!(unused_slots[0].tags, Some(vec![DiagnosticTag::UNNECESSARY]));
+    assert_eq!(
+        unused_slots[0].range.start,
+        ascii_position(source, "unusedSlot")
+    );
+
+    // ── Negatives: used members and the defineModel pair are never flagged ──
+    for never_flagged in ["'used'", "'save'", "'header'", "'title'", "update:title"] {
+        assert!(
+            !diags
+                .iter()
+                .any(|diag| diag.message.contains(never_flagged)),
+            "{never_flagged} is used/self-consumed and must not be flagged: {diags:?}"
+        );
+    }
+}
+
+/// Fail-open boundary: whole-object escapes, destructured `defineProps`
+/// (provider-owned TS6133 — the merge cannot dedup across sources), and
+/// `useSlots()` each silence their WHOLE kind — zero unused-declaration
+/// diagnostics for this component.
+#[test]
+fn unused_declaration_diagnostics_fail_open_on_escapes_destructure_and_use_slots() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script setup lang=\"ts\">\n\
+                  import { useSlots } from 'vue';\n\
+                  const { neverReadProp } = defineProps<{ neverReadProp: number }>();\n\
+                  const emit = defineEmits<{ neverEmitted: [] }>();\n\
+                  const forwarded = emit;\n\
+                  defineSlots<{ neverOutlet(): unknown }>();\n\
+                  const slots = useSlots();\n\
+                  console.log(forwarded, slots);\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <div />\n\
+                  </template>\n";
+    let file = dir.path().join("FailOpen.vue");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+
+    assert!(
+        !diags.iter().any(|diag| matches!(
+            diag.code.as_ref(),
+            Some(NumberOrString::String(code))
+                if code == "verter/no-unused-props"
+                    || code == "verter/no-unused-emit-declarations"
+                    || code == "verter/no-unused-slots"
+        )),
+        "escaped/destructured/useSlots component must produce ZERO unused-declaration \
+         diagnostics (fail-open; destructured props are provider-owned TS6133), got: {diags:?}"
+    );
+}
+
+/// A legacy Svelte `<slot>` has NO declaration site — the unused-declaration
+/// diagnostics apply only to explicit type-level declarations and must never
+/// invent one for Svelte markup.
+#[test]
+fn svelte_legacy_slot_produces_no_unused_declaration_diagnostic() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script lang=\"ts\">\n\
+                  export let title: string;\n\
+                  console.log(title);\n\
+                  </script>\n\
+                  \n\
+                  <div><slot /></div>\n";
+    let file = dir.path().join("LegacySlot.svelte");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "svelte".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+
+    assert!(
+        !diags.iter().any(|diag| matches!(
+            diag.code.as_ref(),
+            Some(NumberOrString::String(code)) if code.starts_with("verter/no-unused-")
+        )),
+        "legacy <slot> has no declaration site — nothing to flag, got: {diags:?}"
+    );
+}
+
+/// The standard template-emit pattern — calling the `defineEmits` return
+/// binding from a template handler (`@click="emit('close')"`) — is a live
+/// emit. The whole emit kind fails open on any template occurrence of the
+/// binding (per-name template extraction stays deferred), so NOTHING may be
+/// flagged.
+#[test]
+fn template_emit_binding_call_never_flags_the_emitted_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script setup lang=\"ts\">\n\
+                  const emit = defineEmits<{ close: []; other: [] }>();\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <button @click=\"emit('close')\">x</button>\n\
+                  </template>\n";
+    let file = dir.path().join("TemplateEmit.vue");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+
+    assert!(
+        !diags.iter().any(|diag| matches!(
+            diag.code.as_ref(),
+            Some(NumberOrString::String(code)) if code == "verter/no-unused-emit-declarations"
+        )),
+        "a template call through the emit binding must suppress unused-emit \
+         diagnostics (fail-open on the binding occurrence), got: {diags:?}"
+    );
+}
+
+/// The `$emit` template form of the same pattern, end-to-end from real source
+/// (the population layer's `$emit` suppression is otherwise only exercised
+/// with hand-built occurrences).
+#[test]
+fn template_dollar_emit_call_suppresses_emit_diagnostics() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script setup lang=\"ts\">\n\
+                  defineEmits<{ close: [] }>();\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <button @click=\"$emit('close')\">x</button>\n\
+                  </template>\n";
+    let file = dir.path().join("DollarEmit.vue");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+
+    assert!(
+        !diags.iter().any(|diag| matches!(
+            diag.code.as_ref(),
+            Some(NumberOrString::String(code)) if code == "verter/no-unused-emit-declarations"
+        )),
+        "a template `$emit('close')` must suppress unused-emit diagnostics, got: {diags:?}"
+    );
+}
+
+/// A mid-edit BROKEN `<script>` (not just a broken template expression) must
+/// fail open: OXC error recovery can silently swallow real usages (here the
+/// unterminated template literal eats the `props.color` read and the
+/// `emit('save')` call), so no unused-declaration hint may be emitted while
+/// the script does not parse.
+#[test]
+fn broken_script_mid_edit_emits_no_unused_declaration_hints() {
+    // Two distinct mid-edit breakage classes: an unterminated template
+    // literal (a fatal parse) and an unterminated block comment (a
+    // RECOVERABLE parse error) — both swallow the trailing real usages, so
+    // both must fail open.
+    let sources = [
+        (
+            "BrokenLiteral.vue",
+            "<script setup lang=\"ts\">\n\
+             const props = defineProps<{ color: string }>();\n\
+             const emit = defineEmits<{ save: [] }>();\n\
+             defineSlots<{ header(): unknown }>();\n\
+             const wip = `unterminated\n\
+             console.log(props.color);\n\
+             emit('save');\n\
+             </script>\n\
+             \n\
+             <template>\n\
+             <div><slot name=\"header\" /></div>\n\
+             </template>\n",
+        ),
+        (
+            "BrokenComment.vue",
+            "<script setup lang=\"ts\">\n\
+             const props = defineProps<{ color: string }>();\n\
+             const emit = defineEmits<{ save: [] }>();\n\
+             defineSlots<{ header(): unknown }>();\n\
+             /* unterminated mid-edit comment\n\
+             console.log(props.color);\n\
+             emit('save');\n\
+             </script>\n\
+             \n\
+             <template>\n\
+             <div><slot name=\"header\" /></div>\n\
+             </template>\n",
+        ),
+    ];
+    for (name, source) in sources {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(name);
+        std::fs::write(&file, source).unwrap();
+
+        let host = crate::test_utils::make_filesystem_test_host(dir.path());
+        let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+        let uri =
+            crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: source.to_string(),
+        });
+
+        let cached_verter_diags = Arc::new(DashMap::new());
+        let diags =
+            compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+
+        assert!(
+            !diags.iter().any(|diag| matches!(
+                diag.code.as_ref(),
+                Some(NumberOrString::String(code)) if code.starts_with("verter/no-unused-")
+            )),
+            "{name}: a script with parse errors must produce ZERO unused-declaration \
+             diagnostics (fail-open — recovery can hide real usages), got: {diags:?}"
+        );
+    }
+}
+
+/// A prop consumed ONLY through `<style>` `v-bind(color)` by BARE name (no
+/// `props.` prefix, non-destructured `defineProps`) is live at runtime — the
+/// style fact must keep that member alive while a genuinely dead prop in the
+/// same component still surfaces (per-member fact, not whole-kind
+/// suppression).
+#[test]
+fn style_vbind_bare_prop_name_keeps_prop_live_and_dead_prop_flagged() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script setup lang=\"ts\">\n\
+                  defineProps<{ color: string; deadProp: string }>();\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <div class=\"x\">t</div>\n\
+                  </template>\n\
+                  \n\
+                  <style>\n\
+                  .x { color: v-bind(color); }\n\
+                  </style>\n";
+    let file = dir.path().join("StyleVBind.vue");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+
+    let unused_props: Vec<_> = diags
+        .iter()
+        .filter(|diag| {
+            matches!(
+                diag.code.as_ref(),
+                Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+            )
+        })
+        .collect();
+    assert!(
+        !unused_props
+            .iter()
+            .any(|diag| diag.message.contains("color")),
+        "`color` is live through `<style>` v-bind(color) and must not be \
+         flagged, got: {unused_props:?}"
+    );
+    assert!(
+        unused_props
+            .iter()
+            .any(|diag| diag.message.contains("deadProp")),
+        "`deadProp` is genuinely unused — the style fact is per-member, not a \
+         whole-kind suppression, got: {diags:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn completion_with_real_tsserver_recovers_when_current_file_sync_was_missed() {
     let workspace_id = fixture_workspace_root("single-project");
@@ -15413,7 +15824,6 @@ async fn completion_with_real_tsserver_recovers_when_current_file_sync_was_misse
                         type_provider: Some(Arc::clone(&type_provider_for_server)),
                         project_sync_mode: crate::ProjectSyncMode::FullProject,
                         type_provider_kind: crate::TypeProviderKind::Tsserver,
-                        suggest_tsgo: false,
                         mcp_port: None,
                         type_provider_reason: None,
                         suppress_imported_carrier_prewarm: false,
@@ -15526,7 +15936,6 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
                         type_provider: Some(Arc::clone(&type_provider_for_server)),
                         project_sync_mode: crate::ProjectSyncMode::FullProject,
                         type_provider_kind: crate::TypeProviderKind::Tsserver,
-                        suggest_tsgo: false,
                         mcp_port: None,
                         type_provider_reason: None,
                         suppress_imported_carrier_prewarm: false,
@@ -16384,7 +16793,6 @@ async fn provider_projection_context_serves_both_carrier_and_self_file() {
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -16511,7 +16919,6 @@ async fn self_file_auto_import_resolve_fails_closed_with_no_edits() {
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -16611,7 +17018,6 @@ async fn missing_ide_context_for_real_carrier_fails_resolve_not_drops_edits() {
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -16714,7 +17120,6 @@ async fn non_vue_carrier_auto_import_resolve_fails_closed_no_script_setup_synthe
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -17068,7 +17473,6 @@ async fn rune_module_queryable_before_resolver_ownership() {
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -17133,7 +17537,6 @@ async fn rune_module_own_buffer_resyncs_on_did_change() {
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -17215,7 +17618,6 @@ async fn rune_module_self_file_state_closed_on_did_close() {
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -17294,7 +17696,6 @@ async fn plain_script_close_while_depended_upon_keeps_carrier_features_answering
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -17432,7 +17833,6 @@ async fn plain_script_features_answer_on_every_provider_route() {
                     type_provider: Some(Arc::clone(&type_provider_for_server)),
                     project_sync_mode: crate::ProjectSyncMode::FullProject,
                     type_provider_kind: kind,
-                    suggest_tsgo: false,
                     mcp_port: None,
                     type_provider_reason: None,
                     suppress_imported_carrier_prewarm: false,
@@ -17597,7 +17997,6 @@ async fn plain_script_features_answer_on_every_provider_route() {
                 type_provider: None,
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::EditorTsserver,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: Some("attested editor project".into()),
                 suppress_imported_carrier_prewarm: false,
@@ -17671,7 +18070,6 @@ async fn deleting_carrier_source_closes_its_companions_in_provider() {
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -17775,7 +18173,6 @@ async fn self_file_rename_and_code_actions_gated_off() {
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -19736,7 +20133,6 @@ async fn did_close_orders_didclose_before_release_so_no_overlay_leak_at_real_han
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 // The proactive declaration-overlay graph is a tsgo-only concern.
                 type_provider_kind: crate::TypeProviderKind::Tsgo,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -19972,7 +20368,6 @@ async fn guarded_decl_close_does_not_strand_concurrently_reopened_overlay() {
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 // The proactive declaration-overlay graph is a tsgo-only concern.
                 type_provider_kind: crate::TypeProviderKind::Tsgo,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -23167,7 +23562,6 @@ async fn stale_close_is_superseded_when_a_reaching_root_reopens_the_overlay() {
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
                 type_provider_kind: crate::TypeProviderKind::Tsgo,
-                suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_reason: None,
                 suppress_imported_carrier_prewarm: false,
@@ -25046,4 +25440,43 @@ async fn contract_directive_hovers_survive_sfc_scanner_dead_zones() {
 
     drain_handle.abort();
     drop(service);
+}
+
+/// The committed VS Code E2E fixture stays semantically tied to the boundary
+/// path: the EXACT fixture bytes produce the three unused-declaration hints
+/// (a drift in the fixture or the pipeline breaks the E2E and this test
+/// together, pointing at the same cause).
+#[test]
+fn e2e_fixture_unused_declarations_matches_boundary_semantics() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+        "../../packages/vue-vscode/e2e/fixtures/vue-parity/src/diagnostics/UnusedDeclarations.vue",
+    );
+    let source = std::fs::read_to_string(&fixture).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("UnusedDeclarations.vue");
+    std::fs::write(&file, &source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+    let count = |code: &str| {
+        diags
+            .iter()
+            .filter(|d| matches!(d.code.as_ref(), Some(NumberOrString::String(c)) if c == code))
+            .count()
+    };
+    assert_eq!(count("verter/no-unused-props"), 1, "props");
+    assert_eq!(count("verter/no-unused-emit-declarations"), 1, "emits");
+    assert_eq!(count("verter/no-unused-slots"), 1, "slots");
 }
