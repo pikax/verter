@@ -237,7 +237,7 @@ fn node_available() -> bool {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rust_and_js_clients_agree_on_the_same_ops() {
-    let Some(exe) = common::engine_or_skip() else {
+    let Some(exe) = common::engine_or_skip().await else {
         return;
     };
     if !node_available() {
@@ -279,7 +279,7 @@ async fn rust_and_js_clients_agree_on_the_same_ops() {
 /// proving the parity holds for the empty-diagnostic case too (not just errors).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rust_and_js_agree_on_clean_carrier() {
-    let Some(exe) = common::engine_or_skip() else {
+    let Some(exe) = common::engine_or_skip().await else {
         return;
     };
     if !node_available() {

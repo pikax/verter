@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use verter_tsgo_api::transport::spawn::discover_tsgo;
 use verter_type_runtime::protocol::TypeDiagnostic;
 use verter_type_runtime::traits::TypeProvider;
 use verter_type_runtime::tsgo::{TsgoOwnedProvider, TsgoTypeProvider};
@@ -22,9 +21,13 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn engine_or_skip() -> Option<PathBuf> {
-    match discover_tsgo(&workspace_root()) {
-        Ok(p) => Some(p),
+async fn engine_or_skip() -> Option<PathBuf> {
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+        verter_tsgo_api::toolchain::validation::Capability::Lsp,
+        Some(workspace_root()),
+    );
+    match verter_tsgo_api::toolchain::discovery::resolve(&request).await {
+        Ok(resolution) => Some(resolution.path),
         Err(e) => {
             if std::env::var("VERTER_REQUIRE_TSGO").is_ok() {
                 panic!("VERTER_REQUIRE_TSGO is set but tsgo was not found: {e}. A skip would be a vacuous pass.");
@@ -96,7 +99,7 @@ async fn build_owned_provider(exe: &Path, dir: &Path) -> TsgoOwnedProvider {
 /// process, ONE query path, both surfaces, one shared Program.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owned_provider_diagnostics_via_api_and_feature_via_lsp_one_process() {
-    let Some(exe) = engine_or_skip() else {
+    let Some(exe) = engine_or_skip().await else {
         return;
     };
     let dir = tempdir();
@@ -209,7 +212,7 @@ fn write_project_fixture(dir: &Path, name: &str) -> PathBuf {
 /// empty / wrong-project result would NOT surface it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owned_api_oracle_resolves_multiple_projects_per_query_on_one_process() {
-    let Some(exe) = engine_or_skip() else {
+    let Some(exe) = engine_or_skip().await else {
         return;
     };
     let dir = tempdir();
@@ -266,7 +269,7 @@ async fn owned_api_oracle_resolves_multiple_projects_per_query_on_one_process() 
 /// provider's. There is no second spawn / parallel feature pipeline.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owned_provider_is_one_process_no_second_spawn() {
-    let Some(exe) = engine_or_skip() else {
+    let Some(exe) = engine_or_skip().await else {
         return;
     };
     let dir = tempdir();

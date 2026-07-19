@@ -8,6 +8,20 @@ homepage.workspace = true
 authors.workspace = true
 description = "Rust-native client for the tsgo (typescript-go) `--api` MessagePack protocol: hand-written wire codec, single-writer process actor, sync host-callback FS adapter, and interactive/batch scheduling lanes."
 publish = false
+# Bins are explicit-only: the fake engine is TEST tooling, never a shipped bin.
+autobins = false
+
+[features]
+# Builds the TEST-ONLY fake tsgo engine (the `verter_tsgo_fake_engine` bin and
+# the `fake_engine` module). Enabled by this crate's own test suite via the
+# dev-dependency on itself below, and by consumer crates' test lanes the same
+# way — never by a default/release build.
+test-fake-engine = []
+
+[[bin]]
+name = "verter_tsgo_fake_engine"
+path = "src/bin/verter_tsgo_fake_engine.rs"
+required-features = ["test-fake-engine"]
 
 [dependencies]
 # Async runtime for the process actor + scheduling lanes. `net` adds the
@@ -52,6 +66,8 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_System_Threading",
+    "Win32_System_Pipes",
+    "Win32_System_JobObjects",
 ] }
 
 # NOTE: the STANDALONE `--api` transport uses the spawned engine's stdin/stdout
@@ -65,3 +81,8 @@ windows-sys = { version = "0.61.2", features = [
 
 [dev-dependencies]
 tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "time", "sync"] }
+# Self dev-dependency: enables the `test-fake-engine` feature for THIS crate's
+# test builds only (cargo builds dev-dependencies when compiling tests), so the
+# fake engine bin exists for `cargo test` (CARGO_BIN_EXE_) while a default
+# `cargo build` / release never produces it.
+verter_tsgo_api = { path = ".", features = ["test-fake-engine"] }

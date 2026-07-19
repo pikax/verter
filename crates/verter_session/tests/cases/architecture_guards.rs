@@ -5087,14 +5087,16 @@ mod foundations_guards {
             "crates/verter_parser/src/utils/oxc/script/type_surface/mod.rs",
             "crates/verter_scheduler/src/source_loader.rs",
             "crates/verter_tsc/src/checker.rs",
-            "crates/verter_tsc/src/reporter.rs",
             "crates/verter_tsc/src/tsconfig.rs",
-            // rc tsgo-engine binary discovery (`discover_tsgo`) — real-OS
-            // pnpm-store + classic-sibling walk to locate the installed
-            // `typescript@>=7` platform binary the `--api` transport spawns;
-            // a subprocess binary is real-FS by nature, never workspace
-            // source (sibling of the `verter_type_runtime` IPC entries).
-            "crates/verter_tsgo_api/src/transport/spawn.rs",
+            // tsgo toolchain provisioning (the 4-tier resolver) — real-OS
+            // walks of PATH dirs, project `node_modules` (flat + pnpm store),
+            // the update cache, and the bundled sidecar to locate a supported
+            // tsgo engine binary, and the capability smoke's minimal temp
+            // project. A subprocess engine binary is real-FS by nature, never
+            // workspace/semantic source (sibling of the
+            // `verter_type_runtime` IPC entries).
+            "crates/verter_tsgo_api/src/toolchain/discovery.rs",
+            "crates/verter_tsgo_api/src/toolchain/validation.rs",
             // Relay-shim rendezvous advertisement — the IPC file a shim
             // writes on startup so a `verter_lsp` control client can DISCOVER
             // it (create_dir_all / write / read / read_dir / remove). An IPC
@@ -9419,17 +9421,18 @@ mod foundations_guards {
             "crates/verter_tsc/src/checker.rs",
             "verter-tsc binary CLI — writes the consolidated diagnostics report file at the end of a checker run.",
         ),
-        (
-            "crates/verter_tsc/src/reporter.rs",
-            "verter-tsc binary CLI — reads the local tsgo cache directory to discover the active tsgo binary for parity reporting.",
-        ),
+
         (
             "crates/verter_tsc/src/tsconfig.rs",
             "verter-tsc binary CLI — reads tsconfig files outside the host's WorkspaceAccess (separate from the LSP/session tsconfig path). Doc comment also references `std::fs::canonicalize` behaviour for documentation.",
         ),
         (
-            "crates/verter_tsgo_api/src/transport/spawn.rs",
-            "rc tsgo-engine binary discovery (`discover_tsgo`) — walks the pnpm virtual store + classic `@typescript/` sibling layout on the REAL OS filesystem to locate the installed `typescript@>=7` platform binary (`tsc`/`tsc.exe`) the `--api` transport spawns. Real-FS by nature (a subprocess binary cannot be read through the in-memory VFS); same category as `verter_type_runtime/src/tsgo/ipc.rs` + `verter_tsc/src/reporter.rs`. Not a NativeFs/VFS disk-boundary bypass — never reads workspace/semantic state.",
+            "crates/verter_tsgo_api/src/toolchain/discovery.rs",
+            "tsgo toolchain provisioning (the 4-tier resolver) — walks PATH directories, the bound project's ancestor `node_modules` (flat + pnpm store layouts), the temp update cache, and the bundled sidecar directory on the REAL OS filesystem to locate a supported tsgo engine binary, with symlink/reparse-point and cache-root trust checks (`symlink_metadata`/`metadata`). Real-FS by nature (a subprocess engine binary cannot be enumerated through the in-memory VFS); same category as `verter_type_runtime/src/tsgo/ipc.rs`. Not a NativeFs/VFS disk-boundary bypass — never reads workspace/semantic state.",
+        ),
+        (
+            "crates/verter_tsgo_api/src/toolchain/validation.rs",
+            "tsgo candidate capability validation — stages a minimal configured project (a temp `tsconfig.json` + `index.ts`) on the REAL OS filesystem for the throwaway `--api` smoke engine to open. A subprocess engine reads real files, not the VFS; same category as `discovery.rs`. Not a NativeFs/VFS disk-boundary bypass — never reads workspace/semantic state.",
         ),
         (
             "crates/verter_tsgo_api/src/control/advertisement.rs",

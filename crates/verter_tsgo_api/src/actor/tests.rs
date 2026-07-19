@@ -52,6 +52,97 @@ async fn request_response_correlates_by_name() {
     engine.await.unwrap();
 }
 
+// ── DISCRIMINATING (B3): a request deadline fires a bounded Timeout, the
+//    transport is TERMINATED (the engine teardown), and the actor ends — a
+//    wedged engine can never hang the caller or the next request. ─────────────
+#[tokio::test]
+async fn a_request_deadline_times_out_terminates_and_ends_the_actor() {
+    use crate::error::{TsgoApiError, TsgoApiResult};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// A transport that accepts frames but NEVER responds, recording
+    /// `terminate()` (the engine-teardown signal).
+    struct WedgedTransport {
+        sent: mpsc::Sender<Vec<u8>>,
+        terminated: Arc<AtomicBool>,
+    }
+
+    impl super::transport::DuplexTransport for WedgedTransport {
+        async fn send_frame(&mut self, bytes: &[u8]) -> TsgoApiResult<()> {
+            self.sent
+                .send(bytes.to_vec())
+                .await
+                .map_err(|_| TsgoApiError::Transport("sink closed".into()))
+        }
+
+        async fn recv_frame(&mut self) -> TsgoApiResult<Option<Vec<u8>>> {
+            // Never a frame, never an EOF: the wedged engine.
+            std::future::pending().await
+        }
+
+        async fn terminate(&mut self) {
+            self.terminated.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let terminated = Arc::new(AtomicBool::new(false));
+    let (outbound_tx, mut to_engine) = mpsc::channel::<Vec<u8>>(64);
+    let transport = WedgedTransport {
+        sent: outbound_tx,
+        terminated: Arc::clone(&terminated),
+    };
+    let handle = spawn_actor(transport, OverlaySnapshot::builder().build(), 8);
+
+    let start = std::time::Instant::now();
+    let err = handle
+        .request(
+            "initialize",
+            b"null".to_vec(),
+            RequestOptions {
+                lane: Lane::Interactive,
+                cancel: None,
+                deadline: Some(Duration::from_millis(200)),
+            },
+        )
+        .await
+        .expect_err("a wedged engine must fail the request within its deadline");
+    assert!(
+        matches!(err, TsgoApiError::Timeout(_)),
+        "the bounded failure must be a Timeout, got {err:?}"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "the deadline must actually fire: {:?}",
+        start.elapsed()
+    );
+    assert!(
+        terminated.load(Ordering::SeqCst),
+        "the deadline must terminate the transport (the engine teardown)"
+    );
+    // The wedged request was written before the deadline fired.
+    let _ = to_engine.recv().await.expect("the request was sent");
+
+    // The actor ended with its engine: a follow-up request fails promptly
+    // (closed lanes), it does NOT queue forever.
+    let follow_up = tokio::time::timeout(
+        Duration::from_secs(2),
+        handle.request(
+            "getSemanticDiagnostics",
+            b"{}".to_vec(),
+            RequestOptions::default(),
+        ),
+    )
+    .await;
+    match follow_up {
+        Ok(Err(e)) => assert!(
+            matches!(e, TsgoApiError::Closed | TsgoApiError::Transport(_)),
+            "after the teardown the client is dead, got {e:?}"
+        ),
+        other => panic!("a follow-up request must fail promptly after the teardown: {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn engine_error_frame_becomes_typed_error() {
     let (stream, from_engine, mut to_engine) = duplex();
@@ -193,6 +284,7 @@ async fn cancel_before_send_skips_the_request() {
             RequestOptions {
                 lane: Lane::Interactive,
                 cancel: Some(tok),
+                deadline: None,
             },
         )
         .await
@@ -232,6 +324,7 @@ async fn cancel_in_flight_resolves_cancelled_and_drains_response() {
             RequestOptions {
                 lane: Lane::Interactive,
                 cancel: Some(tok),
+                deadline: None,
             },
         )
         .await
@@ -280,6 +373,7 @@ async fn interactive_lane_drains_before_batch() {
             RequestOptions {
                 lane: Lane::Batch,
                 cancel: None,
+                deadline: None,
             },
         )
         .await
@@ -293,6 +387,7 @@ async fn interactive_lane_drains_before_batch() {
             RequestOptions {
                 lane: Lane::Interactive,
                 cancel: None,
+                deadline: None,
             },
         )
         .await

@@ -31,6 +31,15 @@ pub trait DuplexTransport: Send {
     fn recv_frame(
         &mut self,
     ) -> impl std::future::Future<Output = TsgoApiResult<Option<Vec<u8>>>> + Send;
+
+    /// Terminate the underlying engine IMMEDIATELY — a process-tree kill where
+    /// the transport owns a process. The actor calls this when a request
+    /// deadline fires: the single-flight wire cannot recover a wedged request,
+    /// so the engine is torn down rather than left to hang the next request.
+    /// Default: no-op (in-memory transports own no process).
+    fn terminate(&mut self) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
 }
 
 /// Read exactly one complete tuple frame from an [`AsyncRead`], returning its

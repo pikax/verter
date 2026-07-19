@@ -12,6 +12,7 @@ publish = false
 [dependencies]
 verter_session = { path = "../verter_session" }
 verter_type_runtime = { path = "../verter_type_runtime" }
+verter_tsgo_api = { path = "../verter_tsgo_api" }
 verter_workspace = { path = "../verter_workspace" }
 verter_scheduler = { path = "../verter_scheduler" }
 verter_span = { path = "../verter_span" }

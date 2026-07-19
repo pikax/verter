@@ -143,13 +143,14 @@ fn update_snapshot_witness_failures(body: &str) -> Vec<String> {
 fn in_band_witness_feeds_gate() {
     let src = read_attach();
 
-    let handshake_body = extract_fn_body(&src, "pub async fn lsp_handshake").unwrap_or_else(|| {
-        panic!(
-            "could not extract the `pub async fn lsp_handshake` body from {} — \
+    let handshake_body = extract_fn_body(&src, "async fn lsp_handshake_with_policy")
+        .unwrap_or_else(|| {
+            panic!(
+                "could not extract the `async fn lsp_handshake_with_policy` body from {} — \
                  the OWNED handshake-half must exist and be brace-balanced",
-            attach_rs().display()
-        )
-    });
+                attach_rs().display()
+            )
+        });
     let ati_body =
         extract_fn_body(&src, "pub async fn attach_to_initialized").unwrap_or_else(|| {
             panic!(

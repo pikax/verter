@@ -67,7 +67,7 @@ async fn req_json<T: serde::de::DeserializeOwned>(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_engine_initialize_update_snapshot_and_diagnostics() {
-    let Some(exe) = common::engine_or_skip() else {
+    let Some(exe) = common::engine_or_skip().await else {
         return;
     };
 
@@ -223,7 +223,7 @@ async fn real_engine_initialize_update_snapshot_and_diagnostics() {
 async fn typed_client_connects_through_gate_and_serves_typed_ops() {
     use verter_tsgo_api::TsgoClient;
 
-    let Some(exe) = common::engine_or_skip() else {
+    let Some(exe) = common::engine_or_skip().await else {
         return;
     };
 
@@ -241,6 +241,7 @@ async fn typed_client_connects_through_gate_and_serves_typed_ops() {
 
     // connect() runs the wire gate first; a matching engine clears it.
     let client = TsgoClient::connect(&exe, &tmp, snapshot, 16)
+        .await
         .expect("typed client connects through the gate");
     assert!(
         !client.clearance().capabilities.is_empty(),
@@ -300,7 +301,7 @@ async fn typed_client_connects_through_gate_and_serves_typed_ops() {
 async fn program_getter_surfaces_non_root_imported_error_that_per_file_misses() {
     use verter_tsgo_api::TsgoClient;
 
-    let Some(exe) = common::engine_or_skip() else {
+    let Some(exe) = common::engine_or_skip().await else {
         return;
     };
 
@@ -352,7 +353,9 @@ async fn program_getter_surfaces_non_root_imported_error_that_per_file_misses() 
         .real_dir_source(Arc::new(StdFsDirSource))
         .build();
 
-    let client = TsgoClient::connect(&exe, &tmp, snapshot, 16).expect("connect");
+    let client = TsgoClient::connect(&exe, &tmp, snapshot, 16)
+        .await
+        .expect("connect");
     client.initialize().await.expect("initialize");
     let params = UpdateSnapshotParams::single_project(common::norm(&tsconfig));
     let snap = client
@@ -416,6 +419,7 @@ async fn program_getter_surfaces_non_root_imported_error_that_per_file_misses() 
             .build(),
         16,
     )
+    .await
     .expect("connect clean");
     clean_client.initialize().await.expect("initialize clean");
     let snap_clean = clean_client
@@ -450,7 +454,7 @@ async fn program_getter_surfaces_non_root_imported_error_that_per_file_misses() 
 async fn config_file_parsing_getter_surfaces_bad_target_and_none_on_clean() {
     use verter_tsgo_api::TsgoClient;
 
-    let Some(exe) = common::engine_or_skip() else {
+    let Some(exe) = common::engine_or_skip().await else {
         return;
     };
 
@@ -491,7 +495,9 @@ async fn config_file_parsing_getter_surfaces_bad_target_and_none_on_clean() {
             .real_dir_source(Arc::new(StdFsDirSource))
             .build();
 
-        let client = TsgoClient::connect(exe, &tmp, snapshot, 16).expect("connect");
+        let client = TsgoClient::connect(exe, &tmp, snapshot, 16)
+            .await
+            .expect("connect");
         client.initialize().await.expect("initialize");
         let params = UpdateSnapshotParams::single_project(common::norm(&tsconfig));
         let snap = client

@@ -37,13 +37,17 @@ pub mod client;
 pub mod control;
 mod egress;
 pub mod error;
+#[cfg(feature = "test-fake-engine")]
+pub mod fake_engine;
 pub mod gate;
 pub mod jsonrpc;
 pub mod lane;
 pub mod offset;
+pub mod process;
 pub mod proto;
 pub mod relay;
 pub mod snapshot;
+pub mod toolchain;
 pub mod transport;
 
 pub use actor::{ClientHandle, RequestOptions};

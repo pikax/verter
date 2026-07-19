@@ -79,8 +79,8 @@ use crate::error::{TsgoApiError, TsgoApiResult};
 use crate::gate::{self, EngineVersionWitness, GateClearance, ObservedEngine};
 use crate::jsonrpc::JsonRpcConnection;
 use crate::relay::CarrierInjectionChannel;
+use crate::toolchain::policy::VersionPolicy;
 use crate::transport::pipe_attach::connect_attach_pipe;
-use crate::transport::spawn::discover_tsgo;
 
 /// Seals [`AttachOwnership`]: the ownership markers are a closed set — the
 /// owned/non-owning write-surface split is not extensible from outside.
@@ -194,6 +194,35 @@ impl TsgoLspConnection {
     pub fn ownership(&self) -> ConnectionOwnership {
         self.ownership
     }
+
+    /// Run the OWNED LSP handshake on this connection (crate-internal — the
+    /// toolchain validator's capability smoke). Delegates to the sole
+    /// handshake-half on [`TsgoAttach<Owned>`]; NO raw-wire accessor is
+    /// exposed (a non-owning connection keeps its deny-by-default surface).
+    pub(crate) async fn lsp_handshake(
+        &self,
+        root_uri: &str,
+        policy: &VersionPolicy,
+    ) -> TsgoApiResult<GateClearance> {
+        if self.ownership != ConnectionOwnership::Owned {
+            return Err(TsgoApiError::Transport(
+                "lsp_handshake must not re-`initialize` an editor-owned connection".into(),
+            ));
+        }
+        TsgoAttach::<Owned>::lsp_handshake_with_policy(&self.conn, root_uri, policy).await
+    }
+
+    /// Terminate an OWNED throwaway connection: close the wire and kill + reap
+    /// the child process TREE (bounded). Crate-internal — used by the toolchain
+    /// validator after a capability smoke; production teardown stays on
+    /// [`TsgoAttach`].
+    pub(crate) async fn terminate(mut self) {
+        let _ = self.conn.close().await;
+        if let Some(mut child) = self.child.take() {
+            let _ =
+                crate::process::kill_tree_and_reap(&mut child, crate::process::REAP_BOUND).await;
+        }
+    }
 }
 
 impl std::fmt::Debug for TsgoLspConnection {
@@ -229,6 +258,8 @@ pub struct SpawnOwnTsgoLsp {
 
 impl SpawnOwnTsgoLsp {
     /// Build the source for an explicit engine binary + working directory.
+    /// Engine DISCOVERY lives in [`crate::toolchain::discovery`] (the 4-tier
+    /// resolver) — resolve there, then pass the validated path here.
     #[must_use]
     pub fn new(exe: impl Into<PathBuf>, cwd: impl Into<PathBuf>) -> Self {
         Self {
@@ -237,23 +268,7 @@ impl SpawnOwnTsgoLsp {
         }
     }
 
-    /// Build the source by discovering the engine under `workspace_root`
-    /// (used as the cwd). Discovery searches ONLY the workspace
-    /// `node_modules` — the pnpm `.pnpm` store layout and the classic
-    /// `@typescript/<name>` sibling layout — for the rc `typescript` package's
-    /// `tsc` binary (see [`discover_tsgo`]). There is NO env-var override, NO
-    /// PATH search, and NO npm/npx cache probe; an explicit binary goes
-    /// through [`SpawnOwnTsgoLsp::new`] instead.
-    pub fn discover(workspace_root: impl AsRef<Path>) -> TsgoApiResult<Self> {
-        let root = workspace_root.as_ref();
-        let exe = discover_tsgo(root)?;
-        Ok(Self {
-            exe,
-            cwd: root.to_path_buf(),
-        })
-    }
-
-    /// The discovered/explicit engine binary path.
+    /// The explicit engine binary path.
     #[must_use]
     pub fn exe(&self) -> &Path {
         &self.exe
@@ -271,18 +286,30 @@ impl TsgoLspConnectionSource for SpawnOwnTsgoLsp {
 }
 
 /// Spawn `tsgo --lsp --stdio` and wrap its stdio in a [`JsonRpcConnection`].
-async fn spawn_own_lsp_connection(exe: &Path, cwd: &Path) -> TsgoApiResult<TsgoLspConnection> {
-    let mut child = tokio::process::Command::new(exe)
+///
+/// `pub(crate)` for the toolchain validator's capability smoke
+/// ([`crate::toolchain::validation`]). The child is `kill_on_drop`: a dropped
+/// connection (e.g. a bounded validation timing out mid-handshake) never leaks
+/// the engine process.
+pub(crate) async fn spawn_own_lsp_connection(
+    exe: &Path,
+    cwd: &Path,
+) -> TsgoApiResult<TsgoLspConnection> {
+    let mut command = tokio::process::Command::new(exe);
+    command
         .arg("--lsp")
         .arg("--stdio")
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|e| {
-            TsgoApiError::Spawn(format!("spawn `{} --lsp --stdio`: {e}", exe.display()))
-        })?;
+        .kill_on_drop(true);
+    // Own process group / job: the teardown tree kill reaches any descendant
+    // that inherited the pipes.
+    crate::process::configure_tree_spawn(&mut command);
+    let mut child = command.spawn().map_err(|e| {
+        TsgoApiError::Spawn(format!("spawn `{} --lsp --stdio`: {e}", exe.display()))
+    })?;
 
     let stdin = child
         .stdin
@@ -491,6 +518,18 @@ impl TsgoAttach<Owned> {
         conn: &JsonRpcConnection,
         root_uri: &str,
     ) -> TsgoApiResult<GateClearance> {
+        Self::lsp_handshake_with_policy(conn, root_uri, &VersionPolicy::from_env()).await
+    }
+
+    /// The policy-explicit handshake-half (crate-internal): the toolchain
+    /// validator injects its own [`VersionPolicy`] so the in-band gate and the
+    /// provisioning policy cannot disagree. [`TsgoAttach::lsp_handshake`]
+    /// delegates here with the env-derived policy.
+    pub(crate) async fn lsp_handshake_with_policy(
+        conn: &JsonRpcConnection,
+        root_uri: &str,
+        policy: &VersionPolicy,
+    ) -> TsgoApiResult<GateClearance> {
         let init_params = serde_json::json!({
             "processId": std::process::id(),
             "rootUri": root_uri,
@@ -508,7 +547,8 @@ impl TsgoAttach<Owned> {
                      cannot gate the engine: {init}"
                 ))
             })?;
-        let clearance = gate::validate(&ObservedEngine::from_in_band_server_info(version))?;
+        let clearance =
+            gate::validate_with(&ObservedEngine::from_in_band_server_info(version), policy)?;
         conn.notify("initialized", serde_json::json!({})).await?;
         Ok(clearance)
     }
@@ -521,6 +561,18 @@ impl TsgoAttach<Owned> {
     /// initialized, and a second Verter-originated `initialize` would be a
     /// protocol violation — use [`TsgoAttach::attach_to_initialized`] instead.
     pub async fn attach_over(lsp: TsgoLspConnection, root_uri: &str) -> TsgoApiResult<Self> {
+        Self::attach_over_with_policy(lsp, root_uri, &VersionPolicy::from_env()).await
+    }
+
+    /// The policy-explicit owned composer (crate-internal): like
+    /// [`TsgoAttach::attach_over`] but gating the in-band `serverInfo.version`
+    /// with the caller's [`VersionPolicy`] (the toolchain validator injects
+    /// its own so the two version checks cannot disagree).
+    pub(crate) async fn attach_over_with_policy(
+        lsp: TsgoLspConnection,
+        root_uri: &str,
+        policy: &VersionPolicy,
+    ) -> TsgoApiResult<Self> {
         if lsp.ownership() != ConnectionOwnership::Owned {
             return Err(TsgoApiError::Transport(
                 "attach_over runs the OWNED handshake and must not re-`initialize` an \
@@ -528,7 +580,7 @@ impl TsgoAttach<Owned> {
                     .into(),
             ));
         }
-        let clearance = Self::lsp_handshake(&lsp.conn, root_uri).await?;
+        let clearance = Self::lsp_handshake_with_policy(&lsp.conn, root_uri, policy).await?;
         let (session, api) = Self::attach_api_session(&lsp.conn).await?;
         Ok(Self::from_parts(lsp, api, session, clearance))
     }
@@ -545,16 +597,18 @@ impl TsgoAttach<Owned> {
 
     /// OWNED full teardown — PRIVATE: reachable only through the owned
     /// [`TsgoAttach::teardown`]. Sends `exit`, closes the connection, and
-    /// kills the child. Keeping this private (and owned-only) makes the
-    /// teardown DISPATCH structural: no lifecycle/teardown path sends `exit`
-    /// on an editor-owned connection.
+    /// kills + reaps the child process TREE (bounded).
+    ///
+    /// Keeping this private (and owned-only) makes the teardown DISPATCH
+    /// structural: no lifecycle/teardown path sends `exit` on an editor-owned
+    /// connection.
     async fn shutdown(mut self) -> TsgoApiResult<()> {
         let _ = self.api.close().await;
         let _ = self.lsp.conn.notify("exit", serde_json::Value::Null).await;
         let _ = self.lsp.conn.close().await;
         if let Some(mut child) = self.lsp.child.take() {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+            let _ =
+                crate::process::kill_tree_and_reap(&mut child, crate::process::REAP_BOUND).await;
         }
         Ok(())
     }
@@ -672,11 +726,6 @@ pub(crate) fn parse_api_session_handle(
         .unwrap_or("")
         .to_string();
     Ok(ApiSessionHandle { session_id, pipe })
-}
-
-/// Discover the engine + cwd and build the OWNED spawn source in one step.
-pub fn owned_source_for(workspace_root: impl AsRef<Path>) -> TsgoApiResult<SpawnOwnTsgoLsp> {
-    SpawnOwnTsgoLsp::discover(workspace_root)
 }
 
 #[cfg(test)]

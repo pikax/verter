@@ -46,7 +46,7 @@
 
 use std::time::Duration;
 
-use verter_type_runtime::tsgo::ipc::{find_tsgo_binary, TsgoTypeProvider};
+use verter_type_runtime::tsgo::ipc::TsgoTypeProvider;
 use verter_type_runtime::{path_to_file_uri_string, TypeProvider};
 
 use super::oracle::admission::{AdmissionVerdict, RejectReason};
@@ -86,11 +86,17 @@ async fn spawn_with(
     tsconfig: &str,
     files: &[(&str, &str)],
 ) -> Option<(TsgoTypeProvider, String, tempfile::TempDir)> {
-    let tsgo_bin = match find_tsgo_binary() {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("oracle_gen_spike: SKIP — tsgo binary not found: {e}");
-            return None;
+    let tsgo_bin = {
+        let request = verter_type_runtime::tsgo::discovery::ResolutionRequest::for_environment(
+            verter_type_runtime::tsgo::validation::Capability::Lsp,
+            None,
+        );
+        match verter_type_runtime::tsgo::discovery::resolve(&request).await {
+            Ok(resolution) => resolution.path.to_string_lossy().into_owned(),
+            Err(e) => {
+                eprintln!("oracle_gen_spike: SKIP — tsgo binary not found: {e}");
+                return None;
+            }
         }
     };
     let dir = tempfile::tempdir().expect("tempdir");
