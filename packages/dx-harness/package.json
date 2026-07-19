@@ -30,7 +30,8 @@
     "test": "pnpm run typecheck && vitest --run",
     "test:unit": "pnpm run typecheck && vitest --run --exclude '**/*Integration.test.ts'",
     "test:editor-neutral-lsp": "vitest --run -c vitest.editor-neutral-lsp.config.ts",
-    "test:endurance": "vitest --run --config vitest.endurance.config.ts"
+    "test:endurance": "vitest --run --config vitest.endurance.config.ts",
+    "test:corpus-gate": "vitest --run --config vitest.corpus-gate.config.ts"
   },
   "dependencies": {
     "@verter/lsp-test-client": "workspace:^"
