@@ -70,6 +70,12 @@ pub struct TemplateCodeGenOptions {
     /// Props known to be const across all call sites (from cross-file analysis).
     /// Passed through to the `BindingResolver` to override reactivity level.
     pub const_props: Option<rustc_hash::FxHashSet<String>>,
+    /// Whether the SFC has a `<script>` or `<script setup>` block (i.e. binding
+    /// metadata exists). Official `@vue/compiler-core` emits the full
+    /// `(_ctx, _cache, $props, $setup, $data, $options)` render signature only
+    /// when binding metadata is present and the template is not inlined;
+    /// template-only SFCs get the 2-param `(_ctx, _cache)` form.
+    pub has_script: bool,
     /// Whether the SFC has `<style scoped>`. When true and in SSR mode, the
     /// template codegen emits `_scopeId` parameter and appends `${_scopeId}`
     /// to element tags and component render calls.
@@ -101,6 +107,7 @@ impl Default for TemplateCodeGenOptions {
             force_js: false,
             self_name: String::new(),
             const_props: None,
+            has_script: false,
             has_scoped_style: false,
             hoist_static: true,
             scope_id: String::new(),

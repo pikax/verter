@@ -793,6 +793,9 @@ fn compile_inner(
                         force_js: verter_options.force_js,
                         self_name: to_pascal_case(&component_name),
                         const_props: verter_options.prop_constness_overrides.clone(),
+                        // Full 6-param render signature only when the SFC has a
+                        // script block (official: `bindingMetadata && !inline`).
+                        has_script: parsed.script().is_some() || parsed.script_setup().is_some(),
                         has_scoped_style,
                         hoist_static: options.resolve_hoist_static(),
                         scope_id: if has_scoped_style {

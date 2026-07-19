@@ -401,11 +401,18 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             preamble
         };
 
-        // Function signature prefix
+        // Function signature prefix. Official `@vue/compiler-core` emits the
+        // full `(_ctx, _cache, $props, $setup, $data, $options)` form only when
+        // binding metadata exists (a script block) and the template is not
+        // inlined; template-only SFCs get the 2-param `(_ctx, _cache)` form —
+        // their bodies reference only `_ctx`/`_cache` (no bindings to route
+        // through `$props`/`$setup`/`$data`/`$options`).
         let fn_sig = if self.options.is_inline {
             "return (_ctx,_cache) => {\n"
-        } else {
+        } else if self.options.has_script {
             "function render(_ctx, _cache, $props, $setup, $data, $options) {\n"
+        } else {
+            "function render(_ctx, _cache) {\n"
         };
 
         // Build resolved component declarations (inside the function body)

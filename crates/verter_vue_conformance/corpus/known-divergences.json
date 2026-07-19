@@ -358,15 +358,6 @@
     },
     {
       "case": "elements-text/multi-root",
-      "backend": "vdom",
-      "reasons": [
-        "[structure] Program[2]/FunctionDeclaration[1]/params \u2014 child count: verter 7 vs golden 3"
-      ],
-      "total": 1,
-      "note": "render signature: Verter always emits the full `(_ctx, _cache, $props, $setup, $data, $options)` form; official emits the short `(_ctx, _cache)` form for template-only SFCs (no bindings)"
-    },
-    {
-      "case": "elements-text/multi-root",
       "backend": "vapor",
       "reasons": [
         "[structure] Program \u2014 child count: verter 9 vs golden 8"
@@ -379,11 +370,10 @@
       "backend": "vdom",
       "reasons": [
         "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/ObjectExpression[0]/ObjectProperty[0] \u2014 leaf kind: verter ident `color` vs golden str `color`",
-        "[structure] Program[3]/FunctionDeclaration[1]/params \u2014 child count: verter 7 vs golden 3",
         "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/spread \u2014 node kind: verter `LogicalExpression` vs golden `spread`"
       ],
-      "total": 3,
-      "note": "render signature: Verter always emits the full `(_ctx, _cache, $props, $setup, $data, $options)` form; official emits the short `(_ctx, _cache)` form for template-only SFCs (no bindings); cache shape: Verter caches the child vnode directly (`_cache[i] || (_cache[i] = v)`); official spreads a cached array (`[...(_cache[i] || ...)]`); static style attribute: Verter normalizes it to a JS object with unquoted keys; official hoists the original attribute string"
+      "total": 2,
+      "note": "cache shape: Verter caches the child vnode directly (`_cache[i] || (_cache[i] = v)`); official spreads a cached array (`[...(_cache[i] || ...)]`); static style attribute: Verter normalizes it to a JS object with unquoted keys; official hoists the original attribute string"
     },
     {
       "case": "elements-text/static-class-style",
@@ -398,11 +388,10 @@
       "case": "elements-text/static-element",
       "backend": "vdom",
       "reasons": [
-        "[structure] Program[3]/FunctionDeclaration[1]/params \u2014 child count: verter 7 vs golden 3",
         "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/spread \u2014 node kind: verter `LogicalExpression` vs golden `spread`"
       ],
-      "total": 2,
-      "note": "render signature: Verter always emits the full `(_ctx, _cache, $props, $setup, $data, $options)` form; official emits the short `(_ctx, _cache)` form for template-only SFCs (no bindings); cache shape: Verter caches the child vnode directly (`_cache[i] || (_cache[i] = v)`); official spreads a cached array (`[...(_cache[i] || ...)]`)"
+      "total": 1,
+      "note": "cache shape: Verter caches the child vnode directly (`_cache[i] || (_cache[i] = v)`); official spreads a cached array (`[...(_cache[i] || ...)]`)"
     },
     {
       "case": "elements-text/static-element",
