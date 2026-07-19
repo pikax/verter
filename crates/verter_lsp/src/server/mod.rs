@@ -232,6 +232,97 @@ pub(crate) struct ResolvedComponentDocument {
     pub(crate) line_index: LineIndex,
 }
 
+/// One generation-aware IDE-sync repair lane. Retirement belongs to the lane
+/// object, never merely to its canonical-id key, so a stale close cannot retire
+/// a reopened document's replacement lane (the key-reuse/ABA case).
+struct IdeSyncRepairLane {
+    mutex: tokio::sync::Mutex<()>,
+    generation: std::sync::atomic::AtomicU64,
+    retired: std::sync::atomic::AtomicBool,
+}
+
+impl IdeSyncRepairLane {
+    fn new(generation: u64) -> Self {
+        Self {
+            mutex: tokio::sync::Mutex::new(()),
+            generation: std::sync::atomic::AtomicU64::new(generation),
+            retired: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+/// One participant in a document's generation-bound IDE-sync repair lane. A
+/// closed lane is retired synchronously by the final participant's drop, so
+/// cleanup is event-driven and never needs a polling task.
+struct IdeSyncRepairLease {
+    canonical_id: String,
+    lane: Arc<IdeSyncRepairLane>,
+    lanes: Arc<DashMap<String, Arc<IdeSyncRepairLane>>>,
+}
+
+impl IdeSyncRepairLease {
+    async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.lane.mutex.lock().await
+    }
+
+    fn retire(&self) {
+        self.lane
+            .retired
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn lane(&self) -> &Arc<IdeSyncRepairLane> {
+        &self.lane
+    }
+}
+
+impl Drop for IdeSyncRepairLease {
+    fn drop(&mut self) {
+        if !self.lane.retired.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        self.lanes.remove_if(&self.canonical_id, |_, current| {
+            Arc::ptr_eq(current, &self.lane) && Arc::strong_count(&self.lane) == 2
+        });
+    }
+}
+
+#[cfg(test)]
+struct IdeSyncPausePoint {
+    canonical_id: String,
+    arrived: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+/// One ordered provider-publication turn assigned while the document commit
+/// fence is held. Waiting happens only after the commit is visible, so slow
+/// provider I/O cannot delay later registry commits. The drop notification also
+/// makes cancellation skip a turn instead of wedging every later edit.
+struct DidChangeProviderTurn {
+    predecessor: Option<Arc<tokio::sync::Notify>>,
+    completion: Arc<tokio::sync::Notify>,
+}
+
+impl DidChangeProviderTurn {
+    async fn wait(&self) {
+        if let Some(predecessor) = &self.predecessor {
+            predecessor.notified().await;
+        }
+    }
+}
+
+impl Drop for DidChangeProviderTurn {
+    fn drop(&mut self) {
+        self.completion.notify_one();
+    }
+}
+
+#[cfg(test)]
+struct CompletionSnapshotPause {
+    arrived: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
 /// The Verter language server implementation.
 ///
 /// Wraps `verter_session` for SFC analysis and optionally a `TypeProvider`
@@ -291,10 +382,6 @@ pub struct VerterLanguageServer {
     /// program-membership gap): suppression does NOT prove `handle_rename`'s own
     /// sync closes the closed child today.
     suppress_imported_carrier_prewarm: bool,
-    /// Generation counter for completion coalescing. During rapid typing, each keystroke
-    /// triggers a completion request. By incrementing this counter, stale requests can
-    /// detect they've been superseded and skip the expensive type provider call.
-    completion_generation: std::sync::atomic::AtomicU64,
     /// E2E attribution seam for TypeScript-provider completion parity. Verter still
     /// owns carrier generation, synchronization, and source mapping, but its native
     /// completion producer contributes no items and cannot act as a provider fallback.
@@ -313,7 +400,19 @@ pub struct VerterLanguageServer {
     /// The guard serializes repairs per canonical id; a waiter re-checks freshness
     /// after acquiring it and returns without re-repairing when a concurrent repair
     /// already made the document fresh.
-    ide_sync_repair_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    ide_sync_repair_locks: Arc<DashMap<String, Arc<IdeSyncRepairLane>>>,
+    /// Current open-document generation per canonical ID. A repair captures this
+    /// before lane acquisition and revalidates it after locking; close removes
+    /// only its exact generation, so reopen/key reuse cannot be mistaken for the
+    /// document instance that initiated stale work.
+    ide_sync_open_generations: Arc<DashMap<String, u64>>,
+    ide_sync_next_generation: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    ide_sync_before_lease_pause: parking_lot::Mutex<Option<IdeSyncPausePoint>>,
+    #[cfg(test)]
+    ide_sync_after_lease_pause: parking_lot::Mutex<Option<IdeSyncPausePoint>>,
+    #[cfg(test)]
+    ide_sync_close_after_lock_pause: parking_lot::Mutex<Option<IdeSyncPausePoint>>,
     /// Canonical IDs needing **deferred API/.vue.ts sync** + owner-aware reconciliation.
     /// Set by did_change and by the interactive path (when API is deferred).
     /// Cleared by the coordinator's debounced sync after a resolver snapshot exists.
@@ -341,6 +440,18 @@ pub struct VerterLanguageServer {
     /// lock at a time. Others `.await` this mutex, YIELDING their worker thread back to
     /// the runtime so timers, completions, and heartbeats can still run.
     did_change_mutex: tokio::sync::Mutex<()>,
+    /// Tail of the ordered provider-publication chain. Each `did_change`
+    /// appends a turn while holding `did_change_mutex`, then releases the commit
+    /// fence before awaiting its predecessor. This keeps provider writes ordered
+    /// without allowing blocked provider I/O to stall registry commits.
+    did_change_provider_tail: parking_lot::Mutex<Option<Arc<tokio::sync::Notify>>>,
+    #[cfg(test)]
+    completion_snapshot_pauses:
+        parking_lot::Mutex<std::collections::VecDeque<CompletionSnapshotPause>>,
+    #[cfg(test)]
+    completion_before_final_pause: parking_lot::Mutex<Option<CompletionSnapshotPause>>,
+    #[cfg(test)]
+    completion_final_snapshot_pause: parking_lot::Mutex<Option<CompletionSnapshotPause>>,
     /// Handle for the background workspace scanner. Receives priority signals
     /// from `did_open` to reorder the scan queue. `None` until `initialized()`.
     /// Arc-wrapped so background init can install the scanner without &self.
@@ -405,6 +516,339 @@ fn e2e_provider_only_completions_enabled() -> bool {
 }
 
 impl VerterLanguageServer {
+    fn enqueue_did_change_provider_update(&self) -> DidChangeProviderTurn {
+        let completion = Arc::new(tokio::sync::Notify::new());
+        let predecessor = self
+            .did_change_provider_tail
+            .lock()
+            .replace(Arc::clone(&completion));
+        DidChangeProviderTurn {
+            predecessor,
+            completion,
+        }
+    }
+
+    #[cfg(test)]
+    fn pause_next_completion_after_snapshot(
+        &self,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        self.completion_snapshot_pauses
+            .lock()
+            .push_back(CompletionSnapshotPause {
+                arrived: Arc::clone(&arrived),
+                release: Arc::clone(&release),
+            });
+        (arrived, release)
+    }
+
+    #[cfg(test)]
+    async fn maybe_pause_completion_after_snapshot(&self) {
+        let pause = self.completion_snapshot_pauses.lock().pop_front();
+        if let Some(pause) = pause {
+            pause.arrived.notify_one();
+            pause.release.notified().await;
+        }
+    }
+
+    #[cfg(test)]
+    fn pause_completion_before_final_native(
+        &self,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *self.completion_before_final_pause.lock() = Some(CompletionSnapshotPause {
+            arrived: Arc::clone(&arrived),
+            release: Arc::clone(&release),
+        });
+        (arrived, release)
+    }
+
+    #[cfg(test)]
+    async fn maybe_pause_completion_before_final_native(&self) {
+        let pause = self.completion_before_final_pause.lock().take();
+        if let Some(pause) = pause {
+            pause.arrived.notify_one();
+            pause.release.notified().await;
+        }
+    }
+
+    #[cfg(test)]
+    fn pause_final_completion_after_snapshot(
+        &self,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *self.completion_final_snapshot_pause.lock() = Some(CompletionSnapshotPause {
+            arrived: Arc::clone(&arrived),
+            release: Arc::clone(&release),
+        });
+        (arrived, release)
+    }
+
+    #[cfg(test)]
+    async fn maybe_pause_final_completion_after_snapshot(&self) {
+        let pause = self.completion_final_snapshot_pause.lock().take();
+        if let Some(pause) = pause {
+            pause.arrived.notify_one();
+            pause.release.notified().await;
+        }
+    }
+
+    /// Acquire the current lifecycle lane. Open and close use this before
+    /// mutating registry membership, so a reopen cannot land in the middle of a
+    /// close of the prior document generation.
+    fn ide_sync_lifecycle_lease(&self, canonical_id: &str) -> IdeSyncRepairLease {
+        let lane = match self.ide_sync_repair_locks.entry(canonical_id.to_string()) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                if entry
+                    .get()
+                    .retired
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    let generation = self
+                        .ide_sync_open_generations
+                        .get(canonical_id)
+                        .map(|entry| *entry)
+                        .unwrap_or(0);
+                    let replacement = Arc::new(IdeSyncRepairLane::new(generation));
+                    entry.insert(Arc::clone(&replacement));
+                    replacement
+                } else {
+                    Arc::clone(entry.get())
+                }
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let generation = self
+                    .ide_sync_open_generations
+                    .get(canonical_id)
+                    .map(|entry| *entry)
+                    .unwrap_or(0);
+                let lane = Arc::new(IdeSyncRepairLane::new(generation));
+                entry.insert(Arc::clone(&lane));
+                lane
+            }
+        };
+        IdeSyncRepairLease {
+            canonical_id: canonical_id.to_string(),
+            lane,
+            lanes: Arc::clone(&self.ide_sync_repair_locks),
+        }
+    }
+
+    /// Acquire only the lane belonging to `generation`. A stale repair never
+    /// inserts or replaces the lane of a closed/reopened document: it receives a
+    /// detached retired lane, fails generation revalidation after locking, and
+    /// disappears on drop without touching the map.
+    fn ide_sync_repair_lease(&self, canonical_id: &str, generation: u64) -> IdeSyncRepairLease {
+        let generation_is_current = self
+            .ide_sync_open_generations
+            .get(canonical_id)
+            .is_some_and(|current| *current == generation);
+        let lane = if generation_is_current {
+            match self.ide_sync_repair_locks.entry(canonical_id.to_string()) {
+                dashmap::mapref::entry::Entry::Occupied(entry)
+                    if !entry
+                        .get()
+                        .retired
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        && entry
+                            .get()
+                            .generation
+                            .load(std::sync::atomic::Ordering::Acquire)
+                            == generation =>
+                {
+                    Arc::clone(entry.get())
+                }
+                dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                    // Re-check while owning the map entry. If this request lost
+                    // the generation race, it must not replace the winner's lane.
+                    if self
+                        .ide_sync_open_generations
+                        .get(canonical_id)
+                        .is_some_and(|current| *current == generation)
+                    {
+                        let replacement = Arc::new(IdeSyncRepairLane::new(generation));
+                        entry.insert(Arc::clone(&replacement));
+                        replacement
+                    } else {
+                        let detached = Arc::new(IdeSyncRepairLane::new(generation));
+                        detached
+                            .retired
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        detached
+                    }
+                }
+                dashmap::mapref::entry::Entry::Vacant(entry) => {
+                    if self
+                        .ide_sync_open_generations
+                        .get(canonical_id)
+                        .is_some_and(|current| *current == generation)
+                    {
+                        let lane = Arc::new(IdeSyncRepairLane::new(generation));
+                        entry.insert(Arc::clone(&lane));
+                        lane
+                    } else {
+                        let detached = Arc::new(IdeSyncRepairLane::new(generation));
+                        detached
+                            .retired
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        detached
+                    }
+                }
+            }
+        } else {
+            let detached = Arc::new(IdeSyncRepairLane::new(generation));
+            detached
+                .retired
+                .store(true, std::sync::atomic::Ordering::Release);
+            detached
+        };
+        IdeSyncRepairLease {
+            canonical_id: canonical_id.to_string(),
+            lane,
+            lanes: Arc::clone(&self.ide_sync_repair_locks),
+        }
+    }
+
+    fn begin_ide_sync_open_generation(
+        &self,
+        canonical_id: &str,
+        lane: &Arc<IdeSyncRepairLane>,
+    ) -> u64 {
+        let generation = self
+            .ide_sync_next_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        lane.generation
+            .store(generation, std::sync::atomic::Ordering::Release);
+        lane.retired
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.ide_sync_repair_locks
+            .insert(canonical_id.to_string(), Arc::clone(lane));
+        self.ide_sync_open_generations
+            .insert(canonical_id.to_string(), generation);
+        generation
+    }
+
+    /// Test helpers often register directly through `DocumentRegistry`; lazily
+    /// establish the same open generation production `did_open` records.
+    fn current_or_init_ide_sync_open_generation(
+        &self,
+        uri: &Uri,
+        canonical_id: &str,
+    ) -> Option<u64> {
+        if self.documents.get_canonical_id(uri).as_deref() != Some(canonical_id) {
+            return None;
+        }
+        if let Some(generation) = self.ide_sync_open_generations.get(canonical_id) {
+            return Some(*generation);
+        }
+        let generation = self
+            .ide_sync_next_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let generation = match self
+            .ide_sync_open_generations
+            .entry(canonical_id.to_string())
+        {
+            dashmap::mapref::entry::Entry::Occupied(entry) => *entry.get(),
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(generation);
+                generation
+            }
+        };
+        Some(generation)
+    }
+
+    fn ide_sync_generation_is_open(&self, uri: &Uri, canonical_id: &str, generation: u64) -> bool {
+        self.documents.get_canonical_id(uri).as_deref() == Some(canonical_id)
+            && self
+                .ide_sync_open_generations
+                .get(canonical_id)
+                .is_some_and(|current| *current == generation)
+    }
+
+    fn close_ide_sync_open_generation(&self, canonical_id: &str, generation: u64) {
+        self.ide_sync_open_generations
+            .remove_if(canonical_id, |_, current| *current == generation);
+    }
+
+    #[cfg(test)]
+    fn pause_next_ide_sync_before_lease(
+        &self,
+        canonical_id: &str,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        Self::pause_next_ide_sync_at(&self.ide_sync_before_lease_pause, canonical_id)
+    }
+
+    #[cfg(test)]
+    fn pause_next_ide_sync_after_lease(
+        &self,
+        canonical_id: &str,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        Self::pause_next_ide_sync_at(&self.ide_sync_after_lease_pause, canonical_id)
+    }
+
+    #[cfg(test)]
+    fn pause_next_ide_sync_close_after_lock(
+        &self,
+        canonical_id: &str,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        Self::pause_next_ide_sync_at(&self.ide_sync_close_after_lock_pause, canonical_id)
+    }
+
+    #[cfg(test)]
+    fn pause_next_ide_sync_at(
+        slot: &parking_lot::Mutex<Option<IdeSyncPausePoint>>,
+        canonical_id: &str,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *slot.lock() = Some(IdeSyncPausePoint {
+            canonical_id: canonical_id.to_string(),
+            arrived: Arc::clone(&arrived),
+            release: Arc::clone(&release),
+        });
+        (arrived, release)
+    }
+
+    #[cfg(test)]
+    async fn maybe_pause_ide_sync_before_lease(&self, canonical_id: &str) {
+        Self::maybe_pause_ide_sync_at(&self.ide_sync_before_lease_pause, canonical_id).await;
+    }
+
+    #[cfg(test)]
+    async fn maybe_pause_ide_sync_after_lease(&self, canonical_id: &str) {
+        Self::maybe_pause_ide_sync_at(&self.ide_sync_after_lease_pause, canonical_id).await;
+    }
+
+    #[cfg(test)]
+    async fn maybe_pause_ide_sync_close_after_lock(&self, canonical_id: &str) {
+        Self::maybe_pause_ide_sync_at(&self.ide_sync_close_after_lock_pause, canonical_id).await;
+    }
+
+    #[cfg(test)]
+    async fn maybe_pause_ide_sync_at(
+        slot: &parking_lot::Mutex<Option<IdeSyncPausePoint>>,
+        canonical_id: &str,
+    ) {
+        let pause = {
+            let mut slot = slot.lock();
+            if slot
+                .as_ref()
+                .is_some_and(|pause| pause.canonical_id == canonical_id)
+            {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some(pause) = pause {
+            pause.arrived.notify_one();
+            pause.release.notified().await;
+        }
+    }
+
     pub fn new(client: Client, config: LspConfig) -> Self {
         let project_sync = config.type_provider.as_ref().map(|tp| {
             // Bind the sync to the active engine kind so the carrier-companion
@@ -419,6 +863,7 @@ impl VerterLanguageServer {
 
         let needs_ide_sync = Arc::new(DashSet::new());
         let ide_sync_repair_locks = Arc::new(DashMap::new());
+        let ide_sync_open_generations = Arc::new(DashMap::new());
         let needs_deferred_sync = Arc::new(DashSet::new());
         let documents = Arc::new(DocumentRegistry::new(config.host));
         let position_encoding = Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16));
@@ -522,17 +967,31 @@ impl VerterLanguageServer {
             type_provider_kind: config.type_provider_kind,
             suggest_tsgo: config.suggest_tsgo,
             suppress_imported_carrier_prewarm: config.suppress_imported_carrier_prewarm,
-            completion_generation: std::sync::atomic::AtomicU64::new(0),
             provider_only_completions: std::sync::atomic::AtomicBool::new(
                 e2e_provider_only_completions_enabled(),
             ),
             needs_ide_sync,
             ide_sync_repair_locks,
+            ide_sync_open_generations,
+            ide_sync_next_generation: std::sync::atomic::AtomicU64::new(1),
+            #[cfg(test)]
+            ide_sync_before_lease_pause: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            ide_sync_after_lease_pause: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            ide_sync_close_after_lock_pause: parking_lot::Mutex::new(None),
             needs_deferred_sync,
             pending_snapshot_provider_sync,
             sync_coordinator,
             last_change_ms: std::sync::atomic::AtomicU64::new(0),
             did_change_mutex: tokio::sync::Mutex::new(()),
+            did_change_provider_tail: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            completion_snapshot_pauses: parking_lot::Mutex::new(std::collections::VecDeque::new()),
+            #[cfg(test)]
+            completion_before_final_pause: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            completion_final_snapshot_pause: parking_lot::Mutex::new(None),
             workspace_scanner: Arc::new(tokio::sync::Mutex::new(None)),
             init_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             mcp_port: config.mcp_port,

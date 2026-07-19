@@ -17,8 +17,8 @@ use tower_lsp_server::ls_types::*;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
 use crate::features::completion::completions_at_position;
 use crate::features::cursor_context::{
-    classify_cursor_context, classify_expression_context_with_trigger, CursorContext,
-    ExpressionContext, TemplateCursorContext,
+    classify_cursor_context_for_language, classify_expression_context_with_trigger,
+    CarrierTemplateLanguage, CursorContext, ExpressionContext, TemplateCursorContext,
 };
 use crate::features::hover;
 use crate::features::hover::hover_at_position;
@@ -327,19 +327,82 @@ impl CompletionSourceContext {
     }
 }
 
+#[derive(Clone)]
+struct CompletionDocumentIdentity {
+    version: i32,
+    source: std::sync::Arc<str>,
+}
+
+fn completion_document_identity(
+    server: &VerterLanguageServer,
+    uri: &Uri,
+) -> Option<CompletionDocumentIdentity> {
+    server
+        .documents
+        .get(uri)
+        .map(|document| CompletionDocumentIdentity {
+            version: document.version,
+            source: std::sync::Arc::clone(&document.source),
+        })
+}
+
+fn completion_document_identity_matches(
+    before: Option<&CompletionDocumentIdentity>,
+    after: Option<&CompletionDocumentIdentity>,
+) -> bool {
+    match (before, after) {
+        (Some(before), Some(after)) => {
+            before.version == after.version && std::sync::Arc::ptr_eq(&before.source, &after.source)
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 pub(super) async fn handle_completion(
     server: &VerterLanguageServer,
     params: CompletionParams,
+) -> Result<Option<CompletionResponse>> {
+    let uri = params.text_document_position.text_document.uri.clone();
+    if uri.as_str().starts_with("verter-virtual://") {
+        return handle_completion_attempt(server, &params, false).await;
+    }
+
+    // Provider work can suspend while a newer document instance or edit commits.
+    // Match both version and immutable source identity: a close/reopen may reuse
+    // the same LSP version and must still invalidate the suspended response. The
+    // final native-only attempt keeps the commit fence through native calculation,
+    // so it returns the coherent post-fence snapshot even if the pre-wait identity
+    // sampled here was older.
+    for _attempt in 0..2 {
+        let identity_before = completion_document_identity(server, &uri);
+        let response = handle_completion_attempt(server, &params, false).await?;
+        let identity_after = completion_document_identity(server, &uri);
+        if completion_document_identity_matches(identity_before.as_ref(), identity_after.as_ref()) {
+            return Ok(response);
+        }
+        tracing::debug!(
+            "completion: retrying {} after document identity advanced {:?} -> {:?}",
+            uri.as_str(),
+            identity_before.as_ref().map(|identity| identity.version),
+            identity_after.as_ref().map(|identity| identity.version)
+        );
+    }
+    #[cfg(test)]
+    server.maybe_pause_completion_before_final_native().await;
+    handle_completion_attempt(server, &params, true).await
+}
+
+async fn handle_completion_attempt(
+    server: &VerterLanguageServer,
+    params: &CompletionParams,
+    native_only: bool,
 ) -> Result<Option<CompletionResponse>> {
     let _hg = HandlerGuard::new("completion");
     let uri = &params.text_document_position.text_document.uri;
     let _timer = server
         .statistics
         .timer("completion", Some(uri.as_str().to_string()));
-    // Increment the generation counter so stale requests can detect they've been superseded.
-    let completion_gen = server
-        .completion_generation
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let position = &params.text_document_position.position;
     let trigger_character = params
         .context
@@ -354,19 +417,12 @@ pub(super) async fn handle_completion(
     );
     let provider_only = server.provider_only_completions();
 
-    // Check coalescing — skip stale requests superseded by newer keystrokes.
-    if server
-        .completion_generation
-        .load(std::sync::atomic::Ordering::Relaxed)
-        != completion_gen + 1
-    {
-        tracing::debug!(
-            "completion: skipping stale request (gen {})",
-            completion_gen
-        );
-        return Ok(None);
-    }
-
+    // Capture completion source only after an already-running `did_change` has
+    // committed its registry and host updates. Keep this document-version
+    // fence through every synchronous native snapshot read below; otherwise a
+    // new edit can land between releasing the mutex and reading source/analysis.
+    // The fence is released before any provider await.
+    let mut edit_fence = server.did_change_mutex.lock().await;
     // NOTE: We do NOT call ensure_provider_synced here.  The debounced sync in
     // did_change sends the update to TSGO within 50ms of the last keystroke.
     // Flushing inline would serialize: sync → TSGO re-analysis → get_completions,
@@ -377,6 +433,7 @@ pub(super) async fn handle_completion(
     // Virtual file: route directly through TSGO
     if let Some(tp) = &server.type_provider {
         if let Some(vf_ctx) = server.virtual_file_context(uri) {
+            drop(edit_fence);
             let tsx_path = vf_ctx.tsx_path.clone();
             if let Some(offset) = vf_ctx.line_index.position_to_offset(position) {
                 if let Ok(result) = tp
@@ -438,21 +495,16 @@ pub(super) async fn handle_completion(
     // sends completion for a document it is opening) instead of falling open into
     // silence. Once the document registers, the normal path answers typed.
     if server.documents.get(uri).is_none() {
-        // ~300ms total, re-checking supersession so a newer keystroke abandons the wait.
+        drop(edit_fence);
+        // ~300ms total. Each request remains independent: unrelated concurrent
+        // completions cannot cancel a valid request into an empty response.
         for wait_ms in [20u64, 20, 40, 60, 80, 80] {
             tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
             if server.documents.get(uri).is_some() {
                 break;
             }
-            if server
-                .completion_generation
-                .load(std::sync::atomic::Ordering::Relaxed)
-                != completion_gen + 1
-            {
-                tracing::debug!("completion: superseded while awaiting document open");
-                return Ok(None);
-            }
         }
+        edit_fence = server.did_change_mutex.lock().await;
     }
 
     let completion_ssr_context = {
@@ -463,14 +515,127 @@ pub(super) async fn handle_completion(
             .unwrap_or(false)
     };
 
-    let verter_result = (|| {
+    struct NativeCompletionSnapshot {
+        source: std::sync::Arc<str>,
+        line_index: crate::documents::line_index::LineIndex,
+        analysis: Option<verter_session::FileAnalysisSnapshot>,
+        blocks: Vec<crate::documents::sfc_scanner::SfcBlock>,
+        canonical_id: String,
+    }
+    let native_snapshot = (|| {
         let doc = server.documents.get(uri)?;
-        let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
-        let canonical_id = crate::documents::uri_to_canonical_id(uri);
+        Some(NativeCompletionSnapshot {
+            source: doc.source.clone(),
+            line_index: doc.line_index.clone(),
+            analysis: server.documents.get_analysis(uri),
+            blocks: scan_sfc_blocks(&doc.source),
+            canonical_id: crate::documents::uri_to_canonical_id(uri),
+        })
+    })();
+    // Normal attempts release the typing fence before cold child/meta work and
+    // validate identity after provider awaits. The bounded final native-only
+    // attempt deliberately retains the fence through the synchronous native
+    // calculation: it has no provider await and therefore returns one coherent,
+    // current snapshot instead of panicking or failing open under sustained churn.
+    let native_edit_fence = if native_only {
+        Some(edit_fence)
+    } else {
+        drop(edit_fence);
+        #[cfg(test)]
+        server.maybe_pause_completion_after_snapshot().await;
+        None
+    };
+    #[cfg(test)]
+    if native_only {
+        server.maybe_pause_final_completion_after_snapshot().await;
+    }
+
+    let verter_result = native_snapshot.as_ref().and_then(|native| {
+        let canonical_id = &native.canonical_id;
         let resolve_component = |import_source: &str,
                                  component_name: Option<&str>|
          -> Option<verter_session::FileAnalysisSnapshot> {
+            let get_component_analysis =
+                |resolved: &str| -> Option<verter_session::FileAnalysisSnapshot> {
+                    if server.documents.host().get_analysis(resolved).is_none() {
+                        server.documents.host().ensure_loaded(resolved);
+                    }
+                    let mut analysis = server.documents.host().get_analysis(resolved)?;
+                    if carrier_language_for(resolved).is_some_and(|language| language.is_svelte())
+                        && analysis
+                            .template
+                            .as_deref()
+                            .is_none_or(|template| template.prop_definitions.is_empty())
+                    {
+                        // The cache-owned component-meta entry point is the
+                        // cold-building semantic authority for public Svelte
+                        // keys. It preserves aliases, string keys, rest-covered
+                        // members, named interfaces, and whole-object `$props()`
+                        // declarations that local bindings cannot.
+                        let host = server.documents.host();
+                        let mut semantic_props = host
+                            .get_component_meta_with_resolution(resolved)
+                            .map(|(component_meta, _resolution)| {
+                                component_meta
+                                    .props
+                                    .into_iter()
+                                    .map(|prop| {
+                                        let is_boolean =
+                                            prop.raw_type.as_deref() == Some("boolean");
+                                        verter_semantic::analysis::AnalyzedPropDefinition {
+                                            name: prop.name,
+                                            type_annotation: prop.raw_type,
+                                            has_default: prop.has_default,
+                                            is_required: prop.required,
+                                            is_boolean,
+                                            used_in_template: false,
+                                            used_in_script: false,
+                                            span: verter_span::Span::new(0, 0),
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        // Svelte's component-meta request currently cold-builds
+                        // the cache entry while its `analysis.props` lane can be
+                        // empty. The cache-owned public contract is the structured
+                        // Svelte projection of that same entry; consult it only
+                        // after the cold-building request, never by parsing source.
+                        if semantic_props.is_empty() {
+                            semantic_props = host
+                                .get_public_api_projection(resolved)
+                                .and_then(|projection| projection.contract)
+                                .map(|contract| {
+                                    contract
+                                        .props
+                                        .into_iter()
+                                        .map(|prop| {
+                                            let is_boolean =
+                                                prop.type_annotation.as_deref() == Some("boolean");
+                                            verter_semantic::analysis::AnalyzedPropDefinition {
+                                                name: prop.name,
+                                                type_annotation: prop.type_annotation,
+                                                has_default: prop.has_default,
+                                                is_required: !prop.optional,
+                                                is_boolean,
+                                                used_in_template: false,
+                                                used_in_script: false,
+                                                span: verter_span::Span::new(0, 0),
+                                            }
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                        }
+                        if !semantic_props.is_empty() {
+                            let mut template =
+                                analysis.template.as_deref().cloned().unwrap_or_default();
+                            template.prop_definitions = semantic_props;
+                            analysis.template = Some(std::sync::Arc::new(template));
+                        }
+                    }
+                    Some(analysis)
+                };
             let try_follow_reexport = |resolved: &str,
                                        comp_name: Option<&str>|
              -> Option<verter_session::FileAnalysisSnapshot> {
@@ -480,10 +645,7 @@ pub(super) async fn handle_completion(
                     // available — the cold-open race where the child is not yet in the
                     // host cache would otherwise leave component-prop completions
                     // empty (D1: the editor then falls back to word suggestions).
-                    if server.documents.host().get_analysis(resolved).is_none() {
-                        server.documents.host().ensure_loaded(resolved);
-                    }
-                    return server.documents.host().get_analysis(resolved);
+                    return get_component_analysis(resolved);
                 }
                 // Ensure the barrel file is loaded so we can inspect its exports
                 if server.documents.host().get_analysis(resolved).is_none() {
@@ -498,18 +660,15 @@ pub(super) async fn handle_completion(
                     {
                         if crate::server::is_default_export_component_carrier(&terminal_id) {
                             // Ensure the terminal .vue file is compiled
-                            if server.documents.host().get_analysis(&terminal_id).is_none() {
-                                server.documents.host().ensure_loaded(&terminal_id);
-                            }
-                            return server.documents.host().get_analysis(&terminal_id);
+                            return get_component_analysis(&terminal_id);
                         }
                     }
                 }
-                server.documents.host().get_analysis(resolved)
+                get_component_analysis(resolved)
             };
 
             // Try 1: Use resolve_import_specifier (handles relative, alias, index files)
-            if let Some(resolved) = server.resolve_import_specifier(&canonical_id, import_source) {
+            if let Some(resolved) = server.resolve_import_specifier(canonical_id, import_source) {
                 if let Some(a) = try_follow_reexport(&resolved, component_name) {
                     return Some(a);
                 }
@@ -543,7 +702,7 @@ pub(super) async fn handle_completion(
 
             // Try 3: VFS resolution (path aliases, tsconfig paths, disk probing)
             if let Some(resolved_path) =
-                server.resolve_import_specifier(&canonical_id, import_source)
+                server.resolve_import_specifier(canonical_id, import_source)
             {
                 if let Some(a) = try_follow_reexport(&resolved_path, component_name) {
                     return Some(a);
@@ -554,13 +713,13 @@ pub(super) async fn handle_completion(
             try_follow_reexport(import_source, component_name)
         };
         // Build workspace component list for auto-import
-        let ws_components = build_workspace_components(&server.documents.host, &canonical_id);
+        let ws_components = build_workspace_components(&server.documents.host, canonical_id);
         completions_at_position(
             position,
-            &doc.source,
-            &blocks,
-            analysis.as_ref(),
-            &doc.line_index,
+            &native.source,
+            &native.blocks,
+            native.analysis.as_ref(),
+            &native.line_index,
             Some(&resolve_component),
             if ws_components.is_empty() {
                 None
@@ -570,7 +729,7 @@ pub(super) async fn handle_completion(
             Some(uri.as_str()),
             completion_ssr_context,
         )
-    })();
+    });
 
     // Provider-attribution E2E still computes Verter's template-visible NAME set,
     // but only as a subtractive scope boundary. No Verter completion item is ever
@@ -589,15 +748,14 @@ pub(super) async fn handle_completion(
                     .collect::<std::collections::HashSet<_>>()
             })
             .unwrap_or_default();
-        if let (Some(doc), Some(analysis)) = (
-            server.documents.get(uri),
-            server.documents.get_analysis(uri),
-        ) {
-            if let (Some(cursor_offset), Some(template)) = (
-                doc.line_index.position_to_offset(position),
-                analysis.template.as_deref(),
-            ) {
-                scope.extend(template_lexical_scope_names(template, cursor_offset));
+        if let Some(native) = native_snapshot.as_ref() {
+            if let Some(analysis) = native.analysis.as_ref() {
+                if let (Some(cursor_offset), Some(template)) = (
+                    native.line_index.position_to_offset(position),
+                    analysis.template.as_deref(),
+                ) {
+                    scope.extend(template_lexical_scope_names(template, cursor_offset));
+                }
             }
         }
         scope
@@ -609,15 +767,28 @@ pub(super) async fn handle_completion(
             .map(|result| (result.is_incomplete, Some(result.items)))
             .unwrap_or((false, None))
     };
+    if native_only {
+        drop(native_edit_fence);
+        return Ok(verter_items.map(|items| {
+            CompletionResponse::List(CompletionList {
+                is_incomplete: verter_is_incomplete,
+                items,
+            })
+        }));
+    }
 
     // Compute the cursor's source context once — template attribute, template
     // expression, script, or other.
     let (source_ctx, source_expr_context) = (|| {
-        let doc = server.documents.get(uri)?;
-        let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
-        let offset = doc.line_index.position_to_offset(position)?;
-        let context = classify_cursor_context(offset, &doc.source, &blocks, analysis.as_ref());
+        let native = native_snapshot.as_ref()?;
+        let offset = native.line_index.position_to_offset(position)?;
+        let context = classify_cursor_context_for_language(
+            offset,
+            &native.source,
+            &native.blocks,
+            native.analysis.as_ref(),
+            CarrierTemplateLanguage::from_uri(uri.as_str()),
+        );
         let source_ctx = match &context {
             CursorContext::Template(TemplateCursorContext::AttributeName { .. }) => {
                 CompletionSourceContext::TemplateAttr
@@ -630,7 +801,7 @@ pub(super) async fn handle_completion(
         };
         let expression_context = source_ctx.computes_expression_context().then(|| {
             classify_expression_context_with_trigger(
-                &doc.source,
+                &native.source,
                 offset as usize,
                 trigger_character,
             )
@@ -638,6 +809,7 @@ pub(super) async fn handle_completion(
         Some((source_ctx, expression_context))
     })()
     .unwrap_or((CompletionSourceContext::Other, None));
+    let carrier_source_snapshot = native_snapshot.as_ref().map(|native| native.source.clone());
     let is_template_attr_context = matches!(source_ctx, CompletionSourceContext::TemplateAttr);
 
     // The attested editor tsserver plugin is the typed owner for all script
@@ -691,14 +863,14 @@ pub(super) async fn handle_completion(
             // that run's generated endpoint. It is consulted ONLY on strict None, ONLY here
             // in completion — no other feature path uses it.
             .or_else(|| {
-                let carrier_source = server.documents.get(uri)?.source.clone();
+                let carrier_source = carrier_source_snapshot.as_ref()?;
                 merge::carrier_completion_member_boundary_offset(
                     position,
                     &ctx.carrier_line_index,
                     &ctx.mapper,
                     &ctx.tsx_line_index,
                     &ctx.tsx_content,
-                    &carrier_source,
+                    carrier_source,
                 )
             });
             if tsx_offset.is_none() {

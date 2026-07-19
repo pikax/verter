@@ -886,9 +886,17 @@ impl VerterLanguageServer {
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
             return;
         };
+        let Some(open_generation) =
+            self.current_or_init_ide_sync_open_generation(uri, &canonical_id)
+        else {
+            return;
+        };
 
         // Touch MRU for snapshot drain ordering
         self.touch_mru(&canonical_id);
+
+        #[cfg(test)]
+        self.maybe_pause_ide_sync_before_lease(&canonical_id).await;
 
         // Per-document singleflight: a hover/completion/definition storm on this
         // document coalesces onto ONE in-flight repair instead of N concurrent
@@ -898,12 +906,28 @@ impl VerterLanguageServer {
         // resolved by the in-flight repair return without re-repairing. Tokio's
         // `Mutex` is fair (FIFO) and cancel-safe (a cancelled request drops out of
         // the queue), so a storm cannot starve or wedge the repair path.
-        let repair_lock = self
-            .ide_sync_repair_locks
-            .entry(canonical_id.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
-        let _repair_guard = repair_lock.lock().await;
+        let repair_lease = self.ide_sync_repair_lease(&canonical_id, open_generation);
+        #[cfg(test)]
+        self.maybe_pause_ide_sync_after_lease(&canonical_id).await;
+        let _repair_guard = repair_lease.lock().await;
+        if !self.ide_sync_generation_is_open(uri, &canonical_id, open_generation) {
+            // Retire only a lane that still belongs to the generation this repair
+            // serialized for: a close→reopen can REVIVE this same lane object in
+            // place for the reopened generation, and retiring it here would strip
+            // the reopened document's singleflight/close serialization. The lane
+            // generation is only reassigned under the lane mutex this repair now
+            // holds (did_open's `begin_ide_sync_open_generation`), so the check is
+            // exact.
+            if repair_lease
+                .lane()
+                .generation
+                .load(std::sync::atomic::Ordering::Acquire)
+                == open_generation
+            {
+                repair_lease.retire();
+            }
+            return;
+        }
 
         let current_state = self.provider_sync_state_for_source(&canonical_id);
         let has_committed_state = current_state.is_some();
@@ -1291,17 +1315,31 @@ impl VerterLanguageServer {
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
             return;
         };
+        let Some(open_generation) =
+            self.current_or_init_ide_sync_open_generation(uri, &canonical_id)
+        else {
+            return;
+        };
 
         // Serialize the close+reopen against any concurrent interactive repair on
         // this document (same per-document singleflight as
         // `ensure_current_file_synced`): a repair that opens the NEW IDE path must
         // never interleave with this path's close of the SAME provider buffer.
-        let repair_lock = self
-            .ide_sync_repair_locks
-            .entry(canonical_id.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
-        let _repair_guard = repair_lock.lock().await;
+        let repair_lease = self.ide_sync_repair_lease(&canonical_id, open_generation);
+        let _repair_guard = repair_lease.lock().await;
+        if !self.ide_sync_generation_is_open(uri, &canonical_id, open_generation) {
+            // Same revived-lane guard as `ensure_current_file_synced`: never
+            // retire a lane a close→reopen revived for a newer generation.
+            if repair_lease
+                .lane()
+                .generation
+                .load(std::sync::atomic::Ordering::Acquire)
+                == open_generation
+            {
+                repair_lease.retire();
+            }
+            return;
+        }
 
         self.documents.recompile_and_refresh_mapper(uri);
 

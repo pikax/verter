@@ -455,8 +455,36 @@ pub(super) async fn handle_did_open(
         .statistics
         .timer("did_open", Some(uri.as_str().to_string()));
     tracing::info!("did_open: {}", uri.as_str());
-    let result = server.documents.did_open(&params.text_document);
-    let current_canonical_id = server.documents.get_canonical_id(uri);
+    let is_virtual = uri.as_str().starts_with("verter-virtual://");
+    // Registry membership and its open-generation token change under the same
+    // lane close holds. Virtual editor projections never participate in carrier
+    // repair generations; their URI spelling can legitimately contain encoded
+    // source identities and must not create raw/decoded duplicate lane keys.
+    let (result, current_canonical_id) = if is_virtual {
+        let document_commit_guard = server.did_change_mutex.lock().await;
+        let result = server.documents.did_open(&params.text_document);
+        let canonical_id = server.documents.get_canonical_id(uri);
+        drop(document_commit_guard);
+        (result, canonical_id)
+    } else {
+        let canonical_hint = uri_to_canonical_id(uri);
+        let lease = server.ide_sync_lifecycle_lease(&canonical_hint);
+        let guard = lease.lock().await;
+        let document_commit_guard = server.did_change_mutex.lock().await;
+        let result = server.documents.did_open(&params.text_document);
+        let canonical_id = server.documents.get_canonical_id(uri);
+        if let Some(canonical_id) = canonical_id.as_ref() {
+            server.begin_ide_sync_open_generation(canonical_id, lease.lane());
+        }
+        drop(document_commit_guard);
+        drop(guard);
+        drop(lease);
+        (result, canonical_id)
+    };
+    if is_virtual {
+        tracing::info!("did_open EXIT (virtual): {}", uri.as_str());
+        return;
+    }
     // Touch MRU for snapshot drain ordering (after did_open registers the canonical ID)
     if let Some(canonical_id) = current_canonical_id.as_ref() {
         server.touch_mru(canonical_id);
@@ -620,7 +648,10 @@ pub(super) async fn handle_did_change(
         std::sync::atomic::Ordering::Relaxed,
     );
 
-    // CRITICAL: Serialize did_change handlers via a tokio::sync::Mutex.
+    let is_virtual = server.documents.get_virtual_source_uri(&uri).is_some();
+
+    // CRITICAL: Serialize the synchronous document commit/upsert via a
+    // tokio::sync::Mutex.
     //
     // tower-lsp dispatches did_change notifications CONCURRENTLY. Each handler calls
     // host.upsert() + host.ensure_compiled() which acquire std::sync::RwLock (blocking).
@@ -635,7 +666,7 @@ pub(super) async fn handle_did_change(
         std::thread::current().id()
     );
     let mutex_wait_start = std::time::Instant::now();
-    let _guard = server.did_change_mutex.lock().await;
+    let document_commit_guard = server.did_change_mutex.lock().await;
     tracing::info!(
         "did_change MUTEX_ACQUIRED v{version} wait={:?} thread={:?}",
         mutex_wait_start.elapsed(),
@@ -646,7 +677,6 @@ pub(super) async fn handle_did_change(
     let _timer = server
         .statistics
         .timer("did_change", Some(uri.as_str().to_string()));
-    let is_virtual = server.documents.get_virtual_source_uri(&uri).is_some();
 
     tracing::info!(
         "did_change UPSERT_START v{version} thread={:?}",
@@ -658,17 +688,27 @@ pub(super) async fn handle_did_change(
             .documents
             .did_change_incremental(&uri, version, params.content_changes)
     });
+    // Assign provider turns in the same total order as committed document
+    // versions, but do not wait for the predecessor while holding the commit
+    // fence. Later edits can therefore commit and serve native features even
+    // when an earlier provider update is suspended.
+    let provider_update_turn = (!is_virtual).then(|| server.enqueue_did_change_provider_update());
     tracing::info!(
         "did_change UPSERT_DONE v{version} elapsed={:?} thread={:?}",
         upsert_start.elapsed(),
         std::thread::current().id()
     );
+    drop(document_commit_guard);
 
     // Virtual files don't need TSX sync or diagnostics.
     if is_virtual {
         tracing::info!("did_change EXIT (virtual) v{version}");
         return;
     }
+
+    let provider_update_turn =
+        provider_update_turn.expect("non-virtual did_change has a provider update turn");
+    provider_update_turn.wait().await;
 
     let style_only = update_result.changed && update_result.slice_changes.is_style_only();
 
@@ -759,6 +799,38 @@ pub(super) async fn handle_did_close(
     let uri = &params.text_document.uri;
     tracing::info!("did_close: {}", uri.as_str());
 
+    // Serialize the complete close against foreground IDE-sync repair and bind
+    // it to the exact open generation observed at entry. A concurrent reopen
+    // advances the generation under this same lifecycle lane, so this close can
+    // never remove or retire the reopened document (canonical-key ABA).
+    let is_virtual = server.documents.get_virtual_source_uri(uri).is_some();
+    let close_canonical_id = (!is_virtual)
+        .then(|| server.documents.get_canonical_id(uri))
+        .flatten();
+    let close_generation = close_canonical_id.as_ref().and_then(|canonical_id| {
+        server.current_or_init_ide_sync_open_generation(uri, canonical_id)
+    });
+    let close_repair_lease = close_canonical_id
+        .as_ref()
+        .zip(close_generation)
+        .map(|(canonical_id, generation)| server.ide_sync_repair_lease(canonical_id, generation));
+    let _close_repair_guard = match close_repair_lease.as_ref() {
+        Some(lease) => Some(lease.lock().await),
+        None => None,
+    };
+    #[cfg(test)]
+    if let Some(canonical_id) = close_canonical_id.as_ref() {
+        server
+            .maybe_pause_ide_sync_close_after_lock(canonical_id)
+            .await;
+    }
+    if let (Some(canonical_id), Some(generation)) = (close_canonical_id.as_ref(), close_generation)
+    {
+        if !server.ide_sync_generation_is_open(uri, canonical_id, generation) {
+            return;
+        }
+    }
+
     // A self-file document (rune module or plain TS-family script) has NO IDE
     // TSX — the carrier-oriented branch below (gated on `get_ide(...).is_some()`)
     // never fires for it. Close + remove its OWN-path Shadow provider state
@@ -777,7 +849,17 @@ pub(super) async fn handle_did_close(
         && server.documents.get_ide(uri).is_some()
     {
         let Some(canonical_id) = server.documents.get_canonical_id(uri) else {
+            let document_commit_guard = server.did_change_mutex.lock().await;
+            if let (Some(canonical_id), Some(generation)) =
+                (close_canonical_id.as_ref(), close_generation)
+            {
+                server.close_ide_sync_open_generation(canonical_id, generation);
+                if let Some(lease) = close_repair_lease.as_ref() {
+                    lease.retire();
+                }
+            }
             server.documents.did_close(uri);
+            drop(document_commit_guard);
             server.cached_verter_diags.remove(uri.as_str());
             return;
         };
@@ -816,7 +898,7 @@ pub(super) async fn handle_did_close(
     // Capture canonical_id before did_close clears document state — every step
     // below that needs the closed file's identity (the overlay release, the host
     // evict, the scheduler close) reads it from here, not from `documents`.
-    let canonical_id = server.documents.get_canonical_id(uri);
+    let canonical_id = close_canonical_id;
 
     // Clear document state FIRST, before releasing the proactive
     // declaration-overlay graph below: `documents.did_close` removes this root
@@ -831,7 +913,14 @@ pub(super) async fn handle_did_close(
     // (Also keeps the required ordering vs `scheduler.close_file()` below: the
     // VFS overlay must clear before `close_file` enqueues a background Source
     // reload that reads via WorkspaceSourceLoader.)
-    server.documents.did_close(uri);
+    {
+        let document_commit_guard = server.did_change_mutex.lock().await;
+        if let (Some(canonical_id), Some(generation)) = (canonical_id.as_ref(), close_generation) {
+            server.close_ide_sync_open_generation(canonical_id, generation);
+        }
+        server.documents.did_close(uri);
+        drop(document_commit_guard);
+    }
 
     // Release this root from the proactive declaration-overlay graph: any
     // `.d.<ext>.ts` overlay its closure opened that NO other open root still
@@ -856,6 +945,14 @@ pub(super) async fn handle_did_close(
     if let Some(ref canonical_id) = canonical_id {
         server.documents.host().evict(canonical_id);
         server.documents.host().scheduler().close_file(canonical_id);
+    }
+
+    // Mark this exact lane object retired while the close still owns it. The final
+    // active/waiting repair lease removes the map entry synchronously on drop;
+    // an equal canonical key opened in a newer generation owns a different/live
+    // lane and cannot be removed by this lease's exact-pointer drop.
+    if let Some(lease) = close_repair_lease.as_ref() {
+        lease.retire();
     }
 }
 

@@ -4003,48 +4003,327 @@ async fn completion_resolves_barrel_reexport_props_via_index_file() {
     drop(service);
 }
 
-/// D1: a DIRECT `.vue` import's prop completion must return the child's typed
+/// D1: a direct carrier import's prop completion must return the child's typed
 /// props (never an empty / word-fallback list) once the document is synced. The
 /// direct `resolve_component` path ensures the child is loaded on demand
 /// (`ensure_loaded`), matching the barrel branch — so even an open+edit+completion
 /// race that reaches completion before the dependency walker has warmed the child
 /// still resolves its props.
-#[tokio::test]
-async fn completion_resolves_direct_import_props_for_cold_child() {
-    let child_source =
-        "<script setup lang=\"ts\">\ndefineProps<{ label: string; zIndex?: number }>()\n</script>\n";
-    let parent_source = "<script setup lang=\"ts\">\nimport DirectComp from './DirectComp.vue'\n</script>\n<template>\n  <DirectComp  />\n</template>\n";
-    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
-        ("src/DirectComp.vue", "vue", child_source),
-        ("src/App.vue", "vue", parent_source),
-    ])
-    .await;
+#[derive(Clone, Copy)]
+struct D1CarrierCase {
+    name: &'static str,
+    extension: &'static str,
+    language_id: &'static str,
+    index_label: &'static str,
+    child_source: &'static str,
+    stale_child_source: &'static str,
+    opened_parent_source: &'static str,
+    edited_parent_source: &'static str,
+    incomplete_parent_source: &'static str,
+}
 
-    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
-    let server = service.inner();
+const D1_CARRIER_CASES: [D1CarrierCase; 4] = [
+    D1CarrierCase {
+        name: "vue-ts",
+        extension: "vue",
+        language_id: "vue",
+        index_label: "z-index",
+        child_source: "<script setup lang=\"ts\">\nconst internalOnly = true\ndefineProps<{ label: string; zIndex?: number }>()\n</script>\n",
+        stale_child_source: "<script setup lang=\"ts\">\ndefineProps<{ staleOnly: string }>()\n</script>\n",
+        opened_parent_source: "<script setup lang=\"ts\">\nimport BeforeComp from './BeforeComp.vue'\n</script>\n<template>\n  <BeforeComp  />\n</template>\n",
+        edited_parent_source: "<script setup lang=\"ts\">\nimport DirectComp from './DirectComp.vue'\n</script>\n<template>\n  <DirectComp  />\n</template>\n",
+        incomplete_parent_source: "<script setup lang=\"ts\">\nimport DirectComp from './DirectComp.vue'\n</script>\n<template>\n  <DirectComp ",
+    },
+    D1CarrierCase {
+        name: "vue-js",
+        extension: "vue",
+        language_id: "vue",
+        index_label: "z-index",
+        child_source: "<script setup>\nconst internalOnly = true\ndefineProps({ label: { type: String, required: true }, zIndex: Number })\n</script>\n",
+        stale_child_source: "<script setup>\ndefineProps({ staleOnly: String })\n</script>\n",
+        opened_parent_source: "<script setup>\nimport BeforeComp from './BeforeComp.vue'\n</script>\n<template>\n  <BeforeComp  />\n</template>\n",
+        edited_parent_source: "<script setup>\nimport DirectComp from './DirectComp.vue'\n</script>\n<template>\n  <DirectComp  />\n</template>\n",
+        incomplete_parent_source: "<script setup>\nimport DirectComp from './DirectComp.vue'\n</script>\n<template>\n  <DirectComp ",
+    },
+    D1CarrierCase {
+        name: "svelte-ts",
+        extension: "svelte",
+        language_id: "svelte",
+        index_label: "zIndex",
+        child_source: "<script lang=\"ts\">\nconst internalOnly = true;\nlet { label, zIndex }: { label: string; zIndex?: number } = $props();\n</script>\n<p>{label}</p>\n",
+        stale_child_source: "<script lang=\"ts\">\nlet { staleOnly }: { staleOnly: string } = $props();\n</script>\n",
+        opened_parent_source: "<script lang=\"ts\">\nimport BeforeComp from './BeforeComp.svelte';\n</script>\n<BeforeComp  />\n",
+        edited_parent_source: "<script lang=\"ts\">\nimport DirectComp from './DirectComp.svelte';\n</script>\n<DirectComp  />\n",
+        incomplete_parent_source: "<script lang=\"ts\">\nimport DirectComp from './DirectComp.svelte';\n</script>\n<DirectComp ",
+    },
+    D1CarrierCase {
+        name: "svelte-js",
+        extension: "svelte",
+        language_id: "svelte",
+        index_label: "zIndex",
+        child_source: "<script>\nconst internalOnly = true;\n/** @type {{ label: string, zIndex?: number }} */\nlet { label, zIndex } = $props();\n</script>\n<p>{label}</p>\n",
+        stale_child_source: "<script>\n/** @type {{ staleOnly: string }} */\nlet { staleOnly } = $props();\n</script>\n",
+        opened_parent_source: "<script>\nimport BeforeComp from './BeforeComp.svelte';\n</script>\n<BeforeComp  />\n",
+        edited_parent_source: "<script>\nimport DirectComp from './DirectComp.svelte';\n</script>\n<DirectComp  />\n",
+        incomplete_parent_source: "<script>\nimport DirectComp from './DirectComp.svelte';\n</script>\n<DirectComp ",
+    },
+];
 
-    // Cursor at `<DirectComp |/>` — attribute (prop-name) position.
-    let cursor_pos = parent_source.find("<DirectComp ").unwrap() + "<DirectComp ".len();
-    let line_index = LineIndex::new_utf16(parent_source);
-    let position = line_index.offset_to_position(cursor_pos as u32).unwrap();
-
-    let labels = completion_labels(
-        server
-            .completion(completion_params(&app_uri, position, None))
-            .await
-            .expect("completion request should succeed"),
-    );
-
-    // Positive: the direct-imported child's props must be offered (typed, never a
-    // word-fallback empty list).
+fn assert_d1_prop_completion(case: D1CarrierCase, labels: &[String], phase: &str) {
     assert!(
         labels.contains(&"label".to_string()),
-        "direct-imported component should offer 'label' prop, got: {labels:?}"
+        "{} {phase} completion must offer the typed `label` prop, got: {labels:?}",
+        case.name
     );
     assert!(
-        labels.contains(&"z-index".to_string()),
-        "direct-imported component should offer 'z-index' prop (kebab-case), got: {labels:?}"
+        labels.contains(&case.index_label.to_string()),
+        "{} {phase} completion must offer the typed `{}` prop, got: {labels:?}",
+        case.name,
+        case.index_label
     );
+    assert!(
+        !labels.contains(&"internal-only".to_string()),
+        "{} {phase} completion must not leak the child's internal script binding, got: {labels:?}",
+        case.name
+    );
+    assert!(
+        !labels.contains(&"stale-only".to_string()),
+        "{} {phase} completion must not answer from the pre-edit component, got: {labels:?}",
+        case.name
+    );
+}
+
+#[tokio::test]
+async fn completion_resolves_direct_import_props_for_cold_child() {
+    for case in D1_CARRIER_CASES {
+        let child_path = format!("src/DirectComp.{}", case.extension);
+        let parent_path = format!("src/App.{}", case.extension);
+        let (temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[]).await;
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("src")).expect("create source directory");
+        std::fs::write(
+            workspace.join(format!("src/DirectComp.{}", case.extension)),
+            case.child_source,
+        )
+        .expect("write cold child");
+        std::fs::write(
+            workspace.join(format!("src/App.{}", case.extension)),
+            case.incomplete_parent_source,
+        )
+        .expect("write parent");
+
+        let app_uri = workspace_uri(&workspace_id, &parent_path);
+        let server = service.inner();
+        let child_canonical = format!("{workspace_id}/{child_path}");
+        let _ = server.documents.did_open(&TextDocumentItem {
+            uri: app_uri.clone(),
+            language_id: case.language_id.to_string(),
+            version: 1,
+            text: case.incomplete_parent_source.to_string(),
+        });
+        // Parent compilation may warm imports proactively. Evict the dependency
+        // after the parent is analyzed so completion itself must exercise the
+        // direct-import `ensure_loaded` branch from a genuine cold host state.
+        server.documents.host().evict(&child_canonical);
+        assert!(
+            server
+                .documents
+                .host()
+                .get_analysis(&child_canonical)
+                .is_none(),
+            "{} precondition: child must be cold when completion begins",
+            case.name
+        );
+        let cursor_pos = case
+            .incomplete_parent_source
+            .find("<DirectComp ")
+            .expect("component tag")
+            + "<DirectComp ".len();
+        let position = LineIndex::new_utf16(case.incomplete_parent_source)
+            .offset_to_position(cursor_pos as u32)
+            .expect("completion position");
+
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&app_uri, position, None))
+                .await
+                .expect("completion request should succeed"),
+        );
+        assert_d1_prop_completion(case, &labels, "cold direct-import");
+        assert!(
+            server
+                .documents
+                .host()
+                .get_analysis(&child_canonical)
+                .is_some(),
+            "{} completion must load the cold child through ensure_loaded",
+            case.name
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+}
+
+#[tokio::test]
+async fn svelte_completion_uses_declared_public_prop_keys_not_local_bindings() {
+    let cases = [
+        (
+            "ts-alias-rest",
+            "<script lang=\"ts\">\nlet { publicName: localName, 'string-key': stringLocal, ...rest }: { publicName: string; 'string-key': number; restOnly?: boolean } = $props();\nconst internalOnly = true;\n</script>\n",
+            &["publicName", "string-key", "restOnly"][..],
+            &["localName", "stringLocal", "rest", "internalOnly"][..],
+        ),
+        (
+            "ts-whole-object",
+            "<script lang=\"ts\">\nlet props: { wholeProp: string; optionalProp?: number } = $props();\n</script>\n",
+            &["wholeProp", "optionalProp"][..],
+            &["props"][..],
+        ),
+        (
+            "ts-named-interface",
+            "<script lang=\"ts\">\ninterface CorpusProps { tone0: string; caption1?: number; }\nlet { tone0, caption1 }: CorpusProps = $props();\n</script>\n",
+            &["tone0", "caption1"][..],
+            &[][..],
+        ),
+        (
+            "js-alias-rest",
+            "<script>\n/** @type {{ publicName: string, 'string-key': number, restOnly?: boolean }} */\nlet { publicName: localName, 'string-key': stringLocal, ...rest } = $props();\nconst internalOnly = true;\n</script>\n",
+            &["publicName", "string-key", "restOnly"][..],
+            &["localName", "stringLocal", "rest", "internalOnly"][..],
+        ),
+        (
+            "js-whole-object",
+            "<script>\n/** @type {{ wholeProp: string, optionalProp?: number }} */\nlet props = $props();\n</script>\n",
+            &["wholeProp", "optionalProp"][..],
+            &["props"][..],
+        ),
+    ];
+    let parent_source =
+        "<script>\nimport DirectComp from './DirectComp.svelte';\n</script>\n<DirectComp ";
+
+    for (name, child_source, expected, forbidden) in cases {
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[
+                ("src/DirectComp.svelte", "svelte", child_source),
+                ("src/App.svelte", "svelte", parent_source),
+            ])
+            .await;
+        let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+        let position = LineIndex::new_utf16(parent_source)
+            .offset_to_position(parent_source.len() as u32)
+            .expect("completion position");
+        let labels = completion_labels(
+            service
+                .inner()
+                .completion(completion_params(&app_uri, position, None))
+                .await
+                .expect("completion request should succeed"),
+        );
+
+        for expected_key in expected {
+            assert!(
+                labels.iter().any(|label| label == expected_key),
+                "{name}: declared public key `{expected_key}` missing from {labels:?}"
+            );
+        }
+        for forbidden_name in forbidden {
+            assert!(
+                labels.iter().all(|label| label != forbidden_name),
+                "{name}: local/non-prop binding `{forbidden_name}` leaked into {labels:?}"
+            );
+        }
+
+        drain_handle.abort();
+        drop(service);
+    }
+}
+
+#[tokio::test]
+async fn svelte_component_attribute_fallback_never_leaks_vue_directives() {
+    let child_source =
+        "<script lang=\"ts\">\nconst internalOnly = true;\n</script>\n<p>empty</p>\n";
+    let zero_prop_source = "<script lang=\"ts\">\nimport EmptyChild from './EmptyChild.svelte';\n</script>\n<EmptyChild ";
+    let unresolved_source = "<script lang=\"ts\">\nconst local = true;\n</script>\n<MissingChild ";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/EmptyChild.svelte", "svelte", child_source),
+        ("src/App.svelte", "svelte", zero_prop_source),
+    ])
+    .await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    let server = service.inner();
+
+    for (index, (name, source)) in [
+        ("zero-public-prop", zero_prop_source),
+        ("unresolved", unresolved_source),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index > 0 {
+            let update = server.documents.did_change(&app_uri, 2, source);
+            assert!(update.changed, "unresolved fixture must replace the parent");
+        }
+        let position = LineIndex::new_utf16(source)
+            .offset_to_position(source.len() as u32)
+            .expect("completion position");
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&app_uri, position, None))
+                .await
+                .expect("completion request should succeed"),
+        );
+        assert!(
+            labels.iter().all(|label| {
+                !label.starts_with("v-")
+                    && !matches!(label.as_str(), "@click" | "@input" | "@change")
+            }),
+            "{name}: Svelte attribute fallback must not leak Vue directives: {labels:?}"
+        );
+    }
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_stable_completions_do_not_cancel_each_other() {
+    let child_source =
+        "<script setup lang=\"ts\">\ndefineProps<{ tone0: string; caption1?: string }>()\n</script>\n";
+    let parent_source = "<script setup lang=\"ts\">\nimport CorpusChild from './CorpusChild.vue'\n</script>\n<template>\n  <CorpusChild  />\n</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/CorpusChild.vue", "vue", child_source),
+        ("src/Corpus1.vue", "vue", parent_source),
+    ])
+    .await;
+    let server = service.inner();
+    let uri = workspace_uri(&workspace_id, "src/Corpus1.vue");
+    let cursor = parent_source.find("<CorpusChild ").unwrap() + "<CorpusChild ".len();
+    let position = LineIndex::new_utf16(parent_source)
+        .offset_to_position(cursor as u32)
+        .expect("completion position");
+
+    // Queue every request behind the edit fence so they are all live at once.
+    // A process-global completion generation cancels the first 31 here even
+    // though document/version state is stable and every request is valid.
+    let fence = server.did_change_mutex.lock().await;
+    let completions = futures_util::future::join_all(
+        (0..32).map(|_| server.completion(completion_params(&uri, position, None))),
+    );
+    let release = async move {
+        tokio::task::yield_now().await;
+        drop(fence);
+    };
+    let (responses, ()) = futures_util::future::join(completions, release).await;
+
+    for (index, response) in responses.into_iter().enumerate() {
+        let labels = completion_labels(response.expect("completion request should succeed"));
+        assert!(
+            labels.contains(&"tone0".to_string()) && labels.contains(&"caption1".to_string()),
+            "stable concurrent completion {index} must remain typed, got {labels:?}"
+        );
+    }
 
     drain_handle.abort();
     drop(service);
@@ -4060,7 +4339,7 @@ async fn completion_resolves_direct_import_props_for_cold_child() {
 /// returned `Ok(None)` immediately (word fallback). GREEN post-fix: the handler
 /// waits (bounded) for the open to land and answers the child's typed props.
 #[tokio::test]
-async fn completion_holds_for_in_flight_open_and_answers_typed() {
+async fn completion_holds_for_in_flight_open_vue_ts_legacy_lane() {
     let child_source =
         "<script setup lang=\"ts\">\ndefineProps<{ label: string; zIndex?: number }>()\n</script>\n";
     let parent_source = "<script setup lang=\"ts\">\nimport DirectComp from './DirectComp.vue'\n</script>\n<template>\n  <DirectComp  />\n</template>\n";
@@ -4140,6 +4419,853 @@ async fn completion_holds_for_in_flight_open_and_answers_typed() {
     assert!(
         labels.contains(&"z-index".to_string()),
         "the held completion must answer the child's typed 'z-index' prop, got: {labels:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn completion_holds_for_in_flight_open_and_answers_typed() {
+    for case in D1_CARRIER_CASES {
+        let child_path = format!("src/DirectComp.{}", case.extension);
+        let parent_path = format!("src/App.{}", case.extension);
+        let (temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[]).await;
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("src")).expect("source directory");
+        std::fs::write(workspace.join(&child_path), case.child_source)
+            .expect("write disk-only child");
+        std::fs::write(workspace.join(&parent_path), case.edited_parent_source)
+            .expect("write disk-only parent");
+
+        let server = service.inner();
+        let app_uri = workspace_uri(&workspace_id, &parent_path);
+        let child_uri = workspace_uri(&workspace_id, &child_path);
+        let child_canonical = crate::documents::uri_to_canonical_id(&child_uri);
+        // The helper's background scanner may discover newly-written disk files;
+        // force the discriminating request-start state to be genuinely cold.
+        server.documents.host().evict(&child_canonical);
+        assert!(
+            server.documents.get(&app_uri).is_none()
+                && server.documents.get(&child_uri).is_none()
+                && server
+                    .documents
+                    .host()
+                    .get_analysis(&child_canonical)
+                    .is_none(),
+            "{} precondition: parent is pre-registration and child is disk-only/cold",
+            case.name
+        );
+        let cursor = case
+            .edited_parent_source
+            .find("<DirectComp ")
+            .expect("component tag")
+            + "<DirectComp ".len();
+        let position = LineIndex::new_utf16(case.edited_parent_source)
+            .offset_to_position(cursor as u32)
+            .expect("completion position");
+
+        let completion = server.completion(completion_params(&app_uri, position, None));
+        let open = async {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            let _ = server.documents.did_open(&TextDocumentItem {
+                uri: app_uri.clone(),
+                language_id: case.language_id.to_string(),
+                version: 1,
+                text: case.edited_parent_source.to_string(),
+            });
+        };
+        let (completion_result, ()) = futures_util::future::join(completion, open).await;
+        let labels = completion_labels(
+            completion_result.expect("completion request should succeed after did_open"),
+        );
+        assert_d1_prop_completion(case, &labels, "pre-registration cold-disk open");
+        assert!(
+            server.documents.get(&child_uri).is_none(),
+            "{} child must remain unopened in the document registry",
+            case.name
+        );
+        assert!(
+            server
+                .documents
+                .host()
+                .get_analysis(&child_canonical)
+                .is_some(),
+            "{} completion must cold-load the disk-only child",
+            case.name
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+}
+
+/// A completion arriving while `did_change` is paused inside provider refresh
+/// observes the already-committed edit without waiting for provider I/O.
+/// The pre-edit component has a discriminating `staleOnly` prop, so an answer
+/// captured from the old source cannot pass. Exercise Vue/Svelte x TS/JS.
+#[tokio::test(flavor = "multi_thread")]
+async fn completion_holds_through_delayed_edit_for_all_carrier_modes() {
+    for case in D1_CARRIER_CASES {
+        let child_path = format!("src/DirectComp.{}", case.extension);
+        let stale_child_path = format!("src/BeforeComp.{}", case.extension);
+        let parent_path = format!("src/App.{}", case.extension);
+        let (_temp, service, drain_handle, provider, workspace_id) =
+            make_definition_test_server_with_kind(
+                &[
+                    (child_path.as_str(), case.language_id, case.child_source),
+                    (
+                        stale_child_path.as_str(),
+                        case.language_id,
+                        case.stale_child_source,
+                    ),
+                    (
+                        parent_path.as_str(),
+                        case.language_id,
+                        case.opened_parent_source,
+                    ),
+                ],
+                crate::TypeProviderKind::Tsgo,
+            )
+            .await;
+
+        let app_uri = workspace_uri(&workspace_id, &parent_path);
+        let server = service.inner();
+        let cursor_pos = case
+            .edited_parent_source
+            .find("<DirectComp ")
+            .expect("component tag")
+            + "<DirectComp ".len();
+        let position = LineIndex::new_utf16(case.edited_parent_source)
+            .offset_to_position(cursor_pos as u32)
+            .expect("completion position");
+
+        server.ensure_current_file_synced(&app_uri).await;
+        let ide_path = server
+            .active_ide_path_for_uri(&app_uri)
+            .expect("initial provider surface must be synced");
+        provider.clear_calls();
+        let (update_arrived, update_release) = provider.block_update_file(&ide_path);
+
+        let edit_fut = async {
+            super::lifecycle::handle_did_change(
+                server,
+                DidChangeTextDocumentParams {
+                    text_document: VersionedTextDocumentIdentifier {
+                        uri: app_uri.clone(),
+                        version: 2,
+                    },
+                    content_changes: vec![TextDocumentContentChangeEvent {
+                        range: None,
+                        range_length: None,
+                        text: case.edited_parent_source.to_string(),
+                    }],
+                },
+            )
+            .await;
+        };
+        let completion_fut = async {
+            tokio::time::timeout(std::time::Duration::from_secs(2), update_arrived.notified())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "{} did_change must reach the armed provider update",
+                        case.name
+                    )
+                });
+            let completion = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                server.completion(completion_params(&app_uri, position, None)),
+            )
+            .await;
+            update_release.notify_one();
+            completion.unwrap_or_else(|_| {
+                panic!(
+                    "{} completion must not wait for provider publication",
+                    case.name
+                )
+            })
+        };
+        let ((), completion_result) = futures_util::future::join(edit_fut, completion_fut).await;
+
+        let labels =
+            completion_labels(completion_result.expect("completion request should succeed"));
+        assert_d1_prop_completion(case, &labels, "in-flight edit");
+        let document = server
+            .documents
+            .get(&app_uri)
+            .expect("edited document remains open");
+        assert_eq!(
+            document.version, 2,
+            "{} must execute the EDIT leg",
+            case.name
+        );
+        assert_eq!(
+            document.source.as_ref(),
+            case.edited_parent_source,
+            "{} must retain the delayed did_change content",
+            case.name
+        );
+        drop(document);
+
+        drain_handle.abort();
+        drop(service);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unrelated_document_completion_does_not_wait_for_blocked_provider_update() {
+    let child_source =
+        "<script setup lang=\"ts\">\ndefineProps<{ independentProp: string }>()\n</script>\n";
+    let editing_source = "<script setup lang=\"ts\">\nconst value = 1\n</script>\n<template><div>{{ value }}</div></template>\n";
+    let edited_source = "<script setup lang=\"ts\">\nconst value = 2\n</script>\n<template><div>{{ value }}</div></template>\n";
+    let independent_source = "<script setup lang=\"ts\">\nimport IndependentChild from './IndependentChild.vue'\n</script>\n<template><IndependentChild  /></template>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/IndependentChild.vue", "vue", child_source),
+                ("src/Editing.vue", "vue", editing_source),
+                ("src/Independent.vue", "vue", independent_source),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+    let server = service.inner();
+    let editing_uri = workspace_uri(&workspace_id, "src/Editing.vue");
+    let independent_uri = workspace_uri(&workspace_id, "src/Independent.vue");
+    server.ensure_current_file_synced(&editing_uri).await;
+    let editing_ide_path = server
+        .active_ide_path_for_uri(&editing_uri)
+        .expect("editing carrier provider path");
+    let (update_arrived, update_release) = provider.block_update_file(&editing_ide_path);
+
+    let edit = super::lifecycle::handle_did_change(
+        server,
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: editing_uri,
+                version: 2,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: edited_source.to_string(),
+            }],
+        },
+    );
+    let probe = async {
+        update_arrived.notified().await;
+        let cursor =
+            independent_source.find("<IndependentChild ").unwrap() + "<IndependentChild ".len();
+        let position = LineIndex::new_utf16(independent_source)
+            .offset_to_position(cursor as u32)
+            .expect("completion position");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            server.completion(completion_params(&independent_uri, position, None)),
+        )
+        .await;
+        update_release.notify_one();
+        result
+    };
+    let ((), completion_result) = futures_util::future::join(edit, probe).await;
+    let response = completion_result
+        .expect("an unrelated completion must not wait for provider publication")
+        .expect("completion request should succeed");
+    let labels = completion_labels(response);
+    assert!(
+        labels.contains(&"independent-prop".to_string()),
+        "unrelated completion must answer typed native props: {labels:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn did_change_provider_lane_preserves_edit_order_after_commit_fence_split() {
+    let v1 = "<script setup lang=\"ts\">\nimport FirstChild from './FirstChild.vue'\n</script>\n<template><FirstChild  /></template>\n";
+    let v2 = "<script setup lang=\"ts\">\nimport SecondChild from './SecondChild.vue'\n</script>\n<template><SecondChild  /></template>\n";
+    let v3 = "<script setup lang=\"ts\">\nimport LatestChild from './LatestChild.vue'\n</script>\n<template><LatestChild  /></template>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                (
+                    "src/FirstChild.vue",
+                    "vue",
+                    "<script setup lang=\"ts\">defineProps<{ firstProp: string }>()</script>",
+                ),
+                (
+                    "src/SecondChild.vue",
+                    "vue",
+                    "<script setup lang=\"ts\">defineProps<{ secondProp: string }>()</script>",
+                ),
+                (
+                    "src/LatestChild.vue",
+                    "vue",
+                    "<script setup lang=\"ts\">defineProps<{ latestProp: string }>()</script>",
+                ),
+                ("src/App.vue", "vue", v1),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+    let server = service.inner();
+    let uri = workspace_uri(&workspace_id, "src/App.vue");
+    server.ensure_current_file_synced(&uri).await;
+    let ide_path = server
+        .active_ide_path_for_uri(&uri)
+        .expect("synced provider path");
+    provider.clear_calls();
+    let (update_arrived, update_release) = provider.block_update_file(&ide_path);
+    let change = |version, text: &'static str| {
+        super::lifecycle::handle_did_change(
+            server,
+            DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier {
+                    uri: uri.clone(),
+                    version,
+                },
+                content_changes: vec![TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: text.to_string(),
+                }],
+            },
+        )
+    };
+
+    let first = change(2, v2);
+    let second = async {
+        update_arrived.notified().await;
+        let third = change(3, v3);
+        let observe = async {
+            tokio::time::timeout(std::time::Duration::from_millis(250), async {
+                loop {
+                    if server.documents.get(&uri).map(|doc| doc.version) == Some(3) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("v3 document commit must not wait for blocked v2 provider publication");
+            assert_eq!(
+                server.documents.get(&uri).map(|doc| doc.version),
+                Some(3),
+                "the later edit must be completion-visible while its provider update is queued"
+            );
+
+            let cursor = v3.find("<LatestChild ").unwrap() + "<LatestChild ".len();
+            let position = LineIndex::new_utf16(v3)
+                .offset_to_position(cursor as u32)
+                .expect("latest completion position");
+            let response = tokio::time::timeout(
+                std::time::Duration::from_millis(250),
+                server.completion(completion_params(&uri, position, None)),
+            )
+            .await
+            .expect("same-document completion must not wait for provider publication")
+            .expect("completion succeeds");
+            let labels = completion_labels(response);
+            assert!(
+                labels.contains(&"latest-prop".to_string()),
+                "completion must answer from committed v3 native state: {labels:?}"
+            );
+            assert!(
+                !labels.contains(&"second-prop".to_string()),
+                "completion must not answer stale v2 native state: {labels:?}"
+            );
+
+            update_release.notify_one();
+        };
+        futures_util::future::join(third, observe).await;
+    };
+    futures_util::future::join(first, second).await;
+    assert_eq!(
+        server.documents.get(&uri).map(|doc| doc.version),
+        Some(3),
+        "v3 remains current after ordered provider publication drains"
+    );
+    let published = provider
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            MockCall::UpdateFile { path, content } if path == ide_path => Some(content),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        published.len(),
+        2,
+        "each committed edit must take one ordered provider turn"
+    );
+    assert!(
+        published[0].contains("SecondChild") && published[1].contains("LatestChild"),
+        "provider turns must publish v2 before v3: {published:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unrelated_edit_commit_and_completion_do_not_wait_for_blocked_provider_update() {
+    let blocker_v1 = "<script setup lang=\"ts\">const blocker = 1</script>\n";
+    let blocker_v2 = "<script setup lang=\"ts\">const blocker = 2</script>\n";
+    let target_v1 = "<script setup lang=\"ts\">\nimport OldChild from './OldChild.vue'\n</script>\n<template><OldChild  /></template>\n";
+    let target_v2 = "<script setup lang=\"ts\">\nimport NewChild from './NewChild.vue'\n</script>\n<template><NewChild  /></template>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/Blocker.vue", "vue", blocker_v1),
+                (
+                    "src/OldChild.vue",
+                    "vue",
+                    "<script setup lang=\"ts\">defineProps<{ staleProp: string }>()</script>",
+                ),
+                (
+                    "src/NewChild.vue",
+                    "vue",
+                    "<script setup lang=\"ts\">defineProps<{ currentProp: string }>()</script>",
+                ),
+                ("src/Target.vue", "vue", target_v1),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+    let server = service.inner();
+    let blocker_uri = workspace_uri(&workspace_id, "src/Blocker.vue");
+    let target_uri = workspace_uri(&workspace_id, "src/Target.vue");
+    server.ensure_current_file_synced(&blocker_uri).await;
+    let blocker_ide_path = server
+        .active_ide_path_for_uri(&blocker_uri)
+        .expect("blocker provider path");
+    let (update_arrived, update_release) = provider.block_update_file(&blocker_ide_path);
+
+    let blocked_update = super::lifecycle::handle_did_change(
+        server,
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: blocker_uri,
+                version: 2,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: blocker_v2.to_string(),
+            }],
+        },
+    );
+    let probe = async {
+        update_arrived.notified().await;
+        let target_edit = super::lifecycle::handle_did_change(
+            server,
+            DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier {
+                    uri: target_uri.clone(),
+                    version: 2,
+                },
+                content_changes: vec![TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: target_v2.to_string(),
+                }],
+            },
+        );
+        let observe = async {
+            tokio::time::timeout(std::time::Duration::from_millis(250), async {
+                loop {
+                    if server.documents.get(&target_uri).map(|doc| doc.version) == Some(2) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("unrelated target commit must not wait for blocker provider publication");
+
+            let cursor = target_v2.find("<NewChild ").unwrap() + "<NewChild ".len();
+            let position = LineIndex::new_utf16(target_v2)
+                .offset_to_position(cursor as u32)
+                .expect("current completion position");
+            let response = tokio::time::timeout(
+                std::time::Duration::from_millis(250),
+                server.completion(completion_params(&target_uri, position, None)),
+            )
+            .await
+            .expect("completion must use the independently committed target edit")
+            .expect("completion succeeds");
+            let labels = completion_labels(response);
+            assert!(
+                labels.contains(&"current-prop".to_string()),
+                "completion must answer current target props: {labels:?}"
+            );
+            assert!(
+                !labels.contains(&"stale-prop".to_string()),
+                "completion must not answer pre-edit target props: {labels:?}"
+            );
+
+            update_release.notify_one();
+        };
+        futures_util::future::join(target_edit, observe).await;
+    };
+    futures_util::future::join(blocked_update, probe).await;
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn completion_recomputes_native_props_when_document_version_advances_during_provider_await() {
+    let old_child =
+        "<script setup lang=\"ts\">\ndefineProps<{ staleV1Prop: string }>()\n</script>\n";
+    let new_child =
+        "<script setup lang=\"ts\">\ndefineProps<{ currentV2Prop: string }>()\n</script>\n";
+    let v1_source = "<script setup lang=\"ts\">\nimport OldChild from './OldChild.vue'\n</script>\n<template><OldChild  /></template>\n";
+    let v2_source = "<script setup lang=\"ts\">\nimport NewChild from './NewChild.vue'\n</script>\n<template><NewChild  /></template>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/OldChild.vue", "vue", old_child),
+                ("src/NewChild.vue", "vue", new_child),
+                ("src/App.vue", "vue", v1_source),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    server.ensure_current_file_synced(&app_uri).await;
+    let ide_path = server
+        .active_ide_path_for_uri(&app_uri)
+        .expect("synced provider path");
+    let (query_arrived, query_release) = provider.block_get_completions(&ide_path);
+    let cursor = v1_source.find("<OldChild ").unwrap() + "<OldChild ".len();
+    let position = LineIndex::new_utf16(v1_source)
+        .offset_to_position(cursor as u32)
+        .expect("completion position");
+
+    let completion = server.completion(completion_params(&app_uri, position, None));
+    let edit = async {
+        query_arrived.notified().await;
+        let result = server.documents.did_change(&app_uri, 2, v2_source);
+        assert!(
+            result.changed,
+            "v2 must commit while the v1 query is suspended"
+        );
+        query_release.notify_one();
+    };
+    let (completion_result, ()) = futures_util::future::join(completion, edit).await;
+    let labels = completion_labels(completion_result.expect("completion request succeeds"));
+    assert!(
+        labels.contains(&"current-v2-prop".to_string()),
+        "completion must recompute against current v2 native analysis: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"stale-v1-prop".to_string()),
+        "completion must never return stale v1 native props after v2 commits: {labels:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn completion_final_native_retry_waits_for_commit_fence_and_returns_current_state() {
+    let child = |prop: &str| {
+        format!("<script setup lang=\"ts\">defineProps<{{ {prop}: string }}>()</script>")
+    };
+    let source = |child_name: &str| {
+        format!(
+            "<script setup lang=\"ts\">\nimport Child from './{child_name}.vue'\n</script>\n<template><Child  /></template>\n"
+        )
+    };
+    let v1 = source("V1Child");
+    let v2 = source("V2Child");
+    let v3 = source("V3Child");
+    let v4 = source("V4Child");
+    let v1_child = child("vOneProp");
+    let v2_child = child("vTwoProp");
+    let v3_child = child("vThreeProp");
+    let v4_child = child("vFourProp");
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/V1Child.vue", "vue", &v1_child),
+                ("src/V2Child.vue", "vue", &v2_child),
+                ("src/V3Child.vue", "vue", &v3_child),
+                ("src/V4Child.vue", "vue", &v4_child),
+                ("src/App.vue", "vue", &v1),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let (first_arrived, first_release) = server.pause_next_completion_after_snapshot();
+    let (second_arrived, second_release) = server.pause_next_completion_after_snapshot();
+    let (final_arrived, final_release) = server.pause_completion_before_final_native();
+    let cursor = v1.find("<Child ").unwrap() + "<Child ".len();
+    let position = LineIndex::new_utf16(&v1)
+        .offset_to_position(cursor as u32)
+        .expect("completion position");
+
+    let completion = server.completion(completion_params(&app_uri, position, None));
+    let advance = async {
+        first_arrived.notified().await;
+        assert!(server.documents.did_change(&app_uri, 2, &v2).changed);
+        first_release.notify_one();
+
+        second_arrived.notified().await;
+        assert!(server.documents.did_change(&app_uri, 3, &v3).changed);
+        second_release.notify_one();
+
+        final_arrived.notified().await;
+        let final_fence = server.did_change_mutex.lock().await;
+        final_release.notify_one();
+        tokio::task::yield_now().await;
+        assert!(server.documents.did_change(&app_uri, 4, &v4).changed);
+        drop(final_fence);
+    };
+    let (completion_result, ()) = futures_util::future::join(completion, advance).await;
+    let labels = completion_labels(completion_result.expect("completion must not panic"));
+    assert!(
+        labels.contains(&"v-four-prop".to_string()),
+        "the final coherent native retry must answer v4: {labels:?}"
+    );
+    for stale in ["v-one-prop", "v-two-prop", "v-three-prop"] {
+        assert!(
+            !labels.contains(&stale.to_string()),
+            "the final retry must exclude stale `{stale}`: {labels:?}"
+        );
+    }
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn final_native_completion_serializes_same_uri_close_reopen_membership() {
+    let child = |prop: &str| {
+        format!("<script setup lang=\"ts\">defineProps<{{ {prop}: string }}>()</script>")
+    };
+    let source = |child_name: &str| {
+        format!(
+            "<script setup lang=\"ts\">\nimport Child from './{child_name}.vue'\n</script>\n<template><Child  /></template>\n"
+        )
+    };
+    let v1 = source("V1Child");
+    let v2 = source("V2Child");
+    let v3 = source("V3Child");
+    let reopened = source("ReChild");
+    let v1_child = child("vOneProp");
+    let v2_child = child("vTwoProp");
+    let v3_child = child("beforeCloseProp");
+    let reopened_child = child("reopenedProp");
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/V1Child.vue", "vue", &v1_child),
+                ("src/V2Child.vue", "vue", &v2_child),
+                ("src/V3Child.vue", "vue", &v3_child),
+                ("src/ReChild.vue", "vue", &reopened_child),
+                ("src/App.vue", "vue", &v1),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    server.ensure_current_file_synced(&app_uri).await;
+    let ide_path = server
+        .active_ide_path_for_uri(&app_uri)
+        .expect("provider path");
+    let (close_arrived, close_release) = provider.block_close_file(&ide_path);
+    let (first_arrived, first_release) = server.pause_next_completion_after_snapshot();
+    let (second_arrived, second_release) = server.pause_next_completion_after_snapshot();
+    let (final_snapshot_arrived, final_snapshot_release) =
+        server.pause_final_completion_after_snapshot();
+    let cursor = v1.find("<Child ").unwrap() + "<Child ".len();
+    let position = LineIndex::new_utf16(&v1)
+        .offset_to_position(cursor as u32)
+        .expect("completion position");
+
+    let completion = server.completion(completion_params(&app_uri, position, None));
+    let replace_document = async {
+        first_arrived.notified().await;
+        assert!(server.documents.did_change(&app_uri, 2, &v2).changed);
+        first_release.notify_one();
+
+        second_arrived.notified().await;
+        assert!(server.documents.did_change(&app_uri, 3, &v3).changed);
+        second_release.notify_one();
+
+        final_snapshot_arrived.notified().await;
+        let close = super::lifecycle::handle_did_close(
+            server,
+            DidCloseTextDocumentParams {
+                text_document: TextDocumentIdentifier {
+                    uri: app_uri.clone(),
+                },
+            },
+        );
+        let prove_serialized = async {
+            close_arrived.notified().await;
+            close_release.notify_one();
+            let raced_membership =
+                tokio::time::timeout(std::time::Duration::from_millis(250), async {
+                    loop {
+                        if server
+                            .documents
+                            .get(&app_uri)
+                            .is_none_or(|document| document.source.as_ref() != v3)
+                        {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await;
+            assert!(
+                raced_membership.is_err(),
+                "close membership must wait for the final native completion fence"
+            );
+            final_snapshot_release.notify_one();
+        };
+        futures_util::future::join(close, prove_serialized).await;
+
+        super::lifecycle::handle_did_open(
+            server,
+            DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: app_uri.clone(),
+                    language_id: "vue".to_string(),
+                    version: 3,
+                    text: reopened.clone(),
+                },
+            },
+        )
+        .await;
+    };
+    let (completion_result, ()) = futures_util::future::join(completion, replace_document).await;
+    let before_close_labels =
+        completion_labels(completion_result.expect("coherent final completion succeeds"));
+    assert!(
+        before_close_labels.contains(&"before-close-prop".to_string()),
+        "the fenced response must match the still-current pre-close identity: {before_close_labels:?}"
+    );
+    assert!(
+        !before_close_labels.contains(&"v-one-prop".to_string())
+            && !before_close_labels.contains(&"v-two-prop".to_string()),
+        "the final retry must not regress to an earlier invalidated identity: {before_close_labels:?}"
+    );
+
+    let current_labels = completion_labels(
+        server
+            .completion(completion_params(&app_uri, position, None))
+            .await
+            .expect("reopened completion succeeds"),
+    );
+    assert!(
+        current_labels.contains(&"reopened-prop".to_string()),
+        "completion after reused-version reopen must answer current props: {current_labels:?}"
+    );
+    assert!(
+        !current_labels.contains(&"before-close-prop".to_string()),
+        "completion after reopen must exclude the retired document identity: {current_labels:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn completion_retries_when_same_uri_reopens_with_reused_document_version() {
+    let old_child = "<script setup lang=\"ts\">defineProps<{ oldOpenProp: string }>()</script>";
+    let new_child = "<script setup lang=\"ts\">defineProps<{ newOpenProp: string }>()</script>";
+    let old_source = "<script setup lang=\"ts\">\nimport Child from './OldChild.vue'\n</script>\n<template><Child  /></template>\n";
+    let new_source = "<script setup lang=\"ts\">\nimport Child from './NewChild.vue'\n</script>\n<template><Child  /></template>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/OldChild.vue", "vue", old_child),
+                ("src/NewChild.vue", "vue", new_child),
+                ("src/App.vue", "vue", old_source),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    server.ensure_current_file_synced(&app_uri).await;
+    let ide_path = server
+        .active_ide_path_for_uri(&app_uri)
+        .expect("provider path");
+    let (query_arrived, query_release) = provider.block_get_completions(&ide_path);
+    let cursor = old_source.find("<Child ").unwrap() + "<Child ".len();
+    let position = LineIndex::new_utf16(old_source)
+        .offset_to_position(cursor as u32)
+        .expect("completion position");
+
+    let completion = server.completion(completion_params(&app_uri, position, None));
+    let reopen = async {
+        query_arrived.notified().await;
+        server.documents.did_close(&app_uri);
+        let _ = server.documents.did_open(&TextDocumentItem {
+            uri: app_uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: new_source.to_string(),
+        });
+        query_release.notify_one();
+    };
+    let (completion_result, ()) = futures_util::future::join(completion, reopen).await;
+    let labels = completion_labels(completion_result.expect("completion succeeds"));
+    assert!(
+        labels.contains(&"new-open-prop".to_string()),
+        "reused v1 must answer the reopened document identity: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"old-open-prop".to_string()),
+        "reused v1 must not validate the closed document identity: {labels:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn paired_svelte_component_attribute_completion_returns_child_props() {
+    let child_source =
+        "<script lang=\"ts\">let { pairedProp }: { pairedProp: string } = $props();</script>\n";
+    let parent_source =
+        "<script lang=\"ts\">\nimport Child from './Child.svelte';\n</script>\n<Child ></Child>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/Child.svelte", "svelte", child_source),
+        ("src/App.svelte", "svelte", parent_source),
+    ])
+    .await;
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    let cursor = parent_source.find("<Child ").unwrap() + "<Child ".len();
+    let position = LineIndex::new_utf16(parent_source)
+        .offset_to_position(cursor as u32)
+        .expect("completion position");
+    let labels = completion_labels(
+        server
+            .completion(completion_params(&app_uri, position, None))
+            .await
+            .expect("completion succeeds"),
+    );
+    assert!(
+        labels.contains(&"pairedProp".to_string()),
+        "a paired Svelte component is template markup, not a custom SFC block: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"lang".to_string()),
+        "paired component attributes must not receive SFC-block attributes: {labels:?}"
     );
 
     drain_handle.abort();
@@ -9337,6 +10463,555 @@ const msg = 'hello'
     );
 }
 
+/// D2's interactive-repair singleflight is carrier-neutral: both framework
+/// carriers and both script modes coalesce a 16-request storm to one IDE sync.
+#[tokio::test(flavor = "multi_thread")]
+async fn ensure_current_file_synced_singleflights_vue_svelte_ts_js_repairs() {
+    let cases = [
+        (
+            "vue-ts",
+            "/workspace/src/App.vue",
+            "vue",
+            "<script setup lang=\"ts\">\nconst msg = 'hello'\n</script>\n<template><div>{{ msg }}</div></template>\n",
+            "/workspace/src/App.vue.tsx",
+            "/workspace/src/App.vue.jsx",
+        ),
+        (
+            "vue-js",
+            "/workspace/src/App.vue",
+            "vue",
+            "<script setup>\nconst msg = 'hello'\n</script>\n<template><div>{{ msg }}</div></template>\n",
+            "/workspace/src/App.vue.jsx",
+            "/workspace/src/App.vue.tsx",
+        ),
+        (
+            "svelte-ts",
+            "/workspace/src/App.svelte",
+            "svelte",
+            "<script lang=\"ts\">\nlet msg = $state('hello');\n</script>\n<div>{msg}</div>\n",
+            "/workspace/src/App.svelte.tsx",
+            "/workspace/src/App.svelte.jsx",
+        ),
+        (
+            "svelte-js",
+            "/workspace/src/App.svelte",
+            "svelte",
+            "<script>\nlet msg = $state('hello');\n</script>\n<div>{msg}</div>\n",
+            "/workspace/src/App.svelte.jsx",
+            "/workspace/src/App.svelte.tsx",
+        ),
+    ];
+
+    for (name, canonical_id, language_id, source, expected_path, forbidden_path) in cases {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service_tsgo(type_provider);
+        let server = service.inner();
+        let uri: Uri = format!("file://{canonical_id}")
+            .parse()
+            .expect("valid carrier uri");
+        let _ = server.documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: language_id.to_string(),
+            version: 1,
+            text: source.to_string(),
+        });
+
+        let (open_arrived, open_release) = provider.block_open_file(expected_path);
+        let repairs = futures_util::future::join_all(
+            (0..16).map(|_| server.ensure_current_file_synced(&uri)),
+        );
+        let release_winner = async {
+            open_arrived.notified().await;
+            // `join_all` polls every child before yielding; this extra yield makes
+            // the queued-waiter schedule explicit and mutation-discriminating.
+            tokio::task::yield_now().await;
+            open_release.notify_one();
+        };
+        let (repairs, ()) = futures_util::future::join(repairs, release_winner).await;
+        assert_eq!(repairs.len(), 16);
+
+        let ide_syncs = || {
+            provider
+                .file_sync_calls()
+                .iter()
+                .filter(|call| {
+                    matches!(
+                        call,
+                        MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+                            if path == expected_path
+                    )
+                })
+                .count()
+        };
+        assert_eq!(
+            ide_syncs(),
+            1,
+            "{name}: 16 concurrent repairs must coalesce into one IDE sync, calls={:?}",
+            provider.file_sync_calls()
+        );
+        assert!(
+            provider.file_sync_calls().iter().all(|call| !matches!(
+                call,
+                MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+                    if path == forbidden_path
+            )),
+            "{name}: the opposite script-mode companion must never be synced, calls={:?}",
+            provider.file_sync_calls()
+        );
+        assert!(
+            server
+                .provider_sync_state_for_source(canonical_id)
+                .is_some_and(|state| state.ide_background_loaded),
+            "{name}: the winning repair must commit a live IDE state"
+        );
+
+        server.ensure_current_file_synced(&uri).await;
+        assert_eq!(
+            ide_syncs(),
+            1,
+            "{name}: a fresh sequential repair must remain a no-op, calls={:?}",
+            provider.file_sync_calls()
+        );
+    }
+}
+
+#[tokio::test]
+async fn did_close_sweeps_only_the_closed_documents_ide_sync_repair_lock() {
+    let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service_tsgo(provider);
+    let server = service.inner();
+    let closed_uri = open_test_vue(
+        server,
+        "/workspace/src/Closed.vue",
+        "<script setup lang=\"ts\">const closed = true</script><template><div /></template>",
+    );
+    let retained_uri = open_test_vue(
+        server,
+        "/workspace/src/Retained.vue",
+        "<script setup lang=\"ts\">const retained = true</script><template><div /></template>",
+    );
+
+    server.ensure_current_file_synced(&closed_uri).await;
+    server.ensure_current_file_synced(&retained_uri).await;
+    assert!(
+        server
+            .ide_sync_repair_locks
+            .contains_key("/workspace/src/Closed.vue")
+            && server
+                .ide_sync_repair_locks
+                .contains_key("/workspace/src/Retained.vue"),
+        "precondition: each touched document owns a repair lock"
+    );
+
+    super::lifecycle::handle_did_close(
+        server,
+        DidCloseTextDocumentParams {
+            text_document: TextDocumentIdentifier {
+                uri: closed_uri.clone(),
+            },
+        },
+    )
+    .await;
+
+    assert!(
+        !server
+            .ide_sync_repair_locks
+            .contains_key("/workspace/src/Closed.vue"),
+        "did_close must sweep the closed document's repair lock"
+    );
+    assert!(
+        server
+            .ide_sync_repair_locks
+            .contains_key("/workspace/src/Retained.vue"),
+        "did_close must not sweep another open document's repair lock"
+    );
+}
+
+#[tokio::test]
+async fn did_close_does_not_accumulate_repair_locks_across_distinct_documents() {
+    let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service_tsgo(provider);
+    let server = service.inner();
+
+    for index in 0..32 {
+        let canonical_id = format!("/workspace/src/Transient{index}.vue");
+        let uri = open_test_vue(
+            server,
+            &canonical_id,
+            "<script setup lang=\"ts\">const value = true</script><template><div /></template>",
+        );
+        server.ensure_current_file_synced(&uri).await;
+        assert!(
+            server.ide_sync_repair_locks.contains_key(&canonical_id),
+            "precondition: transient document {index} owns a repair lock"
+        );
+
+        super::lifecycle::handle_did_close(
+            server,
+            DidCloseTextDocumentParams {
+                text_document: TextDocumentIdentifier { uri },
+            },
+        )
+        .await;
+        assert!(
+            !server.ide_sync_repair_locks.contains_key(&canonical_id),
+            "closed transient document {index} must not retain a repair lock"
+        );
+    }
+
+    assert!(
+        server.ide_sync_repair_locks.is_empty(),
+        "distinct open/close cycles must leave no session-long repair-lock growth"
+    );
+}
+
+#[tokio::test]
+async fn did_close_retires_the_repair_lane_on_final_lease_drop_without_polling() {
+    let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service_tsgo(provider);
+    let server = service.inner();
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/Closing.vue",
+        "<script setup lang=\"ts\">const value = true</script><template><div /></template>",
+    );
+    server.ensure_current_file_synced(&uri).await;
+    let generation = *server
+        .ide_sync_open_generations
+        .get("/workspace/src/Closing.vue")
+        .expect("open generation");
+    let retained_lease = server.ide_sync_repair_lease("/workspace/src/Closing.vue", generation);
+
+    super::lifecycle::handle_did_close(
+        server,
+        DidCloseTextDocumentParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+        },
+    )
+    .await;
+
+    let mapped_lane = server
+        .ide_sync_repair_locks
+        .get("/workspace/src/Closing.vue")
+        .expect("a retained waiter prevents unsafe lane removal");
+    assert!(
+        Arc::ptr_eq(&mapped_lane, retained_lease.lane()),
+        "did_close must not split a retained repair lane into a second mutex"
+    );
+    assert!(
+        retained_lease
+            .lane()
+            .retired
+            .load(std::sync::atomic::Ordering::Acquire),
+        "close must retire the exact retained lane object"
+    );
+    drop(mapped_lane);
+    drop(retained_lease);
+
+    assert!(
+        !server
+            .ide_sync_repair_locks
+            .contains_key("/workspace/src/Closing.vue"),
+        "the final lease drop must synchronously retire the lane"
+    );
+}
+
+#[tokio::test]
+async fn encoded_virtual_uri_open_close_leaves_no_repair_generation_or_lane() {
+    let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service_tsgo(provider);
+    let server = service.inner();
+    let virtual_uri: Uri = "verter-virtual:///tsx.tsx?sourceUri=file%3A%2F%2F%2FC%3A%2FUsers%20dev%2FEncoded%20App.vue"
+        .parse()
+        .expect("encoded virtual URI");
+
+    super::lifecycle::handle_did_open(
+        server,
+        DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: virtual_uri.clone(),
+                language_id: "typescriptreact".to_string(),
+                version: 1,
+                text: "export const virtualValue = 1;".to_string(),
+            },
+        },
+    )
+    .await;
+    super::lifecycle::handle_did_close(
+        server,
+        DidCloseTextDocumentParams {
+            text_document: TextDocumentIdentifier { uri: virtual_uri },
+        },
+    )
+    .await;
+
+    assert!(
+        server.ide_sync_repair_locks.is_empty(),
+        "virtual documents never own carrier repair lanes: {:?}",
+        server
+            .ide_sync_repair_locks
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        server.ide_sync_open_generations.is_empty(),
+        "virtual documents never own carrier open generations"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_repair_paused_before_lease_cannot_recreate_lane_after_close() {
+    let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service_tsgo(provider);
+    let server = service.inner();
+    let canonical_id = "/workspace/src/StaleRepair.vue";
+    let uri = open_test_vue(
+        server,
+        canonical_id,
+        "<script setup lang=\"ts\">const value = true</script><template><div /></template>",
+    );
+    server.ensure_current_file_synced(&uri).await;
+    server.needs_ide_sync.insert(canonical_id.to_string());
+
+    let (arrived, release) = server.pause_next_ide_sync_before_lease(canonical_id);
+    let repair = server.ensure_current_file_synced(&uri);
+    let close = async {
+        arrived.notified().await;
+        super::lifecycle::handle_did_close(
+            server,
+            DidCloseTextDocumentParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+            },
+        )
+        .await;
+        assert!(
+            !server.ide_sync_repair_locks.contains_key(canonical_id),
+            "close must retire its lane before the stale repair resumes"
+        );
+        release.notify_one();
+    };
+    futures_util::future::join(repair, close).await;
+
+    assert!(
+        server.documents.get(&uri).is_none(),
+        "document must stay closed"
+    );
+    assert!(
+        !server.ide_sync_open_generations.contains_key(canonical_id),
+        "close must retire the exact open generation"
+    );
+    assert!(
+        !server.ide_sync_repair_locks.contains_key(canonical_id),
+        "a stale post-close lease acquisition must not recreate a mapped lane"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_repair_cannot_retire_reopened_generation_in_close_open_aba() {
+    let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service_tsgo(provider);
+    let server = service.inner();
+    let canonical_id = "/workspace/src/Reopened.vue";
+    let uri = open_test_vue(
+        server,
+        canonical_id,
+        "<script setup lang=\"ts\">const before = true</script><template><div /></template>",
+    );
+    server.ensure_current_file_synced(&uri).await;
+    let old_generation = *server
+        .ide_sync_open_generations
+        .get(canonical_id)
+        .expect("old open generation");
+    server.needs_ide_sync.insert(canonical_id.to_string());
+
+    let (arrived, release) = server.pause_next_ide_sync_before_lease(canonical_id);
+    let stale_repair = server.ensure_current_file_synced(&uri);
+    let close_reopen = async {
+        arrived.notified().await;
+        super::lifecycle::handle_did_close(
+            server,
+            DidCloseTextDocumentParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+            },
+        )
+        .await;
+        super::lifecycle::handle_did_open(
+            server,
+            DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "vue".to_string(),
+                    version: 2,
+                    text: "<script setup lang=\"ts\">const after = true</script><template><span /></template>"
+                        .to_string(),
+                },
+            },
+        )
+        .await;
+        let new_generation = *server
+            .ide_sync_open_generations
+            .get(canonical_id)
+            .expect("reopened generation");
+        assert_ne!(
+            new_generation, old_generation,
+            "reopen must mint a distinct document generation"
+        );
+        release.notify_one();
+        new_generation
+    };
+    let ((), new_generation) = futures_util::future::join(stale_repair, close_reopen).await;
+
+    let lane = server
+        .ide_sync_repair_locks
+        .get(canonical_id)
+        .expect("reopened document must retain its live lane");
+    assert_eq!(
+        lane.generation.load(std::sync::atomic::Ordering::Acquire),
+        new_generation,
+        "mapped lane must belong to the reopened generation"
+    );
+    assert!(
+        !lane.retired.load(std::sync::atomic::Ordering::Acquire),
+        "the stale prior-generation repair must not retire the reopened lane"
+    );
+    drop(lane);
+    assert!(
+        server.documents.get(&uri).is_some(),
+        "reopened document stays open"
+    );
+    server.ensure_current_file_synced(&uri).await;
+    assert!(
+        server
+            .provider_sync_state_for_source(canonical_id)
+            .is_some_and(|state| state.ide_background_loaded),
+        "the reopened generation must remain repairable"
+    );
+}
+
+/// A STRONGER interleave than `stale_repair_cannot_retire_reopened_generation_in_close_open_aba`:
+/// the stale repair acquires its lane LEASE while the old generation is still open (so it
+/// holds an `Arc` on the very lane object the reopen revives in place), the reopen captures
+/// that lane while the close is parked inside its critical section (so the lane is revived
+/// rather than replaced), and the stale repair wins the lane mutex only AFTER the revival.
+/// Its stale-generation exit must not retire the revived lane — RED before the generation
+/// gate on the stale path: the unguarded `retire()` retired the LIVE reopened lane (and the
+/// repair-lease drop then removed its map entry), stripping the reopened document's
+/// singleflight/close serialization.
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_repair_holding_pre_close_lease_cannot_retire_revived_lane() {
+    let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service_tsgo(provider);
+    let server = service.inner();
+    let canonical_id = "/workspace/src/RevivedLane.vue";
+    let uri = open_test_vue(
+        server,
+        canonical_id,
+        "<script setup lang=\"ts\">const before = true</script><template><div /></template>",
+    );
+    server.ensure_current_file_synced(&uri).await;
+    let old_generation = *server
+        .ide_sync_open_generations
+        .get(canonical_id)
+        .expect("old open generation");
+    server.needs_ide_sync.insert(canonical_id.to_string());
+
+    let (repair_arrived, repair_release) = server.pause_next_ide_sync_after_lease(canonical_id);
+    let (close_arrived, close_release) = server.pause_next_ide_sync_close_after_lock(canonical_id);
+
+    let stale_repair = server.ensure_current_file_synced(&uri);
+    let close_reopen = async {
+        // The stale repair parks holding its pre-close lease (an Arc on the
+        // current lane) before contending for the lane mutex.
+        repair_arrived.notified().await;
+
+        // Drive the close until it parks inside its critical section (lane
+        // mutex held, generation not yet closed, lane not yet retired).
+        let close = super::lifecycle::handle_did_close(
+            server,
+            DidCloseTextDocumentParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+            },
+        );
+        futures_util::pin_mut!(close);
+        futures_util::future::poll_fn(|cx| {
+            let _ = std::future::Future::poll(close.as_mut(), cx);
+            std::task::Poll::Ready(())
+        })
+        .await;
+        close_arrived.notified().await;
+
+        // Queue the reopen on the lane mutex while the close is parked: it
+        // captures the still-live lane object, so its generation begin REVIVES
+        // that lane in place instead of replacing an already-retired map entry.
+        let reopen = super::lifecycle::handle_did_open(
+            server,
+            DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "vue".to_string(),
+                    version: 2,
+                    text: "<script setup lang=\"ts\">const after = true</script><template><span /></template>"
+                        .to_string(),
+                },
+            },
+        );
+        futures_util::pin_mut!(reopen);
+        futures_util::future::poll_fn(|cx| {
+            let _ = std::future::Future::poll(reopen.as_mut(), cx);
+            std::task::Poll::Ready(())
+        })
+        .await;
+
+        close_release.notify_one();
+        close.as_mut().await;
+        reopen.as_mut().await;
+        let new_generation = *server
+            .ide_sync_open_generations
+            .get(canonical_id)
+            .expect("reopened generation");
+        assert_ne!(
+            new_generation, old_generation,
+            "reopen must mint a distinct document generation"
+        );
+
+        // The stale repair contends for the revived lane's mutex only now —
+        // after the revival — and must observe its own generation as stale.
+        repair_release.notify_one();
+        new_generation
+    };
+    let ((), new_generation) = futures_util::future::join(stale_repair, close_reopen).await;
+
+    let lane = server
+        .ide_sync_repair_locks
+        .get(canonical_id)
+        .expect("reopened document must retain its live lane");
+    assert_eq!(
+        lane.generation.load(std::sync::atomic::Ordering::Acquire),
+        new_generation,
+        "mapped lane must belong to the reopened generation"
+    );
+    assert!(
+        !lane.retired.load(std::sync::atomic::Ordering::Acquire),
+        "a stale repair holding a pre-close lease must not retire the revived lane"
+    );
+    drop(lane);
+    assert!(
+        server.documents.get(&uri).is_some(),
+        "reopened document stays open"
+    );
+    server.ensure_current_file_synced(&uri).await;
+    assert!(
+        server
+            .provider_sync_state_for_source(canonical_id)
+            .is_some_and(|state| state.ide_background_loaded),
+        "the reopened generation must remain repairable"
+    );
+}
+
+/// Owner loss through the production `ensure_current_file_synced` transition
+/// retracts a previously owned carrier from the on-disk publish store.
 ///
 /// RED before the fix: the interactive `publish_carrier_to_external_ts` early-
 /// returned on the no-owner transition WITHOUT retracting — the retract inside
