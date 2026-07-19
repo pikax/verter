@@ -13,6 +13,44 @@ use super::ComponentMetaQueryEngine;
 use crate::semantic_query::{ProjectionMode, SemanticNodeId};
 
 impl ComponentMetaQueryEngine<'_> {
+    /// Select the graph-backed registry surface for both initial observation
+    /// and later queue publication. Whole routes compose lone-heritage
+    /// surfaces and otherwise retain the authored carrier. Non-Whole routes
+    /// publish only their exact selected topology and never widen on failure.
+    /// The substituted-whole exemption is an explicit authored-carrier choice.
+    pub(crate) fn registry_surface_source(
+        &mut self,
+        scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
+        symbol_name: &str,
+        route: &crate::resolver_core::RouteDemand,
+        member_use_sites: &[(String, verter_type_expr::locators::TypeBodySlot)],
+        authored_fallback: Option<&verter_type_expr::facts::SemanticTypeSource>,
+        substituted_whole: bool,
+    ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
+        use verter_type_expr::facts::{ProjectedTypeFact, SemanticTypeSource};
+
+        let whole = matches!(route, crate::resolver_core::RouteDemand::Whole)
+            || matches!(route, crate::resolver_core::RouteDemand::MemberPath(path) if path.is_empty());
+        if substituted_whole {
+            return authored_fallback.cloned();
+        }
+        if whole {
+            return self
+                .heritage_merged_surface_fact(scope_canonical_id, scope_owner, symbol_name)
+                .map(|fact| SemanticTypeSource::Projected(ProjectedTypeFact::Surface(fact)))
+                .or_else(|| authored_fallback.cloned());
+        }
+        self.route_scoped_surface_fact(
+            scope_canonical_id,
+            scope_owner,
+            symbol_name,
+            route,
+            member_use_sites,
+        )
+        .map(|fact| SemanticTypeSource::Projected(ProjectedTypeFact::Surface(fact)))
+    }
+
     /// Route-scoped registry publication encoding: the SELECTED one-level
     /// topology of `symbol_name`'s declaration under the accumulated
     /// [`RouteDemand`], as a [`ProjectedSurfaceFact`] the publication site
@@ -38,8 +76,8 @@ impl ComponentMetaQueryEngine<'_> {
     /// through the one dispatch re-derives navigation + substitution) — never
     /// a serialized post-substitution graph node. Declines (`None`) when the
     /// observed surface carries signatures or a selected member's payload
-    /// slot is unrecoverable; the caller falls back to the whole authored
-    /// publication.
+    /// slot is unrecoverable; the caller skips the non-Whole publication and
+    /// never widens it to the authored body.
     ///
     /// [`RouteDemand`]: crate::resolver_core::RouteDemand
     pub(crate) fn route_scoped_surface_fact(

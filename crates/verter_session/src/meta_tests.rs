@@ -10531,6 +10531,72 @@ defineProps<LinkProps>()
 }
 
 #[test]
+fn resolve_component_meta_registry_preserves_module_owner_with_same_name_instance_helper() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+interface Shared {
+  moduleOnly: string
+  moduleSibling: boolean
+}
+
+export interface ModuleProps {
+  value?: Shared['moduleOnly']
+}
+</script>
+<script setup lang="ts">
+interface Shared {
+  instanceOnly: number
+}
+
+defineProps<ModuleProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let shared = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "Shared")
+        .expect("the module-owned Shared route root should be published");
+    let shared_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(shared.type_source.present().expect("present source")),
+        "module-owned Shared registry entry",
+    );
+    let TypeExpr::Object(shape) = &shared_ty else {
+        panic!("module-owned Shared should publish a route-scoped object, got {shared_ty:?}");
+    };
+    let member_names: Vec<&str> = shape
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(property) => Some(property.name.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        member_names,
+        ["moduleOnly"],
+        "the exact Module owner and requested route must win over the same-name Instance helper"
+    );
+    assert!(
+        !member_names.contains(&"instanceOnly") && !member_names.contains(&"moduleSibling"),
+        "owner isolation and non-Whole route precision must exclude unrelated members, got {member_names:?}"
+    );
+}
+
+#[test]
 fn resolve_component_meta_evaluates_owner_local_registry_aliases_against_imported_generic_helpers()
 {
     let project = make_project();
@@ -12904,6 +12970,56 @@ defineProps<ButtonProps>()
             |member| matches!(member, ObjectMember::Property(property) if property.name == "slot"),
         ),
         "LocalConfig should keep its slot member, got {local_config_ty:?}"
+    );
+}
+
+#[test]
+fn resolve_component_meta_registry_declines_ambiguous_same_target_local_aliases() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/helpers.ts",
+            r#"type WithChildren<T> = {
+  slot: ComponentConfig<T>
+}
+
+export type ComponentConfig<T> = WithChildren<T>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Button.vue",
+            r#"<script lang="ts">
+import type { ComponentConfig as First } from './helpers'
+import type { ComponentConfig as Second } from './helpers'
+
+export interface ButtonProps {
+  slot?: First<string>['slot']
+}
+</script>
+<script setup lang="ts">
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/Button.vue", crate::types::ProjectionMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    assert!(
+        resolved.resolved_type_registry.iter().all(|entry| {
+            !matches!(entry.name.as_str(), "First" | "Second" | "ComponentConfig")
+        }),
+        "an ambiguous reverse import identity must not publish an arbitrary local alias: {:?}",
+        resolved
+            .resolved_type_registry
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>()
     );
 }
 

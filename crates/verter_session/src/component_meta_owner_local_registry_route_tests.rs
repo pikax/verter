@@ -25,8 +25,8 @@ use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 use crate::capture_token::CaptureToken;
 use crate::resolver_core::component_meta_registry::{
-    ROUTE_DEMAND_EMITTED_MEMBER_PATH_COUNTER, ROUTE_DEMAND_EMITTED_PICK_COUNTER,
-    ROUTE_DEMAND_EMITTED_WHOLE_COUNTER,
+    RegistryProducerScope, ROUTE_DEMAND_EMITTED_MEMBER_PATH_COUNTER,
+    ROUTE_DEMAND_EMITTED_PICK_COUNTER, ROUTE_DEMAND_EMITTED_WHOLE_COUNTER,
 };
 use crate::types::{HostConfig, ProjectionMode};
 use crate::VerterHost;
@@ -105,7 +105,6 @@ fn macro_root_refs_for(
         &published_names,
         &mut queued_names,
         &mut output,
-        Some(canonical),
     );
     output.into_iter().collect()
 }
@@ -346,13 +345,15 @@ fn public_field_refs_keep_external_indexed_access_routes() {
     let analysis: crate::types::FileAnalysisSnapshot = host
         .get_raw_analysis_snapshot("/workspace/src/Comp.vue")
         .expect("Comp.vue analysis snapshot");
-    let owner_local = component_meta_registry_public_route_owner_local_root(
-        host.as_ref() as &dyn ResolverContext,
+    let producer_scope = RegistryProducerScope::explicit(
         "/workspace/src/Comp.vue",
         verter_type_expr::TopLevelOwnerId::instance(0),
+    );
+    let owner_local = component_meta_registry_public_route_owner_local_root(
+        host.as_ref() as &dyn ResolverContext,
+        &producer_scope,
         &analysis,
         Some("Foo"),
-        None,
     );
     assert!(
         owner_local.is_none(),
@@ -428,13 +429,15 @@ fn owner_local_alias_of_alias_external_import_declines() {
     let analysis: crate::types::FileAnalysisSnapshot = host
         .get_raw_analysis_snapshot("/workspace/src/Comp.vue")
         .expect("Comp.vue analysis snapshot");
-    let owner_local = component_meta_registry_public_route_owner_local_root(
-        host.as_ref() as &dyn ResolverContext,
+    let producer_scope = RegistryProducerScope::explicit(
         "/workspace/src/Comp.vue",
         verter_type_expr::TopLevelOwnerId::instance(0),
+    );
+    let owner_local = component_meta_registry_public_route_owner_local_root(
+        host.as_ref() as &dyn ResolverContext,
+        &producer_scope,
         &analysis,
         Some("Foo"),
-        None,
     );
     assert!(
         owner_local.is_none(),
@@ -473,13 +476,15 @@ fn owner_local_generic_typeparameter_body_declines() {
     let analysis: crate::types::FileAnalysisSnapshot = host
         .get_raw_analysis_snapshot("/workspace/src/Comp.vue")
         .expect("Comp.vue analysis snapshot");
-    let owner_local = component_meta_registry_public_route_owner_local_root(
-        host.as_ref() as &dyn ResolverContext,
+    let producer_scope = RegistryProducerScope::explicit(
         "/workspace/src/Comp.vue",
         verter_type_expr::TopLevelOwnerId::instance(0),
+    );
+    let owner_local = component_meta_registry_public_route_owner_local_root(
+        host.as_ref() as &dyn ResolverContext,
+        &producer_scope,
         &analysis,
         Some("T"),
-        None,
     );
     assert!(
         owner_local.is_none(),

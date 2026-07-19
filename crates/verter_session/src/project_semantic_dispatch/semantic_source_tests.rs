@@ -26,7 +26,7 @@ use verter_type_expr::facts::{
 };
 use verter_type_expr::locators::{
     AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, MacroPayloadLocator,
-    MacroPayloadPosition, TypeBodyPathStep, TypeBodySlot,
+    MacroPayloadPosition, SymbolBodyLocator, TypeBodyPathStep, TypeBodySlot,
 };
 use verter_type_expr::span_origins::{MemberSpansOrigin, SourceSynthetic};
 
@@ -248,6 +248,89 @@ fn closed_leaf_sources_lower_in_scope() {
         !matches!(data.as_deref(), Some(SemanticNodeData::Opaque(_))),
         "a resolvable Ref leaf must never raise to a miss shell"
     );
+}
+
+fn owner_isolation_fixture() -> VerterHost {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/semantic-source/module-target.ts",
+        "export type ModuleTarget = { moduleOnly: string };\n",
+    );
+    upsert_ts(
+        &host,
+        "/w/semantic-source/instance-target.ts",
+        "export type InstanceTarget = { instanceOnly: number };\n",
+    );
+    upsert_vue(
+        &host,
+        "/w/semantic-source/OwnerIsolation.vue",
+        r#"<script lang="ts">
+import type { ModuleTarget as Shared } from './module-target'
+export type ModuleUse = Shared
+</script>
+<script setup lang="ts">
+import type { InstanceTarget as Shared } from './instance-target'
+defineProps<{ value?: Shared }>()
+</script>
+<template><div /></template>
+"#,
+    );
+    host
+}
+
+fn assert_instance_target(host: &VerterHost, node: crate::semantic_query::SemanticNodeId) {
+    let data = crate::project_semantic_dispatch::node_data_for(host, node);
+    let Some(SemanticNodeData::DeclRef { identity }) = data.as_deref() else {
+        panic!("owner-exact reference must lower to a declaration identity, got {data:?}");
+    };
+    assert_eq!(
+        identity.canonical_id.as_ref(),
+        "/w/semantic-source/instance-target.ts"
+    );
+    assert_eq!(identity.decl_name.as_ref(), "InstanceTarget");
+}
+
+#[test]
+fn closed_ref_leaf_uses_exact_instance_owner_when_module_import_has_same_name() {
+    const OWNER: &str = "/w/semantic-source/OwnerIsolation.vue";
+    let host = owner_isolation_fixture();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let raised = dispatch
+        .raise_semantic_type_source_to_hot(
+            &SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Ref(
+                "Shared".to_string(),
+            ))),
+            navigate_ctx(OWNER, verter_type_expr::TopLevelOwnerId::instance(0)),
+        )
+        .expect("the instance-owner leaf reference must raise");
+
+    assert_instance_target(&host, raised.node());
+}
+
+#[test]
+fn synthesized_symbol_ref_uses_exact_anchor_owner_when_module_import_has_same_name() {
+    const OWNER: &str = "/w/semantic-source/OwnerIsolation.vue";
+    let host = owner_isolation_fixture();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let source = SemanticTypeSource::Synthesized(ResolvedLocalShape::Ref(SymbolBodyLocator {
+        anchor: AuthoredAnchor {
+            canonical_id: Arc::from(OWNER),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
+            symbol: Arc::from("Shared"),
+            space: LocatorSymbolSpace::Type,
+        },
+    }));
+
+    let raised = dispatch
+        .raise_semantic_type_source_to_hot(
+            &source,
+            navigate_ctx(OWNER, verter_type_expr::TopLevelOwnerId::ordinary_file()),
+        )
+        .expect("the anchor-owner symbol reference must raise");
+
+    assert_instance_target(&host, raised.node());
 }
 
 #[test]

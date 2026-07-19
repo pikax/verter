@@ -2281,6 +2281,36 @@ impl ShallowFileState {
             .get(&DeclKey::new(owner, local_name))
     }
 
+    /// Return the unique local import binding in `owner` whose resolved target
+    /// is exactly `(canonical_id, imported_name)`.
+    ///
+    /// Reverse lookup is intentionally fail-closed: an absent target, a
+    /// namespace import, or two different local bindings for the same target
+    /// returns `None`. Callers must never recover a local spelling by scanning
+    /// another owner or by matching only the exported symbol name.
+    pub(crate) fn unique_local_import_for_resolved_target_in(
+        &self,
+        owner: TopLevelOwnerId,
+        canonical_id: &str,
+        imported_name: &str,
+    ) -> Option<&str> {
+        let mut unique = None;
+        for (local, target) in &self.owner_import_targets {
+            if local.owner != owner
+                || target.is_namespace
+                || target.canonical_id != canonical_id
+                || target.imported_name != imported_name
+            {
+                continue;
+            }
+            if unique.is_some() {
+                return None;
+            }
+            unique = Some(local.name.as_ref());
+        }
+        unique
+    }
+
     // -----------------------------------------------------------------------
     // Local closure
     // -----------------------------------------------------------------------
@@ -2840,6 +2870,60 @@ mod tests {
                 owner: TopLevelOwnerId::instance(0),
                 symbol_name: "Payload".to_string(),
             }),
+        );
+    }
+
+    #[test]
+    fn reverse_import_target_lookup_is_owner_exact_and_ambiguity_safe() {
+        struct HelpersResolver;
+
+        impl ShallowImportResolver for HelpersResolver {
+            fn resolve_canonical(&self, specifier: &str) -> Option<String> {
+                (specifier == "./helpers").then(|| "/resolved/helpers.ts".to_string())
+            }
+        }
+
+        let unique = ShallowFileState::service_backed_with_provenance_and_resolver_for_test(
+            "/ws/owner.ts",
+            "import type { ComponentConfig as LocalConfig } from './helpers';\n",
+            &HelpersResolver,
+        )
+        .0;
+        assert_eq!(
+            unique.unique_local_import_for_resolved_target_in(
+                TopLevelOwnerId::module(0),
+                "/resolved/helpers.ts",
+                "ComponentConfig",
+            ),
+            Some("LocalConfig"),
+        );
+        assert_eq!(
+            unique.unique_local_import_for_resolved_target_in(
+                TopLevelOwnerId::instance(0),
+                "/resolved/helpers.ts",
+                "ComponentConfig",
+            ),
+            None,
+            "the reverse lookup must never cross lexical owners",
+        );
+
+        let ambiguous = ShallowFileState::service_backed_with_provenance_and_resolver_for_test(
+            "/ws/owner.ts",
+            concat!(
+                "import type { ComponentConfig as First } from './helpers';\n",
+                "import type { ComponentConfig as Second } from './helpers';\n",
+            ),
+            &HelpersResolver,
+        )
+        .0;
+        assert_eq!(
+            ambiguous.unique_local_import_for_resolved_target_in(
+                TopLevelOwnerId::module(0),
+                "/resolved/helpers.ts",
+                "ComponentConfig",
+            ),
+            None,
+            "two local names for one resolved target are ambiguous and must fail closed",
         );
     }
 

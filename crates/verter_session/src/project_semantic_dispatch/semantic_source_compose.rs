@@ -264,7 +264,7 @@ impl ProjectSemanticDispatch<'_> {
                 })
             }
             verter_type_expr::facts::ResolvedLocalShape::Ref(symbol) => {
-                match self.raise_symbol_ref(symbol, ctx.scope_canonical_id) {
+                match self.raise_symbol_ref(symbol, ctx) {
                     Some(hot) => {
                         // A deref'd symbol body's interior failure records
                         // the conservative typed failure (strict path).

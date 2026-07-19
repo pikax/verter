@@ -48,8 +48,9 @@ use crate::resolver_core::component_meta_registry::{
     collect_component_meta_registry_public_field_refs,
     collect_component_meta_registry_public_macro_root_refs,
     collect_component_meta_registry_refs_node, enqueue_component_meta_registry_ref,
-    owner_component_meta_registry_import_root, upsert_component_meta_registry_entry,
-    PendingComponentMetaRegistryRef,
+    observe_component_meta_registry_source, owner_component_meta_registry_import_root,
+    upsert_component_meta_registry_entry, PendingComponentMetaRegistryRef, RegistryProducerScope,
+    RegistryQueuedNames,
 };
 
 // The sink-owned macro-output expansion demand API + its MODULE-PRIVATE
@@ -1293,20 +1294,18 @@ impl VerterHost {
             ctx: &dyn crate::resolver_core::ResolverContext,
             node: crate::semantic_query::SemanticNodeId,
             published_names: &rustc_hash::FxHashSet<String>,
-            queued_names: &mut rustc_hash::FxHashSet<String>,
+            queued_names: &mut RegistryQueuedNames,
             output: &mut std::collections::VecDeque<PendingComponentMetaRegistryRef>,
-            source_hint: Option<&str>,
-            source_owner: verter_type_expr::TopLevelOwnerId,
+            producer_scope: &RegistryProducerScope,
             cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
         ) {
             fn collect_one_filtered_node(
                 ctx: &dyn crate::resolver_core::ResolverContext,
                 node: crate::semantic_query::SemanticNodeId,
                 published_names: &rustc_hash::FxHashSet<String>,
-                queued_names: &mut rustc_hash::FxHashSet<String>,
+                queued_names: &mut RegistryQueuedNames,
                 output: &mut std::collections::VecDeque<PendingComponentMetaRegistryRef>,
-                source_hint: Option<&str>,
-                source_owner: verter_type_expr::TopLevelOwnerId,
+                producer_scope: &RegistryProducerScope,
                 cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
             ) {
                 let mut local_queue = std::collections::VecDeque::new();
@@ -1317,8 +1316,7 @@ impl VerterHost {
                     published_names,
                     &mut local_names,
                     &mut local_queue,
-                    source_hint,
-                    source_owner,
+                    producer_scope,
                     crate::resolver_core::component_meta_registry::RegistryMemberRefPolicy::PublicationBoundary,
                     cursor,
                 );
@@ -1334,8 +1332,7 @@ impl VerterHost {
                         queued_names,
                         output,
                         pending.name.as_str(),
-                        pending.source_hint.as_deref(),
-                        pending.source_owner,
+                        &pending.producer_scope,
                         pending.exported_name.as_deref(),
                         pending.route,
                     );
@@ -1350,8 +1347,7 @@ impl VerterHost {
                             published_names,
                             queued_names,
                             output,
-                            source_hint,
-                            source_owner,
+                            producer_scope,
                             cursor,
                         );
                     }
@@ -1366,8 +1362,7 @@ impl VerterHost {
                             published_names,
                             queued_names,
                             output,
-                            source_hint,
-                            source_owner,
+                            producer_scope,
                             cursor,
                         );
                     }
@@ -1378,8 +1373,7 @@ impl VerterHost {
                             published_names,
                             queued_names,
                             output,
-                            source_hint,
-                            source_owner,
+                            producer_scope,
                             cursor,
                         );
                         collect_one_filtered_node(
@@ -1388,8 +1382,7 @@ impl VerterHost {
                             published_names,
                             queued_names,
                             output,
-                            source_hint,
-                            source_owner,
+                            producer_scope,
                             cursor,
                         );
                     }
@@ -1401,8 +1394,7 @@ impl VerterHost {
                         published_names,
                         queued_names,
                         output,
-                        source_hint,
-                        source_owner,
+                        producer_scope,
                         cursor,
                     );
                 }
@@ -1519,33 +1511,36 @@ impl VerterHost {
             &published_names,
             &mut queued_names,
             &mut referenced_names,
-            Some(owner_canonical),
+        );
+        let setup_resolution_scope = RegistryProducerScope::explicit(
+            owner_canonical,
+            verter_type_expr::TopLevelOwnerId::instance(0),
         );
         if let Some(evaluated_types) = evaluated_types {
             for field in &evaluated_types.props {
+                let producer_scope =
+                    RegistryProducerScope::for_field(field, &setup_resolution_scope);
                 collect_component_meta_registry_public_field_refs(
                     query_engine.ctx,
-                    owner_canonical,
-                    verter_type_expr::TopLevelOwnerId::instance(0),
                     snapshot,
                     field,
                     &published_names,
                     &mut queued_names,
                     &mut referenced_names,
-                    Some(owner_canonical),
+                    &producer_scope,
                 );
             }
             for field in &evaluated_types.emits {
+                let producer_scope =
+                    RegistryProducerScope::for_field(field, &setup_resolution_scope);
                 collect_component_meta_registry_public_field_refs(
                     query_engine.ctx,
-                    owner_canonical,
-                    verter_type_expr::TopLevelOwnerId::instance(0),
                     snapshot,
                     field,
                     &published_names,
                     &mut queued_names,
                     &mut referenced_names,
-                    Some(owner_canonical),
+                    &producer_scope,
                 );
             }
             let define_props_roots =
@@ -1568,6 +1563,8 @@ impl VerterHost {
             // different `TypeExpr` variant and cannot be suppressed
             // by this gate.
             for field in &evaluated_types.slot_bindings {
+                let producer_scope =
+                    RegistryProducerScope::for_field(field, &setup_resolution_scope);
                 // Issue #8 skip runs FIRST — it classifies off the binding's
                 // authored SHALLOW annotation (`Props['avatar']`), which
                 // survives on a graph-raised binding row whose published
@@ -1576,8 +1573,8 @@ impl VerterHost {
                 // publishes it.
                 if slot_binding_targets_define_props_root(
                     query_engine.ctx,
-                    owner_canonical,
-                    verter_type_expr::TopLevelOwnerId::instance(0),
+                    producer_scope.canonical_id.as_ref(),
+                    producer_scope.owner,
                     field,
                     &define_props_roots,
                 ) {
@@ -1602,14 +1599,12 @@ impl VerterHost {
                 }
                 collect_component_meta_registry_public_field_refs(
                     query_engine.ctx,
-                    owner_canonical,
-                    verter_type_expr::TopLevelOwnerId::instance(0),
                     snapshot,
                     field,
                     &published_names,
                     &mut queued_names,
                     &mut referenced_names,
-                    Some(owner_canonical),
+                    &producer_scope,
                 );
             }
         }
@@ -1629,13 +1624,13 @@ impl VerterHost {
             );
         let raise_seed_source =
             |dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
-             owner: verter_type_expr::TopLevelOwnerId,
+             producer_scope: &RegistryProducerScope,
              source: &verter_type_expr::facts::SemanticTypeSource| {
                 dispatch.raise_semantic_type_source_to_hot(
                     source,
                     crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-                        scope_canonical_id: owner_canonical,
-                        scope_owner: owner,
+                        scope_canonical_id: producer_scope.canonical_id.as_ref(),
+                        scope_owner: producer_scope.owner,
                         context: seed_transit_ctx,
                         interior_failures: None,
                     },
@@ -1645,11 +1640,17 @@ impl VerterHost {
             let Some(meta) = resolved_type_registry_meta.get(index) else {
                 continue;
             };
-            let source_hint = Some(meta.declaration.canonical_source.as_str());
+            let declaration_canonical = if meta.declaration.canonical_source.is_empty() {
+                owner_canonical
+            } else {
+                meta.declaration.canonical_source.as_str()
+            };
+            let declaration_scope =
+                RegistryProducerScope::explicit(declaration_canonical, meta.declaration.owner);
             let entry_import_root = owner_component_meta_registry_import_root(
                 query_engine.ctx,
-                owner_canonical,
-                meta.declaration.owner,
+                declaration_scope.canonical_id.as_ref(),
+                declaration_scope.owner,
                 snapshot,
                 entry.name.as_str(),
             );
@@ -1659,8 +1660,7 @@ impl VerterHost {
                     .is_some_and(|(canonical_id, _, _)| {
                         !canonical_id.is_empty() && canonical_id != owner_canonical
                     })
-                    || (!meta.declaration.canonical_source.is_empty()
-                        && meta.declaration.canonical_source != owner_canonical);
+                    || declaration_scope.canonical_id.as_ref() != owner_canonical;
             if entry.type_source.present().is_some_and(|source| {
                 should_skip_imported_registry_seed_refresh(
                     owner_canonical,
@@ -1670,15 +1670,19 @@ impl VerterHost {
             }) {
                 continue;
             }
-            let source_locator = source_hint
-                .filter(|source| source.is_empty() || *source == owner_canonical)
-                .and_then(|_| {
+            let source_locator = (declaration_scope.canonical_id.as_ref() == owner_canonical)
+                .then(|| {
                     query_engine.owner_collection_expr(
-                        owner_canonical,
-                        meta.declaration.owner,
+                        declaration_scope.canonical_id.as_ref(),
+                        declaration_scope.owner,
                         entry.name.as_str(),
                     )
-                });
+                })
+                .flatten();
+            let producer_scope = source_locator
+                .as_ref()
+                .map(|locator| RegistryProducerScope::from_locator(locator, &declaration_scope))
+                .unwrap_or_else(|| declaration_scope.clone());
             if entry_is_imported {
                 // Shallow-by-default registry seeds publish imported helper
                 // aliases as a bare `Ref { name }` (the registry-shallow
@@ -1724,7 +1728,7 @@ impl VerterHost {
                         .type_source
                         .present()
                         .and_then(|source| {
-                            raise_seed_source(&seed_dispatch, meta.declaration.owner, source)
+                            raise_seed_source(&seed_dispatch, &producer_scope, source)
                         })
                         .map(|hot| hot.node()),
                 };
@@ -1735,25 +1739,26 @@ impl VerterHost {
                         &published_names,
                         &mut queued_names,
                         &mut referenced_names,
-                        source_hint,
-                        meta.declaration.owner,
+                        &producer_scope,
                         registry_cursor,
                     );
                 }
             } else {
-                let seed_node = match source_locator.as_ref() {
-                    Some(locator) => seed_dispatch
-                        .raise_authored_locator_to_hot(locator, seed_transit_ctx)
-                        .map(|hot| hot.node()),
-                    None => entry
-                        .type_source
-                        .present()
-                        .and_then(|source| {
-                            raise_seed_source(&seed_dispatch, meta.declaration.owner, source)
-                        })
-                        .map(|hot| hot.node()),
-                };
-                if let Some(node) = seed_node {
+                let authored_fallback = source_locator
+                    .as_ref()
+                    .map(|locator| {
+                        verter_type_expr::facts::SemanticTypeSource::Authored(locator.clone())
+                    })
+                    .or_else(|| entry.type_source.present().cloned());
+                if let Some(observation_source) = query_engine.registry_surface_source(
+                    producer_scope.canonical_id.as_ref(),
+                    producer_scope.owner,
+                    entry.name.as_str(),
+                    &crate::resolver_core::RouteDemand::Whole,
+                    &[],
+                    authored_fallback.as_ref(),
+                    false,
+                ) {
                     // Q6 (demand-scoped owner-local helper discovery): a plain
                     // named ref reached on an actively demanded member path of
                     // an OWNER-LOCAL seed is a registry dependency — the
@@ -1761,14 +1766,13 @@ impl VerterHost {
                     // transparent composites and stops at the first plain ref
                     // head (discovery only; dequeue-time resolution applies
                     // the owner-local-vs-imported policy).
-                    collect_component_meta_registry_refs_node(
+                    observe_component_meta_registry_source(
                         query_engine.ctx,
-                        node,
+                        &producer_scope,
+                        &observation_source,
                         &published_names,
                         &mut queued_names,
                         &mut referenced_names,
-                        source_hint,
-                        meta.declaration.owner,
                         crate::resolver_core::component_meta_registry::RegistryMemberRefPolicy::DemandedOwnerLocalSurface,
                         registry_cursor,
                     );
@@ -1782,43 +1786,47 @@ impl VerterHost {
         // Names referenced from already-seeded registry entries.
         // Helpers that a published type transitively references should
         // still be published even when they are imported generic aliases.
-        let seeded_dependency_names: rustc_hash::FxHashSet<String> = {
-            let mut names = rustc_hash::FxHashSet::default();
-            for (index, entry) in resolved_type_registry.iter().enumerate() {
-                let Some(meta) = resolved_type_registry_meta.get(index) else {
-                    continue;
-                };
-                if let Some(hot) = entry.type_source.present().and_then(|source| {
-                    raise_seed_source(&seed_dispatch, meta.declaration.owner, source)
-                }) {
-                    crate::resolver_core::component_meta_registry::collect_node_ref_names(
-                        query_engine.ctx,
-                        hot.node(),
-                        &mut names,
-                    );
-                }
-            }
-            // Also include owner-local names queued alongside a seeded
-            // published entry. When the registry already has published
-            // entries, any owner-local pending name was transitively
-            // enqueued through seed scanning and must keep its own
-            // registry entry instead of being inlined as an indexed-access
-            // alias. When there are no published entries yet, pending
-            // names come purely from public-field scanning and may still
-            // be inlined; do not protect them here.
-            if !published_names.is_empty() {
-                for pending in referenced_names.iter() {
-                    if pending
-                        .source_hint
-                        .as_deref()
-                        .is_none_or(|s| s.is_empty() || s == owner_canonical)
-                    {
-                        names.insert(pending.name.clone());
+        let seeded_dependency_names: rustc_hash::FxHashSet<String> =
+            {
+                let mut names = rustc_hash::FxHashSet::default();
+                for (index, entry) in resolved_type_registry.iter().enumerate() {
+                    let Some(meta) = resolved_type_registry_meta.get(index) else {
+                        continue;
+                    };
+                    let canonical = if meta.declaration.canonical_source.is_empty() {
+                        owner_canonical
+                    } else {
+                        meta.declaration.canonical_source.as_str()
+                    };
+                    let producer_scope =
+                        RegistryProducerScope::explicit(canonical, meta.declaration.owner);
+                    if let Some(hot) = entry.type_source.present().and_then(|source| {
+                        raise_seed_source(&seed_dispatch, &producer_scope, source)
+                    }) {
+                        crate::resolver_core::component_meta_registry::collect_node_ref_names(
+                            query_engine.ctx,
+                            hot.node(),
+                            &mut names,
+                        );
                     }
                 }
-            }
-            names
-        };
+                // Also include owner-local names queued alongside a seeded
+                // published entry. When the registry already has published
+                // entries, any owner-local pending name was transitively
+                // enqueued through seed scanning and must keep its own
+                // registry entry instead of being inlined as an indexed-access
+                // alias. When there are no published entries yet, pending
+                // names come purely from public-field scanning and may still
+                // be inlined; do not protect them here.
+                if !published_names.is_empty() {
+                    for pending in referenced_names.iter() {
+                        if pending.producer_scope.canonical_id.as_ref() == owner_canonical {
+                            names.insert(pending.name.clone());
+                        }
+                    }
+                }
+                names
+            };
         let mut _loop_iterations: usize = 0;
         let mut _loop_materializations: usize = 0;
         let _loop_start = Instant::now();
@@ -1831,8 +1839,7 @@ impl VerterHost {
                 crate::host_manage::component_meta_debug_enabled().then(Instant::now);
             let PendingComponentMetaRegistryRef {
                 name: type_name,
-                source_hint: pending_source_hint_owned,
-                source_owner: pending_source_owner,
+                producer_scope: pending_producer_scope,
                 exported_name: pending_exported_name_owned,
                 route: pending_route,
                 member_use_sites: pending_member_use_sites,
@@ -1848,24 +1855,17 @@ impl VerterHost {
             );
             let imported_owner_route = owner_component_meta_registry_import_root(
                 query_engine.ctx,
-                owner_canonical,
-                verter_type_expr::TopLevelOwnerId::instance(0),
+                pending_producer_scope.canonical_id.as_ref(),
+                pending_producer_scope.owner,
                 snapshot,
                 type_name.as_str(),
-            )
-            .filter(|_| {
-                pending_source_hint_owned
-                    .as_deref()
-                    .is_none_or(|source| source.is_empty() || source == owner_canonical)
-            });
-            let pending_source_hint = imported_owner_route
+            );
+            let pending_producer_scope = imported_owner_route
                 .as_ref()
-                .map(|(canonical_id, _, _)| canonical_id.as_str())
-                .or(pending_source_hint_owned.as_deref());
-            let pending_source_owner = imported_owner_route
-                .as_ref()
-                .map(|(_, owner, _)| *owner)
-                .unwrap_or(pending_source_owner);
+                .map(|(canonical_id, owner, _)| {
+                    RegistryProducerScope::explicit(canonical_id, *owner)
+                })
+                .unwrap_or(pending_producer_scope);
             let pending_exported_name = imported_owner_route
                 .as_ref()
                 .map(|(_, _, exported_name)| exported_name.as_str())
@@ -1884,30 +1884,32 @@ impl VerterHost {
                     "REGISTRY_PENDING owner={} name={} source_hint={:?} exported={:?} route={:?}",
                     owner_canonical,
                     type_name,
-                    pending_source_hint,
+                    pending_producer_scope.canonical_id,
                     pending_exported_name,
                     pending_route,
                 ));
             }
             let _can_resolve = query_engine.can_resolve_registry_symbol(
-                owner_canonical,
-                pending_source_owner,
+                pending_producer_scope.canonical_id.as_ref(),
+                pending_producer_scope.owner,
                 pending_exported_name.unwrap_or(type_name.as_str()),
-                pending_source_hint,
+                Some(pending_producer_scope.canonical_id.as_ref()),
             );
             if crate::host_manage::component_meta_debug_enabled() && !_can_resolve {
                 crate::host_manage::component_meta_debug(format!(
                     "REGISTRY_SKIP_UNRESOLVABLE owner={} name={} source_hint={:?} exported={:?}",
-                    owner_canonical, type_name, pending_source_hint, pending_exported_name,
+                    owner_canonical,
+                    type_name,
+                    pending_producer_scope.canonical_id,
+                    pending_exported_name,
                 ));
             }
             if !_can_resolve {
                 continue;
             }
             let requested_exported_name = pending_exported_name.unwrap_or(type_name.as_str());
-            if let Some(source_hint) = pending_source_hint
-                .filter(|source| !source.is_empty() && *source != owner_canonical)
-            {
+            if pending_producer_scope.canonical_id.as_ref() != owner_canonical {
+                let source_hint = pending_producer_scope.canonical_id.as_ref();
                 if !query_engine.allow_imported_root() {
                     if crate::host_manage::component_meta_debug_enabled() {
                         crate::host_manage::component_meta_debug(format!(
@@ -1922,7 +1924,7 @@ impl VerterHost {
                     crate::host_manage::component_meta_debug_enabled().then(Instant::now);
                 let _resolved_import = query_engine.resolve_imported_registry_symbol(
                     source_hint,
-                    pending_source_owner,
+                    pending_producer_scope.owner,
                     requested_exported_name,
                 );
                 if crate::host_manage::component_meta_debug_enabled() && _resolved_import.is_none()
@@ -2017,6 +2019,10 @@ impl VerterHost {
                         // entirely — a bare named-reference seed only leaks a
                         // symbolic helper that the consumer didn't ask for.
                         if published_names.contains(&type_name) {
+                            let resolved_scope = RegistryProducerScope::explicit(
+                                resolved.canonical_id.as_str(),
+                                resolved.owner,
+                            );
                             upsert_component_meta_registry_entry(
                                 owner_canonical,
                                 resolved_type_registry,
@@ -2028,6 +2034,7 @@ impl VerterHost {
                                 type_name.clone(),
                                 shallow_named_ref_source(type_name.as_str()),
                                 declaration,
+                                &resolved_scope,
                                 registry_cursor,
                             );
                         }
@@ -2050,45 +2057,24 @@ impl VerterHost {
                     // publishes the SELECTED one-level topology as a
                     // `Projected(Surface)` fact (member payloads stay lazy
                     // authored slots); multiple discoveries union
-                    // monotonically at the upsert. A whole route (or a
-                    // route-scoped build decline) publishes the resolved
-                    // declaration's content-free authored body slot —
-                    // consumers project it path-precisely through the one
-                    // shared dispatch.
-                    let route_scoped_source = (!pending_route_is_whole)
-                        .then(|| {
-                            // Resolve within the resolved declaration's own
-                            // file scope — the pending name need not be
-                            // visible from the owner (it may be referenced
-                            // only inside the imported file).
-                            query_engine.route_scoped_surface_fact(
-                                resolved.canonical_id.as_str(),
-                                resolved.owner,
-                                resolved.exported_name.as_str(),
-                                &pending_route,
-                                &pending_member_use_sites,
-                            )
-                        })
-                        .flatten()
-                        .map(|fact| {
-                            verter_type_expr::facts::SemanticTypeSource::Projected(
-                                verter_type_expr::facts::ProjectedTypeFact::Surface(fact),
-                            )
-                        });
-                    let type_source = match route_scoped_source {
-                        Some(source) => source,
-                        // A route-scoped demand publishes the SELECTED
-                        // topology or nothing — an imported entry whose
-                        // route-scoped surface cannot be built (an open
-                        // mapped/generic surface with no closable member
-                        // selection) is NEVER widened to the whole authored
-                        // body (that would leak the body's unrequested
-                        // references — e.g. an open mapped helper's
-                        // non-identity value type — into the registry).
-                        None if !pending_route_is_whole => {
-                            continue;
-                        }
-                        None => authored_body_source(&resolved.body.body_slot),
+                    // monotonically at the upsert. A whole route publishes the
+                    // resolved declaration's content-free authored body slot;
+                    // a declined non-Whole selection publishes nothing.
+                    let resolved_scope = RegistryProducerScope::explicit(
+                        resolved.canonical_id.as_str(),
+                        resolved.owner,
+                    );
+                    let authored_fallback = authored_body_source(&resolved.body.body_slot);
+                    let Some(type_source) = query_engine.registry_surface_source(
+                        resolved_scope.canonical_id.as_ref(),
+                        resolved_scope.owner,
+                        resolved.exported_name.as_str(),
+                        &pending_route,
+                        &pending_member_use_sites,
+                        Some(&authored_fallback),
+                        false,
+                    ) else {
+                        continue;
                     };
                     let surface_elapsed_ms = surface_started
                         .map(|started| started.elapsed().as_secs_f64() * 1000.0)
@@ -2104,6 +2090,7 @@ impl VerterHost {
                         type_name.clone(),
                         type_source,
                         declaration,
+                        &resolved_scope,
                         registry_cursor,
                     );
                     if let Some(started) = _pending_started {
@@ -2126,34 +2113,27 @@ impl VerterHost {
                 }
             }
 
-            let declaration_owner = pending_source_hint
-                .filter(|source| !source.is_empty())
-                .unwrap_or(owner_canonical);
             track_component_meta_dependency(
                 tracked_dependencies,
                 owner_canonical,
-                declaration_owner,
+                pending_producer_scope.canonical_id.as_ref(),
             );
             let mut declaration = query_engine.resolve_type_declaration(
-                declaration_owner,
-                pending_source_owner,
+                pending_producer_scope.canonical_id.as_ref(),
+                pending_producer_scope.owner,
                 type_name.as_str(),
             );
-            if declaration.canonical_source.is_empty() && declaration_owner != owner_canonical {
-                declaration = query_engine.resolve_type_declaration(
-                    owner_canonical,
-                    verter_type_expr::TopLevelOwnerId::instance(0),
-                    type_name.as_str(),
-                );
+            if declaration.canonical_source.is_empty() {
+                declaration.canonical_source = pending_producer_scope.canonical_id.to_string();
             }
             let declaration_body = query_engine.named_decl_body(
-                declaration_owner,
-                pending_source_owner,
+                pending_producer_scope.canonical_id.as_ref(),
+                pending_producer_scope.owner,
                 type_name.as_str(),
             );
             let owner_collection_locator = query_engine.owner_collection_expr(
-                owner_canonical,
-                verter_type_expr::TopLevelOwnerId::instance(0),
+                pending_producer_scope.canonical_id.as_ref(),
+                pending_producer_scope.owner,
                 type_name.as_str(),
             );
             // The owner-collection body's reference HEAD, read node-domain:
@@ -2179,23 +2159,23 @@ impl VerterHost {
                         pending_route,
                         crate::resolver_core::RouteDemand::MemberPath(ref p) if p.is_empty(),
                     );
-            if declaration_owner == owner_canonical
+            if pending_producer_scope.canonical_id.as_ref() == owner_canonical
                 && !pending_route_is_whole_local
                 && !seeded_dependency_names.contains(&type_name)
             {
                 if let Some((body_ref_name, type_arguments)) = owner_collection_ref_head.as_ref() {
                     if !type_arguments.is_empty() {
                         let body_decl = query_engine.resolve_type_declaration(
-                            owner_canonical,
-                            verter_type_expr::TopLevelOwnerId::instance(0),
+                            pending_producer_scope.canonical_id.as_ref(),
+                            pending_producer_scope.owner,
                             body_ref_name,
                         );
                         let body_scope = if body_decl.canonical_source.is_empty() {
-                            owner_canonical
+                            pending_producer_scope.canonical_id.as_ref()
                         } else {
                             body_decl.canonical_source.as_str()
                         };
-                        if body_scope != owner_canonical {
+                        if body_scope != pending_producer_scope.canonical_id.as_ref() {
                             continue;
                         }
                     }
@@ -2206,36 +2186,7 @@ impl VerterHost {
             // resolved off-owner, else the owner's collection locator / own
             // decl body). Consumers lower it through the one shared dispatch
             // on demand.
-            let published_locator = if declaration_owner != owner_canonical {
-                declaration_body.clone()
-            } else {
-                owner_collection_locator.clone().or_else(|| {
-                    query_engine.named_decl_body(
-                        owner_canonical,
-                        verter_type_expr::TopLevelOwnerId::instance(0),
-                        type_name.as_str(),
-                    )
-                })
-            };
-            if published_locator.is_some() && declaration.canonical_source.is_empty() {
-                if let Some(import) = snapshot
-                    .imports
-                    .iter()
-                    .find(|imp| imp.bindings.iter().any(|b| b.name == type_name))
-                {
-                    if let Some(canonical_id) = import.resolved_canonical_id.as_deref() {
-                        if let Some(binding) = import.bindings.iter().find(|b| b.name == type_name)
-                        {
-                            declaration.canonical_source = canonical_id.to_string();
-                            declaration.resolved_name = binding
-                                .imported_name
-                                .as_deref()
-                                .unwrap_or("default")
-                                .to_string();
-                        }
-                    }
-                }
-            }
+            let published_locator = owner_collection_locator.or(declaration_body);
             track_component_meta_dependency(
                 tracked_dependencies,
                 owner_canonical,
@@ -2256,7 +2207,8 @@ impl VerterHost {
             // the observation executes the outer substitution on demand, so
             // narrowing the entry to a route selection would lose the
             // substituted sibling members consumers demand.
-            let owner_local_substituted_whole = declaration_owner == owner_canonical
+            let owner_local_substituted_whole = pending_producer_scope.canonical_id.as_ref()
+                == owner_canonical
                 && owner_collection_ref_head
                     .as_ref()
                     .is_some_and(|(_, type_arguments)| !type_arguments.is_empty());
@@ -2278,43 +2230,19 @@ impl VerterHost {
             // substituted-whole exemption above. Every other entry keeps the
             // raw authored carrier — the raw Intersection stays the graph
             // carrier outside this structural-surface observation point.
-            let published_source =
-                if pending_route_is_whole_local && declaration_owner == owner_canonical {
-                    query_engine
-                        .heritage_merged_surface_fact(
-                            owner_canonical,
-                            verter_type_expr::TopLevelOwnerId::instance(0),
-                            type_name.as_str(),
-                        )
-                        .map(|fact| {
-                            verter_type_expr::facts::SemanticTypeSource::Projected(
-                                verter_type_expr::facts::ProjectedTypeFact::Surface(fact),
-                            )
-                        })
-                        .unwrap_or_else(|| {
-                            verter_type_expr::facts::SemanticTypeSource::Authored(
-                                published_locator.clone(),
-                            )
-                        })
-                } else if let Some(fact) = (!pending_route_is_whole_local
-                    && !owner_local_substituted_whole)
-                    .then(|| {
-                        query_engine.route_scoped_surface_fact(
-                            owner_canonical,
-                            verter_type_expr::TopLevelOwnerId::instance(0),
-                            type_name.as_str(),
-                            &pending_route,
-                            &pending_member_use_sites,
-                        )
-                    })
-                    .flatten()
-                {
-                    verter_type_expr::facts::SemanticTypeSource::Projected(
-                        verter_type_expr::facts::ProjectedTypeFact::Surface(fact),
-                    )
-                } else {
-                    verter_type_expr::facts::SemanticTypeSource::Authored(published_locator.clone())
-                };
+            let authored_fallback =
+                verter_type_expr::facts::SemanticTypeSource::Authored(published_locator.clone());
+            let Some(published_source) = query_engine.registry_surface_source(
+                pending_producer_scope.canonical_id.as_ref(),
+                pending_producer_scope.owner,
+                type_name.as_str(),
+                &pending_route,
+                &pending_member_use_sites,
+                Some(&authored_fallback),
+                owner_local_substituted_whole,
+            ) else {
+                continue;
+            };
             upsert_component_meta_registry_entry(
                 owner_canonical,
                 resolved_type_registry,
@@ -2326,14 +2254,19 @@ impl VerterHost {
                 type_name.clone(),
                 published_source,
                 declaration,
+                &pending_producer_scope,
                 registry_cursor,
             );
             if let Some(started) = _pending_started {
                 let total_elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
                 if total_elapsed_ms >= 5.0 {
                     crate::host_manage::component_meta_debug(format!(
-                        "REGISTRY_PENDING_LOCAL owner={} name={} declaration_owner={} route={:?} total_ms={:.1}",
-                        owner_canonical, type_name, declaration_owner, pending_route, total_elapsed_ms,
+                        "REGISTRY_PENDING_LOCAL owner={} name={} declaration_owner={:?} route={:?} total_ms={:.1}",
+                        owner_canonical,
+                        type_name,
+                        pending_producer_scope.owner,
+                        pending_route,
+                        total_elapsed_ms,
                     ));
                 }
             }
