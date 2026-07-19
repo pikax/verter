@@ -7768,6 +7768,131 @@ import MyComp from './MyComp.vue'
     );
 }
 
+/// D7 no-silent-empty: a transient provider failure on a carrier hover must
+/// resync + retry — the user-visible tooltip recovers instead of vanishing.
+/// Provider-neutral: the recovery lives in the shared handler above the
+/// per-route provider trait, so both engine routes exercise it.
+///
+/// Call budgets: the freshly-seeded surface classifies as repair-pending, so
+/// the tsserver route additionally fires its documented one-shot
+/// synchronization probe (a discarded ordered response) before the
+/// user-visible query — probe + failed query + retry = 3 calls; tsgo queries
+/// directly — failed query + retry = 2.
+#[tokio::test]
+async fn hover_recovers_with_resync_and_retry_after_transient_provider_error() {
+    for (kind, scripted_failures, expected_calls) in [
+        (crate::TypeProviderKind::Tsserver, 2, 3),
+        (crate::TypeProviderKind::Tsgo, 1, 2),
+    ] {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service_with_kind(type_provider, kind);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let app_source = r#"<script setup lang="ts">
+const recoveredHoverTarget: string = "ok"
+</script>
+<template><div>{{ recoveredHoverTarget.length }}</div></template>
+"#;
+        let app_uri = open_test_vue(server, "/workspace/src/App.vue", app_source);
+        // `length` is a member the verter-native hover cannot answer — only the
+        // provider can — so recovery is observable strictly through the
+        // provider rail.
+        let position = Position {
+            line: 3,
+            character: 45,
+        };
+        set_type_hover_at_vue_position(
+            server,
+            &provider,
+            &app_uri,
+            position,
+            "(property) String.length: number",
+        );
+        // Transient failure(s), then the provider answers normally.
+        provider.fail_next_hovers(scripted_failures);
+
+        let text = hover_text(
+            server
+                .hover(hover_params(&app_uri, position))
+                .await
+                .expect("hover request should succeed"),
+        );
+        assert!(
+            text.contains("String.length"),
+            "{kind}: a transient provider error must recover to the typed hover, got: {text}"
+        );
+        let hover_calls = provider
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::GetHover { .. }))
+            .count();
+        assert_eq!(
+            hover_calls, expected_calls,
+            "{kind}: exactly one retry after the transient failure, got {hover_calls} hover calls"
+        );
+    }
+}
+
+/// D7 no-silent-empty, fail-closed bound: a persistent provider failure must
+/// NOT hang or spin — the handler retries exactly once after a resync and
+/// then fails closed (None) rather than fabricating content. (tsserver adds
+/// its one-shot synchronization probe, see the transient-case test.)
+#[tokio::test]
+async fn hover_fails_closed_after_bounded_retry_when_provider_keeps_failing() {
+    for (kind, expected_calls) in [
+        (crate::TypeProviderKind::Tsserver, 3),
+        (crate::TypeProviderKind::Tsgo, 2),
+    ] {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service_with_kind(type_provider, kind);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let app_source = r#"<script setup lang="ts">
+const persistentFailureTarget: string = "ok"
+</script>
+<template><div>{{ persistentFailureTarget.length }}</div></template>
+"#;
+        let app_uri = open_test_vue(server, "/workspace/src/App.vue", app_source);
+        // `length` is a member the verter-native hover cannot answer — only the
+        // provider can — so a persistent provider failure yields NO tooltip at
+        // all (never a fabrication).
+        let position = Position {
+            line: 3,
+            character: 47,
+        };
+        set_type_hover_at_vue_position(
+            server,
+            &provider,
+            &app_uri,
+            position,
+            "(property) String.length: number",
+        );
+        provider.fail_next_hovers(16);
+
+        let result = server
+            .hover(hover_params(&app_uri, position))
+            .await
+            .expect("hover request must not error to the client");
+        assert!(
+            result.is_none(),
+            "{kind}: a persistent provider error fails closed after the bounded retry"
+        );
+        let hover_calls = provider
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::GetHover { .. }))
+            .count();
+        assert_eq!(
+            hover_calls, expected_calls,
+            "{kind}: retries are bounded to exactly one resync+retry, got {hover_calls} hover calls"
+        );
+    }
+}
+
 // @ai-generated - Guards canonical child resolution across sequential parent sync/query state.
 #[tokio::test]
 async fn component_tag_hover_keeps_analysis_resolved_child_across_two_parents() {

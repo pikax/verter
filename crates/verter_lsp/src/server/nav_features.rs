@@ -140,19 +140,23 @@ pub(super) async fn handle_hover(
             );
             server.ensure_current_file_synced(uri).await;
         }
-        if let Some(ctx) = server.type_provider_context(uri) {
+        if let Some(captured_ctx) = server.type_provider_context(uri) {
             // Use validated mapping to avoid querying TSGO at synthetic TSX
             // positions (e.g., <div> → generated JSX) which can crash it.
             let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
                 position,
-                &ctx.carrier_line_index,
-                &ctx.mapper,
-                &ctx.tsx_line_index,
+                &captured_ctx.carrier_line_index,
+                &captured_ctx.mapper,
+                &captured_ctx.tsx_line_index,
             );
 
-            let type_hover = if let Some(tsx_offset) = tsx_offset {
+            // `(provider hover, surface that produced it)`. The surface is
+            // carried alongside so a post-error resync+retry validates and
+            // merges against the RETRY surface, never the superseded one.
+            let (type_hover, ctx) = if let Some(tsx_offset) = tsx_offset {
                 // Log TSX context snippet around the hover offset for debugging
-                if let Some((before, after)) = debug_snippet(&ctx.tsx_content, tsx_offset as usize)
+                if let Some((before, after)) =
+                    debug_snippet(&captured_ctx.tsx_content, tsx_offset as usize)
                 {
                     tracing::info!(
                         "hover TSX context at offset {}: «{}⸽{}»",
@@ -171,9 +175,9 @@ pub(super) async fn handle_hover(
                 if repaired_current_file
                     && matches!(server.type_provider_kind, crate::TypeProviderKind::Tsserver)
                 {
-                    let _ = tp.get_hover(&ctx.tsx_path, tsx_offset).await;
+                    let _ = tp.get_hover(&captured_ctx.tsx_path, tsx_offset).await;
                 }
-                match tp.get_hover(&ctx.tsx_path, tsx_offset).await {
+                match tp.get_hover(&captured_ctx.tsx_path, tsx_offset).await {
                     Ok(hover) => {
                         tracing::info!(
                             "hover type provider result: {}",
@@ -186,12 +190,47 @@ pub(super) async fn handle_hover(
                                 "None"
                             }
                         );
-                        hover
+                        (hover, captured_ctx)
                     }
                     Err(e) => {
-                        tracing::warn!("hover type provider error: {}", e);
-
-                        None
+                        // No-silent-empty (D7): a FAILED provider hover must
+                        // never surface as a vanishing tooltip. Resync the
+                        // current file and retry exactly once against the
+                        // freshly captured surface; a second failure fails
+                        // closed. Provider-neutral — this sits above the
+                        // per-route provider trait.
+                        tracing::warn!(
+                            "hover type provider error: {} — resyncing and retrying once",
+                            e
+                        );
+                        server.ensure_current_file_synced(uri).await;
+                        match server.type_provider_context(uri) {
+                            Some(retry_ctx) => {
+                                let retry_offset = merge::carrier_position_to_tsx_offset_validated(
+                                    position,
+                                    &retry_ctx.carrier_line_index,
+                                    &retry_ctx.mapper,
+                                    &retry_ctx.tsx_line_index,
+                                );
+                                match retry_offset {
+                                    Some(retry_offset) => {
+                                        match tp.get_hover(&retry_ctx.tsx_path, retry_offset).await
+                                        {
+                                            Ok(hover) => (hover, retry_ctx),
+                                            Err(e2) => {
+                                                tracing::warn!(
+                                                    "hover type provider retry failed: {}",
+                                                    e2
+                                                );
+                                                (None, retry_ctx)
+                                            }
+                                        }
+                                    }
+                                    None => (None, retry_ctx),
+                                }
+                            }
+                            None => (None, captured_ctx),
+                        }
                     }
                 }
             } else {
@@ -200,7 +239,7 @@ pub(super) async fn handle_hover(
                     position.line,
                     position.character
                 );
-                None
+                (None, captured_ctx)
             };
 
             // Post-await validation: a hover produced against a surface that no
