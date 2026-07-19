@@ -262,7 +262,12 @@ impl ProcessValidator {
             .map_err(|e| RejectionReason::LspHandshakeFailed {
                 detail: e.to_string(),
             })?;
-        let result = match TsgoAttach::<Owned>::lsp_handshake(conn.json_rpc(), &staged.uri()).await
+        let result = match TsgoAttach::<Owned>::lsp_handshake_with_policy(
+            conn.json_rpc(),
+            &staged.uri(),
+            &self.policy,
+        )
+        .await
         {
             Ok(clearance) => {
                 if versions_agree(probe, &clearance.observed_version) {
@@ -297,7 +302,7 @@ impl ProcessValidator {
             .map_err(|e| RejectionReason::ApiSmokeFailed {
                 detail: format!("spawn the engine: {e}"),
             })?;
-        let attach = TsgoAttach::attach_over(conn, &staged.uri())
+        let attach = TsgoAttach::attach_over_with_policy(conn, &staged.uri(), &self.policy)
             .await
             .map_err(|e| RejectionReason::ApiSmokeFailed {
                 detail: e.to_string(),

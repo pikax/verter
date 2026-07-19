@@ -79,6 +79,7 @@ use crate::error::{TsgoApiError, TsgoApiResult};
 use crate::gate::{self, EngineVersionWitness, GateClearance, ObservedEngine};
 use crate::jsonrpc::JsonRpcConnection;
 use crate::relay::CarrierInjectionChannel;
+use crate::toolchain::policy::VersionPolicy;
 use crate::transport::pipe_attach::connect_attach_pipe;
 use crate::transport::spawn::discover_tsgo;
 
@@ -519,6 +520,18 @@ impl TsgoAttach<Owned> {
         conn: &JsonRpcConnection,
         root_uri: &str,
     ) -> TsgoApiResult<GateClearance> {
+        Self::lsp_handshake_with_policy(conn, root_uri, &VersionPolicy::from_env()).await
+    }
+
+    /// The policy-explicit handshake-half (crate-internal): the toolchain
+    /// validator injects its own [`VersionPolicy`] so the in-band gate and the
+    /// provisioning policy cannot disagree. [`TsgoAttach::lsp_handshake`]
+    /// delegates here with the env-derived policy.
+    pub(crate) async fn lsp_handshake_with_policy(
+        conn: &JsonRpcConnection,
+        root_uri: &str,
+        policy: &VersionPolicy,
+    ) -> TsgoApiResult<GateClearance> {
         let init_params = serde_json::json!({
             "processId": std::process::id(),
             "rootUri": root_uri,
@@ -536,7 +549,8 @@ impl TsgoAttach<Owned> {
                      cannot gate the engine: {init}"
                 ))
             })?;
-        let clearance = gate::validate(&ObservedEngine::from_in_band_server_info(version))?;
+        let clearance =
+            gate::validate_with(&ObservedEngine::from_in_band_server_info(version), policy)?;
         conn.notify("initialized", serde_json::json!({})).await?;
         Ok(clearance)
     }
@@ -549,6 +563,18 @@ impl TsgoAttach<Owned> {
     /// initialized, and a second Verter-originated `initialize` would be a
     /// protocol violation — use [`TsgoAttach::attach_to_initialized`] instead.
     pub async fn attach_over(lsp: TsgoLspConnection, root_uri: &str) -> TsgoApiResult<Self> {
+        Self::attach_over_with_policy(lsp, root_uri, &VersionPolicy::from_env()).await
+    }
+
+    /// The policy-explicit owned composer (crate-internal): like
+    /// [`TsgoAttach::attach_over`] but gating the in-band `serverInfo.version`
+    /// with the caller's [`VersionPolicy`] (the toolchain validator injects
+    /// its own so the two version checks cannot disagree).
+    pub(crate) async fn attach_over_with_policy(
+        lsp: TsgoLspConnection,
+        root_uri: &str,
+        policy: &VersionPolicy,
+    ) -> TsgoApiResult<Self> {
         if lsp.ownership() != ConnectionOwnership::Owned {
             return Err(TsgoApiError::Transport(
                 "attach_over runs the OWNED handshake and must not re-`initialize` an \
@@ -556,7 +582,7 @@ impl TsgoAttach<Owned> {
                     .into(),
             ));
         }
-        let clearance = Self::lsp_handshake(&lsp.conn, root_uri).await?;
+        let clearance = Self::lsp_handshake_with_policy(&lsp.conn, root_uri, policy).await?;
         let (session, api) = Self::attach_api_session(&lsp.conn).await?;
         Ok(Self::from_parts(lsp, api, session, clearance))
     }

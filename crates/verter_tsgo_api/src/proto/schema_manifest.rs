@@ -44,10 +44,11 @@ pub struct FramingConstants {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchemaManifest {
     /// The REFERENCE `typescript` distribution version this codec was verified
-    /// against (e.g. `7.0.2`). The gate accepts a version CHANNEL
-    /// ([`crate::gate::classify_engine_version`]), not this one build; this
-    /// field documents the build the hand-written codec was checked against
-    /// and appears in gate refusal messages.
+    /// against (e.g. `7.0.2`). The gate accepts versions satisfying the
+    /// supported-version policy ([`crate::toolchain::policy`] — stable
+    /// `>=7.0.2, <7.1.0`), not this one build; this field documents the build
+    /// the hand-written codec was checked against and appears in gate refusal
+    /// messages.
     pub engine_version: &'static str,
     /// The framing constants the codec emits/accepts.
     pub framing: FramingConstants,
@@ -237,9 +238,9 @@ pub const PINNED_REQUEST_FIELDS: &[(&str, &[&str])] = &[
 /// On a version bump the maintainer re-verifies the hand-written codec, then
 /// updates `engine_version` (and the op/callback inventory if the surface
 /// changed). `engine_version` is `typescript@7.0.2` — the REFERENCE build
-/// within the accepted version channel
-/// ([`crate::gate::classify_engine_version`]), not the sole accepted version:
-/// the gate admits every build in the channel, all of which share the
+/// within the supported window ([`crate::toolchain::policy`], stable
+/// `>=7.0.2, <7.1.0`), not the sole accepted version: the gate admits every
+/// stable build in the window, all of which share the
 /// bare-integer opaque-handle wire the codec
 /// ([`crate::proto::types::OpaqueHandle`]) targets. The op inventory
 /// carries `getConfigFileParsingDiagnostics` (the project config-parse /
