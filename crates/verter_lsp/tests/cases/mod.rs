@@ -19,6 +19,7 @@ mod lsp_component_meta_output_error;
 mod lsp_component_meta_wire_equivalence;
 mod owned_binding_gate;
 mod position_mapper_strict;
+mod quoted_prop_consumer_mistype_live;
 mod repro_autoimport_additional_edits;
 mod repro_external_defn_line;
 mod repro_sfc_member_completion;

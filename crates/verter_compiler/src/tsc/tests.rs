@@ -4324,3 +4324,167 @@ fn quote_module_export_name_is_a_complete_ts_string_literal_encoder() {
         );
     }
 }
+
+// ── Quoted / non-identifier prop keys in the public API carrier ──────────────
+//
+// A `defineProps` type literal may declare members whose names are NOT valid TS
+// identifiers (`"onLate-signal"`, `"data-x"`, `"404"`). The synthesized public
+// API carrier must re-quote those keys inside the SINGLE `new(props?: ...)`
+// parameter object. Rendering them bare produces INVALID TypeScript
+// (`{ onLate-signal?: ... }`), which providers error-recover into a corrupted
+// constructor — a phantom second required parameter and an `any` instance —
+// silently disabling consumer prop type-checking.
+
+/// Split the parameter list of every `new(...)` construct signature in `code`
+/// at paren/brace/bracket/angle depth zero and return the per-signature
+/// top-level parameter counts.
+fn construct_signature_param_counts(code: &str) -> Vec<usize> {
+    let mut counts = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(rel) = code[search_from..].find("new(") {
+        let open = search_from + rel + "new(".len() - 1;
+        let bytes = code.as_bytes();
+        let mut depth = 0i32;
+        let mut params = 0usize;
+        let mut saw_non_ws = false;
+        let mut idx = open;
+        while idx < bytes.len() {
+            match bytes[idx] {
+                b'(' | b'{' | b'[' | b'<' => depth += 1,
+                b')' | b'}' | b']' | b'>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                b',' if depth == 1 => params += 1,
+                b if !b.is_ascii_whitespace() => saw_non_ws = true,
+                _ => {}
+            }
+            idx += 1;
+        }
+        if saw_non_ws {
+            params += 1;
+        }
+        counts.push(params);
+        search_from = open + 1;
+    }
+    counts
+}
+
+#[test]
+fn tsc_codegen_quoted_hyphenated_prop_key_stays_quoted_single_ctor_param() {
+    // Mirrors packages/vue-vscode/e2e/fixtures/single-project/src/GlobalEmitComp.vue.
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineProps<{
+  onPing?: (payload: { pingCode: string; pingCount: number }) => void;
+  "onLate-signal"?: (sig: { sigName: string; sigLevel: number }) => void;
+}>()
+</script><template><div>global emit comp</div></template>"#,
+    );
+
+    // The quoted member name survives INSIDE the props object literal.
+    assert!(
+        r.contains("\"onLate-signal\"?:"),
+        "the quoted hyphenated prop key must be preserved (quoted) in the \
+         synthesized props object: got {}",
+        r
+    );
+    // NEGATIVE: the bare (unquoted) member never appears — it is invalid TS and
+    // is exactly what corrupts provider parsing.
+    assert!(
+        !r.contains(" onLate-signal?:") && !r.contains(";onLate-signal?:"),
+        "the hyphenated key must never render unquoted (invalid TS member): got {}",
+        r
+    );
+    // STRUCTURE: every construct signature has exactly ONE top-level parameter
+    // (`props?`) — the quoted key never leaks out as a second parameter.
+    let counts = construct_signature_param_counts(&r);
+    assert!(
+        !counts.is_empty() && counts.iter().all(|&c| c == 1),
+        "every `new(...)` signature must have exactly one `props?` parameter, \
+         got counts {:?} in: {}",
+        counts,
+        r
+    );
+    // The untouched identifier sibling still renders bare.
+    assert!(
+        r.contains("onPing?:"),
+        "identifier keys stay unquoted: got {}",
+        r
+    );
+}
+
+#[test]
+fn tsc_codegen_awkward_prop_keys_requote_data_dash_and_numeric() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+defineProps<{
+  "data-x"?: string;
+  "404": number;
+  plain: boolean;
+}>()
+</script><template/>"#,
+    );
+
+    assert!(
+        r.contains("\"data-x\"?:"),
+        "`data-x` must stay quoted: got {}",
+        r
+    );
+    assert!(
+        r.contains("\"404\":"),
+        "numeric-like key must stay quoted: got {}",
+        r
+    );
+    assert!(
+        !r.contains(" data-x?:") && !r.contains("; 404:"),
+        "awkward keys must never render bare: got {}",
+        r
+    );
+    let counts = construct_signature_param_counts(&r);
+    assert!(
+        !counts.is_empty() && counts.iter().all(|&c| c == 1),
+        "single `props?` parameter regardless of awkward keys, got {:?} in: {}",
+        counts,
+        r
+    );
+    assert!(
+        r.contains("plain: boolean"),
+        "identifier key untouched: {}",
+        r
+    );
+}
+
+#[test]
+fn tsc_codegen_testing_mode_quoted_prop_key_stays_quoted() {
+    // The Testing-mode carrier renders the same full-props surface and must
+    // apply the same re-quoting.
+    let r = gen_tsc_testing(
+        r#"<script setup lang="ts">
+defineProps<{
+  onPing?: () => void;
+  "onLate-signal"?: (sig: { sigName: string }) => void;
+}>()
+</script><template/>"#,
+    );
+
+    assert!(
+        r.contains("\"onLate-signal\"?:"),
+        "testing carrier preserves the quoted key: got {}",
+        r
+    );
+    assert!(
+        !r.contains(" onLate-signal?:"),
+        "testing carrier never renders the key bare: got {}",
+        r
+    );
+    let counts = construct_signature_param_counts(&r);
+    assert!(
+        !counts.is_empty() && counts.iter().all(|&c| c == 1),
+        "testing carrier keeps one `props?` parameter, got {:?} in: {}",
+        counts,
+        r
+    );
+}

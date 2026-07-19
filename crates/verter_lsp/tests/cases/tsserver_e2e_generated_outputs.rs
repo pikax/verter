@@ -59,13 +59,13 @@ async fn completions_with_content_retry(
     last
 }
 
-fn workspace_node_modules() -> Option<PathBuf> {
+pub(super) fn workspace_node_modules() -> Option<PathBuf> {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").ok()?;
     let node_modules = PathBuf::from(manifest_dir).join("../../node_modules");
     node_modules.exists().then_some(node_modules)
 }
 
-fn tsserver_assets_or_skip() -> Option<(String, String)> {
+pub(super) fn tsserver_assets_or_skip() -> Option<(String, String)> {
     let node_modules = workspace_node_modules()?;
     let tsserver_path = if node_modules.join("typescript/lib/tsserver.js").exists() {
         node_modules.join("typescript/lib/tsserver.js")
@@ -102,7 +102,7 @@ fn tsserver_assets_or_skip() -> Option<(String, String)> {
     ))
 }
 
-fn create_test_project_with_workspace_node_modules(dir: &Path) -> std::io::Result<()> {
+pub(super) fn create_test_project_with_workspace_node_modules(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir.join("src"))?;
     let workspace_node_modules = workspace_node_modules().ok_or_else(|| {
         std::io::Error::new(

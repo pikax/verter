@@ -2057,6 +2057,28 @@ fn render_testing_binding_key(name: &str) -> String {
     }
 }
 
+/// Render a member key for a synthesized object type or object literal.
+///
+/// Prop/model names arrive from the resolver as their UNQUOTED string value
+/// (`"onLate-signal"` in the source is the resolved name `onLate-signal`).
+/// A name that is not a valid identifier MUST be re-quoted, or the emitted
+/// member is invalid TypeScript (`{ onLate-signal?: ... }`) and providers
+/// error-recover it into a corrupted surface (a phantom construct-signature
+/// parameter and an `any` instance). A name that is already a quoted literal
+/// (a producer that sliced the source including its quotes) passes through
+/// unchanged; identifiers render bare.
+fn render_member_key(name: &str) -> String {
+    let bytes = name.as_bytes();
+    let already_quoted = bytes.len() >= 2
+        && (bytes[0] == b'"' || bytes[0] == b'\'')
+        && bytes[bytes.len() - 1] == bytes[0];
+    if already_quoted || is_testing_decl_ident(name) {
+        name.to_string()
+    } else {
+        quote_module_export_name(name)
+    }
+}
+
 fn extract_generic_param_names(generic_params: &str) -> Vec<String> {
     let mut names = Vec::new();
     let mut depth = 0u32;
@@ -2544,11 +2566,15 @@ fn generate_testing_code(
     if has_props {
         out.push_str("  props: {\n");
         for (name, val) in &state.props_runtime {
-            out.push_str(&format!("    {}: {},\n", name, val));
+            out.push_str(&format!("    {}: {},\n", render_member_key(name), val));
         }
         for model in &state.models {
             let ctor = ts_to_constructor(&model.ts_type);
-            out.push_str(&format!("    {}: {},\n", model.name, ctor));
+            out.push_str(&format!(
+                "    {}: {},\n",
+                render_member_key(&model.name),
+                ctor
+            ));
         }
         out.push_str("  },\n");
     }
@@ -2716,11 +2742,15 @@ fn generate_code(
     if has_props {
         out.push_str("  props: {\n");
         for (name, val) in &state.props_runtime {
-            out.push_str(&format!("    {}: {},\n", name, val));
+            out.push_str(&format!("    {}: {},\n", render_member_key(name), val));
         }
         for model in &state.models {
             let ctor = ts_to_constructor(&model.ts_type);
-            out.push_str(&format!("    {}: {},\n", model.name, ctor));
+            out.push_str(&format!(
+                "    {}: {},\n",
+                render_member_key(&model.name),
+                ctor
+            ));
         }
         out.push_str("  },\n");
     }
@@ -3185,10 +3215,11 @@ fn render_props_shape_type(
                     rendered.push_str(comment);
                     rendered.push_str(" ");
                 }
+                let rendered_name = render_member_key(&entry.name);
                 if let Some(map_span) = entry.map_span {
-                    rendered.push_mapped(&entry.name, map_span);
+                    rendered.push_mapped(&rendered_name, map_span);
                 } else {
-                    rendered.push_str(&entry.name);
+                    rendered.push_str(&rendered_name);
                 }
                 rendered.push_str(if entry.optional { "?: " } else { ": " });
                 if generic_props.is_some_and(|set| set.contains(entry.name.as_str())) {
@@ -3212,10 +3243,11 @@ fn render_model_props_type(models: &[ModelEntry]) -> Vec<RenderedText> {
         .map(|model| {
             let mut rendered = RenderedText::default();
             rendered.push_str("{ ");
+            let rendered_name = render_member_key(&model.name);
             if let Some(map_span) = model.map_span {
-                rendered.push_mapped(&model.name, map_span);
+                rendered.push_mapped(&rendered_name, map_span);
             } else {
-                rendered.push_str(&model.name);
+                rendered.push_str(&rendered_name);
             }
             rendered.push_str("?: ");
             rendered.push_str(&model.ts_type);
