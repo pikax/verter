@@ -78,6 +78,11 @@ tempfile = "3.27"
 # The ordinary dependency already enables `session_metrics`; keeping the full
 # union here makes feature intent explicit without creating a duplicate key.
 verter_session = { path = "../verter_session", features = ["session_metrics", "test-support", "test-util"] }
+# Used by `tests/cases/kebab_tag_mapping_full_columns.rs` to compile a REAL SFC
+# through the production IDE codegen and assert, through the production
+# `PositionMapper`, that every letter column of a rewritten kebab component tag
+# (including the LAST column) maps into the generated TSX.
+verter_compiler = { path = "../verter_compiler" }
 # Used by `tests/editor_liveness_guards.rs` to AST-parse the LSP provider-sync
 # source so the delegated-stale-close detector is robust against multiline call
 # spans, bare-local stale sets, and aliased delegation (a line-based scan is

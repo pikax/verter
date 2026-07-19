@@ -49,6 +49,8 @@ mod resilient_provider_tests;
 #[cfg(test)]
 mod test_harness;
 #[cfg(test)]
+mod test_harness_gating;
+#[cfg(test)]
 mod test_utils;
 
 use std::sync::Arc;

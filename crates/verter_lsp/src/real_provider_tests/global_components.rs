@@ -106,6 +106,26 @@ async fn assert_global_component_surface(
             && !kebab_hover.contains("GlobalCountComp: unknown"),
         "{arm}: kebab tag hover must not degrade to any/unknown, got: {kebab_hover}"
     );
+
+    // --- Kebab tag TAIL: the LAST column of the authored tag name must map
+    // (the whole-name overwrite left authored columns past the Pascal length
+    // in a dead zone — hover answered at offset 3 but not at the tail). ---
+    let kebab_tail_pos =
+        session.find_position(uri, "<global-count-comp", "<global-count-comp".len() - 1);
+    let kebab_tail_hover = hover_with_retry(session, uri, kebab_tail_pos)
+        .await
+        .unwrap_or_else(|| {
+            panic!("{arm}: hover at the LAST column of the kebab tag name must answer (tail dead-zone)")
+        });
+    assert!(
+        kebab_tail_hover.contains("GlobalCountComp"),
+        "{arm}: tail-column hover must resolve the same component binding, got: {kebab_tail_hover}"
+    );
+    let kebab_tail_defs = session.definition_locations(uri, kebab_tail_pos).await;
+    assert!(
+        !kebab_tail_defs.is_empty(),
+        "{arm}: definition at the LAST column of the kebab tag name must not be empty"
+    );
     let kebab_count_pos = session.find_position(uri, ":count=\"7\"", 2);
     let kebab_count_hover = hover_with_retry(session, uri, kebab_count_pos)
         .await
@@ -189,12 +209,13 @@ real_provider_test!(
         session.ensure_synced(&uri).await;
 
         // Warm-up on a stable local binding so a regression FAILS the
-        // assertions below instead of vacuously skipping.
+        // assertions below instead of vacuously skipping. Under require-mode
+        // the skip itself is a hard failure (non-vacuity gate).
         if !session
             .wait_until_ready(&uri, "{{ pingMsg }}", 6, "pingMsg")
             .await
+            && session.allow_warmup_skip("global_component_tag_typed_in_setup_arm")
         {
-            eprintln!("SKIP global_component_tag_typed_in_setup_arm: provider never warmed up");
             return;
         }
 
@@ -218,8 +239,8 @@ real_provider_test!(
         if !session
             .wait_until_ready(&warm_uri, "{{ pingMsg }}", 6, "pingMsg")
             .await
+            && session.allow_warmup_skip("global_component_tag_typed_in_options_arm")
         {
-            eprintln!("SKIP global_component_tag_typed_in_options_arm: provider never warmed up");
             return;
         }
 
@@ -249,8 +270,8 @@ real_provider_test!(
         if !session
             .wait_until_ready(&uri, "{{ anchorReady }}", 6, "anchorReady")
             .await
+            && session.allow_warmup_skip("global_component_unknown_tag_fails_closed")
         {
-            eprintln!("SKIP global_component_unknown_tag_fails_closed: provider never warmed up");
             return;
         }
 
@@ -259,12 +280,39 @@ real_provider_test!(
         // silent `any`.
         let diags = session.merged_diagnostics(&uri).await;
         let tag_line = session.find_position(&uri, "<TotallyUnknownComp", 3).line;
-        let has_tag_error = diags.iter().any(|d| {
-            d.severity == Some(DiagnosticSeverity::ERROR) && d.range.start.line == tag_line
-        });
+        let tag_line_errors: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                d.severity == Some(DiagnosticSeverity::ERROR) && d.range.start.line == tag_line
+            })
+            .collect();
         assert!(
-            has_tag_error,
+            !tag_line_errors.is_empty(),
             "unknown tag must carry a fail-closed diagnostic, got: {diags:?}"
+        );
+
+        // DISCRIMINATOR against the pre-fallback revert: without the emitted
+        // const the tag is an UNRESOLVED IDENTIFIER — TS2304 ("Cannot find
+        // name") / TS2552 — and hover renders `const TotallyUnknownComp: any`.
+        // The fail-closed design instead produces the TS2604-class JSX-element
+        // diagnostic from an `unknown`-typed const. Assert the diagnostic is
+        // NOT the unresolved-identifier class.
+        let code_num = |d: &Diagnostic| match &d.code {
+            Some(NumberOrString::Number(n)) => Some(*n),
+            Some(NumberOrString::String(s)) => s.parse::<i32>().ok(),
+            None => None,
+        };
+        for d in &tag_line_errors {
+            let code = code_num(d);
+            assert!(
+                code != Some(2304) && code != Some(2552),
+                "unknown tag diagnostic must be the fail-closed JSX-element class, \
+                 NOT unresolved-identifier TS2304/TS2552 (the pre-fallback revert), got: {d:?}"
+            );
+        }
+        assert!(
+            tag_line_errors.iter().any(|d| code_num(d) == Some(2604)),
+            "unknown tag must carry the fail-closed TS2604 JSX-element diagnostic, got: {tag_line_errors:?}"
         );
 
         // Definition on the unknown tag is REQUIRED to be empty (there is no
@@ -276,12 +324,95 @@ real_provider_test!(
             "unknown tag definition must stay empty (fail-closed), got: {defs:?}"
         );
 
-        // Hover must not claim a concrete component type for the tag.
-        if let Some(hover) = session.hover_text(&uri, tag_pos).await {
+        // Hover must render the fail-closed `unknown` const — NEVER `any` (the
+        // pre-fallback revert's `const TotallyUnknownComp: any`), and never a
+        // concrete component type.
+        let hover = hover_with_retry(session, &uri, tag_pos).await;
+        if let Some(hover) = hover {
+            assert!(
+                !hover.contains(": any"),
+                "unknown tag hover must not render the silent-any revert form, got: {hover}"
+            );
             assert!(
                 !hover.contains("$props") && !hover.contains("DefineComponent"),
                 "unknown tag hover must not present a component type, got: {hover}"
             );
+            assert!(
+                hover.contains("unknown") || hover.contains("GlobalComponentType"),
+                "unknown tag hover must render the fail-closed unknown const \
+                 (directly or through its GlobalComponentType alias), got: {hover}"
+            );
         }
+    }
+);
+
+real_provider_test!(
+    custom_element_tag_stays_fail_open,
+    fixture = "single-project",
+    async fn run(session) {
+        materialize_fixture_verter_types();
+        let uri = session.open_fixture_file("src/CustomElementTag.vue").await;
+        let comp_uri = session.open_fixture_file("src/GlobalCountComp.vue").await;
+        session.ensure_synced(&comp_uri).await;
+        session.ensure_synced(&uri).await;
+
+        if !session
+            .wait_until_ready(&uri, "{{ ceReady }}", 6, "ceReady")
+            .await
+            && session.allow_warmup_skip("custom_element_tag_stays_fail_open")
+        {
+            return;
+        }
+
+        // --- The web-component tag must carry NO diagnostic (fail-open, the
+        // pre-fallback behavior of an authored custom-element tag). The
+        // regression class: the kebab rewrite + fail-closed `unknown` const
+        // produced a false TS2604 on every unregistered web-component tag. ---
+        let diags = session.merged_diagnostics(&uri).await;
+        let ce_line = session.find_position(&uri, "<x-status-badge", 3).line;
+        let ce_line_errors: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                d.severity == Some(DiagnosticSeverity::ERROR) && d.range.start.line == ce_line
+            })
+            .collect();
+        assert!(
+            ce_line_errors.is_empty(),
+            "a custom-element tag must stay FAIL-OPEN (no TS2604-class diagnostic), got: {ce_line_errors:?}"
+        );
+
+        // Hover on the tag must not claim the fail-closed `unknown` const.
+        let ce_pos = session.find_position(&uri, "<x-status-badge", 3);
+        if let Some(hover) = session.hover_text(&uri, ce_pos).await {
+            assert!(
+                !hover.contains(": unknown"),
+                "custom-element tag hover must not present the fail-closed unknown const, got: {hover}"
+            );
+        }
+
+        // --- The kebab-ONLY registered global in the same file (no Pascal
+        // occurrence) still types through the fail-open kebab fallback const:
+        // `:count` resolves `number`, tag hover resolves the component. ---
+        let count_pos = session.find_position(&uri, ":count=\"7\"", 2);
+        let count_hover = hover_with_retry(session, &uri, count_pos)
+            .await
+            .expect("kebab-only registered global: :count hover must answer");
+        assert!(
+            count_hover.contains("number"),
+            "kebab-only registered global must keep typing :count as number, got: {count_hover}"
+        );
+        let kebab_pos = session.find_position(&uri, "<global-count-comp", 3);
+        let kebab_hover = hover_with_retry(session, &uri, kebab_pos)
+            .await
+            .expect("kebab-only registered global: tag hover must answer");
+        assert!(
+            kebab_hover.contains("GlobalCountComp"),
+            "kebab-only registered global tag must resolve its component, got: {kebab_hover}"
+        );
+        assert!(
+            !kebab_hover.contains("GlobalCountComp: any")
+                && !kebab_hover.contains("GlobalCountComp: unknown"),
+            "kebab-only registered global tag must not degrade, got: {kebab_hover}"
+        );
     }
 );

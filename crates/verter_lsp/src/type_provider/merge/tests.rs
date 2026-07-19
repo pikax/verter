@@ -247,6 +247,57 @@ fn merge_hover_neither() {
     assert!(result.is_none());
 }
 
+/// The provider's rendered type block never leaks Verter's reserved synthetic
+/// prefix: a GlobalComponents fallback-const hover renders
+/// `GlobalComponentKebabType<…>`, not `___VERTER___GlobalComponentKebabType<…>`
+/// — in BOTH merge arms (type-only, and type+verter).
+#[test]
+fn merge_hover_strips_synthetic_prefix_from_type_block() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+    let type_hover = HoverInfo {
+        contents:
+            "const GlobalCountComp: ___VERTER___GlobalComponentKebabType<\"GlobalCountComp\", \"global-count-comp\">"
+                .to_string(),
+        range_start: None,
+        range_end: None,
+    };
+
+    let result = merge_hover(
+        None,
+        Some(type_hover.clone()),
+        &mapper,
+        &tsx_li,
+        &carrier_li,
+        None,
+        None,
+    );
+    let text = extract_hover_text(&result.unwrap());
+    assert!(
+        !text.contains("___VERTER___"),
+        "synthetic prefix must not reach hover text: {text}"
+    );
+    assert!(
+        text.contains("GlobalComponentKebabType<\"GlobalCountComp\""),
+        "the type itself stays rendered: {text}"
+    );
+
+    let verter = make_verter_hover("**GlobalCountComp** (GlobalComponent)");
+    let merged = merge_hover(
+        Some(verter),
+        Some(type_hover),
+        &mapper,
+        &tsx_li,
+        &carrier_li,
+        None,
+        None,
+    );
+    let merged_text = extract_hover_text(&merged.unwrap());
+    assert!(
+        !merged_text.contains("___VERTER___"),
+        "synthetic prefix must not reach merged hover text: {merged_text}"
+    );
+}
+
 // ── Completion merge tests ─────────────────────────────────────
 
 fn make_verter_completion(label: &str) -> CompletionItem {
