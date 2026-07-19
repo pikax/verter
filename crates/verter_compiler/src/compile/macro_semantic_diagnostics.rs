@@ -118,6 +118,11 @@ fn validate_runtime_entry(
         return;
     };
 
+    if matches!(entry.outcome, MacroRuntimeOutcome::Invalid(_)) {
+        push_invalid(diagnostics, "runtime", syntax_index, anchor);
+        return;
+    }
+
     let compatible = matches!(
         (&entry.outcome, role),
         (
@@ -133,6 +138,41 @@ fn validate_runtime_entry(
     );
     if !compatible {
         push_unavailable(diagnostics, "runtime", syntax_index, anchor);
+        return;
+    }
+
+    match &entry.outcome {
+        MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(shape)) => {
+            for prop in &shape.props {
+                if matches!(
+                    prop.type_shape,
+                    verter_macro_dto::RuntimePropType::Degraded(_)
+                ) {
+                    push_member_degraded(
+                        diagnostics,
+                        "prop",
+                        prop.name.as_str(),
+                        syntax_index,
+                        anchor,
+                    );
+                }
+            }
+        }
+        MacroRuntimeOutcome::Complete(MacroRuntimeShape::Model(model))
+            if matches!(
+                model.prop.type_shape,
+                verter_macro_dto::RuntimePropType::Degraded(_)
+            ) =>
+        {
+            push_member_degraded(
+                diagnostics,
+                "model prop",
+                model.prop.name.as_str(),
+                syntax_index,
+                anchor,
+            );
+        }
+        _ => {}
     }
 }
 
@@ -153,6 +193,11 @@ fn validate_tsc_entry(
         return;
     };
 
+    if matches!(entry.outcome, MacroTscOutcome::Invalid(_)) {
+        push_invalid(diagnostics, "TSC", syntax_index, anchor);
+        return;
+    }
+
     let compatible = matches!(
         (&entry.outcome, role),
         (
@@ -169,6 +214,38 @@ fn validate_tsc_entry(
     if !compatible {
         push_unavailable(diagnostics, "TSC", syntax_index, anchor);
     }
+}
+
+fn push_invalid(diagnostics: &mut Vec<Diagnostic>, lane: &str, syntax_index: u32, anchor: Span) {
+    diagnostics.push(
+        Diagnostic::error_with_message(
+            "script",
+            CompilerErrorCode::XInvalidMacroType,
+            format!(
+                "Resolved {lane} semantics for macro syntax index {syntax_index} have an invalid root shape."
+            ),
+        )
+        .with_span(anchor),
+    );
+}
+
+fn push_member_degraded(
+    diagnostics: &mut Vec<Diagnostic>,
+    role: &str,
+    name: &str,
+    syntax_index: u32,
+    anchor: Span,
+) {
+    diagnostics.push(
+        Diagnostic::warning(
+            "script",
+            CompilerErrorCode::XUnresolvedImportedMacroType,
+        )
+        .with_message(format!(
+            "Could not resolve {role} {name:?} for macro syntax index {syntax_index}; Vue runtime validation degrades this row to null."
+        ))
+        .with_span(anchor),
+    );
 }
 
 fn push_missing(diagnostics: &mut Vec<Diagnostic>, lane: &str, syntax_index: u32, anchor: Span) {

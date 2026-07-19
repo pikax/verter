@@ -11,7 +11,7 @@
 use rustc_hash::FxHashMap;
 use verter_macro_dto::{
     MacroRuntimeBundle, MacroRuntimeOutcome, MacroRuntimeShape, ModelRuntimeShape,
-    PropsRuntimeShape, RuntimeProp,
+    PropsDefaultsAssociation, PropsRuntimeShape, RuntimeConstructor, RuntimeProp,
 };
 
 use super::prepared::PreparedCompanion;
@@ -52,25 +52,44 @@ fn runtime_shape(
         MacroRuntimeOutcome::Complete(shape) => Some(shape),
         MacroRuntimeOutcome::Partial(_)
         | MacroRuntimeOutcome::Unresolved(_)
-        | MacroRuntimeOutcome::Unsupported(_) => None,
+        | MacroRuntimeOutcome::Unsupported(_)
+        | MacroRuntimeOutcome::Invalid(_) => None,
     }
 }
 
-fn render_runtime_prop_options(prop: &RuntimeProp) -> String {
-    let constructors: Vec<&str> = prop
-        .constructors
-        .as_slice()
+fn render_runtime_prop_options(
+    prop: &RuntimeProp,
+    is_production: bool,
+    retain_function_in_production: bool,
+) -> String {
+    let constructors = prop
+        .type_shape
+        .constructors()
+        .map(verter_macro_dto::OrderedRuntimeConstructors::as_slice)
+        .unwrap_or_default();
+    let runtime_expressions: Vec<&str> = constructors
         .iter()
-        .filter_map(|constructor| constructor.as_constructor())
+        .filter_map(|constructor| constructor.as_runtime_expression())
         .collect();
-    let runtime_type = match constructors.as_slice() {
+    let runtime_type = match runtime_expressions.as_slice() {
         [] => "null".to_string(),
         [constructor] => (*constructor).to_string(),
         constructors => format!("[{}]", constructors.join(", ")),
     };
 
+    if is_production {
+        let retains_type = constructors.contains(&RuntimeConstructor::Boolean)
+            || (retain_function_in_production
+                && constructors.contains(&RuntimeConstructor::Function));
+        return if retains_type {
+            format!("{{ type: {runtime_type} }}")
+        } else {
+            "{}".to_string()
+        };
+    }
+
     let mut options = format!("{{ type: {runtime_type}");
-    if prop.skip_check {
+    if prop.type_shape.skip_check() {
         options.push_str(", skipCheck: true");
     }
     if !prop.optional {
@@ -80,13 +99,21 @@ fn render_runtime_prop_options(prop: &RuntimeProp) -> String {
     options
 }
 
-fn render_runtime_props(shape: &PropsRuntimeShape) -> String {
+fn render_runtime_props(shape: &PropsRuntimeShape, is_production: bool) -> String {
     let mut out = String::from("{\n");
+    let retain_function = !matches!(
+        shape.defaults,
+        PropsDefaultsAssociation::WithDefaults { .. }
+    );
     for prop in &shape.props {
         out.push_str("    ");
         push_runtime_prop_key(&mut out, &prop.name);
         out.push_str(": ");
-        out.push_str(&render_runtime_prop_options(prop));
+        out.push_str(&render_runtime_prop_options(
+            prop,
+            is_production,
+            retain_function,
+        ));
         out.push_str(",\n");
     }
     out.push('}');
@@ -100,9 +127,14 @@ fn register_runtime_props<'a>(shape: &PropsRuntimeShape, ctx: &mut ScriptContext
     }
 }
 
-fn render_model_options(model: &ModelRuntimeShape, syntax_options: Option<&str>) -> String {
-    let base = render_runtime_prop_options(&model.prop);
+fn render_model_options(
+    model: &ModelRuntimeShape,
+    syntax_options: Option<&str>,
+    is_production: bool,
+) -> String {
+    let base = render_runtime_prop_options(&model.prop, is_production, syntax_options.is_some());
     match syntax_options {
+        Some(options) if base == "{}" => options.to_owned(),
         Some(options) => {
             let inner = base
                 .strip_prefix('{')
@@ -204,6 +236,7 @@ pub(super) fn process_macro_item<'a>(
     state: &mut MacroState,
     stripped: Option<&StrippedSections>,
     runtime_bundle: Option<&MacroRuntimeBundle>,
+    is_production: bool,
 ) {
     match mac {
         ScriptMacro::DefineExpose { span, .. } => {
@@ -260,7 +293,7 @@ pub(super) fn process_macro_item<'a>(
                 state.props_section = match runtime_shape(runtime_bundle, syntax_index) {
                     Some(MacroRuntimeShape::Props(shape)) => {
                         register_runtime_props(shape, ctx);
-                        Some(render_runtime_props(shape))
+                        Some(render_runtime_props(shape, is_production))
                     }
                     _ => None,
                 };
@@ -377,7 +410,7 @@ pub(super) fn process_macro_item<'a>(
                         .insert(ctx.alloc.alloc_str(&model.prop.name), BindingType::Props);
                     state.models.push(ModelSection {
                         prop_name: model.prop.name.clone(),
-                        prop_options: render_model_options(model, options_src),
+                        prop_options: render_model_options(model, options_src, is_production),
                         modifiers_name: model.modifiers_prop.name.clone(),
                         update_event: model.update_event.name.clone(),
                     });
@@ -428,7 +461,7 @@ pub(super) fn process_macro_item<'a>(
                         ctx.imports.push("_mergeDefaults");
                         Some(format!(
                             "_mergeDefaults({}, {})",
-                            render_runtime_props(shape),
+                            render_runtime_props(shape, is_production),
                             defaults
                         ))
                     }

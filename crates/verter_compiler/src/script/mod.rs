@@ -27,6 +27,8 @@ use crate::template::code_gen::types::CodeGenOutput;
 pub struct ScriptCodeGenOptions<'a> {
     /// Authoritative runtime macro semantics for type-based codegen.
     pub macro_runtime: Option<&'a verter_macro_dto::MacroRuntimeBundle>,
+    /// Vue production policy for runtime prop/model declarations.
+    pub is_production: bool,
     /// Component name (used in `__name` property).
     pub component_name: &'a str,
     /// Scoped style ID (e.g., `"data-v-abc123"`).

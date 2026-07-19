@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use verter_macro_dto::{
     MacroAnchor, MacroRuntimeOutcome, MacroRuntimeShape, MacroTscOutcome, MacroTscProjection,
-    PropsDefaultsAssociation, RuntimeConstructor, RuntimeRootShape, SynthesizedRowKind,
+    PropsDefaultsAssociation, RuntimeConstructor, RuntimeProp, SynthesizedRowKind,
 };
 
 use crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand;
@@ -28,6 +28,13 @@ fn produce(
     crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         host.produce_vue_macro_codegen_with_ctx(ctx, canonical_id, demand)
     })
+}
+
+fn constructors(prop: &RuntimeProp) -> &[RuntimeConstructor] {
+    prop.type_shape
+        .constructors()
+        .expect("fixture prop classification must be complete")
+        .as_slice()
 }
 
 #[test]
@@ -80,7 +87,6 @@ defineProps<{
     else {
         panic!("expected complete props runtime shape: {runtime:?}");
     };
-    assert_eq!(props.root_shape, RuntimeRootShape::ObjectLike);
     assert_eq!(
         props
             .props
@@ -91,16 +97,16 @@ defineProps<{
     );
     assert!(props.props[0].optional);
     assert_eq!(
-        props.props[2].constructors.as_slice(),
+        constructors(&props.props[2]),
         &[RuntimeConstructor::Boolean, RuntimeConstructor::Object]
     );
     assert_eq!(
-        props.props[3].constructors.as_slice(),
+        constructors(&props.props[3]),
         &[RuntimeConstructor::Object],
         "nested objects stop at Object; their child surface is never enumerated"
     );
     assert_eq!(
-        props.props[4].constructors.as_slice(),
+        constructors(&props.props[4]),
         &[RuntimeConstructor::Function]
     );
 }
@@ -253,10 +259,7 @@ defineModel<string>('title')
         panic!("expected model shape: {runtime:?}");
     };
     assert_eq!(model.prop.name, "title");
-    assert_eq!(
-        model.prop.constructors.as_slice(),
-        &[RuntimeConstructor::String]
-    );
+    assert_eq!(constructors(&model.prop), &[RuntimeConstructor::String]);
     assert_eq!(model.update_event.name, "update:title");
     assert_eq!(model.modifiers_prop.name, "titleModifiers");
     assert_eq!(
@@ -289,7 +292,6 @@ fn resolved_empty_props_are_not_collapsed_into_unavailable() {
     else {
         panic!("resolved empty object must be complete: {empty_bundle:?}");
     };
-    assert_eq!(props.root_shape, RuntimeRootShape::ObjectLike);
     assert!(props.props.is_empty());
 
     let missing = produce(&host, "/src/Missing.vue", VueMacroCodegenDemand::Runtime);
@@ -300,6 +302,27 @@ fn resolved_empty_props_are_not_collapsed_into_unavailable() {
             MacroRuntimeOutcome::Complete(_)
         ),
         "an unavailable type argument must not masquerade as resolved-empty"
+    );
+}
+
+#[test]
+fn resolved_non_object_props_are_invalid_not_complete_empty() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert(
+        &host,
+        "/src/Invalid.vue",
+        r#"<script setup lang="ts">defineProps<string>()</script>"#,
+    );
+
+    let output = produce(&host, "/src/Invalid.vue", VueMacroCodegenDemand::Runtime);
+    let bundle = output.runtime.expect("runtime bundle");
+    assert!(
+        matches!(
+            bundle.entries[0].outcome,
+            MacroRuntimeOutcome::Invalid(ref failure)
+                if failure.reason == verter_macro_dto::MacroInvalidReason::NonObjectRoot
+        ),
+        "a resolved primitive root must retain the invalid-root policy: {bundle:?}"
     );
 }
 
@@ -347,11 +370,11 @@ defineProps<{ value: number | bigint }>()
         panic!("expected complete props shape: {runtime:?}");
     };
     assert!(
-        props.props[0].constructors.is_empty(),
+        constructors(&props.props[0]).is_empty(),
         "Unknown mixed with Number must collapse to Vue's no-constructor runtime shape: {:?}",
-        props.props[0].constructors.as_slice()
+        constructors(&props.props[0])
     );
-    assert!(!props.props[0].skip_check);
+    assert!(!props.props[0].type_shape.skip_check());
 }
 
 #[test]

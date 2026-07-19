@@ -11,11 +11,12 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use verter_macro_dto::{
-    AuthoredMemberOrdinal, MacroAnchor, MacroFailure, MacroPartialReason, MacroRuntimeBundle,
-    MacroRuntimeEntry, MacroRuntimeOutcome, MacroRuntimeShape, MacroTscBundle, MacroTscEntry,
-    MacroTscOutcome, MacroTscProjection, ModelRuntimeShape, OrderedRuntimeConstructors,
-    PropsDefaultsAssociation, PropsRuntimeShape, RuntimeConstructor, RuntimeEmit, RuntimeProp,
-    RuntimeRootShape, SynthesizedRowKind, TscSpliceText, UnresolvedReason, UnsupportedReason,
+    AuthoredMemberOrdinal, MacroAnchor, MacroFailure, MacroInvalidReason, MacroMemberReason,
+    MacroPartialReason, MacroRuntimeBundle, MacroRuntimeEntry, MacroRuntimeOutcome,
+    MacroRuntimeShape, MacroTscBundle, MacroTscEntry, MacroTscOutcome, MacroTscProjection,
+    ModelRuntimeShape, OrderedRuntimeConstructors, PropsDefaultsAssociation, PropsRuntimeShape,
+    RuntimeConstructor, RuntimeEmit, RuntimeProp, RuntimePropType, SynthesizedRowKind,
+    TscSpliceText, UnresolvedReason, UnsupportedReason,
 };
 use verter_semantic::analysis::component_meta::MacroExpansionKind;
 use verter_semantic::analysis::{AnalyzedMacro, AnalyzedMacroKind};
@@ -110,6 +111,7 @@ enum ProjectionFailure {
     Partial(MacroPartialReason),
     Unresolved(UnresolvedReason),
     Unsupported(UnsupportedReason),
+    Invalid(MacroInvalidReason),
 }
 
 impl ProjectionFailure {
@@ -122,6 +124,7 @@ impl ProjectionFailure {
             Self::Unsupported(reason) => {
                 MacroRuntimeOutcome::Unsupported(MacroFailure::new(reason, None))
             }
+            Self::Invalid(reason) => MacroRuntimeOutcome::Invalid(MacroFailure::new(reason, None)),
         }
     }
 
@@ -133,6 +136,18 @@ impl ProjectionFailure {
             }
             Self::Unsupported(reason) => {
                 MacroTscOutcome::Unsupported(MacroFailure::new(reason, None))
+            }
+            Self::Invalid(reason) => MacroTscOutcome::Invalid(MacroFailure::new(reason, None)),
+        }
+    }
+
+    fn member(self) -> MacroMemberReason {
+        match self {
+            Self::Partial(reason) => MacroMemberReason::Partial(reason),
+            Self::Unresolved(reason) => MacroMemberReason::Unresolved(reason),
+            Self::Unsupported(reason) => MacroMemberReason::Unsupported(reason),
+            Self::Invalid(_) => {
+                MacroMemberReason::Unsupported(UnsupportedReason::SemanticConstruct)
             }
         }
     }
@@ -404,6 +419,9 @@ impl VerterHost {
         defaults_index: Option<usize>,
         counters: &mut VueMacroCodegenCounters,
     ) -> MacroRuntimeOutcome {
+        if is_definitely_non_object_root(dispatch, payload) {
+            return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
+        }
         counters.root_shallow_demands += 1;
         let surface = self.project_shallow_surface_graph_only(
             ctx,
@@ -420,11 +438,7 @@ impl VerterHost {
             return partial_failure().runtime();
         }
         let Some(surface) = surface else {
-            return MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(PropsRuntimeShape {
-                root_shape: RuntimeRootShape::NonObject,
-                defaults: defaults_association(payload_index, defaults_index),
-                props: Vec::new(),
-            }));
+            return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         };
 
         let mut props = Vec::new();
@@ -433,21 +447,24 @@ impl VerterHost {
             .iter()
             .filter(|member| member.visibility.is_public())
         {
-            let classification = match classify_runtime(dispatch, member.value, counters) {
-                Ok(classification) => classification,
-                Err(failure) => return failure.runtime(),
+            let type_shape = match classify_runtime(dispatch, member.value, counters) {
+                Ok(classification) => RuntimePropType::Resolved {
+                    constructors: classification.constructors,
+                    skip_check: classification.skip_check,
+                },
+                Err(failure) => {
+                    RuntimePropType::Degraded(MacroFailure::new(failure.member(), None))
+                }
             };
             props.push(RuntimeProp {
                 name: member.name.as_ref().to_owned(),
                 optional: member.optional,
-                skip_check: classification.skip_check,
-                constructors: classification.constructors,
+                type_shape,
                 anchor: member_anchor(mac, payload_index, member.name.as_ref()),
             });
         }
 
         MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(PropsRuntimeShape {
-            root_shape: RuntimeRootShape::ObjectLike,
             defaults: defaults_association(payload_index, defaults_index),
             props,
         }))
@@ -464,6 +481,9 @@ impl VerterHost {
         effective_index: usize,
         counters: &mut VueMacroCodegenCounters,
     ) -> MacroRuntimeOutcome {
+        if is_definitely_non_object_root(dispatch, payload) {
+            return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
+        }
         counters.root_shallow_demands += 1;
         let surface = self.project_shallow_surface_graph_only(
             ctx,
@@ -480,7 +500,7 @@ impl VerterHost {
             return partial_failure().runtime();
         }
         let Some(surface) = surface else {
-            return ProjectionFailure::Unresolved(UnresolvedReason::NonObjectRoot).runtime();
+            return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         };
 
         let emits = emit_rows(dispatch, &surface, mac, payload_index, effective_index);
@@ -518,8 +538,10 @@ impl VerterHost {
             prop: RuntimeProp {
                 name: name.to_owned(),
                 optional,
-                constructors: classification.constructors,
-                skip_check: classification.skip_check,
+                type_shape: RuntimePropType::Resolved {
+                    constructors: classification.constructors,
+                    skip_check: classification.skip_check,
+                },
                 anchor: MacroAnchor::Synthesized {
                     macro_index,
                     row: SynthesizedRowKind::ModelProp,
@@ -535,8 +557,10 @@ impl VerterHost {
             modifiers_prop: RuntimeProp {
                 name: modifiers_name,
                 optional: true,
-                constructors: OrderedRuntimeConstructors::default(),
-                skip_check: false,
+                type_shape: RuntimePropType::Resolved {
+                    constructors: OrderedRuntimeConstructors::default(),
+                    skip_check: false,
+                },
                 anchor: MacroAnchor::Synthesized {
                     macro_index,
                     row: SynthesizedRowKind::ModelModifiersProp,
@@ -544,6 +568,26 @@ impl VerterHost {
             },
         }))
     }
+}
+
+fn is_definitely_non_object_root(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    subject: crate::semantic_query::SemanticNodeId,
+) -> bool {
+    use crate::semantic_query::SemanticNodeData;
+
+    matches!(
+        crate::project_semantic_dispatch::node_data_for(dispatch.ctx, subject).as_deref(),
+        Some(
+            SemanticNodeData::Primitive(_)
+                | SemanticNodeData::Literal(_)
+                | SemanticNodeData::TemplateLiteral { .. }
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::Function { .. }
+                | SemanticNodeData::ConstructorType { .. }
+        )
+    )
 }
 
 struct RuntimeClassification {

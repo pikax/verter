@@ -499,6 +499,7 @@ fn compile_inner(
 
         let script_options = ScriptCodeGenOptions {
             macro_runtime: macro_semantics.runtime(),
+            is_production: options.is_production,
             component_name: &component_name,
             scope_id: &scope_id_full,
             keep_ts_types: !verter_options.force_js,

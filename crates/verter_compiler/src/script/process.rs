@@ -175,6 +175,7 @@ pub fn process_script_setup<'alloc>(
                     &mut macro_state,
                     stripped_sections.as_ref(),
                     options.macro_runtime,
+                    options.is_production,
                 );
                 macro_syntax_index = macro_syntax_index.saturating_add(1);
             }

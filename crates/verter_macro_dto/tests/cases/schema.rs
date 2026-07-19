@@ -3,7 +3,7 @@ use verter_macro_dto::{
     MacroRuntimeEntry, MacroRuntimeOutcome, MacroRuntimeShape, MacroTscBundle, MacroTscEntry,
     MacroTscOutcome, MacroTscProjection, ModelRuntimeShape, OrderedRuntimeConstructors,
     PropsDefaultsAssociation, PropsRuntimeShape, RuntimeConstructor, RuntimeEmit, RuntimeProp,
-    RuntimeRootShape, SynthesizedRowKind, TscSpliceText, UnresolvedReason, UnsupportedReason,
+    RuntimePropType, SynthesizedRowKind, TscSpliceText, UnresolvedReason, UnsupportedReason,
 };
 
 fn authored(macro_index: u32, ordinal: Option<u32>) -> MacroAnchor {
@@ -23,8 +23,10 @@ fn prop(name: &str, constructors: Vec<RuntimeConstructor>) -> RuntimeProp {
     RuntimeProp {
         name: name.to_owned(),
         optional: false,
-        constructors: self::constructors(constructors),
-        skip_check: false,
+        type_shape: RuntimePropType::Resolved {
+            constructors: self::constructors(constructors),
+            skip_check: false,
+        },
         anchor: authored(0, None),
     }
 }
@@ -36,7 +38,6 @@ fn runtime_and_tsc_bundles_are_independent_contracts() {
             syntax_index: 0,
             macro_index: 0,
             outcome: MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(PropsRuntimeShape {
-                root_shape: RuntimeRootShape::ObjectLike,
                 defaults: PropsDefaultsAssociation::WithDefaults {
                     payload_macro_index: 0,
                     defaults_macro_index: 1,
@@ -81,7 +82,6 @@ fn runtime_and_tsc_bundles_are_independent_contracts() {
 #[test]
 fn complete_empty_partial_unresolved_and_unsupported_are_distinct() {
     let empty = MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(PropsRuntimeShape {
-        root_shape: RuntimeRootShape::ObjectLike,
         defaults: PropsDefaultsAssociation::None,
         props: vec![],
     }));
@@ -111,6 +111,7 @@ fn complete_empty_partial_unresolved_and_unsupported_are_distinct() {
             MacroRuntimeOutcome::Partial(_) => None,
             MacroRuntimeOutcome::Unresolved(_) => None,
             MacroRuntimeOutcome::Unsupported(_) => None,
+            MacroRuntimeOutcome::Invalid(_) => None,
         }
     }
     assert!(complete(&empty).is_some());
@@ -158,10 +159,10 @@ fn constructors_are_closed_ordered_and_deduplicated_without_bigint() {
     ];
     let labels: Vec<Option<&str>> = every
         .iter()
-        .map(|constructor| constructor.as_constructor())
+        .map(|constructor| constructor.as_runtime_expression())
         .collect();
     assert_eq!(labels[0], Some("String"));
-    assert_eq!(labels[4], None);
+    assert_eq!(labels[4], Some("null"));
     assert_eq!(labels[10], Some("WeakMap"));
     assert_eq!(labels[11], Some("WeakSet"));
     assert_eq!(labels[15], None);
@@ -198,7 +199,6 @@ fn anchors_are_honest_and_authored_ordinal_is_optional() {
 fn props_emits_and_model_are_explicit_runtime_forms() {
     let shapes = [
         MacroRuntimeShape::Props(PropsRuntimeShape {
-            root_shape: RuntimeRootShape::ObjectLike,
             defaults: PropsDefaultsAssociation::None,
             props: vec![prop("value", vec![RuntimeConstructor::String])],
         }),
@@ -218,8 +218,10 @@ fn props_emits_and_model_are_explicit_runtime_forms() {
             modifiers_prop: RuntimeProp {
                 name: "modelModifiers".to_owned(),
                 optional: true,
-                constructors: OrderedRuntimeConstructors::default(),
-                skip_check: false,
+                type_shape: RuntimePropType::Resolved {
+                    constructors: OrderedRuntimeConstructors::default(),
+                    skip_check: false,
+                },
                 anchor: MacroAnchor::Synthesized {
                     macro_index: 2,
                     row: SynthesizedRowKind::ModelModifiersProp,
@@ -264,15 +266,13 @@ fn reason_taxonomies_are_closed_and_tsc_text_is_terminal() {
         UnresolvedReason::MissingDeclaration,
         UnresolvedReason::AmbiguousReference,
         UnresolvedReason::MissingDependency,
-        UnresolvedReason::NonObjectRoot,
     ];
     for reason in unresolved {
         match reason {
             UnresolvedReason::MissingTypeArgument
             | UnresolvedReason::MissingDeclaration
             | UnresolvedReason::AmbiguousReference
-            | UnresolvedReason::MissingDependency
-            | UnresolvedReason::NonObjectRoot => {}
+            | UnresolvedReason::MissingDependency => {}
         }
     }
 

@@ -47,6 +47,8 @@ pub enum MacroRuntimeOutcome {
     Unresolved(MacroFailure<UnresolvedReason>),
     /// The semantic subject is intentionally outside the supported contract.
     Unsupported(MacroFailure<UnsupportedReason>),
+    /// Resolution completed and proved a shape Vue rejects for this macro.
+    Invalid(MacroFailure<MacroInvalidReason>),
 }
 
 /// Closed runtime macro vocabulary.
@@ -63,23 +65,11 @@ pub enum MacroRuntimeShape {
 /// Complete props runtime shape.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
 pub struct PropsRuntimeShape {
-    /// Root validity remains explicit so resolved-empty object surfaces are
-    /// distinct from complete primitive roots.
-    pub root_shape: RuntimeRootShape,
     /// Syntax-owned default composition associated with this effective props
     /// identity. Expressions themselves remain compiler-owned.
     pub defaults: PropsDefaultsAssociation,
     /// Top-level props in deterministic declaration order.
     pub props: Vec<RuntimeProp>,
-}
-
-/// Shape of the resolved macro root.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
-pub enum RuntimeRootShape {
-    /// Object-like top-level surface, including a resolved-empty surface.
-    ObjectLike,
-    /// Complete resolution proved a non-object macro root.
-    NonObject,
 }
 
 /// Association between one effective props result and `withDefaults` syntax.
@@ -104,12 +94,45 @@ pub struct RuntimeProp {
     pub name: String,
     /// The single requiredness fact. Consumers derive required as `!optional`.
     pub optional: bool,
-    /// Ordered, deterministically deduplicated broad runtime constructors.
-    pub constructors: OrderedRuntimeConstructors,
-    /// Vue's Unknown-plus-Boolean/Function validation escape.
-    pub skip_check: bool,
+    /// Authoritative classification or a row-local typed degradation.
+    pub type_shape: RuntimePropType,
     /// Content-free provenance used to associate diagnostics/source maps.
     pub anchor: MacroAnchor,
+}
+
+/// Runtime type policy for one prop row.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum RuntimePropType {
+    /// Complete semantic classification. An empty constructor list is valid
+    /// semantic Unknown and is distinct from degradation.
+    Resolved {
+        constructors: OrderedRuntimeConstructors,
+        skip_check: bool,
+    },
+    /// Member-position resolution failed. Vue renders `null` while the
+    /// compiler surfaces a warning at the row's honest anchor.
+    Degraded(MacroFailure<MacroMemberReason>),
+}
+
+impl RuntimePropType {
+    #[must_use]
+    pub fn constructors(&self) -> Option<&OrderedRuntimeConstructors> {
+        match self {
+            Self::Resolved { constructors, .. } => Some(constructors),
+            Self::Degraded(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn skip_check(&self) -> bool {
+        matches!(
+            self,
+            Self::Resolved {
+                skip_check: true,
+                ..
+            }
+        )
+    }
 }
 
 /// One runtime emit name. Runtime-only compilation never carries payload text.
@@ -158,15 +181,15 @@ pub enum RuntimeConstructor {
 }
 
 impl RuntimeConstructor {
-    /// JavaScript constructor identifier, or `None` for `Null`/`Unknown`.
+    /// Vue runtime type expression, or `None` for semantic Unknown.
     #[must_use]
-    pub const fn as_constructor(self) -> Option<&'static str> {
+    pub const fn as_runtime_expression(self) -> Option<&'static str> {
         match self {
             Self::String => Some("String"),
             Self::Number => Some("Number"),
             Self::Boolean => Some("Boolean"),
             Self::Symbol => Some("Symbol"),
-            Self::Null => None,
+            Self::Null => Some("null"),
             Self::Array => Some("Array"),
             Self::Function => Some("Function"),
             Self::Date => Some("Date"),
@@ -291,7 +314,21 @@ pub enum UnresolvedReason {
     MissingDeclaration,
     AmbiguousReference,
     MissingDependency,
+}
+
+/// Resolved macro roots that are semantically invalid for the role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum MacroInvalidReason {
     NonObjectRoot,
+}
+
+/// Row-local degradation reasons. Root failures remain on the enclosing
+/// macro outcome and never admit a partial row set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum MacroMemberReason {
+    Partial(MacroPartialReason),
+    Unresolved(UnresolvedReason),
+    Unsupported(UnsupportedReason),
 }
 
 /// Closed unsupported-result reasons.
@@ -323,6 +360,7 @@ pub enum MacroTscOutcome {
     Partial(MacroFailure<MacroPartialReason>),
     Unresolved(MacroFailure<UnresolvedReason>),
     Unsupported(MacroFailure<UnsupportedReason>),
+    Invalid(MacroFailure<MacroInvalidReason>),
 }
 
 /// Closed TSC macro projection vocabulary.

@@ -119,7 +119,7 @@ fn vmrs_runtime_bundle_is_the_only_type_based_props_authority() {
         AuthoredMemberOrdinal, MacroAnchor, MacroRuntimeBundle, MacroRuntimeEntry,
         MacroRuntimeOutcome, MacroRuntimeShape, OrderedRuntimeConstructors,
         PropsDefaultsAssociation, PropsRuntimeShape, RuntimeConstructor, RuntimeProp,
-        RuntimeRootShape,
+        RuntimePropType,
     };
 
     let semantics = VueMacroSemanticInput::Runtime(Arc::new(MacroRuntimeBundle {
@@ -127,16 +127,17 @@ fn vmrs_runtime_bundle_is_the_only_type_based_props_authority() {
             syntax_index: 0,
             macro_index: 0,
             outcome: MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(PropsRuntimeShape {
-                root_shape: RuntimeRootShape::ObjectLike,
                 defaults: PropsDefaultsAssociation::None,
                 props: vec![RuntimeProp {
                     name: "authoritative".to_string(),
                     optional: false,
-                    constructors: OrderedRuntimeConstructors::from_ordered([
-                        RuntimeConstructor::Boolean,
-                        RuntimeConstructor::Unknown,
-                    ]),
-                    skip_check: true,
+                    type_shape: RuntimePropType::Resolved {
+                        constructors: OrderedRuntimeConstructors::from_ordered([
+                            RuntimeConstructor::Boolean,
+                            RuntimeConstructor::Unknown,
+                        ]),
+                        skip_check: true,
+                    },
                     anchor: MacroAnchor::Authored {
                         macro_index: 0,
                         member_ordinal: Some(AuthoredMemberOrdinal::new(0)),
@@ -166,12 +167,305 @@ fn vmrs_runtime_bundle_is_the_only_type_based_props_authority() {
 }
 
 #[test]
+fn vmrs_runtime_null_union_and_production_policy_match_vue() {
+    use std::sync::Arc;
+    use verter_macro_dto::{
+        MacroAnchor, MacroRuntimeBundle, MacroRuntimeEntry, MacroRuntimeOutcome, MacroRuntimeShape,
+        OrderedRuntimeConstructors, PropsDefaultsAssociation, PropsRuntimeShape,
+        RuntimeConstructor, RuntimeProp, RuntimePropType,
+    };
+
+    let semantics = VueMacroSemanticInput::Runtime(Arc::new(MacroRuntimeBundle {
+        entries: vec![MacroRuntimeEntry {
+            syntax_index: 0,
+            macro_index: 0,
+            outcome: MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(PropsRuntimeShape {
+                defaults: PropsDefaultsAssociation::None,
+                props: vec![
+                    RuntimeProp {
+                        name: "nullable".to_string(),
+                        optional: false,
+                        type_shape: RuntimePropType::Resolved {
+                            constructors: OrderedRuntimeConstructors::from_ordered([
+                                RuntimeConstructor::String,
+                                RuntimeConstructor::Null,
+                            ]),
+                            skip_check: false,
+                        },
+                        anchor: MacroAnchor::MacroArgument { macro_index: 0 },
+                    },
+                    RuntimeProp {
+                        name: "enabled".to_string(),
+                        optional: false,
+                        type_shape: RuntimePropType::Resolved {
+                            constructors: OrderedRuntimeConstructors::from_ordered([
+                                RuntimeConstructor::Boolean,
+                            ]),
+                            skip_check: false,
+                        },
+                        anchor: MacroAnchor::MacroArgument { macro_index: 0 },
+                    },
+                ],
+            })),
+        }],
+    }));
+    let source = r#"<script setup lang="ts">defineProps<{ nullable: string | null; enabled: boolean }>()</script>"#;
+
+    let alloc = Allocator::new();
+    let dev = compile(
+        source,
+        &CodegenOptions::default(),
+        &VerterCompileOptions {
+            force_js: true,
+            ..Default::default()
+        },
+        &semantics,
+        &alloc,
+    );
+    assert!(dev.errors.is_empty(), "{:?}", dev.errors);
+    let dev = dev.script.expect("dev script").code;
+    assert!(
+        dev.contains("nullable: { type: [String, null], required: true }"),
+        "ordered null union must retain literal null: {dev}"
+    );
+
+    let alloc = Allocator::new();
+    let prod = compile(
+        source,
+        &CodegenOptions {
+            is_production: true,
+            ..Default::default()
+        },
+        &VerterCompileOptions {
+            force_js: true,
+            ..Default::default()
+        },
+        &semantics,
+        &alloc,
+    );
+    assert!(prod.errors.is_empty(), "{:?}", prod.errors);
+    let prod = prod.script.expect("prod script").code;
+    assert!(
+        prod.contains("nullable: {}"),
+        "prod strips non-check types: {prod}"
+    );
+    assert!(
+        prod.contains("enabled: { type: Boolean }"),
+        "prod retains Boolean runtime casting semantics: {prod}"
+    );
+    assert!(
+        !prod.contains("required: true"),
+        "prod strips required: {prod}"
+    );
+}
+
+#[test]
+fn vmrs_invalid_props_root_reports_vue_invalid_macro_type() {
+    use std::sync::Arc;
+    use verter_macro_dto::{
+        MacroFailure, MacroInvalidReason, MacroRuntimeBundle, MacroRuntimeEntry,
+        MacroRuntimeOutcome,
+    };
+
+    let semantics = VueMacroSemanticInput::Runtime(Arc::new(MacroRuntimeBundle {
+        entries: vec![MacroRuntimeEntry {
+            syntax_index: 0,
+            macro_index: 0,
+            outcome: MacroRuntimeOutcome::Invalid(MacroFailure::new(
+                MacroInvalidReason::NonObjectRoot,
+                None,
+            )),
+        }],
+    }));
+    let alloc = Allocator::new();
+    let result = compile(
+        r#"<script setup lang="ts">defineProps<string>()</script>"#,
+        &CodegenOptions::default(),
+        &VerterCompileOptions {
+            force_js: true,
+            ..Default::default()
+        },
+        &semantics,
+        &alloc,
+    );
+
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|diagnostic| diagnostic.code == "XInvalidMacroType"),
+        "resolved wrong-shape roots must retain Vue's invalid-macro diagnostic: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn vmrs_member_degradation_warns_and_renders_null_without_conflating_unknown() {
+    use std::sync::Arc;
+    use verter_macro_dto::{
+        MacroAnchor, MacroFailure, MacroMemberReason, MacroRuntimeBundle, MacroRuntimeEntry,
+        MacroRuntimeOutcome, MacroRuntimeShape, OrderedRuntimeConstructors,
+        PropsDefaultsAssociation, PropsRuntimeShape, RuntimeProp, RuntimePropType,
+        UnresolvedReason,
+    };
+
+    let semantics = VueMacroSemanticInput::Runtime(Arc::new(MacroRuntimeBundle {
+        entries: vec![MacroRuntimeEntry {
+            syntax_index: 0,
+            macro_index: 0,
+            outcome: MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(PropsRuntimeShape {
+                defaults: PropsDefaultsAssociation::None,
+                props: vec![
+                    RuntimeProp {
+                        name: "knownUnknown".to_string(),
+                        optional: true,
+                        type_shape: RuntimePropType::Resolved {
+                            constructors: OrderedRuntimeConstructors::default(),
+                            skip_check: false,
+                        },
+                        anchor: MacroAnchor::MacroArgument { macro_index: 0 },
+                    },
+                    RuntimeProp {
+                        name: "missingMember".to_string(),
+                        optional: false,
+                        type_shape: RuntimePropType::Degraded(MacroFailure::new(
+                            MacroMemberReason::Unresolved(UnresolvedReason::MissingDependency),
+                            None,
+                        )),
+                        anchor: MacroAnchor::MacroArgument { macro_index: 0 },
+                    },
+                ],
+            })),
+        }],
+    }));
+    let alloc = Allocator::new();
+    let result = compile(
+        r#"<script setup lang="ts">defineProps<{ knownUnknown?: unknown; missingMember: Missing }>()</script>"#,
+        &CodegenOptions::default(),
+        &VerterCompileOptions {
+            force_js: true,
+            ..Default::default()
+        },
+        &semantics,
+        &alloc,
+    );
+
+    let warnings = result
+        .errors
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "XUnresolvedImportedMacroType")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "only degraded rows warn: {:?}",
+        result.errors
+    );
+    assert!(
+        warnings[0].message.contains("missingMember"),
+        "warning must retain typed row identity: {:?}",
+        warnings[0]
+    );
+    let code = result.script.expect("script").code;
+    assert!(code.contains("knownUnknown: { type: null }"), "{code}");
+    assert!(
+        code.contains("missingMember: { type: null, required: true }"),
+        "{code}"
+    );
+}
+
+#[test]
+fn vmrs_production_model_uses_vue_runtime_option_policy() {
+    use std::sync::Arc;
+    use verter_macro_dto::{
+        MacroAnchor, MacroRuntimeBundle, MacroRuntimeEntry, MacroRuntimeOutcome, MacroRuntimeShape,
+        ModelRuntimeShape, OrderedRuntimeConstructors, RuntimeConstructor, RuntimeEmit,
+        RuntimeProp, RuntimePropType, SynthesizedRowKind,
+    };
+
+    let model = |macro_index, name: &str| MacroRuntimeEntry {
+        syntax_index: macro_index,
+        macro_index,
+        outcome: MacroRuntimeOutcome::Complete(MacroRuntimeShape::Model(ModelRuntimeShape {
+            prop: RuntimeProp {
+                name: name.to_string(),
+                optional: true,
+                type_shape: RuntimePropType::Resolved {
+                    constructors: OrderedRuntimeConstructors::from_ordered([
+                        RuntimeConstructor::String,
+                    ]),
+                    skip_check: false,
+                },
+                anchor: MacroAnchor::Synthesized {
+                    macro_index,
+                    row: SynthesizedRowKind::ModelProp,
+                },
+            },
+            update_event: RuntimeEmit {
+                name: format!("update:{name}"),
+                anchor: MacroAnchor::Synthesized {
+                    macro_index,
+                    row: SynthesizedRowKind::ModelUpdateEvent,
+                },
+            },
+            modifiers_prop: RuntimeProp {
+                name: format!("{name}Modifiers"),
+                optional: true,
+                type_shape: RuntimePropType::Resolved {
+                    constructors: OrderedRuntimeConstructors::default(),
+                    skip_check: false,
+                },
+                anchor: MacroAnchor::Synthesized {
+                    macro_index,
+                    row: SynthesizedRowKind::ModelModifiersProp,
+                },
+            },
+        })),
+    };
+    let semantics = VueMacroSemanticInput::Runtime(Arc::new(MacroRuntimeBundle {
+        entries: vec![model(0, "title"), model(1, "subtitle")],
+    }));
+    let alloc = Allocator::new();
+    let result = compile(
+        r#"<script setup lang="ts">
+defineModel<string>('title', { required: true })
+defineModel<string>('subtitle')
+</script>"#,
+        &CodegenOptions {
+            is_production: true,
+            ..Default::default()
+        },
+        &VerterCompileOptions {
+            force_js: true,
+            ..Default::default()
+        },
+        &semantics,
+        &alloc,
+    );
+
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    let code = result.script.expect("script").code;
+    assert!(
+        code.contains("title: { required: true }"),
+        "prod keeps authored model runtime options without a phantom type merge: {code}"
+    );
+    assert!(
+        code.contains("subtitle: {}"),
+        "prod elides String-only model runtime type: {code}"
+    );
+    assert!(
+        !code.contains("title: { ,"),
+        "invalid empty option prefix: {code}"
+    );
+}
+
+#[test]
 fn vmrs_with_defaults_performs_one_syntax_owned_merge() {
     use std::sync::Arc;
     use verter_macro_dto::{
         MacroAnchor, MacroRuntimeBundle, MacroRuntimeEntry, MacroRuntimeOutcome, MacroRuntimeShape,
         OrderedRuntimeConstructors, PropsDefaultsAssociation, PropsRuntimeShape,
-        RuntimeConstructor, RuntimeProp, RuntimeRootShape,
+        RuntimeConstructor, RuntimeProp, RuntimePropType,
     };
 
     let semantics = VueMacroSemanticInput::Runtime(Arc::new(MacroRuntimeBundle {
@@ -179,7 +473,6 @@ fn vmrs_with_defaults_performs_one_syntax_owned_merge() {
             syntax_index: 0,
             macro_index: 1,
             outcome: MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(PropsRuntimeShape {
-                root_shape: RuntimeRootShape::ObjectLike,
                 defaults: PropsDefaultsAssociation::WithDefaults {
                     payload_macro_index: 0,
                     defaults_macro_index: 1,
@@ -187,10 +480,12 @@ fn vmrs_with_defaults_performs_one_syntax_owned_merge() {
                 props: vec![RuntimeProp {
                     name: "label".to_string(),
                     optional: true,
-                    constructors: OrderedRuntimeConstructors::from_ordered([
-                        RuntimeConstructor::String,
-                    ]),
-                    skip_check: false,
+                    type_shape: RuntimePropType::Resolved {
+                        constructors: OrderedRuntimeConstructors::from_ordered([
+                            RuntimeConstructor::String,
+                        ]),
+                        skip_check: false,
+                    },
                     anchor: MacroAnchor::MacroArgument { macro_index: 0 },
                 }],
             })),

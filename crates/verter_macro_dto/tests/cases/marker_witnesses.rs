@@ -4,7 +4,7 @@ use verter_macro_dto::{
     MacroRuntimeEntry, MacroRuntimeOutcome, MacroRuntimeShape, MacroTscBundle, MacroTscEntry,
     MacroTscOutcome, MacroTscProjection, ModelRuntimeShape, OrderedRuntimeConstructors,
     PropsDefaultsAssociation, PropsRuntimeShape, RuntimeConstructor, RuntimeEmit, RuntimeProp,
-    RuntimeRootShape, SynthesizedRowKind, TscSpliceText, UnresolvedReason, UnsupportedReason,
+    RuntimePropType, SynthesizedRowKind, TscSpliceText, UnresolvedReason, UnsupportedReason,
 };
 use verter_no_storedspan::NoStoredSpan;
 use verter_no_typeexpr::NoTypeExpr;
@@ -22,7 +22,7 @@ fn every_public_carrier_is_typeexpr_free_and_span_free() {
     assert_markers::<ModelRuntimeShape>();
     assert_markers::<RuntimeProp>();
     assert_markers::<RuntimeEmit>();
-    assert_markers::<RuntimeRootShape>();
+    assert_markers::<RuntimePropType>();
     assert_markers::<OrderedRuntimeConstructors>();
     assert_markers::<RuntimeConstructor>();
     assert_markers::<MacroAnchor>();
