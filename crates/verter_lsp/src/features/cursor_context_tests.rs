@@ -1095,16 +1095,180 @@ fn test_directive_argument() {
 
     let analysis = analysis_with_template(template);
 
-    // Cursor at 25 — inside "default" argument
+    // Cursor at 25 — inside "default" argument: the slot-NAME completion
+    // context (more specific than the generic directive argument).
     let ctx = classify_cursor_context(25, source, &blocks, Some(&analysis));
     match ctx {
-        CursorContext::Template(TemplateCursorContext::DirectiveArgument {
-            directive,
+        CursorContext::Template(TemplateCursorContext::SlotName {
             tag_name,
+            is_component,
         }) => {
-            assert_eq!(directive, "slot");
             assert_eq!(tag_name, "div");
+            assert!(!is_component);
         }
-        other => panic!("expected DirectiveArgument, got: {:?}", other),
+        other => panic!("expected SlotName, got: {:?}", other),
+    }
+}
+
+// =============================================================================
+// Layer 1: SlotName context — incomplete `#|` / `v-slot:|` source scans (D5)
+// =============================================================================
+
+#[test]
+fn test_slot_name_hash_shorthand_empty() {
+    // `<template #|` — the incomplete shorthand is not yet a parsed directive.
+    let source = "<template><template #></template></template>";
+    let blocks = scan_sfc_blocks(source);
+
+    let mut template = empty_template();
+    template
+        .elements
+        .push(make_element("template", (10, 23), 23, 16));
+    let analysis = analysis_with_template(template);
+
+    // Cursor right after `#` (offset 21).
+    let ctx = classify_cursor_context(21, source, &blocks, Some(&analysis));
+    match ctx {
+        CursorContext::Template(TemplateCursorContext::SlotName {
+            tag_name,
+            is_component,
+        }) => {
+            assert_eq!(tag_name, "template");
+            assert!(!is_component);
+        }
+        other => panic!("expected SlotName for `<template #|`, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_slot_name_hash_shorthand_partial_on_component() {
+    // `<MyComp #he|` — partial slot name on a component element.
+    let source = "<template><MyComp #he></MyComp></template>";
+    let blocks = scan_sfc_blocks(source);
+
+    let mut template = empty_template();
+    template
+        .elements
+        .push(make_element("MyComp", (10, 23), 23, 30));
+    let analysis = analysis_with_template(template);
+
+    // Cursor after `#he` (offset 21).
+    let ctx = classify_cursor_context(21, source, &blocks, Some(&analysis));
+    match ctx {
+        CursorContext::Template(TemplateCursorContext::SlotName {
+            tag_name,
+            is_component,
+        }) => {
+            assert_eq!(tag_name, "MyComp");
+            assert!(is_component);
+        }
+        other => panic!("expected SlotName for `<MyComp #he|`, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_slot_name_longhand_empty_arg() {
+    // `<template v-slot:|` — empty longhand argument.
+    let source = "<template><template v-slot:></template></template>";
+    let blocks = scan_sfc_blocks(source);
+
+    let mut template = empty_template();
+    template
+        .elements
+        .push(make_element("template", (10, 29), 29, 22));
+    let analysis = analysis_with_template(template);
+
+    // Cursor right after `v-slot:` (offset 27).
+    let ctx = classify_cursor_context(27, source, &blocks, Some(&analysis));
+    match ctx {
+        CursorContext::Template(TemplateCursorContext::SlotName { tag_name, .. }) => {
+            assert_eq!(tag_name, "template");
+        }
+        other => panic!(
+            "expected SlotName for `<template v-slot:|`, got: {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
+fn test_slot_name_scan_does_not_fire_inside_pattern_value() {
+    // `<template #default="{ ti|` — cursor inside the pattern value is NOT a
+    // slot-name position.
+    let source = "<template><template #default=\"{ ti\"></template></template>";
+    let blocks = scan_sfc_blocks(source);
+
+    let mut template = empty_template();
+    let mut el = make_element("template", (10, 34), 34, 27);
+    let mut dir = make_directive("slot", "#default", (19, 27), 27);
+    dir.argument = Some("default".to_string());
+    dir.arg_span = Some(Span::new(20, 27));
+    dir.expression = Some("{ ti".to_string());
+    dir.expression_span = Some(Span::new(29, 33));
+    el.directives.push(dir);
+    template.elements.push(el);
+    let analysis = analysis_with_template(template);
+
+    // Cursor after `ti` inside the pattern (offset 33).
+    let ctx = classify_cursor_context(33, source, &blocks, Some(&analysis));
+    if let CursorContext::Template(TemplateCursorContext::SlotName { .. }) = ctx {
+        panic!("pattern value positions must not classify as SlotName");
+    }
+}
+
+// =============================================================================
+// Layer 1: Svelte snippet/render completion contexts (D5)
+// =============================================================================
+
+#[test]
+fn test_svelte_snippet_name_context() {
+    // `{#snippet |` inside a component — completing the slot name the child
+    // accepts.
+    let source = "<IdeSurfaceChild>\n  {#snippet \n</IdeSurfaceChild>";
+    let blocks = scan_sfc_blocks(source);
+
+    let mut template = empty_template();
+    template
+        .elements
+        .push(make_element("IdeSurfaceChild", (0, 46), 17, 30));
+    let analysis = analysis_with_template(template);
+
+    // Cursor after `{#snippet ` (offset 30).
+    let ctx = classify_cursor_context_for_language(
+        30,
+        source,
+        &blocks,
+        Some(&analysis),
+        Some(CarrierTemplateLanguage::Svelte),
+    );
+    match ctx {
+        CursorContext::Template(TemplateCursorContext::SvelteSnippetName { tag_name }) => {
+            assert_eq!(tag_name, "IdeSurfaceChild");
+        }
+        other => panic!("expected SvelteSnippetName, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_svelte_render_callee_context() {
+    // `{@render |` — completing an in-scope snippet name.
+    let source = "<ul>\n  {@render \n</ul>";
+    let blocks = scan_sfc_blocks(source);
+
+    let mut template = empty_template();
+    template.elements.push(make_element("ul", (0, 20), 4, 15));
+    let analysis = analysis_with_template(template);
+
+    // Cursor after `{@render ` (offset 16).
+    let ctx = classify_cursor_context_for_language(
+        16,
+        source,
+        &blocks,
+        Some(&analysis),
+        Some(CarrierTemplateLanguage::Svelte),
+    );
+    match ctx {
+        CursorContext::Template(TemplateCursorContext::SvelteRenderCallee) => {}
+        other => panic!("expected SvelteRenderCallee, got: {:?}", other),
     }
 }

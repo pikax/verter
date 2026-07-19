@@ -65,6 +65,7 @@ pub fn server_capabilities(
                 "@".into(),
                 "<".into(),
                 ":".into(),
+                "#".into(),
                 " ".into(),
                 "\"".into(),
                 "'".into(),

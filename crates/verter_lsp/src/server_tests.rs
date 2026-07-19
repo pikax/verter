@@ -5272,6 +5272,164 @@ async fn paired_svelte_component_attribute_completion_returns_child_props() {
     drop(service);
 }
 
+// =========================================================================
+// D5 — slot-name completion contracts (real parses, server-owned items)
+// =========================================================================
+
+const D5_CHILD_SOURCE: &str = "<script setup lang=\"ts\">\ndefineSlots<{\n  header(props: { title: string; count: number }): any;\n  default(props: { body: string }): any;\n  mySlot(props: { note: string }): any;\n}>()\n</script>\n<template>\n  <header><slot name=\"header\" title=\"hdr\" :count=\"1\" /></header>\n  <main><slot body=\"main\" /></main>\n</template>\n";
+
+async fn d5_complete_labels(files: &[(&str, &str, &str)], doc: &str, needle: &str) -> Vec<String> {
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server(files).await;
+    let server = service.inner();
+    let uri = workspace_uri(&workspace_id, doc);
+    let source = files
+        .iter()
+        .find(|(path, _, _)| path == &doc)
+        .map(|(_, _, source)| *source)
+        .expect("document must be one of the served files");
+    let cursor = source.find(needle).unwrap_or_else(|| {
+        panic!("needle {needle:?} must exist in {doc}");
+    }) + needle.len();
+    let position = LineIndex::new_utf16(source)
+        .offset_to_position(cursor as u32)
+        .expect("completion position");
+    let labels = completion_labels(
+        server
+            .completion(completion_params(&uri, position, None))
+            .await
+            .expect("completion succeeds"),
+    );
+    drain_handle.abort();
+    drop(service);
+    labels
+}
+
+#[tokio::test]
+async fn contract_slot_name_completion_offers_child_declared_slots() {
+    let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\n</script>\n<template>\n  <MyComp>\n    <template #\n  </MyComp>\n</template>\n";
+    let labels = d5_complete_labels(
+        &[
+            ("src/MyComp.vue", "vue", D5_CHILD_SOURCE),
+            ("src/App.vue", "vue", parent_source),
+        ],
+        "src/App.vue",
+        "<template #",
+    )
+    .await;
+    for expected in ["header", "default", "mySlot"] {
+        assert!(
+            labels.contains(&expected.to_string()),
+            "`<template #|` must offer declared slot {expected}, got: {labels:?}"
+        );
+    }
+    assert!(
+        !labels
+            .iter()
+            .any(|l| l.contains("___VERTER___") || l.contains("__props")),
+        "internal symbols must not leak: {labels:?}"
+    );
+}
+
+#[tokio::test]
+async fn contract_slot_name_completion_longhand_offers_child_declared_slots() {
+    let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\n</script>\n<template>\n  <MyComp>\n    <template v-slot:\n  </MyComp>\n</template>\n";
+    let labels = d5_complete_labels(
+        &[
+            ("src/MyComp.vue", "vue", D5_CHILD_SOURCE),
+            ("src/App.vue", "vue", parent_source),
+        ],
+        "src/App.vue",
+        "<template v-slot:",
+    )
+    .await;
+    for expected in ["header", "default", "mySlot"] {
+        assert!(
+            labels.contains(&expected.to_string()),
+            "`<template v-slot:|` must offer declared slot {expected}, got: {labels:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn contract_slot_name_completion_filters_already_used_slots() {
+    // Stable parse: the slot being completed is a CLOSED empty attribute
+    // (`<template #="">`), so the typed element tree retains the usage and the
+    // sibling `<template #header>` directive — the filter is a typed fact.
+    let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\n</script>\n<template>\n  <MyComp>\n    <template #header=\"{ title }\">\n      <span>{{ title }}</span>\n    </template>\n    <template #=\"\"></template>\n  </MyComp>\n</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/MyComp.vue", "vue", D5_CHILD_SOURCE),
+        ("src/App.vue", "vue", parent_source),
+    ])
+    .await;
+    let server = service.inner();
+    let uri = workspace_uri(&workspace_id, "src/App.vue");
+    let cursor = parent_source.rfind("<template #").unwrap() + "<template #".len();
+    let position = LineIndex::new_utf16(parent_source)
+        .offset_to_position(cursor as u32)
+        .expect("completion position");
+    let labels = completion_labels(
+        server
+            .completion(completion_params(&uri, position, None))
+            .await
+            .expect("completion succeeds"),
+    );
+    assert!(
+        !labels.contains(&"header".to_string()),
+        "already-used slot must be filtered, got: {labels:?}"
+    );
+    for expected in ["default", "mySlot"] {
+        assert!(
+            labels.contains(&expected.to_string()),
+            "unused slot {expected} must remain, got: {labels:?}"
+        );
+    }
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn contract_svelte_snippet_slot_completion_offers_child_snippet_props() {
+    let child_source = "<script lang=\"ts\">\n  let { label, header, children }: {\n    label: string;\n    header?: import(\"svelte\").Snippet<[{ title: string }]>;\n    children?: import(\"svelte\").Snippet<[{ body: string }]>;\n  } = $props();\n</script>\n<span>{label}</span>\n{#if header}<header>{@render header({ title: \"t\" })}</header>{/if}\n{#if children}<main>{@render children({ body: \"b\" })}</main>{/if}\n";
+    let parent_source = "<script lang=\"ts\">\n  import IdeSurfaceChild from './IdeSurfaceChild.svelte';\n</script>\n<IdeSurfaceChild>\n  {#snippet \n</IdeSurfaceChild>\n";
+    let labels = d5_complete_labels(
+        &[
+            ("src/IdeSurfaceChild.svelte", "svelte", child_source),
+            ("src/App.svelte", "svelte", parent_source),
+        ],
+        "src/App.svelte",
+        "{#snippet ",
+    )
+    .await;
+    for expected in ["header", "children"] {
+        assert!(
+            labels.contains(&expected.to_string()),
+            "`{{#snippet |` must offer the child's snippet prop {expected}, got: {labels:?}"
+        );
+    }
+    assert!(
+        !labels.contains(&"label".to_string()),
+        "non-snippet props must not be offered, got: {labels:?}"
+    );
+}
+
+#[tokio::test]
+async fn contract_svelte_render_callee_completion_offers_in_scope_snippets() {
+    let doc_source = "<script lang=\"ts\">\n  let items = $state([1, 2]);\n</script>\n\n{#snippet row(item: number)}\n  <li>{item}</li>\n{/snippet}\n\n{#snippet cell()}\n  <td>x</td>\n{/snippet}\n\n<ul>\n  {@render \n</ul>\n";
+    let labels = d5_complete_labels(
+        &[("src/List.svelte", "svelte", doc_source)],
+        "src/List.svelte",
+        "{@render ",
+    )
+    .await;
+    for expected in ["row", "cell"] {
+        assert!(
+            labels.contains(&expected.to_string()),
+            "`{{@render |` must offer in-scope snippet {expected}, got: {labels:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn goto_definition_component_event_name_skips_type_provider_virtual_fallback() {
     let child_source = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ custom: [payload: string] }>()\n</script>\n";
