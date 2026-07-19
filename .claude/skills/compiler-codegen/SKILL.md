@@ -259,6 +259,22 @@ Parser extracts structural directives from `el.props` via `prop.take()` and cach
 
 **Consequence**: Code iterating `el.props` will **never see** these directives. Both codegen paths must handle them explicitly. The IDE module removes `v-if/v-for/v-slot/v-once` attributes (they become JSX wrappers/removals) and converts `ref` to JSX expression syntax (`ref={"name"}`).
 
+## GlobalComponents Fallback Consts + Kebab Tag Rewrite (IDE surface)
+
+Globally-registered components (registered only through a `GlobalComponents` augmentation, never imported) type in the template via per-tag **fallback consts** emitted into every script arm (`ide/script/wrapper.rs`):
+
+- Collection (`collect_global_component_fallbacks`) walks the template once per arm: every non-builtin, non-member-expression, non-`<component>` component tag that is NOT already bound and NOT a configured custom element yields one `GlobalComponentFallback { pascal, authored_non_pascal }`, deduplicated by Pascal name in first-seen order. A `<component is="Name">` STATIC target contributes too. The same list feeds the emitted consts AND the `TemplateComponentBindings` inventory (tag rewrite, `@event` spread payloads, simple-handler param inference) so one component types identically everywhere.
+- Emission is **authoring-form-sensitive** (the custom-element/fail-open contract):
+  - Pascal-authored anywhere → fail-closed `const Pascal = {} as ___VERTER___GlobalComponentType<'Pascal'>;` — an unregistered name types `unknown` and produces a real TS2604 at the tag (never silent `any`).
+  - Kebab/lowercase-authored ONLY → fail-open `const Pascal = {} as ___VERTER___GlobalComponentKebabType<'Pascal', 'authored-tag'>;` — a registered member (Pascal key, then the authored key) resolves the component type; an UNREGISTERED tag degrades to a function component over `JSX.IntrinsicElements['authored-tag']` (a user's web-component `IntrinsicElements` augmentation keeps typing it; Vue's `[name: string]: any` index otherwise yields `any`) — never a false TS2604 on a web-component tag.
+  - Each TS const carries a go-to-definition **NAV PROBE** (`void ___VERTER___globalComponentsNav().Pascal;`); `global_component_nav_probe_offset` byte-verifies BOTH emission shapes and fails closed on any mismatch.
+- **Configured custom elements** (`CompileOptions::custom_elements` prefix match, threaded as `IdeScriptOptions::custom_elements` / `IdeTemplateOptions::custom_elements`, shared predicate `ide::matches_custom_element`) are native by contract: excluded from collection AND from the kebab rewrite — the tag stays authored even when a same-name local binding exists.
+- **Kebab tag rewrite** (`ide/template/mod.rs`): a dashed component tag with an inventory/local resolution rewrites to its Pascal identifier via `emit_mapped_kebab_pascal_rewrite` — PER-SEGMENT mapped edits (delete each `-`, overwrite only case-changing segment heads; every other byte stays an `Original` chunk). A whole-name overwrite mapped only up to the generated (Pascal) length, leaving the authored tag TAIL unmapped (dead hover/definition/rename); per-segment keeps every LETTER column mapped, including the last — only the removed `-` separators stay unmapped. Composition mismatch falls back to the whole-span mapped overwrite.
+
+The conditional types live in `@verter/types` — five synchronized copies: `packages/types/index.d.ts`, `packages/types/src/components/components.ts`, `packages/typescript-plugin/src/helpers/verterTypesStub.ts`, `crates/verter_lsp/src/verter_types_stub.d.ts`, and both constants in `crates/verter_compiler/src/ide/script/type_constructs.rs` (`VERTER_TYPES_AMBIENT_MODULE` + `VERTER_TYPES_STANDALONE_DTS`). The shipped empty `declare module "vue" { interface GlobalComponents {} }` augmentation guarantees the surface exists on every Vue version (introduce-on-absence + user-augmentation merge proven by `verterTypesStub.spec.ts`'s ≤3.4 leg and its discrimination control).
+
+Design + deferred-debt rows: [`docs/arch/global-components-ide-typing.md`](../../../docs/arch/global-components-ide-typing.md).
+
 ## IDE Script Error Recovery
 
 OXC parses the original `<script setup>` content exactly ONCE (`ide/script/setup.rs`). There is a single recovery surface — no truncate-and-reparse, no clean-prefix reparse authority, no file-scope error mode.
