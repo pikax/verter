@@ -1243,6 +1243,7 @@ fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
         declaration_id: None,
         resolved_name: "Probe".to_string(),
         canonical_source: "/m6_refusal.ts".to_string(),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         span: verter_span::Span::default(),
         kind: ResolvedDeclarationKind::Interface,
         text: Some(text.to_string()),
@@ -1266,6 +1267,7 @@ fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
     // (its closure never runs).
     let control_key = (
         Arc::<str>::from("/m6_refusal.ts"),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::<str>::from("Probe"),
     );
     let control_computes = Cell::new(0usize);
@@ -1304,6 +1306,7 @@ fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
     // SUBJECT — the same funnel, an UNROOTABLE compute.
     let key = (
         Arc::<str>::from("/m6_refusal.ts"),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::<str>::from("Unrootable"),
     );
     let computes = Cell::new(0usize);

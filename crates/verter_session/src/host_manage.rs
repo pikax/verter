@@ -11,6 +11,7 @@ use crate::resolver_core::{
     fallthrough_cache_key, DynamicRootCandidate, ExportGraphResolver, ExportSurface,
     FallthroughComputeHost, FallthroughRequestHost, FallthroughResolutionView,
     FallthroughResolverHost, ImportedRuntimeValueResolver, ResolvedConsumedBindings, StoreView,
+    ValueDeclIdentity,
 };
 use crate::types::*;
 use crate::VerterHost;
@@ -1120,13 +1121,6 @@ pub(in crate::host_manage) fn log_snapshot_debug(
     ));
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct ImportedSymbolDependency {
-    pub(crate) local_name: String,
-    pub(crate) canonical_id: String,
-    pub(crate) exported_name: String,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct ComputedEvaluatedTypes {
     pub(crate) evaluated_types:
@@ -1234,29 +1228,25 @@ impl ImportedRuntimeValueResolver for HostRuntimeValueResolver<'_> {
 
     fn dependency_value_symbol_graph_native(
         &self,
-        source_canonical_id: &str,
-        source_name: &str,
+        source: &ValueDeclIdentity,
     ) -> Option<verter_semantic::analysis::type_eval::ValueDeclInfo> {
-        self.host
-            .dependency_value_symbol_graph_native(source_canonical_id, source_name)
+        self.host.dependency_value_symbol_graph_native_in(source)
     }
 
     fn prepared_value_decl(
         &self,
-        canonical_id: &str,
-        symbol_name: &str,
+        source: &ValueDeclIdentity,
     ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
-        self.host.prepared_value_decl(canonical_id, symbol_name)
+        self.host
+            .prepared_value_decl_in(&source.canonical_id, source.owner, &source.name)
     }
 
     fn resolve_value_export_target(
         &self,
-        dep_canonical_id: &str,
-        imported_name: &str,
-    ) -> Option<(String, String)> {
+        requested: &ValueDeclIdentity,
+    ) -> Option<ValueDeclIdentity> {
         self.host
-            .resolve_value_export_target(dep_canonical_id, imported_name)
-            .map(|target| (target.canonical_id, target.name))
+            .resolve_value_export_target(&requested.canonical_id, &requested.name)
     }
 }
 
@@ -1336,160 +1326,6 @@ pub(crate) fn is_raw_import_specifier_id(canonical_id: &str) -> bool {
     }
 
     !canonical_id.contains('.')
-}
-
-pub(in crate::host_manage) fn is_builtin_type_symbol(name: &str) -> bool {
-    matches!(
-        name,
-        "Partial"
-            | "Required"
-            | "Readonly"
-            | "Pick"
-            | "Omit"
-            | "Record"
-            | "Extract"
-            | "Exclude"
-            | "NonNullable"
-            | "ReturnType"
-            | "Parameters"
-            | "ConstructorParameters"
-            | "InstanceType"
-            | "Awaited"
-            | "Array"
-            | "ReadonlyArray"
-            | "Promise"
-    )
-}
-
-pub(crate) fn collect_type_expr_symbol_refs(
-    expr: &verter_type_expr::TypeExpr,
-    refs: &mut std::collections::BTreeSet<String>,
-) {
-    use verter_type_expr::{ObjectMember, TypeExpr};
-
-    match expr {
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } => {
-            refs.insert(name.to_string());
-            for arg in type_arguments.iter() {
-                collect_type_expr_symbol_refs(arg, refs);
-            }
-        }
-        // Mirrors the `Ref` arm's recursion over `type_arguments`. The
-        // `specifier`/`qualifier` are a module path, not local symbol names,
-        // so they are NOT inserted; only the nested type-argument exprs are
-        // walked for symbol refs.
-        TypeExpr::ImportType { type_arguments, .. } => {
-            for arg in type_arguments.iter() {
-                collect_type_expr_symbol_refs(arg, refs);
-            }
-        }
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-            for ty in types.iter() {
-                collect_type_expr_symbol_refs(ty, refs);
-            }
-        }
-        TypeExpr::Array { element, .. }
-        | TypeExpr::KeyOf(element)
-        | TypeExpr::Rest(element)
-        | TypeExpr::Parenthesized(element) => collect_type_expr_symbol_refs(element, refs),
-        TypeExpr::Tuple { elements, .. } => {
-            for element in elements.iter() {
-                collect_type_expr_symbol_refs(&element.ty, refs);
-            }
-        }
-        TypeExpr::Object(obj) => {
-            for member in &obj.properties {
-                match member {
-                    ObjectMember::Property(prop) => collect_type_expr_symbol_refs(&prop.ty, refs),
-                    ObjectMember::IndexSignature(sig) => {
-                        collect_type_expr_symbol_refs(&sig.key_type, refs);
-                        collect_type_expr_symbol_refs(&sig.value_type, refs);
-                    }
-                    ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
-                        for param in &func.parameters {
-                            collect_type_expr_symbol_refs(&param.ty, refs);
-                        }
-                        if let Some(return_type) = &func.return_type {
-                            collect_type_expr_symbol_refs(return_type, refs);
-                        }
-                    }
-                    ObjectMember::Method(method) => {
-                        for param in &method.function.parameters {
-                            collect_type_expr_symbol_refs(&param.ty, refs);
-                        }
-                        if let Some(return_type) = &method.function.return_type {
-                            collect_type_expr_symbol_refs(return_type, refs);
-                        }
-                    }
-                }
-            }
-        }
-        // A constructor type's signature refs are collected identically to a
-        // function type's (same `FunctionExpr` payload).
-        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
-            for param in &func.parameters {
-                collect_type_expr_symbol_refs(&param.ty, refs);
-            }
-            if let Some(return_type) = &func.return_type {
-                collect_type_expr_symbol_refs(return_type, refs);
-            }
-        }
-        TypeExpr::IndexedAccess { object, index } => {
-            collect_type_expr_symbol_refs(object, refs);
-            collect_type_expr_symbol_refs(index, refs);
-        }
-        TypeExpr::Conditional {
-            check,
-            extends,
-            true_type,
-            false_type,
-        } => {
-            collect_type_expr_symbol_refs(check, refs);
-            collect_type_expr_symbol_refs(extends, refs);
-            collect_type_expr_symbol_refs(true_type, refs);
-            collect_type_expr_symbol_refs(false_type, refs);
-        }
-        TypeExpr::Mapped {
-            source,
-            value,
-            name_type,
-            ..
-        } => {
-            collect_type_expr_symbol_refs(source, refs);
-            collect_type_expr_symbol_refs(value, refs);
-            if let Some(name_type) = name_type {
-                collect_type_expr_symbol_refs(name_type, refs);
-            }
-        }
-        TypeExpr::TemplateLiteral { expressions, .. } => {
-            for expr in expressions.iter() {
-                collect_type_expr_symbol_refs(expr, refs);
-            }
-        }
-        TypeExpr::RecursiveRef { type_arguments, .. } => {
-            for arg in type_arguments.iter() {
-                collect_type_expr_symbol_refs(arg, refs);
-            }
-        }
-        TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::TypeParameter(_)
-        | TypeExpr::TypeOf(_)
-        | TypeExpr::Infer { .. }
-        // Synthetic carriers carry no workspace symbol references — the
-        // binding_name is intrinsic, not a workspace alias name.
-        | TypeExpr::SyntheticSlotBinding(_)
-        | TypeExpr::Unknown { .. } => {}
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct ValueDeclIdentity {
-    pub(crate) canonical_id: String,
-    pub(crate) name: String,
 }
 
 impl VerterHost {

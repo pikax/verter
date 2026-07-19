@@ -56,6 +56,7 @@ use crate::resolver_core::ResolverContext;
 /// to carry is redundant.
 pub(crate) struct DeclarationScopePayload {
     bundle: Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>,
+    owner: verter_type_expr::TopLevelOwnerId,
 }
 
 impl std::fmt::Debug for DeclarationScopePayload {
@@ -74,33 +75,58 @@ impl std::fmt::Debug for DeclarationScopePayload {
 impl DeclarationScopePayload {
     pub(crate) fn from_bundle(
         bundle: &Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>,
+        owner: verter_type_expr::TopLevelOwnerId,
     ) -> Self {
         Self {
             bundle: Arc::clone(bundle),
+            owner,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn owner(&self) -> verter_type_expr::TopLevelOwnerId {
+        self.owner
+    }
+
+    fn owner_scope(&self) -> Option<&crate::resolver_core::prepared_decl::PreparedOwnerScope> {
+        self.bundle.owner_scope(self.owner)
     }
 
     /// Same-file type names visible in the declaration scope (RAW
     /// bundle set — check [`Self::scope_type_bindings`] too; see the
     /// type-level in-scope predicate contract).
     pub(crate) fn scope_type_names(&self) -> &FxHashSet<String> {
-        &self.bundle.scope_type_names
+        static EMPTY: std::sync::OnceLock<FxHashSet<String>> = std::sync::OnceLock::new();
+        self.owner_scope()
+            .map(|scope| &scope.scope_type_names)
+            .unwrap_or_else(|| EMPTY.get_or_init(FxHashSet::default))
     }
 
     /// Same-file value names visible in the declaration scope.
     pub(crate) fn scope_value_names(&self) -> &FxHashSet<String> {
-        &self.bundle.scope_value_names
+        static EMPTY: std::sync::OnceLock<FxHashSet<String>> = std::sync::OnceLock::new();
+        self.owner_scope()
+            .map(|scope| &scope.scope_value_names)
+            .unwrap_or_else(|| EMPTY.get_or_init(FxHashSet::default))
     }
 
     /// Script-setup generic type parameter bindings (Vue SFC only;
     /// empty for non-Vue files).
     pub(crate) fn scope_type_bindings(&self) -> &FxHashMap<String, TypeParamBinding> {
-        &self.bundle.script_setup_type_bindings
+        static EMPTY: std::sync::OnceLock<FxHashMap<String, TypeParamBinding>> =
+            std::sync::OnceLock::new();
+        self.owner_scope()
+            .map(|scope| &scope.script_setup_type_bindings)
+            .unwrap_or_else(|| EMPTY.get_or_init(FxHashMap::default))
     }
 
     /// Resolved import bindings: local name → (canonical_id, exported_name).
     pub(crate) fn import_bindings(&self) -> &FxHashMap<String, ImportBinding> {
-        &self.bundle.import_bindings
+        static EMPTY: std::sync::OnceLock<FxHashMap<String, ImportBinding>> =
+            std::sync::OnceLock::new();
+        self.owner_scope()
+            .map(|scope| &scope.import_bindings)
+            .unwrap_or_else(|| EMPTY.get_or_init(FxHashMap::default))
     }
 }
 
@@ -122,21 +148,32 @@ impl DeclarationScopePayload {
 pub(crate) fn resolve_bare_name_in_scope(
     ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
+    scope_owner: verter_type_expr::TopLevelOwnerId,
     scope_payload: Option<&DeclarationScopePayload>,
     name: &str,
 ) -> Option<ResolvedRootIdentity> {
     // Identity mints below go through the store-owned intern pool so a
     // repeated `(scope, name)` resolution reuses one shared allocation.
     let interner = ctx.project_type_store().identity_interner();
-    let mint_in_scope =
-        || ResolvedRootIdentity::new(interner.intern(scope_canonical_id), interner.intern(name));
+    let mint_in_scope = || {
+        ResolvedRootIdentity::new_in_owner(
+            interner.intern(scope_canonical_id),
+            scope_owner,
+            interner.intern(name),
+        )
+    };
     // 1. Declaration-scope payload lookup (scope-local type/value,
     //    script-setup type bindings).
-    if let Some(payload) = scope_payload {
-        if payload.scope_type_bindings().contains_key(name)
-            || payload.scope_type_names().contains(name)
-            || payload.scope_value_names().contains(name)
-        {
+    if let Some(payload) = scope_payload.filter(|payload| payload.owner() == scope_owner) {
+        let setup_binding_visible = matches!(
+            scope_owner.kind(),
+            verter_type_expr::TopLevelOwnerKind::Instance
+        ) && payload.scope_type_bindings().contains_key(name);
+        let ordinary_bundle_surface = scope_owner
+            == verter_type_expr::TopLevelOwnerId::ordinary_file()
+            && (payload.scope_type_names().contains(name)
+                || payload.scope_value_names().contains(name));
+        if setup_binding_visible || ordinary_bundle_surface {
             return Some(mint_in_scope());
         }
     }
@@ -153,12 +190,12 @@ pub(crate) fn resolve_bare_name_in_scope(
         .ensure_indexed_ready_serve(scope_canonical_id)
         .map(|serve| serve.indexed)
     {
-        if symbol_exists_in_facts(&entry, name) {
+        if symbol_exists_in_facts(&entry, scope_owner, name) {
             return Some(mint_in_scope());
         }
         if matches!(
             entry.shallow_state.export_target(name),
-            Some(crate::resolver_core::ExportTarget::Local { .. })
+            Some(crate::resolver_core::ExportTarget::Local { owner, .. }) if *owner == scope_owner
         ) {
             return Some(mint_in_scope());
         }
@@ -174,26 +211,28 @@ pub(crate) fn resolve_bare_name_in_scope(
 
     // 3. Import-target walk (shallow state + prepared-bundle bindings).
     if let Some(resolved) =
-        resolve_import_binding_from_facts(ctx, scope_canonical_id, scope_payload, name)
+        resolve_import_binding_from_facts(ctx, scope_canonical_id, scope_owner, scope_payload, name)
     {
         return Some(resolved);
     }
 
     // 4. Namespace-qualified: `Ns.Member`.
-    if let Some(resolved) =
-        resolve_namespace_member_from_facts(ctx, scope_canonical_id, scope_payload, name)
-    {
+    if let Some(resolved) = resolve_namespace_member_from_facts(
+        ctx,
+        scope_canonical_id,
+        scope_owner,
+        scope_payload,
+        name,
+    ) {
         return Some(resolved);
     }
 
     // 5. Cross-owner export target.
-    if let Some((canonical_id, exported_name)) =
-        ctx.resolve_named_type_export_target(scope_canonical_id, name)
-    {
-        return Some(ResolvedRootIdentity::new(
-            interner.intern(&canonical_id),
-            interner.intern(&exported_name),
-        ));
+    let (resolved, route_facts) =
+        ctx.resolve_imported_type_root_with_facts(scope_canonical_id, name);
+    ctx.observe_borrowed_signature(&route_facts);
+    if let Some(resolved) = resolved {
+        return Some(resolved);
     }
 
     None
@@ -201,6 +240,7 @@ pub(crate) fn resolve_bare_name_in_scope(
 
 fn symbol_exists_in_facts(
     entry: &crate::project_type_store::IndexedReady,
+    owner: verter_type_expr::TopLevelOwnerId,
     symbol_name: &str,
 ) -> bool {
     // Local PRESENCE through the CENTRALIZED effective header lookup so a rune
@@ -210,10 +250,10 @@ fn symbol_exists_in_facts(
     // reduces to the header-index probe).
     entry
         .shallow_state
-        .effective_type_header_present(symbol_name)
+        .effective_type_header_present_in(owner, symbol_name)
         || entry
             .shallow_state
-            .effective_value_header_present(symbol_name)
+            .effective_value_header_present_in(owner, symbol_name)
 }
 
 /// Resolve a local import binding for `local_name` declared in
@@ -243,6 +283,7 @@ fn symbol_exists_in_facts(
 fn resolve_import_binding_from_facts(
     ctx: &dyn ResolverContext,
     canonical_id: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     scope_payload: Option<&DeclarationScopePayload>,
     local_name: &str,
 ) -> Option<ResolvedRootIdentity> {
@@ -254,53 +295,47 @@ fn resolve_import_binding_from_facts(
         .map(|serve| serve.indexed)
     {
         let state = &entry.shallow_state;
-        if let Some(target) = state.import_target(local_name) {
+        if let Some(target) = state.import_target_in(owner, local_name) {
             let resolved_id = if target.canonical_id.is_empty() {
                 ctx.resolve_type_dependency_canonical(canonical_id, &target.source_specifier)?
             } else {
                 target.canonical_id.clone()
             };
-            return Some(resolve_imported_type_root_identity(
-                ctx,
-                &resolved_id,
-                &target.imported_name,
-            ));
+            return resolve_imported_type_root_identity(ctx, &resolved_id, &target.imported_name);
         }
     }
 
     // B) Fallback to the scope payload's import bindings (which the
     //    prepared-decl builder may have discovered through script-setup
     //    manifest paths not visible to the raw shallow state).
-    if let Some(payload) = scope_payload {
+    if let Some(payload) = scope_payload.filter(|payload| payload.owner() == owner) {
         if let Some(binding) = payload.import_bindings().get(local_name) {
-            return Some(resolve_imported_type_root_identity(
+            return resolve_imported_type_root_identity(
                 ctx,
                 &binding.canonical_id,
                 &binding.exported_name,
-            ));
+            );
         }
     }
 
     // C) Final fallback: fetch the prepared-decl bundle directly.
     let bundle = ctx.prepared_decl_bundle(canonical_id)?;
-    let binding = bundle.import_bindings.get(local_name)?;
-    Some(resolve_imported_type_root_identity(
-        ctx,
-        &binding.canonical_id,
-        &binding.exported_name,
-    ))
+    let binding = bundle.owner_scope(owner)?.import_bindings.get(local_name)?;
+    resolve_imported_type_root_identity(ctx, &binding.canonical_id, &binding.exported_name)
 }
 
 fn resolve_namespace_member_from_facts(
     ctx: &dyn ResolverContext,
     canonical_id: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     scope_payload: Option<&DeclarationScopePayload>,
     symbol_name: &str,
 ) -> Option<ResolvedRootIdentity> {
     let dot_pos = symbol_name.find('.')?;
     let prefix = &symbol_name[..dot_pos];
     let member = &symbol_name[dot_pos + 1..];
-    let binding = resolve_import_binding_from_facts(ctx, canonical_id, scope_payload, prefix)?;
+    let binding =
+        resolve_import_binding_from_facts(ctx, canonical_id, owner, scope_payload, prefix)?;
     let interner = ctx.project_type_store().identity_interner();
 
     // Structurally read-only (see the scope read above).
@@ -308,36 +343,29 @@ fn resolve_namespace_member_from_facts(
         .ensure_indexed_ready_serve(&binding.canonical_id)
         .map(|serve| serve.indexed)
     {
-        if symbol_exists_in_facts(&target_entry, member) {
-            return Some(ResolvedRootIdentity::new(
-                interner.intern(&binding.canonical_id),
-                interner.intern(member),
-            ));
-        }
-
-        if let Some(crate::resolver_core::ExportTarget::Local { symbol_name }) =
+        if let Some(crate::resolver_core::ExportTarget::Local { owner, symbol_name }) =
             target_entry.shallow_state.export_target(member)
         {
-            return Some(ResolvedRootIdentity::new(
+            return Some(ResolvedRootIdentity::new_in_owner(
                 interner.intern(&binding.canonical_id),
+                *owner,
                 interner.intern(symbol_name),
             ));
         }
     }
 
-    if let Some((resolved_canonical_id, exported_name)) =
-        ctx.resolve_named_type_export_target(&binding.canonical_id, member)
-    {
-        return Some(ResolvedRootIdentity::new(
-            interner.intern(&resolved_canonical_id),
-            interner.intern(&exported_name),
-        ));
+    let (resolved, route_facts) =
+        ctx.resolve_imported_type_root_with_facts(&binding.canonical_id, member);
+    ctx.observe_borrowed_signature(&route_facts);
+    if let Some(resolved) = resolved {
+        return Some(resolved);
     }
 
     ctx.resolve_value_export_target(&binding.canonical_id, member)
         .map(|target| {
-            ResolvedRootIdentity::new(
+            ResolvedRootIdentity::new_in_owner(
                 interner.intern(&target.canonical_id),
+                target.owner,
                 interner.intern(&target.name),
             )
         })
@@ -347,13 +375,9 @@ fn resolve_imported_type_root_identity(
     ctx: &dyn ResolverContext,
     canonical_id: &str,
     exported_name: &str,
-) -> ResolvedRootIdentity {
-    let interner = ctx.project_type_store().identity_interner();
+) -> Option<ResolvedRootIdentity> {
     if canonical_id.is_empty() {
-        return ResolvedRootIdentity::new(
-            interner.intern(canonical_id),
-            interner.intern(exported_name),
-        );
+        return None;
     }
 
     // Facts-returning form + tracer record: bare-name resolution feeds
@@ -361,13 +385,10 @@ fn resolve_imported_type_root_identity(
     // so the route-chain facts must enter the active tracer — otherwise a
     // barrel retarget with the owner unchanged false-warms the enclosing
     // cache entry. A no-op when no tracer is installed.
-    let ((resolved_canonical_id, resolved_symbol_name), route_facts) =
+    let (resolved, route_facts) =
         ctx.resolve_imported_type_root_with_facts(canonical_id, exported_name);
     ctx.observe_borrowed_signature(&route_facts);
-    ResolvedRootIdentity::new(
-        interner.intern(&resolved_canonical_id),
-        interner.intern(&resolved_symbol_name),
-    )
+    resolved
 }
 
 /// Resolve a `PreparedTypeDecl` for a root identity using ctx-owned
@@ -394,9 +415,11 @@ pub(crate) fn resolve_prepared_type_decl_via_host(
     _scope_payload: Option<&DeclarationScopePayload>,
     root_identity: &ResolvedRootIdentity,
 ) -> Option<Arc<PreparedTypeDecl>> {
-    if let Some(prepared) =
-        ctx.prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)
-    {
+    if let Some(prepared) = ctx.prepared_type_decl_return_only(
+        &root_identity.canonical_id,
+        root_identity.owner,
+        &root_identity.symbol_name,
+    ) {
         return Some(prepared);
     }
 
@@ -407,19 +430,21 @@ pub(crate) fn resolve_prepared_type_decl_via_host(
     // Facts-returning form + tracer record (see
     // `resolve_imported_type_root_identity` above): this retry hop also
     // feeds memoized builds, so its route proof must be observed.
-    let ((final_canonical_id, final_symbol_name), route_facts) = ctx
-        .resolve_imported_type_root_with_facts(
-            &root_identity.canonical_id,
-            &root_identity.symbol_name,
-        );
+    let (final_identity, route_facts) = ctx.resolve_imported_type_root_with_facts(
+        &root_identity.canonical_id,
+        &root_identity.symbol_name,
+    );
     ctx.observe_borrowed_signature(&route_facts);
-    if final_canonical_id.as_str() == root_identity.canonical_id.as_ref()
-        && final_symbol_name.as_str() == root_identity.symbol_name.as_ref()
-    {
+    let final_identity = final_identity?;
+    if final_identity == *root_identity {
         return None;
     }
 
-    ctx.prepared_type_decl(&final_canonical_id, &final_symbol_name)
+    ctx.prepared_type_decl_return_only(
+        &final_identity.canonical_id,
+        final_identity.owner,
+        &final_identity.symbol_name,
+    )
 }
 
 /// Resolve an unqualified namespace-member reference to its QUALIFIED sibling
@@ -459,6 +484,7 @@ pub(crate) fn resolve_namespace_sibling_in_scope(
     payload: &crate::semantic_query::LocalScopePayload,
     state: &crate::resolver_core::ShallowFileState,
     scope_canonical_id: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
 ) -> Option<ResolvedRootIdentity> {
     use crate::semantic_query::{LocalScopeOrigin, LocalScopePayload};
@@ -475,11 +501,10 @@ pub(crate) fn resolve_namespace_sibling_in_scope(
         // File-scope namespace: a direct TYPE or VALUE sibling, indexed under
         // its qualified `NS.name` name in the file-scope header inventory.
         LocalScopeOrigin::File => {
-            let is_sibling = state
-                .type_symbol_names()
-                .chain(state.value_symbol_names())
-                .any(|sym| sym == qualified);
-            is_sibling.then(|| ResolvedRootIdentity::new(scope_canonical_id, qualified))
+            let is_sibling = state.has_type_symbol_in(owner, &qualified)
+                || state.has_value_symbol_in(owner, &qualified);
+            is_sibling
+                .then(|| ResolvedRootIdentity::new_in_owner(scope_canonical_id, owner, qualified))
         }
         // Global-augmentation namespace: a global TYPE sibling ONLY.
         LocalScopeOrigin::Global => {
@@ -487,7 +512,13 @@ pub(crate) fn resolve_namespace_sibling_in_scope(
             let is_global_type_sibling = state.augmentation_type_keys().any(|(scope, sym)| {
                 matches!(scope, AugmentationScopeKind::Global) && sym == qualified
             });
-            is_global_type_sibling.then(|| ResolvedRootIdentity::new(scope_canonical_id, qualified))
+            is_global_type_sibling.then(|| {
+                ResolvedRootIdentity::new_in_owner(
+                    scope_canonical_id,
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    qualified,
+                )
+            })
         }
         // Module-augmentation namespace: no consumable sibling today.
         LocalScopeOrigin::Module => None,
@@ -539,33 +570,52 @@ export const defaults = { label: 'ok' }
             &interner,
         ));
 
-        let payload = DeclarationScopePayload::from_bundle(&bundle);
+        let module_owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+        let instance_owner = verter_type_expr::TopLevelOwnerId::instance(0);
+        let module_scope = bundle
+            .owner_scope(module_owner)
+            .expect("ordinary module scope should be prepared");
+        let instance_scope = bundle
+            .owner_scope(instance_owner)
+            .expect("script-setup instance scope should be prepared");
+        let module_payload = DeclarationScopePayload::from_bundle(&bundle, module_owner);
+        let instance_payload = DeclarationScopePayload::from_bundle(&bundle, instance_owner);
 
         assert!(
-            std::ptr::eq(payload.scope_type_names(), &bundle.scope_type_names),
+            std::ptr::eq(
+                module_payload.scope_type_names(),
+                &module_scope.scope_type_names
+            ),
             "scope_type_names must be the bundle's own set, not a copy"
         );
         assert!(
-            std::ptr::eq(payload.scope_value_names(), &bundle.scope_value_names),
+            std::ptr::eq(
+                module_payload.scope_value_names(),
+                &module_scope.scope_value_names
+            ),
             "scope_value_names must be the bundle's own set, not a copy"
         );
         assert!(
             std::ptr::eq(
-                payload.scope_type_bindings(),
-                &bundle.script_setup_type_bindings
+                instance_payload.scope_type_bindings(),
+                &instance_scope.script_setup_type_bindings
             ),
             "scope_type_bindings must be the bundle's own map, not a copy"
         );
         assert!(
-            std::ptr::eq(payload.import_bindings(), &bundle.import_bindings),
+            std::ptr::eq(
+                module_payload.import_bindings(),
+                &module_scope.import_bindings
+            ),
             "import_bindings must be the bundle's own map, not a copy"
         );
 
         // Union-removal contract: the script-setup param is visible
         // through the bindings map, NOT through the raw name set.
-        assert!(payload.scope_type_bindings().contains_key("T"));
-        assert!(!payload.scope_type_names().contains("T"));
-        assert!(payload.scope_type_names().contains("Props"));
-        assert!(payload.scope_value_names().contains("defaults"));
+        assert!(instance_payload.scope_type_bindings().contains_key("T"));
+        assert!(!module_payload.scope_type_names().contains("T"));
+        assert!(module_payload.scope_type_names().contains("Props"));
+        assert!(module_payload.scope_value_names().contains("defaults"));
+        assert!(!module_payload.scope_type_bindings().contains_key("T"));
     }
 }

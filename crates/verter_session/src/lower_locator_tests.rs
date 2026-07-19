@@ -24,6 +24,7 @@ use verter_type_expr::locators::{
     MacroPayloadLocator, MacroPayloadPosition, TypeBodyPathStep, TypeBodySlot,
     TypeParamBoundPosition,
 };
+use verter_type_expr::TopLevelOwnerId;
 use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 
 use crate::decl_body_memo::{DerefedBodyShape, LocatorBodyDerefError};
@@ -56,6 +57,18 @@ fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
         .unwrap();
 }
 
+fn upsert_svelte(host: &VerterHost, id: &str, source: &str) {
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: id.to_string(),
+            source: Arc::from(source),
+            file_language: FileLanguage::svelte(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+}
+
 const OWNER_ID: &str = "/w/locator/owner.ts";
 /// Owner fixture for the annotation-carried macro-payload deref: one
 /// `$props()` declarator carrying a binding annotation at macro ordinal 0.
@@ -77,14 +90,96 @@ export type Deferred = {\n\
 
 /// Whole-decl-body locator for a top-level TYPE symbol.
 fn decl_body_locator(canonical: &str, symbol: &str) -> AuthoredBodyLocator {
+    decl_body_locator_in_owner(canonical, TopLevelOwnerId::ordinary_file(), symbol)
+}
+
+fn decl_body_locator_in_owner(
+    canonical: &str,
+    owner: TopLevelOwnerId,
+    symbol: &str,
+) -> AuthoredBodyLocator {
     AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
             canonical_id: Arc::from(canonical),
+            owner,
             symbol: Arc::from(symbol),
             space: LocatorSymbolSpace::Type,
         },
         path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
     })
+}
+
+#[test]
+fn lower_locator_distinguishes_same_named_module_and_instance_declarations() {
+    let host = host();
+    let canonical = "/w/locator/OwnerSplit.svelte";
+    upsert_svelte(
+        &host,
+        canonical,
+        "<script module lang=\"ts\">\nexport type Shared = { moduleOnly: string };\n</script>\n\
+         <script lang=\"ts\">\nexport type Shared = { instanceOnly: number };\n</script>\n",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let module = match dispatch.lower_locator(decl_body_locator_in_owner(
+        canonical,
+        TopLevelOwnerId::module(0),
+        "Shared",
+    )) {
+        QueryResult::Value(node) => node,
+        other => panic!("module locator must resolve, got {other:?}"),
+    };
+    let instance = match dispatch.lower_locator(decl_body_locator_in_owner(
+        canonical,
+        TopLevelOwnerId::instance(0),
+        "Shared",
+    )) {
+        QueryResult::Value(node) => node,
+        other => panic!("instance locator must resolve, got {other:?}"),
+    };
+
+    assert_ne!(
+        module, instance,
+        "owner-only mutation must change graph identity"
+    );
+    let module_surface = object_surface(&host, module);
+    let instance_surface = object_surface(&host, instance);
+    assert!(module_surface
+        .members
+        .iter()
+        .any(|member| member.name.as_ref() == "moduleOnly"));
+    assert!(instance_surface
+        .members
+        .iter()
+        .any(|member| member.name.as_ref() == "instanceOnly"));
+    assert_eq!(
+        host.project_type_store()
+            .semantic_graph()
+            .node_scope(module),
+        Some(NodeScopeId::File {
+            canonical_id: Arc::from(canonical),
+            owner: TopLevelOwnerId::module(0),
+            whole_hash: host
+                .ensure_indexed_ready(canonical)
+                .expect("indexed")
+                .whole_hash,
+            local_scope: None,
+        })
+    );
+    assert_eq!(
+        host.project_type_store()
+            .semantic_graph()
+            .node_scope(instance),
+        Some(NodeScopeId::File {
+            canonical_id: Arc::from(canonical),
+            owner: TopLevelOwnerId::instance(0),
+            whole_hash: host
+                .ensure_indexed_ready(canonical)
+                .expect("indexed")
+                .whole_hash,
+            local_scope: None,
+        })
+    );
 }
 
 /// A locator into a top-level TYPE symbol's type-parameter constraint / default
@@ -98,6 +193,7 @@ fn type_param_bound_locator(
     AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
             canonical_id: Arc::from(canonical),
+            owner: TopLevelOwnerId::ordinary_file(),
             symbol: Arc::from(symbol),
             space: LocatorSymbolSpace::Type,
         },
@@ -271,6 +367,7 @@ fn locator_shape_nodes_exclude_caller_relative_stamps() {
     }));
     let scope = NodeScopeId::File {
         canonical_id: Arc::from(OWNER_ID),
+        owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: indexed.whole_hash,
         local_scope: None,
     };
@@ -399,6 +496,7 @@ fn lower_locator_rejects_macro_type_argument_payload() {
     let locator = AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
         anchor: AuthoredAnchor {
             canonical_id: Arc::from(OWNER_ID),
+            owner: TopLevelOwnerId::ordinary_file(),
             symbol: Arc::from("default"),
             space: LocatorSymbolSpace::Value,
         },
@@ -450,6 +548,7 @@ fn annotation_carried_macro_payload_deref_hydrates_from_snapshot() {
         AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
             anchor: AuthoredAnchor {
                 canonical_id: Arc::from(ANNOTATION_OWNER_ID),
+                owner: TopLevelOwnerId::ordinary_file(),
                 symbol: Arc::from("default"),
                 space: LocatorSymbolSpace::Value,
             },
@@ -493,6 +592,90 @@ fn annotation_carried_macro_payload_deref_hydrates_from_snapshot() {
         LocatorBodyDerefError::PathUnresolved,
         "never a fabricated body"
     );
+
+    // Role-only identity mutation: the same macro ordinal exists, but in the
+    // ordinary module owner. Replaying it as an instance-owner payload must
+    // fail before the authored annotation can be returned.
+    let mut wrong_owner = annotation_locator(0);
+    let AuthoredBodyLocator::MacroPayload(payload) = &mut wrong_owner else {
+        unreachable!("the fixture is a macro payload locator")
+    };
+    payload.anchor.owner = TopLevelOwnerId::instance(0);
+    assert_eq!(
+        indexed
+            .shallow_state
+            .decl_bodies()
+            .deref_locator_body(&wrong_owner)
+            .expect_err("a role-only owner mutation must be rejected"),
+        LocatorBodyDerefError::OwnerMismatch,
+    );
+}
+
+/// Every replayable macro-payload family keys the retained-AST lookup by the
+/// exact `(owner, macro_index)` pair. A role-only owner mutation cannot read
+/// the same global ordinal from a sibling lexical owner.
+#[test]
+fn macro_payload_replay_rejects_wrong_owner_for_type_argument_and_field() {
+    const PAYLOAD_OWNER: &str = "/w/locator/owner-qualified-payload.ts";
+    let host = host();
+    upsert_ts(
+        &host,
+        PAYLOAD_OWNER,
+        "let props = $props<{ row: string }>();\ndefineProps<{ field: number }>();\n",
+    );
+    let indexed = host
+        .ensure_indexed_ready(PAYLOAD_OWNER)
+        .expect("owner must materialise");
+    let memo = indexed.shallow_state.decl_bodies();
+
+    let locator = |macro_index, payload| {
+        AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
+            anchor: AuthoredAnchor {
+                canonical_id: Arc::from(PAYLOAD_OWNER),
+                owner: TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from("default"),
+                space: LocatorSymbolSpace::Value,
+            },
+            macro_index,
+            payload,
+        })
+    };
+
+    let type_argument = locator(0, MacroPayloadPosition::TypeArgument);
+    assert!(
+        matches!(
+            memo.deref_locator_body(&type_argument),
+            Ok(crate::decl_body_memo::locator_deref::DerefedAuthoredBody {
+                shape: DerefedBodyShape::Single(TypeExpr::Object(_)),
+                ..
+            })
+        ),
+        "the exact-owner Svelte type argument must replay"
+    );
+
+    let field = locator(0, MacroPayloadPosition::Field { field_index: 0 });
+    assert!(
+        matches!(
+            memo.deref_locator_body(&field),
+            Ok(crate::decl_body_memo::locator_deref::DerefedAuthoredBody {
+                shape: DerefedBodyShape::Single(TypeExpr::Primitive(_)),
+                ..
+            })
+        ),
+        "the exact-owner analyzer field must replay"
+    );
+
+    for mut mutated in [type_argument, field] {
+        let AuthoredBodyLocator::MacroPayload(payload) = &mut mutated else {
+            unreachable!("the fixtures are macro payload locators")
+        };
+        payload.anchor.owner = TopLevelOwnerId::instance(0);
+        assert_eq!(
+            memo.deref_locator_body(&mutated)
+                .expect_err("a role-only owner mutation must be rejected"),
+            LocatorBodyDerefError::OwnerMismatch,
+        );
+    }
 }
 
 /// A JSDoc `@typedef {…} Name` alias body lowers through the shape query via
@@ -514,6 +697,7 @@ fn jsdoc_typedef_body_locator_lowers_through_the_shape_query() {
     let locator = AuthoredBodyLocator::JsdocTypedefBody(JsdocTypedefBodyLocator {
         anchor: AuthoredAnchor {
             canonical_id: Arc::from(TYPEDEF_OWNER_ID),
+            owner: TopLevelOwnerId::ordinary_file(),
             symbol: Arc::from("FromDoc"),
             space: LocatorSymbolSpace::Type,
         },
@@ -576,9 +760,10 @@ fn broken_lease_lower_locator_suppresses_parent_admission() {
 
     // Build the SAME LowerLocator key `lower_locator` builds for `Base`.
     let locator = decl_body_locator(OWNER_ID, "Base");
-    let (canonical_id, symbol, space) = match &locator {
+    let (canonical_id, owner, symbol, space) = match &locator {
         AuthoredBodyLocator::DeclBody(slot) => (
             Arc::clone(&slot.anchor.canonical_id),
+            slot.anchor.owner,
             Arc::clone(&slot.anchor.symbol),
             slot.anchor.space,
         ),
@@ -586,7 +771,7 @@ fn broken_lease_lower_locator_suppresses_parent_admission() {
     };
     let dispatch = ProjectSemanticDispatch::new(&host);
     let slot = dispatch
-        .type_slot_for(Arc::clone(&canonical_id), symbol)
+        .type_slot_for(Arc::clone(&canonical_id), owner, symbol)
         .with_symbol_space(semantic_space_for_locator_space(space));
     let env = host.host_view_env_hashes_for(canonical_id.as_ref());
     let key = LocatorLoweringKey::new_unsubstituted(
@@ -748,6 +933,7 @@ fn lower_locator_derefs_a_member_value_sub_position() {
     let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
             canonical_id: Arc::from(OWNER_ID),
+            owner: TopLevelOwnerId::ordinary_file(),
             symbol: Arc::from("Base"),
             space: LocatorSymbolSpace::Type,
         },

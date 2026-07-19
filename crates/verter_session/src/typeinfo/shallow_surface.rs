@@ -90,6 +90,7 @@ impl VerterHost {
         let base = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
                 canonical_id: Arc::clone(&request.canonical_id),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
             },
             name: Arc::clone(&request.name),

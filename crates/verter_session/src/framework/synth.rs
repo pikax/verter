@@ -122,6 +122,7 @@ mod tests {
     fn type_based_props_macro() -> AnalyzedMacro {
         AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineProps,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
             type_references: Vec::new(),
             binding_name: None,
@@ -137,6 +138,7 @@ mod tests {
             parsed_type_argument: Some(MacroPayloadLocator {
                 anchor: AuthoredAnchor {
                     canonical_id: Arc::from("/App.vue"),
+                    owner: verter_type_expr::TopLevelOwnerId::instance(0),
                     symbol: Arc::from("default"),
                     space: LocatorSymbolSpace::Value,
                 },

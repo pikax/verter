@@ -2276,7 +2276,9 @@ const msg = 'hello'
 "#;
     let (registry, uri) = open_vue_file(source);
 
-    let virtual_files = registry.get_virtual_files(&uri);
+    let virtual_files = registry
+        .get_virtual_files(&uri)
+        .expect("public API projection");
     assert!(
         virtual_files.is_some(),
         "Should return virtual files for opened Vue file"
@@ -2316,6 +2318,33 @@ const msg = 'hello'
         "Should have 'style:0' virtual file, got: {:?}",
         kinds
     );
+}
+
+/// @ai-generated — an unsafe carrier projection is a typed failure, not an
+/// ordinary response with `api: null`.
+#[test]
+fn get_virtual_files_preserves_unsafe_projection_failure() {
+    let source = r#"<script setup lang="ts">
+enum Unsafe { Value = Math.random() }
+defineProps<{ value: Unsafe }>()
+</script>
+<template><div /></template>"#;
+    let (registry, uri) = open_vue_file(source);
+
+    let error = registry
+        .get_virtual_files(&uri)
+        .expect_err("unsafe enum must not collapse to api absence");
+    assert_eq!(error.code(), "tsc-generation");
+    assert_eq!(error.detail_code(), "unsupported-declaration-shape");
+    assert_eq!(
+        error.subject(),
+        verter_compiler::tsc::TscFailureSubject::Macro { syntax_index: 0 }
+    );
+    assert_eq!(
+        error.declaration_shape_reason().map(|reason| reason.code()),
+        Some("unsupported-enum-shape")
+    );
+    assert_eq!(error.member_ordinal(), None);
 }
 
 /// @ai-generated — get_analysis returns serializable JSON for an opened Vue file.

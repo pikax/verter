@@ -129,6 +129,7 @@ fn dispatch_warm_hit_bubbles_traced_parse_fact_into_outer_tracer() {
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::from("/w/types.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         },
         name: Arc::from("Foo"),

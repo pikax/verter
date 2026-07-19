@@ -7,7 +7,7 @@ use verter_semantic::analysis::types::{
     ResolvedLocalType,
 };
 use verter_span::Span;
-use verter_type_expr::PrimitiveName;
+use verter_type_expr::{PrimitiveName, TopLevelOwnerId};
 
 /// The analyzer's synthesized closed shape for a locally-resolved type
 /// reference: a non-primitive body stays a shallow named-reference locator
@@ -19,6 +19,7 @@ fn local_ref_shape(type_ref: &str) -> verter_type_expr::facts::ResolvedLocalShap
         verter_type_expr::locators::SymbolBodyLocator {
             anchor: verter_type_expr::locators::AuthoredAnchor {
                 canonical_id: std::sync::Arc::from(""),
+                owner: TopLevelOwnerId::instance(0),
                 symbol: std::sync::Arc::from(type_ref),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Type,
             },
@@ -51,6 +52,7 @@ impl crate::resolver_core::DeclarationMetadataResolver for TestHost {
     fn resolve_export_target(
         &self,
         _dep_canonical: &str,
+        _dep_owner: TopLevelOwnerId,
         _requested_name: &str,
     ) -> Option<ResolvedExportTarget> {
         None
@@ -67,6 +69,7 @@ impl crate::resolver_core::DeclarationMetadataResolver for TestHost {
     fn type_declaration_id(
         &self,
         _canonical_source: &str,
+        _owner: TopLevelOwnerId,
         _resolved_name: &str,
     ) -> Option<DeclarationId> {
         None
@@ -184,6 +187,7 @@ impl crate::resolver_core::DeclarationMetadataResolver for CombinedSurfaceTestHo
     fn resolve_export_target(
         &self,
         _dep_canonical: &str,
+        _dep_owner: TopLevelOwnerId,
         _requested_name: &str,
     ) -> Option<ResolvedExportTarget> {
         None
@@ -200,6 +204,7 @@ impl crate::resolver_core::DeclarationMetadataResolver for CombinedSurfaceTestHo
     fn type_declaration_id(
         &self,
         _canonical_source: &str,
+        _owner: TopLevelOwnerId,
         _resolved_name: &str,
     ) -> Option<DeclarationId> {
         None
@@ -221,6 +226,7 @@ impl ComponentMetaResolverHost for CombinedSurfaceTestHost {
     fn resolve_type_declaration(
         &self,
         _dep_canonical: &str,
+        _owner: TopLevelOwnerId,
         _requested_name: &str,
     ) -> ResolvedTypeDeclaration {
         panic!("resolve_component_meta_parts should use the combined imported-macro surface path");
@@ -282,6 +288,7 @@ impl ComponentMetaResolverHost for CombinedSurfaceTestHost {
                 declaration_id: None,
                 resolved_name: "Props".to_string(),
                 canonical_source: "/dep.ts".to_string(),
+                owner: TopLevelOwnerId::ordinary_file(),
                 span: Span::new(0, 29),
                 kind: crate::resolver_core::ResolvedDeclarationKind::Interface,
                 text: Some("export interface Props { label: string }".to_string()),
@@ -334,6 +341,7 @@ fn resolve_component_meta_parts_prefers_combined_imported_macro_surface() {
     };
     let snapshot = TestSnapshot {
         imports: vec![AnalyzedImport {
+            owner: TopLevelOwnerId::instance(0),
             source: "./dep".to_string(),
             is_type_only: true,
             bindings: vec![AnalyzedImportBinding {
@@ -348,6 +356,7 @@ fn resolve_component_meta_parts_prefers_combined_imported_macro_surface() {
             resolved_canonical_id: Some("/dep.ts".to_string()),
         }],
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec!["Props".to_string()],
@@ -436,6 +445,7 @@ fn resolve_component_meta_parts_fallthrough_reuses_combined_imported_macro_surfa
     };
     let snapshot = TestSnapshot {
         imports: vec![AnalyzedImport {
+            owner: TopLevelOwnerId::instance(0),
             source: "./dep".to_string(),
             is_type_only: true,
             bindings: vec![AnalyzedImportBinding {
@@ -450,6 +460,7 @@ fn resolve_component_meta_parts_fallthrough_reuses_combined_imported_macro_surfa
             resolved_canonical_id: Some("/dep.ts".to_string()),
         }],
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineEmits,
             is_type_based: true,
             type_references: vec!["Emits".to_string()],
@@ -564,6 +575,7 @@ fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_when_eva
     };
     let snapshot = TestSnapshot {
         imports: vec![AnalyzedImport {
+            owner: TopLevelOwnerId::instance(0),
             source: "./dep".to_string(),
             is_type_only: true,
             bindings: vec![AnalyzedImportBinding {
@@ -578,6 +590,7 @@ fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_when_eva
             resolved_canonical_id: Some("/dep.ts".to_string()),
         }],
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineEmits,
             is_type_based: true,
             type_references: vec!["Emits".to_string()],
@@ -652,6 +665,7 @@ defineEmits<Emits>()
     };
     let snapshot = TestSnapshot {
         imports: vec![AnalyzedImport {
+            owner: TopLevelOwnerId::instance(0),
             source: "./dep".to_string(),
             is_type_only: true,
             bindings: vec![AnalyzedImportBinding {
@@ -666,6 +680,7 @@ defineEmits<Emits>()
             resolved_canonical_id: Some("/dep.ts".to_string()),
         }],
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineEmits,
             is_type_based: true,
             type_references: vec!["Emits".to_string()],
@@ -679,6 +694,7 @@ defineEmits<Emits>()
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
+                owner: TopLevelOwnerId::instance(0),
                 name: "Emits".to_string(),
                 expanded: "interface Emits extends RootEmits {}".to_string(),
                 shape: local_ref_shape("Emits"),
@@ -738,6 +754,7 @@ fn local_resolved_macro_types_push_authoritative_owner_local_entry() {
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineEmits,
             is_type_based: true,
             type_references: vec!["AccordionEmits".to_string()],
@@ -751,6 +768,7 @@ fn local_resolved_macro_types_push_authoritative_owner_local_entry() {
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
+                owner: TopLevelOwnerId::instance(0),
                 name: "AccordionEmits".to_string(),
                 expanded:
                     "{ 'update:modelValue': [value: (T extends 'single' ? string : string[]) | undefined] }"
@@ -802,6 +820,7 @@ fn projectable_local_emit_roots_fill_resolved_macros_without_resolved_local_type
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineEmits,
             is_type_based: true,
             type_references: vec!["AppEmits".to_string()],
@@ -869,6 +888,7 @@ defineSlots<CalendarSlots>()
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineSlots,
             is_type_based: true,
             type_references: vec!["CalendarSlots".to_string()],
@@ -882,6 +902,7 @@ defineSlots<CalendarSlots>()
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
+                owner: TopLevelOwnerId::instance(0),
                 name: "CalendarSlots".to_string(),
                 expanded: "{ day?: (props: { day: Date }) => any }".to_string(),
                 shape: local_ref_shape("CalendarSlots"),
@@ -935,6 +956,7 @@ type LocalItem = {
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec!["Props".to_string()],
@@ -948,6 +970,7 @@ type LocalItem = {
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
+                owner: TopLevelOwnerId::instance(0),
                 name: "Props".to_string(),
                 expanded: "{ item?: LocalItem }".to_string(),
                 shape: local_ref_shape("Props"),
@@ -1056,6 +1079,7 @@ type Props = Pick<ImportedBase, 'href'>
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec!["Props".to_string()],
@@ -1069,6 +1093,7 @@ type Props = Pick<ImportedBase, 'href'>
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
+                owner: TopLevelOwnerId::instance(0),
                 name: "Props".to_string(),
                 expanded: "{ href?: string }".to_string(),
                 shape: local_ref_shape("Props"),
@@ -1134,6 +1159,7 @@ type Props = Pick<ImportedBase, 'href'>
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec!["Props".to_string()],
@@ -1148,6 +1174,7 @@ type Props = Pick<ImportedBase, 'href'>
                 payload: Some(verter_type_expr::locators::MacroPayloadLocator {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
                         canonical_id: std::sync::Arc::from("/test.ts"),
+                        owner: TopLevelOwnerId::instance(0),
                         symbol: std::sync::Arc::from("default"),
                         space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                     },
@@ -1169,6 +1196,7 @@ type Props = Pick<ImportedBase, 'href'>
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
+                owner: TopLevelOwnerId::instance(0),
                 name: "Props".to_string(),
                 expanded: "{ href?: string }".to_string(),
                 shape: local_ref_shape("Props"),
@@ -1234,6 +1262,7 @@ type Props = {
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec!["Props".to_string()],
@@ -1247,6 +1276,7 @@ type Props = {
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
+                owner: TopLevelOwnerId::instance(0),
                 name: "Props".to_string(),
                 expanded: "{ href?: ImportedBase['href'] }".to_string(),
                 shape: local_ref_shape("Props"),
@@ -1316,6 +1346,7 @@ type Props = {
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec!["Props".to_string(), "ImportedBase".to_string()],
@@ -1329,6 +1360,7 @@ type Props = {
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
+                owner: TopLevelOwnerId::instance(0),
                 name: "Props".to_string(),
                 expanded: "{ tooltip?: ImportedBase }".to_string(),
                 shape: local_ref_shape("Props"),
@@ -1393,6 +1425,7 @@ type Props = Omit<ImportedBase, 'hidden'>
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec!["Props".to_string(), "ImportedBase".to_string()],
@@ -1406,6 +1439,7 @@ type Props = Omit<ImportedBase, 'hidden'>
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
+                owner: TopLevelOwnerId::instance(0),
                 name: "Props".to_string(),
                 expanded: "Omit<ImportedBase, 'hidden'>".to_string(),
                 shape: local_ref_shape("Props"),
@@ -1471,6 +1505,7 @@ type Props = Omit<ImportedBase, 'hidden'>
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec!["Props".to_string(), "ImportedBase".to_string()],
@@ -1484,6 +1519,7 @@ type Props = Omit<ImportedBase, 'hidden'>
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
+                owner: TopLevelOwnerId::instance(0),
                 name: "Props".to_string(),
                 expanded: "{}".to_string(),
                 shape: local_ref_shape("Props"),
@@ -1537,6 +1573,7 @@ fn resolve_component_meta_parts_keeps_direct_imported_macro_root_seeded() {
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec!["Props".to_string()],
@@ -1620,6 +1657,7 @@ fn resolve_component_meta_parts_seeds_imported_macro_root_when_graph_metadata_un
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec!["StringOrVNode".to_string()],
@@ -1691,6 +1729,7 @@ interface Helper {
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec!["Props".to_string()],
@@ -1705,12 +1744,14 @@ interface Helper {
             expose_fields: Vec::new(),
             resolved_local_types: vec![
                 ResolvedLocalType {
+                    owner: TopLevelOwnerId::instance(0),
                     name: "Props".to_string(),
                     expanded: "{ label?: string }".to_string(),
                     shape: local_ref_shape("Props"),
                     span: Span::new(0, "type Props = Helper".len() as u32),
                 },
                 ResolvedLocalType {
+                    owner: TopLevelOwnerId::instance(0),
                     name: "Helper".to_string(),
                     expanded: "{ label?: string }".to_string(),
                     shape: local_ref_shape("Helper"),

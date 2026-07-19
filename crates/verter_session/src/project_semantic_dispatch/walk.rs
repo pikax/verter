@@ -2186,12 +2186,15 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // empty-path terminal demand.
                 SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                     canonical_id,
+                    owner,
                     name,
                     whole_hash: _,
                 }) => {
-                    let base = self
-                        .dispatch
-                        .type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
+                    let base = self.dispatch.type_slot_for(
+                        Arc::clone(canonical_id),
+                        *owner,
+                        Arc::clone(name),
+                    );
                     let inst_ctx = self.dispatch.instantiate_context_for(
                         canonical_id,
                         crate::semantic_query::ProjectionReductionContext::structural_transit(),
@@ -2222,6 +2225,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 SemanticNodeData::DeclRef { identity } => {
                     let scope = ScopeId {
                         canonical_id: Arc::clone(&identity.canonical_id),
+                        owner: identity.owner,
                         local_scope: None,
                     };
                     let name = Arc::clone(&identity.decl_name);
@@ -2279,7 +2283,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     }
                     let identity = self
                         .dispatch
-                        .type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
+                        .type_slot_for(
+                            Arc::clone(&base.canonical_id),
+                            base.owner,
+                            Arc::clone(&base.decl_name),
+                        );
                     let args_clone = Arc::clone(args);
                     drop(data);
                     // Intermediate-hop demand
@@ -2536,6 +2544,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             SemanticNodeData::DeclRef { identity } => {
                 let scope = ScopeId {
                     canonical_id: Arc::clone(&identity.canonical_id),
+                    owner: identity.owner,
                     local_scope: None,
                 };
                 let name = Arc::clone(&identity.decl_name);
@@ -2560,6 +2569,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 drop(data);
                 let inst_base = self.dispatch.type_slot_for(
                     Arc::clone(&identity.canonical_id),
+                    identity.owner,
                     Arc::clone(&identity.decl_name),
                 );
                 let inst_context = self.dispatch.instantiate_context_for(
@@ -2782,10 +2792,12 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     Some(SemanticNodeData::DeclRef { identity }) => identity.clone(),
                     Some(SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                         canonical_id,
+                        owner,
                         name,
                         whole_hash,
                     })) => crate::semantic_query::DeclIdentity {
                         canonical_id: Arc::clone(canonical_id),
+                        owner: *owner,
                         whole_hash: *whole_hash,
                         decl_name: Arc::clone(name),
                     },
@@ -2822,6 +2834,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 }
                 let identity = crate::semantic_query::DeclIdentity {
                     canonical_id: Arc::from(dep_canonical.as_str()),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash: serve.indexed.whole_hash,
                     decl_name: Arc::from(exported.as_str()),
                 };
@@ -2965,12 +2978,13 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             // DeclPlaceholder — expand via Instantiate.
             SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                 canonical_id,
+                owner,
                 name,
                 whole_hash: _,
             }) => {
-                let identity = self
-                    .dispatch
-                    .type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
+                let identity =
+                    self.dispatch
+                        .type_slot_for(Arc::clone(canonical_id), *owner, Arc::clone(name));
                 if let Some(alias_id) = self.alias_identity(node) {
                     if self.visited_aliases.iter().any(|a| a == &alias_id) {
                         drop(data);
@@ -3694,6 +3708,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // members carry the bit.
                 match self.dispatch.execute_type_node(SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(self.dispatch.type_slot_for(
                         Arc::clone(&identity.canonical_id),
+                        identity.owner,
                         Arc::clone(&identity.decl_name),
                     ), args_clone, self.dispatch.instantiate_context_for(
                         &identity.canonical_id,
@@ -3800,11 +3815,13 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             }
             SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                 canonical_id,
+                owner,
                 name,
                 whole_hash,
             }) => {
                 let identity = DeclIdentity {
                     canonical_id: Arc::clone(canonical_id),
+                    owner: *owner,
                     whole_hash: *whole_hash,
                     decl_name: Arc::clone(name),
                 };
@@ -3828,6 +3845,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // the macro type argument's own body.
                 match self.dispatch.execute_type_node(SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(self.dispatch.type_slot_for(
                         Arc::clone(&identity.canonical_id),
+                        identity.owner,
                         Arc::clone(&identity.decl_name),
                     ), Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()), self.dispatch.instantiate_context_for(
                         &identity.canonical_id,
@@ -4058,6 +4076,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             SemanticNodeData::DeclRef { identity } => {
                 let scope = ScopeId {
                     canonical_id: Arc::clone(&identity.canonical_id),
+                    owner: identity.owner,
                     local_scope: None,
                 };
                 let name = Arc::clone(&identity.decl_name);

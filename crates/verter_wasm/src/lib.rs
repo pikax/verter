@@ -130,6 +130,20 @@ fn to_wasm_value<T: Serialize>(value: &T) -> Result<JsValue, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("Host serialization error: {}", e)))
 }
 
+/// Serialize the public-API tri-state with explicit JavaScript `null` values.
+///
+/// `serde-wasm-bindgen` otherwise maps `None` to `undefined`, which would make
+/// the stable `{ value, error }` result and its nullable error details diverge
+/// from the NAPI binding contract.
+fn public_api_to_wasm_value(value: &FfiPublicApiResult) -> Result<JsValue, JsValue> {
+    let serializer = serde_wasm_bindgen::Serializer::new()
+        .serialize_maps_as_objects(true)
+        .serialize_missing_as_null(true);
+    value
+        .serialize(&serializer)
+        .map_err(|error| JsValue::from_str(&format!("Host serialization error: {error}")))
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WasmDependencyResolution {
@@ -267,17 +281,12 @@ impl WasmVerterHost {
         &self,
         canonical_id: &str,
         mode: Option<&str>,
-    ) -> Result<Option<FfiIdeResponse>, FfiConversionError> {
+    ) -> Result<FfiPublicApiResult, FfiConversionError> {
         let mode = ffi_public_api_mode_to_host(mode)?;
-        Ok(self
-            .inner
-            .get_public_api_with_mode(canonical_id, mode, None)
-            .map(|r| FfiIdeResponse {
-                code: r.code.to_string(),
-                source_map: r.source_map.map(|s| s.to_string()),
-                is_jsx: false,
-                destructured_block: None,
-            }))
+        Ok(host_public_api_result_to_ffi(
+            self.inner
+                .get_public_api_with_mode(canonical_id, mode, None),
+        ))
     }
 }
 
@@ -520,7 +529,7 @@ impl WasmVerterHost {
     /// public surface (a valid `.d.ts` with no runtime/value code). An
     /// unknown mode string throws.
     ///
-    /// Returns `{ code: string, sourceMap?: string, isJsx: boolean }` or `null`.
+    /// Returns `{ value, error }`; both are `null` for ordinary absence.
     #[wasm_bindgen(js_name = getPublicApi)]
     pub fn get_public_api(
         &self,
@@ -529,7 +538,7 @@ impl WasmVerterHost {
     ) -> Result<JsValue, JsValue> {
         let result = catch_panic(|| self.public_api_with_mode(canonical_id, mode.as_deref()))?
             .map_err(ffi_err)?;
-        to_wasm_value(&result)
+        public_api_to_wasm_value(&result)
     }
 
     /// Runs cross-file analysis and returns prop constness optimizations.
@@ -1435,7 +1444,11 @@ fn build_selector_match_results(
 #[cfg(test)]
 mod tests {
     use super::{default_known_dependency_extensions, lint_diagnostics_to_utf16};
-    use super::{host, FfiConversionError, WasmVerterHost};
+    use super::{host, FfiConversionError, FfiTscFailureSubject, WasmVerterHost};
+    #[cfg(target_arch = "wasm32")]
+    use super::{
+        public_api_to_wasm_value, FfiPublicApiProjectionError, FfiPublicApiResult, FfiTscResponse,
+    };
 
     #[test]
     fn default_dependency_resolution_extensions_include_svelte_carriers_once() {
@@ -1502,14 +1515,17 @@ mod tests {
         let decl = wasm_host
             .public_api_with_mode("/src/Cap.vue", Some("declaration"))
             .expect("the WASM plumbing must accept mode 'declaration'")
+            .value
             .expect("declaration-mode output for a Vue SFC");
         let public = wasm_host
             .public_api_with_mode("/src/Cap.vue", Some("public"))
             .expect("mode 'public' stays accepted")
+            .value
             .expect("public-mode output for a Vue SFC");
         let absent = wasm_host
             .public_api_with_mode("/src/Cap.vue", None)
             .expect("absent mode stays accepted")
+            .value
             .expect("default-mode output for a Vue SFC");
 
         // Declaration-specific shape: a valid `.d.ts` — declares the
@@ -1561,6 +1577,171 @@ mod tests {
         assert!(
             matches!(err, FfiConversionError::InvalidPublicApiMode(ref s) if s == "bogus"),
             "an unknown mode must produce InvalidPublicApiMode, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn public_api_binding_preserves_unsafe_enum_error_and_absence_controls() {
+        let wasm_host = WasmVerterHost {
+            inner: std::sync::Arc::new(host::VerterHost::new_standalone(
+                host::HostConfig::default(),
+            )),
+        };
+        wasm_host
+            .inner
+            .upsert(host::UpsertRequest {
+                canonical_id: Some("/src/UnsafeEnum.vue".to_string()),
+                input_id: "/src/UnsafeEnum.vue".to_string(),
+                source: std::sync::Arc::from(
+                    r#"<script setup lang="ts">
+enum Unsafe { Value = Math.random() }
+defineProps<{ value: Unsafe }>()
+</script>"#,
+                ),
+                file_language: host::FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert unsafe enum");
+        wasm_host
+            .inner
+            .upsert(host::UpsertRequest {
+                canonical_id: Some("/src/plain.ts".to_string()),
+                input_id: "/src/plain.ts".to_string(),
+                source: std::sync::Arc::from("export const value = 1"),
+                file_language: host::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert non-carrier control");
+
+        let failure = wasm_host
+            .public_api_with_mode("/src/UnsafeEnum.vue", Some("declaration"))
+            .expect("projection failure uses the result error rail");
+        assert!(failure.value.is_none());
+        let error = failure.error.expect("structured projection error");
+        assert_eq!(error.code, "tsc-generation");
+        assert_eq!(error.detail_code, "unsupported-declaration-shape");
+        assert_eq!(
+            error.subject,
+            FfiTscFailureSubject::Macro { syntax_index: 0 }
+        );
+        assert_eq!(
+            error.declaration_shape_reason.as_deref(),
+            Some("unsupported-enum-shape")
+        );
+        assert_eq!(error.member_ordinal, None);
+        assert_eq!(error.outcome_kind, None);
+        assert_eq!(error.outcome_reason, None);
+        assert_eq!(error.outcome_diagnostic, None);
+
+        for canonical in ["/src/Missing.vue", "/src/plain.ts"] {
+            let absent = wasm_host
+                .public_api_with_mode(canonical, Some("declaration"))
+                .expect("ordinary absence is a successful binding result");
+            assert!(absent.value.is_none(), "{canonical}: value must be null");
+            assert!(absent.error.is_none(), "{canonical}: error must be null");
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn public_api_js_serialization_uses_explicit_null_fields() {
+        let absent = public_api_to_wasm_value(&FfiPublicApiResult {
+            value: None,
+            error: None,
+        })
+        .expect("serialize absence");
+        let absent: serde_json::Value =
+            serde_wasm_bindgen::from_value(absent).expect("decode absence");
+        assert_eq!(absent, serde_json::json!({ "value": null, "error": null }));
+
+        let success = public_api_to_wasm_value(&FfiPublicApiResult {
+            value: Some(FfiTscResponse {
+                code: "export {};".to_string(),
+                source_map: None,
+            }),
+            error: None,
+        })
+        .expect("serialize success");
+        let success: serde_json::Value =
+            serde_wasm_bindgen::from_value(success).expect("decode success");
+        assert_eq!(
+            success,
+            serde_json::json!({
+                "value": { "code": "export {};", "sourceMap": null },
+                "error": null,
+            })
+        );
+
+        let cases = [
+            ("partial", "incomplete-traversal", "partial detail"),
+            ("unresolved", "ambiguous-reference", "unresolved detail"),
+            ("unsupported", "semantic-construct", "unsupported detail"),
+            ("invalid", "non-object-root", "invalid detail"),
+        ];
+        for (syntax_index, (kind, reason, diagnostic)) in cases.into_iter().enumerate() {
+            let failure = public_api_to_wasm_value(&FfiPublicApiResult {
+                value: None,
+                error: Some(FfiPublicApiProjectionError {
+                    code: "tsc-generation".to_string(),
+                    detail_code: "unavailable-outcome".to_string(),
+                    subject: FfiTscFailureSubject::Macro {
+                        syntax_index: syntax_index as u32,
+                    },
+                    declaration_shape_reason: None,
+                    member_ordinal: None,
+                    outcome_kind: Some(kind.to_string()),
+                    outcome_reason: Some(reason.to_string()),
+                    outcome_diagnostic: Some(diagnostic.to_string()),
+                }),
+            })
+            .expect("serialize failure");
+            let failure: serde_json::Value =
+                serde_wasm_bindgen::from_value(failure).expect("decode failure");
+            assert_eq!(
+                failure,
+                serde_json::json!({
+                    "value": null,
+                    "error": {
+                        "code": "tsc-generation",
+                        "detailCode": "unavailable-outcome",
+                        "subject": {
+                            "kind": "macro",
+                            "syntaxIndex": syntax_index,
+                        },
+                        "declarationShapeReason": null,
+                        "memberOrdinal": null,
+                        "outcomeKind": kind,
+                        "outcomeReason": reason,
+                        "outcomeDiagnostic": diagnostic,
+                    },
+                })
+            );
+        }
+
+        let attrs_failure = public_api_to_wasm_value(&FfiPublicApiResult {
+            value: None,
+            error: Some(FfiPublicApiProjectionError {
+                code: "tsc-generation".to_string(),
+                detail_code: "unavailable-outcome".to_string(),
+                subject: FfiTscFailureSubject::ScriptSetupAttrs {
+                    source_range: verter_span::Span::new(31, 37),
+                },
+                declaration_shape_reason: None,
+                member_ordinal: None,
+                outcome_kind: Some("invalid".to_string()),
+                outcome_reason: Some("malformed-or-recovered-type-syntax".to_string()),
+                outcome_diagnostic: None,
+            }),
+        })
+        .expect("serialize attrs failure");
+        let attrs_failure: serde_json::Value =
+            serde_wasm_bindgen::from_value(attrs_failure).expect("decode attrs failure");
+        assert_eq!(
+            attrs_failure["error"]["subject"],
+            serde_json::json!({
+                "kind": "scriptSetupAttrs",
+                "sourceRange": { "start": 31, "end": 37 },
+            })
         );
     }
 

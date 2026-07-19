@@ -11685,10 +11685,12 @@ fn tier_2_split_preserves_semantic_query_key_hashes() {
 
     let scope_a = ScopeId {
         canonical_id: Arc::from("/test/scope-a.vue"),
+        owner: verter_type_expr::TopLevelOwnerId::instance(0),
         local_scope: None,
     };
     let scope_b = ScopeId {
         canonical_id: Arc::from("/test/scope-b.vue"),
+        owner: verter_type_expr::TopLevelOwnerId::instance(0),
         local_scope: None,
     };
 

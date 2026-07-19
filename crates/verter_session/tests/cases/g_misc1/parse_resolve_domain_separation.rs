@@ -38,6 +38,7 @@ fn build_with_import(
         ImportTarget {
             source_specifier: specifier.to_string(),
             imported_name: imported.to_string(),
+            is_namespace: false,
             canonical_id: resolved_canonical.to_string(),
         },
     );

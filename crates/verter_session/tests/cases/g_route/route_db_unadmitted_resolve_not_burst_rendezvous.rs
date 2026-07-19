@@ -117,6 +117,7 @@ fn join_within<T: Send + 'static>(handle: thread::JoinHandle<T>, label: &str) ->
 fn superseded_route() -> RouteResult {
     RouteResult::Resolved {
         defining_canonical: "superseded_dep.ts".to_string(),
+        defining_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         defining_symbol: "Burst".to_string(),
     }
 }
@@ -126,6 +127,7 @@ fn superseded_route() -> RouteResult {
 fn live_route() -> RouteResult {
     RouteResult::Resolved {
         defining_canonical: "live_dep.ts".to_string(),
+        defining_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         defining_symbol: "Burst".to_string(),
     }
 }

@@ -4,6 +4,17 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::type_eval::{EvalEnv, ValueDeclInfo};
 use verter_semantic::analysis::types::{AnalyzedImport, ImportBindingKind};
 
+/// Exact identity of a top-level runtime value declaration.
+///
+/// `owner` is part of the identity for carrier files: module and instance
+/// declarations with the same name are distinct values.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ValueDeclIdentity {
+    pub canonical_id: String,
+    pub owner: verter_type_expr::TopLevelOwnerId,
+    pub name: String,
+}
+
 pub trait ImportedRuntimeValueResolver {
     fn dependency_eval_env(&self, canonical_id: &str) -> Option<Arc<EvalEnv>>;
 
@@ -16,32 +27,29 @@ pub trait ImportedRuntimeValueResolver {
     /// whole-env oracle below).
     fn dependency_value_symbol_graph_native(
         &self,
-        _source_canonical_id: &str,
-        _source_name: &str,
+        _source: &ValueDeclIdentity,
     ) -> Option<ValueDeclInfo> {
         None
     }
 
     fn prepared_value_decl(
         &self,
-        _canonical_id: &str,
-        _symbol_name: &str,
+        _source: &ValueDeclIdentity,
     ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
         None
     }
 
     fn resolve_value_export_target(
         &self,
-        _dep_canonical_id: &str,
-        _imported_name: &str,
-    ) -> Option<(String, String)> {
+        _requested: &ValueDeclIdentity,
+    ) -> Option<ValueDeclIdentity> {
         None
     }
 }
 
 pub fn materialize_imported_runtime_values_into_env<R: ImportedRuntimeValueResolver>(
     imports: &[AnalyzedImport],
-    owner_local_value_names: &FxHashSet<String>,
+    owner_local_value_names: &FxHashSet<verter_type_expr::DeclKey>,
     required_binding_names: Option<&FxHashSet<String>>,
     env: &mut EvalEnv,
     resolver: &R,
@@ -63,7 +71,10 @@ pub fn materialize_imported_runtime_values_into_env<R: ImportedRuntimeValueResol
             .filter(|binding| {
                 !binding.is_type_only
                     && !matches!(binding.kind, ImportBindingKind::Namespace)
-                    && !owner_local_value_names.contains(&binding.name)
+                    && !owner_local_value_names.contains(&verter_type_expr::DeclKey::new(
+                        import.owner,
+                        binding.name.as_str(),
+                    ))
                     && required_binding_names
                         .is_none_or(|required| required.contains(&binding.name))
             })
@@ -77,36 +88,31 @@ pub fn materialize_imported_runtime_values_into_env<R: ImportedRuntimeValueResol
                 .imported_name
                 .as_deref()
                 .unwrap_or(binding.name.as_str());
-            let (source_canonical_id, source_name) = resolver
-                .resolve_value_export_target(dep_canonical_id, imported_name)
-                .unwrap_or_else(|| (dep_canonical_id.to_string(), imported_name.to_string()));
-            if let Some(prepared_value) =
-                resolver.prepared_value_decl(&source_canonical_id, &source_name)
-            {
+            let requested = ValueDeclIdentity {
+                canonical_id: dep_canonical_id.to_string(),
+                owner: import.owner,
+                name: imported_name.to_string(),
+            };
+            let Some(target) = resolver.resolve_value_export_target(&requested) else {
+                continue;
+            };
+            if let Some(prepared_value) = resolver.prepared_value_decl(&target) {
                 let mut alias = prepared_value_decl_to_value_decl_info(prepared_value.as_ref());
+                alias.owner = import.owner;
                 alias.name = binding.name.clone();
                 env.add_value(alias);
                 continue;
             }
-            let dep_env = dep_env_cache
-                .entry(dep_canonical_id.to_string())
-                .or_insert_with(|| resolver.dependency_eval_env(dep_canonical_id));
-            let Some(dep_env) = dep_env.as_ref().cloned() else {
-                continue;
+            let source_env = match dep_env_cache
+                .entry(target.canonical_id.clone())
+                .or_insert_with(|| resolver.dependency_eval_env(&target.canonical_id))
+                .as_ref()
+            {
+                Some(env) => Arc::clone(env),
+                None => continue,
             };
-            let source_env = if source_canonical_id == dep_canonical_id {
-                Arc::clone(&dep_env)
-            } else {
-                match dep_env_cache
-                    .entry(source_canonical_id.clone())
-                    .or_insert_with(|| resolver.dependency_eval_env(&source_canonical_id))
-                    .as_ref()
-                {
-                    Some(env) => Arc::clone(env),
-                    None => continue,
-                }
-            };
-            let Some(dep_group) = source_env.value_symbols.get(&source_name) else {
+            let Some(dep_group) = source_env.value_group_in(target.owner, target.name.as_str())
+            else {
                 continue;
             };
 
@@ -118,18 +124,18 @@ pub fn materialize_imported_runtime_values_into_env<R: ImportedRuntimeValueResol
             // returns `None` and skips the check. Release builds skip this
             // entirely; the oracle below stays authoritative.
             #[cfg(debug_assertions)]
-            if let Some(graph_native) =
-                resolver.dependency_value_symbol_graph_native(&source_canonical_id, &source_name)
-            {
+            if let Some(graph_native) = resolver.dependency_value_symbol_graph_native(&target) {
                 debug_assert_eq!(
                     graph_native.kind, primary.kind,
                     "graph-native consumer-reader readiness: C4 graph-native value reader kind diverged for \
-                     ({source_canonical_id}, {source_name})"
+                     ({}, {:?}, {})",
+                    target.canonical_id, target.owner, target.name,
                 );
                 debug_assert_eq!(
                     graph_native.type_annotation, primary.type_annotation,
                     "graph-native consumer-reader readiness: C4 graph-native value reader type_annotation diverged for \
-                     ({source_canonical_id}, {source_name})"
+                     ({}, {:?}, {})",
+                    target.canonical_id, target.owner, target.name,
                 );
                 // `FunctionSignature` does not implement `PartialEq`;
                 // compare via the structural debug projection.
@@ -137,21 +143,25 @@ pub fn materialize_imported_runtime_values_into_env<R: ImportedRuntimeValueResol
                     format!("{:?}", graph_native.signatures),
                     format!("{:?}", primary.signatures),
                     "graph-native consumer-reader readiness: C4 graph-native value reader signatures diverged for \
-                     ({source_canonical_id}, {source_name})"
+                     ({}, {:?}, {})",
+                    target.canonical_id, target.owner, target.name,
                 );
                 debug_assert_eq!(
                     graph_native.object_shape, primary.object_shape,
                     "graph-native consumer-reader readiness: C4 graph-native value reader object_shape diverged for \
-                     ({source_canonical_id}, {source_name})"
+                     ({}, {:?}, {})",
+                    target.canonical_id, target.owner, target.name,
                 );
                 debug_assert_eq!(
                     graph_native.enum_members, primary.enum_members,
                     "graph-native consumer-reader readiness: C4 graph-native value reader enum_members diverged for \
-                     ({source_canonical_id}, {source_name})"
+                     ({}, {:?}, {})",
+                    target.canonical_id, target.owner, target.name,
                 );
             }
 
             let mut alias = primary.clone();
+            alias.owner = import.owner;
             alias.name = binding.name.clone();
             env.add_value(alias);
         }
@@ -162,6 +172,7 @@ fn prepared_value_decl_to_value_decl_info(
     prepared: &verter_semantic::analysis::type_solver::PreparedValueDecl,
 ) -> ValueDeclInfo {
     ValueDeclInfo {
+        owner: prepared.root_identity.owner,
         name: prepared.root_identity.symbol_name.as_ref().to_string(),
         declaration_id: 0,
         kind: prepared.kind,
@@ -190,7 +201,10 @@ fn prepared_value_decl_to_value_decl_info(
 
 #[cfg(test)]
 mod tests {
-    use super::{materialize_imported_runtime_values_into_env, ImportedRuntimeValueResolver};
+    use super::{
+        materialize_imported_runtime_values_into_env, ImportedRuntimeValueResolver,
+        ValueDeclIdentity,
+    };
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::cell::RefCell;
     use std::sync::Arc;
@@ -216,15 +230,49 @@ mod tests {
         }
     }
 
+    fn value_decl(
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+        annotation: &str,
+    ) -> ValueDeclInfo {
+        ValueDeclInfo {
+            owner,
+            name: name.to_string(),
+            declaration_id: 0,
+            kind: ValueDeclKind::Const,
+            type_annotation: string_literal_annotation(annotation),
+            signatures: Vec::new(),
+            object_shape: None,
+            enum_members: None,
+            enum_member_names: None,
+        }
+    }
+
     #[derive(Default)]
     struct TestResolver {
         dep_envs: FxHashMap<String, Arc<EvalEnv>>,
         prepared_values: FxHashMap<
-            (String, String),
+            ValueDeclIdentity,
             Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>,
         >,
         lookup_counts: RefCell<FxHashMap<String, usize>>,
-        value_export_targets: FxHashMap<(String, String), (String, String)>,
+        value_export_targets: FxHashMap<ValueDeclIdentity, ValueDeclIdentity>,
+    }
+
+    impl TestResolver {
+        fn add_direct_target(
+            &mut self,
+            canonical_id: &str,
+            owner: verter_type_expr::TopLevelOwnerId,
+            name: &str,
+        ) {
+            let identity = ValueDeclIdentity {
+                canonical_id: canonical_id.to_string(),
+                owner,
+                name: name.to_string(),
+            };
+            self.value_export_targets.insert(identity.clone(), identity);
+        }
     }
 
     impl ImportedRuntimeValueResolver for TestResolver {
@@ -239,22 +287,16 @@ mod tests {
 
         fn prepared_value_decl(
             &self,
-            canonical_id: &str,
-            symbol_name: &str,
+            source: &ValueDeclIdentity,
         ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
-            self.prepared_values
-                .get(&(canonical_id.to_string(), symbol_name.to_string()))
-                .cloned()
+            self.prepared_values.get(source).cloned()
         }
 
         fn resolve_value_export_target(
             &self,
-            dep_canonical_id: &str,
-            imported_name: &str,
-        ) -> Option<(String, String)> {
-            self.value_export_targets
-                .get(&(dep_canonical_id.to_string(), imported_name.to_string()))
-                .cloned()
+            requested: &ValueDeclIdentity,
+        ) -> Option<ValueDeclIdentity> {
+            self.value_export_targets.get(requested).cloned()
         }
     }
 
@@ -262,6 +304,7 @@ mod tests {
     fn materialize_imported_runtime_values_keeps_same_name_named_imports() {
         let imports = vec![AnalyzedImport {
             source: "./dep".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "theme".to_string(),
@@ -277,6 +320,7 @@ mod tests {
         let mut dep_env = EvalEnv::new();
         dep_env.add_value(ValueDeclInfo {
             name: "theme".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             declaration_id: 1,
             kind: ValueDeclKind::Const,
             type_annotation: string_literal_annotation("dark"),
@@ -290,7 +334,11 @@ mod tests {
         resolver
             .dep_envs
             .insert("/src/dep.ts".to_string(), Arc::new(dep_env));
-
+        resolver.add_direct_target(
+            "/src/dep.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "theme",
+        );
         let mut env = EvalEnv::new();
         materialize_imported_runtime_values_into_env(
             &imports,
@@ -307,6 +355,7 @@ mod tests {
     fn materialize_imported_runtime_values_prefers_prepared_value_decl() {
         let imports = vec![AnalyzedImport {
             source: "./dep".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "theme".to_string(),
@@ -321,9 +370,18 @@ mod tests {
         }];
 
         let mut resolver = TestResolver::default();
-        resolver
-            .prepared_values
-            .insert(("/src/dep.ts".to_string(), "theme".to_string()), {
+        resolver.add_direct_target(
+            "/src/dep.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "theme",
+        );
+        resolver.prepared_values.insert(
+            ValueDeclIdentity {
+                canonical_id: "/src/dep.ts".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                name: "theme".to_string(),
+            },
+            {
                 let mut decl = verter_semantic::analysis::type_solver::PreparedValueDecl::new(
                     verter_semantic::analysis::type_solver::ResolvedRootIdentity::new(
                         "/src/dep.ts",
@@ -334,7 +392,8 @@ mod tests {
                 decl.exported_name = Some("theme".to_string());
                 decl.type_annotation = string_literal_annotation("dark");
                 Arc::new(decl)
-            });
+            },
+        );
 
         let mut env = EvalEnv::new();
         materialize_imported_runtime_values_into_env(
@@ -356,6 +415,7 @@ mod tests {
     fn materialize_imported_runtime_values_skips_owner_shadowed_values() {
         let imports = vec![AnalyzedImport {
             source: "./dep".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "theme".to_string(),
@@ -371,6 +431,7 @@ mod tests {
         let mut dep_env = EvalEnv::new();
         dep_env.add_value(ValueDeclInfo {
             name: "themeConfig".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             declaration_id: 2,
             kind: ValueDeclKind::Const,
             type_annotation: string_literal_annotation("dark"),
@@ -388,6 +449,7 @@ mod tests {
         let mut env = EvalEnv::new();
         env.add_value(ValueDeclInfo {
             name: "theme".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             declaration_id: 3,
             kind: ValueDeclKind::Const,
             type_annotation: string_literal_annotation("local"),
@@ -398,7 +460,10 @@ mod tests {
         });
         materialize_imported_runtime_values_into_env(
             &imports,
-            &FxHashSet::from_iter(["theme".to_string()]),
+            &FxHashSet::from_iter([verter_type_expr::DeclKey::new(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "theme",
+            )]),
             None,
             &mut env,
             &resolver,
@@ -416,6 +481,7 @@ mod tests {
     fn materialize_imported_runtime_values_filters_to_requested_bindings() {
         let imports = vec![AnalyzedImport {
             source: "./dep".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_only: false,
             bindings: vec![
                 AnalyzedImportBinding {
@@ -441,6 +507,7 @@ mod tests {
         let mut dep_env = EvalEnv::new();
         dep_env.add_value(ValueDeclInfo {
             name: "theme".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             declaration_id: 1,
             kind: ValueDeclKind::Const,
             type_annotation: string_literal_annotation("dark"),
@@ -451,6 +518,7 @@ mod tests {
         });
         dep_env.add_value(ValueDeclInfo {
             name: "helper".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             declaration_id: 2,
             kind: ValueDeclKind::Const,
             type_annotation: string_literal_annotation("helper"),
@@ -464,6 +532,11 @@ mod tests {
         resolver
             .dep_envs
             .insert("/src/dep.ts".to_string(), Arc::new(dep_env));
+        resolver.add_direct_target(
+            "/src/dep.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "theme",
+        );
 
         let mut env = EvalEnv::new();
         let required = FxHashSet::from_iter(["theme".to_string()]);
@@ -484,6 +557,7 @@ mod tests {
         let imports = vec![
             AnalyzedImport {
                 source: "./used".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 is_type_only: false,
                 bindings: vec![AnalyzedImportBinding {
                     name: "theme".to_string(),
@@ -498,6 +572,7 @@ mod tests {
             },
             AnalyzedImport {
                 source: "./unused".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 is_type_only: false,
                 bindings: vec![AnalyzedImportBinding {
                     name: "helper".to_string(),
@@ -514,6 +589,7 @@ mod tests {
         let mut used_env = EvalEnv::new();
         used_env.add_value(ValueDeclInfo {
             name: "theme".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             declaration_id: 1,
             kind: ValueDeclKind::Const,
             type_annotation: string_literal_annotation("dark"),
@@ -525,6 +601,7 @@ mod tests {
         let mut unused_env = EvalEnv::new();
         unused_env.add_value(ValueDeclInfo {
             name: "helper".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             declaration_id: 2,
             kind: ValueDeclKind::Const,
             type_annotation: string_literal_annotation("helper"),
@@ -538,6 +615,11 @@ mod tests {
         resolver
             .dep_envs
             .insert("/src/used.ts".to_string(), Arc::new(used_env));
+        resolver.add_direct_target(
+            "/src/used.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "theme",
+        );
         resolver
             .dep_envs
             .insert("/src/unused.ts".to_string(), Arc::new(unused_env));
@@ -579,6 +661,7 @@ mod tests {
     fn materialize_imported_runtime_values_follows_default_export_target() {
         let imports = vec![AnalyzedImport {
             source: "./theme".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "theme".to_string(),
@@ -595,6 +678,7 @@ mod tests {
         let mut dep_env = EvalEnv::new();
         dep_env.add_value(ValueDeclInfo {
             name: "theme".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             declaration_id: 1,
             kind: ValueDeclKind::Const,
             type_annotation: string_literal_annotation("primary"),
@@ -605,11 +689,13 @@ mod tests {
         });
         dep_env.add_value(ValueDeclInfo {
             name: "default".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             declaration_id: 2,
             kind: ValueDeclKind::Const,
             type_annotation: ValueTypeAnnotationFact {
                 typeof_alias_target: Some(verter_type_expr::facts::ValueDeclIdentityPart {
                     canonical_id: Arc::from("/src/theme.ts"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     symbol: Arc::from("theme"),
                     member_path: Arc::from(Vec::<String>::new().into_boxed_slice()),
                 }),
@@ -627,8 +713,16 @@ mod tests {
             .dep_envs
             .insert("/src/theme.ts".to_string(), Arc::new(dep_env));
         resolver.value_export_targets.insert(
-            ("/src/theme.ts".to_string(), "default".to_string()),
-            ("/src/theme.ts".to_string(), "theme".to_string()),
+            ValueDeclIdentity {
+                canonical_id: "/src/theme.ts".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                name: "default".to_string(),
+            },
+            ValueDeclIdentity {
+                canonical_id: "/src/theme.ts".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                name: "theme".to_string(),
+            },
         );
 
         let mut env = EvalEnv::new();
@@ -653,6 +747,7 @@ mod tests {
     fn materialize_imported_runtime_values_skips_unresolved_import_without_canonical_id() {
         let imports = vec![AnalyzedImport {
             source: "./theme".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "theme".to_string(),
@@ -669,6 +764,7 @@ mod tests {
         let mut dep_env = EvalEnv::new();
         dep_env.add_value(ValueDeclInfo {
             name: "theme".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             declaration_id: 1,
             kind: ValueDeclKind::Const,
             type_annotation: string_literal_annotation("primary"),
@@ -701,22 +797,21 @@ mod tests {
     #[test]
     fn resolved_canonical_id_on_import_hydrates_without_fallback() {
         let mut dep_env = EvalEnv::new();
-        dep_env.value_symbols.insert(
-            "defaults".to_string(),
-            verter_semantic::analysis::type_eval::ValueDeclGroup::new(ValueDeclInfo {
-                name: "defaults".to_string(),
-                declaration_id: 0,
-                kind: ValueDeclKind::Const,
-                type_annotation: string_literal_annotation("cached"),
-                signatures: Vec::new(),
-                object_shape: None,
-                enum_members: None,
-                enum_member_names: None,
-            }),
-        );
+        dep_env.add_value(ValueDeclInfo {
+            name: "defaults".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            declaration_id: 0,
+            kind: ValueDeclKind::Const,
+            type_annotation: string_literal_annotation("cached"),
+            signatures: Vec::new(),
+            object_shape: None,
+            enum_members: None,
+            enum_member_names: None,
+        });
 
         let imports = vec![AnalyzedImport {
             source: "./dep".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_only: false,
             // Pre-resolved canonical ID from shallow import edge
             resolved_canonical_id: Some("/resolved/dep.ts".to_string()),
@@ -735,6 +830,11 @@ mod tests {
         resolver
             .dep_envs
             .insert("/resolved/dep.ts".to_string(), Arc::new(dep_env));
+        resolver.add_direct_target(
+            "/resolved/dep.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "defaults",
+        );
 
         let mut env = EvalEnv::new();
         materialize_imported_runtime_values_into_env(
@@ -751,6 +851,126 @@ mod tests {
                 .map(|v| v.primary().type_annotation.clone()),
             Some(string_literal_annotation("cached")),
             "runtime value materialization should use import.resolved_canonical_id directly"
+        );
+    }
+
+    #[test]
+    fn vue_instance_source_is_selected_and_alias_is_rehomed_to_module_owner() {
+        let module_owner = verter_type_expr::TopLevelOwnerId::module(0);
+        let instance_owner = verter_type_expr::TopLevelOwnerId::instance(0);
+        let imports = vec![AnalyzedImport {
+            source: "./Child.vue".to_string(),
+            owner: module_owner,
+            is_type_only: false,
+            bindings: vec![AnalyzedImportBinding {
+                name: "childShared".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: Some("shared".to_string()),
+                is_type_only: false,
+                vue_api: None,
+                span: Span::new(0, 0),
+            }],
+            span: Span::new(0, 0),
+            resolved_canonical_id: Some("/src/Child.vue".to_string()),
+        }];
+        let mut dep_env = EvalEnv::new();
+        dep_env.add_value(value_decl(module_owner, "shared", "vue-module"));
+        dep_env.add_value(value_decl(instance_owner, "shared", "vue-instance"));
+
+        let requested = ValueDeclIdentity {
+            canonical_id: "/src/Child.vue".to_string(),
+            owner: module_owner,
+            name: "shared".to_string(),
+        };
+        let target = ValueDeclIdentity {
+            canonical_id: "/src/Child.vue".to_string(),
+            owner: instance_owner,
+            name: "shared".to_string(),
+        };
+        let mut resolver = TestResolver::default();
+        resolver
+            .dep_envs
+            .insert("/src/Child.vue".to_string(), Arc::new(dep_env));
+        resolver.value_export_targets.insert(requested, target);
+
+        let mut env = EvalEnv::new();
+        materialize_imported_runtime_values_into_env(
+            &imports,
+            &FxHashSet::default(),
+            None,
+            &mut env,
+            &resolver,
+        );
+
+        assert_eq!(
+            env.value_group_in(module_owner, "childShared")
+                .map(|group| group.primary().type_annotation.clone()),
+            Some(string_literal_annotation("vue-instance")),
+            "the exact instance-owner source must win over the same-name module declaration",
+        );
+        assert!(
+            env.value_group_in(instance_owner, "childShared").is_none(),
+            "the hydrated alias belongs to the import's lexical module owner",
+        );
+    }
+
+    #[test]
+    fn svelte_module_source_is_selected_and_alias_is_rehomed_to_instance_owner() {
+        let module_owner = verter_type_expr::TopLevelOwnerId::module(0);
+        let instance_owner = verter_type_expr::TopLevelOwnerId::instance(0);
+        let imports = vec![AnalyzedImport {
+            source: "./Child.svelte".to_string(),
+            owner: instance_owner,
+            is_type_only: false,
+            bindings: vec![AnalyzedImportBinding {
+                name: "childShared".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: Some("shared".to_string()),
+                is_type_only: false,
+                vue_api: None,
+                span: Span::new(0, 0),
+            }],
+            span: Span::new(0, 0),
+            resolved_canonical_id: Some("/src/Child.svelte".to_string()),
+        }];
+        let mut dep_env = EvalEnv::new();
+        dep_env.add_value(value_decl(module_owner, "shared", "svelte-module"));
+        dep_env.add_value(value_decl(instance_owner, "shared", "svelte-instance"));
+
+        let requested = ValueDeclIdentity {
+            canonical_id: "/src/Child.svelte".to_string(),
+            owner: instance_owner,
+            name: "shared".to_string(),
+        };
+        let target = ValueDeclIdentity {
+            canonical_id: "/src/Child.svelte".to_string(),
+            owner: module_owner,
+            name: "shared".to_string(),
+        };
+        let mut resolver = TestResolver::default();
+        resolver
+            .dep_envs
+            .insert("/src/Child.svelte".to_string(), Arc::new(dep_env));
+        resolver.value_export_targets.insert(requested, target);
+
+        let mut env = EvalEnv::new();
+        materialize_imported_runtime_values_into_env(
+            &imports,
+            &FxHashSet::default(),
+            None,
+            &mut env,
+            &resolver,
+        );
+
+        assert_eq!(
+            env.value_group_in(instance_owner, "childShared")
+                .map(|group| group.primary().type_annotation.clone()),
+            Some(string_literal_annotation("svelte-module")),
+            "the exact module-owner source must win over the same-name instance declaration",
+        );
+        assert!(
+            env.value_group_in(module_owner, "childShared").is_none(),
+            "the hydrated alias belongs to the import's lexical instance owner",
         );
     }
 }

@@ -531,7 +531,7 @@ pub struct ImportedRegistryEntry {
     pub validated_at_generation: u64,
 }
 
-pub type ImportedRegistryKey = (Arc<str>, Arc<str>);
+pub type ImportedRegistryKey = (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>);
 
 /// The value the imported-registry store holds per candidate.
 pub type ImportedRegistryValue = Option<Arc<ResolvedImportedRegistrySymbol>>;
@@ -862,7 +862,11 @@ impl ImportedRegistryDb {
     /// `evict_if_schema_mismatch()`.
     #[cfg(any(test, feature = "test-support"))]
     pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
-        let key: ImportedRegistryKey = (Arc::from(marker), Arc::from("synthetic"));
+        let key: ImportedRegistryKey = (
+            Arc::from(marker),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from("synthetic"),
+        );
         let entry = Arc::new(ImportedRegistryEntry {
             value: None,
             fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
@@ -922,10 +926,10 @@ impl crate::cache_schema::CacheSchemaVersioned for ImportedRegistryDb {
 }
 
 // ===========================================================================
-// 2. DeclarationLookupDb — `(canonical, name) → ResolvedTypeDeclaration`
+// 2. DeclarationLookupDb — `(canonical, owner, name) → ResolvedTypeDeclaration`
 // ===========================================================================
 
-pub type DeclarationLookupKey = (Arc<str>, Arc<str>);
+pub type DeclarationLookupKey = (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>);
 
 pub struct DeclarationLookupDb {
     entries: DashMap<DeclarationLookupKey, Arc<CacheEntry<Arc<ResolvedTypeDeclaration>>>>,
@@ -1049,7 +1053,7 @@ impl DeclarationLookupDb {
             .entries
             .iter()
             .filter_map(|entry| {
-                let (canonical, _) = entry.key();
+                let (canonical, _, _) = entry.key();
                 if canonical.as_ref() == canonical_id {
                     Some(entry.key().clone())
                 } else {
@@ -1085,10 +1089,10 @@ impl Default for DeclarationLookupDb {
 }
 
 // ===========================================================================
-// 3. ResolvabilityDb — `(canonical, name) → bool`
+// 3. ResolvabilityDb — `(canonical, owner, name) → bool`
 // ===========================================================================
 
-pub type ResolvabilityKey = (Arc<str>, Arc<str>);
+pub type ResolvabilityKey = (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>);
 
 pub struct ResolvabilityDb {
     entries: DashMap<ResolvabilityKey, Arc<CacheEntry<bool>>>,
@@ -1195,7 +1199,7 @@ impl ResolvabilityDb {
             .entries
             .iter()
             .filter_map(|entry| {
-                let (canonical, _) = entry.key();
+                let (canonical, _, _) = entry.key();
                 if canonical.as_ref() == canonical_id {
                     Some(entry.key().clone())
                 } else {
@@ -1231,7 +1235,7 @@ impl Default for ResolvabilityDb {
 }
 
 // ===========================================================================
-// 4. OwnerCollectionDb — `(owner, name) → Option<AuthoredBodyLocator>`
+// 4. OwnerCollectionDb — `(canonical, owner, name) → Option<AuthoredBodyLocator>`
 //
 // Note: keyed solely by name within an owner scope. Since multiple owners
 // may collide on the same name with different collection bodies, the entry
@@ -1247,7 +1251,7 @@ impl Default for ResolvabilityDb {
 // only, not a key or validity-oracle change.
 // ===========================================================================
 
-pub type OwnerCollectionKey = (Arc<str>, Arc<str>); // (owner, name)
+pub type OwnerCollectionKey = (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>);
 
 pub struct OwnerCollectionDb {
     entries: DashMap<
@@ -1367,8 +1371,8 @@ impl OwnerCollectionDb {
             .entries
             .iter()
             .filter_map(|entry| {
-                let (owner, _) = entry.key();
-                if owner.as_ref() == canonical_id {
+                let (canonical, _, _) = entry.key();
+                if canonical.as_ref() == canonical_id {
                     Some(entry.key().clone())
                 } else {
                     None
@@ -2608,6 +2612,7 @@ impl MaterializeStructureDb {
         let key = MaterializationCacheKey {
             decl: ResolvedDeclSlotIdentity::type_slot(
                 Arc::from(marker),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("__schema_test__"),
                 0,
                 [0u8; 16],
@@ -2888,7 +2893,11 @@ impl RefCycleResultDb {
     fn key_for(id: &DeclIdentity, ctx: &dyn ResolverContext) -> RefCycleResultKey {
         let dispatch = ctx.dispatch();
         RefCycleResultKey {
-            root: dispatch.type_slot_for(Arc::clone(&id.canonical_id), Arc::clone(&id.decl_name)),
+            root: dispatch.type_slot_for(
+                Arc::clone(&id.canonical_id),
+                id.owner,
+                Arc::clone(&id.decl_name),
+            ),
             resolve_env_hash: dispatch.resolve_env_hash_for(&id.canonical_id),
             version: REF_CYCLE_RESULT_VERSION,
         }

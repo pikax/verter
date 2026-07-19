@@ -42,6 +42,7 @@ fn invalidate_canonical_touches_only_indexed_entries() {
     for i in 0..K {
         let key: ImportedRegistryKey = (
             Arc::clone(&target_arc),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from(format!("name-{i}").as_str()),
         );
         let entry = Arc::new(ImportedRegistryEntry {
@@ -58,6 +59,7 @@ fn invalidate_canonical_touches_only_indexed_entries() {
         for slot in 0..10u64 {
             let key: ImportedRegistryKey = (
                 Arc::clone(&canonical_arc),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from(format!("name-{shard}-{slot}").as_str()),
             );
             let entry = Arc::new(ImportedRegistryEntry {

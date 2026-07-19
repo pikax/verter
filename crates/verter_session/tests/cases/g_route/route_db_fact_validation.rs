@@ -87,6 +87,7 @@ fn cross_consumer_route_hit_produces_one_entry() {
                 Some((
                     RouteResult::Resolved {
                         defining_canonical: "foo.ts".to_owned(),
+                        defining_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         defining_symbol: "Foo".to_owned(),
                     },
                     vec![FactVersionRef::FileWholeHash {

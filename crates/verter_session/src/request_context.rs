@@ -165,10 +165,22 @@ pub fn current_request_result_is_partial() -> bool {
 /// the request's lifetime. No-op when no `RequestContext` is installed
 /// (the scope fold is still attempted — it is `RequestContext`-independent).
 pub fn mark_request_result_partial() {
+    mark_request_result_partial_with(PartialReasonSet::PROPAGATED);
+}
+
+/// Mark a locally exhausted semantic-inference budget without erasing its
+/// structural partial-reason class. This is separate from propagated
+/// partiality because macro handoff consumers classify budget exhaustion
+/// deterministically.
+pub(crate) fn mark_request_result_inference_budget_exceeded() {
+    mark_request_result_partial_with(PartialReasonSet::BUDGET_EXCEEDED);
+}
+
+fn mark_request_result_partial_with(reasons: PartialReasonSet) {
     if let Some(ctx) = current_request_context() {
         ctx.request_result_is_partial.store(true, Ordering::Relaxed);
     }
-    fold_cold_compute_completeness(ResultCompleteness::partial(PartialReasonSet::PROPAGATED));
+    fold_cold_compute_completeness(ResultCompleteness::partial(reasons));
 }
 
 /// Fold a JOINED result completeness into the active suppress state — the

@@ -71,6 +71,7 @@ fn route_fact() -> FactVersionRef {
 fn resolved_route() -> RouteResult {
     RouteResult::Resolved {
         defining_canonical: "cold_dep.ts".to_string(),
+        defining_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         defining_symbol: "ColdExport".to_string(),
     }
 }

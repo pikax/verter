@@ -154,6 +154,7 @@ fn imported_registry_seed_refresh_does_not_engage_skip_under_graph_only_authorit
         declaration_id: None,
         resolved_name: "Props".to_string(),
         canonical_source: "/src/types.ts".to_string(),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         span: verter_span::Span::default(),
         kind: crate::resolver_core::ResolvedDeclarationKind::Interface,
         text: Some("export interface Props { label?: string }".to_string()),
@@ -191,6 +192,7 @@ fn imported_registry_seed_refresh_keeps_symbolic_imported_surfaces_refreshable()
         declaration_id: None,
         resolved_name: "Button".to_string(),
         canonical_source: "/src/types.ts".to_string(),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         span: verter_span::Span::default(),
         kind: crate::resolver_core::ResolvedDeclarationKind::TypeAlias,
         text: Some("export type Button = VariantProps<typeof config>".to_string()),
@@ -201,6 +203,7 @@ fn imported_registry_seed_refresh_keeps_symbolic_imported_surfaces_refreshable()
                 object: verter_type_expr::locators::TypeBodySlot {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
                         canonical_id: Arc::from("/src/types.ts"),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         symbol: Arc::from("Button"),
                         space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                     },
@@ -5207,10 +5210,18 @@ defineProps<Props>()
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
     let result1 = query_engine
-        .resolve_imported_registry_symbol("/src/types.ts", "Props")
+        .resolve_imported_registry_symbol(
+            "/src/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Props",
+        )
         .expect("Props should resolve from DB-backed prepared declarations");
     let result2 = query_engine
-        .resolve_imported_registry_symbol("/src/types.ts", "Props")
+        .resolve_imported_registry_symbol(
+            "/src/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Props",
+        )
         .expect("repeated resolution should stay stable");
 
     assert_eq!(
@@ -5261,7 +5272,11 @@ fn component_meta_query_engine_routes_imported_registry_symbols_to_the_defining_
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
     let resolved = query_engine
-        .resolve_imported_registry_symbol("/src/index.ts", "ButtonProps")
+        .resolve_imported_registry_symbol(
+            "/src/index.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "ButtonProps",
+        )
         .expect("barrel export should resolve through DB-backed route facts");
 
     assert_eq!(
@@ -5927,23 +5942,48 @@ defineProps<{ x: string }>()
 
     // Built-in names should NOT be resolvable
     assert!(
-        !query_engine.can_resolve_registry_symbol("/src/App.vue", "Partial", None),
+        !query_engine.can_resolve_registry_symbol(
+            "/src/App.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            "Partial",
+            None,
+        ),
         "Partial is a builtin and should not be resolvable as a registry ref"
     );
     assert!(
-        !query_engine.can_resolve_registry_symbol("/src/App.vue", "Array", None),
+        !query_engine.can_resolve_registry_symbol(
+            "/src/App.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            "Array",
+            None,
+        ),
         "Array is a builtin and should not be resolvable as a registry ref"
     );
     assert!(
-        !query_engine.can_resolve_registry_symbol("/src/App.vue", "Record", None),
+        !query_engine.can_resolve_registry_symbol(
+            "/src/App.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            "Record",
+            None,
+        ),
         "Record is a builtin and should not be resolvable as a registry ref"
     );
     assert!(
-        query_engine.can_resolve_registry_symbol("/src/App.vue", "Props", Some("/src/types.ts")),
+        query_engine.can_resolve_registry_symbol(
+            "/src/App.vue",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Props",
+            Some("/src/types.ts"),
+        ),
         "imported registry refs should resolve from DB-backed prepared declarations"
     );
     assert!(
-        !query_engine.can_resolve_registry_symbol("/src/App.vue", "Missing", Some("/src/types.ts")),
+        !query_engine.can_resolve_registry_symbol(
+            "/src/App.vue",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Missing",
+            Some("/src/types.ts"),
+        ),
         "missing imported registry refs should still report unresolved"
     );
 }
@@ -7900,6 +7940,7 @@ mod node_predicates_tests {
     fn synthetic_decl_identity(decl_name: &str) -> DeclIdentity {
         DeclIdentity {
             canonical_id: StdArc::from("/test/local.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [0u8; 16],
             decl_name: StdArc::from(decl_name),
         }
@@ -7908,6 +7949,7 @@ mod node_predicates_tests {
     fn package_decl_identity(decl_name: &str) -> DeclIdentity {
         DeclIdentity {
             canonical_id: StdArc::from("/repo/node_modules/some-pkg/index.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [0u8; 16],
             decl_name: StdArc::from(decl_name),
         }
@@ -7920,6 +7962,7 @@ mod node_predicates_tests {
         // route branch so userland shadowing is preserved.
         DeclIdentity {
             canonical_id: StdArc::from("__builtin__"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [0u8; 16],
             decl_name: StdArc::from(name),
         }
@@ -7954,6 +7997,7 @@ mod node_predicates_tests {
         // the registry-route branch to fire.
         let pick_builtin = DeclIdentity {
             canonical_id: StdArc::from("__builtin__"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [0u8; 16],
             decl_name: StdArc::from("Pick"),
         };
@@ -8271,6 +8315,7 @@ defineProps<{ value: A }>()
             .expect("cycle.ts must be indexed");
         let a_identity = DeclIdentity {
             canonical_id: StdArc::from(cycle_canonical),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: shallow.whole_hash,
             decl_name: StdArc::from("A"),
         };
@@ -9162,7 +9207,7 @@ const model = defineModel<string>()
         "fixture precondition: `defineModel<string>()` is a type-based model macro"
     );
 
-    let owner = build_owner_decl_identity(host, "/src/App.vue");
+    let owner = build_owner_decl_identity(host, "/src/App.vue", mac.owner);
 
     // A non-`Model` cursor (here `Props`) MUST be rejected by the kind check —
     // `project_model` returns `None` without publishing the model surface under

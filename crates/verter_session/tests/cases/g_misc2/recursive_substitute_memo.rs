@@ -123,12 +123,14 @@ fn lower_mapped(host: &Arc<VerterHost>) -> SemanticNodeId {
         Some(SemanticNodeData::Opaque(
             verter_session::semantic_query::QueryError::DeclPlaceholder {
                 canonical_id,
+                owner,
                 name,
                 whole_hash,
             },
         )) => {
             let identity = verter_session::semantic_query::DeclIdentity {
                 canonical_id: Arc::clone(canonical_id),
+                owner: *owner,
                 whole_hash: *whole_hash,
                 decl_name: Arc::clone(name),
             };

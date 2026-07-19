@@ -140,6 +140,104 @@ fn host_with_svelte(
     (host, view)
 }
 
+#[test]
+fn instance_export_type_resolution_uses_the_exact_binding_owner() {
+    let canonical = "/OwnerExact.svelte";
+    let source = "<script module lang=\"ts\">\n\
+             export const shared: string = 'module';\n\
+             </script>\n\
+             <script lang=\"ts\">\n\
+             export const shared: number = 1;\n\
+             </script>\n\
+             <div />";
+    let (host, view) = host_with_svelte(canonical, source);
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, canonical)
+        .expect("svelte facts");
+    let export = facts
+        .instance_exports
+        .iter()
+        .find(|export| export.exported_name == "shared")
+        .expect("instance shared export");
+    assert_eq!(
+        export.binding_key.owner,
+        verter_type_expr::TopLevelOwnerId::instance(0),
+        "the capture preserves the instance binding owner"
+    );
+
+    let outcome =
+        resolve_svelte_surface(&host, &ctx, canonical, SvelteSurfaceSource::InstanceExports);
+    let ResolvedOutcome::Resolved(dtos) = outcome else {
+        panic!("the instance-export surface must resolve, got {outcome:?}");
+    };
+    let shared = dtos
+        .expose
+        .as_ref()
+        .and_then(|surface| {
+            surface
+                .members
+                .iter()
+                .find(|member| member.name == "shared")
+        })
+        .expect("the instance `shared` member publishes");
+    assert_eq!(
+        shared.value,
+        Some(
+            crate::typeinfo::framework_surface::results::NamedTypeMemberOutput::Primitive(
+                verter_type_expr::PrimitiveName::Number,
+            )
+        ),
+        "the instance binding resolves as number, never the module string binding"
+    );
+    assert_eq!(shared.type_annotation.as_deref(), Some("number"));
+}
+
+#[test]
+fn exported_route_closure_keeps_same_name_class_owners_disjoint() {
+    let canonical = "/RouteOwnerExact.svelte";
+    let source = "<script module lang=\"ts\">\n\
+             import type { ModuleDep } from './module-dep';\n\
+             class Shared { value!: ModuleDep }\n\
+             export { Shared as ModuleShared };\n\
+             </script>\n\
+             <script lang=\"ts\">\n\
+             import type { InstanceDep } from './instance-dep';\n\
+             class Shared { value!: InstanceDep }\n\
+             export { Shared as InstanceShared };\n\
+             </script>\n\
+             <div />";
+    let (host, _view) = host_with_svelte(canonical, source);
+
+    let instance = host.required_import_routes_for_exported_route(
+        canonical,
+        "InstanceShared",
+        &crate::resolver_core::RouteDemand::Whole,
+    );
+    assert_eq!(
+        instance.get("InstanceDep"),
+        Some(&crate::resolver_core::RouteDemand::Whole),
+        "the instance-owner class supplement keeps its own imported dependency"
+    );
+    assert!(
+        !instance.contains_key("ModuleDep"),
+        "the same-name module-owner class must not contaminate instance closure"
+    );
+
+    let module = host.required_import_routes_for_exported_route(
+        canonical,
+        "ModuleShared",
+        &crate::resolver_core::RouteDemand::Whole,
+    );
+    assert_eq!(
+        module.get("ModuleDep"),
+        Some(&crate::resolver_core::RouteDemand::Whole),
+    );
+    assert!(!module.contains_key("InstanceDep"));
+}
+
 /// Build a WORKSPACE host (rooted at `/workspace`) carrying one `.svelte`
 /// component plus extra supporting files injected into the VFS. A bare
 /// `svelte` import laid out under `/workspace/node_modules/svelte/` (with a
@@ -248,6 +346,7 @@ fn public_api_resolves_local_dispatcher_interface_through_shared_surface() {
 
     let declaration = host
         .get_public_api_with_mode(component, crate::PublicApiMode::Declaration, None)
+        .expect("Svelte public API projection")
         .expect("a dispatcher-bearing Svelte component projects a public API")
         .code
         .to_string();
@@ -419,6 +518,7 @@ fn nsnippet(
     graph.intern_node(crate::semantic_query::SemanticNodeData::InstantiationRef {
         base: crate::semantic_query::DeclIdentity {
             canonical_id: Arc::from("__builtin__"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: crate::semantic_query::HashValue::default(),
             decl_name: Arc::from("Snippet"),
         },

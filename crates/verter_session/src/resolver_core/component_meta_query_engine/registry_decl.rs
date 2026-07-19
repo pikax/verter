@@ -63,15 +63,21 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     pub fn resolve_direct_prepared_type_declaration(
         &mut self,
         canonical_source: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
     ) -> Option<ResolvedTypeDeclaration> {
-        self.prepared_type_decl(canonical_source, resolved_name)?;
-        let metadata =
-            local_type_symbol_metadata_for_known_source(self.ctx, canonical_source, resolved_name)?;
+        self.prepared_type_decl(canonical_source, owner, resolved_name)?;
+        let metadata = local_type_symbol_metadata_for_known_source(
+            self.ctx,
+            canonical_source,
+            owner,
+            resolved_name,
+        )?;
         let resolver = DirectPreparedDeclarationResolver { ctx: self.ctx };
         Some(crate::resolver_core::resolve_local_type_declaration(
             &resolver,
             canonical_source,
+            owner,
             resolved_name,
             metadata.span,
         ))
@@ -80,18 +86,27 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     pub fn resolve_direct_prepared_type_declaration_metadata(
         &mut self,
         canonical_source: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
     ) -> Option<ResolvedTypeDeclaration> {
-        self.prepared_type_decl(canonical_source, resolved_name)?;
-        let metadata =
-            local_type_symbol_metadata_for_known_source(self.ctx, canonical_source, resolved_name)?;
+        self.prepared_type_decl(canonical_source, owner, resolved_name)?;
+        let metadata = local_type_symbol_metadata_for_known_source(
+            self.ctx,
+            canonical_source,
+            owner,
+            resolved_name,
+        )?;
         Some(ResolvedTypeDeclaration {
             requested_name: resolved_name.to_string(),
-            declaration_id: self
-                .ctx
-                .local_type_declaration_id(canonical_source, resolved_name),
+            declaration_id: (owner == verter_type_expr::TopLevelOwnerId::ordinary_file())
+                .then(|| {
+                    self.ctx
+                        .local_type_declaration_id(canonical_source, resolved_name)
+                })
+                .flatten(),
             resolved_name: resolved_name.to_string(),
             canonical_source: canonical_source.to_string(),
+            owner,
             span: metadata.span,
             kind: metadata.kind,
             text: None,
@@ -139,6 +154,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     pub(crate) fn materialize_pick_member_surface(
         &mut self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         root_symbol: &str,
         members: &[String],
         nested_surface: bool,
@@ -154,8 +170,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             };
             // Bare-Ref base for the Pick builtin is an intermediate hop;
             // the Pick result is the terminal demand.
-            let base = dispatch.lower_type_expr_in_scope_with_mode(
+            let base = dispatch.lower_type_expr_in_owner_scope_with_mode(
                 scope_canonical_id,
+                scope_owner,
                 &symbol_ref,
                 ProjectionMode::Navigate,
             )?;
@@ -265,22 +282,40 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     pub fn resolve_final_prepared_type_target(
         &mut self,
         canonical_source: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
-    ) -> (String, String) {
+    ) -> verter_semantic::analysis::type_solver::host::ResolvedRootIdentity {
         if self
-            .prepared_type_decl(canonical_source, resolved_name)
+            .prepared_type_decl(canonical_source, owner, resolved_name)
             .is_some()
         {
-            return (canonical_source.to_string(), resolved_name.to_string());
+            return verter_semantic::analysis::type_solver::host::ResolvedRootIdentity::new_in_owner(
+                canonical_source,
+                owner,
+                resolved_name,
+            );
         }
 
-        self.ctx
-            .resolve_named_type_export_target_shallow(canonical_source, resolved_name)
-            .filter(|(target_canonical, target_name)| {
-                self.prepared_type_decl(target_canonical.as_str(), target_name.as_str())
-                    .is_some()
-            })
-            .unwrap_or_else(|| (canonical_source.to_string(), resolved_name.to_string()))
+        let (resolved, route_facts) = self
+            .ctx
+            .resolve_imported_type_root_with_facts(canonical_source, resolved_name);
+        self.ctx.observe_borrowed_signature(&route_facts);
+        if let Some(target) = resolved.filter(|target| {
+            self.prepared_type_decl(
+                target.canonical_id.as_ref(),
+                target.owner,
+                target.symbol_name.as_ref(),
+            )
+            .is_some()
+        }) {
+            return target;
+        }
+
+        verter_semantic::analysis::type_solver::host::ResolvedRootIdentity::new_in_owner(
+            canonical_source,
+            owner,
+            resolved_name,
+        )
     }
 
     /// The named declaration's authored body LOCATOR (content-free) —
@@ -288,9 +323,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     pub fn named_decl_body(
         &mut self,
         canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> Option<verter_type_expr::locators::AuthoredBodyLocator> {
-        self.prepared_type_decl(canonical_id, name)
+        self.prepared_type_decl(canonical_id, owner, name)
             .map(|prepared| prepared_decl_authored_body_locator(&prepared))
     }
 
@@ -320,9 +356,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     pub(crate) fn prepared_type_decl(
         &mut self,
         canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Option<std::sync::Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>> {
-        let key = (canonical_id.to_string(), symbol_name.to_string());
+        let key = (canonical_id.to_string(), owner, symbol_name.to_string());
         if let Some(cached) = self.prepared_type_decls.get(&key) {
             return cached.clone();
         }
@@ -335,14 +372,29 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let ctx = self.ctx;
         let (resolved, non_cacheable) = crate::fact_signature_helpers::with_cacheability_scope(
             ctx.host_for_fact_tracer_install(),
-            |_probe| {
-                ctx.prepared_type_decl(canonical_id, symbol_name)
-                    .or_else(|| {
-                        // Lazy first-time loading (see scope_payload_for_scope comment).
-                        ctx.ensure_loaded(canonical_id)
-                            .then(|| ctx.prepared_type_decl(canonical_id, symbol_name))
-                            .flatten()
-                    })
+            |_probe| match ctx.prepared_type_decl(canonical_id, owner, symbol_name) {
+                Ok(Some(prepared)) => Some(prepared),
+                Ok(None) => {
+                    // Lazy first-time loading (see scope_payload_for_scope comment).
+                    ctx.ensure_loaded(canonical_id)
+                        .then(|| {
+                            ctx.prepared_type_decl_return_only(canonical_id, owner, symbol_name)
+                        })
+                        .flatten()
+                }
+                Err(failure) => {
+                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                        crate::resolver_core::resolver_context::NonCacheableReadReason::PreparationFailure,
+                    );
+                    tracing::error!(
+                        canonical_id,
+                        ?owner,
+                        symbol_name,
+                        ?failure,
+                        "prepared type declaration failed; leaving query scratch slot vacant"
+                    );
+                    None
+                }
             },
         );
         if resolved.is_none() && non_cacheable {
@@ -379,31 +431,34 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     fn dispatch_decl_anchor(
         &mut self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Option<SemanticNodeId> {
         // Resolve the root identity via
         // `bare_name_resolve::resolve_bare_name_in_scope` directly —
         // no `SessionSolverHost` construction. Matches the dispatch
         // lowering path in `shallow_lower_type_expr`.
-        let scope_payload_arc = self.scope_payload_for_scope(scope_canonical_id);
+        let scope_payload_arc = self.scope_payload_for_scope(scope_canonical_id, scope_owner);
         let resolved_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
             self.ctx,
             scope_canonical_id,
+            scope_owner,
             scope_payload_arc.as_deref(),
             symbol_name,
         )
-        .map(|root| (root.canonical_id, root.symbol_name))
         .unwrap_or_else(|| {
             let interner = self.ctx.project_type_store().identity_interner();
-            (
+            verter_semantic::analysis::type_solver::host::ResolvedRootIdentity::new_in_owner(
                 interner.intern(scope_canonical_id),
+                scope_owner,
                 interner.intern(symbol_name),
             )
         });
         let dispatch = self.semantic_dispatch();
         match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
-            &resolved_root.0,
-            &resolved_root.1,
+            &resolved_root.canonical_id,
+            resolved_root.owner,
+            &resolved_root.symbol_name,
         ))) {
             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => Some(id),
             _ => None,
@@ -413,42 +468,49 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     fn dispatch_root_instantiated(
         &mut self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Option<SemanticNodeId> {
         // Resolve the root identity via
         // `bare_name_resolve::resolve_bare_name_in_scope` directly —
         // no `SessionSolverHost` construction. Matches the dispatch
         // lowering path in `shallow_lower_type_expr`.
-        let scope_payload_arc = self.scope_payload_for_scope(scope_canonical_id);
+        let scope_payload_arc = self.scope_payload_for_scope(scope_canonical_id, scope_owner);
         let resolved_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
             self.ctx,
             scope_canonical_id,
+            scope_owner,
             scope_payload_arc.as_deref(),
             symbol_name,
         )
-        .map(|root| (root.canonical_id, root.symbol_name))
         .unwrap_or_else(|| {
             let interner = self.ctx.project_type_store().identity_interner();
-            (
+            verter_semantic::analysis::type_solver::host::ResolvedRootIdentity::new_in_owner(
                 interner.intern(scope_canonical_id),
+                scope_owner,
                 interner.intern(symbol_name),
             )
         });
         let dispatch = self.semantic_dispatch();
-        let anchor = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(
-            resolve_decl_key(&resolved_root.0, &resolved_root.1),
-        )) {
-            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-            _ => return None,
-        };
+        let anchor =
+            match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
+                &resolved_root.canonical_id,
+                resolved_root.owner,
+                &resolved_root.symbol_name,
+            ))) {
+                QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                _ => return None,
+            };
         // R6: Instantiate.base is the env-bearing content-free
         // `ResolvedDeclSlotIdentity` slot (built via `type_slot_for`); the
         // cold build re-sources the live whole_hash from
         // `ensure_indexed_ready_serve`.
-        let root_canonical: std::sync::Arc<str> = std::sync::Arc::clone(&resolved_root.0);
+        let root_canonical: std::sync::Arc<str> =
+            std::sync::Arc::clone(&resolved_root.canonical_id);
         let base = dispatch.type_slot_for(
             std::sync::Arc::clone(&root_canonical),
-            std::sync::Arc::clone(&resolved_root.1),
+            resolved_root.owner,
+            std::sync::Arc::clone(&resolved_root.symbol_name),
         );
         let root_inst_ctx = dispatch.instantiate_context_for(
             &root_canonical,
@@ -489,9 +551,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     pub(super) fn dispatch_projected_surface_with_node(
         &mut self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Option<(crate::semantic_query::SurfaceView, SemanticNodeId)> {
-        let root = self.dispatch_root_instantiated(scope_canonical_id, symbol_name)?;
+        let root = self.dispatch_root_instantiated(scope_canonical_id, scope_owner, symbol_name)?;
         if let Some(surface) = surface_view_from_semantic_node(self.ctx, root) {
             return Some((surface, root));
         }
@@ -512,7 +575,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // own raise keeps heritage / import carriers unresolved (materialized)
         // and would admit a partial composed surface the surface-materialization
         // filter rejects.
-        let anchor = self.dispatch_decl_anchor(scope_canonical_id, symbol_name)?;
+        let anchor = self.dispatch_decl_anchor(scope_canonical_id, scope_owner, symbol_name)?;
         let (surface, composed_surface_node) =
             compound_root_surface_view_via_dispatch(self.ctx, anchor)?;
         Some((surface, composed_surface_node))
@@ -542,6 +605,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     pub(crate) fn heritage_merged_surface_fact(
         &mut self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Option<verter_type_expr::facts::ProjectedSurfaceFact> {
         use crate::project_semantic_dispatch::node_data_for;
@@ -553,26 +617,30 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
         // The declaration's resolved root identity (the same bare-name
         // resolution the decl-anchor dispatch performs).
-        let scope_payload_arc = self.scope_payload_for_scope(scope_canonical_id);
-        let (own_canonical, own_name) =
-            crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-                self.ctx,
-                scope_canonical_id,
-                scope_payload_arc.as_deref(),
-                symbol_name,
+        let scope_payload_arc = self.scope_payload_for_scope(scope_canonical_id, scope_owner);
+        let own_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+            self.ctx,
+            scope_canonical_id,
+            scope_owner,
+            scope_payload_arc.as_deref(),
+            symbol_name,
+        )
+        .unwrap_or_else(|| {
+            let interner = self.ctx.project_type_store().identity_interner();
+            verter_semantic::analysis::type_solver::host::ResolvedRootIdentity::new_in_owner(
+                interner.intern(scope_canonical_id),
+                scope_owner,
+                interner.intern(symbol_name),
             )
-            .map(|root| (root.canonical_id, root.symbol_name))
-            .unwrap_or_else(|| {
-                let interner = self.ctx.project_type_store().identity_interner();
-                (
-                    interner.intern(scope_canonical_id),
-                    interner.intern(symbol_name),
-                )
-            });
+        });
         // SHAPE classification runs on the raised DeclBody carrier (the
         // lowered body root) — the decl-anchor node is an identity
         // placeholder, not the body.
-        let body_locator = self.named_decl_body(&own_canonical, &own_name)?;
+        let body_locator = self.named_decl_body(
+            &own_root.canonical_id,
+            own_root.owner,
+            &own_root.symbol_name,
+        )?;
         let body_root = {
             let dispatch = self.semantic_dispatch();
             dispatch
@@ -598,12 +666,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             Some(SemanticNodeData::Intersection(arms)) => arms.clone(),
             _ => return None,
         };
-        let mut heritage: Vec<(std::sync::Arc<str>, std::sync::Arc<str>)> = Vec::new();
+        let mut heritage: Vec<(
+            std::sync::Arc<str>,
+            verter_type_expr::TopLevelOwnerId,
+            std::sync::Arc<str>,
+        )> = Vec::new();
         let mut own_object_arms = 0usize;
         for arm in arms.iter() {
             match node_data_for(self.ctx, peel_alias(*arm)).as_deref() {
                 Some(SemanticNodeData::DeclRef { identity }) => heritage.push((
                     std::sync::Arc::clone(&identity.canonical_id),
+                    identity.owner,
                     std::sync::Arc::clone(&identity.decl_name),
                 )),
                 Some(SemanticNodeData::Object(_)) => own_object_arms += 1,
@@ -626,11 +699,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // Slot lookup mirrors the walker's heritage-shadow precedence: the own
         // declaration's prepared member facts win; heritage members resolve
         // from their declaring contributor in arm order.
-        let own_prepared = self.prepared_type_decl(own_canonical.as_ref(), own_name.as_ref());
+        let own_prepared = self.prepared_type_decl(
+            own_root.canonical_id.as_ref(),
+            own_root.owner,
+            own_root.symbol_name.as_ref(),
+        );
         let heritage_prepared: Vec<_> = heritage
             .iter()
-            .filter_map(|(canonical, name)| {
-                self.prepared_type_decl(canonical.as_ref(), name.as_ref())
+            .filter_map(|(canonical, owner, name)| {
+                self.prepared_type_decl(canonical.as_ref(), *owner, name.as_ref())
             })
             .collect();
         if heritage_prepared.len() != heritage.len() {
@@ -681,12 +758,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     pub(crate) fn dispatch_routed_expr_surface_node(
         &mut self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         root_symbol: &str,
         route: &RouteDemand,
     ) -> Option<AdmittedRouteProjectionNode> {
         match route {
             RouteDemand::MemberPath(path) if !path.is_empty() => {
-                let root = self.dispatch_root_instantiated(scope_canonical_id, root_symbol)?;
+                let root =
+                    self.dispatch_root_instantiated(scope_canonical_id, scope_owner, root_symbol)?;
                 let query_path: std::sync::Arc<[PathSegment]> = std::sync::Arc::from(
                     path.iter()
                         .map(|segment| PathSegment::Member(std::sync::Arc::from(segment.as_str())))
@@ -726,6 +805,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             RouteDemand::Pick(members) if !members.is_empty() => self
                 .dispatch_routed_pick_omit_via_shared_engine_node(
                     scope_canonical_id,
+                    scope_owner,
                     root_symbol,
                     "Pick",
                     members.as_slice(),
@@ -733,6 +813,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             RouteDemand::Omit(members) if !members.is_empty() => self
                 .dispatch_routed_pick_omit_via_shared_engine_node(
                     scope_canonical_id,
+                    scope_owner,
                     root_symbol,
                     "Omit",
                     members.as_slice(),
@@ -753,6 +834,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     fn dispatch_routed_pick_omit_via_shared_engine_node(
         &mut self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         root_symbol: &str,
         builtin_name: &str,
         keys: &[String],
@@ -760,7 +842,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // Step A: instantiate the route root to a projectable body. Navigate
         // keeps generic carriers intact (the builtin engine re-projects in the
         // caller's mode), mirroring the materialiser's Step A.
-        let body_id = self.dispatch_root_instantiated(scope_canonical_id, root_symbol)?;
+        let body_id =
+            self.dispatch_root_instantiated(scope_canonical_id, scope_owner, root_symbol)?;
         let dispatch = self.semantic_dispatch();
         let keys_node = crate::meta_resolve::build_keys_union_node(dispatch.graph(), keys);
         // Step B: instantiate the shared builtin Pick/Omit carrier on

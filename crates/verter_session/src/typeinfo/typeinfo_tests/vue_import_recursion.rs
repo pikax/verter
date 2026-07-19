@@ -112,6 +112,7 @@ fn vue_default_object_members(host: &VerterHost, canonical_id: &str) -> Vec<Stri
         crate::semantic_query::InstantiateKey::new(
             crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from(canonical_id),
+                verter_type_expr::TopLevelOwnerId::instance(0),
                 Arc::from("default"),
             ),
             Arc::from(Vec::new().into_boxed_slice()),
@@ -167,6 +168,7 @@ fn vue_default_query_object_members(host: &VerterHost, canonical_id: &str) -> Op
         crate::semantic_query::InstantiateKey::new(
             crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from(canonical_id),
+                verter_type_expr::TopLevelOwnerId::instance(0),
                 Arc::from("default"),
             ),
             Arc::from(Vec::new().into_boxed_slice()),
@@ -220,6 +222,7 @@ fn project_vue_default_path(host: &VerterHost, canonical_id: &str, path: &[&str]
         crate::semantic_query::InstantiateKey::new(
             crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from(canonical_id),
+                verter_type_expr::TopLevelOwnerId::instance(0),
                 Arc::from("default"),
             ),
             Arc::from(Vec::new().into_boxed_slice()),
@@ -274,6 +277,7 @@ fn instantiate_vue_default_node(
         crate::semantic_query::InstantiateKey::new(
             crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from(canonical_id),
+                verter_type_expr::TopLevelOwnerId::instance(0),
                 Arc::from("default"),
             ),
             Arc::from(Vec::new().into_boxed_slice()),
@@ -310,6 +314,7 @@ fn typeof_default_construct_return_node(
         ValueRootKey {
             scope: ScopeId {
                 canonical_id: Arc::from(canonical_id),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 local_scope: None,
             },
             name: Arc::from("default"),

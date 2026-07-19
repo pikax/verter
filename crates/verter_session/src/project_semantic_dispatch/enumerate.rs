@@ -229,10 +229,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // value-build time.
             SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder {
                 canonical_id,
+                owner,
                 name,
                 whole_hash: _,
             }) => {
-                let base = self.type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
+                let base = self.type_slot_for(Arc::clone(canonical_id), *owner, Arc::clone(name));
                 let owner_canonical = Arc::clone(canonical_id);
                 drop(data);
                 let read = self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate(
@@ -529,6 +530,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
                             Arc::clone(&identity.canonical_id),
+                            identity.owner,
                             Arc::clone(&identity.decl_name),
                         ),
                         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -566,6 +568,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
                             Arc::clone(&base.canonical_id),
+                            base.owner,
                             Arc::clone(&base.decl_name),
                         ),
                         Arc::clone(args),

@@ -27,6 +27,7 @@ const LIB_ENV_HASH: [u8; 16] = [2; 16];
 fn type_slot(canonical: &str, name: &str) -> ResolvedDeclSlotIdentity {
     ResolvedDeclSlotIdentity::type_slot(
         Arc::from(canonical),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from(name),
         PROJECT_IDENTITY,
         TYPE_ENV_HASH,
@@ -37,6 +38,7 @@ fn type_slot(canonical: &str, name: &str) -> ResolvedDeclSlotIdentity {
 fn value_slot(canonical: &str, name: &str) -> ResolvedDeclSlotIdentity {
     ResolvedDeclSlotIdentity::value_slot(
         Arc::from(canonical),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from(name),
         PROJECT_IDENTITY,
         TYPE_ENV_HASH,
@@ -212,6 +214,7 @@ fn r7_project_identity_isolates_slots() {
 
     let slot_p1 = ResolvedDeclSlotIdentity::type_slot(
         Arc::from(canonical),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from(name),
         1, // project 1
         TYPE_ENV_HASH,
@@ -219,6 +222,7 @@ fn r7_project_identity_isolates_slots() {
     );
     let slot_p2 = ResolvedDeclSlotIdentity::type_slot(
         Arc::from(canonical),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from(name),
         2, // project 2
         TYPE_ENV_HASH,
@@ -236,11 +240,13 @@ fn r7_project_identity_isolates_slots() {
 fn r7_from_decl_identity_strips_whole_hash() {
     let decl_v1 = DeclIdentity {
         canonical_id: Arc::from("/src/types.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [10; 16], // version 1 hash
         decl_name: Arc::from("Foo"),
     };
     let decl_v2 = DeclIdentity {
         canonical_id: Arc::from("/src/types.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [99; 16], // version 2 hash (different)
         decl_name: Arc::from("Foo"),
     };
@@ -263,5 +269,44 @@ fn r7_from_decl_identity_strips_whole_hash() {
     assert_eq!(
         slot_v1, slot_v2,
         "ResolvedDeclSlotIdentity is content-free; whole_hash MUST NOT enter the slot key"
+    );
+}
+
+/// The content-free projection retains the top-level lexical owner. Vue
+/// instance and module scripts may declare the same name in the same carrier
+/// without sharing a semantic slot.
+#[test]
+fn r7_from_decl_identity_preserves_top_level_owner() {
+    let instance_decl = DeclIdentity {
+        canonical_id: Arc::from("/src/App.vue"),
+        owner: verter_type_expr::TopLevelOwnerId::instance(0),
+        whole_hash: [10; 16],
+        decl_name: Arc::from("Foo"),
+    };
+    let module_decl = DeclIdentity {
+        canonical_id: Arc::clone(&instance_decl.canonical_id),
+        owner: verter_type_expr::TopLevelOwnerId::module(0),
+        whole_hash: instance_decl.whole_hash,
+        decl_name: Arc::clone(&instance_decl.decl_name),
+    };
+
+    let instance_slot = ResolvedDeclSlotIdentity::from_decl_identity(
+        &instance_decl,
+        SemanticSymbolSpace::Type,
+        PROJECT_IDENTITY,
+        TYPE_ENV_HASH,
+        LIB_ENV_HASH,
+    );
+    let module_slot = ResolvedDeclSlotIdentity::from_decl_identity(
+        &module_decl,
+        SemanticSymbolSpace::Type,
+        PROJECT_IDENTITY,
+        TYPE_ENV_HASH,
+        LIB_ENV_HASH,
+    );
+
+    assert_ne!(
+        instance_slot, module_slot,
+        "same-name declarations in distinct carrier owners must not share a slot"
     );
 }

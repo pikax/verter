@@ -207,6 +207,7 @@ mod node_root_gate_tests {
                 Arc::from(name),
                 NodeScopeId::File {
                     canonical_id,
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash,
                     local_scope: None,
                 },
@@ -518,6 +519,7 @@ mod carrier_descent_tests {
         DeclIdentity::from_scope(
             &NodeScopeId::File {
                 canonical_id: Arc::from(canonical),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: [7u8; 16],
                 local_scope: None,
             },
@@ -539,6 +541,7 @@ mod carrier_descent_tests {
                 ValueRootKey {
                     scope: ScopeId {
                         canonical_id: Arc::from("/v.ts"),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         local_scope: None,
                     },
                     name: Arc::from("factory"),

@@ -173,6 +173,7 @@ mod tests {
         MacroPayloadLocator {
             anchor: AuthoredAnchor {
                 canonical_id: Arc::from("/App.vue"),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 symbol: Arc::from("default"),
                 space: LocatorSymbolSpace::Value,
             },
@@ -184,6 +185,7 @@ mod tests {
     fn type_based_macro(kind: AnalyzedMacroKind, macro_index: u32) -> AnalyzedMacro {
         AnalyzedMacro {
             kind,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
             type_references: Vec::new(),
             binding_name: None,
@@ -205,6 +207,7 @@ mod tests {
     fn runtime_macro(kind: AnalyzedMacroKind) -> AnalyzedMacro {
         AnalyzedMacro {
             kind,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: false,
             type_references: Vec::new(),
             binding_name: None,

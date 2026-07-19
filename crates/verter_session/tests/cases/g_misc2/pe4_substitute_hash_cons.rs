@@ -85,6 +85,7 @@ fn lower_mapped(host: &Arc<VerterHost>) -> SemanticNodeId {
         Some(SemanticNodeData::Opaque(
             verter_session::semantic_query::QueryError::DeclPlaceholder {
                 canonical_id,
+                owner,
                 name,
                 whole_hash,
             },
@@ -92,6 +93,7 @@ fn lower_mapped(host: &Arc<VerterHost>) -> SemanticNodeId {
             let _ = whole_hash;
             let base = verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::clone(canonical_id),
+                *owner,
                 Arc::clone(name),
             );
             let key = verter_session::for_tests::instantiate_key_for_tests(

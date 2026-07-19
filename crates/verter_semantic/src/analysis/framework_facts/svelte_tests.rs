@@ -4,7 +4,8 @@
 use super::*;
 use oxc_allocator::Allocator;
 use oxc_parser::Parser;
-use oxc_span::SourceType;
+use oxc_span::{GetSpan, SourceType};
+use verter_type_expr::{DeclKey, TopLevelOwnerId};
 
 fn capture(src: &str) -> SvelteScriptCandidates {
     capture_with_module_region(src, None)
@@ -16,7 +17,18 @@ fn capture_with_module_region(
 ) -> SvelteScriptCandidates {
     let alloc = Allocator::default();
     let program = Parser::new(&alloc, src, SourceType::ts()).parse().program;
-    capture_svelte_candidates(src, &program, module_region, None, false)
+    let owners = crate::analysis::top_level_owners::TopLevelOwnerTable::try_from_statement_owners(
+        program.body.len(),
+        program.body.iter().map(|statement| {
+            if statement_in_module(statement.span().start, module_region) {
+                verter_type_expr::TopLevelOwnerId::module(0)
+            } else {
+                verter_type_expr::TopLevelOwnerId::instance(0)
+            }
+        }),
+    )
+    .expect("test owner table");
+    capture_svelte_candidates(src, &program, &owners, module_region, None, false)
 }
 
 fn has_instance_export(candidates: &SvelteScriptCandidates, name: &str) -> bool {
@@ -31,9 +43,23 @@ fn instance_export(
     local_name: &str,
     source_span: Span,
 ) -> SvelteInstanceExport {
+    let owner = verter_type_expr::TopLevelOwnerId::instance(0);
     SvelteInstanceExport {
         exported_name: exported_name.to_string(),
         local_name: local_name.to_string(),
+        owner,
+        binding_key: verter_type_expr::DeclKey::new(owner, local_name),
+        source_span,
+    }
+}
+
+fn module_export(exported_name: &str, local_name: &str, source_span: Span) -> SvelteModuleExport {
+    let owner = verter_type_expr::TopLevelOwnerId::module(0);
+    SvelteModuleExport {
+        exported_name: exported_name.to_string(),
+        local_name: local_name.to_string(),
+        owner,
+        binding_key: verter_type_expr::DeclKey::new(owner, local_name),
         source_span,
     }
 }
@@ -45,6 +71,7 @@ fn macro_payload_locator(macro_index: u32, payload: MacroPayloadPosition) -> Aut
     AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
         anchor: AuthoredAnchor {
             canonical_id: Arc::from(""),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             symbol: Arc::from("default"),
             space: LocatorSymbolSpace::Value,
         },
@@ -415,7 +442,9 @@ fn module_exports_are_split_from_instance_exports_by_region() {
     let meta_end = src.find('\n').unwrap() as u32;
     let c = capture_with_module_region(src, Some((0, meta_end)));
     assert!(
-        c.module_exports.contains(&"meta".to_string()),
+        c.module_exports
+            .iter()
+            .any(|export| export.exported_name == "meta"),
         "`meta` in the module region is a module export, got module={:?} instance={:?}",
         c.module_exports,
         c.instance_exports
@@ -428,6 +457,44 @@ fn module_exports_are_split_from_instance_exports_by_region() {
         has_instance_export(&c, "ready"),
         "`ready` outside the module region is an instance export"
     );
+}
+
+#[test]
+fn same_name_module_and_instance_exports_keep_distinct_binding_keys() {
+    let src = "export const shared = 1;\nexport const shared = 2;";
+    let module_end = src.find('\n').unwrap() as u32;
+    let candidates = capture_with_module_region(src, Some((0, module_end)));
+    let module = candidates
+        .module_exports
+        .iter()
+        .find(|export| export.exported_name == "shared")
+        .expect("module shared");
+    let instance = candidates
+        .instance_exports
+        .iter()
+        .find(|export| export.exported_name == "shared")
+        .expect("instance shared");
+    assert_eq!(module.owner, verter_type_expr::TopLevelOwnerId::module(0));
+    assert_eq!(
+        instance.owner,
+        verter_type_expr::TopLevelOwnerId::instance(0)
+    );
+    assert_ne!(module.binding_key, instance.binding_key);
+}
+
+#[test]
+fn export_owner_role_only_flip_changes_candidate_hash() {
+    let mut instance = SvelteScriptCandidates::default();
+    instance
+        .instance_exports
+        .push(instance_export("shared", "shared", Span::new(0, 6)));
+    let instance_hash = stable_candidate_hash(&instance);
+
+    let mut role_flipped = instance.clone();
+    let flipped = &mut role_flipped.instance_exports[0];
+    flipped.owner = verter_type_expr::TopLevelOwnerId::module(0);
+    flipped.binding_key = verter_type_expr::DeclKey::new(flipped.owner, "shared");
+    assert_ne!(instance_hash, stable_candidate_hash(&role_flipped));
 }
 
 #[test]
@@ -955,6 +1022,107 @@ fn validate_passes_through_parse_domain_inventory() {
     );
 }
 
+#[test]
+fn resolved_facts_persist_same_name_module_and_instance_exports_exactly() {
+    let provider = SvelteScriptProvider;
+    let candidates = SvelteScriptCandidates {
+        instance_exports: vec![instance_export(
+            "shared",
+            "instance_shared",
+            Span::new(10, 16),
+        )],
+        module_exports: vec![module_export("shared", "module_shared", Span::new(30, 36))],
+        ..Default::default()
+    };
+    let envelope = FrameworkScriptCandidates {
+        adapter_id: FrameworkAdapterId::svelte(),
+        provider_version: SvelteScriptProvider::VERSION,
+        stable_hash: stable_candidate_hash(&candidates),
+        payload: Arc::new(candidates),
+    };
+    let resolved = provider
+        .validate(ResolvedValidationCx {
+            candidates: &envelope,
+            resolved_import_targets: &[],
+            capability_on: &|_| true,
+        })
+        .expect("export-only candidates produce resolved facts");
+    let resolved = resolved
+        .as_any()
+        .downcast_ref::<SvelteScriptFacts>()
+        .expect("Svelte facts");
+
+    assert_eq!(resolved.instance_exports[0].exported_name, "shared");
+    assert_eq!(resolved.module_exports[0].exported_name, "shared");
+    assert_eq!(resolved.module_exports[0].local_name, "module_shared");
+    assert_eq!(resolved.module_exports[0].owner, TopLevelOwnerId::module(0));
+    assert_eq!(
+        resolved.module_exports[0].binding_key,
+        DeclKey::new(TopLevelOwnerId::module(0), "module_shared")
+    );
+
+    let persisted = resolved.to_persisted_fact();
+    assert_eq!(
+        persisted.module_exports.as_ref(),
+        resolved.module_exports.as_ref()
+    );
+    let json = serde_json::to_string(&persisted).expect("serialize Svelte facts");
+    let round_trip: verter_type_expr::facts::SvelteScriptFactsFact =
+        serde_json::from_str(&json).expect("deserialize Svelte facts");
+    assert_eq!(round_trip, persisted);
+}
+
+#[test]
+fn module_export_role_only_change_moves_hash_and_serde_identity() {
+    use std::hash::{Hash, Hasher};
+
+    let mut module = SvelteScriptCandidates::default();
+    module
+        .module_exports
+        .push(module_export("shared", "shared", Span::new(0, 6)));
+    let module_hash = stable_candidate_hash(&module);
+
+    let mut role_flipped = module.clone();
+    role_flipped.module_exports[0].owner = TopLevelOwnerId::instance(0);
+    role_flipped.module_exports[0].binding_key =
+        DeclKey::new(TopLevelOwnerId::instance(0), "shared");
+    assert_ne!(module_hash, stable_candidate_hash(&role_flipped));
+
+    let resolved_fact = |candidates: SvelteScriptCandidates| {
+        let envelope = FrameworkScriptCandidates {
+            adapter_id: FrameworkAdapterId::svelte(),
+            provider_version: SvelteScriptProvider::VERSION,
+            stable_hash: stable_candidate_hash(&candidates),
+            payload: Arc::new(candidates),
+        };
+        let provider = SvelteScriptProvider;
+        let resolved = provider
+            .validate(ResolvedValidationCx {
+                candidates: &envelope,
+                resolved_import_targets: &[],
+                capability_on: &|_| true,
+            })
+            .expect("module export produces facts");
+        resolved
+            .as_any()
+            .downcast_ref::<SvelteScriptFacts>()
+            .expect("Svelte facts")
+            .to_persisted_fact()
+    };
+    let module_fact = resolved_fact(module);
+    let instance_role_fact = resolved_fact(role_flipped);
+    let hash = |fact: &verter_type_expr::facts::SvelteScriptFactsFact| {
+        let mut hasher = rustc_hash::FxHasher::default();
+        fact.hash(&mut hasher);
+        hasher.finish()
+    };
+    assert_ne!(hash(&module_fact), hash(&instance_role_fact));
+    assert_ne!(
+        serde_json::to_string(&module_fact).unwrap(),
+        serde_json::to_string(&instance_role_fact).unwrap()
+    );
+}
+
 /// A fully-populated candidate set exercising EVERY stable-hash input.
 fn full_candidates() -> SvelteScriptCandidates {
     SvelteScriptCandidates {
@@ -978,7 +1146,7 @@ fn full_candidates() -> SvelteScriptCandidates {
             member_name: "row".to_string(),
         }],
         instance_exports: vec![instance_export("focus", "focus", Span::new(31, 36))],
-        module_exports: vec!["meta".to_string()],
+        module_exports: vec![module_export("meta", "meta", Span::new(37, 41))],
         legacy_props: vec![SvelteLegacyProp {
             name: "legacy".to_string(),
             has_default: true,
@@ -1079,7 +1247,7 @@ fn stable_candidate_hash_discriminates_every_input() {
 
     // (9) module exports.
     let mut c = full_candidates();
-    c.module_exports = vec!["config".to_string()];
+    c.module_exports = vec![module_export("config", "config", Span::new(37, 43))];
     assert_ne!(
         stable_candidate_hash(&c),
         base_hash,
@@ -1128,6 +1296,8 @@ fn stable_candidate_hash_discriminates_every_input() {
     let mut c = full_candidates();
     c.props.as_mut().unwrap().call_span = Span::new(999, 1024);
     c.props.as_mut().unwrap().prop_defaults[0].span = Span::new(500, 504);
+    c.instance_exports[0].source_span = Span::new(700, 706);
+    c.module_exports[0].source_span = Span::new(800, 806);
     assert_eq!(
         stable_candidate_hash(&c),
         base_hash,
@@ -1137,7 +1307,7 @@ fn stable_candidate_hash_discriminates_every_input() {
 
 #[test]
 fn stable_candidate_hash_golden_is_deterministic() {
-    // Deterministic golden for the VERSION 7 candidate hash: two independent
+    // Deterministic golden for the VERSION 8 candidate hash: two independent
     // constructions hash identically, and the bytes are pinned so a silently
     // dropped / reordered hash input fails loudly. An INTENTIONAL hash-shape
     // change must bump `SvelteScriptProvider::VERSION` and re-pin.
@@ -1147,10 +1317,10 @@ fn stable_candidate_hash_golden_is_deterministic() {
     assert_eq!(
         a,
         [
-            0x58, 0x04, 0xb7, 0x16, 0xa6, 0x24, 0x4a, 0x16, 0x94, 0x2c, 0xb0, 0x08, 0x6e, 0x2d,
-            0x4c, 0x49
+            0xe2, 0x83, 0x9c, 0x04, 0x13, 0x95, 0x33, 0x91, 0x67, 0x22, 0xc5, 0x07, 0x39, 0x09,
+            0x26, 0x2a
         ],
-        "the VERSION 7 golden candidate hash"
+        "the VERSION 8 golden candidate hash"
     );
 }
 
@@ -1359,10 +1529,19 @@ fn deref_accessor_absent_positions_are_typed_misses() {
 fn provider_capture(src: &str) -> FrameworkScriptCandidates {
     let alloc = Allocator::default();
     let program = Parser::new(&alloc, src, SourceType::ts()).parse().program;
+    let owners = crate::analysis::top_level_owners::TopLevelOwnerTable::try_from_statement_owners(
+        program.body.len(),
+        std::iter::repeat_n(
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            program.body.len(),
+        ),
+    )
+    .expect("instance test owner table");
     SvelteScriptProvider
         .capture(ScriptCandidateCx {
             source: src,
             program: &program,
+            top_level_owners: &owners,
             module_script_region: None,
             framework_mode_hint: None,
         })

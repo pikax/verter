@@ -1035,6 +1035,7 @@ impl VerterHost {
                     synthesis_should_suppress |= result.should_suppress;
                     crate::meta_resolve::projectors::reduce_published_field_types(
                         canonical,
+                        verter_type_expr::TopLevelOwnerId::instance(0),
                         &mut evaluated_types,
                         &mut query_engine,
                     );
@@ -1293,6 +1294,7 @@ impl VerterHost {
             queued_names: &mut rustc_hash::FxHashSet<String>,
             output: &mut std::collections::VecDeque<PendingComponentMetaRegistryRef>,
             source_hint: Option<&str>,
+            source_owner: verter_type_expr::TopLevelOwnerId,
             cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
         ) {
             fn collect_one_filtered_node(
@@ -1302,6 +1304,7 @@ impl VerterHost {
                 queued_names: &mut rustc_hash::FxHashSet<String>,
                 output: &mut std::collections::VecDeque<PendingComponentMetaRegistryRef>,
                 source_hint: Option<&str>,
+                source_owner: verter_type_expr::TopLevelOwnerId,
                 cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
             ) {
                 let mut local_queue = std::collections::VecDeque::new();
@@ -1313,6 +1316,7 @@ impl VerterHost {
                     &mut local_names,
                     &mut local_queue,
                     source_hint,
+                    source_owner,
                     crate::resolver_core::component_meta_registry::RegistryMemberRefPolicy::PublicationBoundary,
                     cursor,
                 );
@@ -1329,6 +1333,7 @@ impl VerterHost {
                         output,
                         pending.name.as_str(),
                         pending.source_hint.as_deref(),
+                        pending.source_owner,
                         pending.exported_name.as_deref(),
                         pending.route,
                     );
@@ -1344,6 +1349,7 @@ impl VerterHost {
                             queued_names,
                             output,
                             source_hint,
+                            source_owner,
                             cursor,
                         );
                     }
@@ -1359,6 +1365,7 @@ impl VerterHost {
                             queued_names,
                             output,
                             source_hint,
+                            source_owner,
                             cursor,
                         );
                     }
@@ -1370,6 +1377,7 @@ impl VerterHost {
                             queued_names,
                             output,
                             source_hint,
+                            source_owner,
                             cursor,
                         );
                         collect_one_filtered_node(
@@ -1379,6 +1387,7 @@ impl VerterHost {
                             queued_names,
                             output,
                             source_hint,
+                            source_owner,
                             cursor,
                         );
                     }
@@ -1391,6 +1400,7 @@ impl VerterHost {
                         queued_names,
                         output,
                         source_hint,
+                        source_owner,
                         cursor,
                     );
                 }
@@ -1445,6 +1455,7 @@ impl VerterHost {
             };
             let Some(resolved) = query_engine.resolve_imported_registry_symbol(
                 declaration_source.as_str(),
+                meta.declaration.owner,
                 requested_exported_name,
             ) else {
                 continue;
@@ -1504,6 +1515,7 @@ impl VerterHost {
                 collect_component_meta_registry_public_field_refs(
                     query_engine.ctx,
                     owner_canonical,
+                    verter_type_expr::TopLevelOwnerId::instance(0),
                     snapshot,
                     field,
                     &published_names,
@@ -1516,6 +1528,7 @@ impl VerterHost {
                 collect_component_meta_registry_public_field_refs(
                     query_engine.ctx,
                     owner_canonical,
+                    verter_type_expr::TopLevelOwnerId::instance(0),
                     snapshot,
                     field,
                     &published_names,
@@ -1553,6 +1566,7 @@ impl VerterHost {
                 if slot_binding_targets_define_props_root(
                     query_engine.ctx,
                     owner_canonical,
+                    verter_type_expr::TopLevelOwnerId::instance(0),
                     field,
                     &define_props_roots,
                 ) {
@@ -1578,6 +1592,7 @@ impl VerterHost {
                 collect_component_meta_registry_public_field_refs(
                     query_engine.ctx,
                     owner_canonical,
+                    verter_type_expr::TopLevelOwnerId::instance(0),
                     snapshot,
                     field,
                     &published_names,
@@ -1603,11 +1618,13 @@ impl VerterHost {
             );
         let raise_seed_source =
             |dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+             owner: verter_type_expr::TopLevelOwnerId,
              source: &verter_type_expr::facts::SemanticTypeSource| {
                 dispatch.raise_semantic_type_source_to_hot(
                     source,
                     crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                         scope_canonical_id: owner_canonical,
+                        scope_owner: owner,
                         context: seed_transit_ctx,
                         interior_failures: None,
                     },
@@ -1621,13 +1638,18 @@ impl VerterHost {
             let entry_import_root = owner_component_meta_registry_import_root(
                 query_engine.ctx,
                 owner_canonical,
+                meta.declaration.owner,
                 snapshot,
                 entry.name.as_str(),
             );
-            let entry_is_imported = entry_import_root.as_ref().is_some_and(|(canonical_id, _)| {
-                !canonical_id.is_empty() && canonical_id != owner_canonical
-            }) || (!meta.declaration.canonical_source.is_empty()
-                && meta.declaration.canonical_source != owner_canonical);
+            let entry_is_imported =
+                entry_import_root
+                    .as_ref()
+                    .is_some_and(|(canonical_id, _, _)| {
+                        !canonical_id.is_empty() && canonical_id != owner_canonical
+                    })
+                    || (!meta.declaration.canonical_source.is_empty()
+                        && meta.declaration.canonical_source != owner_canonical);
             if entry.type_source.present().is_some_and(|source| {
                 should_skip_imported_registry_seed_refresh(
                     owner_canonical,
@@ -1640,7 +1662,11 @@ impl VerterHost {
             let source_locator = source_hint
                 .filter(|source| source.is_empty() || *source == owner_canonical)
                 .and_then(|_| {
-                    query_engine.owner_collection_expr(owner_canonical, entry.name.as_str())
+                    query_engine.owner_collection_expr(
+                        owner_canonical,
+                        meta.declaration.owner,
+                        entry.name.as_str(),
+                    )
                 });
             if entry_is_imported {
                 // Shallow-by-default registry seeds publish imported helper
@@ -1669,6 +1695,7 @@ impl VerterHost {
                     .and_then(|_| {
                         query_engine.named_decl_body(
                             meta.declaration.canonical_source.as_str(),
+                            meta.declaration.owner,
                             meta.declaration.resolved_name.as_str(),
                         )
                     });
@@ -1685,7 +1712,9 @@ impl VerterHost {
                     None => entry
                         .type_source
                         .present()
-                        .and_then(|source| raise_seed_source(&seed_dispatch, source))
+                        .and_then(|source| {
+                            raise_seed_source(&seed_dispatch, meta.declaration.owner, source)
+                        })
                         .map(|hot| hot.node()),
                 };
                 if let Some(node) = seed_node {
@@ -1696,6 +1725,7 @@ impl VerterHost {
                         &mut queued_names,
                         &mut referenced_names,
                         source_hint,
+                        meta.declaration.owner,
                         registry_cursor,
                     );
                 }
@@ -1707,7 +1737,9 @@ impl VerterHost {
                     None => entry
                         .type_source
                         .present()
-                        .and_then(|source| raise_seed_source(&seed_dispatch, source))
+                        .and_then(|source| {
+                            raise_seed_source(&seed_dispatch, meta.declaration.owner, source)
+                        })
                         .map(|hot| hot.node()),
                 };
                 if let Some(node) = seed_node {
@@ -1725,6 +1757,7 @@ impl VerterHost {
                         &mut queued_names,
                         &mut referenced_names,
                         source_hint,
+                        meta.declaration.owner,
                         crate::resolver_core::component_meta_registry::RegistryMemberRefPolicy::DemandedOwnerLocalSurface,
                         registry_cursor,
                     );
@@ -1740,12 +1773,13 @@ impl VerterHost {
         // still be published even when they are imported generic aliases.
         let seeded_dependency_names: rustc_hash::FxHashSet<String> = {
             let mut names = rustc_hash::FxHashSet::default();
-            for entry in resolved_type_registry.iter() {
-                if let Some(hot) = entry
-                    .type_source
-                    .present()
-                    .and_then(|source| raise_seed_source(&seed_dispatch, source))
-                {
+            for (index, entry) in resolved_type_registry.iter().enumerate() {
+                let Some(meta) = resolved_type_registry_meta.get(index) else {
+                    continue;
+                };
+                if let Some(hot) = entry.type_source.present().and_then(|source| {
+                    raise_seed_source(&seed_dispatch, meta.declaration.owner, source)
+                }) {
                     crate::resolver_core::component_meta_registry::collect_node_ref_names(
                         query_engine.ctx,
                         hot.node(),
@@ -1787,6 +1821,7 @@ impl VerterHost {
             let PendingComponentMetaRegistryRef {
                 name: type_name,
                 source_hint: pending_source_hint_owned,
+                source_owner: pending_source_owner,
                 exported_name: pending_exported_name_owned,
                 route: pending_route,
                 member_use_sites: pending_member_use_sites,
@@ -1803,6 +1838,7 @@ impl VerterHost {
             let imported_owner_route = owner_component_meta_registry_import_root(
                 query_engine.ctx,
                 owner_canonical,
+                verter_type_expr::TopLevelOwnerId::instance(0),
                 snapshot,
                 type_name.as_str(),
             )
@@ -1813,16 +1849,20 @@ impl VerterHost {
             });
             let pending_source_hint = imported_owner_route
                 .as_ref()
-                .map(|(canonical_id, _)| canonical_id.as_str())
+                .map(|(canonical_id, _, _)| canonical_id.as_str())
                 .or(pending_source_hint_owned.as_deref());
+            let pending_source_owner = imported_owner_route
+                .as_ref()
+                .map(|(_, owner, _)| *owner)
+                .unwrap_or(pending_source_owner);
             let pending_exported_name = imported_owner_route
                 .as_ref()
-                .map(|(_, exported_name)| exported_name.as_str())
+                .map(|(_, _, exported_name)| exported_name.as_str())
                 .or(pending_exported_name_owned.as_deref());
             if matches!(pending_route, crate::resolver_core::RouteDemand::Whole)
                 && imported_owner_route
                     .as_ref()
-                    .is_some_and(|(canonical_id, _)| {
+                    .is_some_and(|(canonical_id, _, _)| {
                         query_engine.ctx.workspace_is_package_backed(canonical_id)
                     })
             {
@@ -1840,6 +1880,7 @@ impl VerterHost {
             }
             let _can_resolve = query_engine.can_resolve_registry_symbol(
                 owner_canonical,
+                pending_source_owner,
                 pending_exported_name.unwrap_or(type_name.as_str()),
                 pending_source_hint,
             );
@@ -1868,8 +1909,11 @@ impl VerterHost {
                 track_component_meta_dependency(tracked_dependencies, owner_canonical, source_hint);
                 let _imported_pending_started =
                     crate::host_manage::component_meta_debug_enabled().then(Instant::now);
-                let _resolved_import = query_engine
-                    .resolve_imported_registry_symbol(source_hint, requested_exported_name);
+                let _resolved_import = query_engine.resolve_imported_registry_symbol(
+                    source_hint,
+                    pending_source_owner,
+                    requested_exported_name,
+                );
                 if crate::host_manage::component_meta_debug_enabled() && _resolved_import.is_none()
                 {
                     crate::host_manage::component_meta_debug(format!(
@@ -1899,17 +1943,20 @@ impl VerterHost {
                         if matches!(pending_route, crate::resolver_core::RouteDemand::Whole) {
                             query_engine.resolve_type_declaration(
                                 resolved.canonical_id.as_str(),
+                                resolved.owner,
                                 resolved.exported_name.as_str(),
                             )
                         } else {
                             query_engine
                                 .resolve_direct_prepared_type_declaration_metadata(
                                     resolved.canonical_id.as_str(),
+                                    resolved.owner,
                                     resolved.exported_name.as_str(),
                                 )
                                 .unwrap_or_else(|| {
                                     query_engine.resolve_type_declaration(
                                         resolved.canonical_id.as_str(),
+                                        resolved.owner,
                                         resolved.exported_name.as_str(),
                                     )
                                 })
@@ -2005,6 +2052,7 @@ impl VerterHost {
                             // only inside the imported file).
                             query_engine.route_scoped_surface_fact(
                                 resolved.canonical_id.as_str(),
+                                resolved.owner,
                                 resolved.exported_name.as_str(),
                                 &pending_route,
                                 &pending_member_use_sites,
@@ -2075,16 +2123,28 @@ impl VerterHost {
                 owner_canonical,
                 declaration_owner,
             );
-            let mut declaration =
-                query_engine.resolve_type_declaration(declaration_owner, type_name.as_str());
+            let mut declaration = query_engine.resolve_type_declaration(
+                declaration_owner,
+                pending_source_owner,
+                type_name.as_str(),
+            );
             if declaration.canonical_source.is_empty() && declaration_owner != owner_canonical {
-                declaration =
-                    query_engine.resolve_type_declaration(owner_canonical, type_name.as_str());
+                declaration = query_engine.resolve_type_declaration(
+                    owner_canonical,
+                    verter_type_expr::TopLevelOwnerId::instance(0),
+                    type_name.as_str(),
+                );
             }
-            let declaration_body =
-                query_engine.named_decl_body(declaration_owner, type_name.as_str());
-            let owner_collection_locator =
-                query_engine.owner_collection_expr(owner_canonical, type_name.as_str());
+            let declaration_body = query_engine.named_decl_body(
+                declaration_owner,
+                pending_source_owner,
+                type_name.as_str(),
+            );
+            let owner_collection_locator = query_engine.owner_collection_expr(
+                owner_canonical,
+                verter_type_expr::TopLevelOwnerId::instance(0),
+                type_name.as_str(),
+            );
             // The owner-collection body's reference HEAD, read node-domain:
             // the OwnerCollectionDb locator lowers through the ONE shared
             // dispatch and the head classifies off the raised carrier — no
@@ -2114,8 +2174,11 @@ impl VerterHost {
             {
                 if let Some((body_ref_name, type_arguments)) = owner_collection_ref_head.as_ref() {
                     if !type_arguments.is_empty() {
-                        let body_decl =
-                            query_engine.resolve_type_declaration(owner_canonical, body_ref_name);
+                        let body_decl = query_engine.resolve_type_declaration(
+                            owner_canonical,
+                            verter_type_expr::TopLevelOwnerId::instance(0),
+                            body_ref_name,
+                        );
                         let body_scope = if body_decl.canonical_source.is_empty() {
                             owner_canonical
                         } else {
@@ -2135,9 +2198,13 @@ impl VerterHost {
             let published_locator = if declaration_owner != owner_canonical {
                 declaration_body.clone()
             } else {
-                owner_collection_locator
-                    .clone()
-                    .or_else(|| query_engine.named_decl_body(owner_canonical, type_name.as_str()))
+                owner_collection_locator.clone().or_else(|| {
+                    query_engine.named_decl_body(
+                        owner_canonical,
+                        verter_type_expr::TopLevelOwnerId::instance(0),
+                        type_name.as_str(),
+                    )
+                })
             };
             if published_locator.is_some() && declaration.canonical_source.is_empty() {
                 if let Some(import) = snapshot
@@ -2203,7 +2270,11 @@ impl VerterHost {
             let published_source =
                 if pending_route_is_whole_local && declaration_owner == owner_canonical {
                     query_engine
-                        .heritage_merged_surface_fact(owner_canonical, type_name.as_str())
+                        .heritage_merged_surface_fact(
+                            owner_canonical,
+                            verter_type_expr::TopLevelOwnerId::instance(0),
+                            type_name.as_str(),
+                        )
                         .map(|fact| {
                             verter_type_expr::facts::SemanticTypeSource::Projected(
                                 verter_type_expr::facts::ProjectedTypeFact::Surface(fact),
@@ -2219,6 +2290,7 @@ impl VerterHost {
                     .then(|| {
                         query_engine.route_scoped_surface_fact(
                             owner_canonical,
+                            verter_type_expr::TopLevelOwnerId::instance(0),
                             type_name.as_str(),
                             &pending_route,
                             &pending_member_use_sites,

@@ -50,6 +50,35 @@ fn candidate_store_is_content_addressed_hit_and_version_miss() {
     assert!(store.get(&upgraded).is_none());
 }
 
+#[test]
+fn carrier_parser_v3_candidate_is_rejected_by_v4_key() {
+    const PREVIOUS_CARRIER_PARSER_VERSION: u32 = 3;
+    assert_eq!(
+        crate::file_artifact_store::LEGACY_PARSER_VERSION,
+        PREVIOUS_CARRIER_PARSER_VERSION + 1
+    );
+
+    let store = FrameworkScriptCandidateStore::new();
+    let current = candidate_key("/Fixture.vue", [3u8; 16]);
+    let stale = CandidateSlotKey {
+        parser_version: PREVIOUS_CARRIER_PARSER_VERSION,
+        ..current.clone()
+    };
+    store.insert(stale.clone(), fixture_candidates());
+
+    assert!(store.get(&stale).is_some(), "the planted v3 row exists");
+    assert!(
+        store.get(&current).is_none(),
+        "the owner-exact v4 key rejects the v3 carrier candidate"
+    );
+
+    store.insert(current.clone(), fixture_candidates());
+    assert!(
+        store.get(&current).is_some(),
+        "a v4 candidate roundtrips under the current key"
+    );
+}
+
 fn fixture_payload() -> Arc<dyn FrameworkScriptFactPayload> {
     Arc::new(fixtures::FixtureFactPayload {
         resolved_specifier: "@corp/fixture-fw".to_string(),

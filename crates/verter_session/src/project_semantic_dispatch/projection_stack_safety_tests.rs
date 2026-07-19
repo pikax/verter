@@ -72,6 +72,7 @@ fn build_host(source: String) -> Arc<VerterHost> {
             let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
                 anchor: AuthoredAnchor {
                     canonical_id: Arc::from("/deep.ts"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     symbol: Arc::from("Deep"),
                     space: LocatorSymbolSpace::Type,
                 },
@@ -100,6 +101,7 @@ fn run_deep_tuple_projection_child() {
             let read = dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
                 crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                     Arc::from("/deep.ts"),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     Arc::from("Deep"),
                 ),
                 Arc::from(Vec::new().into_boxed_slice()),
@@ -165,6 +167,7 @@ fn run_deep_conditional_projection_child() {
             let read = dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
                 crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                     Arc::from("/deep.ts"),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     Arc::from("Deep"),
                 ),
                 Arc::from(Vec::new().into_boxed_slice()),
@@ -401,11 +404,16 @@ fn active_identity_cycle_keeps_recursive_sentinel_at_exhausted_work_boundary() {
     let recursive = graph.intern_node(SemanticNodeData::DeclRef {
         identity: crate::semantic_query::DeclIdentity {
             canonical_id: Arc::from("/recursive.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: Default::default(),
             decl_name: Arc::from("Recursive"),
         },
     });
-    assert!(dispatch.push_instantiate_active((Arc::from("/recursive.ts"), Arc::from("Recursive"),)));
+    assert!(dispatch.push_instantiate_active((
+        Arc::from("/recursive.ts"),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::from("Recursive"),
+    )));
     let (_demand_guard, initial_trip) = dispatch.enter_connected_demand(false);
     assert_eq!(initial_trip, None);
     let tripped = dispatch
@@ -449,6 +457,7 @@ fn exact_memo_identity_cycle_precedes_both_operational_limits() {
     let key = SemanticQueryKey::Instantiate(InstantiateKey::new(
         crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from("/deep.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Deep"),
         ),
         Arc::from([]),
@@ -533,6 +542,7 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_recomputes() {
     let runaway_carrier = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: crate::semantic_query::DeclIdentity {
             canonical_id: Arc::from("/runaway.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: Default::default(),
             decl_name: Arc::from("Runaway"),
         },
@@ -541,6 +551,7 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_recomputes() {
     let key = SemanticQueryKey::Instantiate(InstantiateKey::new(
         crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from("/w/lib.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("ReturnType"),
         ),
         Arc::from([runaway_carrier]),
@@ -611,6 +622,7 @@ fn connected_query_depth_limit_is_distinct_diagnostic_and_is_not_cached() {
     let key = SemanticQueryKey::Instantiate(InstantiateKey::new(
         crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from("/deep.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Deep"),
         ),
         Arc::from([]),
@@ -675,6 +687,7 @@ fn legitimate_recursive_type_uses_recursive_carrier_without_limit_diagnostic() {
     let read = dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
         crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from("/deep.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Deep"),
         ),
         Arc::from([]),
@@ -734,6 +747,7 @@ fn stable_unresolved_reference_is_complete_carrier_without_limit_diagnostic() {
     let read = dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
         crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from("/deep.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Deep"),
         ),
         Arc::from([]),

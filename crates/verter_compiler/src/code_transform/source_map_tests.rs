@@ -571,6 +571,60 @@ fn test_source_map_token_positions_moved_multiline() {
     );
 }
 
+#[test]
+fn moved_multiline_replacement_and_authored_neighbors_have_exact_coordinates() {
+    let allocator = Allocator::default();
+    let source = "ab\ncd\nef";
+    let mut transform = CodeTransform::new(source, &allocator);
+    transform.overwrite(3, 5, "X\nY");
+    transform.move_slice(3, 5, 6);
+
+    assert_eq!(transform.build_string(), "ab\n\nX\nYef");
+    let map = transform.generate_map(SourceMapOptions::new().with_source("test.ts"));
+    let tokens = map.get_tokens().collect::<Vec<_>>();
+    let mapped_at = |generated_line: u32, generated_column: u32| {
+        tokens
+            .iter()
+            .find(|token| {
+                token.get_dst_line() == generated_line
+                    && token.get_dst_col() == generated_column
+                    && token.get_source_id().is_some()
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing mapped token at generated ({generated_line},{generated_column}): {:?}",
+                    tokens
+                        .iter()
+                        .map(|token| (
+                            token.get_dst_line(),
+                            token.get_dst_col(),
+                            token.get_src_line(),
+                            token.get_src_col(),
+                            token.get_source_id(),
+                        ))
+                        .collect::<Vec<_>>()
+                )
+            })
+    };
+
+    let before = mapped_at(1, 0);
+    assert_eq!((before.get_src_line(), before.get_src_col()), (1, 2));
+
+    let replacement = mapped_at(2, 0);
+    assert_eq!(
+        (replacement.get_src_line(), replacement.get_src_col()),
+        (1, 0),
+        "the moved replacement retains only its replaced-span start identity"
+    );
+
+    let after = mapped_at(3, 1);
+    assert_eq!(
+        (after.get_src_line(), after.get_src_col()),
+        (2, 0),
+        "the byte-preserved authored suffix must restart at its exact source coordinate"
+    );
+}
+
 // ========================================================================
 // TDD: UTF-16 column accuracy tests — these should FAIL before the fix
 // ========================================================================

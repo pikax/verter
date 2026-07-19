@@ -15,7 +15,7 @@
 
 use verter_language::FileLanguage;
 
-use crate::types::{CompileProfile, PublicApiMode, TscResponse};
+use crate::types::{CompileProfile, PublicApiMode, PublicApiProjectionError, TscResponse};
 use crate::VerterHost;
 
 /// One resolved public prop exposed to editor/host consumers alongside a
@@ -55,12 +55,18 @@ pub struct ComponentApiProjection {
 ///
 /// The host selects the impl by the canonical's resolved
 /// [`FileLanguage`](verter_language::FileLanguage) adapter id and calls
-/// [`Self::render_api`]; a `None` return is the no-projection answer (exactly
-/// the host's pre-registry non-Vue behavior).
+/// [`Self::render_api`]; `Ok(None)` is the no-projection answer, while a
+/// selected carrier's projection failure remains a typed error.
 pub trait ComponentApiProjector: Send + Sync {
-    /// Render the component's public-API surface for the requested mode, or
-    /// `None` when this component projects no public-API virtual file.
-    fn render_api(&self, cx: ComponentApiProjectorCtx<'_>) -> Option<ComponentApiProjection>;
+    /// Render the component's public-API surface for the requested mode.
+    ///
+    /// `Ok(None)` means the adapter intentionally exposes no public-API
+    /// virtual file for this language/mode. Projection refusals return their
+    /// exact typed failure.
+    fn render_api(
+        &self,
+        cx: ComponentApiProjectorCtx<'_>,
+    ) -> Result<Option<ComponentApiProjection>, PublicApiProjectionError>;
 }
 
 /// The public-API projection context.

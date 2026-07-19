@@ -5,10 +5,13 @@ import path from "node:path";
 import { VerterHost } from "@verter/native";
 
 import {
+  CarrierPublicApiProjectionFailure,
   runBatchTypecheck,
   commonAncestorDir,
   isInsideDir,
   type CarrierSource,
+  type CarrierCodegenHost,
+  type CarrierPublicApiProjectionError,
 } from "./mirrorHost";
 import {
   createSingleProjectFixture,
@@ -90,6 +93,127 @@ describe("isInsideDir (segment-aware containment, not startsWith)", () => {
 });
 
 describe("runBatchTypecheck — single project (noEmit diagnostics-only)", () => {
+  it("records a projection failure per source and continues later siblings", () => {
+    const fx = track(
+      createSingleProjectFixture([
+        {
+          rel: "src/Ordinal.vue",
+          content: `<script setup lang="ts">\nconst value = 1\n</script>`,
+        },
+        {
+          rel: "src/Later.vue",
+          content: `<script setup lang="ts">\nconst value = 2\n</script>`,
+        },
+      ]),
+    );
+    const native = host();
+    const projectionError: CarrierPublicApiProjectionError = {
+      code: "tsc-generation",
+      detailCode: "invalid-authored-member-ordinal",
+      subject: { kind: "macro", syntaxIndex: 9 },
+      declarationShapeReason: null,
+      memberOrdinal: 3,
+      outcomeKind: null,
+      outcomeReason: null,
+      outcomeDiagnostic: null,
+    };
+    const failingHost: CarrierCodegenHost = {
+      upsert: native.upsert.bind(native),
+      ensureIdeCompiled: native.ensureIdeCompiled.bind(native),
+      getIde: native.getIde.bind(native),
+      getPublicApi: (canonicalId, mode) =>
+        canonicalId === "Ordinal.vue"
+          ? { value: null, error: projectionError }
+          : native.getPublicApi(canonicalId, mode),
+      close: native.close.bind(native),
+    };
+
+    try {
+      const ordinal = path.join(fx.root, "src/Ordinal.vue").replace(/\\/g, "/");
+      const later = path.join(fx.root, "src/Later.vue").replace(/\\/g, "/");
+      const result = runBatchTypecheck({
+        tsconfigPath: fx.tsconfigPath,
+        carrierSources: [
+          ideCarrier(fx.root, "src/Ordinal.vue", "vue"),
+          ideCarrier(fx.root, "src/Later.vue", "vue"),
+        ],
+        host: failingHost,
+      });
+
+      expect(result.sourceOutcomes.get(ordinal)).toEqual({
+        kind: "projectionFailure",
+        error: projectionError,
+      });
+      expect(result.materializedCarriers.has(ordinal)).toBe(false);
+      expect(result.sourceOutcomes.get(later)).toMatchObject({ kind: "materialized" });
+      expect(result.materializedCarriers.has(later)).toBe(true);
+    } finally {
+      failingHost.close?.();
+    }
+  });
+
+  it("preserves all unavailable-outcome arms on the thrown error", () => {
+    const cases: CarrierPublicApiProjectionError[] = [
+      {
+        code: "tsc-generation",
+        detailCode: "unavailable-outcome",
+        subject: { kind: "macro", syntaxIndex: 0 },
+        declarationShapeReason: null,
+        memberOrdinal: null,
+        outcomeKind: "partial",
+        outcomeReason: "incomplete-traversal",
+        outcomeDiagnostic: "partial detail",
+      },
+      {
+        code: "tsc-generation",
+        detailCode: "unavailable-outcome",
+        subject: { kind: "macro", syntaxIndex: 1 },
+        declarationShapeReason: null,
+        memberOrdinal: null,
+        outcomeKind: "unresolved",
+        outcomeReason: "ambiguous-reference",
+        outcomeDiagnostic: "unresolved detail",
+      },
+      {
+        code: "tsc-generation",
+        detailCode: "unavailable-outcome",
+        subject: { kind: "macro", syntaxIndex: 2 },
+        declarationShapeReason: null,
+        memberOrdinal: null,
+        outcomeKind: "unsupported",
+        outcomeReason: "semantic-construct",
+        outcomeDiagnostic: "unsupported detail",
+      },
+      {
+        code: "tsc-generation",
+        detailCode: "unavailable-outcome",
+        subject: { kind: "macro", syntaxIndex: 3 },
+        declarationShapeReason: null,
+        memberOrdinal: null,
+        outcomeKind: "invalid",
+        outcomeReason: "non-object-root",
+        outcomeDiagnostic: "invalid detail",
+      },
+      {
+        code: "tsc-generation",
+        detailCode: "unavailable-outcome",
+        subject: {
+          kind: "scriptSetupAttrs",
+          sourceRange: { start: 31, end: 37 },
+        },
+        declarationShapeReason: null,
+        memberOrdinal: null,
+        outcomeKind: "invalid",
+        outcomeReason: "malformed-or-recovered-type-syntax",
+        outcomeDiagnostic: null,
+      },
+    ];
+
+    for (const error of cases) {
+      expect(new CarrierPublicApiProjectionFailure(error)).toMatchObject(error);
+    }
+  });
+
   it("reports a carrier type error mapped back to the .vue source position", () => {
     const fx = track(
       createSingleProjectFixture([

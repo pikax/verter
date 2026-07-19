@@ -176,11 +176,19 @@ where
             None
         };
         let declaration = if skip_declaration_metadata {
-            placeholder_type_declaration(dep_exported_name.as_ref(), dep_exported_name.as_ref())
+            placeholder_type_declaration(
+                dep_exported_name.as_ref(),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                dep_exported_name.as_ref(),
+            )
         } else if let Some(surface) = imported_surface.as_ref() {
             surface.declaration.clone()
         } else {
-            host.resolve_type_declaration(&dep_canonical, dep_exported_name.as_ref())
+            host.resolve_type_declaration(
+                &dep_canonical,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                dep_exported_name.as_ref(),
+            )
         };
         let jsdoc = if skip_declaration_metadata {
             None
@@ -435,12 +443,14 @@ where
                         declaration: if skip_macro_declaration_metadata_for_purpose(purpose) {
                             placeholder_type_declaration(
                                 resolved.name.as_str(),
+                                resolved.owner,
                                 resolved.name.as_str(),
                             )
                         } else {
                             resolve_local_type_declaration(
                                 host,
                                 owner_canonical,
+                                resolved.owner,
                                 resolved.name.as_str(),
                                 resolved.span,
                             )
@@ -500,9 +510,17 @@ where
                     }
 
                     let declaration = if skip_macro_declaration_metadata_for_purpose(purpose) {
-                        placeholder_type_declaration(root_name.as_str(), root_name.as_str())
+                        placeholder_type_declaration(
+                            root_name.as_str(),
+                            mac.owner,
+                            root_name.as_str(),
+                        )
                     } else {
-                        host.resolve_type_declaration(owner_canonical, root_name.as_str())
+                        host.resolve_type_declaration(
+                            owner_canonical,
+                            mac.owner,
+                            root_name.as_str(),
+                        )
                     };
                     let jsdoc = if skip_macro_declaration_metadata_for_purpose(purpose) {
                         None
@@ -534,9 +552,17 @@ where
             {
                 if seen_registry_names.insert(root_name.clone()) {
                     let declaration = if skip_macro_declaration_metadata_for_purpose(purpose) {
-                        placeholder_type_declaration(root_name.as_str(), root_name.as_str())
+                        placeholder_type_declaration(
+                            root_name.as_str(),
+                            mac.owner,
+                            root_name.as_str(),
+                        )
                     } else {
-                        host.resolve_type_declaration(owner_canonical, root_name.as_str())
+                        host.resolve_type_declaration(
+                            owner_canonical,
+                            mac.owner,
+                            root_name.as_str(),
+                        )
                     };
                     resolved_type_registry.push(ResolvedTypeAnalysis {
                         name: root_name.clone(),

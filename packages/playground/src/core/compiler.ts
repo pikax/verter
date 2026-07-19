@@ -5,6 +5,9 @@ import type {
   FileAnalysis,
   LintDiagnostic,
   HostDiagnostic,
+  PublicApiProjectionError,
+  PublicApiModeOutcome,
+  PublicApiResponse,
 } from "./types";
 import { loadLocalWasm, loadCommitWasm, loadReleaseWasm, type WasmModule } from "./wasmLoader";
 import type { VersionEntry } from "./versions";
@@ -92,6 +95,76 @@ interface HostIdeResponse {
   } | null;
 }
 
+interface HostPublicApiResult {
+  value: PublicApiResponse | null;
+  error: PublicApiProjectionError | null;
+}
+
+class HostPublicApiProjectionFailure extends Error {
+  readonly projection: PublicApiProjectionError;
+
+  constructor(projection: PublicApiProjectionError) {
+    super(`public API projection failed: ${projection.code}/${projection.detailCode}`);
+    this.name = "HostPublicApiProjectionFailure";
+    this.projection = projection;
+  }
+}
+
+function publicApiOutcome(result: HostPublicApiResult): PublicApiModeOutcome {
+  if (result.error !== null) return { kind: "projectionFailure", error: result.error };
+  if (result.value !== null) return { kind: "value", value: result.value };
+  return { kind: "absent" };
+}
+
+function preservePublicApiProjectionFailure(
+  file: File,
+  projection: PublicApiProjectionError,
+): void {
+  const error = new HostPublicApiProjectionFailure(projection);
+  const subject =
+    projection.subject.kind === "macro"
+      ? `macro(${projection.subject.syntaxIndex})`
+      : `scriptSetupAttrs(${projection.subject.sourceRange.start}..${projection.subject.sourceRange.end})`;
+  const diagnostic: HostDiagnostic = {
+    severity: "error",
+    code: `${projection.code}/${projection.detailCode}`,
+    message: `${error.message} (subject=${subject}, declarationShapeReason=${projection.declarationShapeReason ?? "null"}, memberOrdinal=${projection.memberOrdinal ?? "null"}, outcomeKind=${projection.outcomeKind ?? "null"}, outcomeReason=${projection.outcomeReason ?? "null"}, outcomeDiagnostic=${projection.outcomeDiagnostic ?? "null"})`,
+    projectionError: projection,
+  };
+  file.compiled.compilerDiagnostics.push(diagnostic);
+  file.compiled.errors.push(formatDiagnostics([diagnostic])[0]!);
+}
+
+function applyPublicApiOutputs(
+  file: File,
+  canonicalId: string,
+  getPublicApi: NonNullable<HostBinding["getPublicApi"]>,
+): void {
+  const publicOutcome = publicApiOutcome(getPublicApi(canonicalId, "public"));
+  file.compiled.publicApiOutcome = publicOutcome;
+  if (publicOutcome.kind === "value") {
+    file.compiled.tscCode = publicOutcome.value.code;
+  } else {
+    file.compiled.tscCode = "";
+    if (publicOutcome.kind === "projectionFailure") {
+      preservePublicApiProjectionFailure(file, publicOutcome.error);
+    }
+  }
+
+  const declarationOutcome = publicApiOutcome(getPublicApi(canonicalId, "declaration"));
+  file.compiled.declarationOutcome = declarationOutcome;
+  if (declarationOutcome.kind === "value") {
+    file.compiled.declCode = declarationOutcome.value.code;
+    file.compiled.declSourceMap = declarationOutcome.value.sourceMap ?? "";
+  } else {
+    file.compiled.declCode = "";
+    file.compiled.declSourceMap = "";
+    if (declarationOutcome.kind === "projectionFailure") {
+      preservePublicApiProjectionFailure(file, declarationOutcome.error);
+    }
+  }
+}
+
 interface HostDiagnosticsSnapshot {
   diagnostics: HostDiagnostic[];
   hasErrors: boolean;
@@ -150,7 +223,7 @@ interface HostBinding {
   listVirtualFiles(canonicalId: string): HostVirtualNodeKind[];
   getAnalysis(canonicalOrAlias: string): FileAnalysis | null;
   getIde(canonicalId: string, profile?: HostCompileProfile): HostIdeResponse | null;
-  getPublicApi?(canonicalId: string, mode?: "public" | "declaration"): HostIdeResponse | null;
+  getPublicApi?(canonicalId: string, mode?: "public" | "declaration"): HostPublicApiResult;
   lint(canonicalOrAlias: string, config?: unknown): LintDiagnostic[];
   getCodeActions?(canonicalOrAlias: string, offset: number): HostCodeAction[];
   getLintRuleMetadata?(): HostLintRuleMetadata[];
@@ -178,6 +251,14 @@ export function formatDiagnostics(diagnostics: HostDiagnostic[] | undefined): st
 let wasmHost: HostBinding | null = null;
 let initialized = false;
 let initPromise: Promise<void> | null = null;
+
+function isHostBinding(value: unknown): value is HostBinding {
+  if (value === null || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  return ["upsert", "getVirtualFile", "listVirtualFiles", "getAnalysis", "getIde", "lint"].every(
+    (method) => typeof candidate[method] === "function",
+  );
+}
 
 /**
  * Test-only: directly inject a mock host binding and mark the compiler as initialized.
@@ -217,11 +298,12 @@ function configureHost(wasmModule: WasmModule): void {
     return;
   }
   try {
-    wasmHost = new hostCtor({
+    const candidate = new hostCtor({
       devMode: true,
       compileErrorPolicy: "devServeLastKnownGood",
       maxProfilesPerFile: 8,
-    }) as HostBinding;
+    });
+    wasmHost = isHostBinding(candidate) ? candidate : null;
   } catch {
     wasmHost = null;
   }
@@ -725,23 +807,15 @@ function compileVueRenderAssembly(
   // declaration-carrier surface (getPublicApi(id, "declaration")).
   let tscMs: number | null = null;
   if (typeof wasmHost!.getPublicApi === "function") {
-    try {
-      const t0 = performance.now();
-      const tsc = wasmHost!.getPublicApi(file.filename);
-      const decl = wasmHost!.getPublicApi(file.filename, "declaration");
-      tscMs = performance.now() - t0;
-      file.compiled.tscCode = tsc?.code ?? "";
-      file.compiled.declCode = decl?.code ?? "";
-      file.compiled.declSourceMap = decl?.sourceMap ?? "";
-    } catch {
-      file.compiled.tscCode = "";
-      file.compiled.declCode = "";
-      file.compiled.declSourceMap = "";
-    }
+    const t0 = performance.now();
+    applyPublicApiOutputs(file, file.filename, wasmHost!.getPublicApi.bind(wasmHost!));
+    tscMs = performance.now() - t0;
   } else {
     file.compiled.tscCode = "";
+    file.compiled.publicApiOutcome = { kind: "absent" };
     file.compiled.declCode = "";
     file.compiled.declSourceMap = "";
+    file.compiled.declarationOutcome = { kind: "absent" };
   }
 
   // SSR compilation pass: when SSR is toggled on, compile again with ssr: true
@@ -905,23 +979,15 @@ function compileGenericFrameworkSurfaces(
 
   let tscMs: number | null = null;
   if (typeof wasmHost!.getPublicApi === "function") {
-    try {
-      const t0 = performance.now();
-      const tsc = wasmHost!.getPublicApi(file.filename);
-      const decl = wasmHost!.getPublicApi(file.filename, "declaration");
-      tscMs = performance.now() - t0;
-      file.compiled.tscCode = tsc?.code ?? "";
-      file.compiled.declCode = decl?.code ?? "";
-      file.compiled.declSourceMap = decl?.sourceMap ?? "";
-    } catch {
-      file.compiled.tscCode = "";
-      file.compiled.declCode = "";
-      file.compiled.declSourceMap = "";
-    }
+    const t0 = performance.now();
+    applyPublicApiOutputs(file, file.filename, wasmHost!.getPublicApi.bind(wasmHost!));
+    tscMs = performance.now() - t0;
   } else {
     file.compiled.tscCode = "";
+    file.compiled.publicApiOutcome = { kind: "absent" };
     file.compiled.declCode = "";
     file.compiled.declSourceMap = "";
+    file.compiled.declarationOutcome = { kind: "absent" };
   }
 
   return {
@@ -1012,21 +1078,13 @@ function compileTsWithHost(
 
   // Public API output for TS-only mode (+ the declaration surface)
   if (typeof wasmHost!.getPublicApi === "function") {
-    try {
-      const tsc = wasmHost!.getPublicApi(vueFilename);
-      const decl = wasmHost!.getPublicApi(vueFilename, "declaration");
-      file.compiled.tscCode = tsc?.code ?? "";
-      file.compiled.declCode = decl?.code ?? "";
-      file.compiled.declSourceMap = decl?.sourceMap ?? "";
-    } catch {
-      file.compiled.tscCode = "";
-      file.compiled.declCode = "";
-      file.compiled.declSourceMap = "";
-    }
+    applyPublicApiOutputs(file, vueFilename, wasmHost!.getPublicApi.bind(wasmHost!));
   } else {
     file.compiled.tscCode = "";
+    file.compiled.publicApiOutcome = { kind: "absent" };
     file.compiled.declCode = "";
     file.compiled.declSourceMap = "";
+    file.compiled.declarationOutcome = { kind: "absent" };
   }
 
   return {

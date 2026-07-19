@@ -147,6 +147,7 @@ fn instantiation_ref(
         .intern_node(SemanticNodeData::InstantiationRef {
             base: DeclIdentity {
                 canonical_id: Arc::from(canonical),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from(name),
             },

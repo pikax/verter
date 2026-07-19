@@ -35,6 +35,7 @@ use crate::semantic_query::{DeclIdentity, HashValue};
 fn decl(canonical: &str, name: &str) -> DeclIdentity {
     DeclIdentity {
         canonical_id: Arc::from(canonical),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from(name),
     }
@@ -52,7 +53,13 @@ fn proven_closed_source_reports_closed() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let mut budget = 256u32;
     assert_eq!(
-        prepared_decl_body_is_closed(&dispatch, "/types.ts", "Closed", &mut budget),
+        prepared_decl_body_is_closed(
+            &dispatch,
+            "/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Closed",
+            &mut budget,
+        ),
         ClosednessVerdict::ProvenClosed,
         "a plain object interface is a proven-closed key domain"
     );
@@ -60,7 +67,13 @@ fn proven_closed_source_reports_closed() {
     // the same proof.
     let mut budget = 256u32;
     assert_eq!(
-        prepared_decl_body_is_closed(&dispatch, "/types.ts", "Chain", &mut budget),
+        prepared_decl_body_is_closed(
+            &dispatch,
+            "/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Chain",
+            &mut budget,
+        ),
         ClosednessVerdict::ProvenClosed,
         "a bare alias chain onto a closed object proves closed through the ref hop"
     );
@@ -79,7 +92,13 @@ fn proven_open_source_reports_open_not_unavailable() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let mut budget = 256u32;
     assert_eq!(
-        prepared_decl_body_is_closed(&dispatch, "/types.ts", "Bare", &mut budget),
+        prepared_decl_body_is_closed(
+            &dispatch,
+            "/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Bare",
+            &mut budget,
+        ),
         ClosednessVerdict::ProvenOpen,
         "a function-typed body is a PROOF of openness at the key domain, not a refusal"
     );
@@ -93,7 +112,13 @@ fn unavailable_source_is_never_proven_open() {
 
     // A missing declaration is a REFUSAL.
     let mut budget = 256u32;
-    let missing = prepared_decl_body_is_closed(&dispatch, "/types.ts", "Absent", &mut budget);
+    let missing = prepared_decl_body_is_closed(
+        &dispatch,
+        "/types.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "Absent",
+        &mut budget,
+    );
     assert_eq!(missing, ClosednessVerdict::Unavailable);
     assert_ne!(
         missing,
@@ -109,7 +134,13 @@ fn unavailable_source_is_never_proven_open() {
     );
     let mut budget = 256u32;
     assert_eq!(
-        prepared_decl_body_is_closed(&dispatch, "/dangling.ts", "Dangle", &mut budget),
+        prepared_decl_body_is_closed(
+            &dispatch,
+            "/dangling.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Dangle",
+            &mut budget,
+        ),
         ClosednessVerdict::Unavailable,
         "an unresolvable bare name is undecidable — never ProvenOpen"
     );
@@ -129,7 +160,13 @@ fn budget_exhaustion_reports_unavailable_and_recomputes_fresh() {
     // Budget zero: the evaluator REFUSES before any step.
     let mut exhausted = 0u32;
     assert_eq!(
-        prepared_decl_body_is_closed(&dispatch, "/types.ts", "Chain", &mut exhausted),
+        prepared_decl_body_is_closed(
+            &dispatch,
+            "/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Chain",
+            &mut exhausted,
+        ),
         ClosednessVerdict::Unavailable,
         "budget exhaustion is a refusal, never a proof (fail-closed, no-poison)"
     );
@@ -138,7 +175,13 @@ fn budget_exhaustion_reports_unavailable_and_recomputes_fresh() {
     // the exhausted run cached nothing (no warm poisoning of the verdict).
     let mut fresh = 256u32;
     assert_eq!(
-        prepared_decl_body_is_closed(&dispatch, "/types.ts", "Chain", &mut fresh),
+        prepared_decl_body_is_closed(
+            &dispatch,
+            "/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Chain",
+            &mut fresh,
+        ),
         ClosednessVerdict::ProvenClosed,
         "a fresh evaluation after an exhausted one recomputes the genuine verdict"
     );
@@ -266,7 +309,13 @@ fn true_self_recursion_refuses_instead_of_diverging() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let mut budget = 256u32;
     assert_eq!(
-        prepared_decl_body_is_closed(&dispatch, "/types.ts", "Loop", &mut budget),
+        prepared_decl_body_is_closed(
+            &dispatch,
+            "/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Loop",
+            &mut budget,
+        ),
         ClosednessVerdict::Unavailable,
         "a genuine alias cycle refuses through the dispatch-wide in-flight guard"
     );

@@ -40,6 +40,9 @@ mod rune_ambient;
 mod virtual_file_pipeline;
 mod vue_script_extract;
 
+#[cfg(test)]
+pub(crate) use virtual_file_pipeline::vue_macro_output_matches_revision;
+
 // Re-exports preserving the pre-split public surface at
 // `crate::host_resolve::*`. `#[allow(unused_imports)]` because some
 // re-exports are consumed only by `#[cfg(test)]` callers

@@ -157,7 +157,7 @@ fn global_archetype_emits_module_augmentation_fact_via_global_tag() {
 fn augmentation_facts_land_in_fact_registry() {
     // R29: the per-augmentation fact ALSO lands in the parse-domain
     // `FileFacts.registry` under
-    // `FactKey::ModuleAugmentation { specifier, augmented_name, space }`.
+    // `FactKey::ModuleAugmentation { specifier, owner, augmented_name, space }`.
     let raw = fixture("module_augmentation_external.ts");
     let indexed = build_indexed_with_source(&raw);
     let emission = emit_parse_facts(&indexed);
@@ -165,6 +165,7 @@ fn augmentation_facts_land_in_fact_registry() {
     for aug in emission.augmentations.iter() {
         let key = FactKey::ModuleAugmentation {
             specifier: InternedSpecifier::from(aug.specifier.as_ref()),
+            owner: aug.owner,
             augmented_name: aug.augmented_name.clone(),
             space: aug.space,
         };

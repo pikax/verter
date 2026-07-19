@@ -6267,6 +6267,7 @@ defineSlots<OpenMappedSlots<T>>()
             crate::semantic_query::InstantiateKey::new(
                 crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                     Arc::from("/OpenMappedSlots.vue"),
+                    verter_type_expr::TopLevelOwnerId::module(0),
                     Arc::from("OpenMappedSlots"),
                 ),
                 Arc::from(vec![t_param].into_boxed_slice()),
@@ -26298,6 +26299,7 @@ defineEmits<{ change: [value: number]; close: [] }>()
             verter_type_expr::locators::MacroPayloadLocator {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
                     canonical_id: Arc::from("/App.vue"),
+                    owner: verter_type_expr::TopLevelOwnerId::instance(0),
                     symbol: Arc::from("default"),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                 },
@@ -26462,6 +26464,7 @@ fn authored_decl_body_source(
             verter_type_expr::locators::TypeBodySlot {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
                     canonical_id: Arc::from(canonical),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     symbol: Arc::from(symbol),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                 },
@@ -27446,6 +27449,7 @@ fn missing_interior_slot() -> verter_type_expr::locators::TypeBodySlot {
     verter_type_expr::locators::TypeBodySlot {
         anchor: verter_type_expr::locators::AuthoredAnchor {
             canonical_id: Arc::from("/definitely-missing.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             symbol: Arc::from("NoSuchType"),
             space: verter_type_expr::locators::LocatorSymbolSpace::Type,
         },
@@ -27552,6 +27556,7 @@ fn component_meta_output_failed_interior_locator_fails_closed_per_source_family(
                 .into_boxed_slice(),
             ),
             return_ty: None,
+            return_inference: tf::ReturnInferenceCompleteness::NotInferred,
             has_implementation_body: false,
             spans_origin: verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(
                 SourceSynthetic,
@@ -27665,6 +27670,7 @@ fn component_meta_output_genuinely_absent_positions_stay_typed_unknown_not_failu
                 .into_boxed_slice(),
             ),
             return_ty: None, // deliberately absent synthetic return slot
+            return_inference: tf::ReturnInferenceCompleteness::NotInferred,
             has_implementation_body: false,
             spans_origin: verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(
                 SourceSynthetic,
@@ -30984,11 +30990,14 @@ defineProps<Props>()
         .host()
         .prepared_decl_bundle("/inner.ts")
         .expect("the inner dependency materializes a prepared-decl bundle");
+    let inner_scope = inner_bundle
+        .owner_scope(verter_type_expr::TopLevelOwnerId::ordinary_file())
+        .expect("ordinary TypeScript file has a module-zero declaration scope");
     assert!(
-        inner_bundle.scope_type_names.contains("Real"),
+        inner_scope.scope_type_names.contains("Real"),
         "the non-carrier inner file keeps its type inventory (never \
          script-scanned); got {:?}",
-        inner_bundle.scope_type_names
+        inner_scope.scope_type_names
     );
 
     let output = project

@@ -89,6 +89,7 @@ impl crate::resolver_core::DeclarationMetadataResolver
     fn resolve_export_target(
         &self,
         _dep_canonical: &str,
+        _dep_owner: verter_type_expr::TopLevelOwnerId,
         _requested_name: &str,
     ) -> Option<crate::resolver_core::ResolvedExportTarget> {
         None
@@ -105,10 +106,15 @@ impl crate::resolver_core::DeclarationMetadataResolver
     fn type_declaration_id(
         &self,
         canonical_source: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
     ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
-        self.host
-            .local_type_declaration_id(canonical_source, resolved_name)
+        (owner == verter_type_expr::TopLevelOwnerId::ordinary_file())
+            .then(|| {
+                self.host
+                    .local_type_declaration_id(canonical_source, resolved_name)
+            })
+            .flatten()
     }
 
     fn resolve_type_dependency_canonical(
@@ -122,10 +128,14 @@ impl crate::resolver_core::DeclarationMetadataResolver
     fn resolve_local_type_symbol_metadata(
         &self,
         canonical_source: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
     ) -> Option<crate::resolver_core::ResolvedLocalTypeSymbolMetadata> {
         let analysis = self.host.external_type_analysis(canonical_source)?;
-        let symbol = analysis.local_type_symbol(resolved_name)?;
+        let declaration = verter_parser::utils::oxc::script::type_inventory::DeclarationPath::root(
+            verter_type_expr::DeclKey::new(owner, resolved_name),
+        );
+        let symbol = analysis.local_type_symbol(&declaration)?;
         let kind = match symbol.kind {
             verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSymbolKind::TypeAlias => {
                 crate::resolver_core::ResolvedDeclarationKind::TypeAlias

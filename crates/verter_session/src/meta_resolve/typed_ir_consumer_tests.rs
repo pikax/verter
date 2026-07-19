@@ -55,6 +55,7 @@ fn slot_field_function_source_publishes_payload_else_closed_function_fact() {
     let payload = verter_type_expr::locators::MacroPayloadLocator {
         anchor: verter_type_expr::locators::AuthoredAnchor {
             canonical_id: Arc::from("/c.vue"),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             symbol: Arc::from("default"),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
@@ -104,6 +105,7 @@ fn slot_field_function_source_publishes_payload_else_closed_function_fact() {
             &closed,
             crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                 scope_canonical_id: "/c.vue",
+                scope_owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 context:
                     crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         crate::semantic_query::ProjectionMode::Navigate,
@@ -285,6 +287,7 @@ fn imported_alias_source_demands_to_the_resolved_union_through_the_bridge() {
             source,
             crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                 scope_canonical_id: "/c.vue",
+                scope_owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 context: crate::semantic_query::ProjectionReductionContext::published(
                     crate::semantic_query::ProjectionMode::Expanded,
                 ),

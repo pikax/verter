@@ -175,6 +175,13 @@ the normalized props/emits/model shapes. TSC entries contain terminal splice
 text and are emitted directly; the compiler does not parse or reinterpret the
 splice.
 
+Local declaration carriers preserve TypeInfo refusal detail through
+`TscDependencyDeclaration.declaration_failure`: structural inference budgets
+remain the closed depth/work variants, while deterministic unsupported and
+unresolved declaration shapes remain distinct. The compiler forwards that
+typed detail in `TscDeclarationShapeReason`; it never collapses the carrier to
+a generic semantic-inference failure or a diagnostic string.
+
 The compiler must never resolve a typed macro parameter, build a companion
 type environment, accept a compiler-owned external-type map, or merge
 host-resolved types into parser state. `PreparedScript` parses setup and

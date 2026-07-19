@@ -11,6 +11,7 @@ use crate::{
     UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
 use verter_compiler::compile::CompileTarget;
+use verter_compiler::tsc::{TscDeclarationShapeReason, TscGenerationError};
 
 fn strict_host() -> VerterHost {
     VerterHost::new_standalone(HostConfig {
@@ -137,6 +138,7 @@ fn compile_main_error(host: &VerterHost, canonical_id: &str) -> crate::Diagnosti
 
 fn public_api_code(host: &VerterHost, canonical_id: &str) -> String {
     host.get_public_api(canonical_id)
+        .unwrap_or_else(|error| panic!("public API projection failed for {canonical_id}: {error}"))
         .unwrap_or_else(|| panic!("expected public api output for {canonical_id}"))
         .code
         .to_string()
@@ -144,6 +146,7 @@ fn public_api_code(host: &VerterHost, canonical_id: &str) -> String {
 
 fn public_api_code_with_mode(host: &VerterHost, canonical_id: &str, mode: PublicApiMode) -> String {
     host.get_public_api_with_mode(canonical_id, mode, None)
+        .unwrap_or_else(|error| panic!("public API projection failed for {canonical_id}: {error}"))
         .unwrap_or_else(|| panic!("expected public api output for {canonical_id}"))
         .code
         .to_string()
@@ -156,6 +159,7 @@ fn public_api_code_with_profile(
     profile: &CompileProfile,
 ) -> String {
     host.get_public_api_with_mode(canonical_id, mode, Some(profile))
+        .unwrap_or_else(|error| panic!("public API projection failed for {canonical_id}: {error}"))
         .unwrap_or_else(|| panic!("expected public api output for {canonical_id}"))
         .code
         .to_string()
@@ -1642,7 +1646,9 @@ defineProps<{ msg: string }>()
     );
 
     // First call should populate the cache
-    let api = host.get_public_api("/test/Cached.vue");
+    let api = host
+        .get_public_api("/test/Cached.vue")
+        .expect("public API projection");
     assert!(api.is_some(), "should produce public API output");
 
     // Verify cache is populated. cached_tsc_extract lives on
@@ -1682,8 +1688,14 @@ defineEmits<{ (e: 'click'): void }>()
 <template><div /></template>"#,
     );
 
-    let api1 = host.get_public_api("/test/Reuse.vue").expect("first call");
-    let api2 = host.get_public_api("/test/Reuse.vue").expect("second call");
+    let api1 = host
+        .get_public_api("/test/Reuse.vue")
+        .expect("first projection")
+        .expect("first call");
+    let api2 = host
+        .get_public_api("/test/Reuse.vue")
+        .expect("second projection")
+        .expect("second call");
     assert_eq!(
         api1.code, api2.code,
         "two consecutive calls must produce identical code"
@@ -1703,7 +1715,9 @@ defineProps<{ a: string }>()
     );
 
     // Populate cache
-    let _api = host.get_public_api("/test/Clear.vue");
+    let _api = host
+        .get_public_api("/test/Clear.vue")
+        .expect("public API projection");
     #[cfg(not(target_arch = "wasm32"))]
     {
         // cached_tsc_extract lives on DerivedRawState (D48 split).
@@ -1770,7 +1784,9 @@ defineProps<{ msg: string }>()
     );
 
     // Populate cache
-    let _api = host.get_public_api("/test/TplChange.vue");
+    let _api = host
+        .get_public_api("/test/TplChange.vue")
+        .expect("public API projection");
     #[cfg(not(target_arch = "wasm32"))]
     {
         // cached_tsc_extract lives on DerivedRawState (D48 split).
@@ -1882,7 +1898,9 @@ defineProps<{ x: T }>()
     );
 
     // Populate cache
-    let _api = host.get_public_api("/test/DescChange.vue");
+    let _api = host
+        .get_public_api("/test/DescChange.vue")
+        .expect("public API projection");
     #[cfg(not(target_arch = "wasm32"))]
     {
         // cached_tsc_extract lives on DerivedRawState (D48 split).
@@ -4711,6 +4729,7 @@ fn public_api_public_mode_is_byte_identical_through_projector_dispatch() {
     let host = public_api_byte_pin_host();
     let r = host
         .get_public_api_with_mode("/src/Cap.vue", PublicApiMode::Public, None)
+        .expect("public-mode projection")
         .expect("public-mode api output");
     assert_eq!(
         r.code.as_ref(),
@@ -4729,6 +4748,7 @@ fn public_api_testing_mode_is_byte_identical_through_projector_dispatch() {
     let host = public_api_byte_pin_host();
     let r = host
         .get_public_api_with_mode("/src/Cap.vue", PublicApiMode::Testing, None)
+        .expect("testing-mode projection")
         .expect("testing-mode api output");
     assert_eq!(
         r.code.as_ref(),
@@ -4759,6 +4779,7 @@ fn public_api_declaration_mode_is_declaration_safe_through_projector_dispatch() 
     let host = public_api_byte_pin_host();
     let decl = host
         .get_public_api_with_mode("/src/Cap.vue", PublicApiMode::Declaration, None)
+        .expect("declaration-mode projection")
         .expect("declaration-mode api output")
         .code
         .to_string();
@@ -4803,6 +4824,7 @@ fn public_api_declaration_mode_is_declaration_safe_through_projector_dispatch() 
     // and the two outputs differ.
     let public = host
         .get_public_api_with_mode("/src/Cap.vue", PublicApiMode::Public, None)
+        .expect("public-mode projection")
         .expect("public-mode api output")
         .code
         .to_string();
@@ -4829,14 +4851,83 @@ fn public_api_non_vue_canonical_returns_none_through_projector_dispatch() {
     );
     assert!(
         host.get_public_api_with_mode("/src/plain.ts", PublicApiMode::Public, None)
+            .expect("plain script projection")
             .is_none(),
         "a non-Vue canonical must project no public-API surface"
     );
     assert!(
         host.get_public_api_with_mode("/src/plain.ts", PublicApiMode::Testing, None)
+            .expect("plain script projection")
             .is_none(),
         "a non-Vue canonical must project no public-API surface in testing mode either"
     );
+}
+
+#[test]
+fn public_api_unsafe_declaration_is_a_typed_error_not_absence() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/src/UnsafeEnum.vue",
+        r#"<script setup lang="ts">
+enum Unsafe { Value = Math.random() }
+defineProps<{ value: Unsafe }>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let error = host
+        .get_public_api_with_mode("/src/UnsafeEnum.vue", PublicApiMode::Declaration, None)
+        .expect_err("an unsafe declaration must not collapse to None");
+    assert!(matches!(
+        error,
+        crate::PublicApiProjectionError::TscGeneration(
+            TscGenerationError::UnsupportedDeclarationShape {
+                reason: TscDeclarationShapeReason::UnsupportedEnumShape,
+                ..
+            }
+        )
+    ));
+    assert_eq!(error.code(), "tsc-generation");
+    assert_eq!(error.detail_code(), "unsupported-declaration-shape");
+    assert_eq!(
+        error.subject(),
+        verter_compiler::tsc::TscFailureSubject::Macro { syntax_index: 0 }
+    );
+    assert_eq!(error.macro_syntax_index(), Some(0));
+    assert_eq!(
+        error.declaration_shape_reason().map(|reason| reason.code()),
+        Some("unsupported-enum-shape")
+    );
+}
+
+#[test]
+fn public_api_malformed_script_setup_attrs_preserves_exact_subject_range() {
+    let host = strict_host();
+    let source = r#"<script setup lang="ts" attrs="Attrs.">
+import type { Attrs } from './types'
+</script><template/>"#;
+    upsert_vue(&host, "/src/MalformedAttrs.vue", source);
+    let start = source.find("Attrs.").expect("attrs value") as u32;
+    let source_range = Span::new(start, start + "Attrs.".len() as u32);
+
+    let error = host
+        .get_public_api_with_mode("/src/MalformedAttrs.vue", PublicApiMode::Declaration, None)
+        .expect_err("malformed attrs type syntax must fail closed");
+
+    assert_eq!(
+        error.subject(),
+        verter_compiler::tsc::TscFailureSubject::ScriptSetupAttrs { source_range }
+    );
+    assert_eq!(error.macro_syntax_index(), None);
+    assert!(matches!(
+        error.unavailable_outcome(),
+        Some(verter_compiler::tsc::TscUnavailableOutcome::Invalid(
+            verter_compiler::tsc::TscInvalidOutcome::AuthoredTypeSyntax(
+                verter_compiler::tsc::TscInvalidAuthoredTypeReason::MalformedOrRecoveredTypeSyntax,
+            )
+        ))
+    ));
 }
 
 #[test]
@@ -4863,9 +4954,11 @@ fn public_api_through_alias_is_byte_identical_to_canonical() {
     for mode in [PublicApiMode::Public, PublicApiMode::Testing] {
         let via_canonical = host
             .get_public_api_with_mode("/src/Aliased.vue", mode, None)
+            .unwrap_or_else(|error| panic!("canonical projection failed for {mode:?}: {error}"))
             .unwrap_or_else(|| panic!("canonical request must render for {mode:?}"));
         let via_alias = host
             .get_public_api_with_mode("/virtual/aliased-handle", mode, None)
+            .unwrap_or_else(|error| panic!("alias projection failed for {mode:?}: {error}"))
             .unwrap_or_else(|| panic!("alias request must render for {mode:?}"));
         assert_eq!(
             via_alias.code.as_ref(),
@@ -4902,6 +4995,7 @@ fn public_api_classification_authority_is_runtime_load_language_not_path() {
         .unwrap();
     assert!(
         host.get_public_api_with_mode("/src/NotReallyVue.vue", PublicApiMode::Public, None)
+            .expect("plain-script projection")
             .is_none(),
         "a `.vue`-path file loaded as a plain script must project no public-API surface"
     );
@@ -4920,6 +5014,7 @@ fn public_api_classification_authority_is_runtime_load_language_not_path() {
         .unwrap();
     assert!(
         host.get_public_api_with_mode("/src/carrier-as-vue", PublicApiMode::Public, None)
+            .expect("Vue carrier projection")
             .is_some(),
         "a file loaded as the Vue carrier must project a public-API surface regardless of path"
     );
@@ -4951,17 +5046,19 @@ fn vue_api_projector_rejects_a_non_carrier_vue_language() {
 
     // Sanity: the carrier language DOES render this loaded SFC through the leg.
     let carrier = FileLanguage::vue();
-    let via_carrier = VueComponentApiProjector.render_api(ComponentApiProjectorCtx {
-        host: &host,
-        resolved_canonical: "/src/RealSfc.vue",
-        file_language: &carrier,
-        mode: PublicApiMode::Public,
-        profile: None,
-        // This SFC's `defineProps<{ a: string }>()` is an inline literal (no
-        // macro-type deps), so the legacy body never reaches the seed-bearing
-        // macro-deps branch — `None` is sufficient for this carrier-gate test.
-        render_seed: None,
-    });
+    let via_carrier = VueComponentApiProjector
+        .render_api(ComponentApiProjectorCtx {
+            host: &host,
+            resolved_canonical: "/src/RealSfc.vue",
+            file_language: &carrier,
+            mode: PublicApiMode::Public,
+            profile: None,
+            // This SFC's `defineProps<{ a: string }>()` is an inline literal (no
+            // macro-type deps), so the legacy body never reaches the seed-bearing
+            // macro-deps branch — `None` is sufficient for this carrier-gate test.
+            render_seed: None,
+        })
+        .expect("Vue carrier projection");
     assert!(
         via_carrier.is_some(),
         "the Vue leg must render a loaded SFC for the carrier language"
@@ -4974,16 +5071,18 @@ fn vue_api_projector_rejects_a_non_carrier_vue_language() {
         adapter_id: verter_language::FrameworkAdapterId::vue(),
         language_id: verter_language::LanguageId::new("vue_template"),
     };
-    let rejected = VueComponentApiProjector.render_api(ComponentApiProjectorCtx {
-        host: &host,
-        resolved_canonical: "/src/RealSfc.vue",
-        file_language: &vue_non_carrier,
-        mode: PublicApiMode::Public,
-        profile: None,
-        // Rejected by the carrier-narrowness gate BEFORE the legacy body, so
-        // the seed is never consulted.
-        render_seed: None,
-    });
+    let rejected = VueComponentApiProjector
+        .render_api(ComponentApiProjectorCtx {
+            host: &host,
+            resolved_canonical: "/src/RealSfc.vue",
+            file_language: &vue_non_carrier,
+            mode: PublicApiMode::Public,
+            profile: None,
+            // Rejected by the carrier-narrowness gate BEFORE the legacy body, so
+            // the seed is never consulted.
+            render_seed: None,
+        })
+        .expect("Vue non-carrier projection");
     assert!(
         rejected.is_none(),
         "the Vue leg must reject a Vue-adapter non-carrier language before the legacy body, \
@@ -5591,6 +5690,7 @@ fn render_legacy_body_operates_on_the_resolved_canonical_without_re_resolving() 
     // macro-deps branch — `None` for the render seed is sufficient here.
     assert!(
         host.render_vue_public_api_legacy("/src/Coherent.vue", PublicApiMode::Public, None, None)
+            .expect("canonical legacy projection")
             .is_some(),
         "the legacy body must render the resolved canonical it is given"
     );
@@ -5601,6 +5701,7 @@ fn render_legacy_body_operates_on_the_resolved_canonical_without_re_resolving() 
             None,
             None
         )
+        .expect("alias legacy projection")
         .is_none(),
         "the legacy body must NOT resolve an alias itself — the host resolves once up-front"
     );
@@ -5610,6 +5711,7 @@ fn render_legacy_body_operates_on_the_resolved_canonical_without_re_resolving() 
     // is served end-to-end while the leg stays resolution-free.
     assert!(
         host.get_public_api_with_mode("/virtual/coherent-handle", PublicApiMode::Public, None)
+            .expect("alias public API projection")
             .is_some(),
         "the host entry must still serve the alias end-to-end via one resolution"
     );

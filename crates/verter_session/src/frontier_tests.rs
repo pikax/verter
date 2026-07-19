@@ -315,6 +315,7 @@ fn named_export_route_layer_order_shallow_sibling_wins_over_earlier_deep_branch(
     match &route {
         crate::resolver_core::RouteResult::Resolved {
             defining_canonical,
+            defining_owner,
             defining_symbol,
         } => {
             assert_eq!(
@@ -322,6 +323,10 @@ fn named_export_route_layer_order_shallow_sibling_wins_over_earlier_deep_branch(
                 "/workspace/src/same-layer.ts",
                 "the nearest same-layer re-export must win over the deeper \
                  earlier-declared branch",
+            );
+            assert_eq!(
+                *defining_owner,
+                verter_type_expr::TopLevelOwnerId::ordinary_file()
             );
             assert_eq!(defining_symbol.as_str(), "Target");
         }

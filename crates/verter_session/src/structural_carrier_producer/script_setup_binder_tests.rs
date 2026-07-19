@@ -79,6 +79,7 @@ fn extracted_builder_seeds_typeparam_binders_for_script_setup_generics() {
     let graph = host.project_type_store().semantic_graph();
     let scope = NodeScopeId::File {
         canonical_id: Arc::from("/G.vue"),
+        owner: verter_type_expr::TopLevelOwnerId::instance(0),
         whole_hash: indexed.whole_hash,
         local_scope: None,
     };
@@ -153,6 +154,7 @@ fn extracted_builder_returns_empty_frames_without_script_setup_generics() {
     let graph = host.project_type_store().semantic_graph();
     let scope = NodeScopeId::File {
         canonical_id: Arc::from("/Plain.vue"),
+        owner: verter_type_expr::TopLevelOwnerId::instance(0),
         whole_hash: indexed.whole_hash,
         local_scope: None,
     };

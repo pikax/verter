@@ -224,8 +224,6 @@ pub(crate) fn project_evaluated_types(
     evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
 ) {
-    let owner = build_owner_decl_identity(query_engine.ctx, file);
-
     // Construct a `SurfaceProjection` per macro kind so each
     // projector entry receives a path-precise cursor.
     // `whole_surface(kind)` admits every published member name;
@@ -233,6 +231,7 @@ pub(crate) fn project_evaluated_types(
     use crate::meta_resolve::projection_demand::{PublishedSurfaceKind, SurfaceProjection};
 
     for (macro_index, mac) in snapshot.macros.iter().enumerate() {
+        let owner = build_owner_decl_identity(query_engine.ctx, file, mac.owner);
         match mac.kind {
             AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
                 let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Props);
@@ -363,6 +362,7 @@ pub(crate) const SFC_SCRIPT_SETUP_DECL_NAME: &str = "<sfc-script-setup>";
 pub(crate) fn build_owner_decl_identity(
     ctx: &dyn ResolverContext,
     owner_canonical: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
 ) -> DeclIdentity {
     let whole_hash = ctx
         .shallow_file_state(owner_canonical)
@@ -370,6 +370,7 @@ pub(crate) fn build_owner_decl_identity(
         .unwrap_or_default();
     DeclIdentity {
         canonical_id: Arc::from(owner_canonical),
+        owner,
         whole_hash,
         decl_name: Arc::from(SFC_SCRIPT_SETUP_DECL_NAME),
     }
@@ -559,6 +560,7 @@ pub(crate) fn resolve_macro_payload(
     let payload_read = dispatch.execute_read(SemanticQueryKey::ResolveMacroPayload {
         owner: dispatch.type_slot_for(
             Arc::clone(&owner.canonical_id),
+            owner.owner,
             Arc::clone(&owner.decl_name),
         ),
         macro_index,
@@ -705,6 +707,7 @@ pub(crate) fn resolve_macro_payload(
                                 crate::semantic_query::ResolveDeclKey {
                                     scope: crate::semantic_query::ScopeId {
                                         canonical_id: std::sync::Arc::clone(&identity.canonical_id),
+                                        owner: identity.owner,
                                         local_scope: None,
                                     },
                                     name: std::sync::Arc::clone(&identity.decl_name),

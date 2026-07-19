@@ -796,10 +796,12 @@ mod tests {
         let dummy_id: Arc<str> = Arc::from("/x");
         let scope = ScopeId {
             canonical_id: Arc::clone(&dummy_id),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         };
         let identity = crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::clone(&dummy_id),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("X"),
         );
         let dummy_node = crate::semantic_query::SemanticNodeId(1);
@@ -867,6 +869,7 @@ mod tests {
         };
         let slot = crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
             Arc::clone(&dummy_id),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("X"),
             0,
             Default::default(),

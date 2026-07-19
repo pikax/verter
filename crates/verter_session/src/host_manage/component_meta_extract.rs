@@ -207,20 +207,18 @@ fn extract_component_meta_from_inputs(
 /// Cross-file resolution goes through `host.resolve_local_import_symbol_target`
 /// (cache-backed). No fresh resolver; no duplicate route discovery.
 pub(crate) fn resolve_ref_to_root_identity(
-    host: &VerterHost,
+    ctx: &dyn crate::resolver_core::ResolverContext,
     owner_canonical: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
 ) -> Option<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity> {
-    use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
-
-    if host
-        .local_type_declaration_id(owner_canonical, name)
-        .is_some()
-    {
-        return Some(ResolvedRootIdentity::new(owner_canonical, name));
-    }
-    host.resolve_local_import_symbol_target(owner_canonical, name)
-        .map(|(canonical_id, exported_name)| ResolvedRootIdentity::new(canonical_id, exported_name))
+    crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+        ctx,
+        owner_canonical,
+        owner,
+        None,
+        name,
+    )
 }
 
 fn build_public_instance_slots_member(
@@ -503,9 +501,10 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
 pub(in crate::host_manage) fn resolve_ref_to_root_identity_for_test(
     host: &VerterHost,
     owner_canonical: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
 ) -> Option<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity> {
-    resolve_ref_to_root_identity(host, owner_canonical, name)
+    resolve_ref_to_root_identity(host, owner_canonical, owner, name)
 }
 
 #[cfg(test)]

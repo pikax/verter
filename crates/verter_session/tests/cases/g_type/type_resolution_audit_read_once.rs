@@ -65,6 +65,7 @@ fn type_resolution_audit_repeated_query_uses_warm_cache() {
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::from("/types.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         },
         name: Arc::from("Outer"),

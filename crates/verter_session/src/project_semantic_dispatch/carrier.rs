@@ -223,6 +223,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
                             Arc::clone(&identity.canonical_id),
+                            identity.owner,
                             Arc::clone(&identity.decl_name),
                         ),
                         type_args,
@@ -238,6 +239,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
                             Arc::clone(&identity.canonical_id),
+                            identity.owner,
                             Arc::clone(&identity.decl_name),
                         ),
                         type_args,
@@ -377,6 +379,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::Intern {
                 head: RefHeadResolution::Builtin(DeclIdentity {
                     canonical_id: Arc::from("__builtin__"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash: HashValue::default(),
                     decl_name: Arc::clone(name),
                 }),
@@ -401,6 +404,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         {
             let builtin_identity = DeclIdentity {
                 canonical_id: Arc::from("__builtin__"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
                 decl_name: Arc::clone(name),
             };
@@ -417,18 +421,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // the map does not carry (the carrier-subject entry rehydrates an EMPTY
         // map + the scope payload, so the fallback is the whole resolver there).
         let resolved_root = if let Some(direct) = name_resolution.get(name.as_ref()) {
-            Some((
-                Arc::clone(&direct.canonical_id),
-                Arc::clone(&direct.symbol_name),
-            ))
-        } else if let NodeScopeId::File { canonical_id, .. } = scope {
+            Some(direct.clone())
+        } else if let NodeScopeId::File {
+            canonical_id,
+            owner,
+            ..
+        } = scope
+        {
             resolve_bare_name_in_scope(
                 self.ctx,
                 canonical_id.as_ref(),
+                *owner,
                 scope_payload,
                 name.as_ref(),
             )
-            .map(|ri| (ri.canonical_id, ri.symbol_name))
         } else {
             None
         };
@@ -439,7 +445,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // loadable — which is the external ambient-module case the augmentation
         // hook below handles.
         let resolves_to_file = match resolved_root.as_ref() {
-            Some((canonical, _)) if !canonical.is_empty() => {
+            Some(identity) if !identity.canonical_id.is_empty() => {
                 // The DIRECT carrier serve (the LB3 poison shape): the head
                 // probes `IndexedReady` availability, then Navigate/Skeleton/
                 // Shallow interns a `DeclRef`/`InstantiationRef` and returns
@@ -447,7 +453,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // ONLY the fan-out tracer, never the `CacheRead` funnel. The
                 // `IndexedReadyServe` is retained (not immediately `.is_some()`)
                 // so the test seam can consult it before presence collapses.
-                let serve = self.ctx.ensure_indexed_ready_serve(canonical.as_ref());
+                let serve = self
+                    .ctx
+                    .ensure_indexed_ready_serve(identity.canonical_id.as_ref());
                 // Test-only: an armed fence treats a present serve as
                 // `store_published == false` and fans a non-cacheable read onto
                 // every active tracer — the deterministic in-process equivalent
@@ -486,14 +494,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
 
-        let Some((resolved_canonical, resolved_name)) = resolved_root else {
+        let Some(resolved_root) = resolved_root else {
             // Enum-member projection (typed, GATED fallback): a dotted
             // `Enum.Member` whose prefix is a proven enum value declaration
             // projects the member's projected type. Gated on the typed
             // `ValueDeclKind::Enum` fact, not a dotted-name heuristic.
-            if let NodeScopeId::File { canonical_id, .. } = scope {
+            if let NodeScopeId::File {
+                canonical_id,
+                owner,
+                ..
+            } = scope
+            {
                 if let Some(member_value) = self.resolve_enum_member_value(
                     canonical_id.as_ref(),
+                    *owner,
                     name_resolution,
                     scope_payload,
                     name.as_ref(),
@@ -544,21 +558,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `Opaque(RecursiveRef)` — the dispatcher-local `instantiate_active`
         // stack is the single source of truth (never copied into the context).
         if arg_count == 0
-            && self.is_instantiate_active(resolved_canonical.as_ref(), resolved_name.as_ref())
+            && self.is_instantiate_active(
+                resolved_root.canonical_id.as_ref(),
+                resolved_root.owner,
+                resolved_root.symbol_name.as_ref(),
+            )
         {
             return CarrierResolutionPlan::Ready(self.opaque(QueryError::RecursiveRef {
-                name: Arc::clone(&resolved_name),
+                name: Arc::clone(&resolved_root.symbol_name),
             }));
         }
 
         let whole_hash = self
             .ctx
-            .shallow_file_state(resolved_canonical.as_ref())
+            .shallow_file_state(resolved_root.canonical_id.as_ref())
             .map_or(HashValue::default(), |s| s.whole_hash);
         let decl_identity = DeclIdentity {
-            canonical_id: Arc::clone(&resolved_canonical),
+            canonical_id: Arc::clone(&resolved_root.canonical_id),
+            owner: resolved_root.owner,
             whole_hash,
-            decl_name: Arc::clone(&resolved_name),
+            decl_name: Arc::clone(&resolved_root.symbol_name),
         };
 
         // Carrier modes (Navigate / Skeleton / Shallow) intern a transparent
@@ -590,17 +609,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // short-circuits to the bare `ResolveDecl` result.
         let anchor = match self.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
-                canonical_id: Arc::clone(&resolved_canonical),
+                canonical_id: Arc::clone(&resolved_root.canonical_id),
+                owner: resolved_root.owner,
                 local_scope: None,
             },
-            name: Arc::clone(&resolved_name),
+            name: Arc::clone(&resolved_root.symbol_name),
         })) {
             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
             _ => return CarrierResolutionPlan::Ready(self.opaque(QueryError::Miss)),
         };
         let decl_routes_through_instantiate = self
             .ctx
-            .prepared_type_decl(resolved_canonical.as_ref(), resolved_name.as_ref())
+            .prepared_type_decl_return_only(
+                resolved_root.canonical_id.as_ref(),
+                resolved_root.owner,
+                resolved_root.symbol_name.as_ref(),
+            )
             .is_some_and(|prepared| !prepared.type_parameters.is_empty());
         if arg_count == 0 && !decl_routes_through_instantiate {
             CarrierResolutionPlan::Ready(anchor)
@@ -730,10 +754,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // projects the tail.
         let mut injected = ctx.name_resolution().clone();
         let head_name: Arc<str> = Arc::from(first.as_ref());
-        injected.insert(
-            Arc::clone(&head_name),
-            ResolvedRootIdentity::new(dep_canonical.as_str(), head_name),
-        );
+        let (resolved_head, route_facts) = self
+            .ctx
+            .resolve_imported_type_root_with_facts(dep_canonical.as_str(), head_name.as_ref());
+        self.ctx.observe_borrowed_signature(&route_facts);
+        let Some(resolved_head) = resolved_head else {
+            return CarrierResolutionPlan::Ready(self.opaque(QueryError::Miss));
+        };
+        injected.insert(Arc::clone(&head_name), resolved_head);
         // Single-segment terminal carries the args; a multi-hop head is bare (its
         // args, if any, were rejected by the error above).
         let head_arg_count = if rest.is_empty() { arg_count } else { 0 };
@@ -998,7 +1026,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let data = graph.node_data(node).expect("carrier node data");
             Arc::from(data.carrier_type_args().to_vec().into_boxed_slice())
         };
-        let owner_canonical = graph.node_scope(node).and_then(|s| s.canonical_file());
+        let owner_scope = graph.node_scope(node);
+        let owner_canonical = owner_scope.as_ref().and_then(NodeScopeId::canonical_file);
+        let owner = match owner_scope.as_ref() {
+            Some(NodeScopeId::File { owner, .. }) => *owner,
+            Some(NodeScopeId::Global) | None => verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        };
 
         // Rehydrate the value-side resolution inputs from the carrier's scope.
         let env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
@@ -1017,7 +1050,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let scope_payload = scope.canonical_file().and_then(|c| {
                 self.ctx
                     .prepared_decl_bundle(c.as_ref())
-                    .map(|bundle| DeclarationScopePayload::from_bundle(&bundle))
+                    .map(|bundle| DeclarationScopePayload::from_bundle(&bundle, owner))
             });
             let shadowing = ScopeShadowing::from_scope_payload(scope_payload.as_ref());
             let ctx = CarrierResolverContext::new(
@@ -1043,7 +1076,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let scope_payload = owner_canonical.as_ref().and_then(|c| {
                 self.ctx
                     .prepared_decl_bundle(c.as_ref())
-                    .map(|bundle| DeclarationScopePayload::from_bundle(&bundle))
+                    .map(|bundle| DeclarationScopePayload::from_bundle(&bundle, owner))
             });
             let shadowing = ScopeShadowing::from_scope_payload(scope_payload.as_ref());
             let ctx = CarrierResolverContext::new(

@@ -58,6 +58,65 @@ fn test_parse_setup_with_macro() {
 }
 
 #[test]
+fn macro_dependency_paths_come_from_typed_syntax_not_comment_or_literal_text() {
+    let source = r#"
+const typed = defineProps<{ actual: Réel; literal: 'Phantom' /* Phantom */ }>()
+const runtime = defineProps({ actual: Object as PropType<Réel> })
+const emit = defineEmits({ change: (value: Réel /* Phantom */) => true })
+"#;
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::tsx()).parse();
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    let result = parse_script(&parsed.program, ScriptMode::Setup, 0, source);
+    let macros = result
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ScriptItem::Macro(mac) => Some(mac),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    let ScriptMacro::DefineProps {
+        type_params: Some(type_params),
+        ..
+    } = macros[0]
+    else {
+        panic!("expected typed props macro");
+    };
+    assert_eq!(
+        type_params
+            .type_dependency_paths
+            .iter()
+            .map(|path| path.root())
+            .collect::<Vec<_>>(),
+        ["Réel"]
+    );
+
+    for mac in &macros[1..] {
+        let properties = match mac {
+            ScriptMacro::DefineProps {
+                object_arg: Some(object),
+                ..
+            }
+            | ScriptMacro::DefineEmits {
+                object_arg: Some(object),
+                ..
+            } => &object.properties,
+            _ => panic!("expected object macro"),
+        };
+        assert_eq!(
+            properties[0]
+                .type_dependency_paths
+                .iter()
+                .map(|path| path.root())
+                .collect::<Vec<_>>(),
+            ["Réel"]
+        );
+    }
+}
+
+#[test]
 fn test_parse_setup_with_async() {
     let source = r#"const data = await fetch('/api');"#;
     let allocator = Allocator::default();

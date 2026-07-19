@@ -183,6 +183,7 @@ pub(crate) fn shallow_surface_expr(host: &VerterHost, canonical_id: &str, name: 
     let base = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::from(canonical_id),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         },
         name: Arc::from(name),

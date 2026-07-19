@@ -236,8 +236,7 @@ impl OrderedRuntimeConstructors {
     }
 }
 
-/// Optional authored member ordinal. Its optionality is structural: inherited,
-/// mapped, merged, or synthesized rows need not fabricate an authored ordinal.
+/// Required source-order identity for a directly authored member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
 pub struct AuthoredMemberOrdinal(u32);
 
@@ -256,11 +255,10 @@ impl AuthoredMemberOrdinal {
 /// Honest content-free anchor for an authored, type-argument, or synthesized row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
 pub enum MacroAnchor {
-    /// Authored member/event. Ordinal is absent when the row was inherited,
-    /// mapped, or merged and has no direct member in the macro argument.
+    /// Directly authored member/event.
     Authored {
         macro_index: u32,
-        member_ordinal: Option<AuthoredMemberOrdinal>,
+        member_ordinal: AuthoredMemberOrdinal,
     },
     /// Fallback to the macro type-argument as a whole.
     MacroArgument { macro_index: u32 },
@@ -366,9 +364,194 @@ pub enum MacroTscOutcome {
 /// Closed TSC macro projection vocabulary.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
 pub enum MacroTscProjection {
-    Props { splice: TscSpliceText },
-    Emits { splice: TscSpliceText },
-    Model { splice: TscSpliceText },
+    Props(TscPropsProjection),
+    Emits(TscEmitsProjection),
+    Model(TscModelProjection),
+}
+
+/// Closed `defineProps` TSC projection.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub struct TscPropsProjection {
+    /// Public props surface used by declaration/public component output.
+    pub public: TscPublicPropsProjection,
+    /// One explicit testing-mode binding row per public prop.
+    pub testing_rows: Vec<TscPropRow>,
+    /// Typed scope requirements referenced by terminal text.
+    pub scope: TscScopeRequirements,
+}
+
+/// Closed public-props codegen authorization. The compiler preserves the exact
+/// parser-owned first type argument; semantic rows only drive testing bindings.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum TscPublicPropsProjection {
+    AuthoredArgument {
+        /// Exact macro payload identity authorizing preservation of the
+        /// parser-owned first type argument. The compiler validates this
+        /// against the joined effective macro before splicing any bytes.
+        anchor: MacroAnchor,
+    },
+}
+
+/// One testing/public prop row.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub struct TscPropRow {
+    pub name: String,
+    pub optional: bool,
+    pub type_text: TscSpliceText,
+    pub anchor: MacroAnchor,
+}
+
+/// Closed `defineEmits` TSC projection.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub struct TscEmitsProjection {
+    pub events: Vec<TscEmitRow>,
+    pub scope: TscScopeRequirements,
+}
+
+/// One explicit event signature. Parameter strings are terminal codegen text;
+/// consumers splice them directly and never recover semantics from them.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub struct TscEmitRow {
+    pub name: String,
+    pub emit_parameters: TscSpliceText,
+    pub handler_parameters: TscSpliceText,
+    pub anchor: MacroAnchor,
+}
+
+/// Closed `defineModel` TSC projection.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub struct TscModelProjection {
+    pub name: String,
+    pub optional: bool,
+    pub value_type: TscSpliceText,
+    pub anchor: MacroAnchor,
+    pub scope: TscScopeRequirements,
+}
+
+/// Scope facts required by role-specific terminal output.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, NoTypeExpr, NoStoredSpan)]
+pub struct TscScopeRequirements {
+    /// Owner-local runtime values referenced directly by the macro type
+    /// argument rather than through a retained declaration.
+    pub owner_value_dependencies: Vec<TscOwnerValueDependency>,
+    /// Local import identities the compiler retains from its typed import
+    /// inventory. The DTO never reconstructs import statements.
+    pub retained_bindings: Vec<TscRetainedBinding>,
+    /// Dependency-ordered compiler-owned local declaration identities.
+    pub dependency_declarations: Vec<TscDependencyDeclaration>,
+}
+
+/// One script-owner-qualified runtime value required by generated type text.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, NoTypeExpr, NoStoredSpan)]
+pub struct TscOwnerValueDependency {
+    pub owner: TscScriptOwner,
+    pub name: String,
+}
+
+/// One retained local import identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub struct TscRetainedBinding {
+    /// Script block that owns the authored import declaration. This closes the
+    /// compiler join when setup and companion scripts reuse a local name.
+    pub owner: TscScriptOwner,
+    pub local_name: String,
+    pub usage: TscBindingUsage,
+}
+
+/// Authored Vue script block that owns a retained compiler carrier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum TscScriptOwner {
+    Setup,
+    Companion,
+}
+
+/// How an import identity is consumed by generated TSC output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum TscBindingUsage {
+    /// The binding is referenced from generated type syntax. The compiler
+    /// joins this fact to its typed import inventory to preserve the authored
+    /// import form or promote a value import for declaration output.
+    TypePosition,
+    /// The binding is the root of a `typeof` query and must remain
+    /// value-capable when the authored body is omitted.
+    ValueQuery,
+    /// The binding is consumed directly as a value by declaration syntax,
+    /// such as a class heritage expression.
+    ValuePosition,
+}
+
+/// One compiler-owned local declaration contributor required by generated
+/// type syntax. `contributor_ordinal` is the source-ordered ordinal among
+/// declarations with the same local name; the DTO never carries declaration
+/// source text.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub struct TscDependencyDeclaration {
+    /// Script block containing this exact declaration contributor.
+    pub owner: TscScriptOwner,
+    pub name: String,
+    /// Source-order ordinal among same-name contributors in the same owner.
+    pub contributor_ordinal: u32,
+    /// Owner-local runtime values referenced by this declaration (for example
+    /// `type Props = { value: typeof seed }`) that require the owner's
+    /// implementation body. Exact dual-space declaration carriers are kept on
+    /// [`Self::retained_value_carriers`] instead.
+    pub owner_value_dependencies: Vec<TscOwnerValueDependency>,
+    /// Exact retained dual-space declaration contributors that satisfy value
+    /// roots without requiring the owner's implementation body.
+    pub retained_value_carriers: Vec<TscRetainedValueCarrier>,
+    /// Declaration-only readiness. Public/testing modes retain exact compiler
+    /// carriers even when semantic inference cannot prove an ambient shape.
+    pub declaration_failure: Option<TscDeclarationFailureReason>,
+    /// Semantic type insertions required to make an implementation class
+    /// declaration-safe without weakening inferred public member types.
+    pub inferred_class_members: Vec<TscInferredClassMember>,
+}
+
+/// Exact value-capable declaration contributor retained as an ambient carrier.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, NoTypeExpr, NoStoredSpan)]
+pub struct TscRetainedValueCarrier {
+    pub owner: TscScriptOwner,
+    pub name: String,
+    pub contributor_ordinal: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum TscDeclarationFailureReason {
+    /// Semantic inference stopped at a structural safety budget.
+    SemanticInferenceUnavailable(TscSemanticInferenceUnavailableReason),
+    /// The declaration uses a resolved construct outside the supported
+    /// declaration-inference contract.
+    Unsupported(UnsupportedReason),
+    /// The declaration-inference subject or one of its required bodies was
+    /// unavailable.
+    Unresolved(UnresolvedReason),
+}
+
+/// Exact structural budget that stopped semantic declaration inference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum TscSemanticInferenceUnavailableReason {
+    DepthBudgetExceeded,
+    WorkBudgetExceeded,
+}
+
+/// Compiler class-member identity for an inferred declaration-only type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub struct TscInferredClassMember {
+    pub name: String,
+    /// Source-ordered ordinal among class elements with the same staticness,
+    /// name, and requested annotation position.
+    pub occurrence: u32,
+    pub is_static: bool,
+    pub position: TscInferredClassTypePosition,
+    pub type_text: TscSpliceText,
+}
+
+/// Which absent authored class annotation an inferred type fills.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum TscInferredClassTypePosition {
+    Property,
+    Parameter,
+    Return,
 }
 
 /// Terminal codegen text. It is an output-only splice and must never be

@@ -26,6 +26,13 @@ use verter_compiler::framework_common::{
     CompileUnsupported, RuntimeCompileOptions, RuntimeDiagnosticSeverity,
 };
 
+pub(crate) fn vue_macro_output_matches_revision(
+    output: &crate::typeinfo::vue_macro_codegen::VueMacroCodegenOutput,
+    expected: verter_semantic::analysis::types::Hash16,
+) -> bool {
+    output.origin_whole_hash == Some(expected)
+}
+
 /// The render-only `Main` output of the
 /// [`crate::host_compile::CompileManyTarget::RuntimeRender`] lane: the
 /// assembled `_sfc_main` module bytes, its optional source map, and the
@@ -2042,8 +2049,12 @@ impl VerterHost {
     /// defineProps/Emits/Slots/Model/Expose/Options)
     /// and generates a `ComponentPublicInstance`-based declaration.
     ///
-    /// Returns `None` if the file is not in the host or not a Vue SFC.
-    pub fn get_public_api(&self, canonical_id: &str) -> Option<TscResponse> {
+    /// Returns `Ok(None)` if the file is not in the host or exposes no
+    /// framework public-API carrier. Projection failures remain typed errors.
+    pub fn get_public_api(
+        &self,
+        canonical_id: &str,
+    ) -> Result<Option<TscResponse>, crate::PublicApiProjectionError> {
         self.get_public_api_with_mode(canonical_id, PublicApiMode::Public, None)
     }
 
@@ -2065,7 +2076,10 @@ impl VerterHost {
     /// on-demand `ensure_indexed_ready_serve` / `ensure_loaded` path against
     /// globally-published artifacts. Default `Public` mode / no profile — the
     /// scalar surface verter-tsc consumes.
-    pub fn get_public_api_batch(&self, canonical_ids: &[&str]) -> Vec<Option<TscResponse>> {
+    pub fn get_public_api_batch(
+        &self,
+        canonical_ids: &[&str],
+    ) -> Vec<Result<Option<TscResponse>, crate::PublicApiProjectionError>> {
         if canonical_ids.is_empty() {
             return Vec::new();
         }
@@ -2083,7 +2097,9 @@ impl VerterHost {
         let fixed = self.capture_batch_fixed_view(&view);
         self.render_public_api_items(canonical_ids, PublicApiMode::Public, None, &fixed, &view)
             .into_iter()
-            .map(|projection| projection.map(|projection| projection.response))
+            .map(|projection| {
+                projection.map(|projection| projection.map(|projection| projection.response))
+            })
             .collect()
     }
 
@@ -2102,7 +2118,12 @@ impl VerterHost {
         profile: Option<&CompileProfile>,
         fixed: &crate::resolver_store::BatchFixedView,
         _view: &dyn crate::session_view::SessionView,
-    ) -> Vec<Option<crate::framework::api_projector::ComponentApiProjection>> {
+    ) -> Vec<
+        Result<
+            Option<crate::framework::api_projector::ComponentApiProjection>,
+            crate::PublicApiProjectionError,
+        >,
+    > {
         canonical_ids
             .iter()
             .map(|canonical_id| {
@@ -2114,12 +2135,21 @@ impl VerterHost {
                 // api-projector leg projects no public-API surface — a `None`
                 // slot (the pre-registry non-Vue behavior).
                 let canonical = self.resolve_alias_or_canonical(canonical_id);
-                let file_language = self.scheduler.try_get_source(&canonical).and_then(|snap| {
-                    snap.downcast_data::<crate::host_executor::HostSourceData>()
-                        .map(|hd| hd.file_language.clone())
-                })?;
-                let adapter_id = file_language.adapter_id()?;
-                let projector = self.framework_registry().api_projector_for(adapter_id)?;
+                let Some(file_language) =
+                    self.scheduler.try_get_source(&canonical).and_then(|snap| {
+                        snap.downcast_data::<crate::host_executor::HostSourceData>()
+                            .map(|hd| hd.file_language.clone())
+                    })
+                else {
+                    return Ok(None);
+                };
+                let Some(adapter_id) = file_language.adapter_id() else {
+                    return Ok(None);
+                };
+                let Some(projector) = self.framework_registry().api_projector_for(adapter_id)
+                else {
+                    return Ok(None);
+                };
                 projector.render_api(crate::framework::api_projector::ComponentApiProjectorCtx {
                     host: self,
                     resolved_canonical: &canonical,
@@ -2176,7 +2206,7 @@ impl VerterHost {
         canonical_id: &str,
         mode: PublicApiMode,
         profile: Option<&CompileProfile>,
-    ) -> Option<TscResponse> {
+    ) -> Result<Option<TscResponse>, crate::PublicApiProjectionError> {
         // `N=1` of the batch body. Capture ONE `BatchFixedView` and thread its
         // shared cold seed + the base session view through the shared per-item
         // render path ([`Self::render_public_api_items`], which dispatches
@@ -2203,8 +2233,8 @@ impl VerterHost {
         )
         .into_iter()
         .next()
-        .flatten()
-        .map(|projection| projection.response)
+        .unwrap_or(Ok(None))
+        .map(|projection| projection.map(|projection| projection.response))
     }
 
     /// Generate the public declaration and its framework-owned structured
@@ -2217,7 +2247,10 @@ impl VerterHost {
     pub fn get_public_api_projection(
         &self,
         canonical_id: &str,
-    ) -> Option<crate::framework::api_projector::ComponentApiProjection> {
+    ) -> Result<
+        Option<crate::framework::api_projector::ComponentApiProjection>,
+        crate::PublicApiProjectionError,
+    > {
         let view = crate::session_view::HostViewRef::new(self);
         let fixed = self.capture_batch_fixed_view(&view);
         self.render_public_api_items(
@@ -2229,7 +2262,7 @@ impl VerterHost {
         )
         .into_iter()
         .next()
-        .flatten()
+        .unwrap_or(Ok(None))
     }
 
     /// The Vue public-API extraction body — the EXEMPT legacy producer the
@@ -2252,17 +2285,17 @@ impl VerterHost {
         mode: PublicApiMode,
         profile: Option<&CompileProfile>,
         render_seed: Option<crate::framework::api_projector::PublicApiRenderSeed<'_>>,
-    ) -> Option<TscResponse> {
+    ) -> Result<Option<TscResponse>, crate::PublicApiProjectionError> {
         // Already alias-resolved by the caller; own it for the body's
         // existing `&canonical` / `.clone()` consumers without re-resolving.
         let canonical = resolved_canonical.to_string();
         let profile_hash = profile.map(compile_profile_hash);
 
         if self.is_canonical_evicted(&canonical) {
-            return None;
+            return Ok(None);
         }
 
-        let (source, cached_extract, whole_hash) = {
+        let Some((source, cached_extract, whole_hash)) = (|| {
             let efs = self.effective_file_state(&canonical, profile_hash)?;
             // Require the source to be loaded — the rest of the flow reads
             // its derived state. (Framework classification is decided once,
@@ -2283,7 +2316,9 @@ impl VerterHost {
                     }
                 })
             });
-            (efs.source, cached, efs.whole_hash)
+            Some((efs.source, cached, efs.whole_hash))
+        })() else {
+            return Ok(None);
         };
 
         // Derive component name from canonical_id: last path segment, strip .vue extension.
@@ -2315,6 +2350,19 @@ impl VerterHost {
                 crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
             )
         };
+        if !vue_macro_output_matches_revision(&macro_output, whole_hash) {
+            return Ok(None);
+        }
+        // The syntax extract/source and semantic bundle must describe the same
+        // indexed revision. Producing the semantic closure may overlap an edit;
+        // fail closed instead of joining compatible-looking macro ordinals from
+        // different source revisions.
+        if self
+            .effective_file_state(&canonical, profile_hash)
+            .is_none_or(|current| current.whole_hash != whole_hash)
+        {
+            return Ok(None);
+        }
         let transitive_macro_type_deps =
             macro_output.transitive_canonicals.iter().cloned().collect();
         // Unconditional: `replace_semantic_transitive(canonical, {})`
@@ -2358,33 +2406,38 @@ impl VerterHost {
                     filename: Some(canonical.clone()),
                     mode: tsc_mode,
                 },
-                macro_tsc.as_deref(),
-            );
-            return Some(TscResponse {
+                macro_tsc.as_deref().map_or(
+                    verter_compiler::tsc::MacroTscInput::NotRequired,
+                    verter_compiler::tsc::MacroTscInput::Authoritative,
+                ),
+            )?;
+            return Ok(Some(TscResponse {
                 code: Arc::from(tsc_out.code),
                 source_map: if tsc_out.source_map.is_empty() {
                     None
                 } else {
                     Some(Arc::from(tsc_out.source_map))
                 },
-            });
+            }));
         };
 
         let tsc_out = verter_compiler::tsc::generate_tsc_from_state(
             &extract,
-            &source,
             &component_name,
             tsc_mode,
-            macro_tsc.as_deref(),
-        );
-        Some(TscResponse {
+            macro_tsc.as_deref().map_or(
+                verter_compiler::tsc::MacroTscInput::NotRequired,
+                verter_compiler::tsc::MacroTscInput::Authoritative,
+            ),
+        )?;
+        Ok(Some(TscResponse {
             code: Arc::from(tsc_out.code),
             source_map: if tsc_out.source_map.is_empty() {
                 None
             } else {
                 Some(Arc::from(tsc_out.source_map))
             },
-        })
+        }))
     }
 
     /// Store diagnostics from a failed compile without triggering recompilation.

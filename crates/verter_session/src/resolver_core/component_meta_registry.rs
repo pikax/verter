@@ -66,6 +66,7 @@ pub enum RegistryWorkItem {
 pub(crate) struct PendingComponentMetaRegistryRef {
     pub(crate) name: String,
     pub(crate) source_hint: Option<String>,
+    pub(crate) source_owner: verter_type_expr::TopLevelOwnerId,
     pub(crate) exported_name: Option<String>,
     pub(crate) route: RouteDemand,
     /// Authored USE-SITE slots for single-member (`len == 1` `MemberPath`)
@@ -123,6 +124,7 @@ pub(crate) fn upsert_component_meta_registry_entry(
 ) {
     let declaration_source_hint =
         (!declaration.canonical_source.is_empty()).then(|| declaration.canonical_source.clone());
+    let declaration_owner = declaration.owner;
     let collect_nested_refs = should_collect_component_meta_registry_nested_refs(
         owner_canonical,
         declaration_source_hint.as_deref(),
@@ -145,6 +147,7 @@ pub(crate) fn upsert_component_meta_registry_entry(
             source,
             crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                 scope_canonical_id: raise_scope,
+                scope_owner: declaration_owner,
                 context: transit_ctx,
                 interior_failures: None,
             },
@@ -228,6 +231,7 @@ pub(crate) fn upsert_component_meta_registry_entry(
                                 queued_names,
                                 referenced_names,
                                 declaration_source_hint.as_deref(),
+                                declaration_owner,
                                 RegistryMemberRefPolicy::PublicationBoundary,
                                 cursor,
                             );
@@ -255,6 +259,7 @@ pub(crate) fn upsert_component_meta_registry_entry(
                             queued_names,
                             referenced_names,
                             declaration_source_hint.as_deref(),
+                            declaration_owner,
                             RegistryMemberRefPolicy::PublicationBoundary,
                             cursor,
                         );
@@ -298,6 +303,7 @@ pub(crate) fn upsert_component_meta_registry_entry(
                         queued_names,
                         referenced_names,
                         declaration_source_hint.as_deref(),
+                        declaration_owner,
                         RegistryMemberRefPolicy::PublicationBoundary,
                         cursor,
                     );
@@ -316,6 +322,7 @@ pub(crate) fn upsert_component_meta_registry_entry(
                 queued_names,
                 referenced_names,
                 declaration_source_hint.as_deref(),
+                declaration_owner,
                 RegistryMemberRefPolicy::PublicationBoundary,
                 cursor,
             );
@@ -348,10 +355,24 @@ pub(crate) fn should_collect_component_meta_registry_nested_refs(
 pub(crate) fn owner_component_meta_registry_import_root(
     ctx: &dyn ResolverContext,
     owner_canonical: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     _snapshot: &FileAnalysisSnapshot,
     local_name: &str,
-) -> Option<(String, String)> {
-    ctx.resolve_owner_direct_import(owner_canonical, local_name)
+) -> Option<(String, verter_type_expr::TopLevelOwnerId, String)> {
+    let identity = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+        ctx,
+        owner_canonical,
+        owner,
+        None,
+        local_name,
+    )?;
+    (identity.canonical_id.as_ref() != owner_canonical || identity.owner != owner).then(|| {
+        (
+            identity.canonical_id.to_string(),
+            identity.owner,
+            identity.symbol_name.to_string(),
+        )
+    })
 }
 
 /// Issue #7 / true when the named alias's prepared body
@@ -368,14 +389,16 @@ pub(crate) fn owner_component_meta_registry_import_root(
 pub(crate) fn component_meta_registry_owner_local_component_config_alias_name(
     ctx: &dyn ResolverContext,
     owner_canonical: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
 ) -> bool {
     fn body_head(
         ctx: &dyn ResolverContext,
         owner_canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> Option<(String, Vec<SemanticNodeId>)> {
-        let prepared = ctx.prepared_type_decl(owner_canonical, name)?;
+        let prepared = ctx.prepared_type_decl_return_only(owner_canonical, owner, name)?;
         let root = prepared_body_root_node(ctx, prepared.as_ref())?;
         if node_root_is_type_parameter(ctx, root) {
             return None;
@@ -383,7 +406,7 @@ pub(crate) fn component_meta_registry_owner_local_component_config_alias_name(
         component_meta_registry_node_ref_head(ctx, root)
     }
 
-    let Some((ref_name, type_arguments)) = body_head(ctx, owner_canonical, name) else {
+    let Some((ref_name, type_arguments)) = body_head(ctx, owner_canonical, owner, name) else {
         return false;
     };
     if ref_name == "ComponentConfig" && !type_arguments.is_empty() {
@@ -391,7 +414,8 @@ pub(crate) fn component_meta_registry_owner_local_component_config_alias_name(
     }
     // Single alias-of-alias indirection — follow once.
     if type_arguments.is_empty() {
-        if let Some((nested_name, nested_args)) = body_head(ctx, owner_canonical, ref_name.as_str())
+        if let Some((nested_name, nested_args)) =
+            body_head(ctx, owner_canonical, owner, ref_name.as_str())
         {
             return nested_name == "ComponentConfig" && !nested_args.is_empty();
         }
@@ -413,6 +437,7 @@ pub(crate) fn component_meta_registry_owner_local_component_config_alias_name(
 pub(crate) fn component_meta_registry_public_route_owner_local_root(
     ctx: &dyn ResolverContext,
     owner_canonical: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     snapshot: &FileAnalysisSnapshot,
     route_root_name: Option<&str>,
     source_hint: Option<&str>,
@@ -431,16 +456,28 @@ pub(crate) fn component_meta_registry_public_route_owner_local_root(
 
     // Owner-local rule: no import binding on `root_name`. If the
     // resolver routes the name to an external file, it is imported.
-    if owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, root_name.as_str())
-        .is_some()
+    if owner_component_meta_registry_import_root(
+        ctx,
+        owner_canonical,
+        owner,
+        snapshot,
+        root_name.as_str(),
+    )
+    .is_some()
     {
         return None;
     }
 
     // ComponentConfig itself must NOT be imported in the owner's
     // scope.
-    if owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, "ComponentConfig")
-        .is_some()
+    if owner_component_meta_registry_import_root(
+        ctx,
+        owner_canonical,
+        owner,
+        snapshot,
+        "ComponentConfig",
+    )
+    .is_some()
     {
         return None;
     }
@@ -449,6 +486,7 @@ pub(crate) fn component_meta_registry_public_route_owner_local_root(
     if !component_meta_registry_owner_local_component_config_alias_name(
         ctx,
         owner_canonical,
+        owner,
         root_name.as_str(),
     ) {
         return None;
@@ -463,6 +501,7 @@ pub(crate) fn enqueue_component_meta_registry_ref(
     referenced_names: &mut VecDeque<PendingComponentMetaRegistryRef>,
     name: &str,
     source_hint: Option<&str>,
+    source_owner: verter_type_expr::TopLevelOwnerId,
     exported_name: Option<&str>,
     route: RouteDemand,
 ) {
@@ -490,6 +529,7 @@ pub(crate) fn enqueue_component_meta_registry_ref(
         if let Some(existing) = referenced_names.iter_mut().find(|pending| {
             pending.name == name
                 && pending.source_hint == source_hint
+                && pending.source_owner == source_owner
                 && pending.exported_name == exported_name
                 && component_meta_registry_can_merge_pending_route(&pending.route, &route)
         }) {
@@ -498,6 +538,7 @@ pub(crate) fn enqueue_component_meta_registry_ref(
             referenced_names.push_back(PendingComponentMetaRegistryRef {
                 name: name.to_string(),
                 source_hint,
+                source_owner,
                 exported_name,
                 route,
                 member_use_sites: Vec::new(),
@@ -508,6 +549,7 @@ pub(crate) fn enqueue_component_meta_registry_ref(
     referenced_names.push_back(PendingComponentMetaRegistryRef {
         name: name.to_string(),
         source_hint,
+        source_owner,
         exported_name,
         route,
         member_use_sites: Vec::new(),
@@ -540,6 +582,7 @@ fn route_demand_keeps_exact_deep_member_path(
 pub(crate) fn collect_component_meta_registry_public_field_refs(
     ctx: &dyn ResolverContext,
     owner_canonical: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     snapshot: &FileAnalysisSnapshot,
     field: &verter_semantic::analysis::type_expand::ExpandedField,
     published_names: &rustc_hash::FxHashSet<String>,
@@ -563,6 +606,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                 source,
                 crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                     scope_canonical_id: owner_canonical,
+                    scope_owner: owner,
                     context: transit_ctx,
                     interior_failures: None,
                 },
@@ -615,6 +659,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     if let Some(owner_local_root) = component_meta_registry_public_route_owner_local_root(
         ctx,
         owner_canonical,
+        owner,
         snapshot,
         route_root_name.as_deref(),
         source_hint,
@@ -625,6 +670,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             output,
             owner_local_root.as_str(),
             source_hint,
+            owner,
             None,
             RouteDemand::Whole,
         );
@@ -633,32 +679,52 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
 
     // Prepared-body classifications run NODE-DOMAIN off the declaration's
     // lowered body slot (never an embedded body).
-    let prepared_body_root = |canonical_id: &str, symbol_name: &str| {
-        ctx.prepared_type_decl(canonical_id, symbol_name)
+    let prepared_body_root = |canonical_id: &str,
+                              declaration_owner: verter_type_expr::TopLevelOwnerId,
+                              symbol_name: &str| {
+        ctx.prepared_type_decl_return_only(canonical_id, declaration_owner, symbol_name)
             .and_then(|prepared| prepared_body_root_node(ctx, prepared.as_ref()))
     };
     let skip_direct_plain_ref =
         component_meta_registry_node_ref_name(ctx, node).is_some_and(|name| {
             let name = name.as_str();
-            prepared_body_root(owner_canonical, name)
+            prepared_body_root(owner_canonical, owner, name)
                 .is_some_and(|root| node_root_is_type_parameter(ctx, root))
-                || owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, name)
-                    .and_then(|(canonical_id, exported_name)| {
-                        (!canonical_id.is_empty()
-                            && !ctx.workspace_is_package_backed(canonical_id.as_str()))
-                        .then(|| prepared_body_root(canonical_id.as_str(), exported_name.as_str()))
+                || owner_component_meta_registry_import_root(
+                    ctx,
+                    owner_canonical,
+                    owner,
+                    snapshot,
+                    name,
+                )
+                .and_then(|(canonical_id, target_owner, exported_name)| {
+                    (!canonical_id.is_empty()
+                        && !ctx.workspace_is_package_backed(canonical_id.as_str()))
+                    .then(|| {
+                        prepared_body_root(
+                            canonical_id.as_str(),
+                            target_owner,
+                            exported_name.as_str(),
+                        )
                     })
-                    .flatten()
-                    .is_some_and(|root| {
-                        node_root_has_non_object_top_level_surface(ctx, root)
-                            && !node_root_has_explicit_object_surface(ctx, root)
-                    })
-                || owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, name)
-                    .is_some_and(|(canonical_id, _)| {
-                        ctx.workspace_is_package_backed(canonical_id.as_str())
-                    })
+                })
+                .flatten()
+                .is_some_and(|root| {
+                    node_root_has_non_object_top_level_surface(ctx, root)
+                        && !node_root_has_explicit_object_surface(ctx, root)
+                })
+                || owner_component_meta_registry_import_root(
+                    ctx,
+                    owner_canonical,
+                    owner,
+                    snapshot,
+                    name,
+                )
+                .is_some_and(|(canonical_id, _, _)| {
+                    ctx.workspace_is_package_backed(canonical_id.as_str())
+                })
                 || ctx.workspace_is_package_backed(
-                    ctx.resolve_type_declaration_for_dep(owner_canonical, name)
+                    ctx.resolve_type_declaration_for_dep(owner_canonical, owner, name)
                         .canonical_source
                         .as_str(),
                 )
@@ -669,33 +735,42 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             if type_arguments.is_empty() {
                 return false;
             }
-            let Some((canonical_id, exported_name)) = owner_component_meta_registry_import_root(
-                ctx,
-                owner_canonical,
-                snapshot,
-                name.as_str(),
-            ) else {
+            let Some((canonical_id, target_owner, exported_name)) =
+                owner_component_meta_registry_import_root(
+                    ctx,
+                    owner_canonical,
+                    owner,
+                    snapshot,
+                    name.as_str(),
+                )
+            else {
                 return false;
             };
             if canonical_id.is_empty() || ctx.workspace_is_package_backed(canonical_id.as_str()) {
                 return false;
             }
-            prepared_body_root(canonical_id.as_str(), exported_name.as_str()).is_some_and(|root| {
-                node_root_has_non_object_top_level_surface(ctx, root)
-                    && !node_root_has_explicit_object_surface(ctx, root)
-            })
+            prepared_body_root(canonical_id.as_str(), target_owner, exported_name.as_str())
+                .is_some_and(|root| {
+                    node_root_has_non_object_top_level_surface(ctx, root)
+                        && !node_root_has_explicit_object_surface(ctx, root)
+                })
         });
     if (skip_direct_plain_ref || skip_imported_generic_non_object_ref)
         && direct_ref.as_ref().is_some_and(|(name, _)| {
             let name = name.as_str();
-            let local_type_parameter = prepared_body_root(owner_canonical, name)
+            let local_type_parameter = prepared_body_root(owner_canonical, owner, name)
                 .is_some_and(|root| node_root_is_type_parameter(ctx, root));
-            let import_root =
-                owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, name);
-            let package_backed = import_root.as_ref().is_some_and(|(canonical_id, _)| {
+            let import_root = owner_component_meta_registry_import_root(
+                ctx,
+                owner_canonical,
+                owner,
+                snapshot,
+                name,
+            );
+            let package_backed = import_root.as_ref().is_some_and(|(canonical_id, _, _)| {
                 ctx.workspace_is_package_backed(canonical_id.as_str())
             }) || ctx.workspace_is_package_backed(
-                ctx.resolve_type_declaration_for_dep(owner_canonical, name)
+                ctx.resolve_type_declaration_for_dep(owner_canonical, owner, name)
                     .canonical_source
                     .as_str(),
             );
@@ -709,6 +784,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                 output,
                 name.as_str(),
                 source_hint,
+                owner,
                 None,
                 RouteDemand::Whole,
             );
@@ -722,13 +798,14 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             queued_names,
             output,
             source_hint,
+            owner,
         );
     }
 
     // Indexed-access roots whose owner-local prepared body is not a type
     // parameter enqueue their member-path route.
     if let Some((root_name, route)) = component_meta_registry_node_indexed_access_route(ctx, node) {
-        if prepared_body_root(owner_canonical, root_name.as_str())
+        if prepared_body_root(owner_canonical, owner, root_name.as_str())
             .is_some_and(|root| !node_root_is_type_parameter(ctx, root))
         {
             // A single-member route records the field's authored annotation
@@ -753,6 +830,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                 output,
                 root_name.as_str(),
                 source_hint,
+                owner,
                 None,
                 route,
             );
@@ -805,6 +883,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             output,
             local_name.as_str(),
             source_hint,
+            owner,
             None,
             route,
         );
@@ -1183,6 +1262,7 @@ pub(crate) fn collect_component_meta_registry_public_surface_refs_node(
     queued_names: &mut rustc_hash::FxHashSet<String>,
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
     source_hint: Option<&str>,
+    source_owner: verter_type_expr::TopLevelOwnerId,
 ) {
     if let Some((name, _)) = component_meta_registry_node_ref_head(ctx, node) {
         enqueue_component_meta_registry_ref(
@@ -1191,6 +1271,7 @@ pub(crate) fn collect_component_meta_registry_public_surface_refs_node(
             output,
             name.as_str(),
             source_hint,
+            source_owner,
             None,
             RouteDemand::Whole,
         );
@@ -1270,6 +1351,7 @@ pub(crate) fn collect_component_meta_registry_refs_node(
     queued_names: &mut rustc_hash::FxHashSet<String>,
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
     source_hint: Option<&str>,
+    source_owner: verter_type_expr::TopLevelOwnerId,
     member_ref_policy: RegistryMemberRefPolicy,
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) {
@@ -1281,6 +1363,7 @@ pub(crate) fn collect_component_meta_registry_refs_node(
         queued_names,
         output,
         source_hint,
+        source_owner,
         member_ref_policy,
         cursor,
         &mut visited,
@@ -1295,6 +1378,7 @@ fn collect_registry_refs_node_inner(
     queued_names: &mut rustc_hash::FxHashSet<String>,
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
     source_hint: Option<&str>,
+    source_owner: verter_type_expr::TopLevelOwnerId,
     member_ref_policy: RegistryMemberRefPolicy,
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
     visited: &mut rustc_hash::FxHashSet<SemanticNodeId>,
@@ -1311,6 +1395,7 @@ fn collect_registry_refs_node_inner(
             output,
             root_name.as_str(),
             source_hint,
+            source_owner,
             None,
             route,
         );
@@ -1323,6 +1408,7 @@ fn collect_registry_refs_node_inner(
             output,
             name.as_str(),
             source_hint,
+            source_owner,
             None,
             RouteDemand::Whole,
         );
@@ -1340,6 +1426,7 @@ fn collect_registry_refs_node_inner(
                 queued_names,
                 output,
                 source_hint,
+                source_owner,
                 member_ref_policy,
                 cursor,
                 visited,
@@ -1353,6 +1440,7 @@ fn collect_registry_refs_node_inner(
                 queued_names,
                 output,
                 source_hint,
+                source_owner,
                 member_ref_policy,
                 cursor,
                 visited,
@@ -1367,6 +1455,7 @@ fn collect_registry_refs_node_inner(
                     queued_names,
                     output,
                     source_hint,
+                    source_owner,
                     member_ref_policy,
                     cursor,
                     visited,
@@ -1385,6 +1474,7 @@ fn collect_registry_refs_node_inner(
                     queued_names,
                     output,
                     source_hint,
+                    source_owner,
                     member_ref_policy,
                     cursor,
                     visited,
@@ -1417,6 +1507,7 @@ fn collect_registry_refs_node_inner(
                     queued_names,
                     output,
                     source_hint,
+                    source_owner,
                     member_ref_policy,
                     cursor,
                     visited,
@@ -1435,6 +1526,7 @@ fn collect_registry_refs_node_inner(
                     queued_names,
                     output,
                     source_hint,
+                    source_owner,
                     member_ref_policy,
                     cursor,
                     visited,
@@ -1456,6 +1548,7 @@ fn collect_registry_refs_node_inner(
                     queued_names,
                     output,
                     source_hint,
+                    source_owner,
                     member_ref_policy,
                     visited,
                 );
@@ -1473,6 +1566,7 @@ fn collect_registry_refs_node_inner(
                         queued_names,
                         output,
                         source_hint,
+                        source_owner,
                         member_ref_policy,
                         visited,
                     );
@@ -1485,6 +1579,7 @@ fn collect_registry_refs_node_inner(
                         queued_names,
                         output,
                         source_hint,
+                        source_owner,
                         member_ref_policy,
                         visited,
                     );
@@ -1495,6 +1590,7 @@ fn collect_registry_refs_node_inner(
                         queued_names,
                         output,
                         source_hint,
+                        source_owner,
                         member_ref_policy,
                         visited,
                     );
@@ -1514,6 +1610,7 @@ fn collect_registry_refs_node_inner(
                     queued_names,
                     output,
                     source_hint,
+                    source_owner,
                     RegistryMemberRefPolicy::PublicationBoundary,
                     visited,
                 );
@@ -1525,6 +1622,7 @@ fn collect_registry_refs_node_inner(
                 queued_names,
                 output,
                 source_hint,
+                source_owner,
                 RegistryMemberRefPolicy::PublicationBoundary,
                 visited,
             );
@@ -1537,6 +1635,7 @@ fn collect_registry_refs_node_inner(
                 queued_names,
                 output,
                 source_hint,
+                source_owner,
                 member_ref_policy,
                 cursor,
                 visited,
@@ -1550,6 +1649,7 @@ fn collect_registry_refs_node_inner(
                 queued_names,
                 output,
                 source_hint,
+                source_owner,
                 member_ref_policy,
                 cursor,
                 visited,
@@ -1562,6 +1662,7 @@ fn collect_registry_refs_node_inner(
                     queued_names,
                     output,
                     source_hint,
+                    source_owner,
                     member_ref_policy,
                     cursor,
                     visited,
@@ -1582,6 +1683,7 @@ fn collect_registry_member_surface_refs_node(
     queued_names: &mut rustc_hash::FxHashSet<String>,
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
     source_hint: Option<&str>,
+    source_owner: verter_type_expr::TopLevelOwnerId,
     member_ref_policy: RegistryMemberRefPolicy,
     visited: &mut rustc_hash::FxHashSet<SemanticNodeId>,
 ) {
@@ -1597,6 +1699,7 @@ fn collect_registry_member_surface_refs_node(
             output,
             root_name.as_str(),
             source_hint,
+            source_owner,
             None,
             route,
         );
@@ -1618,6 +1721,7 @@ fn collect_registry_member_surface_refs_node(
                 output,
                 name.as_str(),
                 source_hint,
+                source_owner,
                 None,
                 RouteDemand::Whole,
             );
@@ -1640,6 +1744,7 @@ fn collect_registry_member_surface_refs_node(
             queued_names,
             output,
             source_hint,
+            source_owner,
             policy,
             visited,
         );
@@ -2076,6 +2181,7 @@ mod tests {
             &mut output,
             "Button",
             Some("/src/Button.vue"),
+            verter_type_expr::TopLevelOwnerId::instance(0),
             None,
             RouteDemand::pick(vec!["slots".to_string()]),
         );
@@ -2085,6 +2191,7 @@ mod tests {
             &mut output,
             "Button",
             Some("/src/Button.vue"),
+            verter_type_expr::TopLevelOwnerId::instance(0),
             None,
             RouteDemand::member_path(vec!["variants".to_string(), "color".to_string()]),
         );
@@ -2190,13 +2297,18 @@ export interface AvatarProps {
         let resolved = owner_component_meta_registry_import_root(
             &host,
             "/src/App.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
             &snapshot,
             "AvatarProps",
         );
 
         assert_eq!(
             resolved,
-            Some(("/src/Avatar.vue".to_string(), "AvatarProps".to_string())),
+            Some((
+                "/src/Avatar.vue".to_string(),
+                verter_type_expr::TopLevelOwnerId::instance(0),
+                "AvatarProps".to_string(),
+            )),
             "registry import roots should collapse direct named owner imports to the canonical defining file instead of keeping the barrel canonical",
         );
     }

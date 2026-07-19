@@ -38,6 +38,9 @@ use oxc_span::GetSpan;
 use verter_language::{FrameworkAdapterId, LanguageId};
 use verter_no_typeexpr::NoTypeExpr;
 use verter_span::Span;
+use verter_type_expr::facts::{
+    SvelteLegacyPropFact, SvelteModuleExportFact, SvelteScriptFactsFact,
+};
 
 #[path = "svelte_payload.rs"]
 mod payload;
@@ -156,7 +159,21 @@ pub struct SvelteInstanceExport {
     pub exported_name: String,
     /// The local value binding used to resolve the export's type.
     pub local_name: String,
+    /// Neutral lexical owner of the export statement.
+    pub owner: verter_type_expr::TopLevelOwnerId,
+    /// Exact owner-qualified local value binding identity.
+    pub binding_key: verter_type_expr::DeclKey,
     /// The authored export-name token span in the owning Svelte file.
+    pub source_span: Span,
+}
+
+/// One public module-script export with its exact owner-qualified binding.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr)]
+pub struct SvelteModuleExport {
+    pub exported_name: String,
+    pub local_name: String,
+    pub owner: verter_type_expr::TopLevelOwnerId,
+    pub binding_key: verter_type_expr::DeclKey,
     pub source_span: Span,
 }
 
@@ -173,7 +190,7 @@ pub struct SvelteScriptCandidates {
     /// MODULE-script (`<script module>` / legacy `context="module"`) export
     /// names — top-level named declarations of the module, NOT instance members.
     /// The api-projector surfaces these as top-level declarations.
-    pub module_exports: Vec<String>,
+    pub module_exports: Vec<SvelteModuleExport>,
     /// Legacy `export let` props (legacy-mode components).
     pub legacy_props: Vec<SvelteLegacyProp>,
     /// The `createEventDispatcher<E>()` type-argument authored PAYLOAD REF
@@ -271,6 +288,35 @@ pub struct SvelteScriptFacts {
     pub dispatcher_event_references: Arc<[String]>,
     /// The exported instance-script members (the EXPOSE surface).
     pub instance_exports: Arc<[SvelteInstanceExport]>,
+    /// Module-script exports with exact owner-qualified local bindings.
+    pub module_exports: Arc<[SvelteModuleExportFact]>,
+}
+
+impl SvelteScriptFacts {
+    /// Convert the resolved payload into its shared, span-free persisted fact.
+    #[must_use]
+    pub fn to_persisted_fact(&self) -> SvelteScriptFactsFact {
+        SvelteScriptFactsFact {
+            props_type: self.props_type.clone(),
+            bindable_members: Arc::clone(&self.bindable_members),
+            validated_snippet_members: Arc::clone(&self.validated_snippet_members),
+            legacy_props: self
+                .legacy_props
+                .iter()
+                .map(|prop| SvelteLegacyPropFact {
+                    name: prop.name.clone(),
+                    has_default: prop.has_default,
+                })
+                .collect(),
+            dispatcher_events: self.dispatcher_events.clone(),
+            instance_exports: self
+                .instance_exports
+                .iter()
+                .map(|export| export.exported_name.clone())
+                .collect(),
+            module_exports: Arc::clone(&self.module_exports),
+        }
+    }
 }
 
 impl FrameworkScriptFactPayload for SvelteScriptFacts {
@@ -314,7 +360,14 @@ impl SvelteScriptProvider {
     /// both exported and local binding identities. Old candidate keys
     /// intentionally miss so legacy-prop and aliased-export surfaces cannot
     /// remain warm under the corrected semantics.
-    pub const VERSION: u32 = 7;
+    ///
+    /// `8` — instance and module exports carry their exact neutral owner and
+    /// owner-qualified local binding key. Old candidate keys intentionally miss
+    /// so same-name bindings in module and instance scripts cannot alias.
+    ///
+    /// `9` — resolved and persisted Svelte facts retain module-script exports
+    /// as exact, span-free owner-qualified facts. Old resolved-fact keys miss.
+    pub const VERSION: u32 = 9;
 }
 
 impl ScriptFactProvider for SvelteScriptProvider {
@@ -341,6 +394,7 @@ impl ScriptFactProvider for SvelteScriptProvider {
         let candidates = capture_svelte_candidates(
             cx.source,
             cx.program,
+            cx.top_level_owners,
             cx.module_script_region,
             forced_runes,
             template_uses_host_rune,
@@ -470,6 +524,16 @@ impl ScriptFactProvider for SvelteScriptProvider {
                 Arc::from([])
             },
             instance_exports: candidates.instance_exports.clone().into(),
+            module_exports: candidates
+                .module_exports
+                .iter()
+                .map(|export| SvelteModuleExportFact {
+                    exported_name: export.exported_name.clone(),
+                    local_name: export.local_name.clone(),
+                    owner: export.owner,
+                    binding_key: export.binding_key.clone(),
+                })
+                .collect(),
         };
 
         // The honest answer: emit facts whenever the component carries ANY
@@ -482,6 +546,7 @@ impl ScriptFactProvider for SvelteScriptProvider {
             && facts.legacy_props.is_empty()
             && facts.dispatcher_events.is_none()
             && facts.instance_exports.is_empty()
+            && facts.module_exports.is_empty()
         {
             return None;
         }
@@ -504,6 +569,7 @@ fn specifier_resolves_to_svelte(cx: &ResolvedValidationCx<'_>, specifier: &str) 
 fn capture_svelte_candidates(
     source: &str,
     program: &Program<'_>,
+    top_level_owners: &crate::analysis::top_level_owners::TopLevelOwnerTable,
     module_region: Option<(u32, u32)>,
     forced_runes: Option<bool>,
     template_uses_host_rune: bool,
@@ -538,13 +604,21 @@ fn capture_svelte_candidates(
     // yielded `(ordinal, call)` pairs.
     let mut walk = MacroOrdinalWalk::new();
 
-    for stmt in &program.body {
+    for (statement_index, stmt) in program.body.iter().enumerate() {
+        let owner = top_level_owners.statement(statement_index).owner;
         // Ordinal-bearing macro calls of THIS statement (`$props()` declarators
         // and tracked dispatcher calls) — yielded by the shared walk, built
         // into candidates here. Runs before the arms below; the touched
         // candidate fields are disjoint from the export/legacy inventory.
         walk.visit_statement(stmt, module_region, &mut |macro_index, call| {
-            capture_ordinal_macro_call(call, macro_index, source, &snippet_imports, &mut out);
+            capture_ordinal_macro_call(
+                call,
+                owner,
+                macro_index,
+                source,
+                &snippet_imports,
+                &mut out,
+            );
         });
         match stmt {
             Statement::ImportDeclaration(import) => {
@@ -558,11 +632,13 @@ fn capture_svelte_candidates(
                 if export.export_kind.is_type() {
                     continue;
                 }
-                // An export's owning script block: MODULE when its statement
-                // start falls inside the module-script byte region, else
-                // INSTANCE. With no module region (the trait `capture` entry,
-                // conservative) every export is an instance export.
-                let in_module_block = statement_in_module(export.span.start, module_region);
+                let in_module_block =
+                    matches!(owner.kind(), verter_type_expr::TopLevelOwnerKind::Module);
+                let in_instance_block =
+                    matches!(owner.kind(), verter_type_expr::TopLevelOwnerKind::Instance);
+                if !in_module_block && !in_instance_block {
+                    continue;
+                }
                 if let Some(decl) = &export.declaration {
                     // In the INSTANCE block a legacy `export let` / `export var`
                     // is a PROP, NOT an instance-script EXPOSE member, so it must
@@ -579,14 +655,22 @@ fn capture_svelte_candidates(
                         skip_legacy_prop_vars,
                     );
                     if in_module_block {
-                        out.module_exports
-                            .extend(declaration_names.into_iter().map(|(name, _)| name));
+                        for (name, source_span) in declaration_names {
+                            push_module_export(
+                                &mut out.module_exports,
+                                name.clone(),
+                                name,
+                                owner,
+                                source_span,
+                            );
+                        }
                     } else {
                         for (name, source_span) in declaration_names {
                             push_instance_export(
                                 &mut out.instance_exports,
                                 name.clone(),
                                 name,
+                                owner,
                                 source_span,
                             );
                         }
@@ -622,21 +706,28 @@ fn capture_svelte_candidates(
                         continue;
                     }
                     let exported_name = spec.exported.name().to_string();
+                    let value_root = if export.source.is_some() {
+                        exported_name.clone()
+                    } else {
+                        local_name.to_string()
+                    };
                     if in_module_block {
-                        out.module_exports.push(exported_name);
+                        push_module_export(
+                            &mut out.module_exports,
+                            exported_name,
+                            value_root,
+                            owner,
+                            oxc_span_to_verter(spec.exported.span()),
+                        );
                     } else {
                         // A source re-export has no same-file local binding. Its
                         // exported name is the shallow export root the shared
                         // `typeof` resolver follows through the re-export edge.
-                        let value_root = if export.source.is_some() {
-                            exported_name.clone()
-                        } else {
-                            local_name.to_string()
-                        };
                         push_instance_export(
                             &mut out.instance_exports,
                             exported_name,
                             value_root,
+                            owner,
                             oxc_span_to_verter(spec.exported.span()),
                         );
                     }
@@ -647,8 +738,7 @@ fn capture_svelte_candidates(
                 // instance-block export (or when no module region splits
                 // them). An exported `$props()` declarator is already yielded
                 // by the shared ordinal walk above (same instance-only gate).
-                let in_module = statement_in_module(export.span.start, module_region);
-                if !in_module && !runes_mode {
+                if in_instance_block && !runes_mode {
                     if let Some(decl) = &export.declaration {
                         capture_legacy_export_let(decl, &mut out, true);
                     }
@@ -679,6 +769,7 @@ fn push_instance_export(
     exports: &mut Vec<SvelteInstanceExport>,
     exported_name: String,
     local_name: String,
+    owner: verter_type_expr::TopLevelOwnerId,
     source_span: Span,
 ) {
     if exports
@@ -689,7 +780,31 @@ fn push_instance_export(
     }
     exports.push(SvelteInstanceExport {
         exported_name,
+        binding_key: verter_type_expr::DeclKey::new(owner, local_name.as_str()),
         local_name,
+        owner,
+        source_span,
+    });
+}
+
+fn push_module_export(
+    exports: &mut Vec<SvelteModuleExport>,
+    exported_name: String,
+    local_name: String,
+    owner: verter_type_expr::TopLevelOwnerId,
+    source_span: Span,
+) {
+    if exports
+        .iter()
+        .any(|existing| existing.exported_name == exported_name)
+    {
+        return;
+    }
+    exports.push(SvelteModuleExport {
+        exported_name,
+        binding_key: verter_type_expr::DeclKey::new(owner, local_name.as_str()),
+        local_name,
+        owner,
         source_span,
     });
 }
@@ -1079,6 +1194,7 @@ fn leaf_members_from_lowered(
 /// Build the candidate inventory for one walk-yielded macro call.
 fn capture_ordinal_macro_call(
     call: OrdinalMacroCall<'_, '_>,
+    owner: verter_type_expr::TopLevelOwnerId,
     macro_index: u32,
     source: &str,
     snippet_imports: &[(String, String)],
@@ -1099,6 +1215,7 @@ fn capture_ordinal_macro_call(
                 candidate.props_type = Some(authored_type_payload_ref(
                     generic_ty,
                     source,
+                    owner,
                     macro_index,
                     MacroPayloadPosition::TypeArgument,
                 ));
@@ -1116,6 +1233,7 @@ fn capture_ordinal_macro_call(
                 candidate.props_type = Some(authored_type_payload_ref(
                     &annotation.type_annotation,
                     source,
+                    owner,
                     macro_index,
                     MacroPayloadPosition::TypeAnnotation,
                 ));
@@ -1135,6 +1253,7 @@ fn capture_ordinal_macro_call(
             {
                 candidate.props_type = Some(authored_type_payload_ref_from_lowered(
                     &jsdoc_type,
+                    owner,
                     macro_index,
                     MacroPayloadPosition::TypeAnnotation,
                 ));
@@ -1170,6 +1289,7 @@ fn capture_ordinal_macro_call(
                     out.dispatcher_events = Some(authored_type_payload_ref(
                         first,
                         source,
+                        owner,
                         macro_index,
                         MacroPayloadPosition::TypeArgument,
                     ));
@@ -1213,6 +1333,8 @@ pub enum PropsAnnotationLowering {
     /// out-of-range / drifted ordinal, or the ordinal of a non-`$props`
     /// macro call).
     NoPropsCall,
+    /// The ordinal exists, but belongs to a different exact lexical owner.
+    OwnerMismatch,
 }
 
 /// Outcome of [`lower_svelte_type_argument_at`] — the retained-AST
@@ -1226,6 +1348,8 @@ pub enum SvelteTypeArgumentLowering {
     Unannotated,
     /// `macro_index` addresses no Svelte macro call.
     NoMacroCall,
+    /// The ordinal exists, but belongs to a different exact lexical owner.
+    OwnerMismatch,
 }
 
 /// Lower the first generic type argument of the Svelte macro at
@@ -1242,11 +1366,40 @@ pub fn lower_svelte_type_argument_at(
     module_region: Option<(u32, u32)>,
     macro_index: u32,
 ) -> SvelteTypeArgumentLowering {
+    let owners =
+        crate::analysis::top_level_owners::TopLevelOwnerTable::ordinary_file(program.body.len());
+    lower_svelte_type_argument_at_with_owners(
+        program,
+        source,
+        module_region,
+        &owners,
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        macro_index,
+    )
+}
+
+/// Owner-qualified form of [`lower_svelte_type_argument_at`]. The macro
+/// ordinal and its exact lexical owner form one address; a role-only owner
+/// mutation is rejected even when the ordinal still exists.
+#[must_use]
+pub fn lower_svelte_type_argument_at_with_owners(
+    program: &Program<'_>,
+    source: &str,
+    module_region: Option<(u32, u32)>,
+    owners: &crate::analysis::top_level_owners::TopLevelOwnerTable,
+    expected_owner: verter_type_expr::TopLevelOwnerId,
+    macro_index: u32,
+) -> SvelteTypeArgumentLowering {
     let mut walk = MacroOrdinalWalk::new();
     let mut found = SvelteTypeArgumentLowering::NoMacroCall;
-    for stmt in &program.body {
+    for (statement_index, stmt) in program.body.iter().enumerate() {
+        let owner = owners.statement(statement_index).owner;
         walk.visit_statement(stmt, module_region, &mut |ordinal, call| {
             if ordinal != macro_index {
+                return;
+            }
+            if owner != expected_owner {
+                found = SvelteTypeArgumentLowering::OwnerMismatch;
                 return;
             }
             let ty = match call {
@@ -1283,11 +1436,39 @@ pub fn lower_props_annotation_at(
     module_region: Option<(u32, u32)>,
     macro_index: u32,
 ) -> PropsAnnotationLowering {
+    let owners =
+        crate::analysis::top_level_owners::TopLevelOwnerTable::ordinary_file(program.body.len());
+    lower_props_annotation_at_with_owners(
+        program,
+        source,
+        module_region,
+        &owners,
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        macro_index,
+    )
+}
+
+/// Owner-qualified form of [`lower_props_annotation_at`]. The macro ordinal
+/// and exact lexical owner are inseparable locator identity.
+#[must_use]
+pub fn lower_props_annotation_at_with_owners(
+    program: &Program<'_>,
+    source: &str,
+    module_region: Option<(u32, u32)>,
+    owners: &crate::analysis::top_level_owners::TopLevelOwnerTable,
+    expected_owner: verter_type_expr::TopLevelOwnerId,
+    macro_index: u32,
+) -> PropsAnnotationLowering {
     let mut walk = MacroOrdinalWalk::new();
     let mut found = PropsAnnotationLowering::NoPropsCall;
-    for stmt in &program.body {
+    for (statement_index, stmt) in program.body.iter().enumerate() {
+        let owner = owners.statement(statement_index).owner;
         walk.visit_statement(stmt, module_region, &mut |ordinal, call| {
             if ordinal != macro_index {
+                return;
+            }
+            if owner != expected_owner {
+                found = PropsAnnotationLowering::OwnerMismatch;
                 return;
             }
             if let OrdinalMacroCall::Props { declarator, .. } = call {

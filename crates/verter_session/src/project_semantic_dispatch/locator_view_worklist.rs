@@ -209,12 +209,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let SemanticNodeData::DeclRef { identity } = data else {
             return None;
         };
-        self.is_instantiate_active(identity.canonical_id.as_ref(), identity.decl_name.as_ref())
-            .then(|| {
-                self.opaque(QueryError::RecursiveRef {
-                    name: Arc::clone(&identity.decl_name),
-                })
+        self.is_instantiate_active(
+            identity.canonical_id.as_ref(),
+            identity.owner,
+            identity.decl_name.as_ref(),
+        )
+        .then(|| {
+            self.opaque(QueryError::RecursiveRef {
+                name: Arc::clone(&identity.decl_name),
             })
+        })
     }
 
     fn plan_reference_projection(
@@ -290,6 +294,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::DeclRef { identity } => {
                 if self.is_instantiate_active(
                     identity.canonical_id.as_ref(),
+                    identity.owner,
                     identity.decl_name.as_ref(),
                 ) {
                     return ReferenceProjectionPlan::Ready(self.opaque(QueryError::RecursiveRef {
@@ -306,6 +311,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     match self.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                         scope: ScopeId {
                             canonical_id: Arc::clone(&identity.canonical_id),
+                            owner: identity.owner,
                             local_scope: None,
                         },
                         name: Arc::clone(&identity.decl_name),
@@ -317,7 +323,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     };
                 let routes_through_instantiate = self
                     .ctx
-                    .prepared_type_decl(identity.canonical_id.as_ref(), identity.decl_name.as_ref())
+                    .prepared_type_decl_return_only(
+                        identity.canonical_id.as_ref(),
+                        identity.owner,
+                        identity.decl_name.as_ref(),
+                    )
                     .is_some_and(|prepared| !prepared.type_parameters.is_empty());
                 if !routes_through_instantiate {
                     return ReferenceProjectionPlan::Ready(anchor);
@@ -326,6 +336,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
                             Arc::clone(&identity.canonical_id),
+                            identity.owner,
                             Arc::clone(&identity.decl_name),
                         ),
                         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),

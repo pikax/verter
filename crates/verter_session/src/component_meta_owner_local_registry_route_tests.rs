@@ -257,6 +257,7 @@ fn public_field_refs_keep_external_indexed_access_routes() {
     let owner_local = component_meta_registry_public_route_owner_local_root(
         host.as_ref() as &dyn ResolverContext,
         "/workspace/src/Comp.vue",
+        verter_type_expr::TopLevelOwnerId::instance(0),
         &analysis,
         Some("Foo"),
         None,
@@ -338,6 +339,7 @@ fn owner_local_alias_of_alias_external_import_declines() {
     let owner_local = component_meta_registry_public_route_owner_local_root(
         host.as_ref() as &dyn ResolverContext,
         "/workspace/src/Comp.vue",
+        verter_type_expr::TopLevelOwnerId::instance(0),
         &analysis,
         Some("Foo"),
         None,
@@ -382,6 +384,7 @@ fn owner_local_generic_typeparameter_body_declines() {
     let owner_local = component_meta_registry_public_route_owner_local_root(
         host.as_ref() as &dyn ResolverContext,
         "/workspace/src/Comp.vue",
+        verter_type_expr::TopLevelOwnerId::instance(0),
         &analysis,
         Some("T"),
         None,

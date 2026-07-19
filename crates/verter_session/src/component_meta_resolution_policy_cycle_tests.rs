@@ -128,6 +128,7 @@ fn meta_entry(name: &str, canonical_source: &str) -> ResolvedTypeRegistryMeta {
             declaration_id: None,
             resolved_name: name.to_string(),
             canonical_source: canonical_source.to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             span: verter_span::Span::default(),
             kind: ResolvedDeclarationKind::TypeAlias,
             text: None,
@@ -158,6 +159,7 @@ fn run_policy_with_overflow_check(
         for meta_row in registry_meta.iter() {
             let _ = ctx.prepared_type_decl(
                 meta_row.declaration.canonical_source.as_str(),
+                meta_row.declaration.owner,
                 meta_row.name.as_str(),
             );
         }
@@ -509,6 +511,7 @@ fn normalized_type_args_distinguishes_distinct_decl_instantiations() {
     fn decl(canonical_id: &str, decl_name: &str) -> DeclIdentity {
         DeclIdentity {
             canonical_id: Arc::from(canonical_id),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: Default::default(),
             decl_name: Arc::from(decl_name),
         }

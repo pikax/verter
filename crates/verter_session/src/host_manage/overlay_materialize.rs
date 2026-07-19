@@ -622,6 +622,7 @@ impl VerterHost {
             analysis: verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource,
             snapshot: Option<crate::types::FileAnalysisSnapshot>,
             svelte_component_runes_mode: bool,
+            owner_table: Arc<verter_semantic::analysis::TopLevelOwnerTable>,
         }
         let job_canonical = analysis_canonical_id.to_string();
         let job_raw_source = Arc::clone(&raw_source);
@@ -648,6 +649,13 @@ impl VerterHost {
         let outcome = self.decl_lowering.run_leased(
             &snapshot_key,
             move |program: Option<&crate::ParsedEvalProgram>| {
+                let owner_table = Arc::new(match program {
+                    Some(parsed) => crate::parse::top_level_owner_table(
+                        parsed.borrow_dependent(),
+                        job_framework_parse.as_deref(),
+                    )?,
+                    None => verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(0),
+                });
                 let svelte_component_runes_mode = program.is_some_and(|parsed| {
                     job_framework_parse.as_deref().is_some_and(|artifact| {
                         crate::parse::svelte_component_runes_mode(
@@ -659,12 +667,22 @@ impl VerterHost {
                 let (header_index, analysis) = match program {
                     Some(parsed) => {
                         let body = parsed.borrow_dependent();
+                        let parser_owners = owner_table
+                            .statements()
+                            .iter()
+                            .map(|statement| statement.owner)
+                            .collect::<Vec<_>>();
                         (
-                            verter_semantic::analysis::decl_headers::build_decl_header_index(
+                            verter_semantic::analysis::decl_headers::build_decl_header_index_with_owners(
                                 body,
                                 parsed.source_str(),
+                                &owner_table,
                             ),
-                            verter_parser::utils::oxc::script::type_inventory::analyze_external_type_program_headers(body),
+                            verter_parser::utils::oxc::script::type_inventory::analyze_external_type_program_headers_with_owner_table(body, &parser_owners)
+                                .map_err(|error| crate::parse::ScriptOwnerIndexError::ParserTable {
+                                    statement_count: error.statement_count(),
+                                    owner_count: error.owner_count(),
+                                })?,
                         )
                     }
                     None => Default::default(),
@@ -683,6 +701,7 @@ impl VerterHost {
                             eval_is_extracted_script,
                             program,
                         ),
+                        Some(&owner_table),
                     );
                     Some(VerterHost::build_snapshot_from_parse(parse))
                 } else if is_carrier {
@@ -700,6 +719,7 @@ impl VerterHost {
                                 eval_is_extracted_script,
                                 program,
                             ),
+                            Some(&owner_table),
                         );
                         VerterHost::build_snapshot_from_parse(parse)
                     })
@@ -718,12 +738,13 @@ impl VerterHost {
                     // default-empty snapshot IS the parse outcome.
                     Some(crate::types::FileAnalysisSnapshot::default())
                 };
-                ColdIndexProducts {
+                Ok::<_, crate::parse::ScriptOwnerIndexError>(ColdIndexProducts {
                     header_index,
                     analysis,
                     snapshot,
                     svelte_component_runes_mode,
-                }
+                    owner_table,
+                })
             },
         );
         // The parse was already counted at lease acquisition above; the
@@ -740,6 +761,17 @@ impl VerterHost {
             );
             return None;
         };
+        let products = match products {
+            Ok(products) => products,
+            Err(error) => {
+                tracing::error!(
+                    canonical = %snapshot_key.canonical,
+                    error = %error,
+                    "carrier owner indexing failed"
+                );
+                return None;
+            }
+        };
         let snapshot = Arc::new(products.snapshot.unwrap_or_default());
         let external_type_analysis = Arc::new(products.analysis);
 
@@ -753,6 +785,7 @@ impl VerterHost {
             Arc::clone(&eval_source),
             framework_parse.clone(),
             source_type,
+            Arc::clone(&products.owner_table),
             products.svelte_component_runes_mode,
             Arc::clone(&self.decl_lowering),
             Arc::new(products.header_index),
@@ -905,13 +938,14 @@ impl VerterHost {
         // companion), so the overlay wildcard `canonical_id`s agree with the
         // base `IndexedReady` route surface. An unresolvable source leaves
         // the loop-baked known-miss in place.
-        for source in external_type_analysis.wildcard_reexport_sources() {
+        for wildcard in external_type_analysis.wildcard_reexports() {
+            let source = wildcard.source.as_str();
             if let Some(resolved) = self.resolve_route_edge_canonical(analysis_canonical_id, source)
             {
                 import_routes.insert(
-                    source.clone(),
+                    source.to_string(),
                     DependencyResolution {
-                        specifier: source.clone(),
+                        specifier: source.to_string(),
                         resolved_canonical_id: Some(resolved.clone()),
                         possible_canonical_ids: vec![resolved],
                     },

@@ -144,11 +144,13 @@ impl ProjectSemanticDispatch<'_> {
                 }
                 SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                     canonical_id,
+                    owner,
                     name,
                     ..
                 }) => {
                     let identity = crate::semantic_query::DeclIdentity {
                         canonical_id: Arc::clone(canonical_id),
+                        owner: *owner,
                         whole_hash: Default::default(),
                         decl_name: Arc::clone(name),
                     };
@@ -235,6 +237,7 @@ impl ProjectSemanticDispatch<'_> {
     ) {
         let slot = self.type_slot_for(
             Arc::clone(&identity.canonical_id),
+            identity.owner,
             Arc::clone(&identity.decl_name),
         );
         let read = self.execute_read(SemanticQueryKey::Instantiate(

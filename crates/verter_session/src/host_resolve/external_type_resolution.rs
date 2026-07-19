@@ -33,7 +33,7 @@ impl VerterHost {
         cache: &mut crate::resolver_core::component_meta::NativePropProjectionCache,
     ) -> Option<(
         String,
-        String,
+        verter_type_expr::TopLevelOwnerId,
         String,
         Vec<crate::resolver_core::ResolvedNativeProp>,
     )> {
@@ -46,49 +46,33 @@ impl VerterHost {
         tracked_deps.insert(dep_canonical.clone());
         resolution_deps.insert(dep_canonical.clone());
 
-        let cache_key = (dep_canonical.clone(), type_name.to_string());
-        if let Some(cached) = cache.get(&cache_key).cloned() {
-            let resolution = cached?;
-            // Re-query the project-global `ImportedRootDb` for the target
-            // identity. It collapses concurrent cold requests internally, so
-            // repeated calls are cheap warm hits — there is no need for a
-            // second per-request memo layer above it. Route through `ctx`
-            // so request-bound callers exercise the overlay-aware view.
-            let (target_canonical, target_name) =
-                ctx.resolve_imported_type_root(dep_canonical.as_str(), type_name);
-            tracked_deps.insert(target_canonical.clone());
-            resolution_deps.insert(target_canonical.clone());
-            return Some((dep_canonical, target_canonical, target_name, resolution));
-        }
-
-        let (seed_canonical, seed_type_name) =
-            ctx.resolve_imported_type_root(dep_canonical.as_str(), type_name);
+        let seed = ctx.resolve_imported_type_root(dep_canonical.as_str(), type_name)?;
+        let seed_canonical = seed.canonical_id.to_string();
+        let seed_owner = seed.owner;
+        let seed_type_name = seed.symbol_name.to_string();
         tracked_deps.insert(seed_canonical.clone());
         resolution_deps.insert(seed_canonical.clone());
-
-        let seed_target_key = (seed_canonical.clone(), seed_type_name.clone());
-        if let Some(cached) = cache.get(&seed_target_key).cloned() {
-            cache.insert(cache_key, cached.clone());
-            let resolution = cached?;
-            return Some((dep_canonical, seed_canonical, seed_type_name, resolution));
-        }
 
         // ImportedRootDb is the sole routed target authority. It already
         // resolves direct, named-reexport, and wildcard-barrel hops under the
         // request-bound store view; a second frontier walk would duplicate
         // routing and dependency facts.
-        let (effective_dep_canonical, effective_type_name) = (seed_canonical, seed_type_name);
+        let (effective_dep_canonical, effective_owner, effective_type_name) =
+            (seed_canonical, seed_owner, seed_type_name);
 
         tracked_deps.insert(effective_dep_canonical.clone());
         resolution_deps.insert(effective_dep_canonical.clone());
 
-        let final_target_key = (effective_dep_canonical.clone(), effective_type_name.clone());
+        let final_target_key = (
+            effective_dep_canonical.clone(),
+            effective_owner,
+            effective_type_name.clone(),
+        );
         if let Some(cached) = cache.get(&final_target_key).cloned() {
-            cache.insert(cache_key, cached.clone());
             let resolution = cached?;
             return Some((
-                dep_canonical,
                 effective_dep_canonical,
+                effective_owner,
                 effective_type_name,
                 resolution,
             ));
@@ -119,6 +103,7 @@ impl VerterHost {
         let outcome = crate::resolver_core::component_meta::named_native_props_outcome(
             ctx,
             effective_dep_canonical.as_str(),
+            effective_owner,
             effective_type_name.as_str(),
         );
         use crate::resolver_core::component_meta::ResolvedNativePropsOutcome;
@@ -129,12 +114,11 @@ impl VerterHost {
             ResolvedNativePropsOutcome::Miss => None,
         };
 
-        cache.insert(cache_key, resolved.clone());
         cache.insert(final_target_key, resolved.clone());
         resolved.map(|resolution| {
             (
-                dep_canonical,
                 effective_dep_canonical,
+                effective_owner,
                 effective_type_name,
                 resolution,
             )
@@ -173,9 +157,9 @@ impl VerterHost {
     fn build_imported_macro_declaration_from_target(
         &self,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dep_canonical: &str,
         requested_name: &str,
         target_canonical: &str,
+        target_owner: verter_type_expr::TopLevelOwnerId,
         target_name: &str,
     ) -> crate::resolver_core::ResolvedTypeDeclaration {
         self.provenance
@@ -185,14 +169,16 @@ impl VerterHost {
         let mut declaration = crate::resolver_core::resolve_direct_local_type_declaration(
             &resolver,
             target_canonical,
+            target_owner,
             target_name,
         )
         .unwrap_or_else(|| {
             crate::meta_resolve::resolve_type_declaration_with_context(
                 self,
                 ctx,
-                dep_canonical,
-                requested_name,
+                target_canonical,
+                target_owner,
+                target_name,
             )
         });
         declaration.requested_name = requested_name.to_string();
@@ -258,7 +244,7 @@ impl VerterHost {
             ),
         );
 
-        let (dep_canonical, effective_dep_canonical, effective_type_name, resolution) = self
+        let (effective_dep_canonical, effective_owner, effective_type_name, resolution) = self
             .resolve_component_meta_native_props_target_with_view(
                 ctx,
                 owner_canonical,
@@ -271,9 +257,9 @@ impl VerterHost {
         Some(crate::resolver_core::ResolvedImportedMacroSurface {
             declaration: self.build_imported_macro_declaration_from_target(
                 ctx,
-                dep_canonical.as_str(),
                 type_name,
                 effective_dep_canonical.as_str(),
+                effective_owner,
                 effective_type_name.as_str(),
             ),
             native_props: resolution,

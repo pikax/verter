@@ -12,8 +12,8 @@ use oxc_span::GetSpan;
 
 use super::macros::{
     detect_macro_kind, is_define_component, MacroArrayArg, MacroArrayElement, MacroDeclarator,
-    MacroObjectArg, MacroProperty, MacroTypeParams, RuntimeConstructorSyntax, ScriptMacro,
-    VueMacroKind,
+    MacroObjectArg, MacroProperty, MacroTypeParams, MacroTypePropMember, RuntimeConstructorSyntax,
+    ScriptMacro, VueMacroKind,
 };
 use super::shared::ScriptParseContext;
 use super::types::{
@@ -26,6 +26,8 @@ use super::usage::{
     SyncContextUsage, TemplateUtilUsage, UsageCollector, VueApiCategory, VueApiKind, WatcherUsage,
 };
 use crate::common::Span;
+use crate::utils::oxc::script::type_inventory::collect_type_dependency_paths;
+use verter_type_expr::facts::TypeDependencyPathFact;
 
 /// Context for setup script parsing
 pub struct SetupContext {
@@ -768,10 +770,109 @@ fn extract_type_params<'a>(
     // The type content is between < and >
     let type_span = Span::new(full_span.start + 1 + offset, full_span.end - 1 + offset);
 
+    let mut prop_members = Vec::new();
+    let mut emit_member_spans = Vec::new();
+    let type_dependency_paths = tp
+        .params
+        .first()
+        .map(collect_type_dependency_paths)
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    if let Some(first) = tp.params.first() {
+        collect_macro_type_member_spans(first, offset, &mut prop_members, &mut emit_member_spans);
+    }
+
     MacroTypeParams {
         lt_span,
         type_span,
         gt_span,
+        prop_members,
+        emit_member_spans,
+        type_dependency_paths,
+    }
+}
+
+fn collect_macro_type_member_spans(
+    ty: &TSType<'_>,
+    offset: u32,
+    prop_members: &mut Vec<MacroTypePropMember>,
+    emit_spans: &mut Vec<Span>,
+) {
+    match ty {
+        TSType::TSTypeLiteral(literal) => {
+            for member in &literal.members {
+                match member {
+                    TSSignature::TSPropertySignature(property) => {
+                        let Some((name, span)) = authored_property_key(&property.key) else {
+                            continue;
+                        };
+                        let span = Span::new(
+                            span.start.saturating_add(offset),
+                            span.end.saturating_add(offset),
+                        );
+                        prop_members.push(MacroTypePropMember {
+                            name,
+                            key_span: span,
+                            type_span: property.type_annotation.as_ref().map(|annotation| {
+                                let span = annotation.type_annotation.span();
+                                Span::new(
+                                    span.start.saturating_add(offset),
+                                    span.end.saturating_add(offset),
+                                )
+                            }),
+                            optional: property.optional,
+                        });
+                        emit_spans.push(span);
+                    }
+                    TSSignature::TSCallSignatureDeclaration(call) => {
+                        let Some(TSType::TSLiteralType(literal)) = call
+                            .params
+                            .items
+                            .first()
+                            .and_then(|parameter| parameter.type_annotation.as_ref())
+                            .map(|annotation| &annotation.type_annotation)
+                        else {
+                            continue;
+                        };
+                        let TSLiteral::StringLiteral(event_name) = &literal.literal else {
+                            continue;
+                        };
+                        emit_spans.push(Span::new(
+                            event_name.span.start.saturating_add(offset),
+                            event_name.span.end.saturating_add(offset),
+                        ));
+                    }
+                    TSSignature::TSMethodSignature(_)
+                    | TSSignature::TSIndexSignature(_)
+                    | TSSignature::TSConstructSignatureDeclaration(_) => {}
+                }
+            }
+        }
+        TSType::TSIntersectionType(intersection) => {
+            for arm in &intersection.types {
+                collect_macro_type_member_spans(arm, offset, prop_members, emit_spans);
+            }
+        }
+        TSType::TSParenthesizedType(parenthesized) => {
+            collect_macro_type_member_spans(
+                &parenthesized.type_annotation,
+                offset,
+                prop_members,
+                emit_spans,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn authored_property_key(key: &PropertyKey<'_>) -> Option<(String, oxc_span::Span)> {
+    match key {
+        PropertyKey::StaticIdentifier(identifier) => {
+            Some((identifier.name.to_string(), identifier.span))
+        }
+        PropertyKey::StringLiteral(literal) => Some((literal.value.to_string(), literal.span)),
+        _ => None,
     }
 }
 
@@ -885,7 +986,9 @@ fn extract_runtime_types_from_expr(expr: &Expression<'_>) -> Vec<RuntimeConstruc
 /// Extract the `PropType<T>` type annotation span from a `TSAsExpression`.
 ///
 /// For `X as PropType<T>`, returns the span of `T`.
-fn extract_prop_type_annotation(expr: &Expression<'_>) -> Option<Span> {
+fn extract_prop_type_annotation<'ast, 'expr>(
+    expr: &'expr Expression<'ast>,
+) -> Option<(&'expr TSType<'ast>, Span)> {
     let Expression::TSAsExpression(ts_as) = expr else {
         return None;
     };
@@ -904,7 +1007,55 @@ fn extract_prop_type_annotation(expr: &Expression<'_>) -> Option<Span> {
     type_args
         .params
         .first()
-        .map(|p: &TSType<'_>| Span::from(p.span()))
+        .map(|ty: &TSType<'_>| (ty, Span::from(ty.span())))
+}
+
+fn extend_parameter_type_dependencies(
+    parameters: &FormalParameters<'_>,
+    dependencies: &mut std::collections::BTreeSet<TypeDependencyPathFact>,
+) {
+    for parameter in &parameters.items {
+        if let Some(annotation) = &parameter.type_annotation {
+            dependencies.extend(collect_type_dependency_paths(&annotation.type_annotation));
+        }
+    }
+    if let Some(rest) = &parameters.rest {
+        if let Some(annotation) = &rest.type_annotation {
+            dependencies.extend(collect_type_dependency_paths(&annotation.type_annotation));
+        }
+    }
+}
+
+fn callable_type_dependencies(expr: &Expression<'_>) -> Vec<TypeDependencyPathFact> {
+    let mut dependencies = std::collections::BTreeSet::new();
+    match expr {
+        Expression::ArrowFunctionExpression(arrow) => {
+            extend_parameter_type_dependencies(&arrow.params, &mut dependencies);
+            if let Some(annotation) = &arrow.return_type {
+                dependencies.extend(collect_type_dependency_paths(&annotation.type_annotation));
+            }
+        }
+        Expression::FunctionExpression(function) => {
+            extend_parameter_type_dependencies(&function.params, &mut dependencies);
+            if let Some(annotation) = &function.return_type {
+                dependencies.extend(collect_type_dependency_paths(&annotation.type_annotation));
+            }
+        }
+        Expression::TSAsExpression(expression) => {
+            dependencies.extend(callable_type_dependencies(&expression.expression));
+        }
+        Expression::TSSatisfiesExpression(expression) => {
+            dependencies.extend(callable_type_dependencies(&expression.expression));
+        }
+        Expression::TSNonNullExpression(expression) => {
+            dependencies.extend(callable_type_dependencies(&expression.expression));
+        }
+        Expression::ParenthesizedExpression(expression) => {
+            dependencies.extend(callable_type_dependencies(&expression.expression));
+        }
+        _ => {}
+    }
+    dependencies.into_iter().collect()
 }
 
 /// Extract prop metadata from an object-form prop value:
@@ -913,11 +1064,18 @@ fn extract_prop_type_annotation(expr: &Expression<'_>) -> Option<Span> {
 /// Returns `(required, has_default, runtime_types, prop_type_annotation)`.
 fn extract_prop_object_metadata(
     obj: &ObjectExpression<'_>,
-) -> (bool, bool, Vec<RuntimeConstructorSyntax>, Option<Span>) {
+) -> (
+    bool,
+    bool,
+    Vec<RuntimeConstructorSyntax>,
+    Option<Span>,
+    Vec<TypeDependencyPathFact>,
+) {
     let mut required = false;
     let mut has_default = false;
     let mut runtime_types = Vec::new();
     let mut prop_type_annotation = None;
+    let mut type_dependency_paths = std::collections::BTreeSet::new();
 
     for prop in &obj.properties {
         if let ObjectPropertyKind::ObjectProperty(p) = prop {
@@ -928,7 +1086,10 @@ fn extract_prop_object_metadata(
             match key_name {
                 Some("type") => {
                     runtime_types = extract_runtime_types_from_expr(&p.value);
-                    prop_type_annotation = extract_prop_type_annotation(&p.value);
+                    if let Some((ty, span)) = extract_prop_type_annotation(&p.value) {
+                        prop_type_annotation = Some(span);
+                        type_dependency_paths.extend(collect_type_dependency_paths(ty));
+                    }
                 }
                 Some("required") => {
                     if let Expression::BooleanLiteral(b) = &p.value {
@@ -943,7 +1104,13 @@ fn extract_prop_object_metadata(
         }
     }
 
-    (required, has_default, runtime_types, prop_type_annotation)
+    (
+        required,
+        has_default,
+        runtime_types,
+        prop_type_annotation,
+        type_dependency_paths.into_iter().collect(),
+    )
 }
 
 /// Extract object argument details.
@@ -972,25 +1139,42 @@ fn extract_object_arg<'a>(
                         Some(Span::from(p.value.span()))
                     };
 
-                    let (required, has_default, runtime_types, prop_type_annotation) = if p
-                        .shorthand
-                    {
-                        (false, false, vec![], None)
+                    let (
+                        required,
+                        has_default,
+                        runtime_types,
+                        prop_type_annotation,
+                        mut type_dependency_paths,
+                    ) = if p.shorthand {
+                        (false, false, vec![], None, Vec::new())
                     } else {
                         match &p.value {
                             Expression::Identifier(_) | Expression::ArrayExpression(_) => {
                                 let types = extract_runtime_types_from_expr(&p.value);
-                                (false, false, types, None)
+                                (false, false, types, None, Vec::new())
                             }
                             Expression::TSAsExpression(_) => {
                                 let types = extract_runtime_types_from_expr(&p.value);
-                                let annotation = extract_prop_type_annotation(&p.value);
-                                (false, false, types, annotation)
+                                let (annotation, dependencies) =
+                                    extract_prop_type_annotation(&p.value)
+                                        .map(|(ty, span)| {
+                                            (
+                                                Some(span),
+                                                collect_type_dependency_paths(ty)
+                                                    .into_iter()
+                                                    .collect(),
+                                            )
+                                        })
+                                        .unwrap_or_default();
+                                (false, false, types, annotation, dependencies)
                             }
                             Expression::ObjectExpression(obj) => extract_prop_object_metadata(obj),
-                            _ => (false, false, vec![], None),
+                            _ => (false, false, vec![], None, Vec::new()),
                         }
                     };
+                    type_dependency_paths.extend(callable_type_dependencies(&p.value));
+                    type_dependency_paths.sort();
+                    type_dependency_paths.dedup();
 
                     properties.push(MacroProperty {
                         name,
@@ -1001,6 +1185,7 @@ fn extract_object_arg<'a>(
                         has_default,
                         runtime_types,
                         prop_type_annotation,
+                        type_dependency_paths,
                     });
                 }
             }

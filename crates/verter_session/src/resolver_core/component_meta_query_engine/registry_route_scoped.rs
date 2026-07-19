@@ -45,6 +45,7 @@ impl ComponentMetaQueryEngine<'_> {
     pub(crate) fn route_scoped_surface_fact(
         &mut self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
         route: &crate::resolver_core::RouteDemand,
         member_use_sites: &[(String, verter_type_expr::locators::TypeBodySlot)],
@@ -75,23 +76,27 @@ impl ComponentMetaQueryEngine<'_> {
         };
         // The declaration's resolved root identity + raised body root — the
         // same resolution the heritage encoder performs.
-        let scope_payload_arc = self.scope_payload_for_scope(scope_canonical_id);
-        let (own_canonical, own_name) =
-            crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-                self.ctx,
-                scope_canonical_id,
-                scope_payload_arc.as_deref(),
-                symbol_name,
+        let scope_payload_arc = self.scope_payload_for_scope(scope_canonical_id, scope_owner);
+        let own_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+            self.ctx,
+            scope_canonical_id,
+            scope_owner,
+            scope_payload_arc.as_deref(),
+            symbol_name,
+        )
+        .unwrap_or_else(|| {
+            let interner = self.ctx.project_type_store().identity_interner();
+            verter_semantic::analysis::type_solver::host::ResolvedRootIdentity::new_in_owner(
+                interner.intern(scope_canonical_id),
+                scope_owner,
+                interner.intern(symbol_name),
             )
-            .map(|root| (root.canonical_id, root.symbol_name))
-            .unwrap_or_else(|| {
-                let interner = self.ctx.project_type_store().identity_interner();
-                (
-                    interner.intern(scope_canonical_id),
-                    interner.intern(symbol_name),
-                )
-            });
-        let body_locator = self.named_decl_body(own_canonical.as_ref(), own_name.as_ref())?;
+        });
+        let body_locator = self.named_decl_body(
+            own_root.canonical_id.as_ref(),
+            own_root.owner,
+            own_root.symbol_name.as_ref(),
+        )?;
         let body_root = {
             let dispatch = self.semantic_dispatch();
             dispatch
@@ -125,8 +130,9 @@ impl ComponentMetaQueryEngine<'_> {
                 continue;
             }
             let (fact, crossed_substitution) = self.route_scoped_member_fact(
-                own_canonical.as_ref(),
-                own_name.as_ref(),
+                own_root.canonical_id.as_ref(),
+                own_root.owner,
+                own_root.symbol_name.as_ref(),
                 member.name.as_ref(),
             )?;
             // A member reached through a generic SUBSTITUTION retains the
@@ -174,6 +180,7 @@ impl ComponentMetaQueryEngine<'_> {
     fn route_scoped_member_fact(
         &mut self,
         canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         symbol: &str,
         member_name: &str,
     ) -> Option<(verter_type_expr::facts::PreparedMemberFact, bool)> {
@@ -188,14 +195,17 @@ impl ComponentMetaQueryEngine<'_> {
             }
             node
         };
-        let mut current: Vec<(String, String, bool)> =
-            vec![(canonical.to_string(), symbol.to_string(), false)];
+        let mut current: Vec<(String, verter_type_expr::TopLevelOwnerId, String, bool)> =
+            vec![(canonical.to_string(), owner, symbol.to_string(), false)];
         for _ in 0..8 {
-            let mut next: Vec<(String, String, bool)> = Vec::new();
-            for (decl_canonical, decl_name, crossed) in current.drain(..) {
-                let Some(prepared) =
-                    self.prepared_type_decl(decl_canonical.as_str(), decl_name.as_str())
-                else {
+            let mut next: Vec<(String, verter_type_expr::TopLevelOwnerId, String, bool)> =
+                Vec::new();
+            for (decl_canonical, decl_owner, decl_name, crossed) in current.drain(..) {
+                let Some(prepared) = self.prepared_type_decl(
+                    decl_canonical.as_str(),
+                    decl_owner,
+                    decl_name.as_str(),
+                ) else {
                     continue;
                 };
                 if let Some(fact) = prepared.member_index.get(member_name) {
@@ -213,6 +223,7 @@ impl ComponentMetaQueryEngine<'_> {
                     Some(SemanticNodeData::DeclRef { identity }) => {
                         next.push((
                             identity.canonical_id.as_ref().to_string(),
+                            identity.owner,
                             identity.decl_name.as_ref().to_string(),
                             crossed,
                         ));
@@ -231,6 +242,7 @@ impl ComponentMetaQueryEngine<'_> {
                             {
                                 next.push((
                                     identity.canonical_id.as_ref().to_string(),
+                                    identity.owner,
                                     identity.decl_name.as_ref().to_string(),
                                     crossed,
                                 ));
@@ -238,6 +250,7 @@ impl ComponentMetaQueryEngine<'_> {
                         } else if base.canonical_id.as_ref() != "__builtin__" {
                             next.push((
                                 base.canonical_id.as_ref().to_string(),
+                                base.owner,
                                 base.decl_name.as_ref().to_string(),
                                 crossed || !args.is_empty(),
                             ));
@@ -250,6 +263,7 @@ impl ComponentMetaQueryEngine<'_> {
                             {
                                 next.push((
                                     identity.canonical_id.as_ref().to_string(),
+                                    identity.owner,
                                     identity.decl_name.as_ref().to_string(),
                                     crossed,
                                 ));

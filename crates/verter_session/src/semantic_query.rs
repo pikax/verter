@@ -204,6 +204,10 @@ pub struct ScopeId {
     /// version indirectly via any [`ResolveDeclKey`] whose scope points to a
     /// specific `(canonical_id, whole_hash)` artifact.
     pub canonical_id: Arc<str>,
+    /// Exact authored top-level owner within `canonical_id`. Module and
+    /// instance scripts are disjoint lexical scopes even when they declare the
+    /// same name at the same source generation.
+    pub owner: verter_type_expr::TopLevelOwnerId,
     /// Optional local scope index for inner scopes (lambda body, type-param
     /// scope, block scope). `None` means the file top-level scope. Only valid
     /// inside the lowered version of the owning canonical.
@@ -217,10 +221,11 @@ pub struct ScopeId {
 }
 
 impl ScopeId {
-    /// A file top-level scope rooted in `canonical_id`.
-    pub fn file(canonical_id: Arc<str>) -> Self {
+    /// A file top-level scope rooted in an exact authored owner.
+    pub fn file(canonical_id: Arc<str>, owner: verter_type_expr::TopLevelOwnerId) -> Self {
         Self {
             canonical_id,
+            owner,
             local_scope: None,
         }
     }
@@ -255,6 +260,8 @@ pub enum NodeScopeId {
     /// type-param scope).
     File {
         canonical_id: Arc<str>,
+        /// Exact authored top-level owner within `canonical_id`.
+        owner: verter_type_expr::TopLevelOwnerId,
         whole_hash: HashValue,
         local_scope: Option<u32>,
     },
@@ -275,6 +282,15 @@ impl NodeScopeId {
         match self {
             Self::Global => None,
             Self::File { canonical_id, .. } => Some(Arc::clone(canonical_id)),
+        }
+    }
+
+    /// Exact authored top-level owner for a declaration-bound scope.
+    #[must_use]
+    pub fn top_level_owner(&self) -> Option<verter_type_expr::TopLevelOwnerId> {
+        match self {
+            Self::Global => None,
+            Self::File { owner, .. } => Some(*owner),
         }
     }
 }
@@ -374,6 +390,7 @@ pub struct ResolveDeclKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DeclIdentity {
     pub canonical_id: Arc<str>,
+    pub owner: verter_type_expr::TopLevelOwnerId,
     pub whole_hash: HashValue,
     pub decl_name: Arc<str>,
 }
@@ -389,15 +406,18 @@ impl DeclIdentity {
         match scope {
             NodeScopeId::Global => Self {
                 canonical_id: Arc::from(""),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
                 decl_name,
             },
             NodeScopeId::File {
                 canonical_id,
+                owner,
                 whole_hash,
                 ..
             } => Self {
                 canonical_id: Arc::clone(canonical_id),
+                owner: *owner,
                 whole_hash: *whole_hash,
                 decl_name,
             },
@@ -412,6 +432,7 @@ impl DeclIdentity {
     pub fn synthetic(display_name: &str) -> Self {
         Self {
             canonical_id: Arc::from("<synthetic>"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
             decl_name: Arc::from(display_name),
         }
@@ -434,6 +455,7 @@ impl DeclIdentity {
     pub fn to_type_slot_unscoped(&self) -> ResolvedDeclSlotIdentity {
         ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::clone(&self.canonical_id),
+            self.owner,
             Arc::clone(&self.decl_name),
         )
     }
@@ -573,6 +595,8 @@ pub struct ResolvedDeclSlotIdentity {
     /// see audit doc `docs/arch/materialize-owner-local-audit.md`
     /// (a) for the `local_fence_seed` derivation rationale.
     pub defining_canonical: Arc<str>,
+    /// Exact authored top-level owner inside `defining_canonical`.
+    pub owner: verter_type_expr::TopLevelOwnerId,
     /// Stable merged-symbol name. Invariant under declaration
     /// reordering AND under TS declaration merging.
     pub merged_symbol_name: Arc<str>,
@@ -590,6 +614,7 @@ impl ResolvedDeclSlotIdentity {
     #[must_use]
     pub fn type_slot(
         defining_canonical: Arc<str>,
+        owner: verter_type_expr::TopLevelOwnerId,
         merged_symbol_name: Arc<str>,
         project_identity: u32,
         type_env_hash: HashValue,
@@ -597,6 +622,7 @@ impl ResolvedDeclSlotIdentity {
     ) -> Self {
         Self {
             defining_canonical,
+            owner,
             merged_symbol_name,
             symbol_space: SemanticSymbolSpace::Type,
             env: SlotEnvIdentity::from_raw(project_identity, type_env_hash, lib_env_hash),
@@ -607,6 +633,7 @@ impl ResolvedDeclSlotIdentity {
     #[must_use]
     pub fn value_slot(
         defining_canonical: Arc<str>,
+        owner: verter_type_expr::TopLevelOwnerId,
         merged_symbol_name: Arc<str>,
         project_identity: u32,
         type_env_hash: HashValue,
@@ -614,6 +641,7 @@ impl ResolvedDeclSlotIdentity {
     ) -> Self {
         Self {
             defining_canonical,
+            owner,
             merged_symbol_name,
             symbol_space: SemanticSymbolSpace::Value,
             env: SlotEnvIdentity::from_raw(project_identity, type_env_hash, lib_env_hash),
@@ -634,9 +662,14 @@ impl ResolvedDeclSlotIdentity {
     /// integration crates consume it; the one-path contract is pinned by
     /// the arch guard `no_production_caller_of_zero_env_slot_constructors`.
     #[must_use]
-    pub fn type_slot_unscoped(canonical: Arc<str>, name: Arc<str>) -> Self {
+    pub fn type_slot_unscoped(
+        canonical: Arc<str>,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: Arc<str>,
+    ) -> Self {
         Self::type_slot(
             canonical,
+            owner,
             name,
             0,
             HashValue::default(),
@@ -651,7 +684,11 @@ impl ResolvedDeclSlotIdentity {
     /// instead. See [`Self::type_slot_unscoped`].
     #[must_use]
     pub fn builtin_unscoped(name: &str) -> Self {
-        Self::type_slot_unscoped(Arc::from("__builtin__"), Arc::from(name))
+        Self::type_slot_unscoped(
+            Arc::from("__builtin__"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(name),
+        )
     }
 
     /// TEST/FIXTURE-ONLY constructor: derive a slot identity from a
@@ -681,6 +718,7 @@ impl ResolvedDeclSlotIdentity {
     ) -> Self {
         Self {
             defining_canonical: Arc::clone(&identity.canonical_id),
+            owner: identity.owner,
             merged_symbol_name: Arc::clone(&identity.decl_name),
             symbol_space,
             env: SlotEnvIdentity::from_raw(project_identity, type_env_hash, lib_env_hash),
@@ -704,6 +742,7 @@ impl ResolvedDeclSlotIdentity {
     pub fn with_symbol_space(&self, symbol_space: SemanticSymbolSpace) -> Self {
         Self {
             defining_canonical: Arc::clone(&self.defining_canonical),
+            owner: self.owner,
             merged_symbol_name: Arc::clone(&self.merged_symbol_name),
             symbol_space,
             env: self.env,
@@ -723,7 +762,7 @@ impl ResolvedDeclSlotIdentity {
 #[must_use]
 pub fn value_root_of(value_slot: &ResolvedDeclSlotIdentity) -> ValueRootKey {
     ValueRootKey {
-        scope: ScopeId::file(Arc::clone(&value_slot.defining_canonical)),
+        scope: ScopeId::file(Arc::clone(&value_slot.defining_canonical), value_slot.owner),
         name: Arc::clone(&value_slot.merged_symbol_name),
     }
 }
@@ -2647,6 +2686,7 @@ pub enum QueryError {
     /// Instantiate" rather than "not found."
     DeclPlaceholder {
         canonical_id: Arc<str>,
+        owner: verter_type_expr::TopLevelOwnerId,
         name: Arc<str>,
         whole_hash: HashValue,
     },
@@ -2768,15 +2808,17 @@ impl PartialEq for QueryError {
             (
                 Self::DeclPlaceholder {
                     canonical_id: a_c,
+                    owner: a_o,
                     name: a_n,
                     whole_hash: a_h,
                 },
                 Self::DeclPlaceholder {
                     canonical_id: b_c,
+                    owner: b_o,
                     name: b_n,
                     whole_hash: b_h,
                 },
-            ) => a_c == b_c && a_n == b_n && a_h == b_h,
+            ) => a_c == b_c && a_o == b_o && a_n == b_n && a_h == b_h,
             (
                 Self::ValueDomainMismatch {
                     expected: a_e,
@@ -2832,11 +2874,13 @@ impl std::hash::Hash for QueryError {
             }
             Self::DeclPlaceholder {
                 canonical_id,
+                owner,
                 name,
                 whole_hash,
             } => {
                 7u8.hash(state);
                 canonical_id.hash(state);
+                owner.hash(state);
                 name.hash(state);
                 whole_hash.hash(state);
             }
@@ -5923,6 +5967,7 @@ pub trait SemanticQueryApi {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_type_expr::TopLevelOwnerId;
 
     /// The shared structural carrier-arg accessor returns the `type_args`
     /// slice for each of the three carriers that apply type arguments
@@ -5950,6 +5995,7 @@ mod tests {
             ValueRootKey {
                 scope: ScopeId {
                     canonical_id: Arc::from("/m.ts"),
+                    owner: TopLevelOwnerId::ordinary_file(),
                     local_scope: None,
                 },
                 name: Arc::from("factory"),
@@ -5991,6 +6037,7 @@ mod tests {
     fn resolve_decl_keys_dedup_by_scope_and_name() {
         let scope = ScopeId {
             canonical_id: Arc::from("/w/src/types.ts"),
+            owner: TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         };
         let a = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
@@ -6011,6 +6058,7 @@ mod tests {
         let a = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
                 canonical_id: Arc::from("/w/a.ts"),
+                owner: TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
             },
             name: Arc::from("Foo"),
@@ -6018,6 +6066,7 @@ mod tests {
         let b = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
                 canonical_id: Arc::from("/w/b.ts"),
+                owner: TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
             },
             name: Arc::from("Foo"),

@@ -407,7 +407,11 @@ impl VerterHost {
         // under publication demand.
         let base = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
             crate::semantic_query::InstantiateKey::new(
-                dispatch.type_slot_for(Arc::from(canonical_id), Arc::from("default")),
+                dispatch.type_slot_for(
+                    Arc::from(canonical_id),
+                    verter_type_expr::TopLevelOwnerId::instance(0),
+                    Arc::from("default"),
+                ),
                 Arc::from(Vec::new().into_boxed_slice()),
                 dispatch.instantiate_context_for(
                     canonical_id,
@@ -678,6 +682,18 @@ pub(crate) fn navigate_param_to_object_surface(
     payload: &verter_type_expr::locators::AuthoredTypePayloadRef,
 ) -> Option<TypeInfoSurface> {
     let dispatch = ctx.dispatch();
+    let scope_owner = match &payload.locator {
+        verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot) => slot.anchor.owner,
+        verter_type_expr::locators::AuthoredBodyLocator::AugmentationBody(body) => {
+            body.anchor.owner
+        }
+        verter_type_expr::locators::AuthoredBodyLocator::JsdocTypedefBody(body) => {
+            body.anchor.owner
+        }
+        verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(payload) => {
+            payload.anchor.owner
+        }
+    };
 
     // Raise the authored payload locator to its base node through the shared
     // source-raise bridge under structural-transit Navigate (member values
@@ -689,6 +705,7 @@ pub(crate) fn navigate_param_to_object_surface(
             &verter_type_expr::facts::SemanticTypeSource::Authored(payload.locator.clone()),
             crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                 scope_canonical_id: scope_canonical,
+                scope_owner,
                 context: ProjectionReductionContext::structural_transit_with_mode(
                     ProjectionMode::Navigate,
                 ),

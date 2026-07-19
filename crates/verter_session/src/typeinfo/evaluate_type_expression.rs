@@ -402,12 +402,14 @@ fn evaluate_inner(
     };
     let scope_node = crate::semantic_query::NodeScopeId::File {
         canonical_id: Arc::clone(&scratch_canonical),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: shallow.whole_hash,
         local_scope: None,
     };
     let _ = &scope_node;
     let base = dispatch.type_slot_for(
         Arc::clone(&scratch_canonical),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from(SCRATCH_ALIAS_NAME),
     );
     let instantiate_key =
@@ -437,6 +439,7 @@ fn evaluate_inner(
             let resolve_decl_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                 scope: ScopeId {
                     canonical_id: Arc::clone(&scratch_canonical),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     local_scope: None,
                 },
                 name: Arc::from(SCRATCH_ALIAS_NAME),

@@ -139,7 +139,7 @@ pub use route_demand::{
     RoutedSymbolResult, RoutedSymbolStatus, SymbolSpace,
 };
 pub use runtime_values::{
-    materialize_imported_runtime_values_into_env, ImportedRuntimeValueResolver,
+    materialize_imported_runtime_values_into_env, ImportedRuntimeValueResolver, ValueDeclIdentity,
 };
 pub use shallow_file_state::{
     BudgetDomain, BudgetExceededFailure, ClassifiedTypeDeps, ExportTarget, ExternalSymbolRef,

@@ -29,7 +29,9 @@ use verter_type_expr::facts::{
     WholeRouteEdgeFact,
 };
 use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace, SymbolBodyLocator};
-use verter_type_expr::{LiteralValue, ObjectMember, ObjectProperty, RouteDemand, TypeExpr};
+use verter_type_expr::{
+    LiteralValue, ObjectMember, ObjectProperty, RouteDemand, TopLevelOwnerId, TypeExpr,
+};
 
 use super::SymbolSpace;
 
@@ -71,6 +73,9 @@ pub trait RouteFactLens {
     /// The canonical id of the file whose decls are being produced — anchors
     /// the deferred key-source recipe locator.
     fn own_canonical_id(&self) -> Arc<str>;
+
+    /// Lexical owner of the declaration whose route facts are produced.
+    fn own_top_level_owner(&self) -> TopLevelOwnerId;
 }
 
 /// A lens with no imports and no local symbols — for enum-only seeded paths
@@ -87,6 +92,9 @@ impl RouteFactLens for EmptyRouteFactLens {
     }
     fn own_canonical_id(&self) -> Arc<str> {
         Arc::from("")
+    }
+    fn own_top_level_owner(&self) -> TopLevelOwnerId {
+        TopLevelOwnerId::ordinary_file()
     }
 }
 
@@ -258,6 +266,7 @@ fn collect_key_source_arms(
             aliases.push(KeySourceRefFact {
                 anchor: AuthoredAnchor {
                     canonical_id: lens.own_canonical_id(),
+                    owner: lens.own_top_level_owner(),
                     symbol: Arc::from(name.as_ref()),
                     space: LocatorSymbolSpace::Type,
                 },
@@ -723,6 +732,7 @@ impl RouteFactProducer<'_> {
         KeyDomainFact::FollowSlot(SymbolBodyLocator {
             anchor: AuthoredAnchor {
                 canonical_id: self.lens.own_canonical_id(),
+                owner: self.lens.own_top_level_owner(),
                 symbol: Arc::from(alias),
                 space: LocatorSymbolSpace::Type,
             },

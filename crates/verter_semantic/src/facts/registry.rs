@@ -32,6 +32,7 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
+use verter_type_expr::TopLevelOwnerId;
 
 /// Truncated SHA-256 hash used everywhere as a content / structural
 /// fingerprint. Re-exported from
@@ -322,6 +323,7 @@ pub enum FactKey {
     /// `declare module "spec" { ... }` augmenting declaration (R29).
     ModuleAugmentation {
         specifier: InternedSpecifier,
+        owner: TopLevelOwnerId,
         augmented_name: InternedName,
         space: SymbolSpace,
     },
@@ -618,6 +620,26 @@ mod registry_tests {
     }
 
     #[test]
+    fn module_augmentation_keys_are_partitioned_by_lexical_owner() {
+        let mut registry = FactRegistry::empty();
+        let key_for = |owner| FactKey::ModuleAugmentation {
+            specifier: InternedSpecifier::from("vue"),
+            owner,
+            augmented_name: InternedName::from("Shared"),
+            space: SymbolSpace::Type,
+        };
+        let module = key_for(TopLevelOwnerId::module(0));
+        let instance = key_for(TopLevelOwnerId::instance(0));
+
+        registry.insert(fact(module.clone(), 1, 1));
+        registry.insert(fact(instance.clone(), 2, 2));
+
+        assert_eq!(registry.len(), 2);
+        assert_eq!(registry.get(&module).unwrap().semantic_hash[0], 1);
+        assert_eq!(registry.get(&instance).unwrap().semantic_hash[0], 2);
+    }
+
+    #[test]
     fn syntactic_export_set_cache_is_kept_in_sync() {
         let mut r = FactRegistry::empty();
         assert!(r.syntactic_export_set.is_none());
@@ -676,6 +698,7 @@ mod registry_tests {
             },
             FactKey::ModuleAugmentation {
                 specifier: InternedSpecifier::from("vue"),
+                owner: TopLevelOwnerId::ordinary_file(),
                 augmented_name: InternedName::from("ComponentOptions"),
                 space: SymbolSpace::Type,
             },

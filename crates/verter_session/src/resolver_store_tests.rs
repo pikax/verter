@@ -362,6 +362,7 @@ mod route_surface_hash {
             (
                 "Local".to_string(),
                 ExportTarget::Local {
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     symbol_name: "Local".to_string(),
                 },
             ),
@@ -378,6 +379,7 @@ mod route_surface_hash {
         let wildcard_reexports = vec![WildcardReexport {
             source_specifier: "./barrel".to_string(),
             canonical_id: "/src/barrel.ts".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         }];
         let import_locals = FxHashSet::from_iter(["Dep".to_string()]);
         let import_targets = FxHashMap::from_iter([(
@@ -385,6 +387,7 @@ mod route_surface_hash {
             ImportTarget {
                 source_specifier: "./dep".to_string(),
                 imported_name: "Dep".to_string(),
+                is_namespace: false,
                 canonical_id: "/src/dep.ts".to_string(),
             },
         )]);
@@ -493,6 +496,7 @@ mod route_surface_hash_memo {
         mutated.exports.insert(
             "Extra".to_string(),
             ExportTarget::Local {
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 symbol_name: "Extra".to_string(),
             },
         );

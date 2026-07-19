@@ -60,6 +60,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         else {
             return true;
         };
+        let Some(scope_owner) = self
+            .ctx
+            .project_type_store()
+            .semantic_graph()
+            .node_scope(mirror.node())
+            .and_then(|scope| scope.top_level_owner())
+        else {
+            return true;
+        };
         // Anonymous / compound carrier - keep the slow path (parity with the
         // former "carrier is not a Ref" rule; parens are structurally
         // transparent in the mirror).
@@ -67,13 +76,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             return true;
         };
         let name = std::sync::Arc::clone(name);
-        let Some(root_identity) = self.root_identity_in_scope(scope_canonical_id, name.as_ref())
+        let Some(root_identity) =
+            self.root_identity_in_scope(scope_canonical_id, scope_owner, name.as_ref())
         else {
             return true;
         };
-        let Some(prepared) =
-            self.prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)
-        else {
+        let Some(prepared) = self.prepared_type_decl(
+            &root_identity.canonical_id,
+            root_identity.owner,
+            &root_identity.symbol_name,
+        ) else {
             return true;
         };
         // Empty parameter list - no parent-param references possible. The
@@ -142,6 +154,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         field_value: crate::semantic_query::HotTypeRef,
     ) -> Option<FastShallowFieldExpr> {
         use verter_semantic::analysis::type_solver::host::BareRefOrigin;
+        let scope_owner = payload.anchor.owner;
 
         let authored_source = || {
             verter_type_expr::facts::SemanticTypeSource::Authored(
@@ -157,7 +170,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         };
 
         // (1) Direct imported utility route anywhere under the field value.
-        if self.node_contains_imported_utility_route(scope_canonical_id, field_value.node(), 0) {
+        if self.node_contains_imported_utility_route(
+            scope_canonical_id,
+            scope_owner,
+            field_value.node(),
+            0,
+        ) {
             return symbolic_preserve(field_value);
         }
 
@@ -167,11 +185,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // (2) Imported generic reference root.
         if let Some((name, _)) = root_data.bare_ref_head() {
             if !root_data.carrier_type_args().is_empty()
-                && self.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref())
+                && self.bare_ref_origin_in_scope(scope_canonical_id, scope_owner, name.as_ref())
                     == BareRefOrigin::Imported
             {
                 let name = std::sync::Arc::clone(name);
-                let _ = self.root_identity_in_scope(scope_canonical_id, name.as_ref())?;
+                let _ =
+                    self.root_identity_in_scope(scope_canonical_id, scope_owner, name.as_ref())?;
                 return symbolic_preserve(field_value);
             }
         }
@@ -205,17 +224,24 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 })
             });
             if let Some(root_name) = root_name {
-                if self.bare_ref_origin_in_scope(scope_canonical_id, root_name.as_ref())
-                    == BareRefOrigin::Imported
+                if self.bare_ref_origin_in_scope(
+                    scope_canonical_id,
+                    scope_owner,
+                    root_name.as_ref(),
+                ) == BareRefOrigin::Imported
                 {
-                    let root_identity =
-                        self.root_identity_in_scope(scope_canonical_id, root_name.as_ref())?;
+                    let root_identity = self.root_identity_in_scope(
+                        scope_canonical_id,
+                        scope_owner,
+                        root_name.as_ref(),
+                    )?;
                     if is_package_canonical(self.ctx, &root_identity.canonical_id) {
                         return symbolic_preserve(field_value);
                     }
                     let member_name = std::sync::Arc::clone(member_name);
                     let prepared = self.prepared_type_decl(
                         &root_identity.canonical_id,
+                        root_identity.owner,
                         &root_identity.symbol_name,
                     )?;
                     let member = prepared.member_index.get(member_name.as_ref())?.clone();
@@ -266,17 +292,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         if let Some((name, _)) = root_data.bare_ref_head() {
             if root_data.carrier_type_args().is_empty()
                 && matches!(
-                    self.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref()),
+                    self.bare_ref_origin_in_scope(scope_canonical_id, scope_owner, name.as_ref()),
                     BareRefOrigin::Imported | BareRefOrigin::Local
                 )
             {
                 let name = std::sync::Arc::clone(name);
                 if let Some(root_identity) =
-                    self.root_identity_in_scope(scope_canonical_id, name.as_ref())
+                    self.root_identity_in_scope(scope_canonical_id, scope_owner, name.as_ref())
                 {
                     if !is_package_canonical(self.ctx, &root_identity.canonical_id) {
                         if let Some(prepared) = self.prepared_type_decl(
                             &root_identity.canonical_id,
+                            root_identity.owner,
                             &root_identity.symbol_name,
                         ) {
                             if prepared.type_parameters.is_empty() {
@@ -325,6 +352,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let mut active_locals = FxHashSet::default();
         self.node_has_imported_generic_route(
             scope_canonical_id,
+            scope_owner,
             field_value.node(),
             &mut active_locals,
             0,
@@ -364,6 +392,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             scope_canonical_id,
             macro_index,
         )?;
+        let scope_owner = self
+            .ctx
+            .project_type_store()
+            .semantic_graph()
+            .node_scope(mirror.node())?
+            .top_level_owner()?;
         let data = crate::project_semantic_dispatch::node_data_for(self.ctx, mirror.node())?;
         if let crate::semantic_query::SemanticNodeData::Object(surface) = data.as_ref() {
             return surface
@@ -377,12 +411,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             return None;
         }
         let name = std::sync::Arc::clone(name);
-        let root_identity = self.root_identity_in_scope(scope_canonical_id, name.as_ref())?;
+        let root_identity =
+            self.root_identity_in_scope(scope_canonical_id, scope_owner, name.as_ref())?;
         if is_package_canonical(self.ctx, &root_identity.canonical_id) {
             return None;
         }
-        let prepared =
-            self.prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)?;
+        let prepared = self.prepared_type_decl(
+            &root_identity.canonical_id,
+            root_identity.owner,
+            &root_identity.symbol_name,
+        )?;
         let member = prepared.member_index.get(field_name.as_ref())?;
         let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self.ctx);
         dispatch.raise_authored_locator_to_hot(
@@ -399,6 +437,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     fn node_contains_imported_utility_route(
         &mut self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         node: crate::semantic_query::SemanticNodeId,
         depth: u32,
     ) -> bool {
@@ -413,7 +452,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let utility_over_imported_arg =
             |engine: &mut Self, args: &[crate::semantic_query::SemanticNodeId]| {
                 args.iter().any(|&arg| {
-                    engine.node_is_imported_utility_arg(scope_canonical_id, arg, depth + 1)
+                    engine.node_is_imported_utility_arg(
+                        scope_canonical_id,
+                        scope_owner,
+                        arg,
+                        depth + 1,
+                    )
                 })
             };
         match data.as_ref() {
@@ -429,7 +473,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     return true;
                 }
                 args.iter().any(|&arg| {
-                    self.node_contains_imported_utility_route(scope_canonical_id, arg, depth + 1)
+                    self.node_contains_imported_utility_route(
+                        scope_canonical_id,
+                        scope_owner,
+                        arg,
+                        depth + 1,
+                    )
                 })
             }
             SemanticNodeData::InstantiationRef { base, args } => {
@@ -442,7 +491,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     return true;
                 }
                 args.iter().any(|&arg| {
-                    self.node_contains_imported_utility_route(scope_canonical_id, arg, depth + 1)
+                    self.node_contains_imported_utility_route(
+                        scope_canonical_id,
+                        scope_owner,
+                        arg,
+                        depth + 1,
+                    )
                 })
             }
             SemanticNodeData::Union(members)
@@ -450,14 +504,23 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             | SemanticNodeData::MergedDecl {
                 contributors: members,
             } => members.iter().any(|&member| {
-                self.node_contains_imported_utility_route(scope_canonical_id, member, depth + 1)
+                self.node_contains_imported_utility_route(
+                    scope_canonical_id,
+                    scope_owner,
+                    member,
+                    depth + 1,
+                )
             }),
-            SemanticNodeData::Array { element, .. } => {
-                self.node_contains_imported_utility_route(scope_canonical_id, *element, depth + 1)
-            }
+            SemanticNodeData::Array { element, .. } => self.node_contains_imported_utility_route(
+                scope_canonical_id,
+                scope_owner,
+                *element,
+                depth + 1,
+            ),
             SemanticNodeData::Tuple { elements, .. } => elements.iter().any(|element| {
                 self.node_contains_imported_utility_route(
                     scope_canonical_id,
+                    scope_owner,
                     element.value,
                     depth + 1,
                 )
@@ -466,28 +529,33 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 surface.members.iter().any(|member| {
                     self.node_contains_imported_utility_route(
                         scope_canonical_id,
+                        scope_owner,
                         member.value,
                         depth + 1,
                     )
                 }) || surface.index_signatures.iter().any(|signature| {
                     self.node_contains_imported_utility_route(
                         scope_canonical_id,
+                        scope_owner,
                         signature.key_type,
                         depth + 1,
                     ) || self.node_contains_imported_utility_route(
                         scope_canonical_id,
+                        scope_owner,
                         signature.value_type,
                         depth + 1,
                     )
                 }) || surface.call_signatures.iter().any(|&signature| {
                     self.node_contains_imported_utility_route(
                         scope_canonical_id,
+                        scope_owner,
                         signature,
                         depth + 1,
                     )
                 }) || surface.construct_signatures.iter().any(|&signature| {
                     self.node_contains_imported_utility_route(
                         scope_canonical_id,
+                        scope_owner,
                         signature,
                         depth + 1,
                     )
@@ -501,21 +569,30 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 params.iter().any(|param| {
                     self.node_contains_imported_utility_route(
                         scope_canonical_id,
+                        scope_owner,
                         param.ty,
                         depth + 1,
                     )
                 }) || self.node_contains_imported_utility_route(
                     scope_canonical_id,
+                    scope_owner,
                     *return_type,
                     depth + 1,
                 )
             }
-            SemanticNodeData::ConstructorType { signature } => {
-                self.node_contains_imported_utility_route(scope_canonical_id, *signature, depth + 1)
-            }
-            SemanticNodeData::Alias(inner) => {
-                self.node_contains_imported_utility_route(scope_canonical_id, *inner, depth + 1)
-            }
+            SemanticNodeData::ConstructorType { signature } => self
+                .node_contains_imported_utility_route(
+                    scope_canonical_id,
+                    scope_owner,
+                    *signature,
+                    depth + 1,
+                ),
+            SemanticNodeData::Alias(inner) => self.node_contains_imported_utility_route(
+                scope_canonical_id,
+                scope_owner,
+                *inner,
+                depth + 1,
+            ),
             _ => false,
         }
     }
@@ -527,6 +604,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     fn node_is_imported_utility_arg(
         &mut self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         node: crate::semantic_query::SemanticNodeId,
         depth: u32,
     ) -> bool {
@@ -541,28 +619,44 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         if let Some((name, _)) = data.bare_ref_head() {
             let name = std::sync::Arc::clone(name);
             if data.carrier_type_args().is_empty()
-                && self.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref())
+                && self.bare_ref_origin_in_scope(scope_canonical_id, scope_owner, name.as_ref())
                     == verter_semantic::analysis::type_solver::host::BareRefOrigin::Imported
             {
                 return true;
             }
-            return self.node_contains_imported_utility_route(scope_canonical_id, node, depth);
+            return self.node_contains_imported_utility_route(
+                scope_canonical_id,
+                scope_owner,
+                node,
+                depth,
+            );
         }
         if let Some((value_root, _)) = data.typeof_head() {
-            return self.bare_ref_origin_in_scope(scope_canonical_id, value_root.name.as_ref())
-                == verter_semantic::analysis::type_solver::host::BareRefOrigin::Imported;
+            return self.bare_ref_origin_in_scope(
+                scope_canonical_id,
+                scope_owner,
+                value_root.name.as_ref(),
+            ) == verter_semantic::analysis::type_solver::host::BareRefOrigin::Imported;
         }
         match data.as_ref() {
-            SemanticNodeData::IndexedAccess { object, .. } => {
-                self.node_is_imported_utility_arg(scope_canonical_id, *object, depth + 1)
-            }
+            SemanticNodeData::IndexedAccess { object, .. } => self.node_is_imported_utility_arg(
+                scope_canonical_id,
+                scope_owner,
+                *object,
+                depth + 1,
+            ),
             SemanticNodeData::DeclRef { identity } => {
                 identity.canonical_id.as_ref() != scope_canonical_id
             }
             SemanticNodeData::InstantiationRef { base, .. } => {
                 base.canonical_id.as_ref() != scope_canonical_id
             }
-            _ => self.node_contains_imported_utility_route(scope_canonical_id, node, depth),
+            _ => self.node_contains_imported_utility_route(
+                scope_canonical_id,
+                scope_owner,
+                node,
+                depth,
+            ),
         }
     }
 
@@ -574,6 +668,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     fn node_has_imported_generic_route(
         &mut self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         node: crate::semantic_query::SemanticNodeId,
         active_locals: &mut FxHashSet<String>,
         depth: u32,
@@ -590,11 +685,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         if let Some((name, _)) = data.bare_ref_head() {
             let name = std::sync::Arc::clone(name);
             let args_empty = data.carrier_type_args().is_empty();
-            return match self.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref()) {
+            return match self.bare_ref_origin_in_scope(
+                scope_canonical_id,
+                scope_owner,
+                name.as_ref(),
+            ) {
                 BareRefOrigin::Imported => !args_empty,
                 BareRefOrigin::Local if args_empty => {
                     let Some(root_identity) =
-                        self.root_identity_in_scope(scope_canonical_id, name.as_ref())
+                        self.root_identity_in_scope(scope_canonical_id, scope_owner, name.as_ref())
                     else {
                         return false;
                     };
@@ -606,7 +705,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         return false;
                     }
                     let preserve = self
-                        .prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)
+                        .prepared_type_decl(
+                            &root_identity.canonical_id,
+                            root_identity.owner,
+                            &root_identity.symbol_name,
+                        )
                         .map(|prepared| prepared.body_facts.body_slot.clone())
                         .and_then(|body_slot| {
                             let dispatch =
@@ -625,6 +728,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         .is_some_and(|body_node| {
                             self.node_has_imported_generic_route(
                                 root_identity.canonical_id.as_ref(),
+                                root_identity.owner,
                                 body_node.node(),
                                 active_locals,
                                 depth + 1,
@@ -646,6 +750,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     || args.iter().any(|&arg| {
                         self.node_has_imported_generic_route(
                             scope_canonical_id,
+                            scope_owner,
                             arg,
                             active_locals,
                             depth + 1,
@@ -654,24 +759,28 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             }
             SemanticNodeData::IndexedAccess { object, .. } => self.node_has_imported_generic_route(
                 scope_canonical_id,
+                scope_owner,
                 *object,
                 active_locals,
                 depth + 1,
             ),
             SemanticNodeData::Array { element, .. } => self.node_has_imported_generic_route(
                 scope_canonical_id,
+                scope_owner,
                 *element,
                 active_locals,
                 depth + 1,
             ),
             SemanticNodeData::KeyOf { base } => self.node_has_imported_generic_route(
                 scope_canonical_id,
+                scope_owner,
                 *base,
                 active_locals,
                 depth + 1,
             ),
             SemanticNodeData::Alias(inner) => self.node_has_imported_generic_route(
                 scope_canonical_id,
+                scope_owner,
                 *inner,
                 active_locals,
                 depth + 1,
@@ -679,6 +788,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             SemanticNodeData::Tuple { elements, .. } => elements.iter().any(|element| {
                 self.node_has_imported_generic_route(
                     scope_canonical_id,
+                    scope_owner,
                     element.value,
                     active_locals,
                     depth + 1,
@@ -688,6 +798,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 members.iter().any(|&member| {
                     self.node_has_imported_generic_route(
                         scope_canonical_id,
+                        scope_owner,
                         member,
                         active_locals,
                         depth + 1,
@@ -701,17 +812,34 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     fn bare_ref_origin_in_scope(
         &mut self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> verter_semantic::analysis::type_solver::host::BareRefOrigin {
         use verter_semantic::analysis::type_solver::host::BareRefOrigin;
-        let payload = self.scope_payload_for_scope(scope_canonical_id);
-        if let Some(payload) = payload.as_deref() {
-            if payload.import_bindings().contains_key(name) {
+        if let Some(state) = self.ctx.shallow_file_state(scope_canonical_id) {
+            if state.import_target_in(scope_owner, name).is_some() {
                 return BareRefOrigin::Imported;
             }
-            if payload.scope_type_bindings().contains_key(name)
-                || payload.scope_type_names().contains(name)
-                || payload.scope_value_names().contains(name)
+            if state.has_type_symbol_in(scope_owner, name)
+                || state.has_value_symbol_in(scope_owner, name)
+            {
+                return BareRefOrigin::Local;
+            }
+        }
+        let payload = self.scope_payload_for_scope(scope_canonical_id, scope_owner);
+        if let Some(payload) = payload.as_deref() {
+            if scope_owner == verter_type_expr::TopLevelOwnerId::ordinary_file()
+                && payload.import_bindings().contains_key(name)
+            {
+                return BareRefOrigin::Imported;
+            }
+            if (matches!(
+                scope_owner.kind(),
+                verter_type_expr::TopLevelOwnerKind::Instance
+            ) && payload.scope_type_bindings().contains_key(name))
+                || (scope_owner == verter_type_expr::TopLevelOwnerId::ordinary_file()
+                    && (payload.scope_type_names().contains(name)
+                        || payload.scope_value_names().contains(name)))
             {
                 return BareRefOrigin::Local;
             }
@@ -722,12 +850,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     fn root_identity_in_scope(
         &mut self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> Option<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity> {
-        let payload = self.scope_payload_for_scope(scope_canonical_id);
+        let payload = self.scope_payload_for_scope(scope_canonical_id, scope_owner);
         crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
             self.ctx,
             scope_canonical_id,
+            scope_owner,
             payload.as_deref(),
             name,
         )

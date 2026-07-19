@@ -2930,8 +2930,12 @@ fn hash_route_surface_uncached(state: &crate::resolver_core::ShallowFileState) -
         for (name, target) in &exports {
             name.hash(hasher);
             match target {
-                crate::resolver_core::shallow_file_state::ExportTarget::Local { symbol_name } => {
+                crate::resolver_core::shallow_file_state::ExportTarget::Local {
+                    owner,
+                    symbol_name,
+                } => {
                     0u8.hash(hasher);
+                    owner.hash(hasher);
                     symbol_name.hash(hasher);
                 }
                 crate::resolver_core::shallow_file_state::ExportTarget::Reexport {
@@ -2971,6 +2975,7 @@ fn hash_route_surface_uncached(state: &crate::resolver_core::ShallowFileState) -
             name.hash(hasher);
             target.source_specifier.hash(hasher);
             target.imported_name.hash(hasher);
+            target.is_namespace.hash(hasher);
             target.canonical_id.hash(hasher);
         }
 

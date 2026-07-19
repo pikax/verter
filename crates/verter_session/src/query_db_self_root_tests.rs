@@ -148,6 +148,7 @@ fn decl(text: &str, canonical: &str) -> ResolvedTypeDeclaration {
         declaration_id: None,
         resolved_name: "Probe".to_string(),
         canonical_source: canonical.to_string(),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         span: verter_span::Span::default(),
         kind: ResolvedDeclarationKind::Interface,
         text: Some(text.to_string()),
@@ -177,7 +178,11 @@ fn declaration_lookup_db_untracked_self_root_rejects_warm_entry() {
     assert_untracked(&host, c);
     let ctx: &dyn ResolverContext = &host;
     let db = host.project_type_store().declaration_db();
-    let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
+    let key = (
+        Arc::<str>::from(c),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::<str>::from("Probe"),
+    );
 
     // Prime attempt: a "stale" value paired with an untracked
     // self-root. A lazy validator admits this; the strict one does not.
@@ -215,12 +220,14 @@ fn declaration_lookup_db_untracked_self_root_rejects_warm_entry() {
 fn imported_symbol(canonical: &str, marker: &str) -> ResolvedImportedRegistrySymbol {
     ResolvedImportedRegistrySymbol {
         canonical_id: canonical.to_string(),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         exported_name: marker.to_string(),
         body: verter_type_expr::facts::PreparedTypeBodyFacts {
             classification: verter_type_expr::facts::TypeBodyClass::Alias,
             body_slot: verter_type_expr::locators::TypeBodySlot {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
                     canonical_id: Arc::from(canonical),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     symbol: Arc::from(marker),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                 },
@@ -246,7 +253,11 @@ fn imported_registry_db_untracked_self_root_rejects_warm_entry() {
     assert_untracked(&host, c);
     let ctx: &dyn ResolverContext = &host;
     let db = host.project_type_store().imported_registry_db();
-    let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
+    let key = (
+        Arc::<str>::from(c),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::<str>::from("Probe"),
+    );
 
     let _ = db.get_or_compute_admit_traced_for_test(&key, ctx, || {
         crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
@@ -303,7 +314,11 @@ fn resolvability_db_untracked_self_root_rejects_warm_entry() {
     assert_untracked(&host, c);
     let ctx: &dyn ResolverContext = &host;
     let db = host.project_type_store().resolvable_db();
-    let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
+    let key = (
+        Arc::<str>::from(c),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::<str>::from("Probe"),
+    );
 
     let _ = db.get_or_compute_traced_for_test(&key, ctx, || {
         ComputedEntry::Rooted(false, planted_self_root(c))
@@ -344,6 +359,7 @@ fn owner_collection_marker_locator(
         verter_type_expr::locators::TypeBodySlot {
             anchor: verter_type_expr::locators::AuthoredAnchor {
                 canonical_id: Arc::from(canonical),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 symbol: Arc::from(marker),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Type,
             },
@@ -369,7 +385,11 @@ fn owner_collection_db_untracked_self_root_rejects_warm_entry() {
     assert_untracked(&host, c);
     let ctx: &dyn ResolverContext = &host;
     let db = host.project_type_store().owner_collection_db();
-    let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
+    let key = (
+        Arc::<str>::from(c),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::<str>::from("Probe"),
+    );
 
     let _ = db.get_or_compute_traced_for_test(&key, ctx, || {
         ComputedEntry::Rooted(
@@ -940,7 +960,11 @@ fn declaration_lookup_db_self_root_sibling_edit_rejects_warm_entry() {
     load_tracked_keyed(&host, c);
     let ctx: &dyn ResolverContext = &host;
     let db = host.project_type_store().declaration_db();
-    let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
+    let key = (
+        Arc::<str>::from(c),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::<str>::from("Probe"),
+    );
 
     // Observe the keyed canonical's content version at cold-publish
     // time, exactly as the production producer does.
@@ -1007,7 +1031,11 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
     load_tracked_keyed(&host, c);
     let ctx: &dyn ResolverContext = &host;
     let db = host.project_type_store().imported_registry_db();
-    let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
+    let key = (
+        Arc::<str>::from(c),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::<str>::from("Probe"),
+    );
 
     // Observe the keyed canonical's content version at cold-publish
     // time, exactly as the production producer does.
@@ -1079,7 +1107,11 @@ fn resolvability_db_self_root_sibling_edit_rejects_warm_entry() {
     load_tracked_keyed(&host, c);
     let ctx: &dyn ResolverContext = &host;
     let db = host.project_type_store().resolvable_db();
-    let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
+    let key = (
+        Arc::<str>::from(c),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::<str>::from("Probe"),
+    );
 
     // Observe the keyed canonical's content version at cold-publish
     // time, exactly as the production producer does.
@@ -1140,7 +1172,11 @@ fn owner_collection_db_self_root_sibling_edit_rejects_warm_entry() {
     load_tracked_keyed(&host, c);
     let ctx: &dyn ResolverContext = &host;
     let db = host.project_type_store().owner_collection_db();
-    let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
+    let key = (
+        Arc::<str>::from(c),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::<str>::from("Probe"),
+    );
 
     // Observe the keyed canonical's content version at cold-publish
     // time, exactly as the production producer does.
@@ -1218,7 +1254,11 @@ fn owner_collection_db_reuses_warm_then_invalidate_canonical_drops_and_recompute
     load_tracked_keyed(&host, c);
     let ctx: &dyn ResolverContext = &host;
     let db = host.project_type_store().owner_collection_db();
-    let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
+    let key = (
+        Arc::<str>::from(c),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::<str>::from("Probe"),
+    );
 
     assert_eq!(
         db.live_count(),
@@ -2630,7 +2670,12 @@ fn resolvability_db_producer_overlay_discrimination() {
         std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
     );
     let mut overlay_engine = ComponentMetaQueryEngine::new(&overlay_ctx);
-    let overlay_resolvable = overlay_engine.can_resolve_registry_symbol(canonical, "Probe", None);
+    let overlay_resolvable = overlay_engine.can_resolve_registry_symbol(
+        canonical,
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "Probe",
+        None,
+    );
     assert!(
         !overlay_resolvable,
         "fixture invariant: the overlay source does not declare `Probe`, so the \
@@ -2639,7 +2684,12 @@ fn resolvability_db_producer_overlay_discrimination() {
 
     let base_ctx: &dyn ResolverContext = host.as_ref();
     let mut base_engine = ComponentMetaQueryEngine::new(base_ctx);
-    let base_resolvable = base_engine.can_resolve_registry_symbol(canonical, "Probe", None);
+    let base_resolvable = base_engine.can_resolve_registry_symbol(
+        canonical,
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "Probe",
+        None,
+    );
     assert!(
         base_resolvable,
         "ResolvabilityDb LEAKED an overlay-session entry to a base request. \
@@ -2690,7 +2740,11 @@ fn observed_prepared_type_decl_is_single_artifact_and_view_aware() {
     );
     let mut overlay_engine = ComponentMetaQueryEngine::new(&overlay_ctx);
     let observed = overlay_engine
-        .observed_prepared_type_decl(canonical, "Probe")
+        .observed_prepared_type_decl(
+            canonical,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Probe",
+        )
         .expect("observed_prepared_type_decl resolves through the overlay bundle");
 
     // The decl must be the OVERLAY decl — its member index carries
@@ -3115,7 +3169,11 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
         .expect("base IndexedReady materialises")
         .whole_hash;
     let host = Arc::new(host);
-    let key: (Arc<str>, Arc<str>) = (Arc::<str>::from(canonical), Arc::<str>::from("Probe"));
+    let key: crate::component_meta_caches::ImportedRegistryKey = (
+        Arc::<str>::from(canonical),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::<str>::from("Probe"),
+    );
 
     // Base-view publish — self-roots the keyed canonical at its BASE hash.
     let base_self_root: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
@@ -3256,7 +3314,11 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
         .expect("base IndexedReady materialises")
         .whole_hash;
     let host = Arc::new(host);
-    let key: (Arc<str>, Arc<str>) = (Arc::<str>::from(canonical), Arc::<str>::from("Probe"));
+    let key: crate::component_meta_caches::ImportedRegistryKey = (
+        Arc::<str>::from(canonical),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::<str>::from("Probe"),
+    );
 
     let live_counter = Arc::clone(&host.project_type_store().counters.component_meta_cache_live);
     let counter_before = live_counter.load(Ordering::Relaxed);
@@ -3435,7 +3497,11 @@ fn materialize_structure_db_planted_untracked_self_root_rejects_warm_entry() {
     // `scope`), NOT in the key, so any well-formed slot addresses the
     // planted candidate; seed the slot on `scope` for a stable identity.
     let key = MaterializationCacheKey {
-        decl: ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(scope), Arc::from("Probe")),
+        decl: ResolvedDeclSlotIdentity::type_slot_unscoped(
+            Arc::from(scope),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from("Probe"),
+        ),
         projection_path: crate::resolver_core::RouteDemand::Whole,
         scope_axis: MaterializationScope::TopLevel,
         projection_mode: ProjectionMode::Expanded,
@@ -3496,12 +3562,14 @@ fn intern_file_derived_decl_ref(
             SemanticNodeData::DeclRef {
                 identity: DeclIdentity {
                     canonical_id: Arc::from(canonical),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash,
                     decl_name: Arc::from(name),
                 },
             },
             NodeScopeId::File {
                 canonical_id: Arc::from(canonical),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash,
                 local_scope: None,
             },
@@ -3540,6 +3608,7 @@ fn intern_consumer_scoped_pick_carrier(
         .expect("route carrier fixture: root decl file must be tracked with a whole hash");
     let consumer_scope_id = NodeScopeId::File {
         canonical_id: Arc::from(consumer_scope),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: consumer_hash,
         local_scope: None,
     };
@@ -3552,6 +3621,7 @@ fn intern_consumer_scoped_pick_carrier(
         SemanticNodeData::DeclRef {
             identity: DeclIdentity {
                 canonical_id: Arc::from(root_decl_file),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: root_hash,
                 decl_name: Arc::from(root_name),
             },
@@ -3569,6 +3639,7 @@ fn intern_consumer_scoped_pick_carrier(
         SemanticNodeData::InstantiationRef {
             base: DeclIdentity {
                 canonical_id: Arc::from("__builtin__"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: [0u8; 16],
                 decl_name: Arc::from("Pick"),
             },
@@ -3909,6 +3980,7 @@ fn ref_cycle_decl_identity(
         .unwrap_or([0u8; 16]);
     crate::semantic_query::DeclIdentity {
         canonical_id: Arc::from(canonical),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash,
         decl_name: Arc::from(name),
     }
@@ -4079,6 +4151,7 @@ fn ref_cycle_db_untracked_self_root_rejects_warm_entry() {
     let db = host.project_type_store().ref_cycle_db();
     let id = crate::semantic_query::DeclIdentity {
         canonical_id: Arc::from(root),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: PLANTED_HASH,
         decl_name: Arc::from("Probe"),
     };
@@ -4475,8 +4548,11 @@ fn imported_registry_peek_rejects_entry_from_superseded_generation() {
 
     let ctx: &dyn ResolverContext = &host;
     let db = host.project_type_store().imported_registry_db();
-    let key: crate::component_meta_caches::ImportedRegistryKey =
-        (Arc::from(canonical), Arc::from("Probe"));
+    let key: crate::component_meta_caches::ImportedRegistryKey = (
+        Arc::from(canonical),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::from("Probe"),
+    );
 
     // Prime the cache through the production cold path — the `Cacheable`
     // arm stamps `validated_at_generation` with the project generation
@@ -4578,8 +4654,11 @@ fn imported_registry_cooperative_generation_reject_cleans_reverse_index() {
 
     let ctx: &dyn ResolverContext = &host;
     let db = host.project_type_store().imported_registry_db();
-    let key: crate::component_meta_caches::ImportedRegistryKey =
-        (Arc::from(canonical), Arc::from("Probe"));
+    let key: crate::component_meta_caches::ImportedRegistryKey = (
+        Arc::from(canonical),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::from("Probe"),
+    );
 
     // Prime the cache through the production cold path — stamps
     // `validated_at_generation` and registers `key` in the per-canonical
@@ -4712,7 +4791,11 @@ fn declaration_lookup_failed_revalidation_does_not_leak_live_counter() {
     let c = "/live_counter_qdb/declaration_lookup.ts";
     let ctx: &dyn ResolverContext = &host;
     let db = host.project_type_store().declaration_db();
-    let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
+    let key = (
+        Arc::<str>::from(c),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::<str>::from("Probe"),
+    );
 
     let counter_before = component_meta_cache_live(&host);
     let map_before = db.live_count();
@@ -4758,7 +4841,11 @@ fn resolvability_failed_revalidation_does_not_leak_live_counter() {
     let c = "/live_counter_qdb/resolvability.ts";
     let ctx: &dyn ResolverContext = &host;
     let db = host.project_type_store().resolvable_db();
-    let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
+    let key = (
+        Arc::<str>::from(c),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::<str>::from("Probe"),
+    );
 
     let counter_before = component_meta_cache_live(&host);
     let map_before = db.live_count();
@@ -4795,7 +4882,11 @@ fn owner_collection_failed_revalidation_does_not_leak_live_counter() {
     let c = "/live_counter_qdb/owner_collection.ts";
     let ctx: &dyn ResolverContext = &host;
     let db = host.project_type_store().owner_collection_db();
-    let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
+    let key = (
+        Arc::<str>::from(c),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::<str>::from("Probe"),
+    );
 
     let counter_before = component_meta_cache_live(&host);
     let map_before = db.live_count();
@@ -4911,7 +5002,11 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
     };
 
     let _ = store.declaration_db().get_or_compute_traced_for_test(
-        &(Arc::<str>::from("/lc_total/decl.ts"), Arc::<str>::from("P")),
+        &(
+            Arc::<str>::from("/lc_total/decl.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::<str>::from("P"),
+        ),
         ctx,
         || {
             bump();
@@ -4921,6 +5016,7 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
     let _ = store.resolvable_db().get_or_compute_traced_for_test(
         &(
             Arc::<str>::from("/lc_total/resolv.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::<str>::from("P"),
         ),
         ctx,
@@ -4932,6 +5028,7 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
     let _ = store.owner_collection_db().get_or_compute_traced_for_test(
         &(
             Arc::<str>::from("/lc_total/owner.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::<str>::from("P"),
         ),
         ctx,
@@ -5521,6 +5618,7 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
     let seam_member_other = shape_member("seamAlpha", SemanticNodeId(88));
     let seam_owner = DeclIdentity {
         canonical_id: std::sync::Arc::from(seam_scope),
+        owner: verter_type_expr::TopLevelOwnerId::instance(0),
         whole_hash: Default::default(),
         decl_name: std::sync::Arc::from("<sfc-script-setup>"),
     };
@@ -5655,6 +5753,7 @@ fn fenced_serve_surface_member_shape_is_not_admitted() {
                     ValueRootKey {
                         scope: ScopeId {
                             canonical_id: Arc::from(scope),
+                            owner: verter_type_expr::TopLevelOwnerId::instance(0),
                             local_scope: None,
                         },
                         name: Arc::from("definitelyMissingSeamValue"),
@@ -5664,6 +5763,7 @@ fn fenced_serve_surface_member_shape_is_not_admitted() {
                 ));
         let owner = DeclIdentity {
             canonical_id: Arc::from(scope),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             whole_hash: Default::default(),
             decl_name: Arc::from("<sfc-script-setup>"),
         };
@@ -5785,6 +5885,7 @@ fn tracer_overflow_refuses_surface_member_shape_admission() {
                     ValueRootKey {
                         scope: ScopeId {
                             canonical_id: Arc::from(scope),
+                            owner: verter_type_expr::TopLevelOwnerId::instance(0),
                             local_scope: None,
                         },
                         name: Arc::from("definitelyMissingOverflowValue"),
@@ -5794,6 +5895,7 @@ fn tracer_overflow_refuses_surface_member_shape_admission() {
                 ));
         let owner = DeclIdentity {
             canonical_id: Arc::from(scope),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             whole_hash: Default::default(),
             decl_name: Arc::from("<sfc-script-setup>"),
         };
@@ -6133,6 +6235,7 @@ mod fenced_gate_arm_admission_tests {
     fn drive_member_seam(host: &VerterHost, scope: &str, value_node: SemanticNodeId) -> usize {
         let owner = DeclIdentity {
             canonical_id: Arc::from(scope),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             whole_hash: Default::default(),
             decl_name: Arc::from("<sfc-script-setup>"),
         };
@@ -6307,6 +6410,7 @@ mod fenced_gate_arm_admission_tests {
                     Arc::from("MyStr"),
                     NodeScopeId::File {
                         canonical_id: Arc::from(SCOPE),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         whole_hash: indexed.whole_hash,
                         local_scope: None,
                     },
@@ -6372,7 +6476,11 @@ fn declaration_lookup_straddling_compute_is_not_served_to_the_winner() {
     // CONTROL — a STABLE view: the same production signature admits and serves.
     let stable = "/reval_qdb/stable.ts";
     load_tracked_keyed(&host, stable);
-    let stable_key = (Arc::<str>::from(stable), Arc::<str>::from("Probe"));
+    let stable_key = (
+        Arc::<str>::from(stable),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::<str>::from("Probe"),
+    );
     let stable_observed = observed_whole_hash(ctx, stable);
     let control_live_before = db.live_count();
     let control = db
@@ -6404,7 +6512,11 @@ fn declaration_lookup_straddling_compute_is_not_served_to_the_winner() {
     // content version.
     let owner = "/reval_qdb/owner.ts";
     load_tracked_keyed(&host, owner);
-    let key = (Arc::<str>::from(owner), Arc::<str>::from("Probe"));
+    let key = (
+        Arc::<str>::from(owner),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::<str>::from("Probe"),
+    );
     let observed = observed_whole_hash(ctx, owner);
     let generation_before = host.project_type_store().current_project_generation();
     let live_before = db.live_count();

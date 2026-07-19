@@ -544,6 +544,7 @@ fn per_key_route_builds_bounded() {
 
     let route = RouteResult::Resolved {
         defining_canonical: "p.ts".to_string(),
+        defining_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         defining_symbol: "X".to_string(),
     };
     let fact = FactVersionRef::FileWholeHash {

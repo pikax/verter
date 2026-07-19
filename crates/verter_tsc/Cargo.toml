@@ -32,3 +32,6 @@ oxc_sourcemap = "7.0.0"
 walkdir = "2.5"
 # One-shot runtime to drive the async `TsgoClient` from the sync CLI.
 tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "io-util", "process", "net", "time", "sync"] }
+
+[dev-dependencies]
+verter_macro_dto = { path = "../verter_macro_dto" }

@@ -8,6 +8,7 @@
 use oxc_ast::ast::{Argument, Expression, Program, Statement, TSType};
 
 use crate::common::Span;
+use verter_type_expr::facts::TypeDependencyPathFact;
 
 /// Runtime constructors authored in object-form macro syntax.
 ///
@@ -33,6 +34,24 @@ pub struct MacroTypeParams {
     pub type_span: Span,
     /// Span of the `>` token
     pub gt_span: Span,
+    /// Authored property anchors from the first type argument, in the exact
+    /// order used by `AnalyzedMacro::prop_fields`.
+    pub prop_members: Vec<MacroTypePropMember>,
+    /// Authored event anchors from the first type argument, in the exact order
+    /// used by `AnalyzedMacro::emit_fields`.
+    pub emit_member_spans: Vec<Span>,
+    /// Parser-owned dependency paths from the authored first type argument.
+    pub type_dependency_paths: Vec<TypeDependencyPathFact>,
+}
+
+/// Parser-owned geometry for one supported property signature in a macro's
+/// first type argument.
+#[derive(Debug)]
+pub struct MacroTypePropMember {
+    pub name: String,
+    pub key_span: Span,
+    pub type_span: Option<Span>,
+    pub optional: bool,
 }
 
 /// Object argument info: defineProps({ foo: String })
@@ -80,6 +99,9 @@ pub struct MacroProperty<'a> {
     /// - `Array as PropType<string[]>` → span of `string[]`
     /// - `{ type: Object as PropType<{name: string}> }` → span of `{name: string}`
     pub prop_type_annotation: Option<Span>,
+    /// Parser-owned type dependencies in this property's authored value
+    /// syntax (PropType arguments and callable annotations).
+    pub type_dependency_paths: Vec<TypeDependencyPathFact>,
 }
 
 /// One element of a macro array argument (`defineProps(['foo', 'bar'])`).

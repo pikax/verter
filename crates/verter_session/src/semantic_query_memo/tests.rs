@@ -31,8 +31,11 @@ fn production_relation_admission_is_semantic_store_owned() {
         "the production relation write must be private"
     );
 }
-use crate::semantic_query::{DepVersion, PrimitiveKind, ResolveDeclKey, ScopeId};
+use crate::semantic_query::{
+    DeclIdentity, DepVersion, PrimitiveKind, ResolveDeclKey, ResolvedDeclSlotIdentity, ScopeId,
+};
 use crate::{HostConfig, VerterHost};
+use verter_type_expr::TopLevelOwnerId;
 
 /// A standalone host used purely as a
 /// [`crate::resolver_core::ResolverContext`] for the strict warm-read
@@ -53,6 +56,7 @@ fn ctx_host() -> VerterHost {
 fn scope(canonical: &str) -> ScopeId {
     ScopeId {
         canonical_id: Arc::from(canonical),
+        owner: TopLevelOwnerId::ordinary_file(),
         local_scope: None,
     }
 }
@@ -142,6 +146,7 @@ fn intern_dedups_structural_values_across_contexts() {
         SemanticNodeData::Primitive(PrimitiveKind::Number),
         NodeScopeId::File {
             canonical_id: Arc::from("/w/a.ts"),
+            owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: [0u8; 16],
             local_scope: None,
         },
@@ -151,6 +156,122 @@ fn intern_dedups_structural_values_across_contexts() {
         "cross-scope same-payload interns must stay distinct — C7 \
          preserves the scope disambiguation axis",
     );
+}
+
+/// Owner is a semantic identity axis, not presentation metadata. The same
+/// payload at the same canonical/hash/local scope must intern separately when
+/// its authored module/instance owner differs; an ordinary-file control still
+/// deduplicates.
+#[test]
+fn intern_identity_discriminates_top_level_owner() {
+    let store = SemanticGraphStore::new();
+    let scope = |owner| NodeScopeId::File {
+        canonical_id: Arc::from("/w/Component.vue"),
+        owner,
+        whole_hash: [7u8; 16],
+        local_scope: None,
+    };
+    let payload = SemanticNodeData::Primitive(PrimitiveKind::Number);
+
+    let module = store.intern_node_with_scope(payload.clone(), scope(TopLevelOwnerId::module(0)));
+    let instance =
+        store.intern_node_with_scope(payload.clone(), scope(TopLevelOwnerId::instance(0)));
+    let ordinary_first =
+        store.intern_node_with_scope(payload.clone(), scope(TopLevelOwnerId::ordinary_file()));
+    let ordinary_second =
+        store.intern_node_with_scope(payload, scope(TopLevelOwnerId::ordinary_file()));
+
+    assert_ne!(
+        module, instance,
+        "module and instance scopes must not alias"
+    );
+    assert_eq!(
+        module, ordinary_first,
+        "ordinary files are explicitly Module(0)"
+    );
+    assert_eq!(ordinary_first, ordinary_second);
+    assert_eq!(store.node_count(), 2);
+}
+
+/// Declaration payload identity and content-free slot identity both retain
+/// owner. Removing either owner field makes module/instance declarations with
+/// the same canonical/name/space collide before they reach the memo.
+#[test]
+fn declaration_and_slot_identity_discriminate_top_level_owner() {
+    let decl = |owner| DeclIdentity {
+        canonical_id: Arc::from("/w/Component.vue"),
+        owner,
+        whole_hash: [9u8; 16],
+        decl_name: Arc::from("Shared"),
+    };
+    let module_decl = decl(TopLevelOwnerId::module(0));
+    let instance_decl = decl(TopLevelOwnerId::instance(0));
+    assert_ne!(module_decl, instance_decl);
+
+    let slot = |owner| {
+        ResolvedDeclSlotIdentity::type_slot(
+            Arc::from("/w/Component.vue"),
+            owner,
+            Arc::from("Shared"),
+            3,
+            [4u8; 16],
+            [5u8; 16],
+        )
+    };
+    let module_slot = slot(TopLevelOwnerId::module(0));
+    let instance_slot = slot(TopLevelOwnerId::instance(0));
+    assert_ne!(module_slot, instance_slot);
+
+    let mut declarations = std::collections::HashMap::new();
+    declarations.insert(module_decl, "module");
+    declarations.insert(instance_decl, "instance");
+    assert_eq!(declarations.len(), 2);
+
+    let mut slots = std::collections::HashMap::new();
+    slots.insert(module_slot, "module");
+    slots.insert(instance_slot, "instance");
+    assert_eq!(slots.len(), 2);
+}
+
+/// The file-scope owner survives family-key projection. Flipping only the
+/// authored owner must allocate a second warm memo entry and execute a second
+/// cold build; repeating the exact owner is a warm hit.
+#[test]
+fn resolve_decl_memo_key_discriminates_top_level_owner() {
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+    let key = |owner| {
+        SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: ScopeId {
+                canonical_id: Arc::from("/w/Component.vue"),
+                owner,
+                local_scope: None,
+            },
+            name: Arc::from("Shared"),
+        })
+    };
+    let module = key(TopLevelOwnerId::module(0));
+    let instance = key(TopLevelOwnerId::instance(0));
+    let mut builds = 0usize;
+
+    for query in [module.clone(), instance, module] {
+        let _ = store.execute_cooperative(
+            &host,
+            query,
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                builds += 1;
+                let node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                (QueryResult::Value(node), empty_signature())
+            },
+        );
+    }
+
+    assert_eq!(
+        builds, 2,
+        "owner flip must miss; exact-owner repeat must hit"
+    );
+    assert_eq!(store.memo_entry_count(), 2);
 }
 
 #[test]
@@ -236,6 +357,7 @@ fn intern_typeparam_display_name_excluded_from_identity() {
     let mk = |display: &str| SemanticNodeData::TypeParam {
         decl: DeclIdentity {
             canonical_id: Arc::from("/w/a.ts"),
+            owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: [3u8; 16],
             decl_name: Arc::from("T"),
         },
@@ -266,6 +388,7 @@ fn shard_routing_is_deterministic_per_payload_and_scope() {
     let scope_global = NodeScopeId::Global;
     let scope_file = NodeScopeId::File {
         canonical_id: Arc::from("/w/x.ts"),
+        owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [0u8; 16],
         local_scope: None,
     };
@@ -971,11 +1094,13 @@ fn node_arena_invalidation_preserves_global_scope() {
     let whole_b: Hash16 = [2u8; 16];
     let scope_a = NodeScopeId::File {
         canonical_id: Arc::clone(&canonical_a),
+        owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: whole_a,
         local_scope: None,
     };
     let scope_b = NodeScopeId::File {
         canonical_id: Arc::clone(&canonical_b),
+        owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: whole_b,
         local_scope: None,
     };
@@ -986,6 +1111,7 @@ fn node_arena_invalidation_preserves_global_scope() {
     let file_a_payload = SemanticNodeData::TypeParam {
         decl: DeclIdentity {
             canonical_id: Arc::clone(&canonical_a),
+            owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: whole_a,
             decl_name: Arc::from("Param_A"),
         },
@@ -997,6 +1123,7 @@ fn node_arena_invalidation_preserves_global_scope() {
     let file_b_payload = SemanticNodeData::TypeParam {
         decl: DeclIdentity {
             canonical_id: Arc::clone(&canonical_b),
+            owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: whole_b,
             decl_name: Arc::from("Param_B"),
         },
@@ -4673,6 +4800,7 @@ fn node_scope_sidecar_populated_at_intern_time_for_every_decl_origin_node() {
     // `build_instantiate` result).
     let scope = NodeScopeId::File {
         canonical_id: Arc::from("/w/decl.ts"),
+        owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [7u8; 16],
         local_scope: None,
     };
@@ -4697,6 +4825,7 @@ fn node_scope_sidecar_populated_at_intern_time_for_every_decl_origin_node() {
     // Multiple non-exempt nodes get independent sidecar slots.
     let scope_b = NodeScopeId::File {
         canonical_id: Arc::from("/w/other.ts"),
+        owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [8u8; 16],
         local_scope: Some(3),
     };
@@ -4718,11 +4847,13 @@ fn node_scope_returns_origin_not_reader_scope() {
     let store = SemanticGraphStore::new();
     let scope_a = NodeScopeId::File {
         canonical_id: Arc::from("/w/a.ts"),
+        owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [1u8; 16],
         local_scope: None,
     };
     let scope_b = NodeScopeId::File {
         canonical_id: Arc::from("/w/b.ts"),
+        owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [2u8; 16],
         local_scope: None,
     };
@@ -7814,6 +7945,7 @@ mod env_scoped_key_identity_guards {
         SurfaceProvenanceContext,
     };
     use std::sync::Arc;
+    use verter_type_expr::TopLevelOwnerId;
 
     fn empty_args() -> Arc<[SemanticNodeId]> {
         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice())
@@ -7878,6 +8010,7 @@ mod env_scoped_key_identity_guards {
         let name: Arc<str> = Arc::from("Foo");
         let base_t = ResolvedDeclSlotIdentity::type_slot(
             Arc::clone(&canonical),
+            TopLevelOwnerId::ordinary_file(),
             Arc::clone(&name),
             0,
             [1u8; 16],
@@ -7888,6 +8021,7 @@ mod env_scoped_key_identity_guards {
         // type_env differs on the slot.
         let t2 = ResolvedDeclSlotIdentity::type_slot(
             Arc::clone(&canonical),
+            TopLevelOwnerId::ordinary_file(),
             Arc::clone(&name),
             0,
             [2u8; 16],
@@ -7902,6 +8036,7 @@ mod env_scoped_key_identity_guards {
         // lib_env differs on the slot.
         let l = ResolvedDeclSlotIdentity::type_slot(
             Arc::clone(&canonical),
+            TopLevelOwnerId::ordinary_file(),
             Arc::clone(&name),
             0,
             [1u8; 16],
@@ -7916,6 +8051,7 @@ mod env_scoped_key_identity_guards {
         // project_identity differs on the slot.
         let j = ResolvedDeclSlotIdentity::type_slot(
             Arc::clone(&canonical),
+            TopLevelOwnerId::ordinary_file(),
             Arc::clone(&name),
             7,
             [1u8; 16],
@@ -7949,6 +8085,7 @@ mod env_scoped_key_identity_guards {
             inst_key(
                 ResolvedDeclSlotIdentity::type_slot(
                     Arc::clone(&canonical),
+                    TopLevelOwnerId::ordinary_file(),
                     Arc::clone(&name),
                     0,
                     t,
@@ -7987,6 +8124,7 @@ mod env_scoped_key_identity_guards {
         };
         let owner_t = ResolvedDeclSlotIdentity::type_slot(
             Arc::clone(&canonical),
+            TopLevelOwnerId::ordinary_file(),
             Arc::clone(&name),
             0,
             [1u8; 16],
@@ -7996,6 +8134,7 @@ mod env_scoped_key_identity_guards {
 
         let t2 = ResolvedDeclSlotIdentity::type_slot(
             Arc::clone(&canonical),
+            TopLevelOwnerId::ordinary_file(),
             Arc::clone(&name),
             0,
             [2u8; 16],
@@ -8009,6 +8148,7 @@ mod env_scoped_key_identity_guards {
 
         let l = ResolvedDeclSlotIdentity::type_slot(
             Arc::clone(&canonical),
+            TopLevelOwnerId::ordinary_file(),
             Arc::clone(&name),
             0,
             [1u8; 16],
@@ -8027,6 +8167,7 @@ mod env_scoped_key_identity_guards {
         // the baseline slot and this assertion would fail.
         let j = ResolvedDeclSlotIdentity::type_slot(
             Arc::clone(&canonical),
+            TopLevelOwnerId::ordinary_file(),
             Arc::clone(&name),
             7,
             [1u8; 16],
@@ -8261,7 +8402,10 @@ mod env_scoped_key_identity_guards {
     ) -> crate::semantic_query::ValueRootSlotIdentity {
         crate::semantic_query::ValueRootSlotIdentity::new(
             crate::semantic_query::ValueRootKey {
-                scope: crate::semantic_query::ScopeId::file(Arc::clone(canonical)),
+                scope: crate::semantic_query::ScopeId::file(
+                    Arc::clone(canonical),
+                    TopLevelOwnerId::ordinary_file(),
+                ),
                 name: Arc::clone(name),
             },
             project_identity,
@@ -8462,13 +8606,18 @@ mod instantiate_body_source_family_identity {
         ResolvedDeclSlotIdentity, SemanticNodeId, SemanticQueryKey,
     };
     use std::sync::Arc;
+    use verter_type_expr::TopLevelOwnerId;
 
     fn empty_args() -> Arc<[SemanticNodeId]> {
         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice())
     }
 
     fn slot() -> ResolvedDeclSlotIdentity {
-        ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/w/a.ts"), Arc::from("Foo"))
+        ResolvedDeclSlotIdentity::type_slot_unscoped(
+            Arc::from("/w/a.ts"),
+            TopLevelOwnerId::ordinary_file(),
+            Arc::from("Foo"),
+        )
     }
 
     fn inst_key(context: InstantiateContext) -> SemanticQueryKey {
@@ -8630,10 +8779,12 @@ mod lower_locator_family_identity {
     use verter_type_expr::locators::{
         AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot,
     };
+    use verter_type_expr::TopLevelOwnerId;
 
     fn slot() -> ResolvedDeclSlotIdentity {
         ResolvedDeclSlotIdentity::type_slot(
             Arc::from("/w/a.ts"),
+            TopLevelOwnerId::ordinary_file(),
             Arc::from("Foo"),
             7,
             [3u8; 16],
@@ -8645,6 +8796,7 @@ mod lower_locator_family_identity {
         AuthoredBodyLocator::DeclBody(TypeBodySlot {
             anchor: AuthoredAnchor {
                 canonical_id: Arc::from("/w/a.ts"),
+                owner: TopLevelOwnerId::ordinary_file(),
                 symbol: Arc::from("Foo"),
                 space: LocatorSymbolSpace::Type,
             },
@@ -8901,6 +9053,7 @@ mod prepared_identity_bijection {
     use verter_type_expr::locators::{
         AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot,
     };
+    use verter_type_expr::TopLevelOwnerId;
 
     fn h16(byte: u8) -> HashValue {
         [byte; 16]
@@ -8923,6 +9076,7 @@ mod prepared_identity_bijection {
     fn type_slot(name: &str) -> ResolvedDeclSlotIdentity {
         ResolvedDeclSlotIdentity::type_slot(
             Arc::from("/w/a.ts"),
+            TopLevelOwnerId::ordinary_file(),
             Arc::from(name),
             0,
             h16(0),
@@ -8957,7 +9111,7 @@ mod prepared_identity_bijection {
     fn value_root(name: &str) -> ValueRootSlotIdentity {
         ValueRootSlotIdentity::new(
             ValueRootKey {
-                scope: ScopeId::file(Arc::from("/w/a.ts")),
+                scope: ScopeId::file(Arc::from("/w/a.ts"), TopLevelOwnerId::ordinary_file()),
                 name: Arc::from(name),
             },
             0,
@@ -8989,6 +9143,7 @@ mod prepared_identity_bijection {
         let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
             anchor: AuthoredAnchor {
                 canonical_id: Arc::from("/w/a.ts"),
+                owner: TopLevelOwnerId::ordinary_file(),
                 symbol: Arc::from("Foo"),
                 space: LocatorSymbolSpace::Type,
             },
@@ -9013,11 +9168,11 @@ mod prepared_identity_bijection {
         match tag {
             SemanticQueryKeyTag::ResolveDecl => (
                 SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-                    scope: ScopeId::file(Arc::from("/w/a.ts")),
+                    scope: ScopeId::file(Arc::from("/w/a.ts"), TopLevelOwnerId::ordinary_file()),
                     name: Arc::from("Foo"),
                 }),
                 SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-                    scope: ScopeId::file(Arc::from("/w/a.ts")),
+                    scope: ScopeId::file(Arc::from("/w/a.ts"), TopLevelOwnerId::ordinary_file()),
                     name: Arc::from("Bar"),
                 }),
             ),

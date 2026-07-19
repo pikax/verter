@@ -260,12 +260,13 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
     fn resolve_type_declaration(
         &self,
         dep_canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         requested_name: &str,
     ) -> ResolvedTypeDeclaration
     where
         Self: Sized,
     {
-        resolve_type_declaration(self, dep_canonical, requested_name)
+        resolve_type_declaration(self, dep_canonical, owner, requested_name)
     }
 
     fn snapshot_imports<'a>(&self, snapshot: &'a Self::Snapshot) -> &'a [AnalyzedImport];
@@ -357,7 +358,11 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
     {
         let dep_canonical =
             self.resolve_type_dependency_canonical(owner_canonical, import_source)?;
-        let declaration = self.resolve_type_declaration(dep_canonical.as_str(), exported_name);
+        let declaration = self.resolve_type_declaration(
+            dep_canonical.as_str(),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            exported_name,
+        );
         let native_props = self.resolve_native_props(
             owner_canonical,
             import_source,
@@ -423,6 +428,7 @@ fn skip_macro_declaration_metadata_for_purpose(purpose: ComponentMetaResolutionP
 
 fn placeholder_type_declaration(
     requested_name: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     resolved_name: &str,
 ) -> ResolvedTypeDeclaration {
     ResolvedTypeDeclaration {
@@ -430,6 +436,7 @@ fn placeholder_type_declaration(
         declaration_id: None,
         resolved_name: resolved_name.to_string(),
         canonical_source: String::new(),
+        owner,
         span: verter_span::Span::default(),
         kind: crate::resolver_core::ResolvedDeclarationKind::Unknown,
         text: None,

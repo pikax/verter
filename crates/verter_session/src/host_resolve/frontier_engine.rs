@@ -116,10 +116,10 @@ impl VerterHost {
         route_shallow_cache: &mut RouteShallowStateCache,
     ) -> Option<crate::resolver_core::RouteResult> {
         match target {
-            crate::resolver_core::ExportTarget::Local { symbol_name } => {
+            crate::resolver_core::ExportTarget::Local { owner, symbol_name } => {
                 let state = self.route_shallow_state(provider_canonical, route_shallow_cache)?;
-                if state.is_import_local(symbol_name) {
-                    let import_target = state.import_target(symbol_name)?;
+                if state.is_import_local_in(*owner, symbol_name) {
+                    let import_target = state.import_target_in(*owner, symbol_name)?;
                     let target_canonical = if import_target.canonical_id.is_empty() {
                         self.resolve_route_type_edge(
                             provider_canonical,
@@ -140,6 +140,7 @@ impl VerterHost {
 
                 Some(crate::resolver_core::RouteResult::Resolved {
                     defining_canonical: provider_canonical.to_string(),
+                    defining_owner: *owner,
                     defining_symbol: symbol_name.clone(),
                 })
             }
@@ -651,7 +652,7 @@ impl VerterHost {
         let cached_route = cached_route?;
         cached_route
             .resolved()
-            .map(|(defining_canonical, defining_symbol)| {
+            .map(|(defining_canonical, _defining_owner, defining_symbol)| {
                 (defining_canonical.to_owned(), defining_symbol.to_owned())
             })
     }

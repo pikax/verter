@@ -188,19 +188,62 @@ const file = host.getVirtualFile({
 
 **Returns:** `HostVirtualFileResponse`
 
-#### `host.getPublicApi(canonicalId)`
+#### `host.getPublicApi(canonicalId, mode?)`
 
-Get the public TypeScript surface for a Vue SFC.
+Get a framework carrier's TypeScript surface. `mode` is `"public"` (default),
+`"testing"`, or `"declaration"`.
 
 ```ts
-const publicApi = host.getPublicApi("/path/to/App.vue");
-// publicApi.code — public `.vue.ts` module surface
-// publicApi.sourceMap — source map JSON string
+const result = host.getPublicApi("/path/to/App.vue", "declaration");
+if (result.error) {
+  // Stable fields: code, detailCode, subject,
+  // declarationShapeReason, memberOrdinal,
+  // outcomeKind, outcomeReason, outcomeDiagnostic.
+  throw new Error(`${result.error.code}/${result.error.detailCode}`);
+}
+const declaration = result.value;
 ```
 
-For provider and IDE consumers, importing `App.vue` resolves through the public `.vue.ts` surface. The internal IDE TSX/JSX virtual filename is not part of the public API contract.
+The result is always `{ value, error }`:
 
-**Returns:** `{ code: string; sourceMap?: string } | null`
+- Success: `value` is `{ code, sourceMap }`, where `sourceMap` is a string or
+  `null`, and `error` is `null`.
+- Failure: `error.subject` is either `{ kind: "macro", syntaxIndex }` or
+  `{ kind: "scriptSetupAttrs", sourceRange: { start, end } }`; source ranges
+  are SFC-absolute byte offsets.
+- Ordinary absence (missing or non-carrier input): both fields are `null`.
+- Projection failure: `value` is `null`; `error` contains the stable structured identity. Nullable error fields are present as `null`, never omitted.
+
+For `detailCode: "unavailable-outcome"`, `outcomeKind` is the closed
+`"partial" | "unresolved" | "unsupported" | "invalid"` discriminant,
+`outcomeReason` is the corresponding stable reason code, and
+`outcomeDiagnostic` is display-only text or `null`. Those three fields are
+`null` for every other projection failure.
+
+Invalid outcomes correlate the subject and reason: macro subjects may carry
+`"non-object-root"`, while script-setup `attrs` subjects may carry only
+`"malformed-or-recovered-type-syntax"`.
+
+For `detailCode: "unsupported-declaration-shape"`, semantic inference failures
+retain their exact reason:
+
+- `"semantic-inference-depth-budget-exceeded"`
+- `"semantic-inference-work-budget-exceeded"`
+- `"semantic-inference-unsupported-macro-kind"`
+- `"semantic-inference-unsupported-construct"`
+- `"semantic-inference-missing-type-argument"`
+- `"semantic-inference-missing-declaration"`
+- `"semantic-inference-ambiguous-reference"`
+- `"semantic-inference-missing-dependency"`
+
+The retired `"semantic-inference-unavailable"` umbrella is never emitted.
+
+`"public"` returns the application-facing instance surface, `"testing"` adds
+test-only script-setup bindings, and `"declaration"` returns declaration-only
+code with no runtime statements. Provider and IDE consumers must use the
+returned surface rather than depending on an internal virtual filename.
+
+**Returns:** `HostPublicApiResult`
 
 #### `host.getIde(canonicalId, profile?)`
 

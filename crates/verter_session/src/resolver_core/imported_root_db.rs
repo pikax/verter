@@ -20,6 +20,7 @@ pub enum ImportedRootResult {
     /// Root resolved: the type's canonical source and resolved symbol name.
     Resolved {
         canonical_source: String,
+        owner: verter_type_expr::TopLevelOwnerId,
         resolved_symbol: String,
     },
     /// Stable miss — the type root could not be resolved.
@@ -31,24 +32,35 @@ impl ImportedRootResult {
         matches!(self, ImportedRootResult::Miss)
     }
 
-    pub fn resolved(&self) -> Option<(&str, &str)> {
+    pub fn resolved(&self) -> Option<(&str, verter_type_expr::TopLevelOwnerId, &str)> {
         match self {
             ImportedRootResult::Resolved {
                 canonical_source,
+                owner,
                 resolved_symbol,
-            } => Some((canonical_source, resolved_symbol)),
+            } => Some((canonical_source, *owner, resolved_symbol)),
             ImportedRootResult::Miss => None,
         }
     }
 
-    /// Convert to a `(canonical_source, resolved_symbol)` tuple, matching
-    /// the legacy `resolved_type_roots` map value format.
-    pub fn as_tuple(&self) -> Option<(String, String)> {
+    pub fn as_identity(
+        &self,
+    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
+        self.resolved().map(|(canonical, owner, symbol)| {
+            verter_semantic::analysis::type_solver::ResolvedRootIdentity::new_in_owner(
+                canonical, owner, symbol,
+            )
+        })
+    }
+
+    /// Convert to the exact `(canonical_source, owner, resolved_symbol)` identity.
+    pub fn as_tuple(&self) -> Option<(String, verter_type_expr::TopLevelOwnerId, String)> {
         match self {
             ImportedRootResult::Resolved {
                 canonical_source,
+                owner,
                 resolved_symbol,
-            } => Some((canonical_source.clone(), resolved_symbol.clone())),
+            } => Some((canonical_source.clone(), *owner, resolved_symbol.clone())),
             ImportedRootResult::Miss => None,
         }
     }
@@ -435,25 +447,6 @@ impl ImportedRootDb {
         self.roots.insert(key, result, Vec::new());
     }
 
-    /// Seed roots from a legacy `resolved_type_roots` map.
-    #[cfg(test)]
-    pub fn seed_from_legacy_roots(
-        &self,
-        provider_canonical: &str,
-        roots: &rustc_hash::FxHashMap<String, (String, String)>,
-    ) {
-        for (imported_name, (canonical_source, resolved_symbol)) in roots {
-            self.insert(
-                provider_canonical.to_owned(),
-                imported_name.clone(),
-                ImportedRootResult::Resolved {
-                    canonical_source: canonical_source.clone(),
-                    resolved_symbol: resolved_symbol.clone(),
-                },
-            );
-        }
-    }
-
     /// Evict all roots for a provider.
     pub fn evict_provider(&self, provider_canonical: &str) {
         let keys: Vec<_> = self
@@ -577,7 +570,8 @@ mod tests {
             "index.ts".to_owned(),
             "FooProps".to_owned(),
             ImportedRootResult::Resolved {
-                canonical_source: "foo.vue".to_owned(),
+                canonical_source: "foo.ts".to_owned(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 resolved_symbol: "FooProps".to_owned(),
             },
         );
@@ -585,7 +579,14 @@ mod tests {
         let result = db.get("index.ts", "FooProps", &view);
         assert!(result.is_some());
         let root = result.unwrap();
-        assert_eq!(root.resolved(), Some(("foo.vue", "FooProps")));
+        assert_eq!(
+            root.resolved(),
+            Some((
+                "foo.ts",
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "FooProps",
+            ))
+        );
     }
 
     #[test]
@@ -615,14 +616,15 @@ mod tests {
         let call_count = std::sync::atomic::AtomicU32::new(0);
 
         let dummy_fact = FactVersionRef::FileWholeHash {
-            canonical_id: "bar.vue".to_owned(),
+            canonical_id: "bar.ts".to_owned(),
             hash: [0u8; 16],
         };
         let r1 = db.get_or_resolve_with_facts_probe_for_test("index.ts", "Bar", &view, || {
             call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some((
                 ImportedRootResult::Resolved {
-                    canonical_source: "bar.vue".to_owned(),
+                    canonical_source: "bar.ts".to_owned(),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     resolved_symbol: "Bar".to_owned(),
                 },
                 vec![dummy_fact.clone()],
@@ -652,7 +654,8 @@ mod tests {
             call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some((
                 ImportedRootResult::Resolved {
-                    canonical_source: "bar.vue".to_owned(),
+                    canonical_source: "bar.ts".to_owned(),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     resolved_symbol: "Bar".to_owned(),
                 },
                 Vec::new(),
@@ -686,30 +689,19 @@ mod tests {
     }
 
     #[test]
-    fn seed_from_legacy_roots() {
-        let db = ImportedRootDb::new();
-        let view = TestView::new(1);
-
-        let mut legacy = rustc_hash::FxHashMap::default();
-        legacy.insert("Foo".to_owned(), ("foo.vue".to_owned(), "Foo".to_owned()));
-        legacy.insert("Bar".to_owned(), ("bar.vue".to_owned(), "Bar".to_owned()));
-
-        db.seed_from_legacy_roots("index.ts", &legacy);
-
-        assert!(db.get("index.ts", "Foo", &view).is_some());
-        assert!(db.get("index.ts", "Bar", &view).is_some());
-        assert!(db.get("index.ts", "Missing", &view).is_none());
-    }
-
-    #[test]
     fn as_tuple_conversion() {
         let resolved = ImportedRootResult::Resolved {
             canonical_source: "a.ts".to_owned(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             resolved_symbol: "X".to_owned(),
         };
         assert_eq!(
             resolved.as_tuple(),
-            Some(("a.ts".to_owned(), "X".to_owned()))
+            Some((
+                "a.ts".to_owned(),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "X".to_owned(),
+            ))
         );
 
         let miss = ImportedRootResult::Miss;
@@ -726,6 +718,7 @@ mod tests {
             "X".to_owned(),
             ImportedRootResult::Resolved {
                 canonical_source: "x.ts".to_owned(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 resolved_symbol: "X".to_owned(),
             },
         );
@@ -761,6 +754,7 @@ mod tests {
                             Some((
                                 ImportedRootResult::Resolved {
                                     canonical_source: "c.ts".to_owned(),
+                                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                                     resolved_symbol: "Coalesce".to_owned(),
                                 },
                                 vec![FactVersionRef::FileWholeHash {
@@ -825,6 +819,7 @@ mod tests {
                 Some((
                     ImportedRootResult::Resolved {
                         canonical_source: "superseded_dep.ts".to_owned(),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         resolved_symbol: "Foo".to_owned(),
                     },
                     Vec::new(),
@@ -832,7 +827,11 @@ mod tests {
             });
         assert_eq!(
             first.as_deref().and_then(ImportedRootResult::resolved),
-            Some(("superseded_dep.ts", "Foo")),
+            Some((
+                "superseded_dep.ts",
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "Foo",
+            )),
             "the leader's own caller is still served the unadmitted root",
         );
 
@@ -845,6 +844,7 @@ mod tests {
                 Some((
                     ImportedRootResult::Resolved {
                         canonical_source: "live_dep.ts".to_owned(),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         resolved_symbol: "Foo".to_owned(),
                     },
                     vec![live_fact.clone()],
@@ -858,14 +858,22 @@ mod tests {
         );
         assert_eq!(
             second.as_deref().and_then(ImportedRootResult::resolved),
-            Some(("live_dep.ts", "Foo")),
+            Some((
+                "live_dep.ts",
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "Foo",
+            )),
             "the late claimant must return its own fresh resolve's root",
         );
         assert_eq!(
             db.get("provider.ts", "Foo", &view)
                 .as_deref()
                 .and_then(ImportedRootResult::resolved),
-            Some(("live_dep.ts", "Foo")),
+            Some((
+                "live_dep.ts",
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "Foo",
+            )),
             "only the late claimant's admissible (fact-rooted) root may be persisted — the \
              leader's unrooted root must never reach the shared cache",
         );
@@ -941,6 +949,7 @@ mod tests {
                     Some((
                         ImportedRootResult::Resolved {
                             canonical_source: "superseded_dep.ts".to_owned(),
+                            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                             resolved_symbol: "Burst".to_owned(),
                         },
                         Vec::new(),
@@ -970,6 +979,7 @@ mod tests {
                     Some((
                         ImportedRootResult::Resolved {
                             canonical_source: "live_dep.ts".to_owned(),
+                            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                             resolved_symbol: "Burst".to_owned(),
                         },
                         vec![FactVersionRef::FileWholeHash {
@@ -1011,7 +1021,11 @@ mod tests {
             leader_root
                 .as_deref()
                 .and_then(ImportedRootResult::resolved),
-            Some(("superseded_dep.ts", "Burst")),
+            Some((
+                "superseded_dep.ts",
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "Burst",
+            )),
             "the unadmitted leader must still be served the root it computed",
         );
 
@@ -1027,7 +1041,11 @@ mod tests {
             follower_root
                 .as_deref()
                 .and_then(ImportedRootResult::resolved),
-            Some(("live_dep.ts", "Burst")),
+            Some((
+                "live_dep.ts",
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "Burst",
+            )),
             "the follower must serve the root ITS OWN fresh resolve produced, not the leader's \
              unrooted one",
         );
@@ -1035,7 +1053,11 @@ mod tests {
             db.get("burst_provider.ts", "Burst", &probe_view)
                 .as_deref()
                 .and_then(ImportedRootResult::resolved),
-            Some(("live_dep.ts", "Burst")),
+            Some((
+                "live_dep.ts",
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "Burst",
+            )),
             "only the follower's ADMISSIBLE (fact-rooted) root may be persisted — the leader's \
              unrooted root must never reach the shared cache",
         );

@@ -151,7 +151,7 @@ fn oracle_augmented_foo_member_names(host: &VerterHost) -> Vec<String> {
         .expect("base env for /aug.ts must build");
     let aug_key = (
         AugmentationScopeKind::Module("./types".to_string()),
-        "Foo".to_string(),
+        verter_type_expr::DeclKey::new(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Foo"),
     );
     let aug_group = aug_env
         .augmentation_scopes
@@ -522,7 +522,11 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
         let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-            dispatch.type_slot_for(Arc::from("/types.ts"), Arc::from("Foo")),
+            dispatch.type_slot_for(
+                Arc::from("/types.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("Foo"),
+            ),
             Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
             dispatch.instantiate_context_for(
                 "/types.ts",
@@ -740,7 +744,11 @@ fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() 
         let ctx = crate::resolver_core::HostResolverContext::new(&host, &baseline_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-            dispatch.type_slot_for(Arc::from("/types.ts"), Arc::from("Foo")),
+            dispatch.type_slot_for(
+                Arc::from("/types.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("Foo"),
+            ),
             Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
             dispatch.instantiate_context_for(
                 "/types.ts",
@@ -871,7 +879,11 @@ fn external_module_augmentation_warm_parent_rejects_contributor_content_edit_end
         let ctx = crate::resolver_core::HostResolverContext::new(&host, &baseline_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-            dispatch.type_slot_for(Arc::from("/use.ts"), Arc::from("U")),
+            dispatch.type_slot_for(
+                Arc::from("/use.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("U"),
+            ),
             Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
             dispatch.instantiate_context_for(
                 "/use.ts",
@@ -1025,7 +1037,11 @@ fn external_module_augmentation_torn_contributor_folds_cache_suppress() {
         let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-            dispatch.type_slot_for(Arc::from("/use.ts"), Arc::from("U")),
+            dispatch.type_slot_for(
+                Arc::from("/use.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("U"),
+            ),
             Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
             dispatch.instantiate_context_for(
                 "/use.ts",
@@ -1130,7 +1146,11 @@ fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
             let ctx = crate::resolver_core::HostResolverContext::new(host, &view, overlay);
             let dispatch = ProjectSemanticDispatch::new(&ctx);
             let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-                dispatch.type_slot_for(Arc::from("/types.ts"), Arc::from("Foo")),
+                dispatch.type_slot_for(
+                    Arc::from("/types.ts"),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    Arc::from("Foo"),
+                ),
                 Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
                 dispatch.instantiate_context_for(
                     "/types.ts",
@@ -1192,7 +1212,7 @@ fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
 }
 
 /// EXTERNAL (`declare module "<bare>"`) augmentation fold — a BROKEN decl-body
-/// lease pin on a contributing augmenter (`prepare_augmentation_type_decl_outcome`
+/// lease pin on a contributing augmenter (`prepare_augmentation_type_decl_outcome_in`
 /// → `PreparedDeclOutcome::LeaseMiss`) must FOLD its no-warm bit into the
 /// enclosing `Instantiate` query's `QueryBuildOutput.cache_suppress`, so the
 /// parent `/use.ts::U` cannot warm-publish an under-merged surface.
@@ -1262,7 +1282,11 @@ fn external_module_augmentation_broken_lease_contributor_folds_cache_suppress() 
         let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-            dispatch.type_slot_for(Arc::from("/use.ts"), Arc::from("U")),
+            dispatch.type_slot_for(
+                Arc::from("/use.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("U"),
+            ),
             Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
             dispatch.instantiate_context_for(
                 "/use.ts",

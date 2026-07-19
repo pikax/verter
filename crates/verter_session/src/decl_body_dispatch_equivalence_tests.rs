@@ -300,16 +300,29 @@ fn c2_barrel_value_reexport_peels_to_final_source_in_oracle_and_graph_native() {
         .expect("graph-native must resolve the barrel export target");
 
     assert_eq!(
-        (oracle.canonical_id.as_str(), oracle.name.as_str()),
+        (
+            oracle.canonical_id.as_str(),
+            oracle.owner,
+            oracle.name.as_str()
+        ),
         (
             graph_native.canonical_id.as_str(),
+            graph_native.owner,
             graph_native.name.as_str()
         ),
         "C2 barrel terminal divergence: oracle={oracle:?} graph_native={graph_native:?}"
     );
     assert_eq!(
-        (oracle.canonical_id.as_str(), oracle.name.as_str()),
-        ("/dep.ts", "themeImpl"),
+        (
+            oracle.canonical_id.as_str(),
+            oracle.owner,
+            oracle.name.as_str()
+        ),
+        (
+            "/dep.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "themeImpl"
+        ),
         "the barrel re-export must resolve to the FINAL defining (./dep, themeImpl), \
          not the intermediate barrel binding"
     );
@@ -334,15 +347,20 @@ fn c2_typeof_alias_cycle_terminates_identically_in_oracle_and_graph_native() {
          export const b: typeof a = 0 as unknown as { v: 1 }\n",
     );
 
-    let oracle = host.peel_value_decl_alias_for_test("/cyc.ts", "a");
-    let graph_native = host.peel_value_decl_alias_graph_native_for_test("/cyc.ts", "a");
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let oracle = host.peel_value_decl_alias_for_test("/cyc.ts", owner, "a");
+    let graph_native = host.peel_value_decl_alias_graph_native_for_test("/cyc.ts", owner, "a");
     assert_eq!(
         oracle, graph_native,
         "C2 cycle terminal divergence: oracle={oracle:?} graph_native={graph_native:?}"
     );
     assert_eq!(
         oracle,
-        ("/cyc.ts".to_string(), "a".to_string()),
+        crate::resolver_core::ValueDeclIdentity {
+            canonical_id: "/cyc.ts".to_string(),
+            owner,
+            name: "a".to_string(),
+        },
         "the typeof cycle must terminate at its origin `a` (visited-set guard), got {oracle:?}"
     );
 }

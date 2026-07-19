@@ -470,6 +470,7 @@ use std::cell::Cell;
 #[derive(Debug, Clone)]
 pub struct ResolvedImportedRegistrySymbol {
     pub canonical_id: String,
+    pub owner: verter_type_expr::TopLevelOwnerId,
     pub exported_name: String,
     /// The resolved declaration's narrowed body FACTS: classification plus the
     /// content-free authored body-slot locator (never an embedded body).
@@ -546,26 +547,39 @@ pub struct ComponentMetaQueryEngine<'a> {
     // lookups can populate the view after a ctx DB hit. NO independent
     // invalidation, NO
     // independent dep_signature, NO entries the ctx DB doesn't have.
-    imported_registry_symbols:
-        RefCell<FxHashMap<(String, String), Option<ResolvedImportedRegistrySymbol>>>,
+    imported_registry_symbols: RefCell<
+        FxHashMap<
+            (String, verter_type_expr::TopLevelOwnerId, String),
+            Option<ResolvedImportedRegistrySymbol>,
+        >,
+    >,
     /// Cached type declarations (read-through view; authority is
     /// `ProjectTypeStore::declaration_db()`).
-    declarations: RefCell<FxHashMap<(String, String), ResolvedTypeDeclaration>>,
+    declarations: RefCell<
+        FxHashMap<(String, verter_type_expr::TopLevelOwnerId, String), ResolvedTypeDeclaration>,
+    >,
     /// Cached resolvability checks (read-through view; authority is
     /// `ProjectTypeStore::resolvable_db()`).
-    resolvable: RefCell<FxHashMap<(String, String), bool>>,
+    resolvable: RefCell<FxHashMap<(String, verter_type_expr::TopLevelOwnerId, String), bool>>,
     /// Cached owner collection-body locators (read-through view;
     /// authority is `ProjectTypeStore::owner_collection_db()`). The value
     /// mirrors the DB's content-free `AuthoredBodyLocator` — consumers
     /// lower it on demand through the ONE shared dispatch; no body is
     /// stored here.
-    owner_collection_exprs:
-        RefCell<FxHashMap<String, Option<verter_type_expr::locators::AuthoredBodyLocator>>>,
+    owner_collection_exprs: RefCell<
+        FxHashMap<
+            (String, verter_type_expr::TopLevelOwnerId, String),
+            Option<verter_type_expr::locators::AuthoredBodyLocator>,
+        >,
+    >,
     /// Request-local cache of declaration-scope payloads per scope canonical id.
     /// The prepared bundle stays authoritative; this cache only reuses the
     /// bundle-derived names/bindings within one request so repeated projections
     /// do not keep recloning them.
-    scope_payloads: FxHashMap<String, Option<std::sync::Arc<DeclarationScopePayload>>>,
+    scope_payloads: FxHashMap<
+        (String, verter_type_expr::TopLevelOwnerId),
+        Option<std::sync::Arc<DeclarationScopePayload>>,
+    >,
     /// Request-local memo of the per-scope [`ScopeShadowing`] derived from the
     /// cached `scope_payloads` entry. Built ONCE per scope and reused across
     /// every Pick/Omit package-root gate probe in that scope, so the gate is
@@ -575,10 +589,11 @@ pub struct ComponentMetaQueryEngine<'a> {
     /// independent invalidation (a fresh engine per request is the cache
     /// boundary) — so it can never observe a shadow set the payload cache
     /// does not.
-    scope_shadowings: FxHashMap<String, std::sync::Arc<ScopeShadowing>>,
+    scope_shadowings:
+        FxHashMap<(String, verter_type_expr::TopLevelOwnerId), std::sync::Arc<ScopeShadowing>>,
     /// Request-local memoization for prepared declaration lookups.
     prepared_type_decls: FxHashMap<
-        (String, String),
+        (String, verter_type_expr::TopLevelOwnerId, String),
         Option<std::sync::Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>>,
     >,
     #[cfg(test)]
@@ -936,10 +951,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     pub(crate) fn scope_payload_for_scope(
         &mut self,
         scope_canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
     ) -> Option<std::sync::Arc<DeclarationScopePayload>> {
         let ctx = self.ctx;
         self.scope_payloads
-            .entry(scope_canonical_id.to_string())
+            .entry((scope_canonical_id.to_string(), owner))
             .or_insert_with(|| {
                 ctx.prepared_decl_bundle(scope_canonical_id)
                     .or_else(|| {
@@ -952,7 +968,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             .flatten()
                     })
                     .map(|bundle| {
-                        std::sync::Arc::new(DeclarationScopePayload::from_bundle(&bundle))
+                        std::sync::Arc::new(DeclarationScopePayload::from_bundle(&bundle, owner))
                     })
             })
             .clone()
@@ -979,16 +995,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     pub(crate) fn scope_shadowing_for_scope(
         &mut self,
         scope_canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
     ) -> std::sync::Arc<ScopeShadowing> {
-        if let Some(shadowing) = self.scope_shadowings.get(scope_canonical_id) {
+        let key = (scope_canonical_id.to_string(), owner);
+        if let Some(shadowing) = self.scope_shadowings.get(&key) {
             return std::sync::Arc::clone(shadowing);
         }
-        let payload = self.scope_payload_for_scope(scope_canonical_id);
+        let payload = self.scope_payload_for_scope(scope_canonical_id, owner);
         let shadowing = std::sync::Arc::new(ScopeShadowing::from_scope_payload(payload.as_deref()));
-        self.scope_shadowings.insert(
-            scope_canonical_id.to_string(),
-            std::sync::Arc::clone(&shadowing),
-        );
+        self.scope_shadowings
+            .insert(key, std::sync::Arc::clone(&shadowing));
         shadowing
     }
 }
@@ -996,10 +1012,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 fn local_type_symbol_metadata_for_known_source(
     ctx: &dyn ResolverContext,
     canonical_source: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     resolved_name: &str,
 ) -> Option<ResolvedLocalTypeSymbolMetadata> {
     let analysis = ctx.external_type_analysis(canonical_source)?;
-    let symbol = analysis.local_type_symbol(resolved_name)?;
+    let declaration = verter_parser::utils::oxc::script::type_inventory::DeclarationPath::root(
+        verter_type_expr::DeclKey::new(owner, resolved_name),
+    );
+    let symbol = analysis.local_type_symbol(&declaration)?;
     let kind = match symbol.kind {
         verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSymbolKind::TypeAlias => {
             ResolvedDeclarationKind::TypeAlias
@@ -1025,6 +1045,7 @@ impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
     fn resolve_export_target(
         &self,
         _dep_canonical: &str,
+        _dep_owner: verter_type_expr::TopLevelOwnerId,
         _requested_name: &str,
     ) -> Option<super::declaration_metadata::ResolvedExportTarget> {
         None
@@ -1041,10 +1062,15 @@ impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
     fn type_declaration_id(
         &self,
         canonical_source: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
     ) -> Option<DeclarationId> {
-        self.ctx
-            .local_type_declaration_id(canonical_source, resolved_name)
+        (owner == verter_type_expr::TopLevelOwnerId::ordinary_file())
+            .then(|| {
+                self.ctx
+                    .local_type_declaration_id(canonical_source, resolved_name)
+            })
+            .flatten()
     }
 
     fn resolve_type_dependency_canonical(
@@ -1058,9 +1084,15 @@ impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
     fn resolve_local_type_symbol_metadata(
         &self,
         canonical_source: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
     ) -> Option<super::declaration_metadata::ResolvedLocalTypeSymbolMetadata> {
-        local_type_symbol_metadata_for_known_source(self.ctx, canonical_source, resolved_name)
+        local_type_symbol_metadata_for_known_source(
+            self.ctx,
+            canonical_source,
+            owner,
+            resolved_name,
+        )
     }
 }
 

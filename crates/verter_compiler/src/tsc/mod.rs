@@ -14,6 +14,7 @@ mod tests;
 
 pub use script::{
     extract_tsc_state, generate_tsc_from_state, generate_tsc_output,
-    generate_tsc_output_with_options, ExtractedTscState, TscExtractOptions, TscGenOptions, TscMode,
-    TscOutput,
+    generate_tsc_output_with_options, ExtractedTscState, MacroTscInput, TscDeclarationShapeReason,
+    TscExtractOptions, TscFailureSubject, TscGenOptions, TscGenerationError,
+    TscInvalidAuthoredTypeReason, TscInvalidOutcome, TscMode, TscOutput, TscUnavailableOutcome,
 };

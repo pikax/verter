@@ -159,6 +159,7 @@ fn materialize_typeof_round_trips_type_args() {
         ValueRootKey {
             scope: ScopeId {
                 canonical_id: Arc::from("/m.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
             },
             name: Arc::from("factory"),

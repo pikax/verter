@@ -33,7 +33,10 @@ mod imports;
 pub mod jsdoc;
 mod macros;
 pub use macros::lower_macro_type_argument_at_span;
-pub use macros::{lower_macro_field_payload_at, MacroFieldPayloadLowering};
+pub use macros::{
+    lower_macro_field_payload_at, lower_macro_field_payload_at_with_owners,
+    MacroFieldPayloadLowering,
+};
 mod options;
 pub mod project_index;
 pub mod project_resolver;
@@ -42,6 +45,7 @@ pub mod scope;
 pub mod selector_match;
 pub mod style;
 pub mod template;
+pub mod top_level_owners;
 pub mod type_eval;
 pub mod type_eval_build;
 pub mod type_expand;
@@ -59,7 +63,9 @@ mod type_eval_build_tests;
 pub use build::{
     build_export_signatures, build_export_signatures_from_program, build_script_analysis,
     build_script_analysis_with_scope, build_script_analysis_with_scope_from_program,
+    build_script_analysis_with_scope_from_program_with_owners,
     build_script_analysis_with_scope_from_program_with_providers,
+    build_script_analysis_with_scope_from_program_with_providers_and_owners,
 };
 pub use classify::{classify_store_api, is_store_composable_call};
 pub use classify::{classify_vue_api, is_lifecycle_api, is_reactivity_api, is_watcher_api};
@@ -101,6 +107,10 @@ pub use template::{
     TemplateAttribute, TemplateBindingOccurrence, TemplateComponentUsage, TemplateDirective,
     TemplateElement, TemplateEventHandler, TemplatePropUsage, TemplateRef,
     TemplateTypeEnhancements, TypeMismatch, UnresolvedBinding, VForDirective, VModelDirective,
+};
+pub use top_level_owners::{
+    DeclMap, DeclMapKey, TopLevelAttachedOwner, TopLevelOwnerRegion, TopLevelOwnerRegionError,
+    TopLevelOwnerTable, TopLevelOwnerTableError, TopLevelStatementOwner,
 };
 pub use types::hash_16;
 pub use types::{

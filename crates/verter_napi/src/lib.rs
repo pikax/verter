@@ -581,6 +581,93 @@ pub struct NapiTscResponse {
     pub sourceMap: Option<String>,
 }
 
+/// Stable structured identity for a failed public-API projection.
+#[napi(object)]
+pub struct NapiTscMacroFailureSubject {
+    pub kind: String,
+    pub syntaxIndex: u32,
+}
+
+#[napi(object)]
+pub struct NapiSourceRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+#[napi(object)]
+pub struct NapiTscScriptSetupAttrsFailureSubject {
+    pub kind: String,
+    pub sourceRange: NapiSourceRange,
+}
+
+/// Stable structured identity for a failed public-API projection.
+#[napi(object)]
+pub struct NapiPublicApiProjectionError {
+    pub code: String,
+    pub detailCode: String,
+    pub subject: Either<NapiTscMacroFailureSubject, NapiTscScriptSetupAttrsFailureSubject>,
+    pub declarationShapeReason: Option<String>,
+    pub memberOrdinal: Option<u32>,
+    pub outcomeKind: Option<String>,
+    pub outcomeReason: Option<String>,
+    pub outcomeDiagnostic: Option<String>,
+}
+
+/// Explicit tri-state public-API result: value, ordinary absence, or failure.
+#[napi(object)]
+pub struct NapiPublicApiResult {
+    pub value: Option<NapiTscResponse>,
+    pub error: Option<NapiPublicApiProjectionError>,
+}
+
+impl From<FfiTscResponse> for NapiTscResponse {
+    fn from(value: FfiTscResponse) -> Self {
+        Self {
+            code: value.code,
+            sourceMap: value.source_map,
+        }
+    }
+}
+
+impl From<FfiPublicApiProjectionError> for NapiPublicApiProjectionError {
+    fn from(value: FfiPublicApiProjectionError) -> Self {
+        let subject = match value.subject {
+            FfiTscFailureSubject::Macro { syntax_index } => Either::A(NapiTscMacroFailureSubject {
+                kind: "macro".to_string(),
+                syntaxIndex: syntax_index,
+            }),
+            FfiTscFailureSubject::ScriptSetupAttrs { source_range } => {
+                Either::B(NapiTscScriptSetupAttrsFailureSubject {
+                    kind: "scriptSetupAttrs".to_string(),
+                    sourceRange: NapiSourceRange {
+                        start: source_range.start,
+                        end: source_range.end,
+                    },
+                })
+            }
+        };
+        Self {
+            code: value.code,
+            detailCode: value.detail_code,
+            subject,
+            declarationShapeReason: value.declaration_shape_reason,
+            memberOrdinal: value.member_ordinal,
+            outcomeKind: value.outcome_kind,
+            outcomeReason: value.outcome_reason,
+            outcomeDiagnostic: value.outcome_diagnostic,
+        }
+    }
+}
+
+impl From<FfiPublicApiResult> for NapiPublicApiResult {
+    fn from(value: FfiPublicApiResult) -> Self {
+        Self {
+            value: value.value.map(Into::into),
+            error: value.error.map(Into::into),
+        }
+    }
+}
+
 #[napi(object)]
 pub struct NapiRemoveResult {
     pub canonicalId: String,
@@ -1764,22 +1851,19 @@ impl NapiVerterHost {
     /// (a valid `.d.ts` with no runtime/value code). An unknown mode string
     /// is rejected with `InvalidArg`.
     ///
-    /// Returns `{ code, sourceMap? }` or `null` if no TSC output is available.
+    /// Returns `{ value, error }`; both are `null` for ordinary absence.
     #[napi(js_name = "getPublicApi")]
     pub fn get_public_api(
         &self,
         canonical_id: String,
         mode: Option<String>,
-    ) -> Result<Option<NapiTscResponse>> {
+    ) -> Result<NapiPublicApiResult> {
         let mode = ffi_public_api_mode_to_host(mode.as_deref()).map_err(ffi_err)?;
         let result = catch_panic(std::panic::AssertUnwindSafe(|| {
             self.inner
                 .get_public_api_with_mode(&canonical_id, mode, None)
         }))?;
-        Ok(result.map(|r| NapiTscResponse {
-            code: r.code.to_string(),
-            sourceMap: r.source_map.map(|s| s.to_string()),
-        }))
+        Ok(host_public_api_result_to_ffi(result).into())
     }
 
     /// Records the resolved import dependencies for a file.
@@ -3286,10 +3370,12 @@ mod tests {
         let decl = napi_host
             .get_public_api("/src/Cap.vue".to_string(), Some("declaration".to_string()))
             .expect("the NAPI binding must accept mode 'declaration'")
+            .value
             .expect("declaration-mode output for a Vue SFC");
         let public = napi_host
             .get_public_api("/src/Cap.vue".to_string(), Some("public".to_string()))
             .expect("mode 'public' stays accepted")
+            .value
             .expect("public-mode output for a Vue SFC");
 
         // Declaration-specific shape: a valid `.d.ts` — declares the
@@ -3338,10 +3424,12 @@ mod tests {
         let absent = napi_host
             .get_public_api("/src/Cap.vue".to_string(), None)
             .expect("absent mode stays accepted")
+            .value
             .expect("default-mode output for a Vue SFC");
         let public = napi_host
             .get_public_api("/src/Cap.vue".to_string(), Some("public".to_string()))
             .expect("mode 'public' stays accepted")
+            .value
             .expect("public-mode output for a Vue SFC");
         assert_eq!(
             absent.code, public.code,
@@ -3370,5 +3458,132 @@ mod tests {
             "the rejection lists 'declaration' among the accepted modes: {}",
             err.reason
         );
+    }
+
+    #[test]
+    fn get_public_api_binding_preserves_unsafe_enum_error_and_absence_controls() {
+        let napi_host = NapiVerterHost {
+            inner: std::sync::Arc::new(host::VerterHost::new_standalone(
+                host::HostConfig::default(),
+            )),
+        };
+        napi_host
+            .inner
+            .upsert(host::UpsertRequest {
+                canonical_id: Some("/src/UnsafeEnum.vue".to_string()),
+                input_id: "/src/UnsafeEnum.vue".to_string(),
+                source: std::sync::Arc::from(
+                    r#"<script setup lang="ts">
+enum Unsafe { Value = Math.random() }
+defineProps<{ value: Unsafe }>()
+</script>"#,
+                ),
+                file_language: host::FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert unsafe enum");
+        napi_host
+            .inner
+            .upsert(host::UpsertRequest {
+                canonical_id: Some("/src/plain.ts".to_string()),
+                input_id: "/src/plain.ts".to_string(),
+                source: std::sync::Arc::from("export const value = 1"),
+                file_language: host::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert non-carrier control");
+
+        let failure = napi_host
+            .get_public_api(
+                "/src/UnsafeEnum.vue".to_string(),
+                Some("declaration".to_string()),
+            )
+            .expect("projection failure uses the result error rail");
+        assert!(failure.value.is_none());
+        let error = failure.error.expect("structured projection error");
+        assert_eq!(error.code, "tsc-generation");
+        assert_eq!(error.detailCode, "unsupported-declaration-shape");
+        assert!(matches!(
+            error.subject,
+            Either::A(NapiTscMacroFailureSubject { syntaxIndex: 0, .. })
+        ));
+        assert_eq!(
+            error.declarationShapeReason.as_deref(),
+            Some("unsupported-enum-shape")
+        );
+        assert_eq!(error.memberOrdinal, None);
+        assert_eq!(error.outcomeKind, None);
+        assert_eq!(error.outcomeReason, None);
+        assert_eq!(error.outcomeDiagnostic, None);
+
+        for canonical in ["/src/Missing.vue", "/src/plain.ts"] {
+            let absent = napi_host
+                .get_public_api(canonical.to_string(), Some("declaration".to_string()))
+                .expect("ordinary absence is a successful binding result");
+            assert!(absent.value.is_none(), "{canonical}: value must be null");
+            assert!(absent.error.is_none(), "{canonical}: error must be null");
+        }
+    }
+
+    #[test]
+    fn public_api_binding_preserves_all_unavailable_outcome_arms() {
+        let cases = [
+            ("partial", "incomplete-traversal", "partial detail"),
+            ("unresolved", "ambiguous-reference", "unresolved detail"),
+            ("unsupported", "semantic-construct", "unsupported detail"),
+            ("invalid", "non-object-root", "invalid detail"),
+        ];
+
+        for (syntax_index, (kind, reason, diagnostic)) in cases.into_iter().enumerate() {
+            let error: NapiPublicApiProjectionError = FfiPublicApiProjectionError {
+                code: "tsc-generation".to_string(),
+                detail_code: "unavailable-outcome".to_string(),
+                subject: FfiTscFailureSubject::Macro {
+                    syntax_index: syntax_index as u32,
+                },
+                declaration_shape_reason: None,
+                member_ordinal: None,
+                outcome_kind: Some(kind.to_string()),
+                outcome_reason: Some(reason.to_string()),
+                outcome_diagnostic: Some(diagnostic.to_string()),
+            }
+            .into();
+
+            assert_eq!(error.code, "tsc-generation");
+            assert_eq!(error.detailCode, "unavailable-outcome");
+            assert!(matches!(
+                error.subject,
+                Either::A(NapiTscMacroFailureSubject {
+                    syntaxIndex,
+                    ..
+                }) if syntaxIndex == syntax_index as u32
+            ));
+            assert_eq!(error.declarationShapeReason, None);
+            assert_eq!(error.memberOrdinal, None);
+            assert_eq!(error.outcomeKind.as_deref(), Some(kind));
+            assert_eq!(error.outcomeReason.as_deref(), Some(reason));
+            assert_eq!(error.outcomeDiagnostic.as_deref(), Some(diagnostic));
+        }
+
+        let attrs_error: NapiPublicApiProjectionError = FfiPublicApiProjectionError {
+            code: "tsc-generation".to_string(),
+            detail_code: "unavailable-outcome".to_string(),
+            subject: FfiTscFailureSubject::ScriptSetupAttrs {
+                source_range: verter_span::Span::new(31, 37),
+            },
+            declaration_shape_reason: None,
+            member_ordinal: None,
+            outcome_kind: Some("invalid".to_string()),
+            outcome_reason: Some("malformed-or-recovered-type-syntax".to_string()),
+            outcome_diagnostic: None,
+        }
+        .into();
+        assert!(matches!(
+            attrs_error.subject,
+            Either::B(NapiTscScriptSetupAttrsFailureSubject {
+                sourceRange: NapiSourceRange { start: 31, end: 37 },
+                ..
+            })
+        ));
     }
 }

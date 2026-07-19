@@ -401,9 +401,10 @@ fn c2_peel_value_decl_alias_graph_native_matches_oracle_terminal_and_is_bounded(
          export const dangling: typeof ghost = base\n",
     );
 
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
     for name in ["reexp", "base", "dangling"] {
-        let oracle = host.peel_value_decl_alias_for_test("/src/vals.ts", name);
-        let graph = host.peel_value_decl_alias_graph_native_for_test("/src/vals.ts", name);
+        let oracle = host.peel_value_decl_alias_for_test("/src/vals.ts", owner, name);
+        let graph = host.peel_value_decl_alias_graph_native_for_test("/src/vals.ts", owner, name);
         assert_eq!(
             oracle, graph,
             "C2 terminal divergence for `{name}`: oracle={oracle:?} graph_native={graph:?}"
@@ -411,9 +412,10 @@ fn c2_peel_value_decl_alias_graph_native_matches_oracle_terminal_and_is_bounded(
     }
 
     // `reexp` peels to `base`.
-    let peeled = host.peel_value_decl_alias_graph_native_for_test("/src/vals.ts", "reexp");
-    assert_eq!(peeled.0, "/src/vals.ts");
-    assert_eq!(peeled.1, "base", "reexp = typeof base must peel to base");
+    let peeled = host.peel_value_decl_alias_graph_native_for_test("/src/vals.ts", owner, "reexp");
+    assert_eq!(peeled.canonical_id, "/src/vals.ts");
+    assert_eq!(peeled.owner, owner);
+    assert_eq!(peeled.name, "base", "reexp = typeof base must peel to base");
 
     // BOUND: on a FRESH host where ONLY the graph-native peeler runs,
     // whole_env() must NOT be materialised.
@@ -423,7 +425,7 @@ fn c2_peel_value_decl_alias_graph_native_matches_oracle_terminal_and_is_bounded(
         "/src/bvals.ts",
         "export const base = { color: 'red' }\nexport const reexp = base\n",
     );
-    let _ = bound_host.peel_value_decl_alias_graph_native_for_test("/src/bvals.ts", "reexp");
+    let _ = bound_host.peel_value_decl_alias_graph_native_for_test("/src/bvals.ts", owner, "reexp");
     assert!(
         !whole_env_materialized(&bound_host, "/src/bvals.ts"),
         "C2 graph-native reader must NOT materialise whole_env()"
@@ -552,11 +554,12 @@ fn f1_c2_debug_cross_check_is_excluded_for_svelte_rune_modules() {
     // the gate, the rune module is excluded → the divergent terminal does
     // NOT panic. The oracle terminal lands on `$state` (the ambient hop);
     // the call completing WITHOUT a debug panic is the assertion.
-    let (canonical, terminal) =
-        host.peel_value_decl_alias_for_test("/src/runes.svelte.ts", "reexp");
-    assert_eq!(canonical, "/src/runes.svelte.ts");
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let peeled = host.peel_value_decl_alias_for_test("/src/runes.svelte.ts", owner, "reexp");
+    assert_eq!(peeled.canonical_id, "/src/runes.svelte.ts");
+    assert_eq!(peeled.owner, owner);
     assert_eq!(
-        terminal, "$state",
+        peeled.name, "$state",
         "the oracle peels the rune alias to the ambient `$state` (whole_env carries it); the gate \
          excludes the graph-native cross-check that would otherwise panic on this divergence"
     );
@@ -564,9 +567,8 @@ fn f1_c2_debug_cross_check_is_excluded_for_svelte_rune_modules() {
     // A plain (non-`$rune`) value in the SAME rune module still agrees
     // (no ambient divergence), so the gate does not mask real divergences
     // for ordinary symbols.
-    let (_pc, plain_terminal) =
-        host.peel_value_decl_alias_for_test("/src/runes.svelte.ts", "plain");
-    assert_eq!(plain_terminal, "plain");
+    let plain = host.peel_value_decl_alias_for_test("/src/runes.svelte.ts", owner, "plain");
+    assert_eq!(plain.name, "plain");
 }
 
 /// C4 BOUND — on a FRESH host where ONLY
@@ -676,8 +678,7 @@ fn sfc_script_setup_generic_param_is_not_a_type_declaration_id_in_oracle_or_grap
 }
 
 /// A recording `ImportedRuntimeValueResolver` that wraps the REAL
-/// host-backed resolution and records the `(source_canonical_id,
-/// source_name)` pair the materializer computes as the source identity of
+/// host-backed resolution and records the exact source identity the materializer computes for
 /// every binding it actually admits.
 ///
 /// Every method delegates to the same host APIs the production
@@ -688,13 +689,12 @@ fn sfc_script_setup_generic_param_is_not_a_type_declaration_id_in_oracle_or_grap
 /// materializer's binding filter. The hook records inside
 /// `resolve_value_export_target`, which the materializer calls exactly once
 /// per filter-admitted binding (before any hydration-failure `continue`),
-/// mirroring the materializer's `Some(target)`-or-`(dep, imported_name)`
-/// fallback so the recorded pair is byte-identical to the source identity
-/// the materializer computes in BOTH branches.
+/// recording only successfully resolved targets; unresolved targets are not hydrated.
 #[cfg(not(target_arch = "wasm32"))]
 struct RecordingRuntimeValueResolver<'a> {
     host: &'a crate::VerterHost,
-    touched: std::cell::RefCell<std::collections::BTreeSet<(String, String)>>,
+    touched:
+        std::cell::RefCell<std::collections::BTreeSet<crate::resolver_core::ValueDeclIdentity>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -708,38 +708,29 @@ impl crate::resolver_core::ImportedRuntimeValueResolver for RecordingRuntimeValu
 
     fn dependency_value_symbol_graph_native(
         &self,
-        source_canonical_id: &str,
-        source_name: &str,
+        source: &crate::resolver_core::ValueDeclIdentity,
     ) -> Option<verter_semantic::analysis::type_eval::ValueDeclInfo> {
-        self.host
-            .dependency_value_symbol_graph_native(source_canonical_id, source_name)
+        self.host.dependency_value_symbol_graph_native_in(source)
     }
 
     fn prepared_value_decl(
         &self,
-        canonical_id: &str,
-        symbol_name: &str,
+        source: &crate::resolver_core::ValueDeclIdentity,
     ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
-        self.host.prepared_value_decl(canonical_id, symbol_name)
+        self.host
+            .prepared_value_decl_in(&source.canonical_id, source.owner, &source.name)
     }
 
     fn resolve_value_export_target(
         &self,
-        dep_canonical_id: &str,
-        imported_name: &str,
-    ) -> Option<(String, String)> {
-        // Delegate to the REAL host export-target resolution, then record
-        // the SAME source pair the materializer derives — both the resolved
-        // target and the `(dep, imported_name)` fallback the materializer
-        // applies when resolution misses.
+        requested: &crate::resolver_core::ValueDeclIdentity,
+    ) -> Option<crate::resolver_core::ValueDeclIdentity> {
         let resolved = self
             .host
-            .resolve_value_export_target(dep_canonical_id, imported_name)
-            .map(|target| (target.canonical_id, target.name));
-        let pair = resolved
-            .clone()
-            .unwrap_or_else(|| (dep_canonical_id.to_string(), imported_name.to_string()));
-        self.touched.borrow_mut().insert(pair);
+            .resolve_value_export_target(&requested.canonical_id, &requested.name);
+        if let Some(target) = resolved.as_ref() {
+            self.touched.borrow_mut().insert(target.clone());
+        }
         resolved
     }
 }
@@ -769,7 +760,7 @@ fn materializer_touched_source_pairs(
     host: &crate::VerterHost,
     owner: &str,
     snapshot: &crate::types::FileAnalysisSnapshot,
-) -> std::collections::BTreeSet<(String, String)> {
+) -> std::collections::BTreeSet<crate::resolver_core::ValueDeclIdentity> {
     // The materializer's INPUTS (its parameters), identical to what the
     // production `build_fallthrough_eval_env_lightweight` template path
     // passes: the required template runtime-value names + the owner-local
@@ -778,7 +769,7 @@ fn materializer_touched_source_pairs(
         crate::host_manage::component_meta_extract::collect_required_template_runtime_value_names(
             snapshot,
         );
-    let owner_local_value_names: rustc_hash::FxHashSet<String> = host
+    let owner_local_value_names: rustc_hash::FxHashSet<verter_type_expr::DeclKey> = host
         .base_eval_env_arc(owner)
         .map(|env| env.value_symbols.keys().cloned().collect())
         .unwrap_or_default();
@@ -862,8 +853,7 @@ fn c3_fallthrough_runtime_value_deps_graph_native_equals_materializer_touched_fu
         .expect("owner analysis snapshot");
 
     // Graph-native dep extraction (template path → root_reachability None).
-    let deps: std::collections::BTreeSet<(String, String)> =
-        host.fallthrough_runtime_value_deps_graph_native("/src/Owner.vue", &snapshot, None);
+    let deps = host.fallthrough_runtime_value_deps_graph_native("/src/Owner.vue", &snapshot, None);
 
     // The authoritative materializer-touched FULL pair set (legacy oracle
     // export-target resolution).
@@ -880,15 +870,18 @@ fn c3_fallthrough_runtime_value_deps_graph_native_equals_materializer_touched_fu
     // identity (proving the fixture exercises a non-trivial pair, and the
     // extractor follows the barrel to dep.ts under the underlying name).
     assert!(
-        deps.iter()
-            .any(|(canonical, name)| canonical == "/src/dep.ts" && name == "themeImpl"),
+        deps.iter().any(|identity| {
+            identity.canonical_id == "/src/dep.ts"
+                && identity.owner == verter_type_expr::TopLevelOwnerId::ordinary_file()
+                && identity.name == "themeImpl"
+        }),
         "the required, template-referenced `theme` must resolve through the barrel to its real \
          source (/src/dep.ts, themeImpl): {deps:?}"
     );
     assert!(
         !deps
             .iter()
-            .any(|(_, name)| name == "helper" || name == "helperImpl"),
+            .any(|identity| identity.name == "helper" || identity.name == "helperImpl"),
         "the unused `helper` must NOT be a graph-native dep (filtered to required names): {deps:?}"
     );
 }
@@ -959,11 +952,14 @@ fn c3_fallthrough_oracle_value_symbol_surface_matches_graph_native_dep_set() {
         .expect("owner analysis snapshot");
 
     // The graph-native dep SET (the selection the surface must match).
-    let deps: std::collections::BTreeSet<(String, String)> =
-        host.fallthrough_runtime_value_deps_graph_native("/src/Owner.vue", &snapshot, None);
+    let deps = host.fallthrough_runtime_value_deps_graph_native("/src/Owner.vue", &snapshot, None);
     assert_eq!(
         deps,
-        std::collections::BTreeSet::from([("/src/dep.ts".to_string(), "themeImpl".to_string())]),
+        std::collections::BTreeSet::from([crate::resolver_core::ValueDeclIdentity {
+            canonical_id: "/src/dep.ts".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            name: "themeImpl".to_string(),
+        }]),
         "the required `theme` resolves through the barrel to its single source pair: {deps:?}"
     );
 
@@ -990,9 +986,9 @@ fn c3_fallthrough_oracle_value_symbol_surface_matches_graph_native_dep_set() {
     // equals the graph-native per-symbol reader for the SOURCE the single dep
     // pair names (`(/src/dep.ts, themeImpl)`) — so the oracle hydrated from the
     // SAME source the graph-native set resolves, not a barrel-stop.
-    let (source_canonical, source_name) = deps.iter().next().expect("one dep pair").clone();
+    let source = deps.iter().next().expect("one dep identity");
     let graph_source = host
-        .dependency_value_symbol_graph_native(&source_canonical, &source_name)
+        .dependency_value_symbol_graph_native_in(source)
         .expect("graph-native reader must resolve the dep-pair source");
     let oracle_binding = env
         .value_symbols
@@ -1002,7 +998,7 @@ fn c3_fallthrough_oracle_value_symbol_surface_matches_graph_native_dep_set() {
     assert_eq!(
         oracle_binding.object_shape, graph_source.object_shape,
         "the oracle-hydrated `theme` surface must carry the SAME value content as the \
-         graph-native reader for the dep-pair source `({source_canonical}, {source_name})` \
+         graph-native reader for the dep source `{source:?}` \
          — proving both consumers hydrated from the same source, not a barrel-stop"
     );
     assert_eq!(
@@ -1088,11 +1084,14 @@ fn c3_double_alias_onto_same_source_drives_readiness_without_false_panic() {
     // The graph-native dep set collapses both aliased bindings onto the
     // SINGLE underlying source pair — exactly what makes the retired
     // name-count `>=` proxy unsound.
-    let deps: std::collections::BTreeSet<(String, String)> =
-        host.fallthrough_runtime_value_deps_graph_native("/src/Owner.vue", &snapshot, None);
+    let deps = host.fallthrough_runtime_value_deps_graph_native("/src/Owner.vue", &snapshot, None);
     assert_eq!(
         deps,
-        std::collections::BTreeSet::from([("/src/m.ts".to_string(), "xImpl".to_string())]),
+        std::collections::BTreeSet::from([crate::resolver_core::ValueDeclIdentity {
+            canonical_id: "/src/m.ts".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            name: "xImpl".to_string(),
+        }]),
         "two aliases onto the same source must yield exactly the single (source_canonical, \
          source_name) pair: {deps:?}"
     );

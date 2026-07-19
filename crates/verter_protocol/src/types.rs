@@ -349,6 +349,71 @@ pub struct FfiIdeResponse {
     pub destructured_block: Option<FfiDestructuredBlockMeta>,
 }
 
+/// TSC public-API projection payload.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiTscResponse {
+    pub code: String,
+    pub source_map: Option<String>,
+}
+
+/// Stable structured identity for a failed public-API projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum FfiTscFailureSubject {
+    Macro { syntax_index: u32 },
+    ScriptSetupAttrs { source_range: verter_span::Span },
+}
+
+#[cfg(test)]
+mod ffi_tsc_failure_subject_tests {
+    use super::FfiTscFailureSubject;
+
+    #[test]
+    fn serializes_as_closed_discriminated_union() {
+        assert_eq!(
+            serde_json::to_value(FfiTscFailureSubject::Macro { syntax_index: 7 }).unwrap(),
+            serde_json::json!({ "kind": "macro", "syntaxIndex": 7 })
+        );
+        assert_eq!(
+            serde_json::to_value(FfiTscFailureSubject::ScriptSetupAttrs {
+                source_range: verter_span::Span::new(31, 37),
+            })
+            .unwrap(),
+            serde_json::json!({
+                "kind": "scriptSetupAttrs",
+                "sourceRange": { "start": 31, "end": 37 },
+            })
+        );
+    }
+}
+
+/// Stable structured identity for a failed public-API projection.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiPublicApiProjectionError {
+    pub code: String,
+    pub detail_code: String,
+    pub subject: FfiTscFailureSubject,
+    pub declaration_shape_reason: Option<String>,
+    pub member_ordinal: Option<u32>,
+    pub outcome_kind: Option<String>,
+    pub outcome_reason: Option<String>,
+    pub outcome_diagnostic: Option<String>,
+}
+
+/// Explicit tri-state public-API result: value, ordinary absence, or failure.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiPublicApiResult {
+    pub value: Option<FfiTscResponse>,
+    pub error: Option<FfiPublicApiProjectionError>,
+}
+
 /// Result of removing a file from the host.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

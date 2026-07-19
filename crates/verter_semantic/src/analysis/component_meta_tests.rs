@@ -29,6 +29,7 @@ pub(crate) fn test_payload(field_index: u32) -> MacroPayloadLocator {
     MacroPayloadLocator {
         anchor: AuthoredAnchor {
             canonical_id: Arc::from(""),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             symbol: Arc::from("default"),
             space: LocatorSymbolSpace::Value,
         },
@@ -83,6 +84,7 @@ fn empty_input(macros: &[AnalyzedMacro]) -> ComponentMetaInput<'_> {
 fn make_define_props(fields: Vec<AnalyzedPropField>) -> AnalyzedMacro {
     AnalyzedMacro {
         kind: AnalyzedMacroKind::DefineProps,
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         is_type_based: true,
         type_references: Vec::new(),
         binding_name: None,

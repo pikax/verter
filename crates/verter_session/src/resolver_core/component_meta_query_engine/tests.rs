@@ -44,7 +44,11 @@ export interface AvatarProps {
     let mut engine = ComponentMetaQueryEngine::new(&host);
 
     let declaration = engine
-        .resolve_direct_prepared_type_declaration("/src/Avatar.vue", "AvatarProps")
+        .resolve_direct_prepared_type_declaration(
+            "/src/Avatar.vue",
+            verter_type_expr::TopLevelOwnerId::module(0),
+            "AvatarProps",
+        )
         .expect("direct prepared declaration should resolve");
 
     assert_eq!(declaration.canonical_source, "/src/Avatar.vue");
@@ -96,7 +100,11 @@ export interface AvatarProps {
     let mut engine = ComponentMetaQueryEngine::new(&host);
 
     let declaration = engine
-        .resolve_direct_prepared_type_declaration_metadata("/src/Avatar.vue", "AvatarProps")
+        .resolve_direct_prepared_type_declaration_metadata(
+            "/src/Avatar.vue",
+            verter_type_expr::TopLevelOwnerId::module(0),
+            "AvatarProps",
+        )
         .expect("direct prepared metadata should resolve");
 
     assert_eq!(declaration.canonical_source, "/src/Avatar.vue");
@@ -440,7 +448,12 @@ export interface LinkProps extends NuxtLinkProps {
         crate::resolver_core::RouteDemand::pick(vec!["to".to_string(), "target".to_string()]);
 
     let projected = query_engine
-        .dispatch_routed_expr_surface_node("/src/Link.vue", "LinkProps", &route)
+        .dispatch_routed_expr_surface_node(
+            "/src/Link.vue",
+            verter_type_expr::TopLevelOwnerId::module(0),
+            "LinkProps",
+            &route,
+        )
         .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
         .expect("member-viable inherited pick route should project to the requested members only");
     let TypeExpr::Object(object) = &projected else {
@@ -530,7 +543,12 @@ export class MixedClass {
     // Positive control: Pick of the PUBLIC key materialises it.
     let pub_route = crate::resolver_core::RouteDemand::pick(vec!["open".to_string()]);
     if let Some(projected) = query_engine
-        .dispatch_routed_expr_surface_node("/src/Mixed.vue", "MixedClass", &pub_route)
+        .dispatch_routed_expr_surface_node(
+            "/src/Mixed.vue",
+            verter_type_expr::TopLevelOwnerId::module(0),
+            "MixedClass",
+            &pub_route,
+        )
         .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
     {
         assert!(
@@ -543,7 +561,12 @@ export class MixedClass {
     for key in ["secret", "guarded"] {
         let route = crate::resolver_core::RouteDemand::pick(vec![key.to_string()]);
         let projected = query_engine
-            .dispatch_routed_expr_surface_node("/src/Mixed.vue", "MixedClass", &route)
+            .dispatch_routed_expr_surface_node(
+                "/src/Mixed.vue",
+                verter_type_expr::TopLevelOwnerId::module(0),
+                "MixedClass",
+                &route,
+            )
             .and_then(|node| {
                 super::surface::materialize_route_projection_node(query_engine.ctx, &node)
             });
@@ -559,7 +582,12 @@ export class MixedClass {
     // members on the routed surface.
     let omit_route = crate::resolver_core::RouteDemand::omit(vec!["open".to_string()]);
     if let Some(projected) = query_engine
-        .dispatch_routed_expr_surface_node("/src/Mixed.vue", "MixedClass", &omit_route)
+        .dispatch_routed_expr_surface_node(
+            "/src/Mixed.vue",
+            verter_type_expr::TopLevelOwnerId::module(0),
+            "MixedClass",
+            &omit_route,
+        )
         .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
     {
         let names = member_names(&projected);
@@ -619,7 +647,12 @@ export interface LinkProps extends NuxtLinkProps {
         crate::resolver_core::RouteDemand::pick(vec!["to".to_string(), "target".to_string()]);
 
     let projected = query_engine
-        .dispatch_routed_expr_surface_node("/src/Link.vue", "LinkProps", &route)
+        .dispatch_routed_expr_surface_node(
+            "/src/Link.vue",
+            verter_type_expr::TopLevelOwnerId::module(0),
+            "LinkProps",
+            &route,
+        )
         .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
         .expect("package-backed inherited pick route should project");
     let TypeExpr::Object(object) = &projected else {
@@ -717,7 +750,12 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         crate::resolver_core::RouteDemand::pick(vec!["to".to_string(), "target".to_string()]);
 
     let projected = query_engine
-        .dispatch_routed_expr_surface_node("/src/Link.vue", "LinkProps", &route)
+        .dispatch_routed_expr_surface_node(
+            "/src/Link.vue",
+            verter_type_expr::TopLevelOwnerId::module(0),
+            "LinkProps",
+            &route,
+        )
         .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
         .expect(
             "local inherited members should project without deepening unrelated imported utility bases",
@@ -843,7 +881,12 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         crate::resolver_core::RouteDemand::pick(vec!["target".to_string(), "to".to_string()]);
 
     let projected = query_engine
-        .dispatch_routed_expr_surface_node("/src/Link.vue", "LinkProps", &route)
+        .dispatch_routed_expr_surface_node(
+            "/src/Link.vue",
+            verter_type_expr::TopLevelOwnerId::module(0),
+            "LinkProps",
+            &route,
+        )
         .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
         .expect("realistic inherited pick route should project to the requested members only");
     let TypeExpr::Object(object) = &projected else {
@@ -970,7 +1013,12 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         crate::resolver_core::RouteDemand::pick(vec!["target".to_string(), "to".to_string()]);
 
     let projected = query_engine
-        .dispatch_routed_expr_surface_node("/src/Link.vue", "LinkProps", &route)
+        .dispatch_routed_expr_surface_node(
+            "/src/Link.vue",
+            verter_type_expr::TopLevelOwnerId::module(0),
+            "LinkProps",
+            &route,
+        )
         .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
         .expect("module-routed inherited pick route should project to the requested members only");
     let TypeExpr::Object(object) = &projected else {
@@ -1057,6 +1105,7 @@ type F<T> = <T>(x: T) => T
     let instantiated = crate::resolver_core::lower_and_project_to_expanded_node(
         query_engine.ctx,
         "/src/App.vue",
+        verter_type_expr::TopLevelOwnerId::instance(0),
         &expr,
     )
     .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
@@ -1983,7 +2032,11 @@ fn resolve_imported_registry_symbol_reuses_value_on_admission_failure_without_re
     let _refusal = super::force_imported_registry_admission_refusal_for_tests();
     super::reset_imported_registry_resolve_invocations_for_tests();
 
-    let resolved = engine.resolve_imported_registry_symbol("/src/index.ts", "ButtonProps");
+    let resolved = engine.resolve_imported_registry_symbol(
+        "/src/index.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "ButtonProps",
+    );
 
     let resolve_invocations = super::imported_registry_resolve_invocations_for_tests();
     let fuse_consumed = engine
@@ -2111,12 +2164,14 @@ fn resolve_imported_registry_symbol_surfaces_concurrently_published_value() {
     // shared DB for the SAME key while this request was cold.
     let concurrent_symbol = ResolvedImportedRegistrySymbol {
         canonical_id: "/concurrent_pub/types.ts".to_string(),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         exported_name: "Props".to_string(),
         body: verter_type_expr::facts::PreparedTypeBodyFacts {
             classification: verter_type_expr::facts::TypeBodyClass::Interface,
             body_slot: verter_type_expr::locators::TypeBodySlot {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
                     canonical_id: Arc::from("/concurrent_pub/types.ts"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     symbol: Arc::from("Props"),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                 },
@@ -2133,7 +2188,11 @@ fn resolve_imported_registry_symbol_surfaces_concurrently_published_value() {
     // the producer's local slow-lane `resolved` is `None`. The injected
     // concurrent publish makes `get_or_compute` return `Some(<the
     // published symbol>)` via its warm-hit arm.
-    let resolved = engine.resolve_imported_registry_symbol("/concurrent_pub/index.ts", "Missing");
+    let resolved = engine.resolve_imported_registry_symbol(
+        "/concurrent_pub/index.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "Missing",
+    );
 
     let resolved = resolved.expect(
         "the producer MUST surface the concurrently-published value `get_or_compute` returns \
@@ -2293,6 +2352,7 @@ fn resolve_imported_registry_symbol_resolves_once_under_concurrent_misses() {
     // coalescing rendezvous.
     let inflight_key: crate::component_meta_caches::ImportedRegistryKey = (
         std::sync::Arc::<str>::from("/singleflight/index.ts"),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         std::sync::Arc::<str>::from("Wide"),
     );
 
@@ -2308,8 +2368,11 @@ fn resolve_imported_registry_symbol_resolves_once_under_concurrent_misses() {
                         // consumption count, not a near-fanout trip.
                         engine.prime_wildcard_route_fuse_for_tests(WORKERS + 4);
                         let fuse_before = engine.wildcard_route_fuse_consumed_for_tests();
-                        let resolved = engine
-                            .resolve_imported_registry_symbol("/singleflight/index.ts", "Wide");
+                        let resolved = engine.resolve_imported_registry_symbol(
+                            "/singleflight/index.ts",
+                            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                            "Wide",
+                        );
                         let fuse_consumed = engine
                             .wildcard_route_fuse_consumed_for_tests()
                             .saturating_sub(fuse_before);
@@ -2454,7 +2517,11 @@ fn fuse_tripped_route_only_symbol_admits_no_warm_negative_and_fresh_resolves() {
     {
         let mut engine = ComponentMetaQueryEngine::new(host.as_ref());
         engine.prime_wildcard_route_fuse_for_tests(0);
-        let resolved = engine.resolve_imported_registry_symbol("/m4_src/index.ts", "ButtonProps");
+        let resolved = engine.resolve_imported_registry_symbol(
+            "/m4_src/index.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "ButtonProps",
+        );
         assert!(
             resolved.is_none(),
             "the fuse-tripped request returns no symbol (the route was never taken)",
@@ -2476,7 +2543,11 @@ fn fuse_tripped_route_only_symbol_admits_no_warm_negative_and_fresh_resolves() {
     // Request 2 — FRESH engine WITH budget. The symbol resolves (proving
     // no warm negative short-circuited it to None).
     let mut engine2 = ComponentMetaQueryEngine::new(host.as_ref());
-    let resolved2 = engine2.resolve_imported_registry_symbol("/m4_src/index.ts", "ButtonProps");
+    let resolved2 = engine2.resolve_imported_registry_symbol(
+        "/m4_src/index.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "ButtonProps",
+    );
     let resolved2 = resolved2.expect(
         "a fresh request WITH wildcard-route budget MUST resolve the route-only symbol — \
          a cached fuse-trip negative would spuriously short-circuit it to None",
@@ -2518,7 +2589,12 @@ fn fuse_tripped_resolvability_does_not_cache_derived_false() {
         let _guard = RequestContextGuard::install(rctx);
         let mut engine = ComponentMetaQueryEngine::new(host.as_ref());
         engine.prime_wildcard_route_fuse_for_tests(0);
-        let _ = engine.can_resolve_registry_symbol("/m4_src/index.ts", "ButtonProps", None);
+        let _ = engine.can_resolve_registry_symbol(
+            "/m4_src/index.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "ButtonProps",
+            None,
+        );
         assert!(
             engine.has_fuse_tripped(),
             "fixture invariant: the wildcard-route fuse tripped during resolvability",
@@ -2538,7 +2614,12 @@ fn fuse_tripped_resolvability_does_not_cache_derived_false() {
 
     // Request 2 — FRESH engine WITH budget. The symbol IS resolvable.
     let mut engine2 = ComponentMetaQueryEngine::new(host.as_ref());
-    let resolvable2 = engine2.can_resolve_registry_symbol("/m4_src/index.ts", "ButtonProps", None);
+    let resolvable2 = engine2.can_resolve_registry_symbol(
+        "/m4_src/index.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "ButtonProps",
+        None,
+    );
     assert!(
         resolvable2,
         "a fresh request WITH wildcard-route budget MUST report the route-only symbol \
@@ -2580,7 +2661,12 @@ fn fenced_serve_resolvability_verdict_is_not_admitted() {
         let _guard = RequestContextGuard::install(rctx);
         let mut engine = ComponentMetaQueryEngine::new(control.as_ref());
         assert!(
-            engine.can_resolve_registry_symbol("/m4_src/index.ts", "ButtonProps", None),
+            engine.can_resolve_registry_symbol(
+                "/m4_src/index.ts",
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "ButtonProps",
+                None,
+            ),
             "fixture invariant: the route-only symbol resolves",
         );
     }
@@ -2604,7 +2690,12 @@ fn fenced_serve_resolvability_verdict_is_not_admitted() {
         host.test_force
             .force_indexed_ready_serve_fence_for_tests
             .store(true, Ordering::Relaxed);
-        let _ = engine.can_resolve_registry_symbol("/m4_src/index.ts", "ButtonProps", None);
+        let _ = engine.can_resolve_registry_symbol(
+            "/m4_src/index.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "ButtonProps",
+            None,
+        );
         host.test_force
             .force_indexed_ready_serve_fence_for_tests
             .store(false, Ordering::Relaxed);
@@ -2655,7 +2746,12 @@ fn tracer_overflow_refuses_resolvability_verdict_admission() {
         let _guard = RequestContextGuard::install(rctx);
         let mut engine = ComponentMetaQueryEngine::new(control.as_ref());
         assert!(
-            engine.can_resolve_registry_symbol("/m4_src/index.ts", "ButtonProps", None),
+            engine.can_resolve_registry_symbol(
+                "/m4_src/index.ts",
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "ButtonProps",
+                None,
+            ),
             "fixture invariant: the route-only symbol resolves",
         );
     }
@@ -2681,8 +2777,12 @@ fn tracer_overflow_refuses_resolvability_verdict_admission() {
                 crate::resolver_core::FACT_SIGNATURE_CAP + 1,
                 Ordering::Relaxed,
             );
-        let resolvable =
-            engine.can_resolve_registry_symbol("/m4_src/index.ts", "ButtonProps", None);
+        let resolvable = engine.can_resolve_registry_symbol(
+            "/m4_src/index.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "ButtonProps",
+            None,
+        );
         host.test_force
             .force_fact_tracer_overflow_observations
             .store(0, Ordering::Relaxed);
@@ -2758,8 +2858,10 @@ fn scope_shadowing_is_built_once_per_scope_and_memoized() {
     // Two probes for the SAME scope reuse ONE cached instance — the
     // discriminating identity check. A per-field `from_scope_payload` rebuild
     // returns two distinct `Arc`s and FAILS `ptr_eq`.
-    let first = engine.scope_shadowing_for_scope("/src/A.vue");
-    let second = engine.scope_shadowing_for_scope("/src/A.vue");
+    let first = engine
+        .scope_shadowing_for_scope("/src/A.vue", verter_type_expr::TopLevelOwnerId::module(0));
+    let second = engine
+        .scope_shadowing_for_scope("/src/A.vue", verter_type_expr::TopLevelOwnerId::module(0));
     assert!(
         Arc::ptr_eq(&first, &second),
         "the per-scope ScopeShadowing must be built ONCE and memoized — both probes \
@@ -2780,7 +2882,8 @@ fn scope_shadowing_is_built_once_per_scope_and_memoized() {
 
     // A DIFFERENT scope gets its OWN distinct cached instance (no aliasing) and
     // observes ITS scope's shadow names (no userland `Pick` there).
-    let other = engine.scope_shadowing_for_scope("/src/B.vue");
+    let other = engine
+        .scope_shadowing_for_scope("/src/B.vue", verter_type_expr::TopLevelOwnerId::module(0));
     assert!(
         !Arc::ptr_eq(&first, &other),
         "distinct scopes must not alias to one shared ScopeShadowing instance",
@@ -2819,7 +2922,11 @@ fn fenced_serve_declaration_lookup_is_not_admitted() {
     let control_resolved = {
         let mut engine = ComponentMetaQueryEngine::new(control.as_ref());
         engine
-            .resolve_type_declaration("/m4_src/types.ts", "Props")
+            .resolve_type_declaration(
+                "/m4_src/types.ts",
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "Props",
+            )
             .declaration_id
             .is_some()
     };
@@ -2847,7 +2954,11 @@ fn fenced_serve_declaration_lookup_is_not_admitted() {
     let fenced_resolved = {
         let mut engine = ComponentMetaQueryEngine::new(fenced.as_ref());
         engine
-            .resolve_type_declaration("/m4_src/types.ts", "Props")
+            .resolve_type_declaration(
+                "/m4_src/types.ts",
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "Props",
+            )
             .declaration_id
             .is_some()
     };
@@ -2907,7 +3018,11 @@ fn fenced_serve_imported_registry_symbol_is_not_admitted() {
     let control_resolved = {
         let mut engine = ComponentMetaQueryEngine::new(control.as_ref());
         engine
-            .resolve_imported_registry_symbol("/m4_src/index.ts", "ButtonProps")
+            .resolve_imported_registry_symbol(
+                "/m4_src/index.ts",
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "ButtonProps",
+            )
             .is_some()
     };
     assert!(
@@ -2934,7 +3049,11 @@ fn fenced_serve_imported_registry_symbol_is_not_admitted() {
     let fenced_resolved = {
         let mut engine = ComponentMetaQueryEngine::new(fenced.as_ref());
         engine
-            .resolve_imported_registry_symbol("/m4_src/index.ts", "ButtonProps")
+            .resolve_imported_registry_symbol(
+                "/m4_src/index.ts",
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "ButtonProps",
+            )
             .is_some()
     };
     fenced
@@ -3019,7 +3138,11 @@ fn broken_decl_body_lease_owner_collection_is_not_admitted() {
     let control_before = control_db.live_count();
     let control_locator = {
         let mut engine = ComponentMetaQueryEngine::new(control.as_ref());
-        engine.owner_collection_expr("/oc_src/types.ts", "Collection")
+        engine.owner_collection_expr(
+            "/oc_src/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Collection",
+        )
     };
     assert!(
         control_locator.is_some(),
@@ -3055,7 +3178,11 @@ fn broken_decl_body_lease_owner_collection_is_not_admitted() {
     let broken_before = broken_db.live_count();
     let broken_locator = {
         let mut engine = ComponentMetaQueryEngine::new(broken.as_ref());
-        engine.owner_collection_expr("/oc_src/types.ts", "Collection")
+        engine.owner_collection_expr(
+            "/oc_src/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Collection",
+        )
     };
     assert!(
         broken_locator.is_none(),
@@ -3115,7 +3242,11 @@ fn broken_decl_body_lease_prepared_decl_scratch_memo_does_not_shadow_recovery() 
     state.decl_bodies().release_retained_snapshot_for_test();
 
     let mut engine = ComponentMetaQueryEngine::new(host.as_ref());
-    let degraded = engine.prepared_type_decl("/oc_src/types.ts", "Collection");
+    let degraded = engine.prepared_type_decl(
+        "/oc_src/types.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "Collection",
+    );
     assert!(
         degraded.is_none(),
         "fixture invariant: the broken lease must actually degrade the prepared-decl read to \
@@ -3144,7 +3275,11 @@ fn broken_decl_body_lease_prepared_decl_scratch_memo_does_not_shadow_recovery() 
     // declaration, so the host-side recovery is real.
     let control = {
         let mut fresh = ComponentMetaQueryEngine::new(host.as_ref());
-        fresh.prepared_type_decl("/oc_src/types.ts", "Collection")
+        fresh.prepared_type_decl(
+            "/oc_src/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Collection",
+        )
     };
     assert!(
         control.is_some(),
@@ -3152,7 +3287,11 @@ fn broken_decl_body_lease_prepared_decl_scratch_memo_does_not_shadow_recovery() 
          (otherwise the shadow assertion below is vacuous)",
     );
 
-    let recovered = engine.prepared_type_decl("/oc_src/types.ts", "Collection");
+    let recovered = engine.prepared_type_decl(
+        "/oc_src/types.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "Collection",
+    );
     assert!(
         recovered.is_some(),
         "SHADOW: the engine's per-request prepared-decl scratch memo persisted a \

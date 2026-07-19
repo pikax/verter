@@ -327,7 +327,7 @@ fn resolve_defining<C: ResolverContext>(
 
         // (d) An export ALIAS (`export { Foo as Bar }`) bound to a local decl —
         //     resolve the alias to the backing local name and re-test.
-        if let Some(ExportTarget::Local { symbol_name }) = shallow.exports.get(&cur_name) {
+        if let Some(ExportTarget::Local { symbol_name, .. }) = shallow.exports.get(&cur_name) {
             if symbol_name != &cur_name {
                 let backing = symbol_name.clone();
                 let backing_defined = match space {

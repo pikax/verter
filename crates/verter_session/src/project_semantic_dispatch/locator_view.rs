@@ -186,6 +186,7 @@ impl<'a> ProjectionBenchHarness<'a> {
             .lower_locator(AuthoredBodyLocator::DeclBody(TypeBodySlot {
                 anchor: AuthoredAnchor {
                     canonical_id: Arc::from(canonical_id),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     symbol: Arc::from(symbol),
                     space: LocatorSymbolSpace::Type,
                 },
@@ -203,6 +204,7 @@ impl<'a> ProjectionBenchHarness<'a> {
             .unwrap_or_default();
         let scope = NodeScopeId::File {
             canonical_id: Arc::from(canonical_id),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash,
             local_scope: None,
         };
@@ -211,7 +213,11 @@ impl<'a> ProjectionBenchHarness<'a> {
             .map(|(local_name, defining_canonical, defining_symbol)| {
                 (
                     Arc::from(*local_name),
-                    ResolvedRootIdentity::new(*defining_canonical, *defining_symbol),
+                    ResolvedRootIdentity::new_in_owner(
+                        *defining_canonical,
+                        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        *defining_symbol,
+                    ),
                 )
             })
             .collect();

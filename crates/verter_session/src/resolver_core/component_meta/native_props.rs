@@ -51,7 +51,10 @@ pub enum ResolvedNativePropsOutcome {
 /// compile-facing external body cache.
 #[derive(Debug, Default)]
 pub struct NativePropProjectionCache {
-    entries: FxHashMap<(String, String), Option<Vec<ResolvedNativeProp>>>,
+    entries: FxHashMap<
+        (String, verter_type_expr::TopLevelOwnerId, String),
+        Option<Vec<ResolvedNativeProp>>,
+    >,
 }
 
 impl NativePropProjectionCache {
@@ -65,13 +68,16 @@ impl NativePropProjectionCache {
         self.entries.is_empty()
     }
 
-    pub(crate) fn get(&self, key: &(String, String)) -> Option<&Option<Vec<ResolvedNativeProp>>> {
+    pub(crate) fn get(
+        &self,
+        key: &(String, verter_type_expr::TopLevelOwnerId, String),
+    ) -> Option<&Option<Vec<ResolvedNativeProp>>> {
         self.entries.get(key)
     }
 
     pub(crate) fn insert(
         &mut self,
-        key: (String, String),
+        key: (String, verter_type_expr::TopLevelOwnerId, String),
         value: Option<Vec<ResolvedNativeProp>>,
     ) -> Option<Option<Vec<ResolvedNativeProp>>> {
         self.entries.insert(key, value)
@@ -84,12 +90,14 @@ impl NativePropProjectionCache {
 pub(crate) fn named_native_props_outcome(
     ctx: &dyn crate::resolver_core::ResolverContext,
     root_canonical: &str,
+    root_owner: verter_type_expr::TopLevelOwnerId,
     root_name: &str,
 ) -> ResolvedNativePropsOutcome {
     let dispatch = ctx.dispatch();
     let read = dispatch.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::from(root_canonical),
+            owner: root_owner,
             local_scope: None,
         },
         name: Arc::from(root_name),

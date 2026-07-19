@@ -58,7 +58,7 @@ use crate::tokenizer::byte::{tokenize_sfc, tokenize_sfc_with_delimiters};
 use crate::tsc;
 
 use helpers::{empty_sfc_script_block, extract_attrs, extract_block_ranges};
-use macro_semantic_diagnostics::collect_macro_semantic_diagnostics;
+use macro_semantic_diagnostics::{collect_macro_semantic_diagnostics, tsc_generation_diagnostic};
 
 // ── Orchestrator ───────────────────────────────────────────────────
 
@@ -1256,19 +1256,28 @@ fn compile_inner(
                 filename: options.filename.clone(),
                 mode: tsc::TscMode::Public,
             },
-            macro_semantics.tsc(),
+            macro_semantics.tsc().map_or(
+                tsc::MacroTscInput::NotRequired,
+                tsc::MacroTscInput::Authoritative,
+            ),
         );
         let tsc_dur = tsc_start.elapsed().as_secs_f64() * 1000.0;
         if let Some(observer) = verter_audit::current_observer() {
             observer.record_phase_timing("compile.codegen", tsc_dur);
         }
-        Some(VerterTsxBlock {
-            code: tsc_out.code,
-            source_map: tsc_out.source_map,
-            duration_ms: tsc_dur,
-            is_jsx: false,
-            destructured_block: None,
-        })
+        match tsc_out {
+            Ok(tsc_out) => Some(VerterTsxBlock {
+                code: tsc_out.code,
+                source_map: tsc_out.source_map,
+                duration_ms: tsc_dur,
+                is_jsx: false,
+                destructured_block: None,
+            }),
+            Err(error) => {
+                all_diagnostics.push(tsc_generation_diagnostic(error));
+                None
+            }
+        }
     } else {
         None
     };

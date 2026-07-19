@@ -37,20 +37,22 @@ use crate::resolver_core::shallow_file_state::AnalyzedExternalTypeSource;
 use verter_parser::utils::oxc::script::raw_surface::{
     capture_statement_surfaces, merge_overload_groups, RawSourceSurface, SymbolSpace,
 };
-use verter_parser::utils::oxc::script::type_inventory::collect_statement_dependency_names;
+use verter_parser::utils::oxc::script::type_inventory::{
+    collect_statement_dependencies, DeclarationPath,
+};
 use verter_semantic::analysis::decl_headers::DeclHeaderIndex;
 use verter_semantic::analysis::framework_facts::svelte::{
-    lower_props_annotation_at, lower_svelte_type_argument_at, PropsAnnotationLowering,
-    SvelteTypeArgumentLowering,
+    lower_props_annotation_at_with_owners, lower_svelte_type_argument_at_with_owners,
+    PropsAnnotationLowering, SvelteTypeArgumentLowering,
 };
 use verter_semantic::analysis::type_eval::{
-    AugmentationScopeKind, EnumMemberValue, EvalEnv, FunctionSignature, TypeDeclBody, TypeDeclKind,
-    ValueDeclGroup, ValueDeclKind,
+    AugmentationScopeKind, EnumMemberValue, EvalEnv, FunctionSignature, TypeDeclBody, TypeDeclInfo,
+    TypeDeclKind, ValueDeclGroup, ValueDeclKind,
 };
 use verter_semantic::analysis::type_eval_build::{
-    build_eval_env, lower_jsdoc_typedef_named, lower_statement_parts,
-    lower_svelte_runes_statement_parts, register_statement_parts, BuildEvalEnvContext,
-    LoweredSignatureParts, LoweredTypeDeclParts, LoweredValueDeclParts, StatementLowerCtx,
+    lower_jsdoc_typedef_at_comment, lower_statement_parts, lower_svelte_runes_statement_parts,
+    register_statement_parts, BuildEvalEnvContext, LoweredSignatureParts, LoweredTypeDeclParts,
+    LoweredValueDeclParts, StatementLowerCtx,
 };
 use verter_semantic::analysis::type_solver::prepared::{
     collect_heritage_base_facts, collect_key_domain_closedness_fact,
@@ -64,15 +66,16 @@ use verter_semantic::facts::{
 use verter_type_expr::facts::{
     EnumMemberFact, EnumMemberNamesFact, EnumScalar, HeritageBaseFact, KeyDomainClosednessFact,
     NarrowTypeParam, ObjectShapeFact, PreparedMemberFact, PreparedProjectionClassFact,
-    PreparedWrapperShapeFact, ShallowRouteFacts, ValueAnnotationClass, ValueTypeAnnotationFact,
+    PreparedWrapperShapeFact, ShallowRouteFacts, TypeDependencyPathFact, ValueAnnotationClass,
+    ValueTypeAnnotationFact,
 };
 use verter_type_expr::locators::{TypeBodyPathStep, TypeBodySlot};
 use verter_type_expr::span_origins::DeclContributorAnchor;
-use verter_type_expr::{ObjectExpr, TypeExpr, TypeParam};
+use verter_type_expr::{DeclKey, ObjectExpr, TopLevelOwnerId, TypeExpr, TypeParam};
 
 use crate::decl_lowering::{DeclLoweringService, SnapshotKey, SnapshotLease};
 use crate::fact_emission::{RouteLens, ShallowLens};
-use crate::resolver_core::shallow_file_state::{collect_type_refs, collect_typeof_roots};
+use crate::resolver_core::shallow_file_state::collect_typeof_roots;
 use crate::types::MetaProvenance;
 
 pub(crate) mod locator_deref;
@@ -83,6 +86,9 @@ pub(crate) use locator_deref::{DerefedBodyShape, LocatorBodyDerefError};
 #[derive(Debug, Clone)]
 pub struct LoweredTypeDecl {
     pub kind: TypeDeclKind,
+    /// Content-free facts retained per exact source contributor. Member return
+    /// inference is addressed through its producer-emitted origin only.
+    pub contributor_facts: Arc<[TypeDeclInfo]>,
     /// `TypeDeclBody::Single` or the `Merged` carrier — the same
     /// merge-aware body `TypeDeclGroup::merged_body` produces.
     pub body: TypeDeclBody,
@@ -98,11 +104,16 @@ pub struct LoweredTypeDecl {
     /// Generic type parameters, unioned across contributors in source
     /// order.
     pub type_parameters: Vec<TypeParam>,
-    /// Body reference names (the per-statement analyzer product), unioned
-    /// across contributors.
-    pub dep_names: FxHashSet<String>,
-    /// Structural subset of [`dep_names`](Self::dep_names).
-    pub structural_dep_names: FxHashSet<String>,
+    /// Parser-owned dependency segment identities. The root local binding and
+    /// member path remain separate through classification.
+    pub dependency_paths: FxHashSet<TypeDependencyPathFact>,
+    pub structural_dependency_paths: FxHashSet<TypeDependencyPathFact>,
+    /// Complete declaration carrier, including positions intentionally omitted
+    /// from legacy component-meta closure breadth.
+    pub declaration_carrier_paths: FxHashSet<TypeDependencyPathFact>,
+    pub value_query_paths: FxHashSet<TypeDependencyPathFact>,
+    pub value_position_paths: FxHashSet<TypeDependencyPathFact>,
+    pub has_unroutable_value_position: bool,
     /// The per-decl DIRECT route facts (whole-route edges / member edges /
     /// member-path seed edges / member names), produced graph-free at this
     /// lazy lowering from the same transient contributor bodies. The session
@@ -292,8 +303,8 @@ enum DemandCell<D> {
 type TypeCell = Arc<OnceLock<DemandCell<LoweredTypeDecl>>>;
 type ValueCell = Arc<OnceLock<DemandCell<LoweredValueDecl>>>;
 type LoweredDeclGroups = (
-    Vec<(String, LoweredTypeDecl)>,
-    Vec<(String, LoweredValueDecl)>,
+    Vec<(DeclKey, LoweredTypeDecl)>,
+    Vec<(DeclKey, LoweredValueDecl)>,
 );
 
 /// Outcome of a demanded per-symbol lowering ([`DeclBodyMemo::lower_demanded`]).
@@ -373,16 +384,16 @@ struct RetainedTypeTransients {
     /// member facts' span origins descend from — and `None` for a
     /// JSDoc-`@typedef` payload body (comment-derived, not
     /// statement-addressable: the honest `Synthetic` origin).
-    contributor_indices: Vec<Option<u32>>,
+    contributor_anchors: Vec<Option<DeclContributorAnchor>>,
     /// Type parameters unioned across contributors in source order,
     /// first-seen by name.
     type_parameters: Vec<TypeParam>,
 }
 
 impl RetainedTypeTransients {
-    fn push(&mut self, parts: &LoweredTypeDeclParts, contributor_index: Option<u32>) {
+    fn push(&mut self, parts: &LoweredTypeDeclParts, anchor: Option<DeclContributorAnchor>) {
         self.bodies.push(parts.body.clone());
-        self.contributor_indices.push(contributor_index);
+        self.contributor_anchors.push(anchor);
         for param in &parts.type_parameters {
             if !self.type_parameters.iter().any(|p| p.name == param.name) {
                 self.type_parameters.push(param.clone());
@@ -392,12 +403,41 @@ impl RetainedTypeTransients {
 
     fn extend_from(&mut self, other: RetainedTypeTransients) {
         self.bodies.extend(other.bodies);
-        self.contributor_indices.extend(other.contributor_indices);
+        self.contributor_anchors.extend(other.contributor_anchors);
         for param in other.type_parameters {
             if !self.type_parameters.iter().any(|p| p.name == param.name) {
                 self.type_parameters.push(param);
             }
         }
+    }
+}
+
+/// One declaration owner's typed dependency products, unioned across every
+/// same-name contributor before the lowered memo record is minted.
+#[derive(Debug, Clone, Default)]
+struct DeclDependencyFacts {
+    full: FxHashSet<TypeDependencyPathFact>,
+    structural: FxHashSet<TypeDependencyPathFact>,
+    declaration_carrier: FxHashSet<TypeDependencyPathFact>,
+    value_queries: FxHashSet<TypeDependencyPathFact>,
+    value_positions: FxHashSet<TypeDependencyPathFact>,
+    has_unroutable_value_position: bool,
+}
+
+impl DeclDependencyFacts {
+    fn extend(
+        &mut self,
+        dependencies: verter_parser::utils::oxc::script::type_inventory::DeclDependencyNames,
+    ) {
+        self.full.extend(dependencies.dependency_paths);
+        self.structural
+            .extend(dependencies.structural_dependency_paths);
+        self.declaration_carrier
+            .extend(dependencies.declaration_carrier_paths);
+        self.value_queries.extend(dependencies.value_query_paths);
+        self.value_positions
+            .extend(dependencies.value_position_paths);
+        self.has_unroutable_value_position |= !dependencies.unsupported_value_positions.is_empty();
     }
 }
 
@@ -431,10 +471,10 @@ impl RetainedValueTransients {
 /// Owned product of one statement-batch lowering job: every symbol the
 /// demanded statements actually declared, ready for entry population.
 struct LoweredStatementBatch {
-    types: Vec<(String, LoweredTypeDecl)>,
-    values: Vec<(String, LoweredValueDecl)>,
-    aug_types: Vec<(AugmentationScopeKind, String, LoweredTypeDecl)>,
-    aug_values: Vec<(AugmentationScopeKind, String, LoweredValueDecl)>,
+    types: Vec<(DeclKey, LoweredTypeDecl)>,
+    values: Vec<(DeclKey, LoweredValueDecl)>,
+    aug_types: Vec<(AugmentationScopeKind, DeclKey, LoweredTypeDecl)>,
+    aug_values: Vec<(AugmentationScopeKind, DeclKey, LoweredValueDecl)>,
     /// Declaration-body contributors lowered by this job — the
     /// `decl_bodies_lowered` increment.
     lowered_count: usize,
@@ -446,6 +486,7 @@ pub struct DeclBodyMemo {
     eval_source: Arc<str>,
     framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
     source_type: oxc_span::SourceType,
+    owner_table: Arc<verter_semantic::analysis::TopLevelOwnerTable>,
     /// Scope-aware component mode captured from the SAME retained eval program
     /// during cold indexing. This is separate from `.svelte.ts`/`.svelte.js`
     /// rune-module classification: a `.svelte` carrier may be legacy or runes
@@ -474,12 +515,12 @@ pub struct DeclBodyMemo {
     /// header-membership view) the graph-free route producer classifies
     /// against — installed with the shallow lens at state construction.
     route_lens: OnceLock<Arc<RouteLens>>,
-    type_entries: DashMap<String, TypeCell>,
-    value_entries: DashMap<String, ValueCell>,
-    aug_type_entries: DashMap<(AugmentationScopeKind, String), TypeCell>,
-    aug_value_entries: DashMap<(AugmentationScopeKind, String), ValueCell>,
+    type_entries: DashMap<DeclKey, TypeCell>,
+    value_entries: DashMap<DeclKey, ValueCell>,
+    aug_type_entries: DashMap<(AugmentationScopeKind, DeclKey), TypeCell>,
+    aug_value_entries: DashMap<(AugmentationScopeKind, DeclKey), ValueCell>,
     whole_env: OnceLock<Arc<EvalEnv>>,
-    raw_surfaces: DashMap<(String, SymbolSpace), Arc<Vec<RawSourceSurface>>>,
+    raw_surfaces: DashMap<(DeclarationPath, SymbolSpace), Arc<Vec<RawSourceSurface>>>,
 }
 
 impl std::fmt::Debug for DeclBodyMemo {
@@ -507,6 +548,7 @@ impl DeclBodyMemo {
         eval_source: Arc<str>,
         framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
         source_type: oxc_span::SourceType,
+        owner_table: Arc<verter_semantic::analysis::TopLevelOwnerTable>,
         svelte_component_runes_mode: bool,
         service: Arc<DeclLoweringService>,
         header_index: Arc<DeclHeaderIndex>,
@@ -522,6 +564,7 @@ impl DeclBodyMemo {
             eval_source,
             framework_parse,
             source_type,
+            owner_table,
             svelte_component_runes_mode,
             service: Some(service),
             lease: lease_cell,
@@ -555,6 +598,7 @@ impl DeclBodyMemo {
             eval_source: Arc::from(""),
             framework_parse: None,
             source_type: oxc_span::SourceType::ts(),
+            owner_table: Arc::new(verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(0)),
             svelte_component_runes_mode: false,
             service: None,
             lease: OnceLock::new(),
@@ -571,13 +615,15 @@ impl DeclBodyMemo {
         };
 
         for (name, group) in &env.type_symbols {
-            let deps = analysis
-                .local_type_symbol(name)
-                .map(|symbol| {
-                    (
-                        symbol.dependency_names.clone(),
-                        symbol.structural_dependency_names.clone(),
-                    )
+            let dependencies = analysis
+                .local_type_symbol(&DeclarationPath::root(name.clone()))
+                .map(|symbol| DeclDependencyFacts {
+                    full: symbol.dependency_paths.iter().cloned().collect(),
+                    structural: symbol.structural_dependency_paths.iter().cloned().collect(),
+                    declaration_carrier: symbol.declaration_carrier_paths.iter().cloned().collect(),
+                    value_queries: symbol.value_query_paths.iter().cloned().collect(),
+                    value_positions: symbol.value_position_paths.iter().cloned().collect(),
+                    has_unroutable_value_position: !symbol.unsupported_value_positions.is_empty(),
                 })
                 .unwrap_or_default();
             let enum_type_arms = env
@@ -594,8 +640,7 @@ impl DeclBodyMemo {
             // that need non-enum type cells must supply transient bodies.
             let lowered = lowered_type_decl_from_group(
                 group,
-                deps.0,
-                deps.1,
+                &dependencies,
                 enum_type_arms,
                 &RetainedTypeTransients::default(),
                 &UnresolvedLens,
@@ -627,8 +672,7 @@ impl DeclBodyMemo {
             // locator-only groups carry no transient bodies to fingerprint.
             let lowered = lowered_type_decl_from_group(
                 group,
-                FxHashSet::default(),
-                FxHashSet::default(),
+                &DeclDependencyFacts::default(),
                 None,
                 &RetainedTypeTransients::default(),
                 &UnresolvedLens,
@@ -652,6 +696,10 @@ impl DeclBodyMemo {
 
     pub(crate) fn header_index(&self) -> &Arc<DeclHeaderIndex> {
         &self.header_index
+    }
+
+    pub(crate) fn owner_table(&self) -> &Arc<verter_semantic::analysis::TopLevelOwnerTable> {
+        &self.owner_table
     }
 
     /// Install the ONE shared shallow cross-decl lens. Called exactly once, at
@@ -756,94 +804,106 @@ impl DeclBodyMemo {
 
     /// Demand the lowered body of one file-scope TYPE symbol.
     pub(crate) fn type_decl(&self, name: &str) -> Option<Arc<LoweredTypeDecl>> {
-        self.type_decl_outcome(name).into_option()
+        self.type_decl_in(TopLevelOwnerId::ordinary_file(), name)
     }
 
-    /// Demand the lowered body of one file-scope TYPE symbol, PRESERVING the
-    /// lease-miss ReturnOnly outcome distinctly. The locator-deref path uses
-    /// this so a broken-lease demand becomes a typed no-warm signal rather
-    /// than collapsing into a cacheable genuine miss.
-    pub(crate) fn type_decl_outcome(&self, name: &str) -> DemandOutcome<LoweredTypeDecl> {
-        let Some((contributors, from_jsdoc)) = self
+    pub(crate) fn type_decl_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<Arc<LoweredTypeDecl>> {
+        self.type_decl_outcome_in(owner, name).into_option()
+    }
+
+    pub(crate) fn type_decl_outcome_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<LoweredTypeDecl> {
+        let key = DeclKey::new(owner, name);
+        let Some((contributors, jsdoc_typedef)) = self
             .header_index
-            .type_header(name)
-            .map(|header| (header.contributors.clone(), header.from_jsdoc_typedef))
+            .type_header_in(owner, name)
+            .map(|header| (header.contributors.clone(), header.jsdoc_typedef))
         else {
             // Not inventoried: a genuine, cacheable absence — never a
             // lease-miss.
             return DemandOutcome::Ready(None);
         };
-        let cell = self
-            .type_entries
-            .entry(name.to_string())
-            .or_default()
-            .clone();
+        let cell = self.type_entries.entry(key.clone()).or_default().clone();
         // Backfill runs OUTSIDE the cell commit — see [`Self::backfill`]. The
         // initializing caller receives the batch and backfills siblings after
         // its own cell is committed; a lease-miss evicts the cell and commits
         // nothing.
         let (outcome, batch) = self.demand_and_commit(
             &cell,
-            name,
+            &key,
             &contributors,
-            from_jsdoc,
+            jsdoc_typedef,
             |batch| {
                 batch
                     .types
                     .iter()
-                    .find(|(n, _)| n == name)
+                    .find(|(candidate, _)| candidate == &key)
                     .map(|(_, decl)| Arc::new(decl.clone()))
             },
             |poisoned| {
                 self.type_entries
-                    .remove_if(name, |_, existing| Arc::ptr_eq(existing, poisoned));
+                    .remove_if(&key, |_, existing| Arc::ptr_eq(existing, poisoned));
             },
         );
         if let Some(batch) = batch {
-            self.backfill(batch, &contributors, Some((SymbolSpace::Type, name)), None);
+            self.backfill(batch, &contributors, Some((SymbolSpace::Type, &key)), None);
         }
         outcome
     }
 
     /// Demand the lowered body of one file-scope VALUE symbol.
     pub(crate) fn value_decl(&self, name: &str) -> Option<Arc<LoweredValueDecl>> {
-        self.value_decl_outcome(name).into_option()
+        self.value_decl_in(TopLevelOwnerId::ordinary_file(), name)
     }
 
-    /// Demand the lowered body of one file-scope VALUE symbol, PRESERVING the
-    /// lease-miss ReturnOnly outcome distinctly (locator-deref no-warm rail).
-    pub(crate) fn value_decl_outcome(&self, name: &str) -> DemandOutcome<LoweredValueDecl> {
+    pub(crate) fn value_decl_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<Arc<LoweredValueDecl>> {
+        self.value_decl_outcome_in(owner, name).into_option()
+    }
+
+    pub(crate) fn value_decl_outcome_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<LoweredValueDecl> {
+        let key = DeclKey::new(owner, name);
         let Some(contributors) = self
             .header_index
-            .value_header(name)
+            .value_header_in(owner, name)
             .map(|header| header.contributors.clone())
         else {
             return DemandOutcome::Ready(None);
         };
-        let cell = self
-            .value_entries
-            .entry(name.to_string())
-            .or_default()
-            .clone();
+        let cell = self.value_entries.entry(key.clone()).or_default().clone();
         let (outcome, batch) = self.demand_and_commit(
             &cell,
-            name,
+            &key,
             &contributors,
-            false,
+            None,
             |batch| {
                 batch
                     .values
                     .iter()
-                    .find(|(n, _)| n == name)
+                    .find(|(candidate, _)| candidate == &key)
                     .map(|(_, decl)| Arc::new(decl.clone()))
             },
             |poisoned| {
                 self.value_entries
-                    .remove_if(name, |_, existing| Arc::ptr_eq(existing, poisoned));
+                    .remove_if(&key, |_, existing| Arc::ptr_eq(existing, poisoned));
             },
         );
         if let Some(batch) = batch {
-            self.backfill(batch, &contributors, Some((SymbolSpace::Value, name)), None);
+            self.backfill(batch, &contributors, Some((SymbolSpace::Value, &key)), None);
         }
         outcome
     }
@@ -863,51 +923,52 @@ impl DeclBodyMemo {
         Some(self.type_decl(name)?.body_hash.clone())
     }
 
-    /// Demand the lowered body of one augmentation-scoped TYPE symbol.
-    pub(crate) fn augmentation_type_decl(
+    pub(crate) fn augmentation_type_decl_in(
         &self,
         scope: &AugmentationScopeKind,
+        owner: TopLevelOwnerId,
         name: &str,
     ) -> Option<Arc<LoweredTypeDecl>> {
-        self.augmentation_type_decl_outcome(scope, name)
+        self.augmentation_type_decl_outcome_in(scope, owner, name)
             .into_option()
     }
 
-    /// Demand the lowered body of one augmentation-scoped TYPE symbol,
-    /// PRESERVING the lease-miss ReturnOnly outcome distinctly (locator-deref
-    /// no-warm rail).
-    pub(crate) fn augmentation_type_decl_outcome(
+    pub(crate) fn augmentation_type_decl_outcome_in(
         &self,
         scope: &AugmentationScopeKind,
+        owner: TopLevelOwnerId,
         name: &str,
     ) -> DemandOutcome<LoweredTypeDecl> {
+        let key = DeclKey::new(owner, name);
         let Some(contributors) = self
             .header_index
-            .augmentation_type_header(scope, name)
+            .augmentation_type_header_in(scope, owner, name)
             .map(|header| header.contributors.clone())
         else {
             return DemandOutcome::Ready(None);
         };
         let cell = self
             .aug_type_entries
-            .entry((scope.clone(), name.to_string()))
+            .entry((scope.clone(), key.clone()))
             .or_default()
             .clone();
         let (outcome, batch) = self.demand_and_commit(
             &cell,
-            name,
+            &key,
             &contributors,
-            false,
+            None,
             |batch| {
                 batch
                     .aug_types
                     .iter()
-                    .find(|(s, n, _)| s == scope && n == name)
+                    .find(|(candidate_scope, candidate, _)| {
+                        candidate_scope == scope && candidate == &key
+                    })
                     .map(|(_, _, decl)| Arc::new(decl.clone()))
             },
             |poisoned| {
                 self.aug_type_entries
-                    .remove_if(&(scope.clone(), name.to_string()), |_, existing| {
+                    .remove_if(&(scope.clone(), key.clone()), |_, existing| {
                         Arc::ptr_eq(existing, poisoned)
                     });
             },
@@ -917,7 +978,7 @@ impl DeclBodyMemo {
                 batch,
                 &contributors,
                 None,
-                Some((scope, SymbolSpace::Type, name)),
+                Some((scope, SymbolSpace::Type, &key)),
             );
         }
         outcome
@@ -929,45 +990,55 @@ impl DeclBodyMemo {
         scope: &AugmentationScopeKind,
         name: &str,
     ) -> Option<Arc<LoweredValueDecl>> {
-        self.augmentation_value_decl_outcome(scope, name)
+        self.augmentation_value_decl_in(scope, TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    pub(crate) fn augmentation_value_decl_in(
+        &self,
+        scope: &AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<Arc<LoweredValueDecl>> {
+        self.augmentation_value_decl_outcome_in(scope, owner, name)
             .into_option()
     }
 
-    /// Demand the lowered body of one augmentation-scoped VALUE symbol,
-    /// PRESERVING the lease-miss ReturnOnly outcome distinctly (locator-deref
-    /// no-warm rail).
-    fn augmentation_value_decl_outcome(
+    fn augmentation_value_decl_outcome_in(
         &self,
         scope: &AugmentationScopeKind,
+        owner: TopLevelOwnerId,
         name: &str,
     ) -> DemandOutcome<LoweredValueDecl> {
+        let key = DeclKey::new(owner, name);
         let Some(contributors) = self
             .header_index
-            .augmentation_value_header(scope, name)
+            .augmentation_value_header_in(scope, owner, name)
             .map(|header| header.contributors.clone())
         else {
             return DemandOutcome::Ready(None);
         };
         let cell = self
             .aug_value_entries
-            .entry((scope.clone(), name.to_string()))
+            .entry((scope.clone(), key.clone()))
             .or_default()
             .clone();
         let (outcome, batch) = self.demand_and_commit(
             &cell,
-            name,
+            &key,
             &contributors,
-            false,
+            None,
             |batch| {
                 batch
                     .aug_values
                     .iter()
-                    .find(|(s, n, _)| s == scope && n == name)
+                    .find(|(candidate_scope, candidate, _)| {
+                        candidate_scope == scope && candidate == &key
+                    })
                     .map(|(_, _, decl)| Arc::new(decl.clone()))
             },
             |poisoned| {
                 self.aug_value_entries
-                    .remove_if(&(scope.clone(), name.to_string()), |_, existing| {
+                    .remove_if(&(scope.clone(), key.clone()), |_, existing| {
                         Arc::ptr_eq(existing, poisoned)
                     });
             },
@@ -977,7 +1048,7 @@ impl DeclBodyMemo {
                 batch,
                 &contributors,
                 None,
-                Some((scope, SymbolSpace::Value, name)),
+                Some((scope, SymbolSpace::Value, &key)),
             );
         }
         outcome
@@ -1008,9 +1079,17 @@ impl DeclBodyMemo {
         // lease acquisition); the LEASE-ONLY run below reuses it.
         self.ensure_lease();
         let build_ctx = BuildEvalEnvContext::new(Arc::clone(&self.key.canonical));
+        let owner_table = Arc::clone(&self.owner_table);
         let Some(mut env) = service.run_leased(&self.key, move |program| {
             program
-                .map(|p| build_eval_env(p.borrow_dependent(), p.source_str(), &build_ctx))
+                .map(|p| {
+                    verter_semantic::analysis::type_eval_build::build_eval_env_with_owners(
+                        p.borrow_dependent(),
+                        p.source_str(),
+                        &build_ctx,
+                        owner_table.as_ref(),
+                    )
+                })
                 .unwrap_or_default()
         }) else {
             // Broken lease pin (unreachable in practice): fail CLOSED via
@@ -1066,8 +1145,9 @@ impl DeclBodyMemo {
     /// leaves the (lazily-created) cell uninitialised, so this returns `false`.
     #[cfg(test)]
     pub(crate) fn type_entry_materialized(&self, name: &str) -> bool {
+        let key = DeclKey::new(TopLevelOwnerId::ordinary_file(), name);
         self.type_entries
-            .get(name)
+            .get(&key)
             .is_some_and(|cell| matches!(cell.get(), Some(DemandCell::Ready(_))))
     }
 
@@ -1076,7 +1156,10 @@ impl DeclBodyMemo {
     /// never inserts, so this returns `false`.
     #[cfg(test)]
     pub(crate) fn raw_surfaces_materialized(&self, name: &str, space: SymbolSpace) -> bool {
-        self.raw_surfaces.contains_key(&(name.to_string(), space))
+        self.raw_surfaces.contains_key(&(
+            DeclarationPath::root(DeclKey::new(TopLevelOwnerId::ordinary_file(), name)),
+            space,
+        ))
     }
 
     /// Break the memo's worker-retained parse snapshot so the NEXT body
@@ -1097,14 +1180,24 @@ impl DeclBodyMemo {
     /// symbol's contributing statements through the retained snapshot,
     /// memoized per triple.
     pub fn raw_surfaces_for(&self, name: &str, space: SymbolSpace) -> Arc<Vec<RawSourceSurface>> {
-        if let Some(cached) = self.raw_surfaces.get(&(name.to_string(), space)) {
+        self.raw_surfaces_for_in(TopLevelOwnerId::ordinary_file(), name, space)
+    }
+
+    pub fn raw_surfaces_for_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+        space: SymbolSpace,
+    ) -> Arc<Vec<RawSourceSurface>> {
+        let declaration = DeclarationPath::root(DeclKey::new(owner, name));
+        if let Some(cached) = self.raw_surfaces.get(&(declaration.clone(), space)) {
             return Arc::clone(&cached);
         }
 
-        let mut contributors: Vec<u32> = Vec::new();
+        let mut contributors = Vec::new();
         match space {
             SymbolSpace::Type => {
-                if let Some(header) = self.header_index.type_header(name) {
+                if let Some(header) = self.header_index.type_header_in(owner, name) {
                     contributors.extend_from_slice(&header.contributors);
                 }
                 // An enum is registered dual-space, so its TYPE header above
@@ -1112,21 +1205,29 @@ impl DeclBodyMemo {
                 // the member-NAME authority, and folding its contributor
                 // locators in defensively keeps the capture complete even if a
                 // refactor ever decoupled the two (deduped below).
-                if let Some(header) = self.header_index.enum_headers.get(name) {
+                if let Some(header) = self
+                    .header_index
+                    .enum_headers
+                    .get(&DeclKey::new(owner, name))
+                {
                     contributors.extend_from_slice(&header.contributors);
                 }
             }
             SymbolSpace::Value => {
-                if let Some(header) = self.header_index.value_header(name) {
+                if let Some(header) = self.header_index.value_header_in(owner, name) {
                     contributors.extend_from_slice(&header.contributors);
                 }
-                if let Some(header) = self.header_index.enum_headers.get(name) {
+                if let Some(header) = self
+                    .header_index
+                    .enum_headers
+                    .get(&DeclKey::new(owner, name))
+                {
                     contributors.extend_from_slice(&header.contributors);
                 }
             }
         }
-        contributors.sort_unstable();
-        contributors.dedup();
+        contributors.sort_unstable_by_key(|contributor| contributor.anchor.contributor_index);
+        contributors.dedup_by_key(|contributor| contributor.anchor.contributor_index);
 
         let surfaces =
             if let (false, Some(service)) = (contributors.is_empty(), self.service.as_ref()) {
@@ -1145,7 +1246,11 @@ impl DeclBodyMemo {
                     let program = program.borrow_dependent();
                     let captured: Vec<_> = contributors
                         .iter()
-                        .filter_map(|index| program.body.get(*index as usize))
+                        .filter_map(|contributor| {
+                            program
+                                .body
+                                .get(contributor.anchor.contributor_index as usize)
+                        })
                         .flat_map(capture_statement_surfaces)
                         .collect();
                     merge_overload_groups(captured)
@@ -1179,7 +1284,7 @@ impl DeclBodyMemo {
 
         let surfaces = Arc::new(surfaces);
         self.raw_surfaces
-            .insert((name.to_string(), space), Arc::clone(&surfaces));
+            .insert((declaration, space), Arc::clone(&surfaces));
         surfaces
     }
 
@@ -1200,9 +1305,9 @@ impl DeclBodyMemo {
     /// scratch env.
     fn lower_demanded(
         &self,
-        name: &str,
-        contributors: &[u32],
-        from_jsdoc_typedef: bool,
+        key: &DeclKey,
+        contributors: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor],
+        jsdoc_typedef: Option<verter_semantic::analysis::decl_headers::JsdocTypedefHeader>,
     ) -> DemandLower {
         // A seeded memo has no service: nothing to lower, a genuine (cacheable)
         // body-less miss — NOT a lease-pin break.
@@ -1211,7 +1316,7 @@ impl DeclBodyMemo {
         };
         self.ensure_lease();
         let contributors = contributors.to_vec();
-        let name = name.to_string();
+        let key = key.clone();
         let build_ctx = BuildEvalEnvContext::new(Arc::clone(&self.key.canonical));
         let lens = self.shallow_lens();
         let route_lens = self.route_fact_lens();
@@ -1231,27 +1336,29 @@ impl DeclBodyMemo {
             // source order) so a merged group fingerprints its FULL same-name
             // contributor set. Fact-production intermediates — dropped with
             // this closure, never stored.
-            let mut retained_types: FxHashMap<String, RetainedTypeTransients> =
+            let mut retained_types: FxHashMap<DeclKey, RetainedTypeTransients> =
                 FxHashMap::default();
             let mut retained_aug_types: FxHashMap<
-                (AugmentationScopeKind, String),
+                (AugmentationScopeKind, DeclKey),
                 RetainedTypeTransients,
             > = FxHashMap::default();
             // TRANSIENT lowered VALUE annotations/shapes, retained the same
             // way for the value-body fingerprint (see
             // [`RetainedValueTransients`]).
-            let mut retained_values: FxHashMap<String, RetainedValueTransients> =
+            let mut retained_values: FxHashMap<DeclKey, RetainedValueTransients> =
                 FxHashMap::default();
             let mut retained_aug_values: FxHashMap<
-                (AugmentationScopeKind, String),
+                (AugmentationScopeKind, DeclKey),
                 RetainedValueTransients,
             > = FxHashMap::default();
-            let mut dep_records: FxHashMap<String, (FxHashSet<String>, FxHashSet<String>)> =
+            let mut dep_records: FxHashMap<DeclarationPath, DeclDependencyFacts> =
                 FxHashMap::default();
-            for index in &contributors {
-                let Some(stmt) = program.body.get(*index as usize) else {
+            for contributor in &contributors {
+                let index = contributor.anchor.contributor_index;
+                let Some(stmt) = program.body.get(index as usize) else {
                     continue;
                 };
+                let owner = contributor.anchor.owner;
                 let parts = if svelte_component_runes_mode {
                     lower_svelte_runes_statement_parts(stmt, source)
                 } else {
@@ -1259,25 +1366,25 @@ impl DeclBodyMemo {
                 };
                 for decl in &parts.type_decls {
                     retained_types
-                        .entry(decl.name.clone())
+                        .entry(DeclKey::new(owner, decl.name.as_str()))
                         .or_default()
-                        .push(decl, Some(*index));
+                        .push(decl, Some(contributor.anchor));
                 }
                 for (scope, decl) in &parts.aug_type_decls {
                     retained_aug_types
-                        .entry((scope.clone(), decl.name.clone()))
+                        .entry((scope.clone(), DeclKey::new(owner, decl.name.as_str())))
                         .or_default()
-                        .push(decl, Some(*index));
+                        .push(decl, Some(contributor.anchor));
                 }
                 for decl in &parts.value_decls {
                     retained_values
-                        .entry(decl.name.clone())
+                        .entry(DeclKey::new(owner, decl.name.as_str()))
                         .or_default()
                         .push(decl);
                 }
                 for (scope, decl) in &parts.aug_value_decls {
                     retained_aug_values
-                        .entry((scope.clone(), decl.name.clone()))
+                        .entry((scope.clone(), DeclKey::new(owner, decl.name.as_str())))
                         .or_default()
                         .push(decl);
                 }
@@ -1286,9 +1393,12 @@ impl DeclBodyMemo {
                 // registration; mirror the retained transients the same way so
                 // the mirrored symbol fingerprints identically.
                 if let Some(alias_from) = parts.alias_default_type_to.as_deref() {
-                    if let Some(retained) = retained_types.get(alias_from).cloned() {
+                    if let Some(retained) = retained_types
+                        .get(&DeclKey::new(owner, alias_from))
+                        .cloned()
+                    {
                         retained_types
-                            .entry("default".to_string())
+                            .entry(DeclKey::new(owner, "default"))
                             .or_default()
                             .extend_from(retained);
                     }
@@ -1297,46 +1407,38 @@ impl DeclBodyMemo {
                     parts,
                     StatementLowerCtx {
                         build: &build_ctx,
-                        contributor_index: *index,
+                        contributor_index: index,
+                        statement_owner: verter_semantic::analysis::TopLevelStatementOwner {
+                            owner,
+                            owner_local_ordinal: contributor.anchor.owner_local_ordinal,
+                        },
                     },
                     &mut scratch,
                 );
-                for (decl_name, deps) in collect_statement_dependency_names(stmt) {
-                    let entry = dep_records.entry(decl_name).or_default();
-                    entry.0.extend(deps.dependency_names);
-                    entry.1.extend(deps.structural_dependency_names);
+                for (declaration, deps) in collect_statement_dependencies(stmt, owner) {
+                    dep_records.entry(declaration).or_default().extend(deps);
                 }
             }
-            if from_jsdoc_typedef {
-                if let Some(typedef_body) = lower_jsdoc_typedef_named(
+            if let Some(jsdoc_typedef) = jsdoc_typedef {
+                if let Some(typedef) = lower_jsdoc_typedef_at_comment(
                     &program.comments,
                     source,
-                    &name,
+                    key.name.as_ref(),
+                    key.owner,
+                    jsdoc_typedef.comment_span.start,
                     &build_ctx,
                     &mut scratch,
                 ) {
-                    // A JSDoc `@typedef` is NOT a statement, so the statement
-                    // dep-collector never produces its reference edges. Derive
-                    // the dependency roots from the RETAINED transient body of
-                    // the same lowering that registered it, so the cached entry
-                    // carries them (else the typedef caches with EMPTY deps →
-                    // under-resolution + under-invalidation). Stored in BOTH the
-                    // plain and structural sets: a typedef is an alias carrier,
-                    // so its roots are structural for the required-import walk
-                    // (conservative — never under-walks).
-                    let mut refs = Vec::new();
-                    collect_type_refs(&typedef_body, &mut refs);
-                    let entry = dep_records.entry(name.clone()).or_default();
-                    for reference in refs {
-                        entry.0.insert(reference.clone());
-                        entry.1.insert(reference);
-                    }
-                    let retained = retained_types.entry(name.clone()).or_default();
-                    retained.bodies.push(typedef_body);
+                    dep_records
+                        .entry(DeclarationPath::root(key.clone()))
+                        .or_default()
+                        .extend(typedef.dependencies);
+                    let retained = retained_types.entry(key.clone()).or_default();
+                    retained.bodies.push(typedef.body);
                     // A JSDoc `@typedef` payload is comment-derived — not
                     // statement-addressable, so its member span origins are
                     // the honest `Synthetic` miss.
-                    retained.contributor_indices.push(None);
+                    retained.contributor_anchors.push(None);
                 }
             }
 
@@ -1349,67 +1451,74 @@ impl DeclBodyMemo {
                 lowered_count,
             };
             let empty_retained = RetainedTypeTransients::default();
-            for (decl_name, group) in &scratch.type_symbols {
-                let (deps, structural) = dep_records.get(decl_name).cloned().unwrap_or_default();
+            for (decl_key, group) in &scratch.type_symbols {
+                let dependencies = dep_records
+                    .get(&DeclarationPath::root(decl_key.clone()))
+                    .cloned()
+                    .unwrap_or_default();
                 // An enum's type-space body is derived from its MERGED
                 // value members (same name → matching value group), so the
                 // type and value spaces never diverge.
                 let enum_type_arms = scratch
                     .value_symbols
-                    .get(decl_name)
+                    .get(decl_key)
                     .and_then(ValueDeclGroup::enum_type_union);
-                let retained = retained_types.get(decl_name).unwrap_or(&empty_retained);
+                let retained = retained_types.get(decl_key).unwrap_or(&empty_retained);
+                let owned_lens = lens.for_owner(decl_key.owner);
+                let owned_route_lens = route_lens.for_owner(decl_key.owner);
                 batch.types.push((
-                    decl_name.clone(),
+                    decl_key.clone(),
                     lowered_type_decl_from_group(
                         group,
-                        deps,
-                        structural,
+                        &dependencies,
                         enum_type_arms,
                         retained,
-                        lens.as_ref(),
-                        route_lens.as_ref(),
+                        &owned_lens,
+                        &owned_route_lens,
                     ),
                 ));
             }
-            for (decl_name, group) in &scratch.value_symbols {
+            for (decl_key, group) in &scratch.value_symbols {
+                let owned_lens = lens.for_owner(decl_key.owner);
                 batch.values.push((
-                    decl_name.clone(),
+                    decl_key.clone(),
                     lowered_value_decl_from_group(
                         group,
-                        retained_values.get(decl_name),
-                        lens.as_ref(),
+                        retained_values.get(decl_key),
+                        &owned_lens,
                     ),
                 ));
             }
-            for ((scope, decl_name), group) in &scratch.augmentation_scopes {
+            for ((scope, decl_key), group) in &scratch.augmentation_scopes {
                 // Ambient augmentation blocks do not inventory enum
                 // declarations, so no value-derived enum union applies here.
                 let retained = retained_aug_types
-                    .get(&(scope.clone(), decl_name.clone()))
+                    .get(&(scope.clone(), decl_key.clone()))
                     .unwrap_or(&empty_retained);
+                let owned_lens = lens.for_owner(decl_key.owner);
+                let owned_route_lens = route_lens.for_owner(decl_key.owner);
                 batch.aug_types.push((
                     scope.clone(),
-                    decl_name.clone(),
+                    decl_key.clone(),
                     lowered_type_decl_from_group(
                         group,
-                        FxHashSet::default(),
-                        FxHashSet::default(),
+                        &DeclDependencyFacts::default(),
                         None,
                         retained,
-                        lens.as_ref(),
-                        route_lens.as_ref(),
+                        &owned_lens,
+                        &owned_route_lens,
                     ),
                 ));
             }
-            for ((scope, decl_name), group) in &scratch.augmentation_value_scopes {
+            for ((scope, decl_key), group) in &scratch.augmentation_value_scopes {
+                let owned_lens = lens.for_owner(decl_key.owner);
                 batch.aug_values.push((
                     scope.clone(),
-                    decl_name.clone(),
+                    decl_key.clone(),
                     lowered_value_decl_from_group(
                         group,
-                        retained_aug_values.get(&(scope.clone(), decl_name.clone())),
-                        lens.as_ref(),
+                        retained_aug_values.get(&(scope.clone(), decl_key.clone())),
+                        &owned_lens,
                     ),
                 ));
             }
@@ -1460,9 +1569,9 @@ impl DeclBodyMemo {
     fn demand_and_commit<D>(
         &self,
         cell: &Arc<OnceLock<DemandCell<D>>>,
-        name: &str,
-        contributors: &[u32],
-        from_jsdoc: bool,
+        key: &DeclKey,
+        contributors: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor],
+        jsdoc_typedef: Option<verter_semantic::analysis::decl_headers::JsdocTypedefHeader>,
         extract: impl FnOnce(&LoweredStatementBatch) -> Option<Arc<D>>,
         on_lease_miss_evict: impl FnOnce(&Arc<OnceLock<DemandCell<D>>>),
     ) -> (DemandOutcome<D>, Option<LoweredStatementBatch>) {
@@ -1480,7 +1589,7 @@ impl DeclBodyMemo {
         let leftover: std::cell::Cell<Option<LoweredStatementBatch>> = std::cell::Cell::new(None);
         let committed =
             cell.get_or_init(
-                || match self.lower_demanded(name, contributors, from_jsdoc) {
+                || match self.lower_demanded(key, contributors, jsdoc_typedef) {
                     DemandLower::Ready(maybe_batch) => {
                         let decl = maybe_batch.as_ref().and_then(extract);
                         leftover.set(maybe_batch);
@@ -1524,72 +1633,76 @@ impl DeclBodyMemo {
     fn backfill(
         &self,
         batch: LoweredStatementBatch,
-        lowered_statements: &[u32],
-        demanded_file_scope: Option<(SymbolSpace, &str)>,
-        demanded_augmentation: Option<(&AugmentationScopeKind, SymbolSpace, &str)>,
+        lowered_statements: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor],
+        demanded_file_scope: Option<(SymbolSpace, &DeclKey)>,
+        demanded_augmentation: Option<(&AugmentationScopeKind, SymbolSpace, &DeclKey)>,
     ) {
         let covers =
-            |contributors: &[u32]| contributors.iter().all(|c| lowered_statements.contains(c));
-        for (name, decl) in batch.types {
-            if demanded_file_scope == Some((SymbolSpace::Type, name.as_str())) {
+            |contributors: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor]| {
+                contributors
+                    .iter()
+                    .all(|candidate| lowered_statements.contains(candidate))
+            };
+        for (key, decl) in batch.types {
+            if demanded_file_scope == Some((SymbolSpace::Type, &key)) {
                 continue;
             }
             if !self
                 .header_index
-                .type_header(&name)
+                .type_header_in(key.owner, key.name.as_ref())
                 .is_some_and(|header| covers(&header.contributors))
             {
                 continue;
             }
-            let cell = self.type_entries.entry(name).or_default().clone();
+            let cell = self.type_entries.entry(key).or_default().clone();
             let _ = cell.set(DemandCell::Ready(Some(Arc::new(decl))));
         }
-        for (name, decl) in batch.values {
-            if demanded_file_scope == Some((SymbolSpace::Value, name.as_str())) {
+        for (key, decl) in batch.values {
+            if demanded_file_scope == Some((SymbolSpace::Value, &key)) {
                 continue;
             }
             if !self
                 .header_index
-                .value_header(&name)
+                .value_header_in(key.owner, key.name.as_ref())
                 .is_some_and(|header| covers(&header.contributors))
             {
                 continue;
             }
-            let cell = self.value_entries.entry(name).or_default().clone();
+            let cell = self.value_entries.entry(key).or_default().clone();
             let _ = cell.set(DemandCell::Ready(Some(Arc::new(decl))));
         }
-        for (scope, name, decl) in batch.aug_types {
-            if demanded_augmentation == Some((&scope, SymbolSpace::Type, name.as_str())) {
+        for (scope, key, decl) in batch.aug_types {
+            if demanded_augmentation == Some((&scope, SymbolSpace::Type, &key)) {
                 continue;
             }
             if !self
                 .header_index
-                .augmentation_type_header(&scope, &name)
+                .augmentation_type_header_in(&scope, key.owner, key.name.as_ref())
                 .is_some_and(|header| covers(&header.contributors))
             {
                 continue;
             }
             let cell = self
                 .aug_type_entries
-                .entry((scope, name))
+                .entry((scope, key))
                 .or_default()
                 .clone();
             let _ = cell.set(DemandCell::Ready(Some(Arc::new(decl))));
         }
-        for (scope, name, decl) in batch.aug_values {
-            if demanded_augmentation == Some((&scope, SymbolSpace::Value, name.as_str())) {
+        for (scope, key, decl) in batch.aug_values {
+            if demanded_augmentation == Some((&scope, SymbolSpace::Value, &key)) {
                 continue;
             }
             if !self
                 .header_index
-                .augmentation_value_header(&scope, &name)
+                .augmentation_value_header_in(&scope, key.owner, key.name.as_ref())
                 .is_some_and(|header| covers(&header.contributors))
             {
                 continue;
             }
             let cell = self
                 .aug_value_entries
-                .entry((scope, name))
+                .entry((scope, key))
                 .or_default()
                 .clone();
             let _ = cell.set(DemandCell::Ready(Some(Arc::new(decl))));
@@ -1598,7 +1711,7 @@ impl DeclBodyMemo {
 }
 
 /// Owned TRANSIENT value-declaration parts of one demanded symbol, re-lowered
-/// from the retained snapshot by [`DeclBodyMemo::transient_value_parts`] for
+/// from the retained snapshot by [`DeclBodyMemo::transient_value_parts_in`] for
 /// the locator-deref worker: the merged contributor view over the per-
 /// statement [`LoweredValueDeclParts`] (last-wins annotation / object shape;
 /// signatures concatenated in contributor order, so the vector index IS the
@@ -1627,30 +1740,44 @@ impl DeclBodyMemo {
     /// fatal parse (genuine, cacheable); `LeaseMiss` = broken lease pin
     /// (transient ReturnOnly).
     pub(crate) fn transient_type_bodies(&self, name: &str) -> DemandOutcome<Vec<TypeExpr>> {
-        let Some((contributors, from_jsdoc)) = self
+        self.transient_type_bodies_in(TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    pub(crate) fn transient_type_bodies_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<Vec<TypeExpr>> {
+        let Some((contributors, jsdoc_typedef)) = self
             .header_index
-            .type_header(name)
-            .map(|header| (header.contributors.clone(), header.from_jsdoc_typedef))
+            .type_header_in(owner, name)
+            .map(|header| (header.contributors.clone(), header.jsdoc_typedef))
         else {
             return DemandOutcome::Ready(None);
         };
-        self.transient_type_bodies_for(name, &contributors, from_jsdoc, None)
+        self.transient_type_bodies_for(
+            DeclKey::new(owner, name),
+            &contributors,
+            jsdoc_typedef,
+            None,
+        )
     }
 
-    /// Augmentation-scoped sibling of [`Self::transient_type_bodies`].
-    pub(crate) fn transient_augmentation_type_bodies(
+    /// Augmentation-scoped sibling of [`Self::transient_type_bodies_in`].
+    pub(crate) fn transient_augmentation_type_bodies_in(
         &self,
         scope: &AugmentationScopeKind,
+        owner: TopLevelOwnerId,
         name: &str,
     ) -> DemandOutcome<Vec<TypeExpr>> {
         let Some(contributors) = self
             .header_index
-            .augmentation_type_header(scope, name)
+            .augmentation_type_header_in(scope, owner, name)
             .map(|header| header.contributors.clone())
         else {
             return DemandOutcome::Ready(None);
         };
-        self.transient_type_bodies_for(name, &contributors, false, Some(scope))
+        self.transient_type_bodies_for(DeclKey::new(owner, name), &contributors, None, Some(scope))
     }
 
     /// Shared lease-only TYPE-body re-lowering over the demanded symbol's
@@ -1659,9 +1786,9 @@ impl DeclBodyMemo {
     /// `export default interface/class` mirror and the JSDoc-typedef payload).
     fn transient_type_bodies_for(
         &self,
-        name: &str,
-        contributors: &[u32],
-        from_jsdoc: bool,
+        key: DeclKey,
+        contributors: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor],
+        jsdoc_typedef: Option<verter_semantic::analysis::decl_headers::JsdocTypedefHeader>,
         aug_scope: Option<&AugmentationScopeKind>,
     ) -> DemandOutcome<Vec<TypeExpr>> {
         let Some(service) = self.service.as_ref() else {
@@ -1671,7 +1798,6 @@ impl DeclBodyMemo {
         };
         self.ensure_lease();
         let contributors = contributors.to_vec();
-        let name = name.to_string();
         let aug_scope = aug_scope.cloned();
         let build_ctx = BuildEvalEnvContext::new(Arc::clone(&self.key.canonical));
         let outcome = service.run_leased(&self.key, move |program| {
@@ -1679,22 +1805,25 @@ impl DeclBodyMemo {
             let source = program.source_str();
             let program = program.borrow_dependent();
             let mut bodies: Vec<TypeExpr> = Vec::new();
-            for index in &contributors {
-                let Some(stmt) = program.body.get(*index as usize) else {
+            for contributor in &contributors {
+                let Some(stmt) = program
+                    .body
+                    .get(contributor.anchor.contributor_index as usize)
+                else {
                     continue;
                 };
                 let parts = lower_statement_parts(stmt, source);
                 match aug_scope.as_ref() {
                     Some(scope) => {
                         for (part_scope, decl) in &parts.aug_type_decls {
-                            if part_scope == scope && decl.name == name {
+                            if part_scope == scope && decl.name == key.name.as_ref() {
                                 bodies.push(decl.body.clone());
                             }
                         }
                     }
                     None => {
                         for decl in &parts.type_decls {
-                            if decl.name == name {
+                            if decl.name == key.name.as_ref() {
                                 bodies.push(decl.body.clone());
                             }
                         }
@@ -1702,7 +1831,7 @@ impl DeclBodyMemo {
                         // class C` mirrors the declared-name symbol under
                         // `default` — mirror the transient bodies the same
                         // way (see the demanded-lowering path).
-                        if name == "default" {
+                        if key.name.as_ref() == "default" {
                             if let Some(alias_from) = parts.alias_default_type_to.as_deref() {
                                 for decl in &parts.type_decls {
                                     if decl.name == alias_from {
@@ -1714,16 +1843,18 @@ impl DeclBodyMemo {
                     }
                 }
             }
-            if from_jsdoc {
+            if let Some(jsdoc_typedef) = jsdoc_typedef {
                 let mut scratch = EvalEnv::new();
-                if let Some(typedef_body) = lower_jsdoc_typedef_named(
+                if let Some(typedef) = lower_jsdoc_typedef_at_comment(
                     &program.comments,
                     source,
-                    &name,
+                    key.name.as_ref(),
+                    key.owner,
+                    jsdoc_typedef.comment_span.start,
                     &build_ctx,
                     &mut scratch,
                 ) {
-                    bodies.push(typedef_body);
+                    bodies.push(typedef.body);
                 }
             }
             Some(bodies)
@@ -1750,8 +1881,19 @@ impl DeclBodyMemo {
     /// [`Self::transient_type_bodies`]. Serves ONLY the typedef payload
     /// (never a same-name TS declaration's statement body — the typedef
     /// locator addresses the comment-derived payload specifically).
-    pub(crate) fn transient_jsdoc_typedef_body(&self, name: &str) -> DemandOutcome<TypeExpr> {
+    pub(crate) fn transient_jsdoc_typedef_body_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<TypeExpr> {
         let Some(service) = self.service.as_ref() else {
+            return DemandOutcome::Ready(None);
+        };
+        let Some(jsdoc_typedef) = self
+            .header_index
+            .type_header_in(owner, name)
+            .and_then(|header| header.jsdoc_typedef)
+        else {
             return DemandOutcome::Ready(None);
         };
         self.ensure_lease();
@@ -1762,13 +1904,18 @@ impl DeclBodyMemo {
             let source = program.source_str();
             let program = program.borrow_dependent();
             let mut scratch = EvalEnv::new();
-            Some(lower_jsdoc_typedef_named(
-                &program.comments,
-                source,
-                &name,
-                &build_ctx,
-                &mut scratch,
-            ))
+            Some(
+                lower_jsdoc_typedef_at_comment(
+                    &program.comments,
+                    source,
+                    &name,
+                    owner,
+                    jsdoc_typedef.comment_span.start,
+                    &build_ctx,
+                    &mut scratch,
+                )
+                .map(|typedef| typedef.body),
+            )
         });
         match outcome {
             None => {
@@ -1801,6 +1948,7 @@ impl DeclBodyMemo {
     /// [`MacroPayloadPosition::TypeAnnotation`]: verter_type_expr::locators::MacroPayloadPosition::TypeAnnotation
     pub(crate) fn transient_props_annotation_body(
         &self,
+        owner: TopLevelOwnerId,
         macro_index: u32,
     ) -> DemandOutcome<PropsAnnotationLowering> {
         let Some(service) = self.service.as_ref() else {
@@ -1811,14 +1959,17 @@ impl DeclBodyMemo {
             .framework_parse
             .as_deref()
             .and_then(crate::parse::module_script_region);
+        let owner_table = Arc::clone(&self.owner_table);
         let outcome = service.run_leased(&self.key, move |program| {
             let program = program?;
             let source = program.source_str();
             let program = program.borrow_dependent();
-            Some(lower_props_annotation_at(
+            Some(lower_props_annotation_at_with_owners(
                 program,
                 source,
                 module_region,
+                owner_table.as_ref(),
+                owner,
                 macro_index,
             ))
         });
@@ -1848,6 +1999,7 @@ impl DeclBodyMemo {
     /// [`MacroPayloadPosition::TypeArgument`]: verter_type_expr::locators::MacroPayloadPosition::TypeArgument
     pub(crate) fn transient_svelte_type_argument_body(
         &self,
+        owner: TopLevelOwnerId,
         macro_index: u32,
     ) -> DemandOutcome<SvelteTypeArgumentLowering> {
         let Some(service) = self.service.as_ref() else {
@@ -1858,14 +2010,17 @@ impl DeclBodyMemo {
             .framework_parse
             .as_deref()
             .and_then(crate::parse::module_script_region);
+        let owner_table = Arc::clone(&self.owner_table);
         let outcome = service.run_leased(&self.key, move |program| {
             let program = program?;
             let source = program.source_str();
             let program = program.borrow_dependent();
-            Some(lower_svelte_type_argument_at(
+            Some(lower_svelte_type_argument_at_with_owners(
                 program,
                 source,
                 module_region,
+                owner_table.as_ref(),
+                owner,
                 macro_index,
             ))
         });
@@ -1900,6 +2055,7 @@ impl DeclBodyMemo {
     /// [`MacroFieldPayloadLowering`]: verter_semantic::analysis::MacroFieldPayloadLowering
     pub(crate) fn transient_macro_field_payload(
         &self,
+        owner: TopLevelOwnerId,
         macro_index: u32,
         field_index: u32,
     ) -> DemandOutcome<verter_semantic::analysis::MacroFieldPayloadLowering> {
@@ -1907,16 +2063,21 @@ impl DeclBodyMemo {
             return DemandOutcome::Ready(None);
         };
         self.ensure_lease();
+        let owner_table = Arc::clone(&self.owner_table);
         let outcome = service.run_leased(&self.key, move |program| {
             let program = program?;
             let source = program.source_str();
             let program = program.borrow_dependent();
-            Some(verter_semantic::analysis::lower_macro_field_payload_at(
-                program,
-                source,
-                macro_index,
-                field_index,
-            ))
+            Some(
+                verter_semantic::analysis::lower_macro_field_payload_at_with_owners(
+                    program,
+                    source,
+                    owner_table.as_ref(),
+                    owner,
+                    macro_index,
+                    field_index,
+                ),
+            )
         });
         match outcome {
             None => {
@@ -2002,10 +2163,14 @@ impl DeclBodyMemo {
     /// re-lowered from the retained snapshot in a LEASE-ONLY job for the
     /// locator-deref worker. Same outcome semantics as
     /// [`Self::transient_type_bodies`].
-    pub(crate) fn transient_value_parts(&self, name: &str) -> DemandOutcome<TransientValueParts> {
+    pub(crate) fn transient_value_parts_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<TransientValueParts> {
         let Some(contributors) = self
             .header_index
-            .value_header(name)
+            .value_header_in(owner, name)
             .map(|header| header.contributors.clone())
         else {
             return DemandOutcome::Ready(None);
@@ -2022,8 +2187,11 @@ impl DeclBodyMemo {
             let program = program.borrow_dependent();
             let mut merged = TransientValueParts::default();
             let mut found = false;
-            for index in &contributors {
-                let Some(stmt) = program.body.get(*index as usize) else {
+            for contributor in &contributors {
+                let Some(stmt) = program
+                    .body
+                    .get(contributor.anchor.contributor_index as usize)
+                else {
                     continue;
                 };
                 let parts = if svelte_component_runes_mode {
@@ -2094,49 +2262,70 @@ pub(crate) fn lowered_decls_from_env_and_program(
     program: &oxc_ast::ast::Program<'_>,
     source: &str,
 ) -> LoweredDeclGroups {
-    let mut retained_types: FxHashMap<String, RetainedTypeTransients> = FxHashMap::default();
-    let mut retained_values: FxHashMap<String, RetainedValueTransients> = FxHashMap::default();
+    let owner = TopLevelOwnerId::ordinary_file();
+    let mut retained_types: FxHashMap<DeclKey, RetainedTypeTransients> = FxHashMap::default();
+    let mut retained_values: FxHashMap<DeclKey, RetainedValueTransients> = FxHashMap::default();
+    let mut dep_records: FxHashMap<DeclarationPath, DeclDependencyFacts> = FxHashMap::default();
     for (index, stmt) in program.body.iter().enumerate() {
         let parts = lower_statement_parts(stmt, source);
-        let contributor_index = Some(u32::try_from(index).unwrap_or(u32::MAX));
+        let contributor_anchor =
+            u32::try_from(index)
+                .ok()
+                .map(|contributor_index| DeclContributorAnchor {
+                    contributor_index,
+                    owner,
+                    owner_local_ordinal: contributor_index,
+                });
         for decl in &parts.type_decls {
             retained_types
-                .entry(decl.name.clone())
+                .entry(DeclKey::new(owner, decl.name.as_str()))
                 .or_default()
-                .push(decl, contributor_index);
+                .push(decl, contributor_anchor);
         }
         for decl in &parts.value_decls {
             retained_values
-                .entry(decl.name.clone())
+                .entry(DeclKey::new(owner, decl.name.as_str()))
                 .or_default()
                 .push(decl);
         }
         if let Some(alias_from) = parts.alias_default_type_to.as_deref() {
-            if let Some(retained) = retained_types.get(alias_from).cloned() {
+            if let Some(retained) = retained_types
+                .get(&DeclKey::new(owner, alias_from))
+                .cloned()
+            {
                 retained_types
-                    .entry("default".to_string())
+                    .entry(DeclKey::new(owner, "default"))
                     .or_default()
                     .extend_from(retained);
             }
+        }
+        for (declaration, dependencies) in collect_statement_dependencies(stmt, owner) {
+            dep_records
+                .entry(declaration)
+                .or_default()
+                .extend(dependencies);
         }
     }
     let empty_retained = RetainedTypeTransients::default();
     let types = env
         .type_symbols
         .iter()
-        .map(|(name, group)| {
+        .map(|(key, group)| {
+            let dependencies = dep_records
+                .get(&DeclarationPath::root(key.clone()))
+                .cloned()
+                .unwrap_or_default();
             let enum_type_arms = env
                 .value_symbols
-                .get(name)
+                .get(key)
                 .and_then(ValueDeclGroup::enum_type_union);
             (
-                name.clone(),
+                key.clone(),
                 lowered_type_decl_from_group(
                     group,
-                    FxHashSet::default(),
-                    FxHashSet::default(),
+                    &dependencies,
                     enum_type_arms,
-                    retained_types.get(name).unwrap_or(&empty_retained),
+                    retained_types.get(key).unwrap_or(&empty_retained),
                     &UnresolvedLens,
                     &EmptyRouteFactLens,
                 ),
@@ -2146,10 +2335,10 @@ pub(crate) fn lowered_decls_from_env_and_program(
     let values = env
         .value_symbols
         .iter()
-        .map(|(name, group)| {
+        .map(|(key, group)| {
             (
-                name.clone(),
-                lowered_value_decl_from_group(group, retained_values.get(name), &UnresolvedLens),
+                key.clone(),
+                lowered_value_decl_from_group(group, retained_values.get(key), &UnresolvedLens),
             )
         })
         .collect();
@@ -2174,8 +2363,7 @@ pub(crate) fn lowered_decls_from_env_and_program(
 /// inputs, read in place and dropped by the caller.
 fn lowered_type_decl_from_group(
     group: &verter_semantic::analysis::type_eval::TypeDeclGroup,
-    dep_names: FxHashSet<String>,
-    structural_dep_names: FxHashSet<String>,
+    dependencies: &DeclDependencyFacts,
     enum_type_arms: Option<Vec<EnumScalar>>,
     retained: &RetainedTypeTransients,
     lens: &dyn CrossDeclLens,
@@ -2192,7 +2380,7 @@ fn lowered_type_decl_from_group(
     // view the legacy folded-body read observed: the enum scalar-union arms
     // for an enum group; every retained contributor body for a merged group;
     // the last (primary, last-wins) retained body for a single group.
-    let (body_hash, dep_bodies): (HashOutcome, &[TypeExpr]) = match &enum_type_arms {
+    let (mut body_hash, dep_bodies): (HashOutcome, &[TypeExpr]) = match &enum_type_arms {
         Some(arms) => (
             // Scalar arms are literals / primitive domains — they carry no
             // `Ref` sites, no object members, and no `typeof` roots, so the
@@ -2240,7 +2428,11 @@ fn lowered_type_decl_from_group(
     let route_facts = produce_shallow_route_facts(dep_bodies, route_lens);
     let mut typeof_roots = FxHashSet::default();
     for dep_body in dep_bodies {
-        collect_typeof_roots(dep_body, &mut typeof_roots);
+        if collect_typeof_roots(dep_body, &mut typeof_roots).is_err() {
+            body_hash.budget_exceeded = true;
+            typeof_roots.clear();
+            break;
+        }
     }
     let mut typeof_root_names: Vec<String> = typeof_roots.into_iter().collect();
     typeof_root_names.sort_unstable();
@@ -2271,19 +2463,16 @@ fn lowered_type_decl_from_group(
     // object body to classify (its type surface is the value-derived scalar
     // union), so it keeps the default facts.
     let anchor = &primary.body.anchor;
-    let root_identity =
-        ResolvedRootIdentity::new(anchor.canonical_id.as_ref(), anchor.symbol.as_ref());
+    let root_identity = ResolvedRootIdentity::new_in_owner(
+        anchor.canonical_id.as_ref(),
+        anchor.owner,
+        anchor.symbol.as_ref(),
+    );
     let mut scratch = PreparedTypeDecl::new(root_identity.clone(), primary.kind);
     scratch.type_parameters = narrow_type_parameters.clone();
     if enum_type_arms.is_none() {
-        let contributor_anchor = |ordinal: usize| {
-            retained
-                .contributor_indices
-                .get(ordinal)
-                .copied()
-                .flatten()
-                .map(|contributor_index| DeclContributorAnchor { contributor_index })
-        };
+        let contributor_anchor =
+            |ordinal: usize| retained.contributor_anchors.get(ordinal).copied().flatten();
         if body.is_merged() {
             // Per-contributor member indexing so each member fact carries its
             // owning contributor's span-origin anchor AND its `MergedContributor`
@@ -2386,11 +2575,16 @@ fn lowered_type_decl_from_group(
 
     LoweredTypeDecl {
         kind: primary.kind,
+        contributor_facts: Arc::from(group.contributors().to_vec().into_boxed_slice()),
         body,
         body_hash,
         type_parameters: retained.type_parameters.clone(),
-        dep_names,
-        structural_dep_names,
+        dependency_paths: dependencies.full.clone(),
+        structural_dependency_paths: dependencies.structural.clone(),
+        declaration_carrier_paths: dependencies.declaration_carrier.clone(),
+        value_query_paths: dependencies.value_queries.clone(),
+        value_position_paths: dependencies.value_positions.clone(),
+        has_unroutable_value_position: dependencies.has_unroutable_value_position,
         route_facts,
         typeof_root_names,
         narrow_type_parameters,
@@ -2557,6 +2751,7 @@ pub(crate) fn lowered_value_decl_for_synthesised_default(
             type_parameters: Arc::from(Vec::new().into_boxed_slice()),
             parameters: Arc::from(Vec::new().into_boxed_slice()),
             return_ty: None,
+            return_inference: verter_type_expr::facts::ReturnInferenceCompleteness::NotInferred,
             has_implementation_body: true,
             spans_origin: FunctionSpansOrigin::Synthetic(SourceSynthetic),
         }],

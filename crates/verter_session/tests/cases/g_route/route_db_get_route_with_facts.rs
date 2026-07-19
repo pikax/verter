@@ -17,6 +17,7 @@ fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey
 fn make_route() -> RouteResult {
     RouteResult::Resolved {
         defining_canonical: "provider.ts".to_string(),
+        defining_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         defining_symbol: "MyExport".to_string(),
     }
 }

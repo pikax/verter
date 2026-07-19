@@ -155,13 +155,18 @@ type GraphNativeBindingEntry = ((Arc<str>, Arc<str>), ResolvedSlotBinding);
 const SFC_SCRIPT_SETUP_DECL_NAME: &str = "<sfc-script-setup>";
 
 /// Build the owner [`DeclIdentity`] for an SFC's macro queries.
-fn build_owner_decl_identity(ctx: &dyn ResolverContext, owner_canonical: &str) -> DeclIdentity {
+fn build_owner_decl_identity(
+    ctx: &dyn ResolverContext,
+    owner_canonical: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
+) -> DeclIdentity {
     let whole_hash = ctx
         .shallow_file_state(owner_canonical)
         .map(|s| s.whole_hash)
         .unwrap_or_default();
     DeclIdentity {
         canonical_id: Arc::from(owner_canonical),
+        owner,
         whole_hash,
         decl_name: Arc::from(SFC_SCRIPT_SETUP_DECL_NAME),
     }
@@ -493,7 +498,11 @@ pub(crate) fn slot_param_root_is_symbolic_only(
             //   ProjectPath, on the carrier.)
             use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
             let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-                dispatch.type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name)),
+                dispatch.type_slot_for(
+                    Arc::clone(&base.canonical_id),
+                    base.owner,
+                    Arc::clone(&base.decl_name),
+                ),
                 Arc::clone(args),
                 dispatch.instantiate_context_for(
                     &base.canonical_id,
@@ -644,8 +653,6 @@ pub(crate) fn resolve_slot_bindings_graph_native(
 
     let mut should_suppress = false;
     let dispatch = ProjectSemanticDispatch::new(ctx.ctx);
-    let owner = build_owner_decl_identity(ctx.ctx, owner_canonical);
-
     // Synthesis-step budget. Production code leaves
     // `synthesis_steps` `None` so the synthesis runs at full
     // budget. Tests use a small override to drive the budget-
@@ -696,6 +703,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         if mac.parsed_type_argument.is_none() {
             continue;
         }
+        let owner = build_owner_decl_identity(ctx.ctx, owner_canonical, mac.owner);
         let macro_span = tracing::info_span!(
             "synthesize_macro",
             macro_index,
@@ -767,6 +775,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         let macro_payload_read = dispatch.execute_read(SemanticQueryKey::ResolveMacroPayload {
             owner: dispatch.type_slot_for(
                 Arc::clone(&owner.canonical_id),
+                owner.owner,
                 Arc::clone(&owner.decl_name),
             ),
             macro_index,
@@ -1348,6 +1357,7 @@ fn closed_member_path_route_source(
                             object: verter_type_expr::locators::TypeBodySlot {
                                 anchor: verter_type_expr::locators::AuthoredAnchor {
                                     canonical_id: Arc::clone(&identity.canonical_id),
+                                    owner: identity.owner,
                                     symbol: Arc::clone(&identity.decl_name),
                                     space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                                 },
@@ -1384,10 +1394,11 @@ fn owner_local_member_reaches_non_owner_ref(
     identity: &DeclIdentity,
     member_name: &str,
 ) -> bool {
-    let Some(prepared) = dispatch
-        .ctx
-        .prepared_type_decl(identity.canonical_id.as_ref(), identity.decl_name.as_ref())
-    else {
+    let Some(prepared) = dispatch.ctx.prepared_type_decl_return_only(
+        identity.canonical_id.as_ref(),
+        identity.owner,
+        identity.decl_name.as_ref(),
+    ) else {
         return false;
     };
     let Some(member) = prepared.member_index.get(member_name) else {

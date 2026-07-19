@@ -13,6 +13,7 @@
 //! invariant under a type-param IDENTIFIER rename and a member's
 //! VALUE-type edit (bodies never lower at publish).
 
+use std::any::Any;
 use std::sync::Arc;
 
 use oxc_span::SourceType;
@@ -59,6 +60,9 @@ fn indexed_for(source: &str) -> Arc<IndexedReady> {
         Arc::clone(&eval_source),
         None,
         SourceType::ts(),
+        Arc::new(
+            verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(parsed.program.body.len()),
+        ),
         false,
         Arc::new(DeclLoweringService::new()),
         header_index,
@@ -82,6 +86,102 @@ fn indexed_for(source: &str) -> Arc<IndexedReady> {
 
 fn h(source: &str) -> [u8; 16] {
     compute_parse_stable_hash(&indexed_for(source))
+}
+
+#[derive(Debug)]
+struct FixtureCarrier;
+
+impl verter_language::CarrierParse for FixtureCarrier {
+    fn __verter_as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn __verter_as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+        self
+    }
+}
+
+fn h_with_script_region(
+    source: &str,
+    kind: verter_language::ScriptRegionKind,
+    source_type: verter_language::ScriptSourceType,
+) -> [u8; 16] {
+    let mut indexed = Arc::try_unwrap(indexed_for(source)).expect("fixture has one owner");
+    indexed.framework_parse = Some(Arc::new(verter_language::FrameworkParseArtifact::new(
+        verter_language::FrameworkAdapterId::vue(),
+        verter_language::LanguageId::new("vue"),
+        1,
+        verter_language::FrameworkParseCommon {
+            script_regions: vec![verter_language::ScriptRegion {
+                span: verter_span::Span::new(0, source.len() as u32),
+                source_type,
+                kind,
+            }],
+            ..Default::default()
+        },
+        Arc::new(FixtureCarrier),
+    )));
+    compute_parse_stable_hash(&indexed)
+}
+
+#[test]
+fn setup_attribute_only_owner_change_moves_hash() {
+    let source = "const value = 1;\n";
+    let companion = h_with_script_region(
+        source,
+        verter_language::ScriptRegionKind::Module,
+        verter_language::ScriptSourceType::Ts,
+    );
+    let setup = h_with_script_region(
+        source,
+        verter_language::ScriptRegionKind::Instance,
+        verter_language::ScriptSourceType::Ts,
+    );
+
+    assert_ne!(
+        companion, setup,
+        "changing only the typed script owner (<script> <-> <script setup>) must move the hash"
+    );
+}
+
+#[test]
+fn carrier_script_span_offsets_do_not_move_hash() {
+    let source = "const value = 1;\n";
+    let mut first = Arc::try_unwrap(indexed_for(source)).expect("fixture has one owner");
+    first.framework_parse = Some(Arc::new(verter_language::FrameworkParseArtifact::new(
+        verter_language::FrameworkAdapterId::vue(),
+        verter_language::LanguageId::new("vue"),
+        1,
+        verter_language::FrameworkParseCommon {
+            script_regions: vec![verter_language::ScriptRegion {
+                span: verter_span::Span::new(0, 1),
+                source_type: verter_language::ScriptSourceType::Ts,
+                kind: verter_language::ScriptRegionKind::Instance,
+            }],
+            ..Default::default()
+        },
+        Arc::new(FixtureCarrier),
+    )));
+    let mut second = first.clone();
+    let parse = second
+        .framework_parse
+        .take()
+        .expect("fixture has framework parse");
+    let mut common = parse.common.clone();
+    common.script_regions[0].span = verter_span::Span::new(8, 9);
+    second.framework_parse = Some(Arc::new(verter_language::FrameworkParseArtifact::new(
+        verter_language::FrameworkAdapterId::vue(),
+        verter_language::LanguageId::new("vue"),
+        1,
+        common,
+        Arc::new(FixtureCarrier),
+    )));
+
+    assert_eq!(
+        compute_parse_stable_hash(&first),
+        compute_parse_stable_hash(&second),
+        "carrier byte-offset movement is cosmetic"
+    );
 }
 
 // ── Member header shape (kind / optional / readonly) ──────────────────

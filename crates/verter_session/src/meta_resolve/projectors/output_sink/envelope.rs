@@ -176,8 +176,18 @@ impl<'a> OutputSourceMemo<'a> {
             std::collections::hash_map::Entry::Occupied(hit) => Ok(hit.get().clone()),
             std::collections::hash_map::Entry::Vacant(slot) => {
                 self.materialize_calls += 1;
-                let value = materialize_output_source(dispatch, cap, effective_scope, source)
-                    .map_err(|failure| crate::meta_resolve::ComponentMetaOutputError {
+                // Component-meta output lanes are rooted in the component
+                // instance owner. Inherited producing scopes are component
+                // canonicals too, so they preserve the same exact owner lane.
+                let value = materialize_output_source(
+                    dispatch,
+                    cap,
+                    effective_scope,
+                    verter_type_expr::TopLevelOwnerId::instance(0),
+                    source,
+                )
+                .map_err(|failure| {
+                    crate::meta_resolve::ComponentMetaOutputError {
                         lane,
                         index,
                         inner_index,
@@ -185,7 +195,8 @@ impl<'a> OutputSourceMemo<'a> {
                             source.clone(),
                         )),
                         failure,
-                    })?;
+                    }
+                })?;
                 slot.insert(value.clone());
                 Ok(value)
             }

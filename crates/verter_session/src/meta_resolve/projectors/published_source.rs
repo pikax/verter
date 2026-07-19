@@ -9,6 +9,19 @@
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::SemanticNodeId;
 
+fn published_anchor_for_identity(
+    identity: &crate::semantic_query::DeclIdentity,
+) -> Option<verter_type_expr::locators::AuthoredAnchor> {
+    use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
+
+    (!identity.canonical_id.is_empty()).then(|| AuthoredAnchor {
+        canonical_id: std::sync::Arc::clone(&identity.canonical_id),
+        owner: identity.owner,
+        symbol: std::sync::Arc::clone(&identity.decl_name),
+        space: LocatorSymbolSpace::Type,
+    })
+}
+
 /// The publication SOURCE for a reduced node: the complete closed LEAF fact
 /// when the node decided one, the closed LEAF-UNION fact when the node is a
 /// union of complete leaves, otherwise the caller's `existing` source
@@ -84,7 +97,7 @@ pub(super) fn published_member_source_upgrade_for_node(
     node: Option<SemanticNodeId>,
     include_lossy_instantiation: bool,
 ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
-    use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace, SymbolBodyLocator};
+    use verter_type_expr::locators::SymbolBodyLocator;
 
     let node = node?;
     if let Some(leaf) = dispatch.node_leaf_fact(node) {
@@ -112,15 +125,10 @@ pub(super) fn published_member_source_upgrade_for_node(
     match identity {
         // Content-free: canonical + symbol only — the whole-hash is a version,
         // never part of a published source.
-        Some(identity) if !identity.canonical_id.is_empty() => {
+        Some(identity) => {
+            let anchor = published_anchor_for_identity(&identity)?;
             Some(verter_type_expr::facts::SemanticTypeSource::Synthesized(
-                verter_type_expr::facts::ResolvedLocalShape::Ref(SymbolBodyLocator {
-                    anchor: AuthoredAnchor {
-                        canonical_id: std::sync::Arc::clone(&identity.canonical_id),
-                        symbol: std::sync::Arc::clone(&identity.decl_name),
-                        space: LocatorSymbolSpace::Type,
-                    },
-                }),
+                verter_type_expr::facts::ResolvedLocalShape::Ref(SymbolBodyLocator { anchor }),
             ))
         }
         _ => None,
@@ -195,4 +203,29 @@ pub(crate) fn structural_member_value_source(
             path: std::sync::Arc::from(vec![member_name.to_string()].into_boxed_slice()),
         },
     ))
+}
+
+#[cfg(test)]
+mod owner_identity_tests {
+    use super::*;
+    use std::sync::Arc;
+    use verter_type_expr::locators::LocatorSymbolSpace;
+    use verter_type_expr::TopLevelOwnerId;
+
+    #[test]
+    fn published_anchor_preserves_decl_identity_owner() {
+        let identity = crate::semantic_query::DeclIdentity {
+            canonical_id: Arc::from("/w/Component.vue"),
+            owner: TopLevelOwnerId::instance(0),
+            whole_hash: [3u8; 16],
+            decl_name: Arc::from("Shared"),
+        };
+
+        let anchor = published_anchor_for_identity(&identity)
+            .expect("a real declaration identity must publish an anchor");
+        assert_eq!(anchor.canonical_id.as_ref(), "/w/Component.vue");
+        assert_eq!(anchor.owner, TopLevelOwnerId::instance(0));
+        assert_eq!(anchor.symbol.as_ref(), "Shared");
+        assert_eq!(anchor.space, LocatorSymbolSpace::Type);
+    }
 }

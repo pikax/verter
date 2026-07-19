@@ -37,7 +37,10 @@ use crate::types::{PublicApiMode, TscResponse};
 pub struct SvelteComponentApiProjector;
 
 impl ComponentApiProjector for SvelteComponentApiProjector {
-    fn render_api(&self, cx: ComponentApiProjectorCtx<'_>) -> Option<ComponentApiProjection> {
+    fn render_api(
+        &self,
+        cx: ComponentApiProjectorCtx<'_>,
+    ) -> Result<Option<ComponentApiProjection>, crate::PublicApiProjectionError> {
         let ComponentApiProjectorCtx {
             host,
             resolved_canonical,
@@ -52,7 +55,7 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         // same-adapter non-carrier row.
         let descriptor = crate::framework::descriptor::svelte_descriptor();
         if file_language.carrier_language_id() != descriptor.carrier_language.as_ref() {
-            return None;
+            return Ok(None);
         }
 
         // Mode handling is EXPLICIT (no silent fall-through for a future
@@ -66,34 +69,43 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         //   distinct from the rendered `Some`.
         match mode {
             PublicApiMode::Public | PublicApiMode::Declaration => {}
-            PublicApiMode::Testing => return None,
+            PublicApiMode::Testing => return Ok(None),
         }
 
         // Read the already-cached shallow state for the resolved canonical.
         // Source parsing happened during analysis; this render never invokes
         // OXC or scans the source text.
-        let indexed = host.ensure_indexed_ready_serve(resolved_canonical)?.indexed;
+        let Some(serve) = host.ensure_indexed_ready_serve(resolved_canonical) else {
+            return Ok(None);
+        };
+        let indexed = serve.indexed;
         let shallow = &indexed.shallow_state;
         let component_generics = svelte_component_generics(&indexed);
 
         // The synthesized `default` carries the instance shape
         // (`{ $props: Props, …exports }`). A `.svelte` with no synth default
         // (no props, no exports) projects no public API.
-        let default_symbol = shallow.value_symbol("default")?;
+        let Some(default_symbol) = shallow.value_symbol("default") else {
+            return Ok(None);
+        };
         if !default_symbol.is_synthesised_component_default {
-            return None;
+            return Ok(None);
         }
         // The instance shape rides the synthesized BODY's annotation-borne
         // closed SOURCE (`LoweredValueDecl.type_annotation.annotation` =
         // `Synthesized(Object(members))`); the synth's construct signature
         // deliberately carries no authored return position (`return_ty` is an
         // honest `None`), so the annotation source is the shape authority.
-        let default_body = shallow.value_decl("default")?;
-        let instance_source = default_body.type_annotation.annotation.as_ref()?;
+        let Some(default_body) = shallow.value_decl("default") else {
+            return Ok(None);
+        };
+        let Some(instance_source) = default_body.type_annotation.annotation.as_ref() else {
+            return Ok(None);
+        };
         let SemanticTypeSource::Synthesized(ResolvedLocalShape::Object(instance_members)) =
             instance_source
         else {
-            return None;
+            return Ok(None);
         };
 
         // Split the instance shape into props, the legacy dispatcher map, and
@@ -129,6 +141,10 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             .and_then(|ctx| host.resolve_svelte_script_facts_with_ctx(ctx, resolved_canonical));
         let resolved_exports =
             resolver_ctx.and_then(|ctx| resolve_public_exports_text(host, ctx, resolved_canonical));
+        let resolved_module_exports = resolver_ctx
+            .zip(script_facts.as_deref())
+            .map(|(ctx, facts)| resolve_public_module_exports(ctx, resolved_canonical, facts))
+            .unwrap_or_default();
 
         // Collect the PRESERVED type-reference names (leaf refs in the props
         // fact + the dispatcher event-map fact + export member facts) so the
@@ -150,6 +166,9 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         }
         if let Some(exports) = resolved_exports.as_ref() {
             referenced.extend(exports.type_references.iter().cloned());
+        }
+        for export in &resolved_module_exports {
+            referenced.extend(export.type_references.iter().cloned());
         }
 
         let mut out = ShimBuilder::default();
@@ -242,7 +261,12 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
                     .exports
                     .keys()
                     .map(String::as_str)
-                    .chain(export_members.iter().map(|(name, _)| *name)),
+                    .chain(export_members.iter().map(|(name, _)| *name))
+                    .chain(
+                        resolved_module_exports
+                            .iter()
+                            .map(|export| export.exported_name.as_str()),
+                    ),
             ),
         );
         let exports_text = resolved_exports
@@ -289,22 +313,15 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         // 4. The component value is the module's default public API.
         out.line(&format!("export default {component_name};"));
 
-        // 5. `<script module>` exports as TOP-LEVEL named declarations. A
-        //    top-level export of the shallow state that is NOT an INSTANCE member
-        //    of the component is a module-script export — surface it as a
-        //    top-level `export declare const` so the api file exposes the
-        //    module's named exports alongside the default component.
-        let instance_member_names: std::collections::BTreeSet<&str> =
-            export_members.iter().map(|(name, _)| *name).collect();
-        let mut module_exports: Vec<&str> = shallow
-            .exports
-            .keys()
-            .map(String::as_str)
-            .filter(|name| *name != "default" && !instance_member_names.contains(name))
-            .collect();
-        module_exports.sort_unstable();
-        for name in module_exports {
-            out.line(&format!("export declare const {name}: unknown;"));
+        // 5. `<script module>` exports as TOP-LEVEL named declarations. The
+        // resolved script fact is the exact inventory: public name + captured
+        // owner-qualified local binding. No shallow-export set subtraction or
+        // name-based owner inference participates.
+        for export in resolved_module_exports {
+            out.line(&format!(
+                "export declare const {}: {};",
+                export.exported_name, export.type_annotation
+            ));
         }
 
         let (code, name_mappings) = out.finish();
@@ -315,13 +332,13 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             &name_mappings,
         );
 
-        Some(ComponentApiProjection {
+        Ok(Some(ComponentApiProjection {
             response: TscResponse {
                 code: Arc::from(code.as_str()),
                 source_map,
             },
             contract: resolved_props.map(|props| ComponentPublicContract { props: props.props }),
-        })
+        }))
     }
 }
 
@@ -352,6 +369,12 @@ struct PropNameMapping {
 
 struct ResolvedPublicExports {
     text: String,
+    type_references: BTreeSet<String>,
+}
+
+struct ResolvedPublicModuleExport {
+    exported_name: String,
+    type_annotation: String,
     type_references: BTreeSet<String>,
 }
 
@@ -605,7 +628,6 @@ fn resolve_public_exports_text(
     ctx: &dyn crate::resolver_core::ResolverContext,
     owner: &str,
 ) -> Option<ResolvedPublicExports> {
-    use crate::typeinfo::framework_surface::results::NamedTypeMemberOutput;
     use crate::typeinfo::framework_surface::SvelteSurfaceSource;
 
     let outcome = crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface(
@@ -623,22 +645,7 @@ fn resolve_public_exports_text(
             type_references.extend(member.type_references.iter().cloned());
             let name = render_property_name(&member.name);
             let optional = if member.is_optional { "?" } else { "" };
-            let ty = member
-                .type_annotation
-                .clone()
-                .or_else(|| match member.value.as_ref() {
-                    Some(NamedTypeMemberOutput::Primitive(name)) => Some(name.as_str().to_string()),
-                    Some(NamedTypeMemberOutput::Literal(value)) => Some(match value {
-                        verter_type_expr::LiteralValue::String(value) => format!("{value:?}"),
-                        verter_type_expr::LiteralValue::Number(value) => value.to_string(),
-                        verter_type_expr::LiteralValue::BigInt(value) => value.clone(),
-                        verter_type_expr::LiteralValue::Boolean(value) => value.to_string(),
-                    }),
-                    Some(NamedTypeMemberOutput::EmptyObject) => Some("{}".to_string()),
-                    Some(NamedTypeMemberOutput::Ref { name }) => Some(name.to_string()),
-                    Some(NamedTypeMemberOutput::Opaque) | None => None,
-                })
-                .unwrap_or_else(|| "unknown".to_string());
+            let ty = resolved_named_member_type(member);
             format!("{name}{optional}: {ty}")
         })
         .collect::<Vec<_>>();
@@ -650,6 +657,57 @@ fn resolve_public_exports_text(
         },
         type_references,
     })
+}
+
+fn resolve_public_module_exports(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    owner: &str,
+    facts: &verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
+) -> Vec<ResolvedPublicModuleExport> {
+    let mut exports = facts
+        .module_exports
+        .iter()
+        .map(|export| {
+            let member =
+                crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_value_export_member(
+                    ctx,
+                    owner,
+                    &export.exported_name,
+                    &export.binding_key,
+                    None,
+                );
+            ResolvedPublicModuleExport {
+                exported_name: export.exported_name.clone(),
+                type_annotation: resolved_named_member_type(&member),
+                type_references: member.type_references.into_iter().collect(),
+            }
+        })
+        .collect::<Vec<_>>();
+    exports.sort_by(|left, right| left.exported_name.cmp(&right.exported_name));
+    exports
+}
+
+fn resolved_named_member_type(
+    member: &crate::typeinfo::framework_surface::results::NamedTypeMember,
+) -> String {
+    use crate::typeinfo::framework_surface::results::NamedTypeMemberOutput;
+
+    member
+        .type_annotation
+        .clone()
+        .or_else(|| match member.value.as_ref() {
+            Some(NamedTypeMemberOutput::Primitive(name)) => Some(name.as_str().to_string()),
+            Some(NamedTypeMemberOutput::Literal(value)) => Some(match value {
+                verter_type_expr::LiteralValue::String(value) => format!("{value:?}"),
+                verter_type_expr::LiteralValue::Number(value) => value.to_string(),
+                verter_type_expr::LiteralValue::BigInt(value) => value.clone(),
+                verter_type_expr::LiteralValue::Boolean(value) => value.to_string(),
+            }),
+            Some(NamedTypeMemberOutput::EmptyObject) => Some("{}".to_string()),
+            Some(NamedTypeMemberOutput::Ref { name }) => Some(name.to_string()),
+            Some(NamedTypeMemberOutput::Opaque) | None => None,
+        })
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Use the AST-captured type spelling only when every local reference it names
@@ -803,12 +861,20 @@ fn build_api_source_map(
                         ..mapping.source_start as usize + mapping.name.len(),
                 ) == Some(mapping.name.as_str())
         })
-        .map(|mapping| verter_compiler::tsc::script::GeneratedMapping {
-            generated_offset: mapping.generated_offset,
-            source_span: verter_span::Span::new(
-                mapping.source_start,
-                mapping.source_start + mapping.name.len() as u32,
-            ),
+        .flat_map(|mapping| {
+            [
+                verter_compiler::tsc::script::GeneratedMapping {
+                    generated_offset: mapping.generated_offset,
+                    source_span: Some(verter_span::Span::new(
+                        mapping.source_start,
+                        mapping.source_start + mapping.name.len() as u32,
+                    )),
+                },
+                verter_compiler::tsc::script::GeneratedMapping {
+                    generated_offset: mapping.generated_offset + mapping.name.len(),
+                    source_span: None,
+                },
+            ]
         })
         .collect();
     if admitted.is_empty() {

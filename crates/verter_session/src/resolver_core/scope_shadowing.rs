@@ -113,9 +113,10 @@ impl ScopeShadowing {
     pub(crate) fn from_host_scope(
         ctx: &dyn crate::resolver_core::ResolverContext,
         scope_canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
     ) -> Self {
         match ctx.prepared_decl_bundle(scope_canonical_id) {
-            Some(bundle) => Self::from_prepared_decl_bundle(bundle.as_ref()),
+            Some(bundle) => Self::from_prepared_decl_bundle(bundle.as_ref(), owner),
             None => Self::empty(),
         }
     }
@@ -130,11 +131,17 @@ impl ScopeShadowing {
     /// aligned is the load-bearing invariant: the dispatch path and
     /// the materialise path MUST observe the same shadow set per
     /// scope.
-    pub(crate) fn from_prepared_decl_bundle(bundle: &PreparedDeclBundle) -> Self {
+    pub(crate) fn from_prepared_decl_bundle(
+        bundle: &PreparedDeclBundle,
+        owner: verter_type_expr::TopLevelOwnerId,
+    ) -> Self {
+        let Some(scope) = bundle.owner_scope(owner) else {
+            return Self::empty();
+        };
         Self::from_payload_parts(
-            bundle.scope_type_names.iter(),
-            bundle.script_setup_type_bindings.keys(),
-            bundle.import_bindings.keys(),
+            scope.scope_type_names.iter(),
+            scope.script_setup_type_bindings.keys(),
+            scope.import_bindings.keys(),
         )
     }
 
@@ -250,13 +257,16 @@ mod tests {
             "/shadow-fixture.ts",
             state,
             FxHashMap::default(),
-            bindings,
+            bindings.clone(),
             ImportCanonicalization::default(),
             &interner,
         );
-        bundle.scope_type_names = scope_type_names;
-        bundle.import_bindings = import_bindings;
-        DeclarationScopePayload::from_bundle(&Arc::new(bundle))
+        let owner = verter_type_expr::TopLevelOwnerId::instance(0);
+        let owner_scope = bundle.owner_scopes.entry(owner).or_default();
+        owner_scope.scope_type_names = scope_type_names;
+        owner_scope.import_bindings = import_bindings;
+        owner_scope.script_setup_type_bindings = bindings;
+        DeclarationScopePayload::from_bundle(&Arc::new(bundle), owner)
     }
 
     #[test]

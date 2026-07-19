@@ -43,6 +43,10 @@ verter_language = { path = "../verter_language" }
 verter_macro_dto = { workspace = true }
 verter_parser = { path = "../verter_parser" }
 verter_span = { path = "../verter_span", version = "0.0.1-beta.1" }
+# Parser-owned declaration dependency paths used only to retain compiler-owned
+# authored scope carriers. Typed macro semantics still cross exclusively via
+# `verter_macro_dto`; the compiler performs no semantic resolution.
+verter_type_expr = { workspace = true }
 hotpath = { version = "0.16", optional = true }
 bitflags = "2.11"
 memchr = "2.8.0"

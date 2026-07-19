@@ -515,6 +515,7 @@ mod request_error_classification_tests {
     fn decl_placeholder_is_not_a_request_fault() {
         let err = QueryError::DeclPlaceholder {
             canonical_id: Arc::from("/a.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: Arc::from("Foo"),
             whole_hash: Default::default(),
         };

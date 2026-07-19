@@ -30,6 +30,351 @@ use crate::{MemberVisibility, PrimitiveName, TypeExprScope};
 // Supporting typed replacements introduced with the fact substrate
 // ===========================================================================
 
+/// Closed kind of a neutral top-level declaration/import owner.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum TopLevelOwnerKind {
+    Module,
+    Instance,
+    Frontmatter,
+}
+
+/// Neutral top-level declaration/import owner. Framework adapters map their
+/// authored regions into this identity once during cold indexing; semantic
+/// caches never infer ownership from names, spans, or source text.
+///
+/// Ordinary JavaScript/TypeScript files use [`Self::ordinary_file`], which is
+/// exactly `Module(0)`. There is intentionally no special `File` owner: a file
+/// is the first module owner, so plain and carrier-backed sources share one
+/// identity model.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub struct TopLevelOwnerId {
+    kind: TopLevelOwnerKind,
+    ordinal: u32,
+}
+
+impl TopLevelOwnerId {
+    #[must_use]
+    pub const fn new(kind: TopLevelOwnerKind, ordinal: u32) -> Self {
+        Self { kind, ordinal }
+    }
+
+    #[must_use]
+    pub const fn module(ordinal: u32) -> Self {
+        Self::new(TopLevelOwnerKind::Module, ordinal)
+    }
+
+    #[must_use]
+    pub const fn instance(ordinal: u32) -> Self {
+        Self::new(TopLevelOwnerKind::Instance, ordinal)
+    }
+
+    #[must_use]
+    pub const fn frontmatter(ordinal: u32) -> Self {
+        Self::new(TopLevelOwnerKind::Frontmatter, ordinal)
+    }
+
+    #[must_use]
+    pub const fn ordinary_file() -> Self {
+        Self::module(0)
+    }
+
+    #[must_use]
+    pub const fn kind(self) -> TopLevelOwnerKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn ordinal(self) -> u32 {
+        self.ordinal
+    }
+}
+
+impl Default for TopLevelOwnerId {
+    fn default() -> Self {
+        Self::ordinary_file()
+    }
+}
+
+/// Canonical declaration identity within a source artifact.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub struct DeclKey {
+    pub owner: TopLevelOwnerId,
+    pub name: Arc<str>,
+}
+
+impl DeclKey {
+    #[must_use]
+    pub fn new(owner: TopLevelOwnerId, name: impl Into<Arc<str>>) -> Self {
+        Self {
+            owner,
+            name: name.into(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod top_level_owner_identity_tests {
+    use super::{DeclKey, TopLevelOwnerId, TopLevelOwnerKind, ValueDeclIdentityPart};
+    use crate::locators::{AuthoredAnchor, LocatorSymbolSpace};
+    use crate::span_origins::DeclContributorAnchor;
+    use std::collections::HashSet;
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    use std::sync::Arc;
+
+    fn hash_of(value: &impl Hash) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[test]
+    fn top_level_owner_identity_is_closed_ordered_and_serialized() {
+        let ordinary = TopLevelOwnerId::ordinary_file();
+        let module = TopLevelOwnerId::module(0);
+        let instance = TopLevelOwnerId::instance(0);
+        let frontmatter = TopLevelOwnerId::frontmatter(7);
+
+        assert_eq!(ordinary, module);
+        assert_eq!(ordinary.kind(), TopLevelOwnerKind::Module);
+        assert_eq!(ordinary.ordinal(), 0);
+        assert_eq!(instance.kind(), TopLevelOwnerKind::Instance);
+        assert_eq!(frontmatter.ordinal(), 7);
+        assert_ne!(module, instance);
+        assert_ne!(hash_of(&module), hash_of(&instance));
+
+        let json = serde_json::to_string(&frontmatter).expect("serialize owner");
+        let round_trip: TopLevelOwnerId = serde_json::from_str(&json).expect("deserialize owner");
+        assert_eq!(round_trip, frontmatter);
+    }
+
+    #[test]
+    fn declaration_key_discriminates_same_name_across_owners() {
+        let module = DeclKey::new(TopLevelOwnerId::module(0), "Props");
+        let instance = DeclKey::new(TopLevelOwnerId::instance(0), "Props");
+
+        assert_eq!(module.name.as_ref(), "Props");
+        assert_ne!(module, instance);
+        assert_ne!(hash_of(&module), hash_of(&instance));
+
+        let json = serde_json::to_string(&instance).expect("serialize key");
+        let round_trip: DeclKey = serde_json::from_str(&json).expect("deserialize key");
+        assert_eq!(round_trip, instance);
+    }
+
+    #[test]
+    fn owner_bearing_value_and_locator_identities_discriminate_hash_and_serde() {
+        let module = TopLevelOwnerId::module(0);
+        let instance = TopLevelOwnerId::instance(0);
+        let value = |owner| ValueDeclIdentityPart {
+            canonical_id: Arc::from("/src/App.vue"),
+            owner,
+            symbol: Arc::from("shared"),
+            member_path: Arc::from([]),
+        };
+        let anchor = |owner| AuthoredAnchor {
+            canonical_id: Arc::from("/src/App.vue"),
+            owner,
+            symbol: Arc::from("Shared"),
+            space: LocatorSymbolSpace::Type,
+        };
+        let contributor = |owner| DeclContributorAnchor {
+            contributor_index: 0,
+            owner,
+            owner_local_ordinal: 0,
+        };
+
+        let module_value = value(module);
+        let instance_value = value(instance);
+        assert_ne!(module_value, instance_value);
+        assert_eq!(
+            HashSet::from([module_value.clone(), instance_value.clone()]).len(),
+            2
+        );
+        let module_value_json = serde_json::to_string(&module_value).unwrap();
+        assert_ne!(
+            module_value_json,
+            serde_json::to_string(&instance_value).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_str::<ValueDeclIdentityPart>(&module_value_json).unwrap(),
+            module_value
+        );
+
+        let module_anchor = anchor(module);
+        let instance_anchor = anchor(instance);
+        assert_ne!(module_anchor, instance_anchor);
+        assert_eq!(
+            HashSet::from([module_anchor.clone(), instance_anchor]).len(),
+            2
+        );
+        let module_anchor_json = serde_json::to_string(&module_anchor).unwrap();
+        assert_ne!(
+            module_anchor_json,
+            serde_json::to_string(&anchor(instance)).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_str::<AuthoredAnchor>(&module_anchor_json).unwrap(),
+            module_anchor
+        );
+
+        let module_contributor = contributor(module);
+        let instance_contributor = contributor(instance);
+        assert_ne!(module_contributor, instance_contributor);
+        assert_eq!(
+            HashSet::from([module_contributor, instance_contributor]).len(),
+            2
+        );
+        let module_contributor_json = serde_json::to_string(&contributor(module)).unwrap();
+        assert_ne!(
+            module_contributor_json,
+            serde_json::to_string(&contributor(instance)).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_str::<DeclContributorAnchor>(&module_contributor_json).unwrap(),
+            contributor(module)
+        );
+    }
+}
+
+/// One parser-authored type dependency path. The root binding and ordered
+/// member path remain structurally distinct until routing; dotted text is only
+/// exposed for legacy compatibility surfaces.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, NoTypeExpr, NoStoredSpan,
+)]
+pub struct TypeDependencyPathFact {
+    segments: Arc<[String]>,
+}
+
+impl<'de> serde::Deserialize<'de> for TypeDependencyPathFact {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct Wire {
+            segments: Vec<String>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::from_segments(wire.segments).ok_or_else(|| {
+            serde::de::Error::custom("type dependency path requires non-empty, non-blank segments")
+        })
+    }
+}
+
+#[cfg(test)]
+mod type_dependency_path_fact_tests {
+    use super::TypeDependencyPathFact;
+
+    #[test]
+    fn construction_requires_non_empty_non_blank_segments() {
+        assert!(TypeDependencyPathFact::from_segments(Vec::<String>::new()).is_none());
+        assert!(TypeDependencyPathFact::from_segments([""]).is_none());
+        assert!(TypeDependencyPathFact::from_segments(["   "]).is_none());
+        assert!(TypeDependencyPathFact::from_segments(["Root", ""]).is_none());
+
+        let path = TypeDependencyPathFact::from_segments(["Root", "Member"]).unwrap();
+        assert_eq!(path.root(), "Root");
+        assert_eq!(path.member_path(), ["Member"]);
+    }
+
+    #[test]
+    fn deserialization_rejects_paths_that_bypass_constructor_invariants() {
+        for invalid in [
+            r#"{"segments":[]}"#,
+            r#"{"segments":[""]}"#,
+            r#"{"segments":["Root",""]}"#,
+            r#"{"segments":["Root","   "]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<TypeDependencyPathFact>(invalid).is_err(),
+                "invalid path must be rejected: {invalid}"
+            );
+        }
+
+        let path = TypeDependencyPathFact::from_segments(["Root", "Member"]).unwrap();
+        let json = serde_json::to_string(&path).expect("serialize valid path");
+        let round_trip: TypeDependencyPathFact =
+            serde_json::from_str(&json).expect("deserialize valid path");
+        assert_eq!(round_trip, path);
+    }
+}
+
+impl TypeDependencyPathFact {
+    /// Construct a non-empty dependency path.
+    pub fn from_segments<I, S>(segments: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let segments = segments.into_iter().map(Into::into).collect::<Vec<_>>();
+        (!segments.is_empty() && segments.iter().all(|segment| !segment.trim().is_empty())).then(
+            || Self {
+                segments: Arc::from(segments.into_boxed_slice()),
+            },
+        )
+    }
+
+    /// Local binding named by this path.
+    pub fn root(&self) -> &str {
+        &self.segments[0]
+    }
+
+    /// Ordered path below [`Self::root`].
+    pub fn member_path(&self) -> &[String] {
+        &self.segments[1..]
+    }
+
+    /// Full ordered segment view.
+    pub fn segments(&self) -> &[String] {
+        &self.segments
+    }
+
+    /// Compatibility spelling for legacy dependency-name consumers.
+    pub fn legacy_dotted_name(&self) -> String {
+        self.segments.join(".")
+    }
+}
+
 /// Typed replacement for the untyped `declaration_origin: Option<Arc<str>>` /
 /// `String` member field: the canonical file id the member's declaration lives
 /// in, or an explicit synthetic/multi-origin marker.
@@ -69,6 +414,8 @@ pub enum DeclarationOrigin {
 pub struct ValueDeclIdentityPart {
     /// Canonical id of the file declaring the value symbol.
     pub canonical_id: Arc<str>,
+    /// Top-level lexical owner of the value declaration.
+    pub owner: TopLevelOwnerId,
     /// The value symbol name (`typeof x` → `x`).
     pub symbol: Arc<str>,
     /// Member path for `typeof x.y.z` (empty = the bare value symbol).
@@ -1109,6 +1456,26 @@ pub enum ValueAnnotationClass {
     Direct,
     /// No annotation.
     Absent,
+    /// Initializer inference was refused by a structural safety budget.
+    InferenceUnavailable(InferenceUnavailableReason),
+}
+
+/// Typed reason semantic expression inference could not produce an exact type.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum InferenceUnavailableReason {
+    DepthBudgetExceeded,
+    WorkBudgetExceeded,
 }
 
 /// The `PreparedValueDecl.type_annotation` narrowing: a precomputed
@@ -1269,6 +1636,85 @@ pub struct FunctionParamFact {
     pub span_origin: FunctionParamSpanOrigin,
 }
 
+/// Why an implementation body's return type is absent instead of inferred.
+///
+/// These statement families require a richer control-flow model than the
+/// semantic producer currently supports. They are persisted explicitly so a
+/// consumer cannot mistake an incomplete scan for a safely narrowed return.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum ReturnInferenceUnsupported {
+    Loop,
+    Switch,
+    Try,
+    Jump,
+    Labeled,
+    With,
+    ModuleDeclaration,
+}
+
+/// Producer verdict for body-derived function return inference.
+///
+/// `NotInferred` covers authored/JSDoc returns, bodiless declarations, and
+/// synthesized signatures. `Complete` means every reachable statement was
+/// modeled and records whether execution can reach the end of the body.
+/// `Unsupported` is a fail-closed verdict and never carries a narrowed return.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum ReturnInferenceCompleteness {
+    NotInferred,
+    Complete { can_fall_through: bool },
+    Unsupported(ReturnInferenceUnsupported),
+    Unavailable(InferenceUnavailableReason),
+}
+
+impl Default for ReturnInferenceCompleteness {
+    fn default() -> Self {
+        Self::NotInferred
+    }
+}
+
+/// Exact declaration-member address and return-inference verdict for one
+/// authored method. This inventory remains separate from open `FunctionExpr`
+/// typed IR so facts have one authority and consumers never rematch by shape.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub struct MemberReturnInferenceFact {
+    /// Exact member origin: declaration contributor plus produced-shape path.
+    pub origin: FunctionSpansOrigin,
+    /// Producer verdict for this member's return inference.
+    pub return_inference: ReturnInferenceCompleteness,
+}
+
 /// A narrowed function signature (an overload-group member). `FunctionExpr`
 /// carries `FunctionSpans` in identity, recovered via `spans_origin`.
 #[derive(
@@ -1293,6 +1739,10 @@ pub struct FunctionSignatureFact {
     /// an authored return-type source span exists. `None` therefore means the
     /// signature has no recoverable return carrier, not merely "inferred".
     pub return_ty: Option<TypeBodySlot>,
+    /// Whether body-derived return inference was complete and, when it was,
+    /// whether an implicit fallthrough return remains reachable.
+    #[serde(default)]
+    pub return_inference: ReturnInferenceCompleteness,
     /// Overload-visibility fact: hide the trailing implementation signature.
     pub has_implementation_body: bool,
     /// Origin locator recovering `FunctionSpans`.
@@ -2274,6 +2724,9 @@ pub enum ResolvedLocalShape {
 pub struct ResolvedLocalTypeFact {
     /// The type name as referenced.
     pub name: String,
+    /// Top-level lexical owner of the resolved declaration.
+    #[serde(default)]
+    pub owner: TopLevelOwnerId,
     /// The synthesized shape.
     pub shape: ResolvedLocalShape,
 }
@@ -2386,6 +2839,31 @@ pub struct SvelteLegacyPropFact {
     pub has_default: bool,
 }
 
+/// One persisted Svelte module-script export. Source spans are deliberately
+/// excluded; exact lexical owner and owner-qualified binding identity are the
+/// semantic authority.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub struct SvelteModuleExportFact {
+    /// User-visible exported name.
+    pub exported_name: String,
+    /// Local value binding supplying the export.
+    pub local_name: String,
+    /// Exact neutral lexical owner of the export statement.
+    pub owner: crate::TopLevelOwnerId,
+    /// Exact owner-qualified local value binding.
+    pub binding_key: crate::DeclKey,
+}
+
 /// The narrowed persisted `SvelteScriptFacts`. `props_type` /
 /// `dispatcher_events` are authored-type payload refs: a content-free
 /// `MacroPayload` locator (the re-resolution address) plus a parse-stable
@@ -2417,6 +2895,9 @@ pub struct SvelteScriptFactsFact {
     pub dispatcher_events: Option<AuthoredTypePayloadRef>,
     /// EXPOSE surface (instance exports).
     pub instance_exports: Arc<[String]>,
+    /// Top-level module-script exports with exact owner-qualified bindings.
+    #[serde(default)]
+    pub module_exports: Arc<[SvelteModuleExportFact]>,
 }
 
 // ===========================================================================
@@ -2978,6 +3459,7 @@ impl FunctionSignatureFact {
             type_parameters: type_parameters.unwrap_or_else(|| Arc::clone(&self.type_parameters)),
             parameters: parameters.unwrap_or_else(|| Arc::clone(&self.parameters)),
             return_ty: return_ty.unwrap_or_else(|| self.return_ty.clone()),
+            return_inference: self.return_inference,
             has_implementation_body: self.has_implementation_body,
             spans_origin: self.spans_origin.clone(),
         })

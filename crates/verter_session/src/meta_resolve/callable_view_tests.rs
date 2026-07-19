@@ -18,9 +18,10 @@ use crate::project_semantic_dispatch::{
 use crate::resolver_core::{CanonicalCompletionOverlay, HostResolverContext, ResolverContext};
 use crate::resolver_store::CurrentHostStoreView;
 use crate::semantic_query::{
-    DeclIdentity, FunctionParam, HashValue, LiteralValue, PartialReasonSet, PrimitiveKind,
-    ProjectionMode, ProjectionReductionContext, QueryError, SemanticNodeData, SemanticNodeId,
-    SurfaceMember, SurfaceView, TupleElement,
+    DeclIdentity, FunctionParam, HashValue, InstantiateKey, LiteralValue, PartialReasonSet,
+    PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryError, QueryResult,
+    ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey, SurfaceMember,
+    SurfaceView, TupleElement,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use crate::typeinfo::framework_surface::vue_exec::navigate_param_to_object_surface;
@@ -138,6 +139,7 @@ fn instantiation_ref(
     graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity {
             canonical_id: Arc::from("__builtin__"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
             decl_name: Arc::from(base_name),
         },
@@ -1210,6 +1212,350 @@ fn workspace_host_with_svelte(
     ]);
     let view = crate::typeinfo::current_store_view_for_query(&host).expect("current store view");
     (host, view)
+}
+
+#[test]
+fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fallback() {
+    let component = "/workspace/OwnedProps.svelte";
+    let source = "<script lang=\"ts\">\n\
+         import type { Snippet } from './snippet';\n\
+         interface Item { id: number }\n\
+         interface Props { row: Snippet<[item: Item, index: number]> }\n\
+         let props: Props = $props();\n\
+         void props;\n\
+         </script>\n\
+         <div />";
+    let (host, view) = workspace_host_with_svelte(
+        component,
+        source,
+        &[(
+            "/workspace/snippet.ts",
+            "export interface Snippet<Params extends unknown[] = []> {\n\
+                 (this: void, ...args: Params): { __brand: 'snippet' };\n\
+                 }\n",
+        )],
+    );
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    let ctx = HostResolverContext::from_current(&host, &view, overlay);
+    let owner = verter_type_expr::TopLevelOwnerId::instance(0);
+    let prepared = ctx
+        .prepared_type_decl(component, owner, "Props")
+        .expect("exact-owner preparation succeeds")
+        .expect("the instance owner has a prepared `Props` declaration");
+    assert_eq!(prepared.root_identity.owner, owner);
+    assert!(
+        prepared.member_index.contains_key("row"),
+        "the exact-owner prepared declaration indexes `row`"
+    );
+    assert!(
+        ctx.prepared_type_decl(
+            component,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Props"
+        )
+        .expect("ordinary-owner control lookup succeeds")
+        .is_none(),
+        "the unplanted ordinary owner must not recover instance-owned `Props`"
+    );
+
+    let dispatch = ctx.dispatch();
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, component)
+        .expect("svelte facts");
+    let props_type = facts.props_type.as_ref().expect("props type");
+    let macro_base = match dispatch.lower_locator(props_type.locator.clone()) {
+        QueryResult::Value(node) => node,
+        other => panic!("the exact-owner macro locator materializes, got {other:?}"),
+    };
+    let macro_data = node_data_for(dispatch.ctx, macro_base);
+    let Some(SemanticNodeData::DeclRef { identity }) = macro_data.as_deref() else {
+        panic!("the `Props` macro payload lowers to DeclRef, got {macro_data:?}");
+    };
+    assert_eq!(identity.owner, owner, "MacroPayload → DeclRef keeps owner");
+    assert_eq!(identity.decl_name.as_ref(), "Props");
+    let raised_base = dispatch
+        .raise_semantic_type_source_to_hot(
+            &verter_type_expr::facts::SemanticTypeSource::Authored(props_type.locator.clone()),
+            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                scope_canonical_id: component,
+                scope_owner: owner,
+                context: ProjectionReductionContext::structural_transit_with_mode(
+                    ProjectionMode::Navigate,
+                ),
+                interior_failures: None,
+            },
+        )
+        .expect("the exact-owner authored source raises")
+        .node();
+    assert_eq!(
+        raised_base, macro_base,
+        "source raise seeds ProjectPath with the exact MacroPayload LowerLocator node"
+    );
+
+    let resolved = match dispatch
+        .execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: ScopeId::file(Arc::clone(&identity.canonical_id), identity.owner),
+            name: Arc::clone(&identity.decl_name),
+        }))
+        .value
+    {
+        QueryResult::Value(node) => node,
+        other => panic!("the exact-owner DeclRef resolves, got {other:?}"),
+    };
+    let resolved_data = node_data_for(dispatch.ctx, resolved);
+    let Some(SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
+        owner: resolved_owner,
+        name: resolved_name,
+        ..
+    })) = resolved_data.as_deref()
+    else {
+        panic!("ResolveDecl returns a declaration placeholder, got {resolved_data:?}");
+    };
+    assert_eq!(*resolved_owner, owner, "DeclRef → ResolveDecl keeps owner");
+    assert_eq!(resolved_name.as_ref(), "Props");
+
+    let instantiated = match dispatch
+        .execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
+            dispatch.type_slot_for(
+                Arc::clone(&identity.canonical_id),
+                identity.owner,
+                Arc::clone(&identity.decl_name),
+            ),
+            Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            dispatch.instantiate_context_for(
+                &identity.canonical_id,
+                ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+            ),
+        )))
+        .value
+    {
+        QueryResult::Value(node) => node,
+        other => panic!("the exact-owner declaration instantiates, got {other:?}"),
+    };
+    let instantiated_data = node_data_for(dispatch.ctx, instantiated);
+    let Some(SemanticNodeData::Object(instantiated_surface)) = instantiated_data.as_deref() else {
+        panic!("Instantiate returns the `Props` Object, got {instantiated_data:?}");
+    };
+    assert!(
+        instantiated_surface
+            .members
+            .iter()
+            .any(|member| member.name.as_ref() == "row"),
+        "ResolveDecl → Instantiate preserves the exact-owner `row` member"
+    );
+
+    let body =
+        match dispatch.lower_locator(verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+            prepared.body_facts.body_slot.clone(),
+        )) {
+            QueryResult::Value(node) => node,
+            other => panic!("the exact-owner prepared body locator materializes, got {other:?}"),
+        };
+    let data = node_data_for(dispatch.ctx, body);
+    let Some(SemanticNodeData::Object(surface)) = data.as_deref() else {
+        panic!("the exact-owner `Props` body is an Object, got {data:?}");
+    };
+    assert!(
+        surface
+            .members
+            .iter()
+            .any(|member| member.name.as_ref() == "row"),
+        "the exact-owner body locator preserves the `row` member"
+    );
+}
+
+#[test]
+fn direct_import_preparation_has_cold_warm_exact_owner_parity() {
+    let component = "/workspace/OwnerParity.svelte";
+    let source = "<script lang=\"ts\">\n\
+         import type { Snippet } from './snippet';\n\
+         interface Props { row: Snippet<[value: string]> }\n\
+         let props: Props = $props();\n\
+         void props;\n\
+         </script>\n\
+         <div />";
+
+    for target_is_warm in [false, true] {
+        let (host, cold_view) = workspace_host_with_svelte(
+            component,
+            source,
+            &[(
+                "/workspace/snippet.ts",
+                "export interface Snippet<Params extends unknown[] = []> {\n\
+                     (this: void, ...args: Params): unknown;\n\
+                     }\n",
+            )],
+        );
+        let view = if target_is_warm {
+            let warmed = host
+                .prepared_type_decl("/workspace/snippet.ts", "Snippet")
+                .expect("the direct target prepares before the owner bundle");
+            assert_eq!(
+                warmed.root_identity.owner,
+                verter_type_expr::TopLevelOwnerId::ordinary_file()
+            );
+            crate::typeinfo::current_store_view_for_query(&host)
+                .expect("store view after warming the direct target")
+        } else {
+            cold_view
+        };
+        let ctx = HostResolverContext::from_current(
+            &host,
+            &view,
+            Arc::new(CanonicalCompletionOverlay::new()),
+        );
+        let prepared = ctx
+            .prepared_type_decl(
+                component,
+                verter_type_expr::TopLevelOwnerId::instance(0),
+                "Props",
+            )
+            .expect("the exact-owner declaration prepares")
+            .expect("the instance owner declares Props");
+        assert_eq!(prepared.external_deps.len(), 1);
+        let external = &prepared.external_deps[0];
+        assert_eq!(external.canonical_id, "/workspace/snippet.ts");
+        assert_eq!(
+            external.owner,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "cold and warm direct targets preserve the defining owner"
+        );
+        assert_eq!(external.symbol_name, "Snippet");
+        assert!(prepared.member_index.contains_key("row"));
+    }
+}
+
+#[test]
+fn same_import_name_in_module_and_instance_keeps_each_exact_target() {
+    let component = "/workspace/OwnerPartition.svelte";
+    let source = "<script module lang=\"ts\">\n\
+         import type { Shared } from './module-shared';\n\
+         export interface ModuleShape { value: Shared }\n\
+         </script>\n\
+         <script lang=\"ts\">\n\
+         import type { Shared } from './instance-shared';\n\
+         interface InstanceShape { value: Shared }\n\
+         </script>\n\
+         <div />";
+    let (host, view) = workspace_host_with_svelte(
+        component,
+        source,
+        &[
+            (
+                "/workspace/module-shared.ts",
+                "export interface Shared { module: string }\n",
+            ),
+            (
+                "/workspace/instance-shared.ts",
+                "export interface Shared { instance: number }\n",
+            ),
+        ],
+    );
+    let ctx = HostResolverContext::from_current(
+        &host,
+        &view,
+        Arc::new(CanonicalCompletionOverlay::new()),
+    );
+
+    for (owner, declaration, expected_canonical) in [
+        (
+            verter_type_expr::TopLevelOwnerId::module(0),
+            "ModuleShape",
+            "/workspace/module-shared.ts",
+        ),
+        (
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            "InstanceShape",
+            "/workspace/instance-shared.ts",
+        ),
+    ] {
+        let prepared = ctx
+            .prepared_type_decl(component, owner, declaration)
+            .expect("owner-qualified preparation succeeds")
+            .unwrap_or_else(|| panic!("{owner:?} declares {declaration}"));
+        assert_eq!(prepared.root_identity.owner, owner);
+        assert_eq!(prepared.external_deps.len(), 1);
+        let external = &prepared.external_deps[0];
+        assert_eq!(external.canonical_id, expected_canonical);
+        assert_eq!(
+            external.owner,
+            verter_type_expr::TopLevelOwnerId::ordinary_file()
+        );
+        assert_eq!(external.symbol_name, "Shared");
+    }
+}
+
+#[test]
+fn ordinary_ts_direct_import_keeps_authoritative_target_owner() {
+    let importer = "/workspace/importer.ts";
+    let (host, view) = workspace_host_with_svelte(
+        "/workspace/Dummy.svelte",
+        "<div />",
+        &[
+            (
+                importer,
+                "import type { External } from './external';\n\
+                 export interface Props { value: External }\n",
+            ),
+            (
+                "/workspace/external.ts",
+                "export interface External { id: number }\n",
+            ),
+        ],
+    );
+    let ctx = HostResolverContext::from_current(
+        &host,
+        &view,
+        Arc::new(CanonicalCompletionOverlay::new()),
+    );
+    let prepared = ctx
+        .prepared_type_decl(
+            importer,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Props",
+        )
+        .expect("ordinary-file preparation succeeds")
+        .expect("ordinary-file Props exists");
+    assert_eq!(prepared.external_deps.len(), 1);
+    let external = &prepared.external_deps[0];
+    assert_eq!(external.canonical_id, "/workspace/external.ts");
+    assert_eq!(
+        external.owner,
+        verter_type_expr::TopLevelOwnerId::ordinary_file()
+    );
+    assert_eq!(external.symbol_name, "External");
+}
+
+#[test]
+fn unresolved_direct_import_remains_a_typed_preparation_failure() {
+    let importer = "/workspace/missing-importer.ts";
+    let (host, view) = workspace_host_with_svelte(
+        "/workspace/Dummy.svelte",
+        "<div />",
+        &[(
+            importer,
+            "import type { External } from './missing';\n\
+             export interface Props { value: External }\n",
+        )],
+    );
+    let ctx = HostResolverContext::from_current(
+        &host,
+        &view,
+        Arc::new(CanonicalCompletionOverlay::new()),
+    );
+
+    for _ in 0..2 {
+        assert!(matches!(
+            ctx.prepared_type_decl(
+                importer,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "Props",
+            ),
+            Err(crate::resolver_core::prepared_decl::PreparationFailure::MissingExternalOwner {
+                local_name
+            }) if local_name == "External"
+        ));
+    }
 }
 
 #[test]
@@ -2690,6 +3036,23 @@ fn peel_stops_at_instantiation_ref_while_normalize_instantiates() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect("svelte facts");
     let props_type = facts.props_type.as_ref().expect("props type");
+    let verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(props_locator) =
+        &props_type.locator
+    else {
+        panic!("Svelte props carry a macro-payload locator");
+    };
+    assert_eq!(
+        props_locator.anchor.owner,
+        verter_type_expr::TopLevelOwnerId::instance(0),
+        "the Svelte `$props` payload is owned by the instance script"
+    );
+    let shallow = ctx
+        .shallow_file_state(component)
+        .expect("component shallow state");
+    assert!(
+        shallow.has_type_symbol_in(props_locator.anchor.owner, "Props"),
+        "the exact instance owner indexes the local `Props` declaration"
+    );
     let surface =
         navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
     let dispatch = ctx.dispatch();
@@ -2697,7 +3060,16 @@ fn peel_stops_at_instantiation_ref_while_normalize_instantiates() {
         .members
         .iter()
         .find(|m| m.name.as_ref() == "row")
-        .expect("the `row` member is present")
+        .unwrap_or_else(|| {
+            panic!(
+                "the `row` member is present; observed members: {:?}",
+                surface
+                    .members
+                    .iter()
+                    .map(|member| member.name.as_ref())
+                    .collect::<Vec<_>>()
+            )
+        })
         .value;
 
     let peeled = dispatch
@@ -2769,6 +3141,23 @@ fn peel_bounded_fail_closed_on_declref_cycle() {
         .resolve_svelte_script_facts_with_ctx(&ctx, "/workspace/Carriers.svelte")
         .expect("svelte facts");
     let props_type = facts.props_type.as_ref().expect("props type");
+    let verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(props_locator) =
+        &props_type.locator
+    else {
+        panic!("Svelte props carry a macro-payload locator");
+    };
+    assert_eq!(
+        props_locator.anchor.owner,
+        verter_type_expr::TopLevelOwnerId::instance(0),
+        "the Svelte `$props` payload is owned by the instance script"
+    );
+    let shallow = ctx
+        .shallow_file_state("/workspace/Carriers.svelte")
+        .expect("component shallow state");
+    assert!(
+        shallow.has_type_symbol_in(props_locator.anchor.owner, "Props"),
+        "the exact instance owner indexes the local `Props` declaration"
+    );
     let surface = navigate_param_to_object_surface(&ctx, "/workspace/Carriers.svelte", props_type)
         .expect("props surface");
     let dispatch = ctx.dispatch();
@@ -2776,7 +3165,16 @@ fn peel_bounded_fail_closed_on_declref_cycle() {
         .members
         .iter()
         .find(|m| m.name.as_ref() == "mutual")
-        .expect("the `mutual` member is present")
+        .unwrap_or_else(|| {
+            panic!(
+                "the `mutual` member is present; observed members: {:?}",
+                surface
+                    .members
+                    .iter()
+                    .map(|member| member.name.as_ref())
+                    .collect::<Vec<_>>()
+            )
+        })
         .value;
 
     let peeled = dispatch.peel_node_for_uninstantiated_carrier_fact_demand(mutual, navigate());

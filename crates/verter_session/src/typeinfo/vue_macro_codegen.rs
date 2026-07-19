@@ -6,7 +6,7 @@
 //! SFC, reuses the canonical macro payload carrier, and independently fulfills
 //! runtime and TSC demands.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -16,10 +16,16 @@ use verter_macro_dto::{
     MacroRuntimeShape, MacroTscBundle, MacroTscEntry, MacroTscOutcome, MacroTscProjection,
     ModelRuntimeShape, OrderedRuntimeConstructors, PropsDefaultsAssociation, PropsRuntimeShape,
     RuntimeConstructor, RuntimeEmit, RuntimeProp, RuntimePropType, SynthesizedRowKind,
-    TscSpliceText, UnresolvedReason, UnsupportedReason,
+    TscBindingUsage, TscDeclarationFailureReason, TscDependencyDeclaration, TscEmitRow,
+    TscEmitsProjection, TscInferredClassMember, TscInferredClassTypePosition, TscModelProjection,
+    TscOwnerValueDependency, TscPropRow, TscPropsProjection, TscPublicPropsProjection,
+    TscRetainedBinding, TscRetainedValueCarrier, TscScopeRequirements, TscScriptOwner,
+    TscSemanticInferenceUnavailableReason, TscSpliceText, UnresolvedReason, UnsupportedReason,
 };
 use verter_semantic::analysis::component_meta::MacroExpansionKind;
-use verter_semantic::analysis::{AnalyzedMacro, AnalyzedMacroKind};
+use verter_semantic::analysis::{
+    AnalyzedMacro, AnalyzedMacroKind, LocalDeclarationKind, ScriptAnalysisSnapshot,
+};
 
 use crate::meta_resolve::callable_view::CallableNodeView;
 use crate::meta_resolve::projectors::{build_owner_decl_identity, resolve_macro_payload};
@@ -72,6 +78,8 @@ pub(crate) struct VueMacroCodegenCounters {
 /// One per-call, non-retained semantic handoff for an SFC.
 #[derive(Debug, Clone)]
 pub(crate) struct VueMacroCodegenOutput {
+    /// Content identity of the exact indexed snapshot used by the producer.
+    pub origin_whole_hash: Option<verter_semantic::analysis::types::Hash16>,
     /// Runtime bundle only when demanded.
     pub runtime: Option<Arc<MacroRuntimeBundle>>,
     /// TSC bundle only when demanded.
@@ -114,6 +122,61 @@ enum ProjectionFailure {
     Invalid(MacroInvalidReason),
 }
 
+struct TscScopeInventory<'a> {
+    analysis: &'a ScriptAnalysisSnapshot,
+    shallow_state: &'a crate::resolver_core::ShallowFileState,
+    raw_source: &'a str,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ClassInferenceFailure {
+    InferenceUnavailable(verter_type_expr::facts::InferenceUnavailableReason),
+    Unsupported(UnsupportedReason),
+    Unresolved(UnresolvedReason),
+}
+
+impl ClassInferenceFailure {
+    fn declaration_reason(self) -> TscDeclarationFailureReason {
+        match self {
+            Self::InferenceUnavailable(reason) => {
+                crate::request_context::mark_request_result_inference_budget_exceeded();
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::InferenceBudgetExceeded,
+                );
+                TscDeclarationFailureReason::SemanticInferenceUnavailable(match reason {
+                    verter_type_expr::facts::InferenceUnavailableReason::DepthBudgetExceeded => {
+                        TscSemanticInferenceUnavailableReason::DepthBudgetExceeded
+                    }
+                    verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded => {
+                        TscSemanticInferenceUnavailableReason::WorkBudgetExceeded
+                    }
+                })
+            }
+            Self::Unsupported(reason) => TscDeclarationFailureReason::Unsupported(reason),
+            Self::Unresolved(reason) => TscDeclarationFailureReason::Unresolved(reason),
+        }
+    }
+}
+
+fn tsc_script_owner(
+    owner: verter_type_expr::TopLevelOwnerId,
+) -> Result<TscScriptOwner, ProjectionFailure> {
+    match (owner.kind(), owner.ordinal()) {
+        (verter_type_expr::TopLevelOwnerKind::Instance, 0) => Ok(TscScriptOwner::Setup),
+        (verter_type_expr::TopLevelOwnerKind::Module, 0) => Ok(TscScriptOwner::Companion),
+        _ => Err(ProjectionFailure::Unsupported(
+            UnsupportedReason::SemanticConstruct,
+        )),
+    }
+}
+
+fn top_level_owner(owner: TscScriptOwner) -> verter_type_expr::TopLevelOwnerId {
+    match owner {
+        TscScriptOwner::Setup => verter_type_expr::TopLevelOwnerId::instance(0),
+        TscScriptOwner::Companion => verter_type_expr::TopLevelOwnerId::module(0),
+    }
+}
+
 impl ProjectionFailure {
     fn runtime(self) -> MacroRuntimeOutcome {
         match self {
@@ -154,6 +217,7 @@ impl ProjectionFailure {
 }
 
 struct ProducerState {
+    origin_whole_hash: Option<verter_semantic::analysis::types::Hash16>,
     runtime_entries: Vec<MacroRuntimeEntry>,
     tsc_entries: Vec<MacroTscEntry>,
     counters: VueMacroCodegenCounters,
@@ -221,6 +285,7 @@ impl VerterHost {
 
         let (transitive_canonicals, facts_cacheable) = fact_footprint(finalise);
         VueMacroCodegenOutput {
+            origin_whole_hash: state.origin_whole_hash,
             runtime: demand.wants_runtime().then(|| {
                 Arc::new(MacroRuntimeBundle {
                     entries: state.runtime_entries,
@@ -245,6 +310,7 @@ impl VerterHost {
         demand: VueMacroCodegenDemand,
     ) -> ProducerState {
         let mut state = ProducerState {
+            origin_whole_hash: None,
             runtime_entries: Vec::new(),
             tsc_entries: Vec::new(),
             counters: VueMacroCodegenCounters {
@@ -257,17 +323,23 @@ impl VerterHost {
         let Some(serve) = ctx.ensure_indexed_ready_serve(owner_canonical) else {
             return state;
         };
+        state.origin_whole_hash = Some(serve.indexed.whole_hash);
         let Some(script_analysis) = serve.indexed.script_analysis.as_ref() else {
             return state;
         };
         let macros = &script_analysis.macros;
-        let owner = build_owner_decl_identity(ctx, owner_canonical);
+        let tsc_scope_inventory = TscScopeInventory {
+            analysis: script_analysis,
+            shallow_state: &serve.indexed.shallow_state,
+            raw_source: &serve.indexed.raw_source,
+        };
         let dispatch = ProjectSemanticDispatch::new(ctx);
 
         for (payload_index, mac) in macros.iter().enumerate() {
             if mac.kind == AnalyzedMacroKind::WithDefaults || !mac.is_type_based {
                 continue;
             }
+            let owner = build_owner_decl_identity(ctx, owner_canonical, mac.owner);
 
             let defaults_index = (mac.kind == AnalyzedMacroKind::DefineProps)
                 .then(|| containing_with_defaults_index(macros, payload_index))
@@ -283,13 +355,6 @@ impl VerterHost {
                         macro_index,
                         outcome: ProjectionFailure::Unsupported(UnsupportedReason::MacroKind)
                             .runtime(),
-                    });
-                }
-                if demand.wants_tsc() {
-                    state.tsc_entries.push(MacroTscEntry {
-                        syntax_index,
-                        macro_index,
-                        outcome: ProjectionFailure::Unsupported(UnsupportedReason::MacroKind).tsc(),
                     });
                 }
                 continue;
@@ -367,34 +432,16 @@ impl VerterHost {
 
             if demand.wants_tsc() {
                 let outcome = match payload {
-                    Some(payload) => {
-                        state.counters.tsc_materializations += 1;
-                        let rendered =
-                            crate::typeinfo::raise::render_node_display_with_ctx(ctx, payload);
-                        if crate::request_context::current_cold_compute_completeness().is_partial()
-                        {
-                            partial_failure().tsc()
-                        } else {
-                            match rendered {
-                                Some(text) => MacroTscOutcome::Complete(match mac.kind {
-                                    AnalyzedMacroKind::DefineProps => MacroTscProjection::Props {
-                                        splice: TscSpliceText::new(text),
-                                    },
-                                    AnalyzedMacroKind::DefineEmits => MacroTscProjection::Emits {
-                                        splice: TscSpliceText::new(text),
-                                    },
-                                    AnalyzedMacroKind::DefineModel => MacroTscProjection::Model {
-                                        splice: TscSpliceText::new(text),
-                                    },
-                                    _ => unreachable!("codegen macro filter is exhaustive"),
-                                }),
-                                None => ProjectionFailure::Unsupported(
-                                    UnsupportedReason::SemanticConstruct,
-                                )
-                                .tsc(),
-                            }
-                        }
-                    }
+                    Some(payload) => self.project_tsc_macro(
+                        ctx,
+                        &dispatch,
+                        payload,
+                        mac,
+                        payload_index,
+                        effective_index,
+                        &tsc_scope_inventory,
+                        &mut state.counters,
+                    ),
                     None => resolution_failure().tsc(),
                 };
                 state.tsc_entries.push(MacroTscEntry {
@@ -406,6 +453,137 @@ impl VerterHost {
         }
 
         state
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn project_tsc_macro(
+        &self,
+        ctx: &dyn ResolverContext,
+        dispatch: &ProjectSemanticDispatch<'_>,
+        payload: crate::semantic_query::SemanticNodeId,
+        mac: &AnalyzedMacro,
+        payload_index: usize,
+        effective_index: usize,
+        scope_inventory: &TscScopeInventory<'_>,
+        counters: &mut VueMacroCodegenCounters,
+    ) -> MacroTscOutcome {
+        let scope = match tsc_scope_requirements(mac, scope_inventory) {
+            Ok(scope) => scope,
+            Err(failure) => return failure.tsc(),
+        };
+        match mac.kind {
+            AnalyzedMacroKind::DefineProps => {
+                if is_definitely_non_object_root(dispatch, payload) {
+                    return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).tsc();
+                }
+                counters.root_shallow_demands += 1;
+                let surface = self.project_shallow_surface_graph_only(
+                    ctx,
+                    dispatch,
+                    payload,
+                    Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                    ProjectionReductionContext::macro_object_surface(
+                        ProjectionMode::Shallow,
+                        SurfaceProvenanceContext::MacroTypeArgOwnBody,
+                    ),
+                    None,
+                );
+                if crate::request_context::current_cold_compute_completeness().is_partial() {
+                    return partial_failure().tsc();
+                }
+                let Some(surface) = surface else {
+                    return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).tsc();
+                };
+
+                let mut testing_rows = Vec::new();
+                for member in surface
+                    .members
+                    .iter()
+                    .filter(|member| member.visibility.is_public())
+                {
+                    let type_text = match render_tsc_node(ctx, member.value, counters) {
+                        Ok(text) => text,
+                        Err(failure) => return failure.tsc(),
+                    };
+                    testing_rows.push(TscPropRow {
+                        name: member.name.as_ref().to_owned(),
+                        optional: member.optional,
+                        type_text,
+                        anchor: member_anchor(mac, payload_index, member.name.as_ref()),
+                    });
+                }
+                MacroTscOutcome::Complete(MacroTscProjection::Props(TscPropsProjection {
+                    public: TscPublicPropsProjection::AuthoredArgument {
+                        anchor: MacroAnchor::MacroArgument {
+                            macro_index: macro_index(payload_index),
+                        },
+                    },
+                    testing_rows,
+                    scope,
+                }))
+            }
+            AnalyzedMacroKind::DefineEmits => {
+                if is_definitely_non_object_root(dispatch, payload) {
+                    return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).tsc();
+                }
+                counters.root_shallow_demands += 1;
+                let surface = self.project_shallow_surface_graph_only(
+                    ctx,
+                    dispatch,
+                    payload,
+                    Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                    ProjectionReductionContext::macro_object_surface(
+                        ProjectionMode::Shallow,
+                        SurfaceProvenanceContext::Structural,
+                    ),
+                    None,
+                );
+                if crate::request_context::current_cold_compute_completeness().is_partial() {
+                    return partial_failure().tsc();
+                }
+                let Some(surface) = surface else {
+                    return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).tsc();
+                };
+                let events = match tsc_emit_rows(
+                    ctx,
+                    dispatch,
+                    &surface,
+                    mac,
+                    payload_index,
+                    effective_index,
+                    counters,
+                ) {
+                    Ok(events) => events,
+                    Err(failure) => return failure.tsc(),
+                };
+                MacroTscOutcome::Complete(MacroTscProjection::Emits(TscEmitsProjection {
+                    events,
+                    scope,
+                }))
+            }
+            AnalyzedMacroKind::DefineModel => {
+                let value_type = match render_tsc_node(ctx, payload, counters) {
+                    Ok(text) => text,
+                    Err(failure) => return failure.tsc(),
+                };
+                let name = mac.model_name.as_deref().unwrap_or("modelValue").to_owned();
+                let optional = mac
+                    .prop_fields
+                    .first()
+                    .is_none_or(|field| field.is_optional);
+                MacroTscOutcome::Complete(MacroTscProjection::Model(TscModelProjection {
+                    name,
+                    optional,
+                    value_type,
+                    anchor: MacroAnchor::Synthesized {
+                        macro_index: macro_index(effective_index),
+                        row: SynthesizedRowKind::ModelProp,
+                    },
+                    scope,
+                }))
+            }
+            _ => unreachable!("codegen macro filter is exhaustive"),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -570,6 +748,1098 @@ impl VerterHost {
     }
 }
 
+fn render_tsc_node(
+    ctx: &dyn ResolverContext,
+    node: crate::semantic_query::SemanticNodeId,
+    counters: &mut VueMacroCodegenCounters,
+) -> Result<TscSpliceText, ProjectionFailure> {
+    counters.tsc_materializations += 1;
+    let rendered = crate::typeinfo::raise::render_node_display_with_ctx(ctx, node);
+    if crate::request_context::current_cold_compute_completeness().is_partial() {
+        return Err(partial_failure());
+    }
+    rendered
+        .map(TscSpliceText::new)
+        .ok_or(ProjectionFailure::Unsupported(
+            UnsupportedReason::SemanticConstruct,
+        ))
+}
+
+fn tsc_scope_requirements(
+    mac: &AnalyzedMacro,
+    inventory: &TscScopeInventory<'_>,
+) -> Result<TscScopeRequirements, ProjectionFailure> {
+    let macro_owner = tsc_script_owner(mac.owner)?;
+    let mut required_imports = BTreeMap::new();
+    let mut roots = Vec::new();
+    for name in &mac.type_references {
+        match visible_type_binding(inventory, macro_owner, name)? {
+            Some(VisibleTypeBinding::Import(owner)) => {
+                required_imports.insert((owner, name.clone()), TscBindingUsage::TypePosition);
+            }
+            Some(VisibleTypeBinding::Local(owner)) => roots.push((owner, name.clone())),
+            None => {}
+        }
+    }
+    for dependency in inventory
+        .analysis
+        .macro_type_deps
+        .iter()
+        .filter(|dependency| dependency.macro_span == mac.span)
+        .filter(|dependency| dependency.usage.is_value_query())
+    {
+        let Some(owner) = visible_import_owner(
+            inventory,
+            macro_owner,
+            &dependency.type_name,
+            Some(&dependency.import_source),
+        )?
+        else {
+            continue;
+        };
+        if let Some(usage) = required_imports.get_mut(&(owner, dependency.type_name.clone())) {
+            *usage = TscBindingUsage::ValueQuery;
+        }
+    }
+    let mut direct_owner_value_dependencies = Vec::new();
+    for name in &mac.type_references {
+        if visible_import_owner(inventory, macro_owner, name, None)?.is_some() {
+            continue;
+        }
+        let Ok(owner) = local_value_owner(inventory, macro_owner, name) else {
+            continue;
+        };
+        let declaration_owner = top_level_owner(owner);
+        if !inventory
+            .shallow_state
+            .has_value_symbol_in(declaration_owner, name)
+            || inventory
+                .shallow_state
+                .has_type_symbol_in(declaration_owner, name)
+        {
+            continue;
+        }
+        direct_owner_value_dependencies.push(TscOwnerValueDependency {
+            owner,
+            name: name.clone(),
+        });
+    }
+    direct_owner_value_dependencies.sort_by(|left, right| {
+        (left.owner, left.name.as_str()).cmp(&(right.owner, right.name.as_str()))
+    });
+    direct_owner_value_dependencies.dedup();
+
+    roots.sort_by_key(|(owner, name)| declaration_order(inventory, *owner, name));
+    roots.dedup();
+
+    let mut visiting = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut owner_value_dependencies =
+        BTreeMap::<(TscScriptOwner, String), BTreeSet<TscOwnerValueDependency>>::new();
+    let mut retained_value_dependencies =
+        BTreeMap::<(TscScriptOwner, String), BTreeSet<TscRetainedValueCarrier>>::new();
+    let mut declaration_ordered_names = Vec::new();
+    for (owner, root) in roots {
+        collect_local_declaration_closure(
+            owner,
+            &root,
+            inventory,
+            &mut required_imports,
+            &mut visiting,
+            &mut visited,
+            &mut owner_value_dependencies,
+            &mut retained_value_dependencies,
+            &mut declaration_ordered_names,
+        )?;
+    }
+
+    let retained_value_carriers = declaration_ordered_names
+        .iter()
+        .filter_map(|(owner, name)| retained_value_carrier(inventory, *owner, name).ok())
+        .map(|carrier| ((carrier.owner, carrier.name.clone()), carrier))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut dependency_declarations = Vec::new();
+    for (owner, name) in declaration_ordered_names {
+        let mut found = false;
+        for (contributor_ordinal, entry) in inventory
+            .analysis
+            .declaration_entries
+            .iter()
+            .filter(|entry| {
+                entry.name == name
+                    && entry.owner == top_level_owner(owner)
+                    && matches!(
+                        entry.kind,
+                        LocalDeclarationKind::Type | LocalDeclarationKind::TypeAndValue
+                    )
+            })
+            .enumerate()
+        {
+            inventory
+                .raw_source
+                .get(entry.span.start as usize..entry.span.end as usize)
+                .ok_or(ProjectionFailure::Unresolved(
+                    UnresolvedReason::MissingDependency,
+                ))?;
+            found = true;
+            let (inferred_class_members, inferred_value_dependencies, declaration_failure) =
+                match inferred_class_members(
+                    top_level_owner(owner),
+                    &name,
+                    contributor_ordinal,
+                    entry.span,
+                    entry.kind == LocalDeclarationKind::TypeAndValue,
+                    inventory,
+                ) {
+                    Ok(inferred) => (inferred.members, inferred.value_dependencies, None),
+                    Err(failure) => (
+                        Vec::new(),
+                        BTreeSet::new(),
+                        Some(failure.declaration_reason()),
+                    ),
+                };
+            for dependency in inferred_value_dependencies {
+                let root = dependency.root();
+                if let Some(import_owner) = visible_import_owner(inventory, owner, root, None)? {
+                    let import_key = (import_owner, root.to_string());
+                    merge_required_import(
+                        &mut required_imports,
+                        import_key,
+                        TscBindingUsage::ValueQuery,
+                    );
+                } else {
+                    let value_owner = local_value_owner(inventory, owner, root)?;
+                    if let Some(carrier) =
+                        retained_value_carriers.get(&(value_owner, root.to_string()))
+                    {
+                        retained_value_dependencies
+                            .entry((owner, name.clone()))
+                            .or_default()
+                            .insert(carrier.clone());
+                        continue;
+                    }
+                    owner_value_dependencies
+                        .entry((owner, name.clone()))
+                        .or_default()
+                        .insert(TscOwnerValueDependency {
+                            owner: value_owner,
+                            name: root.to_string(),
+                        });
+                }
+            }
+            dependency_declarations.push(TscDependencyDeclaration {
+                owner,
+                name: name.clone(),
+                contributor_ordinal: u32::try_from(contributor_ordinal).map_err(|_| {
+                    ProjectionFailure::Unresolved(UnresolvedReason::MissingDependency)
+                })?,
+                owner_value_dependencies: owner_value_dependencies
+                    .get(&(owner, name.clone()))
+                    .map(|dependencies| dependencies.iter().cloned().collect())
+                    .unwrap_or_default(),
+                retained_value_carriers: retained_value_dependencies
+                    .get(&(owner, name.clone()))
+                    .map(|dependencies| dependencies.iter().cloned().collect())
+                    .unwrap_or_default(),
+                declaration_failure,
+                inferred_class_members,
+            });
+        }
+        if !found {
+            return Err(ProjectionFailure::Unresolved(
+                UnresolvedReason::MissingDependency,
+            ));
+        }
+    }
+
+    let mut retained_names = BTreeSet::new();
+    let mut retained_bindings = Vec::new();
+    for import in &inventory.analysis.imports {
+        let owner = tsc_script_owner(import.owner)?;
+        for binding in &import.bindings {
+            let key = (owner, binding.name.clone());
+            let Some(usage) = required_imports.get(&key).copied() else {
+                continue;
+            };
+            if retained_names.insert(key) {
+                retained_bindings.push(TscRetainedBinding {
+                    owner,
+                    local_name: binding.name.clone(),
+                    usage,
+                });
+            }
+        }
+    }
+    if retained_bindings.len() != required_imports.len() {
+        return Err(ProjectionFailure::Unresolved(
+            UnresolvedReason::MissingDependency,
+        ));
+    }
+
+    Ok(TscScopeRequirements {
+        owner_value_dependencies: direct_owner_value_dependencies,
+        retained_bindings,
+        dependency_declarations,
+    })
+}
+
+fn local_value_owner(
+    inventory: &TscScopeInventory<'_>,
+    requester: TscScriptOwner,
+    name: &str,
+) -> Result<TscScriptOwner, ProjectionFailure> {
+    visible_owner(
+        requester,
+        inventory
+            .analysis
+            .declaration_entries
+            .iter()
+            .filter(|entry| entry.name == name)
+            .filter(|entry| {
+                matches!(
+                    entry.kind,
+                    LocalDeclarationKind::Value | LocalDeclarationKind::TypeAndValue
+                )
+            })
+            .map(|entry| tsc_script_owner(entry.owner))
+            .collect::<Result<BTreeSet<_>, _>>()?,
+    )
+    .ok_or(ProjectionFailure::Unresolved(
+        UnresolvedReason::MissingDependency,
+    ))
+}
+
+fn declaration_order(
+    inventory: &TscScopeInventory<'_>,
+    owner: TscScriptOwner,
+    name: &str,
+) -> (u32, TscScriptOwner, String) {
+    (
+        inventory
+            .analysis
+            .declaration_entries
+            .iter()
+            .filter(|entry| entry.name == name && entry.owner == top_level_owner(owner))
+            .map(|entry| entry.span.start)
+            .min()
+            .unwrap_or(u32::MAX),
+        owner,
+        name.to_owned(),
+    )
+}
+
+#[derive(Clone, Copy)]
+enum VisibleTypeBinding {
+    Import(TscScriptOwner),
+    Local(TscScriptOwner),
+}
+
+fn visible_type_binding(
+    inventory: &TscScopeInventory<'_>,
+    requester: TscScriptOwner,
+    name: &str,
+) -> Result<Option<VisibleTypeBinding>, ProjectionFailure> {
+    for owner in visible_owner_order(requester) {
+        let has_import = visible_import_owner(inventory, owner, name, None)? == Some(owner);
+        let has_local = inventory.analysis.declaration_entries.iter().any(|entry| {
+            entry.name == name
+                && entry.owner == top_level_owner(owner)
+                && matches!(
+                    entry.kind,
+                    LocalDeclarationKind::Type | LocalDeclarationKind::TypeAndValue
+                )
+        });
+        match (has_import, has_local) {
+            (true, false) => return Ok(Some(VisibleTypeBinding::Import(owner))),
+            (false, true) => return Ok(Some(VisibleTypeBinding::Local(owner))),
+            (true, true) => {
+                return Err(ProjectionFailure::Unsupported(
+                    UnsupportedReason::SemanticConstruct,
+                ));
+            }
+            (false, false) => {}
+        }
+    }
+    Ok(None)
+}
+
+fn visible_local_type_owner(
+    inventory: &TscScopeInventory<'_>,
+    requester: TscScriptOwner,
+    name: &str,
+) -> Result<TscScriptOwner, ProjectionFailure> {
+    match visible_type_binding(inventory, requester, name)? {
+        Some(VisibleTypeBinding::Local(owner)) => Ok(owner),
+        Some(VisibleTypeBinding::Import(_)) => Err(ProjectionFailure::Unsupported(
+            UnsupportedReason::SemanticConstruct,
+        )),
+        None => Err(ProjectionFailure::Unresolved(
+            UnresolvedReason::MissingDependency,
+        )),
+    }
+}
+
+fn visible_import_owner(
+    inventory: &TscScopeInventory<'_>,
+    requester: TscScriptOwner,
+    name: &str,
+    source: Option<&str>,
+) -> Result<Option<TscScriptOwner>, ProjectionFailure> {
+    let mut owners = BTreeSet::new();
+    for import in &inventory.analysis.imports {
+        if source.is_none_or(|source| import.source == source)
+            && import.bindings.iter().any(|binding| binding.name == name)
+        {
+            owners.insert(tsc_script_owner(import.owner)?);
+        }
+    }
+    Ok(visible_owner(requester, owners))
+}
+
+fn visible_owner(
+    requester: TscScriptOwner,
+    owners: BTreeSet<TscScriptOwner>,
+) -> Option<TscScriptOwner> {
+    visible_owner_order(requester)
+        .into_iter()
+        .find(|owner| owners.contains(owner))
+}
+
+fn visible_owner_order(requester: TscScriptOwner) -> Vec<TscScriptOwner> {
+    match requester {
+        TscScriptOwner::Setup => vec![TscScriptOwner::Setup, TscScriptOwner::Companion],
+        TscScriptOwner::Companion => vec![TscScriptOwner::Companion],
+    }
+}
+
+struct InferredClassProjection {
+    members: Vec<TscInferredClassMember>,
+    value_dependencies: BTreeSet<verter_type_expr::facts::TypeDependencyPathFact>,
+}
+
+fn inferred_class_members(
+    owner: verter_type_expr::TopLevelOwnerId,
+    name: &str,
+    contributor_ordinal: usize,
+    declaration_span: verter_span::Span,
+    include_static: bool,
+    inventory: &TscScopeInventory<'_>,
+) -> Result<InferredClassProjection, ClassInferenceFailure> {
+    fn collect_overload_groups(
+        ty: &verter_type_expr::TypeExpr,
+        is_static: bool,
+        groups: &mut BTreeSet<(String, bool)>,
+    ) -> Result<(), verter_type_expr::facts::InferenceUnavailableReason> {
+        use crate::resolver_core::shallow_file_state::SEMANTIC_INFERENCE_TRAVERSAL_BUDGET;
+
+        let mut pending = vec![ty];
+        let mut visited = 0usize;
+        while let Some(current) = pending.pop() {
+            visited = visited.saturating_add(1);
+            if visited > SEMANTIC_INFERENCE_TRAVERSAL_BUDGET {
+                return Err(
+                    verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+                );
+            }
+            match current {
+                verter_type_expr::TypeExpr::Object(object) => {
+                    for member in &object.properties {
+                        if let verter_type_expr::ObjectMember::Method(method) = member {
+                            if !method.has_implementation_body {
+                                groups.insert((method.name.clone(), is_static));
+                            }
+                        }
+                    }
+                }
+                verter_type_expr::TypeExpr::Intersection(parts)
+                | verter_type_expr::TypeExpr::Union(parts) => pending.extend(parts.iter()),
+                verter_type_expr::TypeExpr::Parenthesized(inner) => pending.push(inner),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    let Some(lowered) = inventory.shallow_state.effective_type_decl_in(owner, name) else {
+        return Err(ClassInferenceFailure::Unresolved(
+            UnresolvedReason::MissingDependency,
+        ));
+    };
+    if lowered.kind != verter_semantic::analysis::type_eval::TypeDeclKind::Class {
+        return Ok(InferredClassProjection {
+            members: Vec::new(),
+            value_dependencies: BTreeSet::new(),
+        });
+    }
+    let contributors = match inventory
+        .shallow_state
+        .decl_bodies()
+        .transient_type_bodies_in(owner, name)
+    {
+        crate::decl_body_memo::DemandOutcome::Ready(Some(contributors)) => contributors,
+        _ => {
+            return Err(ClassInferenceFailure::Unresolved(
+                UnresolvedReason::MissingDependency,
+            ));
+        }
+    };
+    let Some(body) = contributors.get(contributor_ordinal) else {
+        return Err(ClassInferenceFailure::Unresolved(
+            UnresolvedReason::MissingDependency,
+        ));
+    };
+    let Some(contributor_fact) = lowered.contributor_facts.get(contributor_ordinal) else {
+        return Err(ClassInferenceFailure::Unresolved(
+            UnresolvedReason::MissingDependency,
+        ));
+    };
+
+    struct Candidate<'a> {
+        start: u32,
+        name: &'a str,
+        is_static: bool,
+        position: TscInferredClassTypePosition,
+        ty: Option<&'a verter_type_expr::TypeExpr>,
+        has_implementation_body: bool,
+        return_inference: Option<verter_type_expr::facts::ReturnInferenceCompleteness>,
+    }
+
+    let mut overload_groups = BTreeSet::new();
+    collect_overload_groups(body, false, &mut overload_groups)
+        .map_err(ClassInferenceFailure::InferenceUnavailable)?;
+    let mut candidates = Vec::new();
+    let mut pending = vec![body];
+    while let Some(current) = pending.pop() {
+        match current {
+            verter_type_expr::TypeExpr::Object(object) => {
+                for (member_index, member) in object.properties.iter().enumerate() {
+                    match member {
+                        verter_type_expr::ObjectMember::Property(property)
+                            if property.spans.type_annotation.is_none() =>
+                        {
+                            if let Some(span) = property.spans.declaration.filter(|span| {
+                                span.start >= declaration_span.start
+                                    && span.end <= declaration_span.end
+                            }) {
+                                candidates.push(Candidate {
+                                    start: span.start,
+                                    name: &property.name,
+                                    is_static: false,
+                                    position: TscInferredClassTypePosition::Property,
+                                    ty: Some(&property.ty),
+                                    has_implementation_body: false,
+                                    return_inference: None,
+                                });
+                            }
+                        }
+                        verter_type_expr::ObjectMember::Method(method) => {
+                            for parameter in &method.function.parameters {
+                                if parameter.has_ts_annotation || parameter.is_parameter_property {
+                                    continue;
+                                }
+                                if let (Some(name), Some(span)) = (
+                                    parameter.name.as_deref(),
+                                    parameter.span.filter(|span| {
+                                        span.start >= declaration_span.start
+                                            && span.end <= declaration_span.end
+                                    }),
+                                ) {
+                                    candidates.push(Candidate {
+                                        start: span.start,
+                                        name,
+                                        is_static: false,
+                                        position: TscInferredClassTypePosition::Parameter,
+                                        ty: Some(&parameter.ty),
+                                        has_implementation_body: method.has_implementation_body,
+                                        return_inference: None,
+                                    });
+                                }
+                            }
+                            if method.function.spans.return_type.is_none()
+                                && method.method_kind != verter_type_expr::ObjectMethodKind::Set
+                            {
+                                if let Some(span) = method.spans.declaration.filter(|span| {
+                                    span.start >= declaration_span.start
+                                        && span.end <= declaration_span.end
+                                }) {
+                                    candidates.push(Candidate {
+                                        start: span.start,
+                                        name: &method.name,
+                                        is_static: false,
+                                        position: TscInferredClassTypePosition::Return,
+                                        ty: method.function.return_type.as_deref(),
+                                        has_implementation_body: method.has_implementation_body,
+                                        return_inference: u32::try_from(member_index)
+                                            .ok()
+                                            .and_then(|member_ordinal| {
+                                                let member_path = [member_ordinal];
+                                                contributor_fact
+                                                    .return_inference_for_member_path(&member_path)
+                                            }),
+                                    });
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            verter_type_expr::TypeExpr::Intersection(parts)
+            | verter_type_expr::TypeExpr::Union(parts) => {
+                pending.extend(parts.iter().rev());
+            }
+            verter_type_expr::TypeExpr::Parenthesized(inner) => pending.push(inner),
+            _ => {}
+        }
+    }
+
+    let static_decl = if include_static {
+        Some(
+            inventory
+                .shallow_state
+                .effective_value_decl_in(owner, name)
+                .ok_or(ClassInferenceFailure::Unresolved(
+                    UnresolvedReason::MissingDependency,
+                ))?,
+        )
+    } else {
+        None
+    };
+    let static_parts = if include_static {
+        match inventory
+            .shallow_state
+            .decl_bodies()
+            .transient_value_parts_in(owner, name)
+        {
+            crate::decl_body_memo::DemandOutcome::Ready(Some(parts)) => Some(parts),
+            _ => {
+                return Err(ClassInferenceFailure::Unresolved(
+                    UnresolvedReason::MissingDependency,
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(object) = static_parts
+        .as_ref()
+        .and_then(|parts| parts.object_shape.as_ref())
+    {
+        let Some(object_fact) = static_decl
+            .as_ref()
+            .and_then(|declaration| declaration.object_shape.as_ref())
+        else {
+            return Err(ClassInferenceFailure::Unresolved(
+                UnresolvedReason::MissingDependency,
+            ));
+        };
+        collect_overload_groups(
+            &verter_type_expr::TypeExpr::Object(object.clone().into()),
+            true,
+            &mut overload_groups,
+        )
+        .map_err(ClassInferenceFailure::InferenceUnavailable)?;
+        for (member_index, member) in object.properties.iter().enumerate() {
+            match member {
+                verter_type_expr::ObjectMember::Property(property)
+                    if property.spans.type_annotation.is_none() =>
+                {
+                    if let Some(span) = property.spans.declaration.filter(|span| {
+                        span.start >= declaration_span.start && span.end <= declaration_span.end
+                    }) {
+                        candidates.push(Candidate {
+                            start: span.start,
+                            name: &property.name,
+                            is_static: true,
+                            position: TscInferredClassTypePosition::Property,
+                            ty: Some(&property.ty),
+                            has_implementation_body: false,
+                            return_inference: None,
+                        });
+                    }
+                }
+                verter_type_expr::ObjectMember::Method(method) => {
+                    for parameter in &method.function.parameters {
+                        if parameter.has_ts_annotation || parameter.is_parameter_property {
+                            continue;
+                        }
+                        if let (Some(name), Some(span)) = (
+                            parameter.name.as_deref(),
+                            parameter.span.filter(|span| {
+                                span.start >= declaration_span.start
+                                    && span.end <= declaration_span.end
+                            }),
+                        ) {
+                            candidates.push(Candidate {
+                                start: span.start,
+                                name,
+                                is_static: true,
+                                position: TscInferredClassTypePosition::Parameter,
+                                ty: Some(&parameter.ty),
+                                has_implementation_body: method.has_implementation_body,
+                                return_inference: None,
+                            });
+                        }
+                    }
+                    if method.function.spans.return_type.is_none()
+                        && method.method_kind != verter_type_expr::ObjectMethodKind::Set
+                    {
+                        if let Some(span) = method.spans.declaration.filter(|span| {
+                            span.start >= declaration_span.start && span.end <= declaration_span.end
+                        }) {
+                            candidates.push(Candidate {
+                                start: span.start,
+                                name: &method.name,
+                                is_static: true,
+                                position: TscInferredClassTypePosition::Return,
+                                ty: method.function.return_type.as_deref(),
+                                has_implementation_body: method.has_implementation_body,
+                                return_inference: object_fact.members.get(member_index).and_then(
+                                    |member| match member {
+                                        verter_type_expr::facts::ObjectMemberFact::Method(
+                                            method,
+                                        ) => Some(method.function.return_inference),
+                                        _ => None,
+                                    },
+                                ),
+                            });
+                        }
+                    }
+                }
+                verter_type_expr::ObjectMember::ConstructSignature(function) => {
+                    for parameter in &function.parameters {
+                        if parameter.has_ts_annotation || parameter.is_parameter_property {
+                            continue;
+                        }
+                        if let (Some(name), Some(span)) = (
+                            parameter.name.as_deref(),
+                            parameter.span.filter(|span| {
+                                span.start >= declaration_span.start
+                                    && span.end <= declaration_span.end
+                            }),
+                        ) {
+                            candidates.push(Candidate {
+                                start: span.start,
+                                name,
+                                is_static: false,
+                                position: TscInferredClassTypePosition::Parameter,
+                                ty: Some(&parameter.ty),
+                                has_implementation_body: false,
+                                return_inference: None,
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    candidates.retain(|candidate| {
+        !(candidate.has_implementation_body
+            && overload_groups.contains(&(candidate.name.to_owned(), candidate.is_static)))
+    });
+    candidates.sort_by_key(|candidate| candidate.start);
+
+    let mut occurrences = std::collections::BTreeMap::new();
+    let mut inferred = Vec::with_capacity(candidates.len());
+    let mut value_dependencies = BTreeSet::new();
+    for candidate in candidates {
+        if candidate.position == TscInferredClassTypePosition::Return {
+            let Some(completeness) = candidate.return_inference else {
+                return Err(ClassInferenceFailure::Unsupported(
+                    UnsupportedReason::SemanticConstruct,
+                ));
+            };
+            match completeness {
+                verter_type_expr::facts::ReturnInferenceCompleteness::Unavailable(reason) => {
+                    return Err(ClassInferenceFailure::InferenceUnavailable(reason));
+                }
+                verter_type_expr::facts::ReturnInferenceCompleteness::Unsupported(_) => {
+                    return Err(ClassInferenceFailure::Unsupported(
+                        UnsupportedReason::SemanticConstruct,
+                    ));
+                }
+                verter_type_expr::facts::ReturnInferenceCompleteness::NotInferred
+                | verter_type_expr::facts::ReturnInferenceCompleteness::Complete { .. } => {}
+            }
+        }
+        let Some(candidate_type) = candidate.ty else {
+            return Err(ClassInferenceFailure::Unsupported(
+                UnsupportedReason::SemanticConstruct,
+            ));
+        };
+        match crate::resolver_core::shallow_file_state::type_expr_is_declaration_safe(
+            candidate_type,
+        ) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(ClassInferenceFailure::Unsupported(
+                    UnsupportedReason::SemanticConstruct,
+                ));
+            }
+            Err(reason) => return Err(ClassInferenceFailure::InferenceUnavailable(reason)),
+        }
+        let occurrence = occurrences
+            .entry((candidate.name, candidate.is_static, candidate.position))
+            .or_insert(0_u32);
+        let type_text = verter_type_expr::render_type_expr_display(candidate_type)
+            .map_err(|_| ClassInferenceFailure::Unsupported(UnsupportedReason::SemanticConstruct))?
+            .text;
+        crate::resolver_core::shallow_file_state::collect_typeof_roots(
+            candidate_type,
+            &mut value_dependencies,
+        )
+        .map_err(ClassInferenceFailure::InferenceUnavailable)?;
+        inferred.push(TscInferredClassMember {
+            name: candidate.name.to_owned(),
+            occurrence: *occurrence,
+            is_static: candidate.is_static,
+            position: candidate.position,
+            type_text: TscSpliceText::new(type_text),
+        });
+        *occurrence = occurrence.saturating_add(1);
+    }
+    Ok(InferredClassProjection {
+        members: inferred,
+        value_dependencies,
+    })
+}
+
+fn collect_local_declaration_closure(
+    owner: TscScriptOwner,
+    name: &str,
+    inventory: &TscScopeInventory<'_>,
+    required_imports: &mut BTreeMap<(TscScriptOwner, String), TscBindingUsage>,
+    visiting: &mut BTreeSet<(TscScriptOwner, String)>,
+    visited: &mut BTreeSet<(TscScriptOwner, String)>,
+    owner_value_dependencies: &mut BTreeMap<
+        (TscScriptOwner, String),
+        BTreeSet<TscOwnerValueDependency>,
+    >,
+    retained_value_dependencies: &mut BTreeMap<
+        (TscScriptOwner, String),
+        BTreeSet<TscRetainedValueCarrier>,
+    >,
+    ordered: &mut Vec<(TscScriptOwner, String)>,
+) -> Result<(), ProjectionFailure> {
+    let identity = (owner, name.to_owned());
+    if visited.contains(&identity) || !visiting.insert(identity.clone()) {
+        return Ok(());
+    }
+
+    let declaration_owner = top_level_owner(owner);
+    let Some(deps) = inventory
+        .shallow_state
+        .type_deps_in(declaration_owner, name)
+    else {
+        return Err(resolution_failure());
+    };
+    if !deps.unroutable_declaration_dependencies.is_empty() || deps.has_unroutable_value_position {
+        return Err(ProjectionFailure::Unsupported(
+            UnsupportedReason::SemanticConstruct,
+        ));
+    }
+    for external in &deps.declaration_external_deps {
+        let usage = if deps.external_value_positions.contains(&external.local_name) {
+            TscBindingUsage::ValuePosition
+        } else if deps.external_value_queries.contains(&external.local_name) {
+            TscBindingUsage::ValueQuery
+        } else {
+            TscBindingUsage::TypePosition
+        };
+        let import_owner = visible_import_owner(
+            inventory,
+            owner,
+            &external.local_name,
+            Some(&external.source_specifier),
+        )?
+        .ok_or(ProjectionFailure::Unresolved(
+            UnresolvedReason::MissingDependency,
+        ))?;
+        merge_required_import(
+            required_imports,
+            (import_owner, external.local_name.clone()),
+            usage,
+        );
+    }
+    for dependency in &deps.owner_value_deps {
+        let value_owner = local_value_owner(inventory, owner, dependency)?;
+        owner_value_dependencies
+            .entry(identity.clone())
+            .or_default()
+            .insert(TscOwnerValueDependency {
+                owner: value_owner,
+                name: dependency.clone(),
+            });
+    }
+    for dependency in &deps.retained_value_carrier_deps {
+        retained_value_dependencies
+            .entry(identity.clone())
+            .or_default()
+            .insert(retained_value_carrier(inventory, owner, dependency)?);
+    }
+
+    let mut local_deps = deps.declaration_local_deps.clone();
+    let mut local_deps = local_deps
+        .drain(..)
+        .map(|dependency| {
+            let dependency_owner = visible_local_type_owner(inventory, owner, &dependency)?;
+            Ok((dependency_owner, dependency))
+        })
+        .collect::<Result<Vec<_>, ProjectionFailure>>()?;
+    local_deps.sort_by_key(|(owner, dependency)| declaration_order(inventory, *owner, dependency));
+    local_deps.dedup();
+    for (dependency_owner, dependency) in local_deps {
+        if !inventory
+            .shallow_state
+            .effective_type_header_present_in(top_level_owner(dependency_owner), &dependency)
+        {
+            return Err(ProjectionFailure::Unresolved(
+                UnresolvedReason::MissingDependency,
+            ));
+        }
+        collect_local_declaration_closure(
+            dependency_owner,
+            &dependency,
+            inventory,
+            required_imports,
+            visiting,
+            visited,
+            owner_value_dependencies,
+            retained_value_dependencies,
+            ordered,
+        )?;
+    }
+
+    visiting.remove(&identity);
+    if visited.insert(identity.clone()) {
+        ordered.push(identity);
+    }
+    Ok(())
+}
+
+fn retained_value_carrier(
+    inventory: &TscScopeInventory<'_>,
+    owner: TscScriptOwner,
+    name: &str,
+) -> Result<TscRetainedValueCarrier, ProjectionFailure> {
+    inventory
+        .analysis
+        .declaration_entries
+        .iter()
+        .filter(|entry| {
+            entry.owner == top_level_owner(owner)
+                && entry.name == name
+                && matches!(
+                    entry.kind,
+                    LocalDeclarationKind::Type | LocalDeclarationKind::TypeAndValue
+                )
+        })
+        .enumerate()
+        .filter(|(_, entry)| entry.kind == LocalDeclarationKind::TypeAndValue)
+        .last()
+        .and_then(|(contributor_ordinal, _)| {
+            u32::try_from(contributor_ordinal)
+                .ok()
+                .map(|contributor_ordinal| TscRetainedValueCarrier {
+                    owner,
+                    name: name.to_owned(),
+                    contributor_ordinal,
+                })
+        })
+        .ok_or(ProjectionFailure::Unresolved(
+            UnresolvedReason::MissingDependency,
+        ))
+}
+
+fn merge_required_import(
+    required_imports: &mut BTreeMap<(TscScriptOwner, String), TscBindingUsage>,
+    key: (TscScriptOwner, String),
+    usage: TscBindingUsage,
+) {
+    required_imports
+        .entry(key)
+        .and_modify(|existing| {
+            if binding_usage_precedence(usage) > binding_usage_precedence(*existing) {
+                *existing = usage;
+            }
+        })
+        .or_insert(usage);
+}
+
+fn binding_usage_precedence(usage: TscBindingUsage) -> u8 {
+    match usage {
+        TscBindingUsage::TypePosition => 0,
+        TscBindingUsage::ValueQuery => 1,
+        TscBindingUsage::ValuePosition => 2,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tsc_emit_rows(
+    ctx: &dyn ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_>,
+    surface: &TypeInfoSurface,
+    mac: &AnalyzedMacro,
+    payload_index: usize,
+    effective_index: usize,
+    counters: &mut VueMacroCodegenCounters,
+) -> Result<Vec<TscEmitRow>, ProjectionFailure> {
+    let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
+    let mut rows = Vec::new();
+
+    for signature in surface.call_signatures.iter() {
+        let callable = CallableNodeView::new(dispatch, signature.node);
+        let Some(names) = callable.event_names(context) else {
+            continue;
+        };
+        let Some(signature) = callable.signature(context) else {
+            continue;
+        };
+        let parameters = render_function_parameters(ctx, &signature.raw_params()[1..], counters)?;
+        for name in names {
+            push_tsc_emit(
+                &mut rows,
+                name.as_ref(),
+                parameters.clone(),
+                authored_emit_anchor(mac, payload_index, effective_index, name.as_ref()),
+            );
+        }
+    }
+
+    for member in surface
+        .members
+        .iter()
+        .filter(|member| member.visibility.is_public())
+    {
+        let parameters = render_emit_payload_parameters(ctx, dispatch, member.value, counters)?;
+        push_tsc_emit(
+            &mut rows,
+            member.name.as_ref(),
+            parameters,
+            authored_emit_anchor(mac, payload_index, effective_index, member.name.as_ref()),
+        );
+    }
+
+    for field in &mac.emit_fields {
+        push_tsc_emit(
+            &mut rows,
+            field.name.as_str(),
+            TscSpliceText::new("...args: unknown[]"),
+            authored_emit_anchor(mac, payload_index, effective_index, field.name.as_str()),
+        );
+    }
+
+    if crate::request_context::current_cold_compute_completeness().is_partial() {
+        return Err(partial_failure());
+    }
+    Ok(rows)
+}
+
+fn push_tsc_emit(
+    rows: &mut Vec<TscEmitRow>,
+    name: &str,
+    parameters: TscSpliceText,
+    anchor: MacroAnchor,
+) {
+    if rows.iter().any(|row| row.name == name) {
+        return;
+    }
+    rows.push(TscEmitRow {
+        name: name.to_owned(),
+        emit_parameters: parameters.clone(),
+        handler_parameters: parameters,
+        anchor,
+    });
+}
+
+fn render_emit_payload_parameters(
+    ctx: &dyn ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: crate::semantic_query::SemanticNodeId,
+    counters: &mut VueMacroCodegenCounters,
+) -> Result<TscSpliceText, ProjectionFailure> {
+    use crate::semantic_query::SemanticNodeData;
+
+    let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
+    let Some(node) = dispatch
+        .normalize_node_for_structural_fact_demand(node, context)
+        .into_complete_node()
+    else {
+        return Err(
+            if crate::request_context::current_cold_compute_completeness().is_partial() {
+                partial_failure()
+            } else {
+                resolution_failure()
+            },
+        );
+    };
+    match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node).as_deref() {
+        Some(SemanticNodeData::Tuple { elements, .. }) => {
+            render_tuple_parameters(ctx, elements, counters)
+        }
+        Some(SemanticNodeData::Function { params, .. }) => {
+            render_function_parameters(ctx, params, counters)
+        }
+        _ => Ok(TscSpliceText::new("...args: unknown[]")),
+    }
+}
+
+fn render_tuple_parameters(
+    ctx: &dyn ResolverContext,
+    elements: &[crate::semantic_query::TupleElement],
+    counters: &mut VueMacroCodegenCounters,
+) -> Result<TscSpliceText, ProjectionFailure> {
+    let mut rendered = Vec::with_capacity(elements.len());
+    for (index, element) in elements.iter().enumerate() {
+        let ty = render_tsc_node(ctx, element.value, counters)?;
+        let name = element
+            .label
+            .as_deref()
+            .map_or_else(|| format!("arg{index}"), ToOwned::to_owned);
+        rendered.push(render_tsc_parameter(
+            &name,
+            ty.as_str(),
+            element.optional,
+            element.rest,
+        ));
+    }
+    Ok(TscSpliceText::new(rendered.join(", ")))
+}
+
+fn render_function_parameters(
+    ctx: &dyn ResolverContext,
+    params: &[crate::semantic_query::FunctionParam],
+    counters: &mut VueMacroCodegenCounters,
+) -> Result<TscSpliceText, ProjectionFailure> {
+    let mut rendered = Vec::with_capacity(params.len());
+    for (index, param) in params.iter().enumerate() {
+        let ty = render_tsc_node(ctx, param.ty, counters)?;
+        let name = param
+            .name
+            .as_deref()
+            .map_or_else(|| format!("arg{index}"), ToOwned::to_owned);
+        rendered.push(render_tsc_parameter(
+            &name,
+            ty.as_str(),
+            param.optional,
+            param.rest,
+        ));
+    }
+    Ok(TscSpliceText::new(rendered.join(", ")))
+}
+
+fn render_tsc_parameter(name: &str, ty: &str, optional: bool, rest: bool) -> String {
+    format!(
+        "{}{}{}: {}",
+        if rest { "..." } else { "" },
+        name,
+        if optional && !rest { "?" } else { "" },
+        ty
+    )
+}
+
 fn is_definitely_non_object_root(
     dispatch: &ProjectSemanticDispatch<'_>,
     subject: crate::semantic_query::SemanticNodeId,
@@ -676,14 +1946,11 @@ fn emit_rows(
 ) -> Vec<RuntimeEmit> {
     let mut rows = Vec::new();
 
-    for (ordinal, field) in mac.emit_fields.iter().enumerate() {
+    for field in &mac.emit_fields {
         push_emit(
             &mut rows,
             field.name.as_str(),
-            MacroAnchor::Authored {
-                macro_index: macro_index(effective_index),
-                member_ordinal: Some(AuthoredMemberOrdinal::new(member_ordinal(ordinal))),
-            },
+            authored_emit_anchor(mac, payload_index, effective_index, field.name.as_str()),
         );
     }
 
@@ -726,14 +1993,19 @@ fn push_emit(rows: &mut Vec<RuntimeEmit>, name: &str, anchor: MacroAnchor) {
 }
 
 fn member_anchor(mac: &AnalyzedMacro, payload_index: usize, name: &str) -> MacroAnchor {
-    let Some(ordinal) = mac.prop_fields.iter().position(|field| field.name == name) else {
+    let Some(ordinal) = mac
+        .prop_fields
+        .iter()
+        .filter(|field| span_is_owned_by_macro(field.span, mac.span))
+        .position(|field| field.name == name)
+    else {
         return MacroAnchor::MacroArgument {
             macro_index: macro_index(payload_index),
         };
     };
     MacroAnchor::Authored {
         macro_index: macro_index(payload_index),
-        member_ordinal: Some(AuthoredMemberOrdinal::new(member_ordinal(ordinal))),
+        member_ordinal: AuthoredMemberOrdinal::new(member_ordinal(ordinal)),
     }
 }
 
@@ -743,15 +2015,24 @@ fn authored_emit_anchor(
     effective_index: usize,
     name: &str,
 ) -> MacroAnchor {
-    let Some(ordinal) = mac.emit_fields.iter().position(|field| field.name == name) else {
+    let Some(ordinal) = mac
+        .emit_fields
+        .iter()
+        .filter(|field| span_is_owned_by_macro(field.span, mac.span))
+        .position(|field| field.name == name)
+    else {
         return MacroAnchor::MacroArgument {
             macro_index: macro_index(payload_index),
         };
     };
     MacroAnchor::Authored {
         macro_index: macro_index(effective_index),
-        member_ordinal: Some(AuthoredMemberOrdinal::new(member_ordinal(ordinal))),
+        member_ordinal: AuthoredMemberOrdinal::new(member_ordinal(ordinal)),
     }
+}
+
+fn span_is_owned_by_macro(member: verter_span::Span, mac: verter_span::Span) -> bool {
+    member.start >= mac.start && member.end <= mac.end
 }
 
 fn defaults_association(

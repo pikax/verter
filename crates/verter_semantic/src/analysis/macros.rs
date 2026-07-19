@@ -2,8 +2,9 @@ use oxc_ast::ast::*;
 use oxc_ast::Comment;
 
 use oxc_span::GetSpan;
-use verter_type_expr::TypeExpr;
+use verter_type_expr::{TopLevelOwnerId, TypeExpr};
 
+use crate::analysis::top_level_owners::TopLevelOwnerTable;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::analysis::types::{
@@ -181,8 +182,8 @@ fn collect_type_references_recursive(ts_type: &TSType<'_>, refs: &mut Vec<String
         }
         TSType::TSInferType(_) => {}
         TSType::TSTypeQuery(query) => {
-            if let TSTypeQueryExprName::IdentifierReference(ident) = &query.expr_name {
-                refs.push(ident.name.to_string());
+            if let Some(root) = type_query_root_name(&query.expr_name) {
+                refs.push(root);
             }
         }
         TSType::TSImportType(_) => {}
@@ -215,6 +216,14 @@ fn type_ref_root_name(type_name: &TSTypeName<'_>) -> Option<String> {
     }
 }
 
+fn type_query_root_name(type_name: &TSTypeQueryExprName<'_>) -> Option<String> {
+    match type_name {
+        TSTypeQueryExprName::IdentifierReference(identifier) => Some(identifier.name.to_string()),
+        TSTypeQueryExprName::QualifiedName(qualified) => type_ref_root_name(&qualified.left),
+        TSTypeQueryExprName::ThisExpression(_) | TSTypeQueryExprName::TSImportType(_) => None,
+    }
+}
+
 /// Classify every type reference of each type-based macro's TYPE ARGUMENT by
 /// structural position (the [`MacroTypeDepUsage`] tier):
 ///
@@ -233,11 +242,13 @@ fn type_ref_root_name(type_name: &TSTypeName<'_>) -> Option<String> {
 /// Returns one `(name, strongest role)` list per macro, in first-occurrence
 /// order (index-aligned with `macros`; `Surface` outranks `Member`). The
 /// deterministic order keeps the derived `macro_type_deps` payload stable.
-pub(crate) fn classify_macro_type_reference_roles(
+pub(crate) fn classify_macro_type_reference_roles_with_owners(
     program: &Program<'_>,
     macros: &[AnalyzedMacro],
+    owners: &TopLevelOwnerTable,
 ) -> Vec<Vec<(String, MacroTypeDepUsage)>> {
-    let registry = build_local_type_registry(program);
+    let registries = build_local_type_registries(program, owners);
+    let empty_registry = FxHashMap::default();
     macros
         .iter()
         .map(|mac| {
@@ -250,8 +261,9 @@ pub(crate) fn classify_macro_type_reference_roles(
             else {
                 return Vec::new();
             };
+            let registry = registries.get(&mac.owner).unwrap_or(&empty_registry);
             let mut walk = RoleWalk {
-                registry: &registry,
+                registry,
                 roles: Vec::new(),
                 role_index: FxHashMap::default(),
                 visited: FxHashSet::default(),
@@ -263,7 +275,7 @@ pub(crate) fn classify_macro_type_reference_roles(
 }
 
 /// Role-classifying walker over a macro type argument (see
-/// [`classify_macro_type_reference_roles`]).
+/// [`classify_macro_type_reference_roles_with_owners`]).
 struct RoleWalk<'a, 'r> {
     registry: &'r FxHashMap<String, LocalTypeDecl<'a>>,
     /// First-occurrence-ordered `(name, strongest role)` results.
@@ -277,10 +289,16 @@ struct RoleWalk<'a, 'r> {
 impl<'a> RoleWalk<'a, '_> {
     fn record(&mut self, name: String, role: MacroTypeDepUsage) {
         if let Some(&at) = self.role_index.get(&name) {
-            // Surface outranks Member.
-            if role == MacroTypeDepUsage::Surface {
-                self.roles[at].1 = MacroTypeDepUsage::Surface;
-            }
+            let existing = self.roles[at].1;
+            self.roles[at].1 = match (
+                existing.is_surface() || role.is_surface(),
+                existing.is_value_query() || role.is_value_query(),
+            ) {
+                (true, true) => MacroTypeDepUsage::ValueQuerySurface,
+                (true, false) => MacroTypeDepUsage::Surface,
+                (false, true) => MacroTypeDepUsage::ValueQueryMember,
+                (false, false) => MacroTypeDepUsage::Member,
+            };
         } else {
             self.role_index.insert(name.clone(), self.roles.len());
             self.roles.push((name, role));
@@ -291,6 +309,12 @@ impl<'a> RoleWalk<'a, '_> {
     /// recorded as SURFACE and its local chain followed — used for argument
     /// shapes whose surface cannot be enumerated syntactically.
     fn surface_flat(&mut self, ts_type: &TSType<'a>) {
+        if let TSType::TSTypeQuery(query) = ts_type {
+            if let Some(root) = type_query_root_name(&query.expr_name) {
+                self.record(root, MacroTypeDepUsage::ValueQuerySurface);
+                return;
+            }
+        }
         for name in collect_type_references(ts_type) {
             self.record(name.clone(), MacroTypeDepUsage::Surface);
             self.follow_local_surface(&name);
@@ -329,6 +353,11 @@ impl<'a> RoleWalk<'a, '_> {
             }
             TSType::TSParenthesizedType(paren) => self.surface_type(&paren.type_annotation),
             TSType::TSTypeLiteral(literal) => self.literal_members(&literal.members),
+            TSType::TSTypeQuery(query) => {
+                if let Some(root) = type_query_root_name(&query.expr_name) {
+                    self.record(root, MacroTypeDepUsage::ValueQuerySurface);
+                }
+            }
             TSType::TSMappedType(mapped) => {
                 // The key domain enumerates the surface; the value is a
                 // per-member annotation.
@@ -434,6 +463,11 @@ impl<'a> RoleWalk<'a, '_> {
                 }
             }
             TSType::TSParenthesizedType(paren) => self.member_type(&paren.type_annotation),
+            TSType::TSTypeQuery(query) => {
+                if let Some(root) = type_query_root_name(&query.expr_name) {
+                    self.record(root, MacroTypeDepUsage::ValueQueryMember);
+                }
+            }
             // Arrays, tuples, function types, literals, inline objects, …:
             // the constructor is derivable syntactically; inner references
             // are nested.
@@ -465,10 +499,21 @@ impl<'a> RoleWalk<'a, '_> {
 /// macro-ordinal / field-ordinal addressing engine. The deref-side field
 /// replay ([`lower_macro_field_payload_at`]) calls it over the retained
 /// snapshot so the mint side and the deref side cannot drift.
+#[cfg(test)]
 fn analyze_macros_from_program(program: &Program<'_>, source: &str) -> Vec<AnalyzedMacro> {
+    let owners = TopLevelOwnerTable::ordinary_file(program.body.len());
+    analyze_macros_from_program_with_owners(program, source, &owners)
+}
+
+fn analyze_macros_from_program_with_owners(
+    program: &Program<'_>,
+    source: &str,
+    owners: &TopLevelOwnerTable,
+) -> Vec<AnalyzedMacro> {
     let mut macros = Vec::new();
 
-    for stmt in &program.body {
+    for (statement_index, stmt) in program.body.iter().enumerate() {
+        let owner = owners.statement(statement_index).owner;
         match stmt {
             Statement::ExpressionStatement(expr_stmt) => {
                 try_extract_macro_from_expr(
@@ -476,11 +521,18 @@ fn analyze_macros_from_program(program: &Program<'_>, source: &str) -> Vec<Analy
                     &mut macros,
                     source,
                     &program.comments,
+                    owner,
                 );
             }
             Statement::VariableDeclaration(var_decl) => {
                 for decl in &var_decl.declarations {
-                    try_extract_macro_from_var_decl(decl, &mut macros, source, &program.comments);
+                    try_extract_macro_from_var_decl(
+                        decl,
+                        &mut macros,
+                        source,
+                        &program.comments,
+                        owner,
+                    );
                 }
             }
             _ => {}
@@ -488,14 +540,17 @@ fn analyze_macros_from_program(program: &Program<'_>, source: &str) -> Vec<Analy
     }
 
     // Post-processing: resolve local type references in prop fields
-    resolve_macro_type_references(program, &mut macros, source);
+    resolve_macro_type_references_with_owners(program, &mut macros, source, owners);
 
     // Final normalization: stamp the authored macro-payload locators at each
     // macro's final index. Constructor sites record authored-annotation
     // presence via the scope pairing fields; the content-free POSITION (macro
     // index + field index) is only known once the macro list is final.
     for (macro_index, mac) in macros.iter_mut().enumerate() {
-        stamp_macro_payload_locators(mac, u32::try_from(macro_index).unwrap_or(u32::MAX));
+        let Ok(macro_index) = u32::try_from(macro_index) else {
+            break;
+        };
+        stamp_macro_payload_locators(mac, macro_index);
     }
 
     macros
@@ -590,6 +645,10 @@ pub enum MacroFieldPayloadLowering {
     /// vocabulary, or a field whose authored node no longer sits at the
     /// recorded position).
     NoField,
+    /// The macro ordinal exists, but belongs to a different exact lexical
+    /// owner than the locator requested. Owner-qualified replay must fail
+    /// closed instead of reading the same ordinal from a sibling script.
+    OwnerMismatch,
 }
 
 /// The lowered authored PER-FIELD payload of the macro at ordinal
@@ -597,7 +656,7 @@ pub enum MacroFieldPayloadLowering {
 /// of the position a [`MacroPayloadPosition::Field`] payload locator
 /// addresses.
 ///
-/// Replays the analyzer's OWN macro assembly ([`analyze_macros_from_program`]
+/// Replays the analyzer's OWN macro assembly ([`analyze_macros_from_program_with_owners`]
 /// — the one macro-ordinal / field-ordinal addressing engine, so the mint
 /// side and the deref side cannot drift), selects the field family by the
 /// macro's kind (props for `defineProps` / `defineModel`, emits, slots), and
@@ -626,10 +685,33 @@ pub fn lower_macro_field_payload_at(
     macro_index: u32,
     field_index: u32,
 ) -> MacroFieldPayloadLowering {
-    let macros = analyze_macros_from_program(program, source);
+    let owners = TopLevelOwnerTable::ordinary_file(program.body.len());
+    lower_macro_field_payload_at_with_owners(
+        program,
+        source,
+        &owners,
+        TopLevelOwnerId::ordinary_file(),
+        macro_index,
+        field_index,
+    )
+}
+
+#[must_use]
+pub fn lower_macro_field_payload_at_with_owners(
+    program: &Program<'_>,
+    source: &str,
+    owners: &TopLevelOwnerTable,
+    expected_owner: TopLevelOwnerId,
+    macro_index: u32,
+    field_index: u32,
+) -> MacroFieldPayloadLowering {
+    let macros = analyze_macros_from_program_with_owners(program, source, owners);
     let Some(mac) = macros.get(macro_index as usize) else {
         return MacroFieldPayloadLowering::NoField;
     };
+    if mac.owner != expected_owner {
+        return MacroFieldPayloadLowering::OwnerMismatch;
+    }
     enum FieldTarget {
         Prop { span: verter_span::Span },
         ModelTypeArgument { macro_span: verter_span::Span },
@@ -688,10 +770,14 @@ pub fn lower_macro_field_payload_at(
                 None => MacroFieldPayloadLowering::NoField,
             }
         }
-        FieldTarget::Prop { span } => lower_prop_field_payload_at_span(program, source, mac, span),
-        FieldTarget::Emit { span } => lower_emit_field_payload_at_span(program, source, mac, span),
+        FieldTarget::Prop { span } => {
+            lower_prop_field_payload_at_span(program, source, owners, mac, span)
+        }
+        FieldTarget::Emit { span } => {
+            lower_emit_field_payload_at_span(program, source, owners, mac, span)
+        }
         FieldTarget::SlotReturn { span } => {
-            lower_slot_return_payload_at_span(program, source, mac, span)
+            lower_slot_return_payload_at_span(program, source, owners, mac, span)
         }
     }
 }
@@ -699,9 +785,10 @@ pub fn lower_macro_field_payload_at(
 /// Collect every `TSSignature` member list an analyzer field span can live
 /// in: the macro call's type-argument literal (plus intersection arms) and
 /// every local registry declaration body (interface bodies and alias object
-/// literals — the bodies `resolve_macro_type_references` draws fields from).
+/// literals — the bodies `resolve_macro_type_references_with_owners` draws fields from).
 fn field_payload_member_lists<'a>(
     program: &'a Program<'a>,
+    owners: &TopLevelOwnerTable,
     mac: &AnalyzedMacro,
 ) -> Vec<&'a [TSSignature<'a>]> {
     fn collect_from_type<'a>(ts_type: &'a TSType<'a>, out: &mut Vec<&'a [TSSignature<'a>]>) {
@@ -723,7 +810,9 @@ fn field_payload_member_lists<'a>(
             }
         }
     }
-    for decl in build_local_type_registry(program).into_values() {
+    let mut registries = build_local_type_registries(program, owners);
+    let registry = registries.remove(&mac.owner).unwrap_or_default();
+    for decl in registry.into_values() {
         match decl {
             LocalTypeDecl::Interface { body, .. } => lists.push(&body.body),
             LocalTypeDecl::Alias(ts_type) => collect_from_type(ts_type, &mut lists),
@@ -795,10 +884,11 @@ fn find_macro_call_at_span<'a>(
 fn lower_prop_field_payload_at_span(
     program: &Program<'_>,
     source: &str,
+    owners: &TopLevelOwnerTable,
     mac: &AnalyzedMacro,
     span: verter_span::Span,
 ) -> MacroFieldPayloadLowering {
-    for members in field_payload_member_lists(program, mac) {
+    for members in field_payload_member_lists(program, owners, mac) {
         for member in members {
             if let TSSignature::TSPropertySignature(prop) = member {
                 let key_span: verter_span::Span = prop.key.span().into();
@@ -885,10 +975,11 @@ fn lower_runtime_prop_assertion(value: &Expression<'_>, source: &str) -> MacroFi
 fn lower_emit_field_payload_at_span(
     program: &Program<'_>,
     source: &str,
+    owners: &TopLevelOwnerTable,
     mac: &AnalyzedMacro,
     span: verter_span::Span,
 ) -> MacroFieldPayloadLowering {
-    for members in field_payload_member_lists(program, mac) {
+    for members in field_payload_member_lists(program, owners, mac) {
         for member in members {
             match member {
                 TSSignature::TSPropertySignature(prop) => {
@@ -960,10 +1051,11 @@ fn lower_emit_field_payload_at_span(
 fn lower_slot_return_payload_at_span(
     program: &Program<'_>,
     source: &str,
+    owners: &TopLevelOwnerTable,
     mac: &AnalyzedMacro,
     span: verter_span::Span,
 ) -> MacroFieldPayloadLowering {
-    for members in field_payload_member_lists(program, mac) {
+    for members in field_payload_member_lists(program, owners, mac) {
         for member in members {
             match member {
                 TSSignature::TSPropertySignature(prop) => {
@@ -1016,46 +1108,50 @@ pub(crate) fn stamp_macro_payload_locators(mac: &mut AnalyzedMacro, macro_index:
         AuthoredAnchor, LocatorSymbolSpace, MacroPayloadLocator, MacroPayloadPosition,
     };
 
-    fn local_default_anchor() -> AuthoredAnchor {
+    fn local_default_anchor(owner: TopLevelOwnerId) -> AuthoredAnchor {
         AuthoredAnchor {
             canonical_id: std::sync::Arc::from(""),
+            owner,
             symbol: std::sync::Arc::from("default"),
             space: LocatorSymbolSpace::Value,
         }
     }
-    let field_locator = |macro_index: u32, field_index: usize| MacroPayloadLocator {
-        anchor: local_default_anchor(),
-        macro_index,
-        payload: MacroPayloadPosition::Field {
-            field_index: u32::try_from(field_index).unwrap_or(u32::MAX),
-        },
+    let owner = mac.owner;
+    let field_locator = |macro_index: u32, field_index: usize| {
+        Some(MacroPayloadLocator {
+            anchor: local_default_anchor(owner),
+            macro_index,
+            payload: MacroPayloadPosition::Field {
+                field_index: u32::try_from(field_index).ok()?,
+            },
+        })
     };
 
     if mac.parsed_type_argument_scope.is_some() {
         mac.parsed_type_argument = Some(MacroPayloadLocator {
-            anchor: local_default_anchor(),
+            anchor: local_default_anchor(owner),
             macro_index,
             payload: MacroPayloadPosition::TypeArgument,
         });
     }
     for (field_index, field) in mac.prop_fields.iter_mut().enumerate() {
         if field.type_expr_scope.is_some() {
-            field.payload = Some(field_locator(macro_index, field_index));
+            field.payload = field_locator(macro_index, field_index);
         }
     }
     for (field_index, field) in mac.emit_fields.iter_mut().enumerate() {
         if field.payload_expr_scope.is_some() {
-            field.payload = Some(field_locator(macro_index, field_index));
+            field.payload = field_locator(macro_index, field_index);
         }
     }
     for (field_index, field) in mac.slot_fields.iter_mut().enumerate() {
         if field.return_expr_scope.is_some() {
-            field.payload = Some(field_locator(macro_index, field_index));
+            field.payload = field_locator(macro_index, field_index);
         }
     }
     for (field_index, field) in mac.expose_fields.iter_mut().enumerate() {
         if field.type_expr_scope.is_some() {
-            field.payload = Some(field_locator(macro_index, field_index));
+            field.payload = field_locator(macro_index, field_index);
         }
     }
 }
@@ -1102,14 +1198,20 @@ fn insert_local_type_decl_from_declaration<'a>(
     }
 }
 
-/// Build a registry of local type declarations from the program.
-fn build_local_type_registry<'a>(program: &'a Program<'a>) -> FxHashMap<String, LocalTypeDecl<'a>> {
+fn build_local_type_registries<'a>(
+    program: &'a Program<'a>,
+    owners: &TopLevelOwnerTable,
+) -> FxHashMap<TopLevelOwnerId, FxHashMap<String, LocalTypeDecl<'a>>> {
     // Each top-level statement contributes at most one registry entry, so
     // the statement count is a tight capacity bound — sized up front
     // instead of growing by doubling (type-decl-dominated files, the hot
     // case, land close to exact).
-    let mut registry = FxHashMap::with_capacity_and_hasher(program.body.len(), Default::default());
-    for stmt in &program.body {
+    let mut registries = FxHashMap::default();
+    for (statement_index, stmt) in program.body.iter().enumerate() {
+        let owner = owners.statement(statement_index).owner;
+        let registry = registries.entry(owner).or_insert_with(|| {
+            FxHashMap::with_capacity_and_hasher(program.body.len(), Default::default())
+        });
         match stmt {
             Statement::TSInterfaceDeclaration(decl) => {
                 let extends: &[TSInterfaceHeritage<'_>] = &decl.extends;
@@ -1134,13 +1236,13 @@ fn build_local_type_registry<'a>(program: &'a Program<'a>) -> FxHashMap<String, 
             }
             Statement::ExportNamedDeclaration(export) => {
                 if let Some(ref decl) = export.declaration {
-                    insert_local_type_decl_from_declaration(&mut registry, decl);
+                    insert_local_type_decl_from_declaration(registry, decl);
                 }
             }
             _ => {}
         }
     }
-    registry
+    registries
 }
 
 /// Extract prop fields from an interface body. The `declared_in_macro_type_arg`
@@ -1448,13 +1550,14 @@ fn heritage_name(expr: &Expression<'_>) -> Option<String> {
 /// For `defineProps<Props>()` where `Props` is a local interface, this resolves
 /// the interface members into prop fields. Also populates `resolved_local_types`
 /// for the schema layer.
-pub(crate) fn resolve_macro_type_references(
+pub(crate) fn resolve_macro_type_references_with_owners(
     program: &Program<'_>,
     macros: &mut [AnalyzedMacro],
     source: &str,
+    owners: &TopLevelOwnerTable,
 ) {
-    let registry = build_local_type_registry(program);
-    if registry.is_empty() {
+    let registries = build_local_type_registries(program, owners);
+    if registries.is_empty() {
         return;
     }
 
@@ -1467,6 +1570,9 @@ pub(crate) fn resolve_macro_type_references(
         if !mac.is_type_based || mac.type_references.is_empty() {
             continue;
         }
+        let Some(registry) = registries.get(&mac.owner) else {
+            continue;
+        };
 
         // Check if any type references are in our registry (need resolution)
         let has_local_refs = mac
@@ -1552,8 +1658,9 @@ fn resolve_local_define_props(
                         };
                         resolved_types.push(ResolvedLocalType {
                             name: type_ref.clone(),
+                            owner: mac.owner,
                             expanded,
-                            shape: local_type_ref_shape(type_ref),
+                            shape: local_type_ref_shape(type_ref, mac.owner),
                             span,
                         });
                     }
@@ -1596,8 +1703,9 @@ fn resolve_local_define_props(
                     };
                     resolved_types.push(ResolvedLocalType {
                         name: type_ref.clone(),
+                        owner: mac.owner,
                         expanded,
-                        shape: local_type_ref_shape(type_ref),
+                        shape: local_type_ref_shape(type_ref, mac.owner),
                         span,
                     });
                     mac.prop_fields = fields;
@@ -2217,10 +2325,11 @@ pub(crate) fn try_extract_macro_from_expr(
     macros: &mut Vec<AnalyzedMacro>,
     source: &str,
     comments: &[Comment],
+    owner: TopLevelOwnerId,
 ) {
-    if let Some(m) = try_extract_macro(expression, None, source, comments) {
+    if let Some(m) = try_extract_macro(expression, None, source, comments, owner) {
         if m.kind == AnalyzedMacroKind::WithDefaults {
-            try_extract_inner_macro(expression, macros, source, comments);
+            try_extract_inner_macro(expression, macros, source, comments, owner);
         }
         macros.push(m);
     }
@@ -2233,6 +2342,7 @@ pub(crate) fn try_extract_macro_from_var_decl(
     macros: &mut Vec<AnalyzedMacro>,
     source: &str,
     comments: &[Comment],
+    owner: TopLevelOwnerId,
 ) {
     if let Some(ref init) = decl.init {
         let binding_name = if let BindingPattern::BindingIdentifier(id) = &decl.id {
@@ -2240,9 +2350,9 @@ pub(crate) fn try_extract_macro_from_var_decl(
         } else {
             None
         };
-        if let Some(m) = try_extract_macro(init, binding_name, source, comments) {
+        if let Some(m) = try_extract_macro(init, binding_name, source, comments, owner) {
             if m.kind == AnalyzedMacroKind::WithDefaults {
-                try_extract_inner_macro(init, macros, source, comments);
+                try_extract_inner_macro(init, macros, source, comments, owner);
             }
             macros.push(m);
         }
@@ -2256,11 +2366,12 @@ fn try_extract_inner_macro(
     macros: &mut Vec<AnalyzedMacro>,
     source: &str,
     comments: &[Comment],
+    owner: TopLevelOwnerId,
 ) {
     if let Expression::CallExpression(call) = expr {
         if let Some(first_arg) = call.arguments.first() {
             if let Some(inner_expr) = first_arg.as_expression() {
-                if let Some(m) = try_extract_macro(inner_expr, None, source, comments) {
+                if let Some(m) = try_extract_macro(inner_expr, None, source, comments, owner) {
                     macros.push(m);
                 }
             }
@@ -2272,11 +2383,15 @@ fn try_extract_inner_macro(
 /// object expansion is never a primitive, so it stays a shallow named
 /// reference resolved on demand (the analyzer's local-file scope convention is
 /// the empty producing canonical).
-fn local_type_ref_shape(type_ref: &str) -> verter_type_expr::facts::ResolvedLocalShape {
+fn local_type_ref_shape(
+    type_ref: &str,
+    owner: TopLevelOwnerId,
+) -> verter_type_expr::facts::ResolvedLocalShape {
     verter_type_expr::facts::ResolvedLocalShape::Ref(
         verter_type_expr::locators::SymbolBodyLocator {
             anchor: verter_type_expr::locators::AuthoredAnchor {
                 canonical_id: std::sync::Arc::from(""),
+                owner,
                 symbol: std::sync::Arc::from(type_ref),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Type,
             },
@@ -2290,6 +2405,7 @@ fn try_extract_macro(
     binding_name: Option<String>,
     source: &str,
     comments: &[Comment],
+    owner: TopLevelOwnerId,
 ) -> Option<AnalyzedMacro> {
     match expr {
         Expression::CallExpression(call) => {
@@ -2393,6 +2509,7 @@ fn try_extract_macro(
 
             Some(AnalyzedMacro {
                 kind,
+                owner,
                 is_type_based,
                 type_references,
                 binding_name,
@@ -2644,7 +2761,7 @@ fn extract_prop_fields_from_type(
         TSType::TSIntersectionType(intersection) => {
             // Merge fields from all branches. Inline literal arms (`{ ... }`)
             // contribute author-declared members; reference arms return empty
-            // here and are resolved later by `resolve_macro_type_references`,
+            // here and are resolved later by `resolve_macro_type_references_with_owners`,
             // where their provenance is preserved based on whether the
             // referenced declaration is local-author-declared or external.
             intersection

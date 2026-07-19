@@ -1084,19 +1084,21 @@ impl VerterLanguageServer {
         &self,
         parent_uri: &Uri,
         target: &hover::ChildHoverTarget,
-    ) -> Option<Hover> {
+    ) -> Result<Option<Hover>, verter_session::PublicApiProjectionError> {
         match target {
             hover::ChildHoverTarget::ComponentTag(target) => {
-                let child = self.resolve_component_context(
+                let Some(child) = self.resolve_component_context(
                     parent_uri,
                     &target.import_source,
                     Some(&target.component_name),
-                )?;
+                ) else {
+                    return Ok(None);
+                };
                 let projection = self
                     .documents
                     .host()
-                    .get_public_api_projection(&child.canonical_id);
-                Some(hover::build_child_component_hover(
+                    .get_public_api_projection(&child.canonical_id)?;
+                Ok(Some(hover::build_child_component_hover(
                     &target.component_name,
                     &target.import_source,
                     &child.analysis,
@@ -1107,21 +1109,26 @@ impl VerterLanguageServer {
                         .as_ref()
                         .map(|projection| projection.response.code.as_ref()),
                     &target.usage_props,
-                ))
+                )))
             }
             hover::ChildHoverTarget::ImportBinding(target) => {
-                let parent_analysis = self.documents.get_analysis(parent_uri)?;
-                let child = self.resolve_component_document_for_import_binding(
+                let Some(parent_analysis) = self.documents.get_analysis(parent_uri) else {
+                    return Ok(None);
+                };
+                let Some(child) = self.resolve_component_document_for_import_binding(
                     parent_uri,
                     &parent_analysis,
                     &target.import_source,
                     &target.binding_name,
-                )?;
+                ) else {
+                    return Ok(None);
+                };
+                let child_canonical_id = crate::documents::uri_to_canonical_id(&child.uri);
                 let projection = self
                     .documents
                     .host()
-                    .get_public_api_projection(&crate::documents::uri_to_canonical_id(&child.uri));
-                Some(hover::build_child_component_hover(
+                    .get_public_api_projection(&child_canonical_id)?;
+                Ok(Some(hover::build_child_component_hover(
                     &target.binding_name,
                     &target.import_source,
                     &child.analysis,
@@ -1132,21 +1139,24 @@ impl VerterLanguageServer {
                         .as_ref()
                         .map(|projection| projection.response.code.as_ref()),
                     &[],
-                ))
+                )))
             }
             hover::ChildHoverTarget::EventAttribute(target) => {
-                let child =
-                    self.resolve_component_context(parent_uri, &target.import_source, None)?;
+                let Some(child) =
+                    self.resolve_component_context(parent_uri, &target.import_source, None)
+                else {
+                    return Ok(None);
+                };
                 let public_api = self
                     .documents
                     .host()
-                    .get_public_api(&child.canonical_id)
+                    .get_public_api(&child.canonical_id)?
                     .map(|api| api.code.to_string());
-                hover::build_child_event_hover(
+                Ok(hover::build_child_event_hover(
                     &target.vue_attr,
                     &child.analysis,
                     public_api.as_deref(),
-                )
+                ))
             }
         }
     }

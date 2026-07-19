@@ -222,6 +222,7 @@ fn semantic_memo_invalidate_drains_fact_canonical_entry() {
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::from("/test/scope.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         },
         name: Arc::from("MemoTarget"),

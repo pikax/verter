@@ -112,6 +112,41 @@ pub(crate) struct GeneratedSourceRange {
     pub(crate) replacement: bool,
 }
 
+fn push_preserved_source_ranges(
+    ranges: &mut Vec<GeneratedSourceRange>,
+    locations: &[u32],
+    generated_start: u32,
+    source_start: u32,
+    len: u32,
+) {
+    let source_end = source_start.saturating_add(len);
+    let mut segment_source = source_start;
+    let mut segment_generated = generated_start;
+    for location in locations
+        .iter()
+        .copied()
+        .filter(|location| *location > source_start && *location < source_end)
+    {
+        let segment_len = location - segment_source;
+        ranges.push(GeneratedSourceRange {
+            generated_start: segment_generated,
+            generated_end: segment_generated + segment_len,
+            source_start: segment_source,
+            replacement: false,
+        });
+        segment_source = location;
+        segment_generated += segment_len;
+    }
+    if segment_source < source_end {
+        ranges.push(GeneratedSourceRange {
+            generated_start: segment_generated,
+            generated_end: generated_start + len,
+            source_start: segment_source,
+            replacement: false,
+        });
+    }
+}
+
 #[allow(dead_code)] // Many API methods only exercised by tests currently
 impl<'a> CodeTransform<'a> {
     /// Create a new CodeTransform from source text and an allocator
@@ -998,15 +1033,20 @@ impl<'a> CodeTransform<'a> {
                     content,
                     ..
                 } => {
-                    chunks_to_move.push(Chunk::moved(start, end, content));
+                    chunks_to_move.push(Chunk::moved_replacement(start, end, content));
                 }
                 Chunk::Moved {
                     start,
                     end,
                     content,
+                    replacement,
                     ..
                 } => {
-                    chunks_to_move.push(Chunk::moved(start, end, content));
+                    chunks_to_move.push(if replacement {
+                        Chunk::moved_replacement(start, end, content)
+                    } else {
+                        Chunk::moved(start, end, content)
+                    });
                 }
                 Chunk::Inserted { content } => {
                     chunks_to_move.push(Chunk::inserted(content));
@@ -1141,29 +1181,48 @@ impl<'a> CodeTransform<'a> {
         let output = self.build_string();
         let mut generated = self.intro.len() as u32;
         let mut ranges = Vec::with_capacity(self.chunks.len());
+        let mut locations = self.sourcemap_locations.clone();
+        locations.sort_unstable();
+        locations.dedup();
         for chunk in &self.chunks {
             match chunk {
                 Chunk::Original { start, end } => {
                     let len = end - start;
                     if len > 0 {
-                        ranges.push(GeneratedSourceRange {
-                            generated_start: generated,
-                            generated_end: generated + len,
-                            source_start: *start,
-                            replacement: false,
-                        });
+                        push_preserved_source_ranges(
+                            &mut ranges,
+                            &locations,
+                            generated,
+                            *start,
+                            len,
+                        );
                     }
                     generated += len;
                 }
-                Chunk::Moved { start, content, .. } => {
+                Chunk::Moved {
+                    start,
+                    content,
+                    replacement,
+                    ..
+                } => {
                     let len = content.len() as u32;
                     if len > 0 {
-                        ranges.push(GeneratedSourceRange {
-                            generated_start: generated,
-                            generated_end: generated + len,
-                            source_start: *start,
-                            replacement: false,
-                        });
+                        if *replacement {
+                            ranges.push(GeneratedSourceRange {
+                                generated_start: generated,
+                                generated_end: generated + len,
+                                source_start: *start,
+                                replacement: true,
+                            });
+                        } else {
+                            push_preserved_source_ranges(
+                                &mut ranges,
+                                &locations,
+                                generated,
+                                *start,
+                                len,
+                            );
+                        }
                     }
                     generated += len;
                 }

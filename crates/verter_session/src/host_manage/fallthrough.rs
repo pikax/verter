@@ -483,7 +483,7 @@ impl VerterHost {
             // (every downstream consumer reads it immutably).
             return Some(base_env);
         }
-        let local_value_names: rustc_hash::FxHashSet<String> =
+        let local_value_names: rustc_hash::FxHashSet<verter_type_expr::DeclKey> =
             base_env.value_symbols.keys().cloned().collect();
         // Hydration mutates: clone the base env once, hydrate, and
         // hand out a fresh Arc.
@@ -536,7 +536,7 @@ impl VerterHost {
     /// file-scope value symbols.
     ///
     /// Its equivalence with the materializer is proved on full
-    /// `(source_canonical, source_name)` pairs by the C3 dep-equivalence
+    /// `(source_canonical, source_owner, source_name)` identities by the C3 dep-equivalence
     /// tests; its presence is pinned by
     /// `whole_env_consumer_graph_native_inventory.rs`.
     #[allow(dead_code)]
@@ -545,7 +545,7 @@ impl VerterHost {
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         root_reachability: Option<&verter_semantic::analysis::component_meta::RootReachability>,
-    ) -> std::collections::BTreeSet<(String, String)> {
+    ) -> std::collections::BTreeSet<crate::resolver_core::ValueDeclIdentity> {
         use verter_semantic::analysis::types::ImportBindingKind;
 
         let required_runtime_value_names = match root_reachability {
@@ -564,16 +564,20 @@ impl VerterHost {
         // index — NO whole-env clone. A binding whose name is an owner
         // file-scope value symbol is shadowed and never hydrated, exactly
         // as the materializer's `local_value_names` filter requires.
-        let owner_local_value_names: rustc_hash::FxHashSet<String> = self
+        let owner_local_value_names: rustc_hash::FxHashMap<
+            verter_type_expr::TopLevelOwnerId,
+            rustc_hash::FxHashSet<String>,
+        > = self
             .routed_shallow_state(canonical_id)
             .map(|state| {
-                state
-                    .decl_bodies()
-                    .header_index()
-                    .value_headers
-                    .keys()
-                    .cloned()
-                    .collect()
+                let mut names_by_owner = rustc_hash::FxHashMap::default();
+                for key in state.decl_bodies().header_index().value_headers.keys() {
+                    names_by_owner
+                        .entry(key.owner)
+                        .or_insert_with(rustc_hash::FxHashSet::default)
+                        .insert(key.name.to_string());
+                }
+                names_by_owner
             })
             .unwrap_or_default();
 
@@ -587,7 +591,9 @@ impl VerterHost {
             for binding in &import.bindings {
                 if binding.is_type_only
                     || matches!(binding.kind, ImportBindingKind::Namespace)
-                    || owner_local_value_names.contains(&binding.name)
+                    || owner_local_value_names
+                        .get(&import.owner)
+                        .is_some_and(|names| names.contains(binding.name.as_str()))
                     || !required_runtime_value_names.contains(&binding.name)
                 {
                     continue;
@@ -602,11 +608,11 @@ impl VerterHost {
                 // env. The materializer's selection identity is preserved
                 // — same `resolve_named_export` walk, same single-segment
                 // alias chain, peeled per-symbol instead of via the env.
-                let (source_canonical_id, source_name) = self
-                    .resolve_value_export_target_graph_native(dep_canonical_id, imported_name)
-                    .map(|target| (target.canonical_id, target.name))
-                    .unwrap_or_else(|| (dep_canonical_id.to_string(), imported_name.to_string()));
-                deps.insert((source_canonical_id, source_name));
+                if let Some(target) =
+                    self.resolve_value_export_target_graph_native(dep_canonical_id, imported_name)
+                {
+                    deps.insert(target);
+                }
             }
         }
 
@@ -617,7 +623,7 @@ impl VerterHost {
     pub(super) fn materialize_imported_runtime_values_into_env(
         &self,
         snapshot: &FileAnalysisSnapshot,
-        owner_local_value_names: &rustc_hash::FxHashSet<String>,
+        owner_local_value_names: &rustc_hash::FxHashSet<verter_type_expr::DeclKey>,
         required_runtime_value_names: Option<&rustc_hash::FxHashSet<String>>,
         env: &mut verter_semantic::analysis::type_eval::EvalEnv,
     ) {
@@ -692,9 +698,13 @@ impl VerterHost {
                 continue;
             }
 
-            let Some(node) =
-                engine.value_expression_override_node(canonical_id, prop, env_ref, overrides_in)
-            else {
+            let Some(node) = engine.value_expression_override_node(
+                canonical_id,
+                verter_type_expr::TopLevelOwnerId::instance(0),
+                prop,
+                env_ref,
+                overrides_in,
+            ) else {
                 continue;
             };
             entries.push(crate::resolver_core::FallthroughPropOverride {
@@ -792,6 +802,7 @@ impl VerterHost {
 
                 let Some(summary) = engine.known_spread_keys_for_value_expression(
                     canonical_id,
+                    verter_type_expr::TopLevelOwnerId::instance(0),
                     expression,
                     env_ref,
                     overrides,
@@ -867,6 +878,7 @@ impl VerterHost {
         let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
         candidates.extend(engine.dynamic_root_candidates_for_value_expression(
             canonical_id,
+            verter_type_expr::TopLevelOwnerId::instance(0),
             &expression,
             eval_env.as_deref(),
             overrides,

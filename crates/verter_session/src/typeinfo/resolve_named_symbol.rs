@@ -557,6 +557,7 @@ fn resolve_named_symbol_in_current_view(
     let resolve_decl_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::clone(&scope_arc),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         },
         name: Arc::from(name),
@@ -599,11 +600,16 @@ fn resolve_named_symbol_in_current_view(
     };
     let scope_node = NodeScopeId::File {
         canonical_id: Arc::clone(&scope_arc),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: shallow.whole_hash,
         local_scope: None,
     };
     let _ = &scope_node;
-    let base = dispatch.type_slot_for(Arc::clone(&scope_arc), Arc::from(name));
+    let base = dispatch.type_slot_for(
+        Arc::clone(&scope_arc),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::from(name),
+    );
 
     let instantiate_key =
         SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
@@ -709,13 +715,15 @@ pub(crate) fn materialize_through_aliases(
             Some(SemanticNodeData::Opaque(
                 crate::semantic_query::QueryError::DeclPlaceholder {
                     canonical_id,
+                    owner,
                     name,
                     whole_hash: _,
                 },
             )) => {
                 // Materialise the placeholder by dispatching an
                 // empty-args Instantiate against its identity.
-                let base = dispatch.type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
+                let base =
+                    dispatch.type_slot_for(Arc::clone(canonical_id), *owner, Arc::clone(name));
                 let key =
                     SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
                         base,
@@ -825,6 +833,7 @@ pub(crate) fn materialize_through_aliases(
                             SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                                 scope: ScopeId {
                                     canonical_id: Arc::clone(&identity.canonical_id),
+                                    owner: identity.owner,
                                     local_scope: None,
                                 },
                                 name: Arc::clone(&identity.decl_name),
@@ -844,6 +853,7 @@ pub(crate) fn materialize_through_aliases(
                     }) => {
                         let inst_base = dispatch.type_slot_for(
                             Arc::clone(&ref_base.canonical_id),
+                            ref_base.owner,
                             Arc::clone(&ref_base.decl_name),
                         );
                         let inst_result = match dispatch

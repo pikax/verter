@@ -5,10 +5,96 @@
 import { basename, sep } from "node:path";
 import { execFileSync } from "node:child_process";
 import { describe, it, expect } from "vitest";
-import { VerterHost, processStyle } from "./index.js";
+import {
+  VerterHost,
+  processStyle,
+  type HostPublicApiProjectionError,
+  type HostTscDeclarationShapeReason,
+} from "./index.js";
+
+const DECLARATION_SHAPE_REASONS = [
+  "semantic-inference-depth-budget-exceeded",
+  "semantic-inference-work-budget-exceeded",
+  "semantic-inference-unsupported-macro-kind",
+  "semantic-inference-unsupported-construct",
+  "semantic-inference-missing-type-argument",
+  "semantic-inference-missing-declaration",
+  "semantic-inference-ambiguous-reference",
+  "semantic-inference-missing-dependency",
+  "owner-value-dependency-unavailable",
+  "class-decorator",
+  "complex-class-heritage",
+  "decorated-class-member",
+  "computed-class-member",
+  "private-class-member",
+  "rest-class-parameter",
+  "destructured-class-parameter",
+  "decorated-class-parameter",
+  "constructor-overload",
+  "unsupported-class-shape",
+  "unsupported-enum-shape",
+  "inconsistent-class-inference",
+] as const satisfies readonly HostTscDeclarationShapeReason[];
+
+type SameUnion<Left, Right> = [Exclude<Left, Right>, Exclude<Right, Left>] extends [never, never]
+  ? true
+  : false;
+
+const DECLARATION_SHAPE_REASON_UNION_IS_EXHAUSTIVE: SameUnion<
+  HostTscDeclarationShapeReason,
+  (typeof DECLARATION_SHAPE_REASONS)[number]
+> = true;
 
 const SFC_INPUT =
   '<script setup>\nconst msg = "hello"\n</script>\n<template><div>{{ msg }}</div></template>';
+
+describe("TSC public-API error wire contract", () => {
+  it("keeps every declaration-shape code exact and rejects the retired umbrella", () => {
+    expect(DECLARATION_SHAPE_REASON_UNION_IS_EXHAUSTIVE).toBe(true);
+    expect(new Set(DECLARATION_SHAPE_REASONS).size).toBe(DECLARATION_SHAPE_REASONS.length);
+    expect(DECLARATION_SHAPE_REASONS).toHaveLength(21);
+    expect(DECLARATION_SHAPE_REASONS).not.toContain("semantic-inference-unavailable");
+
+    // @ts-expect-error — Rust never emits the retired, lossy umbrella code.
+    const retired: HostTscDeclarationShapeReason = "semantic-inference-unavailable";
+    expect(retired).toBe("semantic-inference-unavailable");
+  });
+
+  it("correlates invalid outcome reasons with their exact subjects", () => {
+    const attrsNonObjectRoot: HostPublicApiProjectionError = {
+      code: "tsc-generation",
+      detailCode: "unavailable-outcome",
+      subject: {
+        kind: "scriptSetupAttrs",
+        // @ts-expect-error — non-object-root requires a macro subject.
+        sourceRange: { start: 1, end: 2 },
+      },
+      declarationShapeReason: null,
+      memberOrdinal: null,
+      outcomeKind: "invalid",
+      outcomeReason: "non-object-root",
+      outcomeDiagnostic: null,
+    };
+    const macroMalformedSyntax: HostPublicApiProjectionError = {
+      code: "tsc-generation",
+      detailCode: "unavailable-outcome",
+      subject: {
+        kind: "macro",
+        // @ts-expect-error — malformed authored syntax requires an attrs subject.
+        syntaxIndex: 0,
+      },
+      declarationShapeReason: null,
+      memberOrdinal: null,
+      outcomeKind: "invalid",
+      outcomeReason: "malformed-or-recovered-type-syntax",
+      outcomeDiagnostic: null,
+    };
+    expect([attrsNonObjectRoot.outcomeReason, macroMalformedSyntax.outcomeReason]).toEqual([
+      "non-object-root",
+      "malformed-or-recovered-type-syntax",
+    ]);
+  });
+});
 
 describe("VerterHost", () => {
   it("should compile a simple SFC via upsert + getVirtualFile (string source)", () => {
@@ -290,11 +376,77 @@ defineExpose({ count })
     const publicApi = host.getPublicApi("DebugBindings.vue");
     const testingApi = host.getPublicApi("DebugBindings.vue", "testing");
 
-    expect(publicApi?.code).toBeTruthy();
-    expect(testingApi?.code).toContain("count: typeof count");
-    expect(testingApi?.code).toContain("hidden: typeof hidden");
-    expect(testingApi?.code).not.toContain("ref: typeof ref");
-    expect(publicApi?.code).not.toContain("hidden: typeof hidden");
+    expect(publicApi.error).toBeNull();
+    expect(testingApi.error).toBeNull();
+    expect(publicApi.value?.code).toBeTruthy();
+    expect(testingApi.value?.code).toContain("count: typeof count");
+    expect(testingApi.value?.code).toContain("hidden: typeof hidden");
+    expect(testingApi.value?.code).not.toContain("ref: typeof ref");
+    expect(publicApi.value?.code).not.toContain("hidden: typeof hidden");
+  });
+
+  it("returns the exact unsafe-enum error and null/null absence controls", () => {
+    const host = new VerterHost();
+    host.upsert({
+      inputId: "UnsafeEnum.vue",
+      fileKind: "vue",
+      source: `<script setup lang="ts">
+enum Unsafe { Value = Math.random() }
+defineProps<{ value: Unsafe }>()
+</script>`,
+    });
+    host.upsert({
+      inputId: "plain.ts",
+      fileKind: "non_sfc",
+      source: "export const value = 1",
+    });
+    const malformedAttrsSource = `<script setup lang="ts" attrs="Attrs.">
+import type { Attrs } from './types'
+</script><template/>`;
+    host.upsert({
+      inputId: "MalformedAttrs.vue",
+      fileKind: "vue",
+      source: malformedAttrsSource,
+    });
+
+    expect(host.getPublicApi("UnsafeEnum.vue", "declaration")).toEqual({
+      value: null,
+      error: {
+        code: "tsc-generation",
+        detailCode: "unsupported-declaration-shape",
+        subject: { kind: "macro", syntaxIndex: 0 },
+        declarationShapeReason: "unsupported-enum-shape",
+        memberOrdinal: null,
+        outcomeKind: null,
+        outcomeReason: null,
+        outcomeDiagnostic: null,
+      },
+    });
+    expect(host.getPublicApi("Missing.vue", "declaration")).toEqual({
+      value: null,
+      error: null,
+    });
+    expect(host.getPublicApi("plain.ts", "declaration")).toEqual({
+      value: null,
+      error: null,
+    });
+    const attrsStart = malformedAttrsSource.indexOf("Attrs.");
+    expect(host.getPublicApi("MalformedAttrs.vue", "declaration")).toEqual({
+      value: null,
+      error: {
+        code: "tsc-generation",
+        detailCode: "unavailable-outcome",
+        subject: {
+          kind: "scriptSetupAttrs",
+          sourceRange: { start: attrsStart, end: attrsStart + "Attrs.".length },
+        },
+        declarationShapeReason: null,
+        memberOrdinal: null,
+        outcomeKind: "invalid",
+        outcomeReason: "malformed-or-recovered-type-syntax",
+        outcomeDiagnostic: null,
+      },
+    });
   });
 });
 

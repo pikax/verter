@@ -7,6 +7,7 @@ use crate::analysis::classify::classify_vue_api;
 use crate::analysis::types::{
     AnalyzedImport, AnalyzedImportBinding, ImportBindingKind, ImportSourceInfo,
 };
+use verter_type_expr::TopLevelOwnerId;
 
 /// Extract lightweight import source info from script content.
 /// Returns source strings and binding names for each import declaration.
@@ -78,7 +79,10 @@ pub fn extract_import_sources(
 
 /// Analyze a single import declaration into an `AnalyzedImport`.
 /// Called per-statement from the single-pass AST walk in `build_script_analysis`.
-pub(crate) fn analyze_import_declaration(decl: &ImportDeclaration<'_>) -> AnalyzedImport {
+pub(crate) fn analyze_import_declaration(
+    decl: &ImportDeclaration<'_>,
+    owner: TopLevelOwnerId,
+) -> AnalyzedImport {
     let source = decl.source.value.to_string();
     let is_type_only = decl.import_kind.is_type();
     let is_vue = is_vue_source(&source);
@@ -132,6 +136,7 @@ pub(crate) fn analyze_import_declaration(decl: &ImportDeclaration<'_>) -> Analyz
 
     AnalyzedImport {
         source,
+        owner,
         is_type_only,
         bindings,
         span: decl.span.into(),
@@ -257,7 +262,10 @@ mod tests {
             .iter()
             .filter_map(|stmt| {
                 if let Statement::ImportDeclaration(decl) = stmt {
-                    Some(analyze_import_declaration(decl))
+                    Some(analyze_import_declaration(
+                        decl,
+                        TopLevelOwnerId::ordinary_file(),
+                    ))
                 } else {
                     None
                 }

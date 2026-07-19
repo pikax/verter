@@ -172,7 +172,7 @@ pub(crate) use evaluate::StructuralFactDemandOutcome;
 /// `Arc<str>` so membership checks are refcount compares, not string
 /// compares. Lives on [`ProjectSemanticDispatch`] so nested
 /// `build_instantiate` invocations share the active set.
-pub(super) type InstantiateIdentity = (Arc<str>, Arc<str>);
+pub(super) type InstantiateIdentity = (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>);
 
 const MAX_CONNECTED_PROJECTION_WORK: usize = 262_144;
 const MAX_CONNECTED_QUERY_DEPTH: u16 = 24;
@@ -584,6 +584,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 graph.intern_node(SemanticNodeData::InstantiationRef {
                     base: DeclIdentity {
                         canonical_id: Arc::clone(&key.base().defining_canonical),
+                        owner: key.base().owner,
                         whole_hash: crate::semantic_query::HashValue::default(),
                         decl_name: Arc::clone(&key.base().merged_symbol_name),
                     },
@@ -820,6 +821,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(crate) fn type_slot_for(
         &self,
         canonical: Arc<str>,
+        owner: verter_type_expr::TopLevelOwnerId,
         name: Arc<str>,
     ) -> crate::semantic_query::ResolvedDeclSlotIdentity {
         let host = self.ctx.host_for_fact_tracer_install();
@@ -829,6 +831,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .fold_u32();
         crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
             canonical,
+            owner,
             name,
             project_identity,
             env.type_env_hash,
@@ -847,7 +850,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         name: &str,
     ) -> crate::semantic_query::ResolvedDeclSlotIdentity {
-        self.type_slot_for(Arc::from("__builtin__"), Arc::from(name))
+        self.type_slot_for(
+            Arc::from("__builtin__"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(name),
+        )
     }
 
     /// The `resolve_env_hash` (`R`) dimension for a declaration defined in
@@ -1029,7 +1036,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn push_instantiate_active(&self, identity: InstantiateIdentity) -> bool {
         let mut active = self.instantiate_active.borrow_mut();
         if active.iter().any(|existing| {
-            existing.0.as_ref() == identity.0.as_ref() && existing.1.as_ref() == identity.1.as_ref()
+            existing.0.as_ref() == identity.0.as_ref()
+                && existing.1 == identity.1
+                && existing.2.as_ref() == identity.2.as_ref()
         }) {
             return false;
         }
@@ -1052,7 +1061,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn push_closedness_active(&self, identity: InstantiateIdentity) -> bool {
         let mut active = self.closedness_active.borrow_mut();
         if active.iter().any(|existing| {
-            existing.0.as_ref() == identity.0.as_ref() && existing.1.as_ref() == identity.1.as_ref()
+            existing.0.as_ref() == identity.0.as_ref()
+                && existing.1 == identity.1
+                && existing.2.as_ref() == identity.2.as_ref()
         }) {
             return false;
         }
@@ -1069,11 +1080,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// Check whether `identity` is currently being instantiated on this
     /// dispatcher's call chain without taking ownership.
-    pub(super) fn is_instantiate_active(&self, canonical_id: &str, name: &str) -> bool {
+    pub(super) fn is_instantiate_active(
+        &self,
+        canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> bool {
         let active = self.instantiate_active.borrow();
-        active.iter().any(|(existing_canonical, existing_name)| {
-            existing_canonical.as_ref() == canonical_id && existing_name.as_ref() == name
-        })
+        active
+            .iter()
+            .any(|(existing_canonical, existing_owner, existing_name)| {
+                existing_canonical.as_ref() == canonical_id
+                    && *existing_owner == owner
+                    && existing_name.as_ref() == name
+            })
     }
 
     pub(super) fn graph(&self) -> &Arc<SemanticGraphStore> {
@@ -1211,8 +1231,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
         expr: &verter_type_expr::TypeExpr,
         mode: crate::semantic_query::ProjectionMode,
     ) -> Option<SemanticNodeId> {
-        self.lower_type_expr_in_scope_with_context(
+        self.lower_type_expr_in_owner_scope_with_context(
             scope_canonical_id,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            expr,
+            crate::semantic_query::ProjectionReductionContext::published(mode),
+        )
+    }
+
+    /// Owner-exact mode-aware lowering for carrier-backed files whose module
+    /// and instance scripts share one canonical id.
+    pub fn lower_type_expr_in_owner_scope_with_mode(
+        &self,
+        scope_canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expr: &verter_type_expr::TypeExpr,
+        mode: crate::semantic_query::ProjectionMode,
+    ) -> Option<SemanticNodeId> {
+        self.lower_type_expr_in_owner_scope_with_context(
+            scope_canonical_id,
+            owner,
             expr,
             crate::semantic_query::ProjectionReductionContext::published(mode),
         )
@@ -1237,6 +1275,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
         expr: &verter_type_expr::TypeExpr,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
+        self.lower_type_expr_in_owner_scope_with_context(
+            scope_canonical_id,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            expr,
+            context,
+        )
+    }
+
+    /// Owner-exact context-aware lowering. This is the carrier producer entry;
+    /// callers with a real authored region must pass its validated owner.
+    pub fn lower_type_expr_in_owner_scope_with_context(
+        &self,
+        scope_canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expr: &verter_type_expr::TypeExpr,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
         // A scope whose file is not (yet) materialised still lowers: the
         // lowering is a pure typed-IR → carrier-graph mapping, and every
         // reference that cannot resolve NOW stays a scoped `BareRef`
@@ -1254,6 +1309,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .unwrap_or_default();
         let scope = NodeScopeId::File {
             canonical_id: Arc::from(scope_canonical_id),
+            owner,
             whole_hash,
             local_scope: None,
         };
@@ -1264,7 +1320,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .prepared_decl_bundle(scope_canonical_id)
             .map(|bundle| {
                 crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
-                    &bundle,
+                    &bundle, owner,
                 )
             });
         // R15/F11 — construct the resolver-context
@@ -1348,11 +1404,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(crate) fn decl_body_hot_ref(
         &self,
         canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         symbol: &str,
         args: Arc<[SemanticNodeId]>,
         prc: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<crate::semantic_query::HotTypeRef> {
-        let slot = self.type_slot_for(Arc::from(canonical), Arc::from(symbol));
+        let slot = self.type_slot_for(Arc::from(canonical), owner, Arc::from(symbol));
         let read = self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate(
             crate::semantic_query::InstantiateKey::new(
                 slot,
@@ -2704,10 +2761,15 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
 /// `canonical_id`. Wrapping the arc-conversion here keeps call sites tidy
 /// and avoids having each caller re-invent the scope construction.
 #[must_use]
-pub fn resolve_decl_key(canonical_id: &str, name: &str) -> ResolveDeclKey {
+pub fn resolve_decl_key(
+    canonical_id: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
+    name: &str,
+) -> ResolveDeclKey {
     ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::from(canonical_id),
+            owner,
             local_scope: None,
         },
         name: Arc::from(name),
@@ -2759,6 +2821,7 @@ pub(crate) fn node_data_for(
 pub fn pick_builtin_decl_identity() -> crate::semantic_query::ResolvedDeclSlotIdentity {
     crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
         Arc::from("__builtin__"),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from("Pick"),
         0,
         Default::default(),
@@ -2775,6 +2838,7 @@ pub fn pick_builtin_decl_identity() -> crate::semantic_query::ResolvedDeclSlotId
 pub fn omit_builtin_decl_identity() -> crate::semantic_query::ResolvedDeclSlotIdentity {
     crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
         Arc::from("__builtin__"),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from("Omit"),
         0,
         Default::default(),
@@ -3090,6 +3154,7 @@ pub trait DispatchHost {
         &self,
         base: SemanticNodeId,
         canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Option<ResolvedRootIdentity>;
 
@@ -3160,11 +3225,15 @@ impl<'a> SessionDispatchHost<'a> {
         &self,
         base: SemanticNodeId,
     ) -> (
-        Option<String>,
+        Option<(String, verter_type_expr::TopLevelOwnerId)>,
         Option<crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
     ) {
         match self.base_scope(base) {
-            NodeScopeId::File { canonical_id, .. } => {
+            NodeScopeId::File {
+                canonical_id,
+                owner,
+                ..
+            } => {
                 // Instrumentation: callsite attribution for
                 // `prepared_decl_bundle_warm` reads. The four
                 // `DispatchHost` trait callbacks
@@ -3181,10 +3250,11 @@ impl<'a> SessionDispatchHost<'a> {
                     |bundle| {
                         crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
                             &bundle,
+                            owner,
                         )
                     },
                 );
-                (Some(canonical_id.as_ref().to_string()), payload)
+                (Some((canonical_id.as_ref().to_string(), owner)), payload)
             }
             NodeScopeId::Global => (None, None),
         }
@@ -3197,10 +3267,10 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
         base: SemanticNodeId,
         root_identity: &ResolvedRootIdentity,
     ) -> Option<Arc<PreparedTypeDecl>> {
-        let (scope_canonical, payload) = self.scope_payload_for_base(base);
+        let (scope, payload) = self.scope_payload_for_base(base);
         crate::resolver_core::bare_name_resolve::resolve_prepared_type_decl_via_host(
             self.ctx,
-            scope_canonical.as_deref(),
+            scope.as_ref().map(|(canonical, _)| canonical.as_str()),
             payload.as_ref(),
             root_identity,
         )
@@ -3210,18 +3280,23 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
         &self,
         base: SemanticNodeId,
         canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Option<ResolvedRootIdentity> {
-        let (scope_canonical, payload) = self.scope_payload_for_base(base);
+        let (scope, payload) = self.scope_payload_for_base(base);
         // An empty caller canonical defers to the base's origin scope.
-        let resolution_scope = if canonical_id.is_empty() {
-            scope_canonical.as_deref().unwrap_or("")
+        let (resolution_scope, resolution_owner) = if canonical_id.is_empty() {
+            scope
+                .as_ref()
+                .map(|(canonical, owner)| (canonical.as_str(), *owner))
+                .unwrap_or(("", verter_type_expr::TopLevelOwnerId::ordinary_file()))
         } else {
-            canonical_id
+            (canonical_id, owner)
         };
         crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
             self.ctx,
             resolution_scope,
+            resolution_owner,
             payload.as_ref(),
             symbol_name,
         )
@@ -3229,7 +3304,7 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
 
     fn utility_source(&self, base: SemanticNodeId, name: &str) -> UtilitySource {
         use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
-        let (_scope_canonical, payload) = self.scope_payload_for_base(base);
+        let (_scope, payload) = self.scope_payload_for_base(base);
         // Scope-local shadowing takes priority: a userland `type Partial`
         // in scope wins over the built-in utility.
         if let Some(payload) = payload.as_ref() {
@@ -3257,7 +3332,7 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
     }
 
     fn bare_ref_origin(&self, base: SemanticNodeId, name: &str) -> BareRefOrigin {
-        let (_scope_canonical, payload) = self.scope_payload_for_base(base);
+        let (_scope, payload) = self.scope_payload_for_base(base);
         if let Some(payload) = payload.as_ref() {
             if payload.import_bindings().contains_key(name) {
                 return BareRefOrigin::Imported;

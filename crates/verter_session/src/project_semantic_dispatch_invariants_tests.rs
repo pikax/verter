@@ -1438,6 +1438,7 @@ fn relation_memo_fences_on_transitive_imported_fact_edit() {
     let source = graph.intern_node(SemanticNodeData::Opaque(
         crate::semantic_query::QueryError::DeclPlaceholder {
             canonical_id: Arc::from("/w/dep.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: Arc::from("Dep"),
             whole_hash: whole_hash_v1,
         },

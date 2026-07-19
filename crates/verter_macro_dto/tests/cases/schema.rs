@@ -3,13 +3,18 @@ use verter_macro_dto::{
     MacroRuntimeEntry, MacroRuntimeOutcome, MacroRuntimeShape, MacroTscBundle, MacroTscEntry,
     MacroTscOutcome, MacroTscProjection, ModelRuntimeShape, OrderedRuntimeConstructors,
     PropsDefaultsAssociation, PropsRuntimeShape, RuntimeConstructor, RuntimeEmit, RuntimeProp,
-    RuntimePropType, SynthesizedRowKind, TscSpliceText, UnresolvedReason, UnsupportedReason,
+    RuntimePropType, SynthesizedRowKind, TscDeclarationFailureReason, TscPropRow,
+    TscPropsProjection, TscPublicPropsProjection, TscScopeRequirements,
+    TscSemanticInferenceUnavailableReason, TscSpliceText, UnresolvedReason, UnsupportedReason,
 };
 
 fn authored(macro_index: u32, ordinal: Option<u32>) -> MacroAnchor {
-    MacroAnchor::Authored {
-        macro_index,
-        member_ordinal: ordinal.map(AuthoredMemberOrdinal::new),
+    match ordinal {
+        Some(ordinal) => MacroAnchor::Authored {
+            macro_index,
+            member_ordinal: AuthoredMemberOrdinal::new(ordinal),
+        },
+        None => MacroAnchor::MacroArgument { macro_index },
     }
 }
 
@@ -50,9 +55,18 @@ fn runtime_and_tsc_bundles_are_independent_contracts() {
         entries: vec![MacroTscEntry {
             syntax_index: 0,
             macro_index: 0,
-            outcome: MacroTscOutcome::Complete(MacroTscProjection::Props {
-                splice: TscSpliceText::new("{ enabled: boolean }"),
-            }),
+            outcome: MacroTscOutcome::Complete(MacroTscProjection::Props(TscPropsProjection {
+                public: TscPublicPropsProjection::AuthoredArgument {
+                    anchor: MacroAnchor::MacroArgument { macro_index: 0 },
+                },
+                testing_rows: vec![TscPropRow {
+                    name: "enabled".to_owned(),
+                    optional: false,
+                    type_text: TscSpliceText::new("boolean"),
+                    anchor: authored(0, Some(0)),
+                }],
+                scope: TscScopeRequirements::default(),
+            })),
         }],
     };
 
@@ -283,6 +297,27 @@ fn reason_taxonomies_are_closed_and_tsc_text_is_terminal() {
     for reason in unsupported {
         match reason {
             UnsupportedReason::MacroKind | UnsupportedReason::SemanticConstruct => {}
+        }
+    }
+
+    let declaration_failures = [
+        TscDeclarationFailureReason::SemanticInferenceUnavailable(
+            TscSemanticInferenceUnavailableReason::DepthBudgetExceeded,
+        ),
+        TscDeclarationFailureReason::SemanticInferenceUnavailable(
+            TscSemanticInferenceUnavailableReason::WorkBudgetExceeded,
+        ),
+        TscDeclarationFailureReason::Unsupported(UnsupportedReason::SemanticConstruct),
+        TscDeclarationFailureReason::Unresolved(UnresolvedReason::MissingDependency),
+    ];
+    for failure in declaration_failures {
+        match failure {
+            TscDeclarationFailureReason::SemanticInferenceUnavailable(
+                TscSemanticInferenceUnavailableReason::DepthBudgetExceeded
+                | TscSemanticInferenceUnavailableReason::WorkBudgetExceeded,
+            )
+            | TscDeclarationFailureReason::Unsupported(_)
+            | TscDeclarationFailureReason::Unresolved(_) => {}
         }
     }
 

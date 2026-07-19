@@ -2128,6 +2128,95 @@ pub struct TscResponse {
     pub source_map: Option<Arc<str>>,
 }
 
+/// Typed failure produced while projecting a framework carrier's public API.
+///
+/// Absence remains [`Ok(None)`](Result::Ok): this error channel is reserved for
+/// a carrier that was selected and then failed its closed projection contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublicApiProjectionError {
+    /// Vue TSC generation rejected an incomplete, mismatched, or unsafe macro
+    /// projection.
+    TscGeneration(verter_compiler::tsc::TscGenerationError),
+}
+
+impl PublicApiProjectionError {
+    /// Stable machine-readable error family.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::TscGeneration(_) => "tsc-generation",
+        }
+    }
+
+    /// Stable machine-readable error detail.
+    #[must_use]
+    pub const fn detail_code(&self) -> &'static str {
+        match self {
+            Self::TscGeneration(error) => error.code(),
+        }
+    }
+
+    /// Exact compiler-owned syntax carrier associated with the failure.
+    #[must_use]
+    pub const fn subject(&self) -> verter_compiler::tsc::TscFailureSubject {
+        match self {
+            Self::TscGeneration(error) => error.subject(),
+        }
+    }
+
+    /// Parser-owned macro syntax slot, when the subject is a macro.
+    #[must_use]
+    pub const fn macro_syntax_index(&self) -> Option<u32> {
+        match self {
+            Self::TscGeneration(error) => error.macro_syntax_index(),
+        }
+    }
+
+    /// Declaration-shape detail, when applicable.
+    #[must_use]
+    pub const fn declaration_shape_reason(
+        &self,
+    ) -> Option<verter_compiler::tsc::TscDeclarationShapeReason> {
+        match self {
+            Self::TscGeneration(error) => error.declaration_shape_reason(),
+        }
+    }
+
+    /// Authored member ordinal, when applicable.
+    #[must_use]
+    pub const fn member_ordinal(&self) -> Option<u32> {
+        match self {
+            Self::TscGeneration(error) => error.member_ordinal(),
+        }
+    }
+
+    /// Exact unavailable TypeInfo outcome, when applicable.
+    #[must_use]
+    pub const fn unavailable_outcome(
+        &self,
+    ) -> Option<&verter_compiler::tsc::TscUnavailableOutcome> {
+        match self {
+            Self::TscGeneration(error) => error.unavailable_outcome(),
+        }
+    }
+}
+
+impl From<verter_compiler::tsc::TscGenerationError> for PublicApiProjectionError {
+    fn from(error: verter_compiler::tsc::TscGenerationError) -> Self {
+        Self::TscGeneration(error)
+    }
+}
+
+impl std::fmt::Display for PublicApiProjectionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TscGeneration(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for PublicApiProjectionError {}
+
 /// Controls which public API surface the host generates for a Vue SFC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublicApiMode {

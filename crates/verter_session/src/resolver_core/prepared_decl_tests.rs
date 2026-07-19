@@ -19,7 +19,8 @@ fn prepares_local_exported_type_decl_from_shallow_file_state() {
 
     let prepared =
         prepare_exported_type_decl("/src/types.ts", &state, "Props", None, &test_interner())
-            .expect("Props should prepare");
+            .expect("Props preparation should succeed")
+            .expect("Props should be present");
 
     assert_eq!(
         prepared.root_identity.canonical_id.as_ref(),
@@ -45,7 +46,7 @@ export const defaults: Props = { label: 'ok' }
 
     let prepared =
         prepare_exported_value_decl("/src/types.ts", &state, "defaults", None, &test_interner())
-            .expect("defaults should prepare");
+            .expect("defaults should be present");
 
     assert_eq!(
         prepared.root_identity.canonical_id.as_ref(),
@@ -81,7 +82,8 @@ export type Button = ComponentConfig<typeof theme>
         Some(&dep_edges),
         &test_interner(),
     )
-    .expect("Button should prepare");
+    .expect("Button preparation should succeed")
+    .expect("Button should be present");
 
     assert_eq!(
         prepared
@@ -121,7 +123,8 @@ import { Separator } from './runtime'
         Some(&dep_edges),
         &test_interner(),
     )
-    .expect("SeparatorSlots should prepare");
+    .expect("SeparatorSlots preparation should succeed")
+    .expect("SeparatorSlots should be present");
 
     assert_eq!(
         slots
@@ -140,6 +143,7 @@ import { Separator } from './runtime'
             &ImportCanonicalization::default(),
             &test_interner(),
         )
+        .expect("Separator preparation should succeed")
         .is_some(),
         "the same-file type declaration must remain addressable even when the value namespace imports the same name"
     );
@@ -158,7 +162,8 @@ export type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
 
     let prepared =
         prepare_exported_type_decl("/src/Button.vue", &state, "Button", None, &test_interner())
-            .expect("Button should prepare");
+            .expect("Button preparation should succeed")
+            .expect("Button should be present");
 
     assert_eq!(
         prepared
@@ -199,7 +204,7 @@ export const defaults: Theme = {} as Theme
         None,
         &test_interner(),
     )
-    .expect("defaults should prepare");
+    .expect("defaults should be present");
 
     assert_eq!(
         prepared
@@ -217,6 +222,7 @@ fn does_not_prepare_reexport_without_frontier_routing() {
 
     assert!(
         prepare_exported_type_decl("/src/barrel.ts", &state, "Props", None, &test_interner())
+            .expect("barrel preparation should succeed")
             .is_none()
     );
 }
@@ -232,7 +238,8 @@ export interface Props { child: Inner; data: Local }
 
     let prepared =
         prepare_exported_type_decl("/src/types.ts", &state, "Props", None, &test_interner())
-            .expect("Props should prepare");
+            .expect("Props preparation should succeed")
+            .expect("Props should be present");
 
     // Should have a member index for 'child' and 'data'
     assert!(
@@ -281,7 +288,8 @@ fn prepared_type_decl_build_counter_is_thread_local() {
 
     let prepared =
         prepare_exported_type_decl("/src/types.ts", &state, "Props", None, &test_interner())
-            .expect("Props should prepare");
+            .expect("Props preparation should succeed")
+            .expect("Props should be present");
     assert_eq!(prepared.root_identity.symbol_name.as_ref(), "Props");
     assert_eq!(prepared_type_decl_build_count_for_tests(), 1);
 
@@ -328,7 +336,8 @@ declare module "ext" { namespace NS { interface Foo { x: GlobalOnly } } }
         None,
         &test_interner(),
     )
-    .expect("NS.Foo should prepare");
+    .expect("NS.Foo preparation should succeed")
+    .expect("NS.Foo should be present");
 
     assert!(
         !prepared.name_resolution.contains_key("GlobalOnly"),
@@ -363,7 +372,8 @@ declare global { namespace JSX {
         &ImportCanonicalization::default(),
         &test_interner(),
     )
-    .expect("JSX.El should prepare");
+    .expect("JSX.El preparation should succeed")
+    .expect("JSX.El should be present");
 
     // Positive control: the global TYPE sibling still binds (proves the
     // Global TYPE scan is retained, not gutted along with the value scan).
@@ -423,7 +433,8 @@ export namespace NS {
         &ImportCanonicalization::default(),
         &test_interner(),
     )
-    .expect("NS.Holder should prepare");
+    .expect("NS.Holder preparation should succeed")
+    .expect("NS.Holder should be present");
 
     assert_eq!(
         prepared
@@ -463,7 +474,8 @@ export namespace NS {
         &ImportCanonicalization::default(),
         &test_interner(),
     )
-    .expect("NS.Holder should prepare");
+    .expect("NS.Holder preparation should succeed")
+    .expect("NS.Holder should be present");
 
     assert_eq!(
         prepared
@@ -502,7 +514,8 @@ export interface SeparatorSlots { root: Separator }
         &ImportCanonicalization::default(),
         &test_interner(),
     )
-    .expect("SeparatorSlots should prepare");
+    .expect("SeparatorSlots preparation should succeed")
+    .expect("SeparatorSlots should be present");
     assert_eq!(
         type_prepared
             .name_resolution
@@ -520,7 +533,7 @@ export interface SeparatorSlots { root: Separator }
         &ImportCanonicalization::default(),
         &test_interner(),
     )
-    .expect("defaults should prepare");
+    .expect("defaults should be present");
     assert_eq!(
         value_prepared
             .name_resolution
@@ -557,7 +570,8 @@ export namespace NS {
         &ImportCanonicalization::default(),
         &test_interner(),
     )
-    .expect("Plain should prepare");
+    .expect("Plain preparation should succeed")
+    .expect("Plain should be present");
     let namespaced = prepare_local_type_decl(
         "/ws/fixture.ts",
         &state,
@@ -566,7 +580,8 @@ export namespace NS {
         &ImportCanonicalization::default(),
         &test_interner(),
     )
-    .expect("NS.Holder should prepare");
+    .expect("NS.Holder preparation should succeed")
+    .expect("NS.Holder should be present");
 
     for key in ["helper", "Plain", "NS.Member", "NS.Holder"] {
         assert_eq!(
@@ -615,16 +630,22 @@ export namespace NS {
         &test_interner(),
     );
 
-    let a = type_cache.get("A").expect("A prepares");
-    let b = type_cache.get("B").expect("B prepares");
+    let a = type_cache
+        .get("A")
+        .expect("A preparation should succeed")
+        .expect("A should be present");
+    let b = type_cache
+        .get("B")
+        .expect("B preparation should succeed")
+        .expect("B should be present");
     assert!(
         Arc::ptr_eq(&a.name_resolution, &b.name_resolution),
         "non-namespaced type decls of one file must SHARE one base table, \
              not rebuild it per declaration"
     );
 
-    let c = value_cache.get("c").expect("c prepares");
-    let d = value_cache.get("d").expect("d prepares");
+    let c = value_cache.get("c").expect("c should be present");
+    let d = value_cache.get("d").expect("d should be present");
     assert!(
         Arc::ptr_eq(&c.name_resolution, &d.name_resolution),
         "value decls of one file must SHARE one base table"
@@ -638,7 +659,10 @@ export namespace NS {
 
     // A namespaced decl binds declaration-scoped sibling names, so it owns a
     // PRIVATE table — never a mutated view of the shared base.
-    let holder = type_cache.get("NS.Holder").expect("NS.Holder prepares");
+    let holder = type_cache
+        .get("NS.Holder")
+        .expect("NS.Holder preparation should succeed")
+        .expect("NS.Holder should be present");
     assert!(
         !Arc::ptr_eq(&a.name_resolution, &holder.name_resolution),
         "a namespaced decl owns a private table"
@@ -683,7 +707,10 @@ fn broken_lease_prepared_type_decl_get_does_not_warm_admit_none_slot() {
 
     // One successful demand pins the retained-snapshot lease and commits Var0.
     assert!(
-        cache.get("Var0").is_some(),
+        cache
+            .get("Var0")
+            .expect("Var0 preparation should succeed")
+            .is_some(),
         "Var0 prepares under a live lease"
     );
     assert!(cache.slot_committed_for_test("Var0"));
@@ -693,7 +720,10 @@ fn broken_lease_prepared_type_decl_get_does_not_warm_admit_none_slot() {
     state.decl_bodies().release_retained_snapshot_for_test();
 
     assert!(
-        cache.get("Var1").is_none(),
+        cache
+            .get("Var1")
+            .expect("Var1 lease-miss demand should not fail")
+            .is_none(),
         "a broken-lease prepared-type demand fails CLOSED to None (ReturnOnly)"
     );
     assert!(
@@ -701,6 +731,52 @@ fn broken_lease_prepared_type_decl_get_does_not_warm_admit_none_slot() {
         "the broken-lease prepared-type demand must NOT commit the write-once \
              slot to None — the false-warm absence the LowerLocator rail already \
              refuses"
+    );
+}
+
+/// Typed structural preparation failures remain distinct from genuine symbol
+/// absence and leave the write-once slot vacant. If the failure were collapsed
+/// through `ok().flatten()`, the cache could publish a permanent `None` for a
+/// declaration that becomes preparable once its external owner is available.
+#[test]
+fn prepared_type_failure_is_not_published_as_absence() {
+    let source = "import type { External } from './missing';\n\
+                  export interface Props { value: External }\n";
+    let state = ShallowFileState::service_backed_for_test(source);
+    let cache = build_prepared_type_decl_cache(
+        "/ws/fixture.ts",
+        Arc::clone(&state),
+        Arc::new(FxHashMap::default()),
+        Arc::new(ImportCanonicalization::default()),
+        &test_interner(),
+    );
+
+    assert!(matches!(
+        cache.get("Props"),
+        Err(PreparationFailure::MissingExternalOwner { local_name })
+            if local_name == "External"
+    ));
+    assert!(
+        !cache.slot_committed_for_test("Props"),
+        "a typed preparation failure must leave the declaration slot vacant"
+    );
+    let builds_after_failure = cache.cold_build_count_for_test();
+
+    assert!(matches!(cache.get("Absent"), Ok(None)));
+    assert_eq!(
+        cache.cold_build_count_for_test(),
+        builds_after_failure,
+        "genuine absence is answered without building a declaration slot"
+    );
+
+    assert!(matches!(
+        cache.get("Props"),
+        Err(PreparationFailure::MissingExternalOwner { local_name })
+            if local_name == "External"
+    ));
+    assert!(
+        cache.cold_build_count_for_test() > builds_after_failure,
+        "a failed slot must retry instead of serving a cached absence"
     );
 }
 
@@ -780,10 +856,11 @@ fn broken_lease_augmentation_prepared_build_surfaces_lease_miss() {
     // Pin the augmenter memo's lease with one successful augmentation demand.
     assert!(
         matches!(
-            prepare_augmentation_type_decl_outcome(
+            prepare_augmentation_type_decl_outcome_in(
                 &Arc::from("/ws/fixture.ts"),
                 &state,
                 &scope,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 "A",
                 None,
                 &test_interner(),
@@ -799,10 +876,11 @@ fn broken_lease_augmentation_prepared_build_surfaces_lease_miss() {
     // outcome MUST be the distinct LeaseMiss, never a collapsed Ready(None).
     assert!(
         matches!(
-            prepare_augmentation_type_decl_outcome(
+            prepare_augmentation_type_decl_outcome_in(
                 &Arc::from("/ws/fixture.ts"),
                 &state,
                 &scope,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 "B",
                 None,
                 &test_interner(),
@@ -863,7 +941,8 @@ fn concurrent_cold_prepared_type_get_is_single_flight() {
         .map(|h| {
             h.join()
                 .expect("no caller thread may panic")
-                .expect("T7 builds")
+                .expect("T7 preparation should succeed")
+                .expect("T7 should be present")
         })
         .collect();
 
@@ -900,13 +979,19 @@ fn broken_lease_prepared_type_slot_stays_vacant_and_is_rebuildable() {
 
     // Pin the lease with one successful build, then break the snapshot.
     assert!(
-        cache.get("Var0").is_some(),
+        cache
+            .get("Var0")
+            .expect("Var0 preparation should succeed")
+            .is_some(),
         "Var0 prepares under a live lease"
     );
     state.decl_bodies().release_retained_snapshot_for_test();
 
     assert!(
-        cache.get("Var1").is_none(),
+        cache
+            .get("Var1")
+            .expect("Var1 lease-miss demand should not fail")
+            .is_none(),
         "a broken-lease prepared-type demand fails CLOSED to None (ReturnOnly)"
     );
     assert!(
@@ -917,7 +1002,10 @@ fn broken_lease_prepared_type_slot_stays_vacant_and_is_rebuildable() {
     // A vacant slot re-runs the build on the next demand; a write-once None
     // would short-circuit and never recompute.
     assert!(
-        cache.get("Var1").is_none(),
+        cache
+            .get("Var1")
+            .expect("Var1 retry should not fail")
+            .is_none(),
         "a second broken-lease demand still fails closed to None"
     );
     assert!(
@@ -938,7 +1026,10 @@ fn broken_lease_prepared_type_slot_stays_vacant_and_is_rebuildable() {
         &test_interner(),
     );
     assert!(
-        fresh_cache.get("Var1").is_some(),
+        fresh_cache
+            .get("Var1")
+            .expect("fresh Var1 preparation should succeed")
+            .is_some(),
         "under a live lease the symbol recovers — the lease-miss was never a \
              genuine absence"
     );
@@ -968,11 +1059,13 @@ export type Variant = 'solid' | 'outline'
     let props = bundle
         .prepared_type_decls
         .get("Props")
-        .expect("Props prepares");
+        .expect("Props preparation should succeed")
+        .expect("Props should be present");
     let variant = bundle
         .prepared_type_decls
         .get("Variant")
-        .expect("Variant prepares");
+        .expect("Variant preparation should succeed")
+        .expect("Variant should be present");
 
     // Every identity minted for this file shares ONE canonical-id
     // allocation — the pool's — instead of a fresh String per identity.
@@ -1016,11 +1109,12 @@ export const defaults = { label: 'ok' }
     let ty = bundle
         .prepared_type_decls
         .get("Props")
-        .expect("Props prepares");
+        .expect("Props preparation should succeed")
+        .expect("Props should be present");
     let value = bundle
         .prepared_value_decls
         .get("defaults")
-        .expect("defaults prepares");
+        .expect("defaults should be present");
     assert!(
         Arc::ptr_eq(
             &ty.root_identity.canonical_id,
@@ -1028,4 +1122,62 @@ export const defaults = { label: 'ok' }
         ),
         "type and value identities of one file share the pooled canonical"
     );
+}
+
+#[test]
+fn prepared_bundle_partitions_declaration_scope_by_exact_owner() {
+    let source = r#"
+import type { ModuleOnly } from './module-dep'
+interface Shared { module: ModuleOnly }
+import type { InstanceOnly } from './instance-dep'
+interface Shared { instance: InstanceOnly }
+"#;
+    let module = verter_type_expr::TopLevelOwnerId::module(0);
+    let instance = verter_type_expr::TopLevelOwnerId::instance(0);
+    let state = ShallowFileState::service_backed_for_test_with_statement_owners(
+        "/src/Fixture.vue",
+        source,
+        &[module, module, instance, instance],
+    );
+    let mut dep_edges = FxHashMap::default();
+    dep_edges.insert("./module-dep".to_string(), "/src/module-dep.ts".to_string());
+    dep_edges.insert(
+        "./instance-dep".to_string(),
+        "/src/instance-dep.ts".to_string(),
+    );
+    let mut setup_bindings = FxHashMap::default();
+    setup_bindings.insert(
+        "SetupGeneric".to_string(),
+        TypeParamBinding {
+            name: Arc::from("SetupGeneric"),
+            ordinal: 0,
+            constraint: None,
+            default: None,
+        },
+    );
+
+    let bundle = build_prepared_decl_bundle(
+        "/src/Fixture.vue",
+        state,
+        dep_edges,
+        setup_bindings,
+        ImportCanonicalization::default(),
+        &test_interner(),
+    );
+    let module_scope = bundle.owner_scope(module).expect("module scope");
+    let instance_scope = bundle.owner_scope(instance).expect("instance scope");
+
+    assert!(module_scope.scope_type_names.contains("Shared"));
+    assert!(instance_scope.scope_type_names.contains("Shared"));
+    assert!(module_scope.import_bindings.contains_key("ModuleOnly"));
+    assert!(!module_scope.import_bindings.contains_key("InstanceOnly"));
+    assert!(instance_scope.import_bindings.contains_key("InstanceOnly"));
+    assert!(!instance_scope.import_bindings.contains_key("ModuleOnly"));
+    assert!(module_scope.script_setup_type_bindings.is_empty());
+    assert!(instance_scope
+        .script_setup_type_bindings
+        .contains_key("SetupGeneric"));
+    assert!(bundle
+        .owner_scope(verter_type_expr::TopLevelOwnerId::instance(1))
+        .is_none());
 }

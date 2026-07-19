@@ -520,6 +520,7 @@ mod raise_miss_normalization_tests {
             .expect("/dep.ts must index");
         let scope = NodeScopeId::File {
             canonical_id: Arc::from("/dep.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: shallow.whole_hash,
             local_scope: None,
         };

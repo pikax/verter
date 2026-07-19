@@ -46,15 +46,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let decl = match inputs.scope {
                     NodeScopeId::Global => DeclIdentity {
                         canonical_id: Arc::from(""),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         whole_hash: crate::semantic_query::HashValue::default(),
                         decl_name: Arc::from("<script-setup>"),
                     },
                     NodeScopeId::File {
                         canonical_id,
+                        owner,
                         whole_hash,
                         ..
                     } => DeclIdentity {
                         canonical_id: Arc::clone(canonical_id),
+                        owner: *owner,
                         whole_hash: *whole_hash,
                         decl_name: Arc::from("<script-setup>"),
                     },
@@ -471,6 +474,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         crate::semantic_query::InstantiateKey::new(
                             self.type_slot_for(
                                 Arc::clone(&base.canonical_id),
+                                base.owner,
                                 Arc::clone(&base.decl_name),
                             ),
                             projected_args,
@@ -491,6 +495,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         crate::semantic_query::InstantiateKey::new(
                             self.type_slot_for(
                                 Arc::clone(&base.canonical_id),
+                                base.owner,
                                 Arc::clone(&base.decl_name),
                             ),
                             projected_args,

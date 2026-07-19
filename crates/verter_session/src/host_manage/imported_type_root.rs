@@ -28,7 +28,7 @@ impl VerterHost {
         &self,
         dep_canonical: &str,
         imported_name: &str,
-    ) -> (String, String) {
+    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
         self.resolve_imported_type_root_with_facts(dep_canonical, imported_name)
             .0
     }
@@ -53,7 +53,7 @@ impl VerterHost {
         view: &dyn crate::resolver_core::StoreView,
         dep_canonical: &str,
         imported_name: &str,
-    ) -> (String, String) {
+    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
         self.resolve_imported_type_root_with_facts_with_store_view(
             view,
             dep_canonical,
@@ -81,7 +81,7 @@ impl VerterHost {
         dep_canonical: &str,
         imported_name: &str,
     ) -> (
-        (String, String),
+        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
         Arc<[crate::resolver_core::FactVersionRef]>,
     ) {
         // Test-only convenience: seed the resolve-and-cache method with a
@@ -114,7 +114,7 @@ impl VerterHost {
         dep_canonical: &str,
         imported_name: &str,
     ) -> (
-        (String, String),
+        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
         Arc<[crate::resolver_core::FactVersionRef]>,
     ) {
         let audit_started = self.config.audit_enabled.then(Instant::now);
@@ -165,7 +165,8 @@ impl VerterHost {
                         return Some((
                             crate::resolver_core::ImportedRootResult::Resolved {
                                 canonical_source: resolved.0,
-                                resolved_symbol: resolved.1,
+                                owner: resolved.1,
+                                resolved_symbol: resolved.2,
                             },
                             facts,
                         ));
@@ -183,11 +184,13 @@ impl VerterHost {
                     let root_result = match route_result {
                         crate::resolver_core::RouteResult::Resolved {
                             defining_canonical,
+                            defining_owner,
                             defining_symbol,
                         } => crate::resolver_core::ImportedRootResult::Resolved {
                             canonical_source: self
                                 .resolve_eval_dependency_canonical(defining_canonical.as_str())
                                 .unwrap_or(defining_canonical),
+                            owner: defining_owner,
                             resolved_symbol: defining_symbol,
                         },
                         crate::resolver_core::RouteResult::Miss => {
@@ -198,16 +201,9 @@ impl VerterHost {
                 },
             );
         let (resolved, source_kind, facts) = match cached {
-            Some((cached, facts)) => match cached.as_tuple() {
-                Some(tuple) => (tuple, "named_export_target", facts),
-                None => (
-                    (normalized_canonical.clone(), imported_name.to_string()),
-                    "miss",
-                    facts,
-                ),
-            },
+            Some((cached, facts)) => (cached.as_identity(), "named_export_target", facts),
             None => (
-                (normalized_canonical.clone(), imported_name.to_string()),
+                None,
                 "miss",
                 crate::fact_signature_helpers::empty_fact_signature(),
             ),
@@ -224,13 +220,20 @@ impl VerterHost {
                     + imported_name.len()
                     + normalized_canonical.len()
                     + source_kind.len()
-                    + resolved.0.len()
-                    + resolved.1.len(),
+                    + resolved.as_ref().map_or(0, |identity| {
+                        identity.canonical_id.len() + identity.symbol_name.len()
+                    }),
             );
+            let target_canonical = resolved
+                .as_ref()
+                .map_or("<miss>", |identity| identity.canonical_id.as_ref());
+            let target_symbol = resolved
+                .as_ref()
+                .map_or("<miss>", |identity| identity.symbol_name.as_ref());
             let _ = write!(
                 detail,
                 "canonical={} imported={} normalized={} source={} target_canonical={} target_symbol={} store_view=false",
-                dep_canonical, imported_name, normalized_canonical, source_kind, resolved.0, resolved.1,
+                dep_canonical, imported_name, normalized_canonical, source_kind, target_canonical, target_symbol,
             );
             detail
         });

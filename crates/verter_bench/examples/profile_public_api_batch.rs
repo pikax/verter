@@ -70,7 +70,11 @@ fn main() {
     let responses = host.get_public_api_batch(&refs);
     let elapsed = start.elapsed();
 
-    let resolved = responses.iter().filter(|r| r.is_some()).count();
+    let resolved = responses
+        .iter()
+        .map(|response| response.as_ref().expect("public API projection"))
+        .filter(|response| response.is_some())
+        .count();
     let per_call_us = elapsed.as_secs_f64() * 1e6 / (n as f64);
     eprintln!("  Resolved:     {resolved}/{n}");
     eprintln!("  Total:        {elapsed:?}");

@@ -768,11 +768,18 @@ impl StructuralEncoder<'_> {
             NodeScopeId::Global => self.buf.push(0),
             NodeScopeId::File {
                 canonical_id,
+                owner,
                 whole_hash,
                 local_scope,
             } => {
                 self.buf.push(1);
                 self.push_str(canonical_id);
+                self.buf.push(match owner.kind() {
+                    verter_type_expr::TopLevelOwnerKind::Module => 0,
+                    verter_type_expr::TopLevelOwnerKind::Instance => 1,
+                    verter_type_expr::TopLevelOwnerKind::Frontmatter => 2,
+                });
+                self.buf.extend_from_slice(&owner.ordinal().to_le_bytes());
                 self.buf.extend_from_slice(whole_hash);
                 match local_scope {
                     Some(s) => {

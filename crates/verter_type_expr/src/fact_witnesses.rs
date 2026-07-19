@@ -160,6 +160,7 @@ assert_fact_carriers!(
     ProjectedIndexSignatureFact,
     ProjectedSurfaceFact,
     SvelteLegacyPropFact,
+    SvelteModuleExportFact,
     SvelteScriptFactsFact,
 );
 
@@ -223,6 +224,7 @@ assert_impl_all!(ResolvedLocalTypeFact: NoStoredSpan);
 fn anchor() -> AuthoredAnchor {
     AuthoredAnchor {
         canonical_id: std::sync::Arc::from("/ws/a.ts"),
+        owner: crate::TopLevelOwnerId::ordinary_file(),
         symbol: std::sync::Arc::from("A"),
         space: LocatorSymbolSpace::Type,
     }
@@ -239,6 +241,8 @@ fn member_origin(ordinal: u32) -> MemberSpansOrigin {
     MemberSpansOrigin::Authored {
         anchor: DeclContributorAnchor {
             contributor_index: 0,
+            owner: crate::TopLevelOwnerId::ordinary_file(),
+            owner_local_ordinal: 0,
         },
         member_path: std::sync::Arc::from(vec![ordinal].into_boxed_slice()),
     }
@@ -260,10 +264,13 @@ fn empty_fn() -> FunctionSignatureFact {
         type_parameters: std::sync::Arc::from(Vec::<NarrowTypeParam>::new().into_boxed_slice()),
         parameters: std::sync::Arc::from(Vec::<FunctionParamFact>::new().into_boxed_slice()),
         return_ty: None,
+        return_inference: ReturnInferenceCompleteness::NotInferred,
         has_implementation_body: false,
         spans_origin: FunctionSpansOrigin::AliasBody {
             anchor: DeclContributorAnchor {
                 contributor_index: 0,
+                owner: crate::TopLevelOwnerId::ordinary_file(),
+                owner_local_ordinal: 0,
             },
         },
     }
@@ -288,6 +295,8 @@ fn index_sig(key: KeyTypeShape) -> IndexSignatureFact {
         span_origin: IndexSignatureSpansOrigin::Authored {
             anchor: DeclContributorAnchor {
                 contributor_index: 0,
+                owner: crate::TopLevelOwnerId::ordinary_file(),
+                owner_local_ordinal: 0,
             },
             member_path: std::sync::Arc::from(vec![0u32].into_boxed_slice()),
         },
@@ -1115,6 +1124,7 @@ fn fact_carriers_round_trip_through_serde() {
         ty: TypeBodySlot {
             anchor: AuthoredAnchor {
                 canonical_id: std::sync::Arc::from("/ws/types.ts"),
+                owner: crate::TopLevelOwnerId::ordinary_file(),
                 symbol: std::sync::Arc::from("Props"),
                 space: LocatorSymbolSpace::Type,
             },
@@ -1126,6 +1136,8 @@ fn fact_carriers_round_trip_through_serde() {
         span_origin: MemberSpansOrigin::Authored {
             anchor: DeclContributorAnchor {
                 contributor_index: 3,
+                owner: crate::TopLevelOwnerId::ordinary_file(),
+                owner_local_ordinal: 3,
             },
             member_path: std::sync::Arc::from(vec![2u32]),
         },
@@ -1139,6 +1151,7 @@ fn fact_carriers_round_trip_through_serde() {
         SemanticTypeSource::Authored(AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
             anchor: AuthoredAnchor {
                 canonical_id: std::sync::Arc::from("/ws/App.vue"),
+                owner: crate::TopLevelOwnerId::ordinary_file(),
                 symbol: std::sync::Arc::from("default"),
                 space: LocatorSymbolSpace::Value,
             },
@@ -1360,6 +1373,7 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
     let typeof_target = ValueTypeAnnotationFact {
         typeof_alias_target: Some(ValueDeclIdentityPart {
             canonical_id: std::sync::Arc::from("/ws/a.ts"),
+            owner: crate::TopLevelOwnerId::ordinary_file(),
             symbol: std::sync::Arc::from("x"),
             member_path: std::sync::Arc::from(Vec::<String>::new().into_boxed_slice()),
         }),

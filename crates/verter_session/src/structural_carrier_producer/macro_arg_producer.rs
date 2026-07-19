@@ -973,8 +973,13 @@ fn collect_function_infer_binder_names(func: &FunctionExpr, out: &mut Vec<Arc<st
 /// root the value lookup in, so it cannot be structurally lowered.
 fn value_root_scope(scope: &NodeScopeId) -> Result<ScopeId, StructuralLowerError> {
     match scope {
-        NodeScopeId::File { canonical_id, .. } => Ok(ScopeId {
+        NodeScopeId::File {
+            canonical_id,
+            owner,
+            ..
+        } => Ok(ScopeId {
             canonical_id: Arc::clone(canonical_id),
+            owner: *owner,
             local_scope: None,
         }),
         NodeScopeId::Global => Err(StructuralLowerError::UnsupportedWithoutResolution {
@@ -1174,15 +1179,18 @@ fn build_script_setup_seed_frames(
     let decl = match scope {
         NodeScopeId::Global => DeclIdentity {
             canonical_id: Arc::from(""),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
             decl_name: Arc::from("<script-setup>"),
         },
         NodeScopeId::File {
             canonical_id,
+            owner,
             whole_hash,
             ..
         } => DeclIdentity {
             canonical_id: Arc::clone(canonical_id),
+            owner: *owner,
             whole_hash: *whole_hash,
             decl_name: Arc::from("<script-setup>"),
         },
@@ -1457,6 +1465,7 @@ fn build_macro_hot_ref(
     let graph = ctx.project_type_store().semantic_graph();
     let scope = NodeScopeId::File {
         canonical_id: Arc::from(owner_canonical),
+        owner: mac.owner,
         whole_hash: indexed.whole_hash,
         local_scope: None,
     };

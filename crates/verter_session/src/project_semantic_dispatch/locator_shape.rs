@@ -629,8 +629,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     return self.opaque(QueryError::Miss);
                 };
                 let root_scope = match scope {
-                    NodeScopeId::File { canonical_id, .. } => ScopeId {
+                    NodeScopeId::File {
+                        canonical_id,
+                        owner,
+                        ..
+                    } => ScopeId {
                         canonical_id: Arc::clone(canonical_id),
+                        owner: *owner,
                         local_scope: None,
                     },
                     NodeScopeId::Global => return self.opaque(QueryError::Miss),
@@ -936,29 +941,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // the active fact tracer and land in the enclosing
                 // `LowerLocator` entry's `ReadSetSignature`, so a barrel
                 // retarget with the owner unchanged MISSES the warm shape.
-                let ((final_canonical, final_symbol), route_facts) =
-                    self.ctx.resolve_imported_type_root_with_facts(
-                        &direct.canonical_id,
-                        &direct.symbol_name,
-                    );
-                self.ctx.observe_borrowed_signature(&route_facts);
+                let final_identity =
+                    if direct.owner == verter_type_expr::TopLevelOwnerId::ordinary_file() {
+                        let (routed, route_facts) = self.ctx.resolve_imported_type_root_with_facts(
+                            &direct.canonical_id,
+                            &direct.symbol_name,
+                        );
+                        self.ctx.observe_borrowed_signature(&route_facts);
+                        routed.unwrap_or_else(|| direct.clone())
+                    } else {
+                        direct.clone()
+                    };
                 // ONE leaf shallow-state retrieval: this read is BOTH the
                 // liveness gate (the permitted first canonical shallow
                 // materialization — at most once per content generation)
                 // AND the versioned-identity hash source. It builds the
                 // versioned `DeclIdentity` + correct invalidation facts;
                 // it never lowers the target's declaration bodies.
-                let state = self.ctx.shallow_file_state(&final_canonical)?;
-                Some((
-                    ResolvedRootIdentity::new(final_canonical, final_symbol),
-                    state.whole_hash,
-                ))
+                let state = self.ctx.shallow_file_state(&final_identity.canonical_id)?;
+                Some((final_identity, state.whole_hash))
             })
             .or_else(|| match scope {
                 NodeScopeId::File { canonical_id, .. } => {
                     let ri = resolve_bare_name_in_scope(
                         self.ctx,
                         canonical_id.as_ref(),
+                        scope
+                            .top_level_owner()
+                            .expect("file scope carries an authored owner"),
                         ctx.scope_payload,
                         name.as_ref(),
                     )?;
@@ -978,6 +988,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some((ri, whole_hash)) = resolved {
             let identity = DeclIdentity {
                 canonical_id: Arc::clone(&ri.canonical_id),
+                owner: ri.owner,
                 whole_hash,
                 decl_name: Arc::clone(&ri.symbol_name),
             };
@@ -1001,6 +1012,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return self.intern_ref_head_carrier(
                 RefHeadResolution::Builtin(DeclIdentity {
                     canonical_id: Arc::from("__builtin__"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash: HashValue::default(),
                     decl_name: Arc::clone(name),
                 }),
@@ -1261,8 +1273,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         };
 
+        let anchor = match key.locator() {
+            AuthoredBodyLocator::DeclBody(slot) => &slot.anchor,
+            AuthoredBodyLocator::AugmentationBody(augmentation) => &augmentation.anchor,
+            AuthoredBodyLocator::JsdocTypedefBody(typedef) => &typedef.anchor,
+            AuthoredBodyLocator::MacroPayload(payload) => &payload.anchor,
+        };
         let scope = NodeScopeId::File {
             canonical_id: Arc::clone(&canonical),
+            owner: anchor.owner,
             whole_hash: indexed.whole_hash,
             local_scope: None,
         };
@@ -1282,17 +1301,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // import shadowing. Absence (no prepared declaration for the
         // anchor) degrades to the payload-aware in-scope resolver.
         let bundle = self.ctx.prepared_decl_bundle(canonical.as_ref());
-        let scope_payload = bundle.as_ref().map(DeclarationScopePayload::from_bundle);
+        let scope_payload = bundle
+            .as_ref()
+            .map(|bundle| DeclarationScopePayload::from_bundle(bundle, anchor.owner));
         let dep_edges = bundle.as_ref().map(|b| Arc::clone(&b.dep_edges));
         let prepared_anchor: Option<AnchorPreparedDecl> = match key.locator() {
             AuthoredBodyLocator::DeclBody(slot) => match slot.anchor.space {
                 verter_type_expr::locators::LocatorSymbolSpace::Type => self
                     .ctx
-                    .prepared_type_decl(canonical.as_ref(), anchor_symbol.as_ref())
+                    .prepared_type_decl_return_only(
+                        canonical.as_ref(),
+                        anchor.owner,
+                        anchor_symbol.as_ref(),
+                    )
                     .map(AnchorPreparedDecl::Type),
                 verter_type_expr::locators::LocatorSymbolSpace::Value => self
                     .ctx
-                    .prepared_value_decl(canonical.as_ref(), anchor_symbol.as_ref())
+                    .prepared_value_decl(canonical.as_ref(), anchor.owner, anchor_symbol.as_ref())
                     .map(AnchorPreparedDecl::Value),
                 verter_type_expr::locators::LocatorSymbolSpace::Namespace => None,
             },
@@ -1306,14 +1331,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         AugmentationScopeKind::Module(specifier.as_ref().to_string())
                     }
                 };
-                crate::resolver_core::prepare_augmentation_type_decl(
+                crate::resolver_core::prepared_decl::prepare_augmentation_type_decl_in(
                     canonical.as_ref(),
                     &indexed.shallow_state,
                     &scope_kind,
+                    anchor.owner,
                     anchor_symbol.as_ref(),
                     dep_edges.as_deref(),
                     self.ctx.project_type_store().identity_interner(),
                 )
+                .ok()
+                .flatten()
                 .map(|prepared| AnchorPreparedDecl::Augmentation(Box::new(prepared)))
             }
             // A JSDoc typedef declares NO header type parameters (its deref
@@ -1420,7 +1448,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             AuthoredBodyLocator::MacroPayload(payload) => &payload.anchor,
         };
         let slot = self
-            .type_slot_for(Arc::clone(&anchor.canonical_id), Arc::clone(&anchor.symbol))
+            .type_slot_for(
+                Arc::clone(&anchor.canonical_id),
+                anchor.owner,
+                Arc::clone(&anchor.symbol),
+            )
             .with_symbol_space(semantic_space_for_locator_space(anchor.space));
         let env = self
             .ctx

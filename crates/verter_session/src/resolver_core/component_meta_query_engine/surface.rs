@@ -95,6 +95,7 @@ pub(in crate::resolver_core::component_meta_query_engine) fn materialize_route_p
 pub(crate) fn lower_and_project_to_expanded_node(
     ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
+    scope_owner: verter_type_expr::TopLevelOwnerId,
     expr: &TypeExpr,
 ) -> Option<AdmittedRouteProjectionNode> {
     use crate::project_semantic_dispatch::raise::node_raised_shape_for_eq_with_dispatch;
@@ -102,8 +103,9 @@ pub(crate) fn lower_and_project_to_expanded_node(
     use crate::semantic_query::{PathSegment, ProjectionMode, QueryResult, SemanticQueryKey};
 
     let dispatch = ProjectSemanticDispatch::new(ctx);
-    let base = dispatch.lower_type_expr_in_scope_with_mode(
+    let base = dispatch.lower_type_expr_in_owner_scope_with_mode(
         scope_canonical_id,
+        scope_owner,
         expr,
         ProjectionMode::Expanded,
     )?;
@@ -138,6 +140,7 @@ pub(crate) fn lower_and_project_to_expanded_node(
 pub(crate) fn project_class_a_terminal_node(
     ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
+    scope_owner: verter_type_expr::TopLevelOwnerId,
     expr: &TypeExpr,
 ) -> Option<AdmittedRouteProjectionNode> {
     use crate::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
@@ -148,8 +151,9 @@ pub(crate) fn project_class_a_terminal_node(
         crate::meta_resolve::dispatch_helpers::decompose_indexed_access_chain(expr);
     let dispatch = ProjectSemanticDispatch::new(ctx);
     let (base, project_path) = if path_segments.is_empty() {
-        let base = dispatch.lower_type_expr_in_scope_with_mode(
+        let base = dispatch.lower_type_expr_in_owner_scope_with_mode(
             scope_canonical_id,
+            scope_owner,
             expr,
             ProjectionMode::Expanded,
         )?;
@@ -158,8 +162,9 @@ pub(crate) fn project_class_a_terminal_node(
             std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
         )
     } else {
-        let base = dispatch.lower_type_expr_in_scope_with_mode(
+        let base = dispatch.lower_type_expr_in_owner_scope_with_mode(
             scope_canonical_id,
+            scope_owner,
             base_expr,
             ProjectionMode::Navigate,
         )?;
@@ -214,6 +219,7 @@ pub(crate) fn project_class_a_published(
         ctx,
         None,
         scope_canonical_id,
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         expr,
     )?;
     materialize_route_projection_node(ctx, &node)

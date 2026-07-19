@@ -3,7 +3,7 @@
 //! Three-stage pipeline:
 //!
 //! **Stub stage — Public API stubs:**
-//!   For each .vue file → `get_public_api()` → public-API stub with real component types.
+//!   Batched `.vue` inputs → `get_public_api_batch()` → public-API stubs with real component types.
 //!   Enables cross-component prop/emit/slot type checking (imports resolve to actual types
 //!   instead of the generic `DefineComponent<{}, {}, any>` wildcard shim).
 //!
@@ -14,7 +14,7 @@
 //!   Type-checks script body + template. Reports ALL type errors.
 //!
 //! **Declaration-generation stage (TSC):**
-//!   For each .vue file → `generate_tsc_output()` → write `.tsc.tsx` to tempdir.
+//!   Batched `.vue` inputs → typed public-API projection → write `.tsc.tsx` to tempdir.
 //!   Only when `--declaration` is requested. Reuses the shared
 //!   `VerterHost` produced by the stub stage.
 //!
@@ -30,7 +30,9 @@ use oxc_allocator::Allocator;
 use rayon::prelude::*;
 use tempfile::TempDir;
 use verter_compiler::compile::{CodegenOptions, CompileTarget, VerterCompileOptions};
-use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{
+    FileLanguage, HostConfig, PublicApiProjectionError, UpsertRequest, VerterHost,
+};
 
 use crate::api_check;
 use crate::error_map::map_tsc_position;
@@ -51,6 +53,77 @@ pub struct EmitOptions {
 pub struct CheckResult {
     pub diagnostics: Vec<Diagnostic>,
     pub emitted_files: Vec<PathBuf>,
+    pub public_api_outcomes: Vec<PublicApiOutcome>,
+    pub public_api_failures: Vec<PublicApiFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublicApiOutcome {
+    Generated { source: PathBuf },
+    Absent { source: PathBuf },
+    Failed(PublicApiFailure),
+}
+
+/// Per-source public-API projection failure. This is a normal checker outcome;
+/// only process, filesystem, configuration, or checker-engine failures use the
+/// top-level [`api_check::TypecheckError`] rail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicApiFailure {
+    pub source: PathBuf,
+    pub code: &'static str,
+    pub detail_code: &'static str,
+    pub subject: verter_compiler::tsc::TscFailureSubject,
+    pub declaration_shape_reason: Option<&'static str>,
+    pub member_ordinal: Option<u32>,
+    pub outcome_kind: Option<&'static str>,
+    pub outcome_reason: Option<&'static str>,
+    pub outcome_diagnostic: Option<String>,
+    pub message: String,
+}
+
+impl PublicApiFailure {
+    fn new(source: &Path, error: PublicApiProjectionError) -> Self {
+        let unavailable_outcome = error.unavailable_outcome();
+        Self {
+            source: source.to_path_buf(),
+            code: error.code(),
+            detail_code: error.detail_code(),
+            subject: error.subject(),
+            declaration_shape_reason: error.declaration_shape_reason().map(|reason| reason.code()),
+            member_ordinal: error.member_ordinal(),
+            outcome_kind: unavailable_outcome.map(|outcome| outcome.kind_code()),
+            outcome_reason: unavailable_outcome.map(|outcome| outcome.reason_code()),
+            outcome_diagnostic: unavailable_outcome
+                .and_then(|outcome| outcome.diagnostic().map(str::to_owned)),
+            message: error.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for PublicApiFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}: error VTER1001: {} [code={}, detailCode={}, subject={}, declarationShapeReason={}, memberOrdinal={}, outcomeKind={}, outcomeReason={}, outcomeDiagnostic={}]",
+            self.source.display(),
+            self.message,
+            self.code,
+            self.detail_code,
+            self.subject,
+            self.declaration_shape_reason.unwrap_or("null"),
+            self.member_ordinal
+                .map_or_else(|| "null".to_string(), |ordinal| ordinal.to_string()),
+            self.outcome_kind.unwrap_or("null"),
+            self.outcome_reason.unwrap_or("null"),
+            self.outcome_diagnostic.as_deref().unwrap_or("null"),
+        )
+    }
+}
+
+struct PublicApiBatch<T> {
+    value: T,
+    outcomes: Vec<PublicApiOutcome>,
+    failures: Vec<PublicApiFailure>,
 }
 
 struct CheckerInvocation {
@@ -75,9 +148,11 @@ fn generate_public_api_stubs(
     host: &VerterHost,
     vue_files: &[PathBuf],
     base_dir: &Path,
-) -> (Vec<(PathBuf, String)>, HashMap<String, PathBuf>) {
+) -> PublicApiBatch<(Vec<(PathBuf, String)>, HashMap<String, PathBuf>)> {
     let mut stub_files = Vec::new();
     let mut vue_ts_map = HashMap::new();
+    let mut outcomes = Vec::with_capacity(vue_files.len());
+    let mut failures = Vec::new();
 
     // ONE batched public-API call for every .vue file: the batch captures a
     // single per-batch fixed store view and threads its shared cold seed into
@@ -99,8 +174,19 @@ fn generate_public_api_stubs(
         vue_files.iter().zip(canonical_ids).zip(responses)
     {
         let tsc_response = match tsc_response {
-            Some(r) => r,
-            None => continue,
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                outcomes.push(PublicApiOutcome::Absent {
+                    source: vue_path.clone(),
+                });
+                continue;
+            }
+            Err(error) => {
+                let failure = PublicApiFailure::new(vue_path, error);
+                outcomes.push(PublicApiOutcome::Failed(failure.clone()));
+                failures.push(failure);
+                continue;
+            }
         };
 
         // Rewrite relative imports in the public API code to absolute paths
@@ -122,9 +208,16 @@ fn generate_public_api_stubs(
 
         vue_ts_map.insert(canonical_id, stub_path.clone());
         stub_files.push((stub_path, code));
+        outcomes.push(PublicApiOutcome::Generated {
+            source: vue_path.clone(),
+        });
     }
 
-    (stub_files, vue_ts_map)
+    PublicApiBatch {
+        value: (stub_files, vue_ts_map),
+        outcomes,
+        failures,
+    }
 }
 
 /// Validation stage: generate full TSX (script body + template) for every `.vue` file in parallel.
@@ -134,14 +227,19 @@ fn generate_public_api_stubs(
 /// deterministic virtual path (`<base>/Name_<hash>.tsx`). Returns
 /// `(vue_path, tsx_code, virtual tsx_path)` tuples; the in-memory `--api` overlay
 /// serves the code and the synthetic tsconfig lists the path in `files`.
-fn generate_all_tsx(vue_files: &[PathBuf], base_dir: &Path) -> Vec<(PathBuf, String, PathBuf)> {
+fn generate_all_tsx(
+    vue_files: &[PathBuf],
+    base_dir: &Path,
+) -> Result<Vec<(PathBuf, String, PathBuf)>, api_check::TypecheckError> {
     vue_files
         .par_iter()
         .map(|vue_path| {
-            let source = match fs::read_to_string(vue_path) {
-                Ok(s) => s,
-                Err(_) => return None,
-            };
+            let source = fs::read_to_string(vue_path).map_err(|error| {
+                api_check::TypecheckError::new(format!(
+                    "verter-tsc: failed to read validation carrier source {}: {error}",
+                    vue_path.display()
+                ))
+            })?;
 
             let raw_name = vue_path
                 .file_stem()
@@ -170,7 +268,12 @@ fn generate_all_tsx(vue_files: &[PathBuf], base_dir: &Path) -> Vec<(PathBuf, Str
                 &alloc,
             );
 
-            let tsx_block = result.tsx?;
+            let tsx_block = result.tsx.ok_or_else(|| {
+                api_check::TypecheckError::new(format!(
+                    "verter-tsc: compiler produced no validation carrier for {}",
+                    vue_path.display()
+                ))
+            })?;
 
             // Rewrite relative imports (both `import('...')` and `from '...'` patterns)
             let vue_dir = vue_path.parent().unwrap_or(Path::new("."));
@@ -189,13 +292,12 @@ fn generate_all_tsx(vue_files: &[PathBuf], base_dir: &Path) -> Vec<(PathBuf, Str
             let tsx_name = format!("{component_name}_{hash:016x}.tsx");
             let tsx_path = base_dir.join(&tsx_name);
 
-            Some((vue_path.clone(), code, tsx_path))
+            Ok((vue_path.clone(), code, tsx_path))
         })
-        .flatten()
         .collect()
 }
 
-/// Declaration-generation stage: generate minimal TSC declaration output for every `.vue` file in parallel.
+/// Declaration-generation stage: generate minimal TSC declaration output for every `.vue` file.
 ///
 /// Uses the host-backed public API path so imported macro types resolve the same
 /// way they do in the IDE. Accepts a shared `VerterHost` whose files have
@@ -205,7 +307,7 @@ fn generate_all_tsc(
     host: &VerterHost,
     vue_files: &[PathBuf],
     temp_dir: &Path,
-) -> Vec<(PathBuf, String, PathBuf)> {
+) -> Result<PublicApiBatch<Vec<(PathBuf, String, PathBuf)>>, api_check::TypecheckError> {
     // ONE batched public-API call for every .vue file (mirrors
     // `generate_public_api_stubs`): the batch captures a single per-batch fixed
     // store view and threads its shared cold seed into every item, collapsing
@@ -222,35 +324,60 @@ fn generate_all_tsc(
         host.get_public_api_batch(&id_refs)
     };
 
-    vue_files
-        .iter()
-        .zip(canonical_ids)
-        .zip(responses)
-        .filter_map(|((vue_path, _canonical_id), tsc_response)| {
-            let tsc_out = tsc_response?;
-
-            // Rewrite relative import() paths in the generated code to absolute paths.
-            // The .tsc.tsx files live in a temp dir, so relative imports like
-            // `import('./types')` need to resolve from the .vue file's directory.
-            let vue_dir = vue_path.parent().unwrap_or(Path::new("."));
-            let code = rewrite_relative_imports(&tsc_out.code, vue_dir);
-
-            let raw_name = vue_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("Component");
-            let component_name = sanitize_component_name(raw_name);
-            let hash = simple_hash(vue_path.to_string_lossy().as_bytes());
-            let tsc_tsx_name = format!("{component_name}_{hash:016x}.tsc.tsx");
-            let tsc_tsx_path = temp_dir.join(&tsc_tsx_name);
-
-            if fs::write(&tsc_tsx_path, &code).is_err() {
-                return None;
+    let mut generated = Vec::new();
+    let mut outcomes = Vec::with_capacity(vue_files.len());
+    let mut failures = Vec::new();
+    for ((vue_path, _canonical_id), tsc_response) in
+        vue_files.iter().zip(canonical_ids).zip(responses)
+    {
+        let tsc_out = match tsc_response {
+            Ok(Some(output)) => output,
+            Ok(None) => {
+                outcomes.push(PublicApiOutcome::Absent {
+                    source: vue_path.clone(),
+                });
+                continue;
             }
+            Err(error) => {
+                let failure = PublicApiFailure::new(vue_path, error);
+                outcomes.push(PublicApiOutcome::Failed(failure.clone()));
+                failures.push(failure);
+                continue;
+            }
+        };
 
-            Some((vue_path.clone(), code, tsc_tsx_path))
-        })
-        .collect()
+        // Rewrite relative import() paths in the generated code to absolute paths.
+        // The .tsc.tsx files live in a temp dir, so relative imports like
+        // `import('./types')` need to resolve from the .vue file's directory.
+        let vue_dir = vue_path.parent().unwrap_or(Path::new("."));
+        let code = rewrite_relative_imports(&tsc_out.code, vue_dir);
+
+        let raw_name = vue_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Component");
+        let component_name = sanitize_component_name(raw_name);
+        let hash = simple_hash(vue_path.to_string_lossy().as_bytes());
+        let tsc_tsx_name = format!("{component_name}_{hash:016x}.tsc.tsx");
+        let tsc_tsx_path = temp_dir.join(&tsc_tsx_name);
+
+        fs::write(&tsc_tsx_path, &code).map_err(|error| {
+            api_check::TypecheckError::new(format!(
+                "verter-tsc: failed to write declaration carrier {}: {error}",
+                tsc_tsx_path.display()
+            ))
+        })?;
+
+        generated.push((vue_path.clone(), code, tsc_tsx_path));
+        outcomes.push(PublicApiOutcome::Generated {
+            source: vue_path.clone(),
+        });
+    }
+    Ok(PublicApiBatch {
+        value: generated,
+        outcomes,
+        failures,
+    })
 }
 
 /// Single source of truth for the [`HostConfig`] the production `verter-tsc`
@@ -288,6 +415,8 @@ pub fn run(
         return Ok(CheckResult {
             diagnostics: Vec::new(),
             emitted_files: Vec::new(),
+            public_api_outcomes: Vec::new(),
+            public_api_failures: Vec::new(),
         });
     }
 
@@ -295,30 +424,57 @@ pub fn run(
     // build from it — the typecheck overlay carriers and the declaration `.tsc.tsx`.
     let host = VerterHost::new_standalone(build_host_config());
     for vue_path in &config.vue_files {
-        let source = match fs::read_to_string(vue_path) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
+        let source = fs::read_to_string(vue_path).map_err(|error| {
+            api_check::TypecheckError::new(format!(
+                "verter-tsc: failed to read carrier source {}: {error}",
+                vue_path.display()
+            ))
+        })?;
         let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
-        let _ = host.upsert(UpsertRequest {
+        host.upsert(UpsertRequest {
             canonical_id: Some(canonical_id.clone()),
             input_id: canonical_id,
             source: std::sync::Arc::<str>::from(source),
             file_language: FileLanguage::vue(),
             aliases: Vec::new(),
-        });
+        })
+        .map_err(|error| {
+            api_check::TypecheckError::new(format!(
+                "verter-tsc: failed to ingest carrier source {}: {error}",
+                vue_path.display()
+            ))
+        })?;
     }
 
     // ── Typecheck stage: in-memory tsgo `--api` (the `--noEmit` diagnostic set). ──
     // A hard failure here (engine absent / connect / protocol) aborts the whole run
     // with `Err` — we never proceed to emit against a compromised typecheck.
-    let mut diagnostics = run_inmemory_typecheck(&host, config, tsconfig_path)?;
+    let in_memory = run_inmemory_typecheck(&host, config, tsconfig_path)?;
+    let mut diagnostics = in_memory.value;
+    let public_api_outcomes = in_memory.outcomes;
+    let mut public_api_failures = in_memory.failures;
 
     // ── Declaration/emit stage: temp-file `tsgo --project` (tsgo `--api` has no
     //    emit surface). Only when `--declaration` is requested. ──
     let emitted_files = if opts.declaration {
-        let (decl_diagnostics, emitted) = run_declaration_stage(&host, config, tsconfig_path, opts);
+        let (decl_diagnostics, emitted, declaration_failures) =
+            run_declaration_stage(&host, config, tsconfig_path, opts)?;
         diagnostics.extend(decl_diagnostics);
+        for failure in declaration_failures {
+            if !public_api_failures.iter().any(|existing| {
+                existing.source == failure.source
+                    && existing.code == failure.code
+                    && existing.detail_code == failure.detail_code
+                    && existing.subject == failure.subject
+                    && existing.declaration_shape_reason == failure.declaration_shape_reason
+                    && existing.member_ordinal == failure.member_ordinal
+                    && existing.outcome_kind == failure.outcome_kind
+                    && existing.outcome_reason == failure.outcome_reason
+                    && existing.outcome_diagnostic == failure.outcome_diagnostic
+            }) {
+                public_api_failures.push(failure);
+            }
+        }
         emitted
     } else {
         Vec::new()
@@ -327,6 +483,8 @@ pub fn run(
     Ok(CheckResult {
         diagnostics,
         emitted_files,
+        public_api_outcomes,
+        public_api_failures,
     })
 }
 
@@ -414,7 +572,7 @@ fn run_inmemory_typecheck(
     host: &VerterHost,
     config: &TsConfig,
     tsconfig_path: &Path,
-) -> Result<Vec<Diagnostic>, api_check::TypecheckError> {
+) -> Result<PublicApiBatch<Vec<Diagnostic>>, api_check::TypecheckError> {
     let root = strip_unc_prefix(&config.root_dir);
 
     // Discover the GATED `--api` engine (the rc `@typescript/typescript-*` native
@@ -435,8 +593,9 @@ fn run_inmemory_typecheck(
 
     // Generate the validation carriers IN-MEMORY, rooted at deterministic
     // in-project virtual paths (so node_modules resolution walks from the root).
-    let (stub_files, vue_ts_map) = generate_public_api_stubs(host, &config.vue_files, &root);
-    let mut tsx_files = generate_all_tsx(&config.vue_files, &root);
+    let stubs = generate_public_api_stubs(host, &config.vue_files, &root);
+    let (stub_files, vue_ts_map) = stubs.value;
+    let mut tsx_files = generate_all_tsx(&config.vue_files, &root)?;
     // Lower the generated TSX's OWN carrier specifiers to the public-API stubs (or
     // strip back to the bare carrier for the `*.vue` wildcard shim).
     for (_, code, _) in &mut tsx_files {
@@ -511,12 +670,17 @@ fn run_inmemory_typecheck(
     };
     let virtual_tsconfig_path = slash(&root.join("verter-tsc-check.tsconfig.json"));
 
-    api_check::typecheck(api_check::TypecheckInputs {
+    let diagnostics = api_check::typecheck(api_check::TypecheckInputs {
         engine: engine.as_path(),
         cwd: root.as_path(),
         tsconfig_path: virtual_tsconfig_path,
         tsconfig_bytes,
         files: overlay_files,
+    })?;
+    Ok(PublicApiBatch {
+        value: diagnostics,
+        outcomes: stubs.outcomes,
+        failures: stubs.failures,
     })
 }
 
@@ -524,34 +688,45 @@ fn run_inmemory_typecheck(
 /// exposes no emit surface). Generates the minimal `.tsc.tsx` carriers + the
 /// vue-shims ambient on disk, runs `tsgo --project --declaration` (tsc fallback if
 /// tsgo is absent), remaps diagnostics, and post-processes `.tsc.tsx.d.ts` →
-/// `.vue.d.ts`. Returns `(declaration diagnostics, emitted .d.ts files)`.
+/// `.vue.d.ts`. Returns declaration diagnostics, emitted `.d.ts` files, and
+/// per-source projection failures.
 fn run_declaration_stage(
     host: &VerterHost,
     config: &TsConfig,
     tsconfig_path: &Path,
     opts: &EmitOptions,
-) -> (Vec<Diagnostic>, Vec<PathBuf>) {
+) -> Result<(Vec<Diagnostic>, Vec<PathBuf>, Vec<PublicApiFailure>), api_check::TypecheckError> {
     // The temp dir MUST be inside the project root so tsc resolves node_modules
     // (e.g. `import("vue")`) from the generated `.tsc.tsx` files.
     let temp_dir = match TempDir::new_in(&config.root_dir) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!(
+            return Err(api_check::TypecheckError::new(format!(
                 "verter-tsc: failed to create temp directory for declaration emit in {}: {e}",
                 config.root_dir.display()
-            );
-            return (Vec::new(), Vec::new());
+            )));
         }
     };
 
     // Minimal macro-only `.tsc.tsx` carriers (declaration codegen), on disk.
     let decl_dir = temp_dir.path().join("_tsc");
-    let _ = fs::create_dir_all(&decl_dir);
-    let declaration_generated = generate_all_tsc(host, &config.vue_files, &decl_dir);
+    fs::create_dir_all(&decl_dir).map_err(|error| {
+        api_check::TypecheckError::new(format!(
+            "verter-tsc: failed to create declaration carrier directory {}: {error}",
+            decl_dir.display()
+        ))
+    })?;
+    let declaration_batch = generate_all_tsc(host, &config.vue_files, &decl_dir)?;
+    let declaration_generated = declaration_batch.value;
 
     // vue-shims so the checker resolves `import X from '*.vue'`.
     let shims_path = temp_dir.path().join("vue-shims.d.ts");
-    let _ = fs::write(&shims_path, VUE_SHIMS_DTS);
+    fs::write(&shims_path, VUE_SHIMS_DTS).map_err(|error| {
+        api_check::TypecheckError::new(format!(
+            "verter-tsc: failed to write declaration shim {}: {error}",
+            shims_path.display()
+        ))
+    })?;
 
     // Declaration file set + the `.tsc.tsx` → `.vue` source-map remap table.
     let mut tsx_to_vue: HashMap<String, (PathBuf, String)> = HashMap::new();
@@ -590,7 +765,9 @@ fn run_declaration_stage(
              Install tsgo: npm install -D @typescript/native-preview\n\
              Or install tsc: npm install -D typescript"
         );
-        return (Vec::new(), Vec::new());
+        return Err(api_check::TypecheckError::new(
+            "verter-tsc: no type checker found for declaration emit; install tsgo or tsc",
+        ));
     };
 
     let decl_opts = EmitOptions {
@@ -607,16 +784,18 @@ fn run_declaration_stage(
     ) {
         Ok(tc) => tc,
         Err(e) => {
-            eprintln!("verter-tsc: failed to write declaration tsconfig: {e}");
-            return (Vec::new(), Vec::new());
+            return Err(api_check::TypecheckError::new(format!(
+                "verter-tsc: failed to write declaration tsconfig: {e}"
+            )));
         }
     };
 
     let invocation = match invoke_checker(&checker_bin, &decl_tsconfig, &decl_opts) {
         Ok(inv) => inv,
         Err(e) => {
-            eprintln!("verter-tsc: declaration stage failed: {e}");
-            return (Vec::new(), Vec::new());
+            return Err(api_check::TypecheckError::new(format!(
+                "verter-tsc: declaration stage failed: {e}"
+            )));
         }
     };
 
@@ -641,7 +820,7 @@ fn run_declaration_stage(
         .map(|d| collect_dts_files(d))
         .unwrap_or_default();
 
-    (diagnostics, emitted)
+    Ok((diagnostics, emitted, declaration_batch.failures))
 }
 
 /// Invoke the type-checker binary and return its combined stdout+stderr output
@@ -2261,7 +2440,14 @@ exit 1
                 aliases: Vec::new(),
             });
         }
-        run_declaration_stage(&host, config, tsconfig_path, opts)
+        let (diagnostics, emitted, failures) =
+            run_declaration_stage(&host, config, tsconfig_path, opts)
+                .expect("declaration infrastructure");
+        assert!(
+            failures.is_empty(),
+            "fixture projection failures: {failures:?}"
+        );
+        (diagnostics, emitted)
     }
 
     fn create_run_fixture(
@@ -2303,6 +2489,252 @@ const props = defineProps<{ msg: string }>()
 
         let config = load_tsconfig(&tsconfig_path).expect("test tsconfig should load");
         (temp, config, tsconfig_path, decl_dir)
+    }
+
+    #[test]
+    fn public_api_batch_preserves_sibling_success_and_typed_failure() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let good = PathBuf::from("/src/Good.vue");
+        let unsafe_enum = PathBuf::from("/src/UnsafeEnum.vue");
+        let absent = PathBuf::from("/src/Missing.vue");
+        for (path, source) in [
+            (
+                &good,
+                r#"<script setup lang="ts">defineProps<{ value: string }>()</script>"#,
+            ),
+            (
+                &unsafe_enum,
+                r#"<script setup lang="ts">
+enum Unsafe { Value = Math.random() }
+defineProps<{ value: Unsafe }>()
+</script>"#,
+            ),
+        ] {
+            let canonical = path.to_string_lossy().replace('\\', "/");
+            host.upsert(UpsertRequest {
+                canonical_id: Some(canonical.clone()),
+                input_id: canonical,
+                source: std::sync::Arc::from(source),
+                file_language: FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert batch fixture");
+        }
+
+        let batch = generate_public_api_stubs(
+            &host,
+            &[unsafe_enum.clone(), good.clone(), absent.clone()],
+            Path::new("/virtual"),
+        );
+        assert_eq!(batch.value.0.len(), 1, "good sibling still projects");
+        assert_eq!(batch.outcomes.len(), 3, "one outcome per input file");
+        assert!(batch.outcomes.iter().any(|outcome| matches!(
+            outcome,
+            PublicApiOutcome::Generated { source } if source == &good
+        )));
+        assert!(batch.outcomes.iter().any(|outcome| matches!(
+            outcome,
+            PublicApiOutcome::Failed(failure) if failure.source == unsafe_enum
+        )));
+        assert!(batch.outcomes.iter().any(|outcome| matches!(
+            outcome,
+            PublicApiOutcome::Absent { source } if source == &absent
+        )));
+        assert_eq!(batch.failures.len(), 1, "one per-file failure is retained");
+        let failure = &batch.failures[0];
+        assert_eq!(failure.source, unsafe_enum);
+        assert_eq!(failure.code, "tsc-generation");
+        assert_eq!(failure.detail_code, "unsupported-declaration-shape");
+        assert_eq!(
+            failure.subject,
+            verter_compiler::tsc::TscFailureSubject::Macro { syntax_index: 0 }
+        );
+        assert_eq!(
+            failure.declaration_shape_reason,
+            Some("unsupported-enum-shape")
+        );
+        assert_eq!(failure.member_ordinal, None);
+        assert_eq!(failure.outcome_kind, None);
+        assert_eq!(failure.outcome_reason, None);
+        assert_eq!(failure.outcome_diagnostic, None);
+
+        let declaration_dir = tempfile::tempdir().expect("declaration output directory");
+        let declaration_batch = generate_all_tsc(
+            &host,
+            &[unsafe_enum.clone(), good.clone(), absent.clone()],
+            declaration_dir.path(),
+        )
+        .expect("declaration carrier infrastructure");
+        assert_eq!(
+            declaration_batch.value.len(),
+            1,
+            "declaration generation preserves the good sibling after a failure"
+        );
+        assert_eq!(
+            declaration_batch.value[0].0, good,
+            "the generated declaration belongs to the good sibling"
+        );
+        assert_eq!(declaration_batch.outcomes.len(), 3);
+        assert!(matches!(
+            &declaration_batch.outcomes[0],
+            PublicApiOutcome::Failed(failure) if failure.source == unsafe_enum
+        ));
+        assert!(matches!(
+            &declaration_batch.outcomes[1],
+            PublicApiOutcome::Generated { source } if source == &good
+        ));
+        assert!(matches!(
+            &declaration_batch.outcomes[2],
+            PublicApiOutcome::Absent { source } if source == &absent
+        ));
+        assert_eq!(declaration_batch.failures, batch.failures);
+    }
+
+    #[test]
+    fn public_api_failure_rendering_preserves_member_ordinal() {
+        let failure = PublicApiFailure::new(
+            Path::new("/src/Ordinal.vue"),
+            verter_compiler::tsc::TscGenerationError::InvalidAuthoredMemberOrdinal {
+                subject: verter_compiler::tsc::TscFailureSubject::Macro { syntax_index: 5 },
+                member_ordinal: 11,
+            }
+            .into(),
+        );
+        assert_eq!(failure.source, PathBuf::from("/src/Ordinal.vue"));
+        assert_eq!(failure.code, "tsc-generation");
+        assert_eq!(failure.detail_code, "invalid-authored-member-ordinal");
+        assert_eq!(
+            failure.subject,
+            verter_compiler::tsc::TscFailureSubject::Macro { syntax_index: 5 }
+        );
+        assert_eq!(failure.declaration_shape_reason, None);
+        assert_eq!(failure.member_ordinal, Some(11));
+        assert_eq!(failure.outcome_kind, None);
+        assert_eq!(failure.outcome_reason, None);
+        assert_eq!(failure.outcome_diagnostic, None);
+        assert_eq!(
+            failure.to_string(),
+            "/src/Ordinal.vue: error VTER1001: authoritative TSC row anchor references an unavailable authored member for macro syntax index 5 [code=tsc-generation, detailCode=invalid-authored-member-ordinal, subject=macro syntax index 5, declarationShapeReason=null, memberOrdinal=11, outcomeKind=null, outcomeReason=null, outcomeDiagnostic=null]"
+        );
+    }
+
+    #[test]
+    fn public_api_failure_rendering_preserves_all_unavailable_outcome_arms() {
+        use verter_compiler::tsc::{
+            TscFailureSubject, TscGenerationError, TscInvalidOutcome, TscUnavailableOutcome,
+        };
+        use verter_macro_dto::{
+            MacroFailure, MacroInvalidReason, MacroPartialReason, UnresolvedReason,
+            UnsupportedReason,
+        };
+
+        let cases = [
+            (
+                TscUnavailableOutcome::Partial(MacroFailure::new(
+                    MacroPartialReason::IncompleteTraversal,
+                    Some("partial detail".to_string()),
+                )),
+                "partial",
+                "incomplete-traversal",
+                "partial detail",
+            ),
+            (
+                TscUnavailableOutcome::Unresolved(MacroFailure::new(
+                    UnresolvedReason::AmbiguousReference,
+                    Some("unresolved detail".to_string()),
+                )),
+                "unresolved",
+                "ambiguous-reference",
+                "unresolved detail",
+            ),
+            (
+                TscUnavailableOutcome::Unsupported(MacroFailure::new(
+                    UnsupportedReason::SemanticConstruct,
+                    Some("unsupported detail".to_string()),
+                )),
+                "unsupported",
+                "semantic-construct",
+                "unsupported detail",
+            ),
+            (
+                TscUnavailableOutcome::Invalid(TscInvalidOutcome::Macro(MacroFailure::new(
+                    MacroInvalidReason::NonObjectRoot,
+                    Some("invalid detail".to_string()),
+                ))),
+                "invalid",
+                "non-object-root",
+                "invalid detail",
+            ),
+        ];
+
+        for (syntax_index, (outcome, kind, reason, diagnostic)) in cases.into_iter().enumerate() {
+            let source = PathBuf::from(format!("/src/{kind}.vue"));
+            let failure = PublicApiFailure::new(
+                &source,
+                TscGenerationError::UnavailableOutcome {
+                    subject: TscFailureSubject::Macro {
+                        syntax_index: syntax_index as u32,
+                    },
+                    outcome,
+                }
+                .into(),
+            );
+
+            assert_eq!(failure.detail_code, "unavailable-outcome");
+            assert_eq!(
+                failure.subject,
+                TscFailureSubject::Macro {
+                    syntax_index: syntax_index as u32,
+                }
+            );
+            assert_eq!(failure.declaration_shape_reason, None);
+            assert_eq!(failure.member_ordinal, None);
+            assert_eq!(failure.outcome_kind, Some(kind));
+            assert_eq!(failure.outcome_reason, Some(reason));
+            assert_eq!(failure.outcome_diagnostic.as_deref(), Some(diagnostic));
+            assert_eq!(
+                failure.to_string(),
+                format!(
+                    "{}: error VTER1001: authoritative TSC outcome is {kind} ({reason}) for macro syntax index {syntax_index}: {diagnostic} [code=tsc-generation, detailCode=unavailable-outcome, subject=macro syntax index {syntax_index}, declarationShapeReason=null, memberOrdinal=null, outcomeKind={kind}, outcomeReason={reason}, outcomeDiagnostic={diagnostic}]",
+                    source.display()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn public_api_failure_rendering_preserves_script_setup_attrs_subject() {
+        use verter_compiler::tsc::{
+            TscFailureSubject, TscGenerationError, TscInvalidAuthoredTypeReason, TscInvalidOutcome,
+            TscUnavailableOutcome,
+        };
+
+        let failure = PublicApiFailure::new(
+            Path::new("/src/MalformedAttrs.vue"),
+            TscGenerationError::UnavailableOutcome {
+                subject: TscFailureSubject::ScriptSetupAttrs {
+                    source_range: verter_span::Span::new(31, 37),
+                },
+                outcome: TscUnavailableOutcome::Invalid(TscInvalidOutcome::AuthoredTypeSyntax(
+                    TscInvalidAuthoredTypeReason::MalformedOrRecoveredTypeSyntax,
+                )),
+            }
+            .into(),
+        );
+
+        assert_eq!(
+            failure.subject,
+            TscFailureSubject::ScriptSetupAttrs {
+                source_range: verter_span::Span::new(31, 37),
+            }
+        );
+        assert_eq!(
+            failure.outcome_reason,
+            Some("malformed-or-recovered-type-syntax")
+        );
+        assert!(failure
+            .to_string()
+            .contains("subject=script setup attrs source range 31..37"));
     }
 
     /// Helper: write a minimal tsconfig and read back the `files` array.
@@ -3671,7 +4103,8 @@ import type { Foo } from './types'"#;
         let out_dir = temp.path().join("out");
         fs::create_dir_all(&out_dir).unwrap();
 
-        let results = generate_all_tsx(&[vue_path], &out_dir);
+        let results =
+            generate_all_tsx(&[vue_path], &out_dir).expect("validation carrier infrastructure");
         assert_eq!(results.len(), 1, "should produce one TSX file");
 
         let (_vue, tsx_code, _tsx_path) = &results[0];
@@ -3692,7 +4125,8 @@ import type { Foo } from './types'"#;
         let out_dir = temp.path().join("out");
         fs::create_dir_all(&out_dir).unwrap();
 
-        let results = generate_all_tsx(std::slice::from_ref(&vue_path), &out_dir);
+        let results = generate_all_tsx(std::slice::from_ref(&vue_path), &out_dir)
+            .expect("validation carrier infrastructure");
         let (_vue, tsx_code, _tsx_path) = &results[0];
 
         // Find the line of `a = {}` in the generated TSX.
@@ -3716,6 +4150,25 @@ import type { Foo } from './types'"#;
         // In the original .vue, `a = {}` is on line 3 (1-indexed).
         // Source map positions are 0-indexed, so line 2.
         assert_eq!(pos.line, 2, "should map to line 3 (0-indexed: 2) in .vue");
+    }
+
+    #[test]
+    fn generate_all_tsx_reports_missing_source_as_infrastructure_failure() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let missing = temp.path().join("Missing.vue");
+
+        let error = generate_all_tsx(std::slice::from_ref(&missing), temp.path())
+            .expect_err("missing source must use the infrastructure error rail");
+        let rendered = error.to_string();
+
+        assert!(
+            rendered.starts_with("verter-tsc: failed to read validation carrier source "),
+            "stable infrastructure prefix: {rendered}"
+        );
+        assert!(
+            rendered.contains(&missing.display().to_string()),
+            "failure identifies its source: {rendered}"
+        );
     }
 
     #[test]
@@ -4098,8 +4551,13 @@ defineProps<{ msg: string }>()
         let out_dir = temp.path().join("out");
         fs::create_dir_all(&out_dir).unwrap();
 
-        let (stub_files, vue_ts_map) =
-            generate_public_api_stubs(&host, std::slice::from_ref(&child_vue), &out_dir);
+        let batch = generate_public_api_stubs(&host, std::slice::from_ref(&child_vue), &out_dir);
+        assert!(
+            batch.failures.is_empty(),
+            "projection failures: {:?}",
+            batch.failures
+        );
+        let (stub_files, vue_ts_map) = batch.value;
 
         // Positive: exactly one in-memory `.vue.ts` stub carrier.
         assert_eq!(stub_files.len(), 1, "should generate one stub carrier");
@@ -4255,7 +4713,14 @@ defineProps<{ msg: string }>()
         let out_dir = temp.path().join("tsc_out");
         fs::create_dir_all(&out_dir).unwrap();
 
-        let results = generate_all_tsc(&host, &[vue_path], &out_dir);
+        let batch = generate_all_tsc(&host, &[vue_path], &out_dir)
+            .expect("declaration carrier infrastructure");
+        assert!(
+            batch.failures.is_empty(),
+            "projection failures: {:?}",
+            batch.failures
+        );
+        let results = batch.value;
 
         // Positive: should produce output
         assert!(
@@ -4341,20 +4806,27 @@ defineEmits<ChildEmits>()
         fs::create_dir_all(&out_dir).unwrap();
 
         // Cold pass warms the extract + transitive-dep caches.
-        let _cold = generate_all_tsc(&host, &vue_files, &out_dir);
+        let _cold = generate_all_tsc(&host, &vue_files, &out_dir)
+            .expect("declaration carrier infrastructure");
 
         // WARM pass: measure this host's `from_host` reads in isolation.
         const N: u64 = 4;
         host.provenance()
             .store_view_from_host_reads
             .store(0, Relaxed);
-        let results = generate_all_tsc(&host, &vue_files, &out_dir);
+        let results = generate_all_tsc(&host, &vue_files, &out_dir)
+            .expect("declaration carrier infrastructure");
         let warm_from_host = host.provenance().store_view_from_host_reads.load(Relaxed);
 
         assert_eq!(
-            results.len(),
+            results.value.len(),
             4,
             "all four .vue files produce declaration output"
+        );
+        assert!(
+            results.failures.is_empty(),
+            "projection failures: {:?}",
+            results.failures
         );
         assert!(
             warm_from_host >= 1,
@@ -4374,6 +4846,7 @@ defineEmits<ChildEmits>()
         for i in 0..3 {
             let consumer_name = format!("Consumer{i}.vue");
             let code = results
+                .value
                 .iter()
                 .find(|(p, _, _)| {
                     p.file_name().and_then(|s| s.to_str()) == Some(consumer_name.as_str())

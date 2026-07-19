@@ -392,7 +392,7 @@ fn vue_tsx_sfc_canonical_state_parses_under_authoritative_source_type() {
 /// `<script setup generic="T">` type parameters must reach the shared
 /// artifact rail every consumer resolves through. Generic substitution is
 /// graph-native (`Instantiate` dispatch): the binding rides the
-/// prepared-decl bundle's `script_setup_type_bindings` (the
+/// prepared-decl bundle's instance-owner `script_setup_type_bindings` (the
 /// `DeclarationScopePayload` source), NOT the whole-file eval env — so the
 /// probe asserts the bundle carries `T` while the env-build dedup counters
 /// stay pinned.
@@ -437,7 +437,9 @@ fn vue_generic_sfc_prepared_bundle_carries_script_setup_type_params() {
         let bundle = ctx
             .prepared_decl_bundle(canonical)
             .expect("generic vue canonical must materialise a prepared-decl bundle");
-        carries_t = bundle.script_setup_type_bindings.contains_key("T");
+        carries_t = bundle
+            .owner_scope(verter_type_expr::TopLevelOwnerId::instance(0))
+            .is_some_and(|scope| scope.script_setup_type_bindings.contains_key("T"));
     });
     assert!(
         carries_t,
@@ -2533,9 +2535,18 @@ fn imported_root_fast_path_from_fenced_state_is_served_but_not_admitted() {
         flight.join().unwrap()
     });
     *host.materialize_seam_hook.lock() = None;
+    let resolved = resolved.expect("the fenced resolve must still serve its caller");
     assert_eq!(
-        (resolved.0.as_str(), resolved.1.as_str()),
-        (leaf, "P"),
+        (
+            resolved.canonical_id.as_ref(),
+            resolved.owner,
+            resolved.symbol_name.as_ref(),
+        ),
+        (
+            leaf,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "P",
+        ),
         "the fenced resolve must still serve its caller the resolved root",
     );
 
@@ -2556,9 +2567,18 @@ fn imported_root_fast_path_from_fenced_state_is_served_but_not_admitted() {
     // No over-decline: an unfenced re-resolve admits and serves the same
     // root.
     let (resolved, _facts) = host.resolve_imported_type_root_with_facts(barrel, "P");
+    let resolved = resolved.expect("the unfenced re-resolve must serve its caller");
     assert_eq!(
-        (resolved.0.as_str(), resolved.1.as_str()),
-        (leaf, "P"),
+        (
+            resolved.canonical_id.as_ref(),
+            resolved.owner,
+            resolved.symbol_name.as_ref(),
+        ),
+        (
+            leaf,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "P",
+        ),
         "the unfenced re-resolve serves the same root",
     );
     assert!(
@@ -2613,11 +2633,20 @@ fn route_entry_built_from_fenced_participant_serves_with_empty_facts() {
     match &route_result {
         crate::resolver_core::RouteResult::Resolved {
             defining_canonical,
+            defining_owner,
             defining_symbol,
         } => {
             assert_eq!(
-                (defining_canonical.as_str(), defining_symbol.as_str()),
-                (leaf, "P"),
+                (
+                    defining_canonical.as_str(),
+                    *defining_owner,
+                    defining_symbol.as_str(),
+                ),
+                (
+                    leaf,
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    "P",
+                ),
                 "the fenced walk resolves the route for its own caller",
             );
         }
@@ -2638,8 +2667,13 @@ fn route_entry_built_from_fenced_participant_serves_with_empty_facts() {
     assert!(
         matches!(
             &route_result,
-            crate::resolver_core::RouteResult::Resolved { defining_canonical, defining_symbol }
-                if defining_canonical == leaf && defining_symbol == "P"
+            crate::resolver_core::RouteResult::Resolved {
+                defining_canonical,
+                defining_owner,
+                defining_symbol,
+            } if defining_canonical == leaf
+                && *defining_owner == verter_type_expr::TopLevelOwnerId::ordinary_file()
+                && defining_symbol == "P"
         ),
         "the unfenced walk resolves the same route",
     );
@@ -2851,6 +2885,7 @@ fn fenced_indexed_serve_semantic_memo_build_is_served_but_not_admitted() {
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::from(owner),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         },
         name: Arc::from("Owner"),
@@ -2967,6 +3002,7 @@ fn fenced_declaring_serve_class_surface_static_is_served_but_not_admitted() {
     let key = SemanticQueryKey::ResolveClassSurface {
         decl_slot: ResolvedDeclSlotIdentity::type_slot(
             Arc::from(barrel),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Klass"),
             project_identity,
             env.type_env_hash,

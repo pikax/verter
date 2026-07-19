@@ -941,7 +941,18 @@ async fn sync_file_to_provider(
             let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
 
             // Sync DTS (tsgo opens the companion buffer directly).
-            if let Some(api) = host.get_public_api(canonical_id) {
+            let api = match host.get_public_api(canonical_id) {
+                Ok(api) => api,
+                Err(error) => {
+                    crate::report_public_api_projection_error(
+                        "workspace_scanner",
+                        canonical_id,
+                        &error,
+                    );
+                    return;
+                }
+            };
+            if let Some(api) = api {
                 if let Some(dts_path) = committed_state.api_path.clone() {
                     let result = if is_tsgo {
                         sync.open_dts(&dts_path, &api.code).await

@@ -593,8 +593,18 @@ pub fn record_carrier_api_surface_code_only(
     provider_path: &str,
     api_code: &str,
 ) {
-    let owned_map: Option<Arc<str>> = host
-        .get_public_api(canonical_id)
+    let api = match host.get_public_api(canonical_id) {
+        Ok(api) => api,
+        Err(error) => {
+            crate::report_public_api_projection_error(
+                "provider_surface_store.code_only",
+                canonical_id,
+                &error,
+            );
+            return;
+        }
+    };
+    let owned_map: Option<Arc<str>> = api
         .filter(|api| &*api.code == api_code)
         .and_then(|api| api.source_map.clone());
     record_carrier_api_surface(

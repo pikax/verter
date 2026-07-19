@@ -32,6 +32,37 @@ fn make_lazy_host() -> VerterHost {
     })
 }
 
+fn expected_imported_root(
+    canonical_id: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
+    symbol_name: &str,
+) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
+    Some(
+        verter_semantic::analysis::type_solver::ResolvedRootIdentity::new_in_owner(
+            canonical_id,
+            owner,
+            symbol_name,
+        ),
+    )
+}
+
+fn expected_imported_root_tuple(
+    canonical_id: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
+    symbol_name: &str,
+) -> (String, verter_type_expr::TopLevelOwnerId, String) {
+    (canonical_id.to_string(), owner, symbol_name.to_string())
+}
+
+fn declaration_path(
+    owner: verter_type_expr::TopLevelOwnerId,
+    name: &str,
+) -> verter_parser::utils::oxc::script::type_inventory::DeclarationPath {
+    verter_parser::utils::oxc::script::type_inventory::DeclarationPath::root(
+        verter_type_expr::DeclKey::new(owner, name),
+    )
+}
+
 fn upsert_vue(host: &VerterHost, id: &str, src: &str) {
     let _ = host
         .upsert(UpsertRequest {
@@ -1114,9 +1145,10 @@ export type { FancyProps }"#,
     let resolved = host.resolve_imported_type_root(canonical_id, "FancyProps");
     assert_eq!(
         resolved,
-        (
-            "/workspace/node_modules/lib/dist/inner.d.ts".to_string(),
-            "FancyProps".to_string()
+        expected_imported_root(
+            "/workspace/node_modules/lib/dist/inner.d.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "FancyProps",
         ),
         "imported declaration entrypoints must upgrade stale miss routes to the exact declaration target",
     );
@@ -1405,8 +1437,8 @@ fn resolve_imported_type_root_caches_stable_miss_in_imported_root_db() {
     let resolved = host.resolve_imported_type_root(canonical_id, "MissingProps");
     assert_eq!(
         resolved,
-        (canonical_id.to_string(), "MissingProps".to_string()),
-        "legacy callers still observe the provider/name tuple on a miss",
+        None,
+        "a stable imported-root miss must fail closed instead of fabricating a provider-local identity",
     );
 
     let cached = host
@@ -1607,21 +1639,28 @@ fn prepared_type_decl_reuses_indexed_package_shallow_state_without_reread() {
     );
 
     let _view = host.resolver_store_view_read().into_owned_view();
-    let (target_canonical, target_name) = host.resolve_imported_type_root(
-        "/workspace/node_modules/pkg/dist/index.d.ts",
-        "PackageEmits",
-    );
+    let target = host
+        .resolve_imported_type_root(
+            "/workspace/node_modules/pkg/dist/index.d.ts",
+            "PackageEmits",
+        )
+        .expect("PackageEmits must resolve to its exact imported declaration");
     assert_eq!(
-        target_canonical, "/workspace/node_modules/pkg/dist/index3.d.ts",
+        target.canonical_id.as_ref(),
+        "/workspace/node_modules/pkg/dist/index3.d.ts",
         "shallow lookup should still normalize the package export target first",
     );
-    assert_eq!(target_name, "PackageEmits");
+    assert_eq!(
+        target.owner,
+        verter_type_expr::TopLevelOwnerId::ordinary_file()
+    );
+    assert_eq!(target.symbol_name.as_ref(), "PackageEmits");
 
     ws.reset_reads();
     host.provenance().reset();
 
     let prepared = host
-        .prepared_type_decl(target_canonical.as_str(), target_name.as_str())
+        .prepared_type_decl(target.canonical_id.as_ref(), target.symbol_name.as_ref())
         .expect("prepared package declaration should reuse the warmed indexed shallow state");
 
     let payload = prepared
@@ -2182,7 +2221,12 @@ fn store_view_indexed_imported_seed_reuses_cached_source_for_snapshot_and_env() 
         .external_type_analysis(canonical_id)
         .expect("external type analysis should reuse the indexed imported source");
     assert!(
-        analysis.local_type_symbol("Alpha").is_some(),
+        analysis
+            .local_type_symbol(&declaration_path(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "Alpha",
+            ))
+            .is_some(),
         "external type analysis should still expose the imported declaration symbol",
     );
     assert_eq!(
@@ -5656,7 +5700,12 @@ fn external_type_analysis_prefers_declaration_companion_for_runtime_js_dependenc
         .expect("runtime-script analysis requests should prefer the declaration companion");
 
     assert!(
-        analysis.local_symbol_span("Props").is_some(),
+        analysis
+            .local_symbol_span(&declaration_path(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "Props",
+            ))
+            .is_some(),
         "the declaration companion analysis should expose declaration symbols",
     );
 
@@ -6848,6 +6897,7 @@ fn edge_currency_oracle_stales_wildcard_surface_after_generation_advance() {
         match shape {
             EdgeShape::None => {}
             EdgeShape::Wildcard => wildcard_reexports.push(WildcardReexport {
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 source_specifier: "./dep".to_string(),
                 canonical_id: String::new(),
             }),
@@ -6868,6 +6918,7 @@ fn edge_currency_oracle_stales_wildcard_surface_after_generation_advance() {
                     ImportTarget {
                         source_specifier: "./dep".to_string(),
                         imported_name: "Foo".to_string(),
+                        is_namespace: false,
                         canonical_id: "/workspace/dep.ts".to_string(),
                     },
                 );
@@ -8061,13 +8112,28 @@ export interface Props extends Base {
         .expect("vue dependency analysis should be built from the script/eval source");
 
     assert!(
-        analysis.local_symbol_span("Props").is_some(),
+        analysis
+            .local_symbol_span(&declaration_path(
+                verter_type_expr::TopLevelOwnerId::module(0),
+                "Props",
+            ))
+            .is_some(),
         "vue dependency analysis should see local type symbols in the script block",
     );
+    let base_binding = analysis
+        .local_import_symbol_target(&verter_type_expr::DeclKey::new(
+            verter_type_expr::TopLevelOwnerId::module(0),
+            "Base",
+        ))
+        .expect("the module script import must retain its exact owner-qualified binding");
+    assert_eq!(base_binding.source, "./base");
     assert_eq!(
-        analysis.local_import_symbol_target("Base"),
-        Some(("./base", "Base")),
-        "vue dependency analysis should keep import lookup-table entries for script imports",
+        base_binding.imported,
+        verter_parser::utils::oxc::script::type_inventory::ImportedExportPath::Symbol(
+            verter_type_expr::facts::TypeDependencyPathFact::from_segments(["Base"])
+                .expect("Base is a valid dependency path"),
+        ),
+        "vue dependency analysis should keep the exact imported export path",
     );
     // Required imported names are a BODY-dependent product: they
     // demand-walk through the artifact's shallow state (lazy
@@ -8105,19 +8171,39 @@ export type Props = {
         .expect("tsx vue dependency analysis should be built from the script block");
 
     assert!(
-        analysis.local_symbol_span("Props").is_some(),
+        analysis
+            .local_symbol_span(&declaration_path(
+                verter_type_expr::TopLevelOwnerId::module(0),
+                "Props",
+            ))
+            .is_some(),
         "tsx shallow analysis should retain exported type symbols from the script block",
     );
     assert!(
-        analysis.local_import_symbol_target("Button").is_none(),
+        analysis
+            .local_import_symbol_target(&verter_type_expr::DeclKey::new(
+                verter_type_expr::TopLevelOwnerId::module(0),
+                "Button",
+            ))
+            .is_none(),
         "tsx shallow analysis should not invent import targets for local JSX-bearing bindings",
     );
     assert!(
-        analysis.direct_reexport_target("Props").is_none(),
+        analysis
+            .direct_reexport_target(&verter_type_expr::DeclKey::new(
+                verter_type_expr::TopLevelOwnerId::module(0),
+                "Props",
+            ))
+            .is_none(),
         "local tsx exports should stay local instead of being routed through synthetic reexport edges",
     );
     assert!(
-        analysis.required_import_names("Props").is_empty(),
+        analysis
+            .required_import_bindings(&declaration_path(
+                verter_type_expr::TopLevelOwnerId::module(0),
+                "Props",
+            ))
+            .is_empty(),
         "local tsx-only types should not invent import dependencies",
     );
 }
@@ -8416,7 +8502,11 @@ fn route_and_root_resolution_do_not_fall_back_through_frontier() {
     let root = host.resolve_imported_type_root("/src/index.ts", "Props");
     assert_eq!(
         root,
-        ("/src/types.ts".to_string(), "Props".to_string()),
+        expected_imported_root(
+            "/src/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Props",
+        ),
         "imported-root proof should reuse the DB-owned route without frontier fallback",
     );
 }
@@ -8924,17 +9014,19 @@ export type TargetEmits = { change: [value: string] }
 
     assert_eq!(
         props_root,
-        (
-            "/src/types/target.ts".to_string(),
-            "TargetProps".to_string()
+        expected_imported_root(
+            "/src/types/target.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "TargetProps",
         ),
         "TargetProps should resolve through the cached shallow barrel route",
     );
     assert_eq!(
         emits_root,
-        (
-            "/src/types/target.ts".to_string(),
-            "TargetEmits".to_string()
+        expected_imported_root(
+            "/src/types/target.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "TargetEmits",
         ),
         "TargetEmits should resolve through the cached shallow barrel route",
     );
@@ -9050,7 +9142,11 @@ export interface Props {
 
     assert_eq!(
         root,
-        ("/src/types.ts".to_string(), "Props".to_string()),
+        expected_imported_root(
+            "/src/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Props",
+        ),
         "local exported symbols should resolve to their defining file without leaving the file",
     );
     // The owner's own import EDGES canonicalise once as part of its
@@ -9097,7 +9193,11 @@ fn direct_imported_type_root_fast_path_tracks_provider_route_and_target_whole_ha
 
     assert_eq!(
         resolved,
-        ("/src/target.ts".to_string(), "Props".to_string()),
+        expected_imported_root_tuple(
+            "/src/target.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Props",
+        ),
         "fast imported-root proof should preserve the exact child target tuple",
     );
     assert!(
@@ -9174,7 +9274,11 @@ fn direct_imported_type_root_fast_path_resolves_cold_target_under_store_view() {
 
     assert_eq!(
         resolved,
-        ("/src/target.ts".to_string(), "Props".to_string()),
+        expected_imported_root_tuple(
+            "/src/target.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Props",
+        ),
         "store-view fast path should keep the same routed child tuple",
     );
     assert!(
@@ -9254,7 +9358,11 @@ fn imported_type_root_fast_path_follows_exported_local_import_without_child_rout
 
     assert_eq!(
         resolved,
-        ("/src/target.ts".to_string(), "Props".to_string()),
+        expected_imported_root_tuple(
+            "/src/target.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Props",
+        ),
         "fast imported-root proof should follow the exported local import to the exact child target tuple",
     );
     assert!(
@@ -9991,7 +10099,11 @@ export interface UnusedProps {
 
     assert_eq!(
         root,
-        ("/src/Checkbox.vue".to_string(), "CheckboxProps".to_string()),
+        expected_imported_root(
+            "/src/Checkbox.vue",
+            verter_type_expr::TopLevelOwnerId::module(0),
+            "CheckboxProps",
+        ),
         "late wildcard imported-root proof should still resolve to the correct child",
     );
     for never_inspected in [
@@ -10062,17 +10174,19 @@ export interface AccordionEmits {
 
     assert_eq!(
         props_root,
-        (
-            "/src/Accordion.vue".to_string(),
-            "AccordionProps".to_string()
+        expected_imported_root(
+            "/src/Accordion.vue",
+            verter_type_expr::TopLevelOwnerId::module(0),
+            "AccordionProps",
         ),
         "first imported-root proof should resolve the Vue child type export",
     );
     assert_eq!(
         emits_root,
-        (
-            "/src/Accordion.vue".to_string(),
-            "AccordionEmits".to_string()
+        expected_imported_root(
+            "/src/Accordion.vue",
+            verter_type_expr::TopLevelOwnerId::module(0),
+            "AccordionEmits",
         ),
         "second imported-root proof should resolve through the same indexed Vue child",
     );
@@ -11324,7 +11438,11 @@ export interface UnusedProps {
 
     assert_eq!(
         root,
-        ("/src/Icon.vue".to_string(), "IconProps".to_string()),
+        expected_imported_root(
+            "/src/Icon.vue",
+            verter_type_expr::TopLevelOwnerId::module(0),
+            "IconProps",
+        ),
         "wildcard route proof should resolve IconProps through the matching child stem",
     );
     assert_eq!(
@@ -11423,7 +11541,11 @@ export interface UnusedProps {
 
     assert_eq!(
         root,
-        ("/src/Link.vue".to_string(), "LinkProps".to_string()),
+        expected_imported_root(
+            "/src/Link.vue",
+            verter_type_expr::TopLevelOwnerId::module(0),
+            "LinkProps",
+        ),
         "nested barrel alias proof should still resolve LinkProps through the direct sibling barrel child",
     );
     for never_inspected in ["/src/Button.vue", "/src/Unused.vue"] {
@@ -12739,8 +12861,12 @@ fn imported_root_invalidates_on_intermediate_barrel_change() {
     let _view1 = host.resolver_store_view_read().into_owned_view();
     let root1 = host.resolve_imported_type_root("/src/index.ts", "Props");
     assert_eq!(
-        root1.0.as_str(),
-        "/src/types-a.ts",
+        root1,
+        expected_imported_root(
+            "/src/types-a.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Props",
+        ),
         "initial root should point to types-a",
     );
 
@@ -12760,8 +12886,12 @@ fn imported_root_invalidates_on_intermediate_barrel_change() {
     let _view2 = host.resolver_store_view_read().into_owned_view();
     let root2 = host.resolve_imported_type_root("/src/index.ts", "Props");
     assert_eq!(
-        root2.0.as_str(),
-        "/src/types-b.ts",
+        root2,
+        expected_imported_root(
+            "/src/types-b.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Props",
+        ),
         "after intermediate barrel change, root must point to types-b, \
          not stale types-a from the cached imported root",
     );

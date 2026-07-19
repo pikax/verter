@@ -275,6 +275,7 @@ mod tests {
             QueryError::Other(Arc::from("custom failure text")),
             QueryError::DeclPlaceholder {
                 canonical_id: Arc::from("/w/p.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 name: Arc::from("Pending"),
                 whole_hash: [0u8; 16],
             },
@@ -310,6 +311,7 @@ mod tests {
             QueryError::Other(Arc::from("genuinely free text")),
             QueryError::DeclPlaceholder {
                 canonical_id: Arc::from("/w/p.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 name: Arc::from("semanticMiss"),
                 whole_hash: [0u8; 16],
             },
@@ -382,6 +384,7 @@ mod tests {
         assert!(
             !query_error_is_unmaterialized_sentinel(&QueryError::DeclPlaceholder {
                 canonical_id: Arc::from("/w/p.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 name: Arc::from("semanticMiss"),
                 whole_hash: [0u8; 16],
             }),

@@ -1084,6 +1084,7 @@ fn typeof_carrier_renders_type_args() {
     let value_root = ValueRootKey {
         scope: ScopeId {
             canonical_id: Arc::from("/m.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         },
         name: Arc::from("factory"),

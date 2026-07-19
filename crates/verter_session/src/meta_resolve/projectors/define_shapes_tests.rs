@@ -258,6 +258,7 @@ defineEmits<{ save: [id: number] }>()
         base: AuthoredBodyLocator::MacroPayload(verter_type_expr::locators::MacroPayloadLocator {
             anchor: verter_type_expr::locators::AuthoredAnchor {
                 canonical_id: std::sync::Arc::from("/App.vue"),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 symbol: std::sync::Arc::from("default"),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
@@ -319,6 +320,7 @@ defineEmits<{ save: [id: number] }>()
         base: AuthoredBodyLocator::MacroPayload(verter_type_expr::locators::MacroPayloadLocator {
             anchor: verter_type_expr::locators::AuthoredAnchor {
                 canonical_id: std::sync::Arc::from("/App.vue"),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 symbol: std::sync::Arc::from("default"),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },

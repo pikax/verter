@@ -635,6 +635,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let read = self.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                         scope: ScopeId {
                             canonical_id: Arc::clone(&identity.canonical_id),
+                            owner: identity.owner,
                             local_scope: None,
                         },
                         name: Arc::clone(&identity.decl_name),
@@ -666,8 +667,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // the un-instantiated `InstantiationRef` as its deliberate
                 // stable stop above.
                 SemanticNodeData::InstantiationRef { base, args } => {
-                    let slot = self
-                        .type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
+                    let slot = self.type_slot_for(
+                        Arc::clone(&base.canonical_id),
+                        base.owner,
+                        Arc::clone(&base.decl_name),
+                    );
                     let owner_canonical = Arc::clone(&base.canonical_id);
                     let args: Arc<[SemanticNodeId]> = Arc::from(
                         args.iter()
@@ -1047,11 +1051,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             }
                             SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                                 canonical_id,
+                                owner,
                                 name,
                                 whole_hash: _,
                             }) => {
-                                let base =
-                                    self.type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
+                                let base = self.type_slot_for(
+                                    Arc::clone(canonical_id),
+                                    *owner,
+                                    Arc::clone(name),
+                                );
                                 let context =
                                     frames.last().expect("active evaluator frame").context;
                                 let read = self.execute_read(SemanticQueryKey::Instantiate(

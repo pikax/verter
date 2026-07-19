@@ -71,6 +71,14 @@ import { SourceMap } from "node:module";
 import type * as TS from "typescript";
 
 import { VIRTUAL_FILE_NAMING, type VirtualPathPolicy } from "@verter/language-shared";
+import type {
+  HostPublicApiProjectionError,
+  HostPublicApiResult,
+  HostTscFailureSubject,
+  HostTscDeclarationShapeReason,
+  HostTscProjectionDetailCode,
+  HostTscUnavailableOutcome,
+} from "@verter/native";
 
 /**
  * The component-carrier source extensions (`.vue`, `.svelte`), derived from the
@@ -127,9 +135,42 @@ export interface CarrierCodegenHost {
   getPublicApi(
     canonicalId: string,
     mode?: "public" | "testing" | "declaration",
-  ): { code: string; sourceMap?: string } | null;
+  ): CarrierPublicApiResult;
   /** Release host resources before the process exits (prevents hangs). */
   close?(): void;
+}
+
+/** Plugin-facing aliases of the native binding's single closed wire contract. */
+export type CarrierTscDeclarationShapeReason = HostTscDeclarationShapeReason;
+export type CarrierTscProjectionDetailCode = HostTscProjectionDetailCode;
+export type CarrierTscUnavailableOutcome = HostTscUnavailableOutcome;
+export type CarrierTscFailureSubject = HostTscFailureSubject;
+export type CarrierPublicApiProjectionError = HostPublicApiProjectionError;
+export type CarrierPublicApiResult = HostPublicApiResult;
+
+/** Error rail used by the batch driver; preserves every binding field. */
+export class CarrierPublicApiProjectionFailure extends Error {
+  readonly code: "tsc-generation";
+  readonly detailCode: CarrierTscProjectionDetailCode;
+  readonly subject: CarrierTscFailureSubject;
+  readonly declarationShapeReason: CarrierTscDeclarationShapeReason | null;
+  readonly memberOrdinal: number | null;
+  readonly outcomeKind: CarrierTscUnavailableOutcome["outcomeKind"] | null;
+  readonly outcomeReason: CarrierTscUnavailableOutcome["outcomeReason"] | null;
+  readonly outcomeDiagnostic: string | null;
+
+  constructor(error: CarrierPublicApiProjectionError) {
+    super(`public API projection failed: ${error.code}/${error.detailCode}`);
+    this.name = "CarrierPublicApiProjectionFailure";
+    this.code = error.code;
+    this.detailCode = error.detailCode;
+    this.subject = error.subject;
+    this.declarationShapeReason = error.declarationShapeReason;
+    this.memberOrdinal = error.memberOrdinal;
+    this.outcomeKind = error.outcomeKind;
+    this.outcomeReason = error.outcomeReason;
+    this.outcomeDiagnostic = error.outcomeDiagnostic;
+  }
 }
 
 /** The framework of a carrier source — selects the virtual-file-naming row. */
@@ -244,7 +285,14 @@ export interface BatchTypecheckResult {
    * outside the mirror.
    */
   materializedCarriers: Map<string, string>;
+  /** Per-owned-source carrier result; one projection failure never aborts siblings. */
+  sourceOutcomes: Map<string, CarrierSourceOutcome>;
 }
+
+export type CarrierSourceOutcome =
+  | { kind: "materialized"; carrierPath: string }
+  | { kind: "absent" }
+  | { kind: "projectionFailure"; error: CarrierPublicApiProjectionError };
 
 /** Resolve a virtual-file-naming suffix policy to a concrete file path. */
 function applySuffixPolicy(
@@ -568,6 +616,7 @@ export function runBatchTypecheck(args: RunBatchTypecheckArgs): BatchTypecheckRe
     mirrorRoot,
     buildMode: false,
     materializedCarriers: new Map(),
+    sourceOutcomes: new Map(),
   };
 
   try {
@@ -639,7 +688,7 @@ export function runBatchTypecheck(args: RunBatchTypecheckArgs): BatchTypecheckRe
       src: CarrierSource,
       role: "ide" | "api",
       code: string,
-      mapRaw: string | undefined,
+      mapRaw: string | null | undefined,
       isJsx: boolean,
     ): string | null => {
       const carrierPath = companionMirrorPath({ ...src, role }, mirroredSource, isJsx);
@@ -647,13 +696,13 @@ export function runBatchTypecheck(args: RunBatchTypecheckArgs): BatchTypecheckRe
       const carrierAbs = toSlash(carrierPath);
       fs.mkdirSync(path.dirname(carrierAbs), { recursive: true });
       fs.writeFileSync(carrierAbs, code, "utf8");
-      if (mapRaw !== undefined) fs.writeFileSync(carrierAbs + ".map", mapRaw, "utf8");
+      if (mapRaw != null) fs.writeFileSync(carrierAbs + ".map", mapRaw, "utf8");
       carrierStates.push({
         carrierPath: carrierAbs,
         sourcePath: toSlash(src.sourcePath),
         carrierText: code,
         sourceText: src.source,
-        map: parseMap(mapRaw),
+        map: parseMap(mapRaw ?? undefined),
       });
       return carrierAbs;
     };
@@ -681,7 +730,22 @@ export function runBatchTypecheck(args: RunBatchTypecheckArgs): BatchTypecheckRe
         const ideProfile = { target: "ide" as const, sourceMap: true };
         host.ensureIdeCompiled?.(canonical, ideProfile);
         const ide = host.getIde(canonical, ideProfile);
-        if (!ide) continue; // no IDE surface (non-carrier) — skip.
+        if (!ide) {
+          result.sourceOutcomes.set(sourcePath, { kind: "absent" });
+          continue;
+        }
+
+        // Resolve the required sibling API carrier before writing either file.
+        // A typed failure excludes only this source and leaves later siblings
+        // eligible for materialisation and typechecking.
+        const apiResult = host.getPublicApi(canonical, "public");
+        if (apiResult.error !== null) {
+          result.sourceOutcomes.set(sourcePath, {
+            kind: "projectionFailure",
+            error: apiResult.error,
+          });
+          continue;
+        }
 
         const ideCarrier = materialize(
           mirroredSource,
@@ -691,8 +755,15 @@ export function runBatchTypecheck(args: RunBatchTypecheckArgs): BatchTypecheckRe
           ide.sourceMap,
           ide.isJsx,
         );
-        if (ideCarrier === null) continue;
+        if (ideCarrier === null) {
+          result.sourceOutcomes.set(sourcePath, { kind: "absent" });
+          continue;
+        }
         result.materializedCarriers.set(sourcePath, ideCarrier);
+        result.sourceOutcomes.set(sourcePath, {
+          kind: "materialized",
+          carrierPath: ideCarrier,
+        });
         group.carriers.push({ src, carrierPath: ideCarrier });
 
         // The IDE carrier self-imports `./{canonical}.verter.ts` for instance
@@ -700,16 +771,34 @@ export function runBatchTypecheck(args: RunBatchTypecheckArgs): BatchTypecheckRe
         // self-import resolves. It is NOT added to the project's `files` (it is a
         // dependency reached through the self-import, not a root), and its
         // diagnostics are mapped back to the same source.
-        const api = host.getPublicApi(canonical, "public");
+        const api = apiResult.value;
         if (api) {
           materialize(mirroredSource, src, "api", api.code, api.sourceMap, false);
         }
       } else {
-        const api = host.getPublicApi(canonical, "public");
-        if (!api) continue;
+        const apiResult = host.getPublicApi(canonical, "public");
+        if (apiResult.error !== null) {
+          result.sourceOutcomes.set(sourcePath, {
+            kind: "projectionFailure",
+            error: apiResult.error,
+          });
+          continue;
+        }
+        const api = apiResult.value;
+        if (!api) {
+          result.sourceOutcomes.set(sourcePath, { kind: "absent" });
+          continue;
+        }
         const apiCarrier = materialize(mirroredSource, src, "api", api.code, api.sourceMap, false);
-        if (apiCarrier === null) continue;
+        if (apiCarrier === null) {
+          result.sourceOutcomes.set(sourcePath, { kind: "absent" });
+          continue;
+        }
         result.materializedCarriers.set(sourcePath, apiCarrier);
+        result.sourceOutcomes.set(sourcePath, {
+          kind: "materialized",
+          carrierPath: apiCarrier,
+        });
         group.carriers.push({ src, carrierPath: apiCarrier });
       }
     }

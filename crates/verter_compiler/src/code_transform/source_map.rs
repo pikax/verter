@@ -195,13 +195,34 @@ impl<'a> CodeTransform<'a> {
                     start: orig_start,
                     end: orig_end,
                     content,
+                    replacement,
                     ..
                 } => {
                     if content.is_empty() {
                         continue;
                     }
-                    // Moved content — line-by-line mappings like Original chunks
-                    if let Some(source_id) = source_id {
+                    // Byte-preserved moved content maps linearly. Replacement
+                    // text retains its pre-move non-linear identity and maps
+                    // only at the replaced source span's start.
+                    if *replacement {
+                        if let Some(source_id) = source_id {
+                            let (src_line_1, src_col_1) =
+                                resolver.offset_to_line_and_col(*orig_start as usize);
+                            tokens.push(Token::new(
+                                generated_line,
+                                generated_column,
+                                (src_line_1 - 1) as u32,
+                                (src_col_1 - 1) as u32,
+                                Some(source_id),
+                                None,
+                            ));
+                        }
+                        Self::advance_generated_position(
+                            content,
+                            &mut generated_line,
+                            &mut generated_column,
+                        );
+                    } else if let Some(source_id) = source_id {
                         Self::emit_mapped_content(
                             &mut tokens,
                             content,

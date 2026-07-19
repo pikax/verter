@@ -140,7 +140,7 @@ fn vmrs_runtime_bundle_is_the_only_type_based_props_authority() {
                     },
                     anchor: MacroAnchor::Authored {
                         macro_index: 0,
-                        member_ordinal: Some(AuthoredMemberOrdinal::new(0)),
+                        member_ordinal: AuthoredMemberOrdinal::new(0),
                     },
                 }],
             })),
@@ -510,19 +510,24 @@ fn vmrs_with_defaults_performs_one_syntax_owned_merge() {
 }
 
 #[test]
-fn vmrs_tsc_consumes_terminal_splice_without_source_type_fallback() {
+fn vmrs_tsc_preserves_the_authorized_parser_owned_props_argument() {
     use std::sync::Arc;
     use verter_macro_dto::{
-        MacroTscBundle, MacroTscEntry, MacroTscOutcome, MacroTscProjection, TscSpliceText,
+        MacroTscBundle, MacroTscEntry, MacroTscOutcome, MacroTscProjection, TscPropsProjection,
+        TscPublicPropsProjection, TscScopeRequirements,
     };
 
     let semantics = VueMacroSemanticInput::Tsc(Arc::new(MacroTscBundle {
         entries: vec![MacroTscEntry {
             syntax_index: 0,
             macro_index: 0,
-            outcome: MacroTscOutcome::Complete(MacroTscProjection::Props {
-                splice: TscSpliceText::new("{ authoritative: string; count?: number }"),
-            }),
+            outcome: MacroTscOutcome::Complete(MacroTscProjection::Props(TscPropsProjection {
+                public: TscPublicPropsProjection::AuthoredArgument {
+                    anchor: verter_macro_dto::MacroAnchor::MacroArgument { macro_index: 0 },
+                },
+                testing_rows: Vec::new(),
+                scope: TscScopeRequirements::default(),
+            })),
         }],
     }));
     let alloc = Allocator::new();
@@ -539,11 +544,129 @@ fn vmrs_tsc_consumes_terminal_splice_without_source_type_fallback() {
 
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     let code = result.tsc.expect("TSC output").code;
-    assert!(
-        code.contains("{ authoritative: string; count?: number }"),
-        "{code}"
+    assert!(code.contains("{ ignored: boolean }"), "{code}");
+}
+
+#[test]
+fn vmrs_tsc_join_failure_is_reported_as_an_explicit_compiler_diagnostic() {
+    use std::sync::Arc;
+    use verter_macro_dto::{
+        MacroTscBundle, MacroTscEntry, MacroTscOutcome, MacroTscProjection, TscPropsProjection,
+        TscPublicPropsProjection, TscScopeRequirements,
+    };
+
+    let entry = MacroTscEntry {
+        syntax_index: 0,
+        macro_index: 0,
+        outcome: MacroTscOutcome::Complete(MacroTscProjection::Props(TscPropsProjection {
+            public: TscPublicPropsProjection::AuthoredArgument {
+                anchor: verter_macro_dto::MacroAnchor::MacroArgument { macro_index: 0 },
+            },
+            testing_rows: Vec::new(),
+            scope: TscScopeRequirements::default(),
+        })),
+    };
+    let semantics = VueMacroSemanticInput::Tsc(Arc::new(MacroTscBundle {
+        entries: vec![entry.clone(), entry],
+    }));
+    let result = compile(
+        r#"<script setup lang="ts">defineProps<{ value: string }>()</script>"#,
+        &CodegenOptions {
+            target: CompileTarget::TSC,
+            ..Default::default()
+        },
+        &VerterCompileOptions::default(),
+        &semantics,
+        &Allocator::new(),
     );
-    assert!(!code.contains("ignored: boolean"), "{code}");
+
+    assert!(result.tsc.is_none());
+    assert!(
+        result.errors.iter().any(|diagnostic| {
+            diagnostic.code == "XUnavailableMacroSemanticResult"
+                && diagnostic.message.contains("duplicate")
+        }),
+        "typed TSC join failure must not be silently dropped: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn vmrs_tsc_unavailable_diagnostics_preserve_exact_outcome_reason_and_detail() {
+    use std::sync::Arc;
+    use verter_macro_dto::{
+        MacroFailure, MacroInvalidReason, MacroPartialReason, MacroTscBundle, MacroTscEntry,
+        MacroTscOutcome, UnresolvedReason, UnsupportedReason,
+    };
+
+    let cases = [
+        (
+            MacroTscOutcome::Partial(MacroFailure::new(
+                MacroPartialReason::Recursion,
+                Some("partial detail".to_owned()),
+            )),
+            "partial",
+            "recursion",
+            "partial detail",
+        ),
+        (
+            MacroTscOutcome::Unresolved(MacroFailure::new(
+                UnresolvedReason::AmbiguousReference,
+                Some("unresolved detail".to_owned()),
+            )),
+            "unresolved",
+            "ambiguous-reference",
+            "unresolved detail",
+        ),
+        (
+            MacroTscOutcome::Unsupported(MacroFailure::new(
+                UnsupportedReason::SemanticConstruct,
+                Some("unsupported detail".to_owned()),
+            )),
+            "unsupported",
+            "semantic-construct",
+            "unsupported detail",
+        ),
+        (
+            MacroTscOutcome::Invalid(MacroFailure::new(
+                MacroInvalidReason::NonObjectRoot,
+                Some("invalid detail".to_owned()),
+            )),
+            "invalid",
+            "non-object-root",
+            "invalid detail",
+        ),
+    ];
+
+    for (outcome, kind, reason, detail) in cases {
+        let semantics = VueMacroSemanticInput::Tsc(Arc::new(MacroTscBundle {
+            entries: vec![MacroTscEntry {
+                syntax_index: 0,
+                macro_index: 0,
+                outcome,
+            }],
+        }));
+        let result = compile(
+            r#"<script setup lang="ts">defineProps<{ value: string }>()</script>"#,
+            &CodegenOptions {
+                target: CompileTarget::TSC,
+                ..Default::default()
+            },
+            &VerterCompileOptions::default(),
+            &semantics,
+            &Allocator::new(),
+        );
+        assert!(result.tsc.is_none());
+        assert!(
+            result.errors.iter().any(|diagnostic| {
+                diagnostic.message.contains(kind)
+                    && diagnostic.message.contains(reason)
+                    && diagnostic.message.contains(detail)
+            }),
+            "kind={kind}, diagnostics={:?}",
+            result.errors
+        );
+    }
 }
 
 fn compile_and_validate_vapor_template(source: &str) -> String {

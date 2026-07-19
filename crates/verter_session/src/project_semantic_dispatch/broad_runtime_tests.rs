@@ -25,7 +25,11 @@ fn instantiated_alias(
     canonical: &str,
     name: &str,
 ) -> crate::semantic_query::SemanticNodeId {
-    let slot = dispatch.type_slot_for(Arc::from(canonical), Arc::from(name));
+    let slot = dispatch.type_slot_for(
+        Arc::from(canonical),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::from(name),
+    );
     let key = crate::semantic_query::InstantiateKey::new(
         slot,
         Arc::from([]),
@@ -167,6 +171,7 @@ fn broad_runtime_recognizes_only_shadow_safe_builtin_nominal_identities() {
         graph.intern_node(SemanticNodeData::DeclRef {
             identity: DeclIdentity {
                 canonical_id: Arc::from("__builtin__"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from(name),
             },
@@ -191,6 +196,7 @@ fn broad_runtime_recognizes_only_shadow_safe_builtin_nominal_identities() {
         let user_nominal = graph.intern_node(SemanticNodeData::DeclRef {
             identity: DeclIdentity {
                 canonical_id: Arc::from(format!("/src/{name}.ts")),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from(name),
             },

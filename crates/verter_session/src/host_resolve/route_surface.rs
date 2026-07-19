@@ -8,14 +8,14 @@
 //! - `resolve_prepared_decl_target` /
 //!   `resolve_decl_in_scope_with_reexport_chain` (test-only) — host-state
 //!   helpers that consult the prepared-decl bundles.
-//! - `resolve_named_type_export_target` — the production wrapper around
-//!   the route-DB cooperative resolve that also runs `ensure_indexed_ready_serve`
-//!   on the resolved target.
+//! - `resolve_named_type_export_target` — test-only route-DB fixture that
+//!   materialises the resolved target through `ensure_indexed_ready_serve`.
 //! - `read_dep_source_for_type_resolution` — test-only effective-source reader.
 
 #[cfg(test)]
 use std::sync::Arc;
 
+#[cfg(test)]
 use crate::host_manage::component_meta_trace_custom;
 use crate::types::*;
 use crate::VerterHost;
@@ -221,12 +221,14 @@ impl VerterHost {
             std::sync::Arc::new(
                 crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
                     &bundle,
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             )
         });
         let resolved_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
             self,
             scope_canonical_id,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             scope_payload_arc.as_deref(),
             symbol_name,
         )
@@ -247,18 +249,15 @@ impl VerterHost {
             .unwrap_or_default();
         Some(crate::semantic_query::DeclIdentity {
             canonical_id: std::sync::Arc::from(declaring_canonical.as_str()),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash,
             decl_name: std::sync::Arc::from(declaring_symbol.as_str()),
         })
     }
 
-    /// Test-only bare wrapper around the view-bound variant. Production
-    /// callers go through `ctx.resolve_named_type_export_target` (which
-    /// routes through the request-bound `_with_store_view`); the
-    /// test-only arm on `impl ResolverContext for VerterHost` reaches
-    /// this wrapper on test fixtures that call `host.<method>` directly.
-    #[cfg(any(test, feature = "test-support"))]
-    #[allow(dead_code)]
+    /// Test-only bare wrapper around the view-bound route-resolution fixture
+    /// surface.
+    #[cfg(test)]
     pub(crate) fn resolve_named_type_export_target(
         &self,
         dep_canonical: &str,
@@ -281,8 +280,8 @@ impl VerterHost {
         )
     }
 
-    /// View-bound variant — production-reachable through ctx-bound
-    /// `HostResolverContext` / `SessionResolverContext` callers.
+    /// View-bound test fixture variant.
+    #[cfg(test)]
     pub(crate) fn resolve_named_type_export_target_with_store_view(
         &self,
         view: &dyn crate::resolver_core::StoreView,

@@ -23,7 +23,9 @@ use verter_type_expr::facts::{
     FactOrLocator, LeafTypeFact, ResolvedLocalShape, SemanticTypeSource, SynthesizedLeafMember,
     SynthesizedMemberFact,
 };
-use verter_type_expr::locators::{AuthoredBodyLocator, AuthoredTypePayloadRef};
+use verter_type_expr::locators::{
+    AuthoredAnchor, AuthoredBodyLocator, AuthoredTypePayloadRef, LocatorSymbolSpace, TypeBodySlot,
+};
 use verter_type_expr::span_origins::{MemberSpansOrigin, SourceSynthetic};
 use verter_type_expr::PrimitiveName;
 
@@ -96,13 +98,22 @@ pub fn synthesise_svelte_default_value_symbol(
     }
 
     // The exported instance-script members (each exported binding is a member
-    // of the component instance). The member values stay bare `Ref` leaves so
-    // consumers re-resolve the binding on demand (shallow-by-default).
+    // of the component instance). The member values retain the exact lexical
+    // owner in an authored value-body locator so same-name module/instance
+    // bindings cannot alias during on-demand lowering.
     for export in &candidates.instance_exports {
         members.push(synthetic_member(
             &export.exported_name,
             false,
-            FactOrLocator::Leaf(LeafTypeFact::Ref(export.local_name.clone())),
+            FactOrLocator::Locator(TypeBodySlot {
+                anchor: AuthoredAnchor {
+                    canonical_id: Arc::from(""),
+                    owner: export.binding_key.owner,
+                    symbol: Arc::clone(&export.binding_key.name),
+                    space: LocatorSymbolSpace::Value,
+                },
+                path: Arc::from([]),
+            }),
         ));
     }
 
@@ -212,15 +223,15 @@ mod tests {
         SvelteInstanceExport, SvelteLegacyProp, SveltePropsCandidate,
     };
     use verter_semantic::analysis::type_eval::ValueDeclKind;
-    use verter_type_expr::locators::{
-        AuthoredAnchor, LocatorSymbolSpace, MacroPayloadLocator, MacroPayloadPosition,
-    };
+    use verter_type_expr::locators::{MacroPayloadLocator, MacroPayloadPosition};
+    use verter_type_expr::{DeclKey, TopLevelOwnerId};
 
     fn props_payload_ref(macro_index: u32, seed: u8) -> AuthoredTypePayloadRef {
         AuthoredTypePayloadRef {
             locator: AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
                 anchor: AuthoredAnchor {
                     canonical_id: Arc::from(""),
+                    owner: TopLevelOwnerId::instance(0),
                     symbol: Arc::from("default"),
                     space: LocatorSymbolSpace::Value,
                 },
@@ -339,7 +350,8 @@ mod tests {
     }
 
     #[test]
-    fn exported_members_appear_on_the_instance_as_ref_leaves() {
+    fn exported_members_retain_exact_binding_owner_locators() {
+        let instance_owner = TopLevelOwnerId::instance(0);
         let candidates = SvelteScriptCandidates {
             props: Some(SveltePropsCandidate {
                 props_type: None,
@@ -349,11 +361,15 @@ mod tests {
                 SvelteInstanceExport {
                     exported_name: "focus".to_string(),
                     local_name: "focus".to_string(),
+                    owner: instance_owner,
+                    binding_key: DeclKey::new(instance_owner, "focus"),
                     source_span: verter_span::Span::new(0, 5),
                 },
                 SvelteInstanceExport {
                     exported_name: "reset".to_string(),
                     local_name: "reset".to_string(),
+                    owner: instance_owner,
+                    binding_key: DeclKey::new(instance_owner, "reset"),
                     source_span: verter_span::Span::new(6, 11),
                 },
             ],
@@ -370,11 +386,15 @@ mod tests {
                 "reset".to_string()
             ]
         );
-        // Each exported member stays a bare `Ref` leaf the consumer
-        // re-resolves on demand (shallow-by-default).
+        // Each exported member stays an exact owner-qualified locator the
+        // consumer dereferences on demand (shallow-by-default).
         match member_ty(&sym, "focus") {
-            FactOrLocator::Leaf(LeafTypeFact::Ref(name)) => assert_eq!(name, "focus"),
-            other => panic!("expected a bare Ref leaf, got {other:?}"),
+            FactOrLocator::Locator(slot) => {
+                assert_eq!(slot.anchor.owner, instance_owner);
+                assert_eq!(slot.anchor.symbol.as_ref(), "focus");
+                assert_eq!(slot.anchor.space, LocatorSymbolSpace::Value);
+            }
+            other => panic!("expected an owner-qualified value locator, got {other:?}"),
         }
     }
 

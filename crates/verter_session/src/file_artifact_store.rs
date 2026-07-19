@@ -64,6 +64,7 @@ use smallvec::SmallVec;
 use verter_language::FileLanguage;
 use verter_semantic::analysis::Hash16;
 use verter_semantic::facts::registry as fact_registry;
+use verter_type_expr::TopLevelOwnerId;
 
 use crate::project_type_store::IndexedReady;
 
@@ -293,7 +294,11 @@ impl FileArtifactKey {
 /// post-parse artifact's spans are SFC-absolute rather than compact-relative.
 /// The bump evicts any pre-existing compact-layout artifact so a stale entry
 /// cannot serve eval-relative spans after the change.
-pub const CURRENT_PARSER_VERSION: u32 = 2;
+///
+/// Bumped 2 → 3: parse facts and declaration inventories now retain exact
+/// top-level lexical owners. An artifact produced under version 2 cannot
+/// distinguish same-name module and instance declarations.
+pub const CURRENT_PARSER_VERSION: u32 = 3;
 
 /// Parser version stamped on the canonical-keyed legacy surface that
 /// builds [`FileArtifactKey`] inline (the env-hash-threading entry
@@ -308,7 +313,11 @@ pub const CURRENT_PARSER_VERSION: u32 = 2;
 /// changes — a parser-behavior change is exactly what this dimension
 /// owns, so the bump evicts every artifact parsed under the old
 /// uniform-TS dialect.
-pub const LEGACY_PARSER_VERSION: u32 = 3;
+///
+/// Bumped 3 → 4: carrier script facts and declaration inventories retain exact
+/// top-level lexical owners. Version 3 candidates can alias same-name module
+/// and instance bindings and therefore cannot remain warm.
+pub const LEGACY_PARSER_VERSION: u32 = 4;
 
 /// `parse_env_hash` sentinel marking a BASE artifact key
 /// ([`FileArtifactKey::base`]) — used by the canonical-keyed surface
@@ -454,6 +463,7 @@ impl FileFacts {
 /// Fields:
 ///
 /// - `specifier` — the syntactic specifier inside `declare module "X" {}`.
+/// - `owner` — the lexical top-level owner that authored the declaration.
 /// - `augmented_name` — the name of an augmented binding inside the block.
 /// - `space` — which symbol space the augmented binding occupies.
 /// - `augmented_member_shape_fingerprint` — alpha-normalised fingerprint
@@ -463,6 +473,7 @@ impl FileFacts {
 #[derive(Debug, Clone)]
 pub struct ModuleAugmentationFact {
     pub specifier: InternedSpecifier,
+    pub owner: TopLevelOwnerId,
     pub augmented_name: InternedName,
     pub space: SymbolSpace,
     pub augmented_member_shape_fingerprint: Hash16,
@@ -761,7 +772,7 @@ fn base_snapshot_equivalent(prev: &FileArtifacts, next: &FileArtifacts) -> bool 
 /// every call site (an augmenter artifact only ever replaces itself at its own
 /// canonical), so comparing `parse_stable_hash` here is exactly comparing the
 /// per-augmenter fingerprint contribution. The fact compare is order-
-/// INDEPENDENT (a multiset over the four fact dimensions) and CONSERVATIVE:
+/// INDEPENDENT (a multiset over the five fact dimensions) and CONSERVATIVE:
 /// any genuine membership change makes the multisets differ. The lockstep unit
 /// invariant
 /// `file_artifact_store_tests::augmentation_contribution_equivalence_tracks_fingerprint_inputs`
@@ -782,13 +793,20 @@ fn augmentation_contribution_equivalent(prev: &FileArtifacts, next: &FileArtifac
     if prev_facts.len() != next_facts.len() {
         return false;
     }
-    // Multiset compare keyed by the four fact dimensions (all `Eq + Hash`).
+    // Multiset compare keyed by the five fact dimensions (all `Eq + Hash`).
     // `ModuleAugmentationFact` is not `Eq`, so fold a per-fact count map and
     // confirm `next` exactly drains it.
-    type FactKey = (InternedSpecifier, InternedName, SymbolSpace, Hash16);
+    type FactKey = (
+        InternedSpecifier,
+        TopLevelOwnerId,
+        InternedName,
+        SymbolSpace,
+        Hash16,
+    );
     let key_of = |fact: &ModuleAugmentationFact| -> FactKey {
         (
             fact.specifier.clone(),
+            fact.owner,
             fact.augmented_name.clone(),
             fact.space,
             fact.augmented_member_shape_fingerprint,

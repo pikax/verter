@@ -17,6 +17,12 @@ use verter_type_expr::locators::{
 /// The canonical id every fixture memo in this module is keyed on.
 const FIXTURE_CANONICAL: &str = "/ws/fixture.ts";
 
+fn has_dependency(decl: &LoweredTypeDecl, name: &str) -> bool {
+    decl.dependency_paths
+        .iter()
+        .any(|dependency| dependency.legacy_dotted_name() == name)
+}
+
 /// Build a TYPE-space decl-body locator anchored on this fixture's canonical.
 fn type_body_locator(symbol: &str, path: Vec<TypeBodyPathStep>) -> AuthoredBodyLocator {
     type_body_locator_on(FIXTURE_CANONICAL, symbol, path)
@@ -31,6 +37,7 @@ fn type_body_locator_on(
     AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
             canonical_id: Arc::from(canonical),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             symbol: Arc::from(symbol),
             space: LocatorSymbolSpace::Type,
         },
@@ -43,6 +50,7 @@ fn value_body_locator(symbol: &str, path: Vec<TypeBodyPathStep>) -> AuthoredBody
     AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
             canonical_id: Arc::from(FIXTURE_CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             symbol: Arc::from(symbol),
             space: LocatorSymbolSpace::Value,
         },
@@ -55,6 +63,7 @@ fn namespace_body_locator(symbol: &str, path: Vec<TypeBodyPathStep>) -> Authored
     AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
             canonical_id: Arc::from(FIXTURE_CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             symbol: Arc::from(symbol),
             space: LocatorSymbolSpace::Namespace,
         },
@@ -72,6 +81,7 @@ fn aug_type_locator(
     AuthoredBodyLocator::AugmentationBody(AugmentationBodyLocator {
         anchor: AuthoredAnchor {
             canonical_id: Arc::from(FIXTURE_CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             symbol: Arc::from(symbol),
             space: LocatorSymbolSpace::Type,
         },
@@ -200,15 +210,15 @@ fn class_statement_backfills_its_value_sibling() {
 }
 
 #[test]
-fn dependency_names_ride_on_the_lowered_entry() {
+fn dependency_paths_ride_on_the_lowered_entry() {
     let (memo, _) = memo_for(
         "import { Ext } from './dep';\ntype WithDeps = { a: Ext; b: Local };\ntype Local = { v: 1 };\n",
     );
     let decl = memo.type_decl("WithDeps").expect("WithDeps exists");
-    assert!(decl.dep_names.contains("Ext"));
-    assert!(decl.dep_names.contains("Local"));
+    assert!(has_dependency(&decl, "Ext"));
+    assert!(has_dependency(&decl, "Local"));
     assert!(
-        !decl.dep_names.contains("WithDeps"),
+        !has_dependency(&decl, "WithDeps"),
         "self is not a dependency"
     );
 }
@@ -226,15 +236,15 @@ fn default_class_declared_name_and_alias_both_carry_heritage_dep() {
     );
     let declared = memo.type_decl("Props").expect("declared-name type side");
     assert!(
-        declared.dep_names.contains("Imported"),
+        has_dependency(&declared, "Imported"),
         "the default class's declared-name body must carry its heritage dep; got {:?}",
-        declared.dep_names
+        declared.dependency_paths
     );
     let aliased = memo.type_decl("default").expect("default alias");
     assert!(
-        aliased.dep_names.contains("Imported"),
+        has_dependency(&aliased, "Imported"),
         "the `default` alias body must carry its heritage dep; got {:?}",
-        aliased.dep_names
+        aliased.dependency_paths
     );
 }
 
@@ -250,9 +260,9 @@ fn namespaced_type_alias_carries_its_dep_under_qualified_name() {
     );
     let decl = memo.type_decl("N.T").expect("namespaced type symbol N.T");
     assert!(
-        decl.dep_names.contains("Imported"),
+        has_dependency(&decl, "Imported"),
         "namespaced `N.T` body must carry its dep `Imported`; got {:?}",
-        decl.dep_names
+        decl.dependency_paths
     );
 }
 
@@ -267,9 +277,9 @@ fn nested_namespace_type_alias_carries_dep_under_double_qualified_name() {
         .type_decl("Outer.Inner.T")
         .expect("nested namespaced type symbol");
     assert!(
-        decl.dep_names.contains("Imported"),
+        has_dependency(&decl, "Imported"),
         "nested `Outer.Inner.T` body must carry its dep `Imported`; got {:?}",
-        decl.dep_names
+        decl.dependency_paths
     );
 }
 
@@ -285,10 +295,29 @@ fn jsdoc_typedef_carries_its_dep() {
     );
     let decl = memo.type_decl("Alias").expect("typedef must lower");
     assert!(
-        decl.dep_names.contains("Imported"),
+        has_dependency(&decl, "Imported"),
         "the JSDoc typedef body must carry its dep `Imported`; got {:?}",
-        decl.dep_names
+        decl.dependency_paths
     );
+}
+
+#[test]
+fn jsdoc_typedef_preserves_qualified_nullable_dependency_paths() {
+    let (memo, _) = memo_for(
+        "import * as NS from './dep';\n\
+         /** @typedef {NS.Value} Plain */\n\
+         /** @typedef {?NS.Value} Nullable */\n\
+         /** @typedef {!NS.Value} NonNullable */\n",
+    );
+
+    for name in ["Plain", "Nullable", "NonNullable"] {
+        let declaration = memo.type_decl(name).unwrap();
+        assert!(
+            has_dependency(&declaration, "NS.Value"),
+            "{name} lost its qualified JSDoc dependency: {:?}",
+            declaration.dependency_paths,
+        );
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -352,7 +381,10 @@ fn concurrent_broken_lease_demand_every_waiter_sees_lease_miss() {
                 barrier.wait();
                 // Demand a DIFFERENT, not-yet-lowered symbol so the demand
                 // actually runs and lease-misses (rather than a warm hit).
-                match memo.type_decl_outcome("Var1") {
+                match memo.type_decl_outcome_in(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    "Var1",
+                ) {
                     DemandOutcome::LeaseMiss => 0u8,
                     DemandOutcome::Ready(None) => 1u8,
                     DemandOutcome::Ready(Some(_)) => 2u8,
@@ -424,7 +456,11 @@ type FileScope = { f: 1 };
     let (memo, provenance) = memo_for(source);
     let scope = AugmentationScopeKind::Module("vue".to_string());
     let decl = memo
-        .augmentation_type_decl(&scope, "ComponentCustomProperties")
+        .augmentation_type_decl_in(
+            &scope,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "ComponentCustomProperties",
+        )
         .expect("augmentation entry exists");
     assert!(matches!(decl.kind, TypeDeclKind::Interface));
     // The block statement lowers both its inner declarations (type +
@@ -457,7 +493,11 @@ fn unknown_names_are_none_without_lowering() {
     assert!(memo.type_decl("Missing").is_none());
     assert!(memo.value_decl("Missing").is_none());
     assert!(memo
-        .augmentation_type_decl(&AugmentationScopeKind::Global, "Missing")
+        .augmentation_type_decl_in(
+            &AugmentationScopeKind::Global,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Missing",
+        )
         .is_none());
     assert_eq!(bodies(&provenance), 0, "a miss lowers nothing");
     assert_eq!(parses(&provenance), 0, "a miss parses nothing");
@@ -545,31 +585,37 @@ declare module "ext" {
 
     // PARITY — every indexed header symbol demand-resolves through its
     // matching accessor.
-    for name in header_index.type_headers.keys() {
+    for key in header_index.type_headers.keys() {
         assert!(
-            memo.type_decl(name).is_some(),
-            "type header `{name}` must demand-resolve through type_decl"
+            memo.type_decl_in(key.owner, key.name.as_ref()).is_some(),
+            "type header `{}` must demand-resolve through type_decl",
+            key.name,
         );
     }
-    for name in header_index.value_headers.keys() {
+    for key in header_index.value_headers.keys() {
         assert!(
-            memo.value_decl(name).is_some(),
-            "value header `{name}` must demand-resolve through value_decl"
+            memo.value_decl_in(key.owner, key.name.as_ref()).is_some(),
+            "value header `{}` must demand-resolve through value_decl",
+            key.name,
         );
     }
     for (scope, names) in &header_index.augmentation_type_headers {
-        for name in names.keys() {
+        for key in names.keys() {
             assert!(
-                memo.augmentation_type_decl(scope, name).is_some(),
-                "augmentation type header `{name}` in {scope:?} must demand-resolve"
+                memo.augmentation_type_decl_in(scope, key.owner, key.name.as_ref())
+                    .is_some(),
+                "augmentation type header `{}` in {scope:?} must demand-resolve",
+                key.name,
             );
         }
     }
     for (scope, names) in &header_index.augmentation_value_headers {
-        for name in names.keys() {
+        for key in names.keys() {
             assert!(
-                memo.augmentation_value_decl(scope, name).is_some(),
-                "augmentation value header `{name}` in {scope:?} must demand-resolve"
+                memo.augmentation_value_decl_in(scope, key.owner, key.name.as_ref())
+                    .is_some(),
+                "augmentation value header `{}` in {scope:?} must demand-resolve",
+                key.name,
             );
         }
     }

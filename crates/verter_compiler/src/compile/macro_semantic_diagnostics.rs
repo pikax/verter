@@ -9,6 +9,15 @@ use crate::script::prepared::PreparedScript;
 use crate::utils::oxc::vue::{MacroTypeParams, ScriptItem, ScriptMacro};
 
 use super::{CompileTarget, VueMacroSemanticInput};
+use crate::tsc::TscUnavailableOutcome;
+
+pub(super) fn tsc_generation_diagnostic(error: crate::tsc::TscGenerationError) -> Diagnostic {
+    Diagnostic::error_with_message(
+        "script",
+        CompilerErrorCode::XUnavailableMacroSemanticResult,
+        format!("Authoritative TSC generation failed: {error}."),
+    )
+}
 
 #[derive(Clone, Copy)]
 enum ExpectedMacroRole {
@@ -193,27 +202,50 @@ fn validate_tsc_entry(
         return;
     };
 
-    if matches!(entry.outcome, MacroTscOutcome::Invalid(_)) {
-        push_invalid(diagnostics, "TSC", syntax_index, anchor);
+    if let Some(outcome) = TscUnavailableOutcome::from_macro_outcome(&entry.outcome) {
+        push_tsc_unavailable(diagnostics, syntax_index, anchor, &outcome);
         return;
     }
 
     let compatible = matches!(
         (&entry.outcome, role),
         (
-            MacroTscOutcome::Complete(MacroTscProjection::Props { .. }),
+            MacroTscOutcome::Complete(MacroTscProjection::Props(_)),
             ExpectedMacroRole::Props
         ) | (
-            MacroTscOutcome::Complete(MacroTscProjection::Emits { .. }),
+            MacroTscOutcome::Complete(MacroTscProjection::Emits(_)),
             ExpectedMacroRole::Emits
         ) | (
-            MacroTscOutcome::Complete(MacroTscProjection::Model { .. }),
+            MacroTscOutcome::Complete(MacroTscProjection::Model(_)),
             ExpectedMacroRole::Model
         )
     );
     if !compatible {
         push_unavailable(diagnostics, "TSC", syntax_index, anchor);
     }
+}
+
+fn push_tsc_unavailable(
+    diagnostics: &mut Vec<Diagnostic>,
+    syntax_index: u32,
+    anchor: Span,
+    outcome: &TscUnavailableOutcome,
+) {
+    let code = if matches!(outcome, TscUnavailableOutcome::Invalid(_)) {
+        CompilerErrorCode::XInvalidMacroType
+    } else {
+        CompilerErrorCode::XUnavailableMacroSemanticResult
+    };
+    let mut message = format!(
+        "Authoritative TSC semantics for macro syntax index {syntax_index} are {} ({}).",
+        outcome.kind_code(),
+        outcome.reason_code()
+    );
+    if let Some(diagnostic) = outcome.diagnostic() {
+        message.push(' ');
+        message.push_str(diagnostic);
+    }
+    diagnostics.push(Diagnostic::error_with_message("script", code, message).with_span(anchor));
 }
 
 fn push_invalid(diagnostics: &mut Vec<Diagnostic>, lane: &str, syntax_index: u32, anchor: Span) {

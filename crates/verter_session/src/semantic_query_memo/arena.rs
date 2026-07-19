@@ -404,6 +404,7 @@ mod arena_intern_tests {
     fn file_scope(canonical: &str) -> NodeScopeId {
         NodeScopeId::File {
             canonical_id: Arc::from(canonical),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [7u8; 16],
             local_scope: None,
         }

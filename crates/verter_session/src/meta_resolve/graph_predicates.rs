@@ -584,6 +584,7 @@ pub(crate) fn bfs_compute_inner(
         let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
             dispatch.type_slot_for(
                 Arc::clone(&current.canonical_id),
+                current.owner,
                 Arc::clone(&current.decl_name),
             ),
             Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),

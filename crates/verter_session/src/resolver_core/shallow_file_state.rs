@@ -12,6 +12,7 @@
 //! - Cross-file references are returned as `ExternalSymbolRef` for the
 //!   frontier engine to handle â€” this module never crosses import boundaries.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -19,11 +20,16 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::route_demand::RouteDemand;
 use crate::decl_body_memo::{DemandOutcome, LoweredTypeDecl, LoweredValueDecl};
 pub(crate) use verter_parser::utils::oxc::script::type_inventory::AnalyzedExternalTypeSource;
+use verter_parser::utils::oxc::script::type_inventory::{
+    DeclarationPath, ExportTarget as AnalyzedExportTarget, ImportBindingForm, ImportedExportPath,
+    SyntaxCapability,
+};
 use verter_semantic::analysis::decl_headers::{TypeDeclHeader, ValueDeclHeader};
 use verter_semantic::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
 use verter_semantic::analysis::Hash16;
 use verter_span::Span;
-use verter_type_expr::TypeExpr;
+use verter_type_expr::facts::TypeDependencyPathFact;
+use verter_type_expr::{DeclKey, TopLevelOwnerId, TypeExpr};
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -55,6 +61,10 @@ pub struct ShallowFileState {
     /// Import specifier targets: local import name → canonical import target.
     pub import_targets: FxHashMap<String, ImportTarget>,
 
+    /// Authoritative owner-qualified import table. The public string-keyed
+    /// table above is the ordinary-file compatibility projection only.
+    pub(crate) owner_import_targets: FxHashMap<DeclKey, ImportTarget>,
+
     /// The HEADER-ONLY analyzed source: import/export/reexport tables plus
     /// the local type-symbol NAME inventory (kind + span, no dependency
     /// names). Body-derived data lives behind the lazy declaration-body
@@ -73,7 +83,7 @@ pub struct ShallowFileState {
     /// edges, never a lowered body product — body data is read through
     /// the lazy memo accessors ([`Self::type_decl`]). Populated only for
     /// names the header inventory knows; a header miss never inserts.
-    type_deps_cache: dashmap::DashMap<String, Option<Arc<ClassifiedTypeDeps>>>,
+    type_deps_cache: dashmap::DashMap<DeclKey, Option<Arc<ClassifiedTypeDeps>>>,
 
     /// EAGER synthesised value-symbol HEADERS (the `.vue` implicit
     /// `default` public-instance shape) — header-only records carrying
@@ -142,6 +152,7 @@ impl Clone for RouteSurfaceHashMemo {
 /// A wildcard `export * from ‘...’` reexport with its resolved canonical target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WildcardReexport {
+    pub owner: TopLevelOwnerId,
     /// The raw source specifier (e.g., `./types`).
     pub source_specifier: String,
     /// The resolved canonical file ID of the target.
@@ -155,6 +166,8 @@ pub struct ImportTarget {
     pub source_specifier: String,
     /// The original exported name in the source module.
     pub imported_name: String,
+    /// Whether the local binding is a namespace import (`import * as NS`).
+    pub is_namespace: bool,
     /// The resolved canonical file ID of the target.
     pub canonical_id: String,
 }
@@ -173,7 +186,10 @@ pub struct ShallowTypeView<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExportTarget {
     /// Locally declared and exported.
-    Local { symbol_name: String },
+    Local {
+        owner: TopLevelOwnerId,
+        symbol_name: String,
+    },
     /// Explicitly re-exported from another module.
     /// `export { Foo } from './bar'` or `export { Foo as Bar } from './bar'`
     Reexport {
@@ -237,9 +253,37 @@ pub struct ClassifiedTypeDeps {
     /// Names of same-file symbols this type directly depends on.
     /// Used for iterative local closure.
     pub local_deps: Vec<String>,
+    /// Same-file runtime values reached through a type query (`typeof seed`).
+    /// These are not type-closure hops: consumers that omit the owning body
+    /// must provide a declaration-safe value carrier or reject the projection.
+    pub owner_value_deps: Vec<String>,
+    /// Same-file dual-space roots reached in a runtime-value role. Their
+    /// exact declaration contributors can satisfy body-omitting output.
+    pub retained_value_carrier_deps: Vec<String>,
     /// Names of import-local symbols this type directly depends on.
     /// These become `ExternalSymbolRef` during frontier traversal.
     pub external_deps: Vec<ExternalSymbolRef>,
+    /// TSC declaration-carrier closure. Kept separate so component-meta keeps
+    /// its historical FULL/STRUCTURAL breadth.
+    pub declaration_local_deps: Vec<String>,
+    pub declaration_external_deps: Vec<ExternalSymbolRef>,
+    /// Bare namespace roots cannot identify an exported declaration carrier.
+    pub unroutable_declaration_dependencies: Vec<String>,
+    pub has_unroutable_value_position: bool,
+    /// Import-local roots reached through `typeof` queries.
+    pub external_value_queries: Vec<String>,
+    /// Import-local roots required in a runtime value position by declaration
+    /// syntax, currently class `extends` heritage.
+    pub external_value_positions: Vec<String>,
+}
+
+/// Classification of an arbitrary parser-authored dependency-path set against
+/// this file's import table and local header inventory.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ClassifiedDependencyPaths {
+    pub(crate) local_deps: Vec<String>,
+    pub(crate) external_deps: Vec<ExternalSymbolRef>,
+    pub(crate) unroutable_imports: Vec<String>,
 }
 
 /// Slim HEADER metadata for one locally-declared value symbol.
@@ -326,6 +370,13 @@ pub struct ExternalSymbolRef {
 /// miss sentinel internally; external refs carry the explicit `Option`).
 pub(crate) fn external_canonical(target: &ImportTarget) -> Option<Arc<str>> {
     (!target.canonical_id.is_empty()).then(|| Arc::<str>::from(target.canonical_id.as_str()))
+}
+
+fn imported_export_root_name(exported: &ImportedExportPath, namespace_fallback: &str) -> String {
+    match exported {
+        ImportedExportPath::NamespaceRoot => namespace_fallback.to_string(),
+        ImportedExportPath::Symbol(path) => path.root().to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -578,7 +629,26 @@ impl ShallowFileState {
         source: &str,
         whole_hash: Hash16,
     ) -> Arc<Self> {
-        Self::service_backed_core_for_test(canonical, source, Some(whole_hash), &NullResolver).0
+        Self::service_backed_core_for_test(canonical, source, Some(whole_hash), &NullResolver, None)
+            .0
+    }
+
+    /// [`Self::service_backed_for_test`] with an exact lexical owner for
+    /// every parsed top-level statement.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn service_backed_for_test_with_statement_owners(
+        canonical: &str,
+        source: &str,
+        statement_owners: &[TopLevelOwnerId],
+    ) -> Arc<Self> {
+        Self::service_backed_core_for_test(
+            canonical,
+            source,
+            None,
+            &NullResolver,
+            Some(statement_owners),
+        )
+        .0
     }
 
     /// Full-parameter service-backed test builder: caller-chosen canonical,
@@ -592,7 +662,7 @@ impl ShallowFileState {
         source: &str,
         resolver: &dyn ShallowImportResolver,
     ) -> (Arc<Self>, Arc<crate::types::MetaProvenance>) {
-        Self::service_backed_core_for_test(canonical, source, None, resolver)
+        Self::service_backed_core_for_test(canonical, source, None, resolver, None)
     }
 
     /// The ONE service-backed construction core every `service_backed_*`
@@ -603,22 +673,41 @@ impl ShallowFileState {
         source: &str,
         whole_hash: Option<Hash16>,
         resolver: &dyn ShallowImportResolver,
+        statement_owners: Option<&[TopLevelOwnerId]>,
     ) -> (Arc<Self>, Arc<crate::types::MetaProvenance>) {
         let allocator = oxc_allocator::Allocator::default();
         let parsed =
             oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
         assert!(!parsed.panicked, "service-backed test fixture must parse");
+        let owner_table = Arc::new(match statement_owners {
+            Some(owners) => {
+                verter_semantic::analysis::TopLevelOwnerTable::try_from_statement_owners(
+                    parsed.program.body.len(),
+                    owners.iter().copied(),
+                )
+                .expect("service-backed test owner table must cover every statement")
+            }
+            None => verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(
+                parsed.program.body.len(),
+            ),
+        });
         let header_index = Arc::new(
-            verter_semantic::analysis::decl_headers::build_decl_header_index(
+            verter_semantic::analysis::decl_headers::build_decl_header_index_with_owners(
                 &parsed.program,
                 source,
+                owner_table.as_ref(),
             ),
         );
-        let analysis = Arc::new(
-            verter_parser::utils::oxc::script::type_inventory::analyze_external_type_source(
-                source, &allocator,
+        let analysis = Arc::new(match statement_owners {
+            Some(owners) => verter_parser::utils::oxc::script::type_inventory::analyze_external_type_program_with_owner_table(
+                &parsed.program,
+                owners,
+            )
+            .expect("service-backed test owner table must cover every statement"),
+            None => verter_parser::utils::oxc::script::type_inventory::analyze_external_type_program(
+                &parsed.program,
             ),
-        );
+        });
         let eval_source: Arc<str> = Arc::from(source);
         let whole_hash = whole_hash.unwrap_or_else(|| crate::hash::hash_16(source.as_bytes()));
         let provenance = Arc::new(crate::types::MetaProvenance::default());
@@ -631,6 +720,7 @@ impl ShallowFileState {
             Arc::clone(&eval_source),
             None,
             oxc_span::SourceType::ts(),
+            owner_table,
             false,
             Arc::new(crate::decl_lowering::DeclLoweringService::new()),
             header_index,
@@ -668,6 +758,16 @@ impl ShallowFileState {
         state.wildcard_reexports = wildcard_reexports;
         state.import_locals = import_locals;
         state.import_targets = import_targets;
+        state.owner_import_targets = state
+            .import_targets
+            .iter()
+            .map(|(name, target)| {
+                (
+                    DeclKey::new(TopLevelOwnerId::ordinary_file(), name.as_str()),
+                    target.clone(),
+                )
+            })
+            .collect();
         // The lens installs AFTER the routing mutation above: the memo's
         // `install_shallow_lens` is OnceLock-first-wins, so installing
         // through `header_routing_only_for_test` first would pin a lens
@@ -733,83 +833,120 @@ impl ShallowFileState {
         // Capacity bounds are exact per-source counts (cheap header-inventory
         // walks, no allocation); `entry` collisions across the export sources
         // only ever shrink the final size.
-        let binding_count = analysis.extracted.bindings.len();
+        let ordinary_owner = TopLevelOwnerId::ordinary_file();
+        let binding_count = analysis
+            .extracted
+            .bindings
+            .iter()
+            .filter(|binding| binding.local.owner == ordinary_owner)
+            .count();
         let export_bound = analysis.direct_reexport_entries().count()
-            + analysis.exported_local_type_names().count()
-            + analysis.exported_local_symbol_names().count()
+            + analysis.exported_symbol_keys().count()
             + 1; // the implicit `default` local-export probe
         let mut exports = FxHashMap::with_capacity_and_hasher(export_bound, Default::default());
-        let mut wildcard_reexports = Vec::with_capacity(analysis.wildcard_reexport_sources().len());
+        let mut ambiguous_exports = FxHashSet::default();
+        let mut wildcard_reexports = Vec::with_capacity(analysis.wildcard_reexports().len());
         let mut import_locals =
             FxHashSet::with_capacity_and_hasher(binding_count, Default::default());
         let mut import_targets: FxHashMap<String, ImportTarget> =
             FxHashMap::with_capacity_and_hasher(binding_count, Default::default());
+        let mut owner_import_targets: FxHashMap<DeclKey, ImportTarget> =
+            FxHashMap::with_capacity_and_hasher(
+                analysis.extracted.bindings.len(),
+                Default::default(),
+            );
 
         // Populate exports from the extracted bindings
         // Direct reexports
-        for (exported_name, source, original) in analysis.direct_reexport_entries() {
-            let canonical_id = resolver.resolve_canonical(source).unwrap_or_default();
-            let is_type = resolver.is_type_reexport(exported_name, source);
-            exports.insert(
-                exported_name.to_string(),
-                ExportTarget::Reexport {
-                    source_specifier: source.to_string(),
-                    original_name: original.to_string(),
-                    canonical_id,
-                    is_type,
-                },
-            );
+        for (exported, target) in analysis.direct_reexport_entries() {
+            let exported_name = exported.name.to_string();
+            if ambiguous_exports.contains(&exported_name) {
+                continue;
+            }
+            let canonical_id = resolver
+                .resolve_canonical(&target.source)
+                .unwrap_or_default();
+            let original_name = imported_export_root_name(&target.exported, exported.name.as_ref());
+            let is_type = matches!(target.capability, SyntaxCapability::TypeOnly)
+                || resolver.is_type_reexport(exported.name.as_ref(), &target.source);
+            let route = ExportTarget::Reexport {
+                source_specifier: target.source.clone(),
+                original_name,
+                canonical_id,
+                is_type,
+            };
+            if exports.insert(exported_name.clone(), route).is_some() {
+                exports.remove(&exported_name);
+                ambiguous_exports.insert(exported_name);
+            }
         }
 
-        // Locally exported type names
-        for name in analysis.exported_local_type_names() {
-            exports
-                .entry(name.to_string())
-                .or_insert_with(|| ExportTarget::Local {
-                    symbol_name: name.to_string(),
-                });
+        for exported in analysis.exported_symbol_keys() {
+            let exported_name = exported.name.to_string();
+            if ambiguous_exports.contains(&exported_name) {
+                continue;
+            }
+            let Some(target) = analysis.export_target(exported) else {
+                continue;
+            };
+            let (owner, symbol_name) = match target {
+                AnalyzedExportTarget::LocalDeclaration { declaration, .. } => {
+                    (declaration.root.owner, declaration.root.name.to_string())
+                }
+                AnalyzedExportTarget::LocalBinding { binding, .. } => {
+                    (binding.owner, binding.name.to_string())
+                }
+                AnalyzedExportTarget::External(_) => continue,
+            };
+            let target = ExportTarget::Local { owner, symbol_name };
+            if exports.insert(exported_name.clone(), target).is_some() {
+                exports.remove(&exported_name);
+                ambiguous_exports.insert(exported_name);
+            }
         }
 
-        for name in analysis.exported_local_symbol_names() {
-            let symbol_name = analysis.local_export_symbol_target(name).unwrap_or(name);
-            exports
-                .entry(name.to_string())
-                .or_insert_with(|| ExportTarget::Local {
-                    symbol_name: symbol_name.to_string(),
-                });
-        }
-
-        if analysis.local_symbol_span("default").is_some() {
+        let default_declaration = DeclarationPath::root(DeclKey::new(ordinary_owner, "default"));
+        if analysis.local_symbol_span(&default_declaration).is_some() {
             exports
                 .entry("default".to_string())
                 .or_insert_with(|| ExportTarget::Local {
+                    owner: ordinary_owner,
                     symbol_name: "default".to_string(),
                 });
         }
 
         // Wildcard reexport sources (in declaration order) with canonical targets
-        for source in analysis.wildcard_reexport_sources() {
-            let canonical_id = resolver.resolve_canonical(source).unwrap_or_default();
+        for wildcard in analysis.wildcard_reexports() {
+            let canonical_id = resolver
+                .resolve_canonical(&wildcard.source)
+                .unwrap_or_default();
             wildcard_reexports.push(WildcardReexport {
-                source_specifier: source.clone(),
+                owner: wildcard.owner,
+                source_specifier: wildcard.source.clone(),
                 canonical_id,
             });
         }
 
         // Import locals and targets
         for binding in &analysis.extracted.bindings {
-            import_locals.insert(binding.local_name.clone());
             let canonical_id = resolver
                 .resolve_canonical(&binding.source)
                 .unwrap_or_default();
-            import_targets.insert(
-                binding.local_name.clone(),
-                ImportTarget {
-                    source_specifier: binding.source.clone(),
-                    imported_name: binding.imported_name.clone(),
-                    canonical_id,
-                },
-            );
+            let target = ImportTarget {
+                source_specifier: binding.source.clone(),
+                imported_name: imported_export_root_name(
+                    &binding.imported,
+                    binding.local.name.as_ref(),
+                ),
+                is_namespace: matches!(binding.form, ImportBindingForm::Namespace),
+                canonical_id,
+            };
+            owner_import_targets.insert(binding.local.clone(), target.clone());
+            if binding.local.owner == ordinary_owner {
+                let local_name = binding.local.name.to_string();
+                import_locals.insert(local_name.clone());
+                import_targets.insert(local_name, target);
+            }
         }
 
         Self {
@@ -817,8 +954,11 @@ impl ShallowFileState {
             exports,
             wildcard_reexports,
             import_locals,
-            export_assignment: analysis.export_assignment_target().map(str::to_string),
+            export_assignment: analysis
+                .export_assignment_target(ordinary_owner)
+                .map(|target| target.name.to_string()),
             import_targets,
+            owner_import_targets,
             analysis,
             decl_bodies,
             type_deps_cache: dashmap::DashMap::default(),
@@ -905,19 +1045,27 @@ impl ShallowFileState {
             .header_index()
             .type_headers
             .keys()
-            .map(String::as_str)
+            .filter(|key| key.owner == TopLevelOwnerId::ordinary_file())
+            .map(|key| key.name.as_ref())
     }
 
     /// Every file-scope VALUE symbol name in the shallow inventory,
     /// including eager synthesised symbols (header-level).
     pub fn value_symbol_names(&self) -> impl Iterator<Item = &str> {
         let headers = &self.decl_bodies.header_index().value_headers;
-        headers.keys().map(String::as_str).chain(
-            self.synthesised_value_symbols
-                .keys()
-                .map(String::as_str)
-                .filter(move |name| !headers.contains_key(*name)),
-        )
+        headers
+            .keys()
+            .filter(|key| key.owner == TopLevelOwnerId::ordinary_file())
+            .map(|key| key.name.as_ref())
+            .chain(
+                self.synthesised_value_symbols
+                    .keys()
+                    .map(String::as_str)
+                    .filter(move |name| {
+                        !headers
+                            .contains_key(&DeclKey::new(TopLevelOwnerId::ordinary_file(), *name))
+                    }),
+            )
     }
 
     /// Every eager synthesised VALUE body (the `.vue` implicit
@@ -936,9 +1084,18 @@ impl ShallowFileState {
         &self,
         name: &str,
     ) -> Option<verter_semantic::analysis::type_eval::TypeDeclKind> {
+        self.type_symbol_kind_in(TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    /// Header-level kind of an exact owner-qualified TYPE symbol.
+    pub(crate) fn type_symbol_kind_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<verter_semantic::analysis::type_eval::TypeDeclKind> {
         self.decl_bodies
             .header_index()
-            .type_header(name)
+            .type_header_in(owner, name)
             .map(|header| header.kind)
     }
 
@@ -982,7 +1139,8 @@ impl ShallowFileState {
             .header_index()
             .enum_headers
             .keys()
-            .map(String::as_str)
+            .filter(|key| key.owner == TopLevelOwnerId::ordinary_file())
+            .map(|key| key.name.as_ref())
     }
 
     /// Header-level ordered member (variant) names of an `enum`
@@ -991,7 +1149,7 @@ impl ShallowFileState {
         self.decl_bodies
             .header_index()
             .enum_headers
-            .get(name)
+            .get(&DeclKey::new(TopLevelOwnerId::ordinary_file(), name))
             .map(|header| header.member_names.as_slice())
     }
 
@@ -1050,14 +1208,29 @@ impl ShallowFileState {
 
     /// Whether `name` is a file-scope TYPE symbol (header-level).
     pub fn has_type_symbol(&self, name: &str) -> bool {
-        self.decl_bodies.header_index().type_header(name).is_some()
+        self.has_type_symbol_in(TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    pub(crate) fn has_type_symbol_in(&self, owner: TopLevelOwnerId, name: &str) -> bool {
+        self.decl_bodies
+            .header_index()
+            .type_header_in(owner, name)
+            .is_some()
     }
 
     /// Whether `name` is a file-scope VALUE symbol (header-level,
     /// including synthesised symbols).
     pub fn has_value_symbol(&self, name: &str) -> bool {
-        self.decl_bodies.header_index().value_header(name).is_some()
-            || self.synthesised_value_symbols.contains_key(name)
+        self.has_value_symbol_in(TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    pub(crate) fn has_value_symbol_in(&self, owner: TopLevelOwnerId, name: &str) -> bool {
+        self.decl_bodies
+            .header_index()
+            .value_header_in(owner, name)
+            .is_some()
+            || (owner == TopLevelOwnerId::ordinary_file()
+                && self.synthesised_value_symbols.contains_key(name))
     }
 
     /// Every `(scope, name)` key in the augmentation-scope TYPE inventory
@@ -1074,7 +1247,27 @@ impl ShallowFileState {
             .header_index()
             .augmentation_type_headers
             .iter()
-            .flat_map(|(scope, names)| names.keys().map(move |name| (scope, name.as_str())))
+            .flat_map(|(scope, names)| {
+                names
+                    .keys()
+                    .filter(|key| key.owner == TopLevelOwnerId::ordinary_file())
+                    .map(move |key| (scope, key.name.as_ref()))
+            })
+    }
+
+    pub(crate) fn augmentation_type_decl_keys(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+            &DeclKey,
+        ),
+    > {
+        self.decl_bodies
+            .header_index()
+            .augmentation_type_headers
+            .iter()
+            .flat_map(|(scope, declarations)| declarations.keys().map(move |key| (scope, key)))
     }
 
     /// Every `(scope, name)` key in the augmentation-scope VALUE inventory
@@ -1091,7 +1284,12 @@ impl ShallowFileState {
             .header_index()
             .augmentation_value_headers
             .iter()
-            .flat_map(|(scope, names)| names.keys().map(move |name| (scope, name.as_str())))
+            .flat_map(|(scope, names)| {
+                names
+                    .keys()
+                    .filter(|key| key.owner == TopLevelOwnerId::ordinary_file())
+                    .map(move |key| (scope, key.name.as_ref()))
+            })
     }
 
     // -----------------------------------------------------------------------
@@ -1145,11 +1343,7 @@ impl ShallowFileState {
     pub fn has_shallow_cross_file_edges(&self) -> bool {
         !self.import_targets.is_empty()
             || self.has_wildcard_reexports()
-            || !self
-                .analysis
-                .extracted
-                .bindingless_import_sources
-                .is_empty()
+            || !self.analysis.extracted.bindingless_imports.is_empty()
             || self
                 .exports
                 .values()
@@ -1183,35 +1377,56 @@ impl ShallowFileState {
     /// returns `None`. This is the sole body authority for file-scope
     /// type symbols; the slim [`ShallowTypeSymbol`] carries no body.
     pub fn type_decl(&self, name: &str) -> Option<Arc<LoweredTypeDecl>> {
-        self.decl_bodies.type_decl(name)
+        self.type_decl_in(TopLevelOwnerId::ordinary_file(), name)
     }
 
-    /// Lease-aware counterpart of [`Self::type_decl`]: preserves the DISTINCT
-    /// `LeaseMiss` ReturnOnly outcome (a broken decl-body lease pin) so a
-    /// cache-admitting consumer refuses warm admission instead of persisting a
-    /// transient body-less result as genuine absence.
-    pub(crate) fn type_decl_outcome(&self, name: &str) -> DemandOutcome<LoweredTypeDecl> {
-        self.decl_bodies.type_decl_outcome(name)
+    pub(crate) fn type_decl_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<Arc<LoweredTypeDecl>> {
+        self.decl_bodies.type_decl_in(owner, name)
+    }
+
+    pub(crate) fn type_decl_outcome_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<LoweredTypeDecl> {
+        self.decl_bodies.type_decl_outcome_in(owner, name)
     }
 
     /// Demand the lowered BODY of a local VALUE symbol — eager
     /// synthesised `.vue`-default bodies first, then the lazy memo. A
     /// miss returns `None`.
     pub fn value_decl(&self, name: &str) -> Option<Arc<LoweredValueDecl>> {
-        if let Some(body) = self.synthesised_value_bodies.get(name) {
-            return Some(Arc::clone(body));
-        }
-        self.decl_bodies.value_decl(name)
+        self.value_decl_in(TopLevelOwnerId::ordinary_file(), name)
     }
 
-    /// Lease-aware counterpart of [`Self::value_decl`]: an eager synthesised
-    /// `.vue`-default body is a genuine `Ready`, otherwise the memo's typed
-    /// outcome (preserving the `LeaseMiss` no-warm signal) flows through.
-    pub(crate) fn value_decl_outcome(&self, name: &str) -> DemandOutcome<LoweredValueDecl> {
-        if let Some(body) = self.synthesised_value_bodies.get(name) {
-            return DemandOutcome::Ready(Some(Arc::clone(body)));
+    pub(crate) fn value_decl_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<Arc<LoweredValueDecl>> {
+        if owner == TopLevelOwnerId::ordinary_file() {
+            if let Some(body) = self.synthesised_value_bodies.get(name) {
+                return Some(Arc::clone(body));
+            }
         }
-        self.decl_bodies.value_decl_outcome(name)
+        self.decl_bodies.value_decl_in(owner, name)
+    }
+
+    pub(crate) fn value_decl_outcome_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<LoweredValueDecl> {
+        if owner == TopLevelOwnerId::ordinary_file() {
+            if let Some(body) = self.synthesised_value_bodies.get(name) {
+                return DemandOutcome::Ready(Some(Arc::clone(body)));
+            }
+        }
+        self.decl_bodies.value_decl_outcome_in(owner, name)
     }
 
     /// The per-contributor body surface for a file-scope TYPE symbol, as the
@@ -1282,10 +1497,18 @@ impl ShallowFileState {
     /// transitively through the rune module's own facts, never a fail-closed
     /// synthetic canonical.
     pub fn effective_value_decl(&self, name: &str) -> Option<Arc<LoweredValueDecl>> {
-        if let Some(decl) = self.value_decl(name) {
+        self.effective_value_decl_in(TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    pub(crate) fn effective_value_decl_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<Arc<LoweredValueDecl>> {
+        if let Some(decl) = self.value_decl_in(owner, name) {
             return Some(decl);
         }
-        if self.decl_bodies.rune_ambient_visible() {
+        if owner == TopLevelOwnerId::ordinary_file() && self.decl_bodies.rune_ambient_visible() {
             return crate::host_resolve::rune_ambient_value_decl(name);
         }
         None
@@ -1296,22 +1519,38 @@ impl ShallowFileState {
     /// inventory for a rune module. Mirrors [`Self::effective_value_decl`]'s
     /// precedence without lowering a body.
     pub fn effective_value_header_present(&self, name: &str) -> bool {
-        if self.decl_bodies.header_index().value_header(name).is_some()
-            || self.synthesised_value_bodies.contains_key(name)
-        {
+        self.effective_value_header_present_in(TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    pub(crate) fn effective_value_header_present_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> bool {
+        if self.has_value_symbol_in(owner, name) {
             return true;
         }
-        self.decl_bodies.rune_ambient_visible() && crate::host_resolve::rune_ambient_has_value(name)
+        owner == TopLevelOwnerId::ordinary_file()
+            && self.decl_bodies.rune_ambient_visible()
+            && crate::host_resolve::rune_ambient_has_value(name)
     }
 
     /// TYPE-space counterpart of [`Self::effective_value_decl`]: a user
     /// declaration wins, else the rune ambient inventory's TYPE symbols (the
     /// rune namespace types) for a rune module, else a miss.
     pub fn effective_type_decl(&self, name: &str) -> Option<Arc<LoweredTypeDecl>> {
-        if let Some(decl) = self.type_decl(name) {
+        self.effective_type_decl_in(TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    pub(crate) fn effective_type_decl_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<Arc<LoweredTypeDecl>> {
+        if let Some(decl) = self.type_decl_in(owner, name) {
             return Some(decl);
         }
-        if self.decl_bodies.rune_ambient_visible() {
+        if owner == TopLevelOwnerId::ordinary_file() && self.decl_bodies.rune_ambient_visible() {
             return crate::host_resolve::rune_ambient_type_decl(name);
         }
         None
@@ -1319,10 +1558,20 @@ impl ShallowFileState {
 
     /// TYPE-symbol PRESENCE under the centralized effective lookup.
     pub fn effective_type_header_present(&self, name: &str) -> bool {
-        if self.decl_bodies.header_index().type_header(name).is_some() {
+        self.effective_type_header_present_in(TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    pub(crate) fn effective_type_header_present_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> bool {
+        if self.has_type_symbol_in(owner, name) {
             return true;
         }
-        self.decl_bodies.rune_ambient_visible() && crate::host_resolve::rune_ambient_has_type(name)
+        owner == TopLevelOwnerId::ordinary_file()
+            && self.decl_bodies.rune_ambient_visible()
+            && crate::host_resolve::rune_ambient_has_type(name)
     }
 
     /// Demand the dependency-edge classification of a local TYPE symbol —
@@ -1331,8 +1580,19 @@ impl ShallowFileState {
     /// for any header type symbol (possibly with empty edge lists); a
     /// header miss returns `None` without lowering or caching anything.
     pub fn type_deps(&self, name: &str) -> Option<Arc<ClassifiedTypeDeps>> {
-        self.decl_bodies.header_index().type_header(name)?;
-        if let Some(hit) = self.type_deps_cache.get(name) {
+        self.type_deps_in(TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    pub(crate) fn type_deps_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<Arc<ClassifiedTypeDeps>> {
+        self.decl_bodies
+            .header_index()
+            .type_header_in(owner, name)?;
+        let key = DeclKey::new(owner, name);
+        if let Some(hit) = self.type_deps_cache.get(&key) {
             return hit.clone();
         }
         // A header-present symbol classifies to a genuine `Ready` under a live
@@ -1341,7 +1601,7 @@ impl ShallowFileState {
         // transient result as genuine absence — a cached wrong-empty would
         // under-classify the symbol's dependency edges for the artifact's life
         // (under-invalidation). A later demand under a live lease recovers.
-        match self.classify_type_deps(name) {
+        match self.classify_type_deps_in(owner, name) {
             DemandOutcome::LeaseMiss => {
                 // Broken decl-body lease pin: mark the generalized
                 // non-cacheability rail so an enclosing traced compute refuses
@@ -1354,8 +1614,7 @@ impl ShallowFileState {
                 None
             }
             DemandOutcome::Ready(computed) => {
-                self.type_deps_cache
-                    .insert(name.to_string(), computed.clone());
+                self.type_deps_cache.insert(key, computed.clone());
                 computed
             }
         }
@@ -1368,7 +1627,7 @@ impl ShallowFileState {
     #[cfg(test)]
     pub(crate) fn type_deps_cache_has_none_entry(&self, name: &str) -> bool {
         self.type_deps_cache
-            .get(name)
+            .get(&DeclKey::new(TopLevelOwnerId::ordinary_file(), name))
             .is_some_and(|entry| entry.is_none())
     }
 
@@ -1382,31 +1641,38 @@ impl ShallowFileState {
         scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
         name: &str,
     ) -> Option<Arc<LoweredTypeDecl>> {
-        self.decl_bodies
-            .header_index()
-            .augmentation_type_header(scope, name)?;
-        self.decl_bodies.augmentation_type_decl(scope, name)
+        self.augmentation_type_decl_in(scope, TopLevelOwnerId::ordinary_file(), name)
     }
 
-    /// Lease-aware counterpart of [`Self::augmentation_type_decl`]: preserves
-    /// the DISTINCT `LeaseMiss` ReturnOnly outcome so the cross-file
-    /// augmentation stitch folds a broken-lease augmenter body into the
-    /// no-warm (`source_env_unobservable`) rail instead of silently dropping
-    /// the contributor as genuine absence (an under-merged warm result).
-    pub(crate) fn augmentation_type_decl_outcome(
+    pub(crate) fn augmentation_type_decl_in(
         &self,
         scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<Arc<LoweredTypeDecl>> {
+        self.decl_bodies
+            .header_index()
+            .augmentation_type_header_in(scope, owner, name)?;
+        self.decl_bodies
+            .augmentation_type_decl_in(scope, owner, name)
+    }
+
+    pub(crate) fn augmentation_type_decl_outcome_in(
+        &self,
+        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        owner: TopLevelOwnerId,
         name: &str,
     ) -> DemandOutcome<LoweredTypeDecl> {
         if self
             .decl_bodies
             .header_index()
-            .augmentation_type_header(scope, name)
+            .augmentation_type_header_in(scope, owner, name)
             .is_none()
         {
             return DemandOutcome::Ready(None);
         }
-        self.decl_bodies.augmentation_type_decl_outcome(scope, name)
+        self.decl_bodies
+            .augmentation_type_decl_outcome_in(scope, owner, name)
     }
 
     /// Value-space counterpart of [`Self::augmentation_type_decl`].
@@ -1421,13 +1687,96 @@ impl ShallowFileState {
         self.decl_bodies.augmentation_value_decl(scope, name)
     }
 
+    pub(crate) fn classify_dependency_paths(
+        &self,
+        declaration_owner: TopLevelOwnerId,
+        declaration_name: &str,
+        paths: &FxHashSet<TypeDependencyPathFact>,
+    ) -> ClassifiedDependencyPaths {
+        let mut local = FxHashSet::default();
+        let mut external = FxHashSet::default();
+        let mut unroutable = FxHashSet::default();
+
+        for path in paths {
+            let root = path.root();
+            if let Some(target) = self
+                .owner_import_targets
+                .get(&DeclKey::new(declaration_owner, root))
+            {
+                let (imported_name, member_path) = if target.is_namespace {
+                    let Some((exported_name, member_path)) = path.member_path().split_first()
+                    else {
+                        unroutable.insert(root.to_string());
+                        continue;
+                    };
+                    (exported_name.clone(), member_path)
+                } else {
+                    (target.imported_name.clone(), path.member_path())
+                };
+                let route = if member_path.is_empty() {
+                    RouteDemand::Whole
+                } else {
+                    RouteDemand::MemberPath(Arc::from(member_path.to_vec().into_boxed_slice()))
+                };
+                external.insert(ExternalSymbolRef {
+                    local_name: root.to_string(),
+                    source_specifier: target.source_specifier.clone(),
+                    imported_name,
+                    canonical_id: external_canonical(target),
+                    route,
+                });
+                continue;
+            }
+
+            let declaration = DeclarationPath::root(DeclKey::new(declaration_owner, root));
+            if root != declaration_name
+                && (self.analysis.local_type_symbol(&declaration).is_some()
+                    || self.has_type_symbol_in(declaration_owner, root))
+            {
+                local.insert(root.to_string());
+            }
+        }
+
+        let mut local = local.into_iter().collect::<Vec<_>>();
+        local.sort();
+        let mut external = external.into_iter().collect::<Vec<_>>();
+        external.sort_by(|left, right| {
+            left.local_name
+                .cmp(&right.local_name)
+                .then_with(|| left.source_specifier.cmp(&right.source_specifier))
+                .then_with(|| left.imported_name.cmp(&right.imported_name))
+                .then_with(|| {
+                    let left_path: &[String] = match &left.route {
+                        RouteDemand::MemberPath(path) => path,
+                        _ => &[],
+                    };
+                    let right_path: &[String] = match &right.route {
+                        RouteDemand::MemberPath(path) => path,
+                        _ => &[],
+                    };
+                    left_path.cmp(right_path)
+                })
+        });
+        let mut unroutable = unroutable.into_iter().collect::<Vec<_>>();
+        unroutable.sort();
+        ClassifiedDependencyPaths {
+            local_deps: local,
+            external_deps: external,
+            unroutable_imports: unroutable,
+        }
+    }
+
     /// Classify one file-scope TYPE symbol's dependency edges: the local
     /// vs external split over the per-declaration dependency names,
     /// `typeof`-root import edges appended, deterministic ordering by
     /// final sort. Lowers the body through the memo to read its
     /// dependency-name roots; stores ONLY dependency edges.
-    fn classify_type_deps(&self, name: &str) -> DemandOutcome<ClassifiedTypeDeps> {
-        let lowered = match self.decl_bodies.type_decl_outcome(name) {
+    fn classify_type_deps_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<ClassifiedTypeDeps> {
+        let lowered = match self.decl_bodies.type_decl_outcome_in(owner, name) {
             // A broken decl-body lease pin: surface the DISTINCT no-warm signal
             // so the caller declines to cache a transient empty classification.
             DemandOutcome::LeaseMiss => return DemandOutcome::LeaseMiss,
@@ -1436,86 +1785,94 @@ impl ShallowFileState {
             DemandOutcome::Ready(Some(lowered)) => lowered,
         };
 
-        // LOCAL deps: dependency-name roots that are local type symbols
-        // (analyzer name inventory — header data), never imports, never
-        // self.
-        let mut local_set = FxHashSet::default();
-        for reference in &lowered.dep_names {
-            let root = reference.split('.').next().unwrap_or(reference.as_str());
-            if self.import_locals.contains(root) {
-                continue;
-            }
-            // Local membership consults the analyzer inventory AND the
-            // shallow header index: namespaced (`N.T`), default-aliased,
-            // and JSDoc-`@typedef` symbols live in the header index but
-            // not the analyzer's `local_type_symbol` table, so a dep on
-            // one must still resolve as a LOCAL hop — never a phantom
-            // import / dropped edge.
-            if root != name
-                && (self.analysis.local_type_symbol(root).is_some() || self.has_type_symbol(root))
-            {
-                local_set.insert(root.to_string());
-            }
-        }
-        let mut local_deps: Vec<String> = local_set.into_iter().collect();
-        local_deps.sort();
+        let legacy = self.classify_dependency_paths(owner, name, &lowered.dependency_paths);
+        let declaration =
+            self.classify_dependency_paths(owner, name, &lowered.declaration_carrier_paths);
+        let local_deps = legacy.local_deps;
+        let mut external_deps = legacy.external_deps;
+        let declaration_local_deps = declaration.local_deps;
+        let mut declaration_external_deps = declaration.external_deps;
+        let mut unroutable_declaration_dependencies = declaration.unroutable_imports;
 
-        // EXTERNAL deps: dependency-name roots bound by imports, deduped
-        // by `(specifier, imported_name)` via keyed-map accumulation.
-        let mut external_deps = Vec::new();
-        let mut seen_external: FxHashSet<(String, String)> = FxHashSet::default();
-        for dep_name in lowered
-            .dep_names
+        let mut owner_value_deps = lowered
+            .value_query_paths
             .iter()
-            .chain(lowered.structural_dep_names.iter())
-        {
-            let root = dep_name.split('.').next().unwrap_or(dep_name.as_str());
-            if !self.import_locals.contains(root) {
-                continue;
-            }
-            let Some(target) = self.import_targets.get(root) else {
-                continue;
-            };
-            let imported_name = if root == dep_name {
-                target.imported_name.clone()
-            } else if let Some(suffix) = dep_name.strip_prefix(root) {
-                format!("{}{suffix}", target.imported_name)
-            } else {
-                target.imported_name.clone()
-            };
-            if !seen_external.insert((target.source_specifier.clone(), imported_name.clone())) {
-                continue;
-            }
-            external_deps.push(ExternalSymbolRef {
-                local_name: dep_name.clone(),
-                source_specifier: target.source_specifier.clone(),
-                imported_name,
-                canonical_id: external_canonical(target),
-                route: RouteDemand::Whole,
-            });
-        }
+            .chain(lowered.value_position_paths.iter())
+            .map(TypeDependencyPathFact::root)
+            .filter(|root| {
+                !self
+                    .owner_import_targets
+                    .contains_key(&DeclKey::new(owner, *root))
+            })
+            .filter(|root| *root != name)
+            .filter(|root| {
+                self.has_value_symbol_in(owner, root) && !self.has_type_symbol_in(owner, root)
+            })
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        owner_value_deps.sort();
+        owner_value_deps.dedup();
 
-        // `typeof` roots referencing imports contribute external edges
-        // (the precomputed roots ride on the lowered entry — no body
-        // re-walk here).
-        for root in &lowered.typeof_root_names {
-            let Some(target) = self.import_targets.get(root.as_str()) else {
+        let mut retained_value_carrier_deps = lowered
+            .value_query_paths
+            .iter()
+            .chain(lowered.value_position_paths.iter())
+            .map(TypeDependencyPathFact::root)
+            .filter(|root| {
+                !self
+                    .owner_import_targets
+                    .contains_key(&DeclKey::new(owner, *root))
+            })
+            .filter(|root| {
+                self.has_value_symbol_in(owner, root) && self.has_type_symbol_in(owner, root)
+            })
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        retained_value_carrier_deps.sort();
+        retained_value_carrier_deps.dedup();
+
+        // Value-role roots retain the import declaration even when they do not
+        // identify a type-space exported symbol (notably bare namespace
+        // queries). They are appended to both legacy and declaration rails;
+        // the role vectors below tell TSC whether the import must be usable as
+        // a runtime value.
+        for path in lowered
+            .value_query_paths
+            .iter()
+            .chain(lowered.value_position_paths.iter())
+        {
+            let root = path.root();
+            let Some(target) = self.owner_import_targets.get(&DeclKey::new(owner, root)) else {
                 continue;
             };
-            if !seen_external.insert((
-                target.source_specifier.clone(),
-                target.imported_name.clone(),
-            )) {
-                continue;
-            }
-            external_deps.push(ExternalSymbolRef {
-                local_name: root.clone(),
+            let external = ExternalSymbolRef {
+                local_name: root.to_string(),
                 source_specifier: target.source_specifier.clone(),
                 imported_name: target.imported_name.clone(),
                 canonical_id: external_canonical(target),
                 route: RouteDemand::Whole,
-            });
+            };
+            if !external_deps
+                .iter()
+                .any(|dependency| dependency.local_name == root)
+            {
+                external_deps.push(external.clone());
+            }
+            if !declaration_external_deps
+                .iter()
+                .any(|dependency| dependency.local_name == root)
+            {
+                declaration_external_deps.push(external);
+            }
         }
+
+        unroutable_declaration_dependencies.retain(|root| {
+            !lowered
+                .value_query_paths
+                .iter()
+                .chain(lowered.value_position_paths.iter())
+                .any(|path| path.root() == root)
+        });
 
         external_deps.sort_by(|left, right| {
             left.local_name
@@ -1523,10 +1880,50 @@ impl ShallowFileState {
                 .then_with(|| left.source_specifier.cmp(&right.source_specifier))
                 .then_with(|| left.imported_name.cmp(&right.imported_name))
         });
+        declaration_external_deps.sort_by(|left, right| {
+            left.local_name
+                .cmp(&right.local_name)
+                .then_with(|| left.source_specifier.cmp(&right.source_specifier))
+                .then_with(|| left.imported_name.cmp(&right.imported_name))
+        });
+        let mut external_value_queries = lowered
+            .value_query_paths
+            .iter()
+            .map(TypeDependencyPathFact::root)
+            .filter(|root| {
+                self.owner_import_targets
+                    .contains_key(&DeclKey::new(owner, *root))
+            })
+            .map(str::to_string)
+            .collect::<FxHashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        external_value_queries.sort();
+        let mut external_value_positions = lowered
+            .value_position_paths
+            .iter()
+            .map(TypeDependencyPathFact::root)
+            .filter(|root| {
+                self.owner_import_targets
+                    .contains_key(&DeclKey::new(owner, *root))
+            })
+            .map(str::to_string)
+            .collect::<FxHashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        external_value_positions.sort();
 
         DemandOutcome::Ready(Some(Arc::new(ClassifiedTypeDeps {
             local_deps,
+            owner_value_deps,
+            retained_value_carrier_deps,
             external_deps,
+            declaration_local_deps,
+            declaration_external_deps,
+            unroutable_declaration_dependencies,
+            has_unroutable_value_position: lowered.has_unroutable_value_position,
+            external_value_queries,
+            external_value_positions,
         })))
     }
 
@@ -1534,6 +1931,15 @@ impl ShallowFileState {
     /// import-local names the type's structural dependency graph reaches.
     /// Demand-scoped: only the walked symbols' bodies lower.
     pub(crate) fn required_import_names(&self, type_name: &str) -> FxHashSet<String> {
+        self.required_import_names_in(TopLevelOwnerId::ordinary_file(), type_name)
+    }
+
+    /// Exact-owner transitive required-import closure of one local type.
+    pub(crate) fn required_import_names_in(
+        &self,
+        owner: TopLevelOwnerId,
+        type_name: &str,
+    ) -> FxHashSet<String> {
         let mut required_imports = FxHashSet::default();
         let mut visited = FxHashSet::default();
         let mut pending = vec![type_name.to_string()];
@@ -1541,8 +1947,11 @@ impl ShallowFileState {
         // Import membership mirrors the analyzer's `import_locals` set
         // (named + default bindings; namespace bindings are NOT members),
         // so the walk agrees with the historical whole-analysis product.
-        let is_import_local =
-            |name: &str| -> bool { self.analysis.local_import_symbol_target(name).is_some() };
+        let is_import_local = |name: &str| -> bool {
+            self.analysis
+                .local_import_symbol_target(&DeclKey::new(owner, name))
+                .is_some()
+        };
 
         while let Some(current) = pending.pop() {
             if !visited.insert(current.clone()) {
@@ -1558,17 +1967,15 @@ impl ShallowFileState {
             // JSDoc-`@typedef` symbols are not in the analyzer table but
             // ARE shallow type symbols whose structural dep graph must be
             // walked for the required-import closure.
-            if self.analysis.local_type_symbol(&current).is_some() || self.has_type_symbol(&current)
+            let declaration = DeclarationPath::root(DeclKey::new(owner, current.as_str()));
+            if self.analysis.local_type_symbol(&declaration).is_some()
+                || self.has_type_symbol_in(owner, &current)
             {
-                let Some(lowered) = self.decl_bodies.type_decl(&current) else {
+                let Some(lowered) = self.decl_bodies.type_decl_in(owner, &current) else {
                     continue;
                 };
-                for reference in &lowered.structural_dep_names {
-                    let root = reference
-                        .split('.')
-                        .next()
-                        .map(str::to_string)
-                        .unwrap_or_else(|| reference.clone());
+                for reference in &lowered.structural_dependency_paths {
+                    let root = reference.root().to_string();
                     if is_import_local(&root) {
                         required_imports.insert(root);
                     } else if !visited.contains(&root) {
@@ -1621,18 +2028,37 @@ impl ShallowFileState {
         self.exports
             .entry(name.to_string())
             .or_insert_with(|| ExportTarget::Local {
+                owner: if self.decl_bodies.framework_parse().is_some() {
+                    TopLevelOwnerId::instance(0)
+                } else {
+                    TopLevelOwnerId::ordinary_file()
+                },
                 symbol_name: name.to_string(),
             });
     }
 
     /// Check if a name is an import-local binding.
     pub fn is_import_local(&self, name: &str) -> bool {
-        self.import_locals.contains(name)
+        self.is_import_local_in(TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    pub(crate) fn is_import_local_in(&self, owner: TopLevelOwnerId, name: &str) -> bool {
+        self.owner_import_targets
+            .contains_key(&DeclKey::new(owner, name))
     }
 
     /// Get the import target for a local import name.
     pub fn import_target(&self, local_name: &str) -> Option<&ImportTarget> {
-        self.import_targets.get(local_name)
+        self.import_target_in(TopLevelOwnerId::ordinary_file(), local_name)
+    }
+
+    pub(crate) fn import_target_in(
+        &self,
+        owner: TopLevelOwnerId,
+        local_name: &str,
+    ) -> Option<&ImportTarget> {
+        self.owner_import_targets
+            .get(&DeclKey::new(owner, local_name))
     }
 
     // -----------------------------------------------------------------------
@@ -1646,8 +2072,17 @@ impl ShallowFileState {
     /// fact-closure core (`verter_semantic::facts::route_closure`) reading
     /// this state's stored per-decl route facts + dependency edges.
     pub fn local_closure(&self, symbol_name: &str, budget: usize) -> LocalClosureResult {
+        self.local_closure_in(TopLevelOwnerId::ordinary_file(), symbol_name, budget)
+    }
+
+    pub(crate) fn local_closure_in(
+        &self,
+        owner: TopLevelOwnerId,
+        symbol_name: &str,
+        budget: usize,
+    ) -> LocalClosureResult {
         from_fact_closure(verter_semantic::facts::local_closure_over_facts(
-            &SfsRouteFactProvider { state: self },
+            &SfsRouteFactProvider { state: self, owner },
             symbol_name,
             budget,
         ))
@@ -1670,8 +2105,18 @@ impl ShallowFileState {
         route: &RouteDemand,
         budget: usize,
     ) -> LocalClosureResult {
+        self.route_closure_in(TopLevelOwnerId::ordinary_file(), symbol_name, route, budget)
+    }
+
+    pub(crate) fn route_closure_in(
+        &self,
+        owner: TopLevelOwnerId,
+        symbol_name: &str,
+        route: &RouteDemand,
+        budget: usize,
+    ) -> LocalClosureResult {
         from_fact_closure(verter_semantic::facts::route_closure_over_facts(
-            &SfsRouteFactProvider { state: self },
+            &SfsRouteFactProvider { state: self, owner },
             symbol_name,
             route,
             budget,
@@ -1685,21 +2130,22 @@ impl ShallowFileState {
 /// re-walk.
 struct SfsRouteFactProvider<'s> {
     state: &'s ShallowFileState,
+    owner: TopLevelOwnerId,
 }
 
 impl verter_semantic::facts::RouteClosureProvider for SfsRouteFactProvider<'_> {
     fn has_type_symbol(&self, name: &str) -> bool {
-        self.state.has_type_symbol(name)
+        self.state.has_type_symbol_in(self.owner, name)
     }
 
     fn route_facts(&self, name: &str) -> Option<verter_type_expr::facts::ShallowRouteFacts> {
         self.state
-            .type_decl(name)
+            .type_decl_in(self.owner, name)
             .map(|lowered| lowered.route_facts.clone())
     }
 
     fn classified_deps(&self, name: &str) -> Option<verter_semantic::facts::ClassifiedRouteDeps> {
-        let deps = self.state.type_deps(name)?;
+        let deps = self.state.type_deps_in(self.owner, name)?;
         Some(verter_semantic::facts::ClassifiedRouteDeps {
             local_deps: deps.local_deps.clone(),
             external_deps: deps
@@ -1711,14 +2157,14 @@ impl verter_semantic::facts::RouteClosureProvider for SfsRouteFactProvider<'_> {
     }
 
     fn is_import_local(&self, name: &str) -> bool {
-        self.state.import_locals.contains(name)
+        self.state.is_import_local_in(self.owner, name)
     }
 
     fn import_route_target(
         &self,
         name: &str,
     ) -> Option<verter_type_expr::facts::ExternalRouteRefFact> {
-        let target = self.state.import_targets.get(name)?;
+        let target = self.state.import_target_in(self.owner, name)?;
         Some(verter_type_expr::facts::ExternalRouteRefFact {
             local_name: name.to_string(),
             source_specifier: target.source_specifier.clone(),
@@ -1735,7 +2181,7 @@ impl verter_semantic::facts::RouteClosureProvider for SfsRouteFactProvider<'_> {
         // Header-decidable without any body demand: a non-type-symbol alias
         // enumerates to zero keys (the legacy non-symbol arm — the empty-keys
         // fall-through applies downstream).
-        if !self.state.has_type_symbol(name) {
+        if !self.state.has_type_symbol_in(self.owner, name) {
             return KeySourceLookup::MissingTypeSymbol;
         }
 
@@ -1752,15 +2198,15 @@ impl verter_semantic::facts::RouteClosureProvider for SfsRouteFactProvider<'_> {
         // re-borrow), so the fact rail observes exactly the declarations the
         // enumeration consumed. The route-closure core never sees a
         // declaration body — only this tri-state outcome.
-        let route_lens = self.state.decl_bodies().route_fact_lens();
-        let own_canonical =
-            verter_semantic::facts::RouteFactLens::own_canonical_id(route_lens.as_ref());
+        let route_fact_lens = self.state.decl_bodies().route_fact_lens();
+        let route_lens = route_fact_lens.for_owner(self.owner);
+        let own_canonical = verter_semantic::facts::RouteFactLens::own_canonical_id(&route_lens);
         let mut visited = FxHashSet::default();
         let mut keys: Vec<String> = Vec::new();
         let mut pending = vec![name.to_string()];
         visited.insert(name.to_string());
         while let Some(current) = pending.pop() {
-            let Some(fact) = self.mint_key_source_fact(&current, route_lens.as_ref()) else {
+            let Some(fact) = self.mint_key_source_fact(&current, &route_lens) else {
                 return KeySourceLookup::Unavailable;
             };
             match fact {
@@ -1773,13 +2219,15 @@ impl verter_semantic::facts::RouteClosureProvider for SfsRouteFactProvider<'_> {
                         // The producer anchors same-scope refs on the owning
                         // file's canonical; any other hop is unresolvable
                         // here — fail closed, never a fabricated key set.
-                        if alias.anchor.canonical_id != own_canonical {
+                        if alias.anchor.canonical_id != own_canonical
+                            || alias.anchor.owner != self.owner
+                        {
                             return KeySourceLookup::Unavailable;
                         }
                         let symbol = alias.anchor.symbol.as_ref();
                         // A ref that names no file-scope TYPE symbol
                         // enumerates to zero keys (the legacy guard arm).
-                        if !self.state.has_type_symbol(symbol) {
+                        if !self.state.has_type_symbol_in(self.owner, symbol) {
                             continue;
                         }
                         if visited.insert(symbol.to_string()) {
@@ -1811,8 +2259,12 @@ impl SfsRouteFactProvider<'_> {
         name: &str,
         lens: &dyn verter_semantic::facts::RouteFactLens,
     ) -> Option<verter_type_expr::facts::KeySourceFact> {
-        self.state.type_decl(name)?;
-        match self.state.decl_bodies().transient_type_bodies(name) {
+        self.state.type_decl_in(self.owner, name)?;
+        match self
+            .state
+            .decl_bodies()
+            .transient_type_bodies_in(self.owner, name)
+        {
             crate::decl_body_memo::DemandOutcome::Ready(Some(bodies)) if !bodies.is_empty() => {
                 Some(verter_semantic::facts::produce_key_source_fact(
                     bodies.as_ref(),
@@ -1910,143 +2362,141 @@ impl<'a> ShallowTypeView<'a> {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Collect all named type references from a TypeExpr, non-recursively
-/// (only direct references, not transitive).
-pub(crate) fn collect_type_refs(expr: &TypeExpr, out: &mut Vec<String>) {
-    match expr {
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } => {
-            out.push(name.to_string());
-            for arg in type_arguments.iter() {
-                collect_type_refs(arg, out);
-            }
+pub(crate) trait TypeofDependencyCollector {
+    fn record(&mut self, value_ref: &verter_type_expr::ValueRef);
+}
+
+/// Runaway-safety fuse for session-owned semantic-inference tree walks.
+/// Parser syntax depth is substantially lower; this bound protects mutated or
+/// synthesized owned IR while leaving ordinary authored programs untouched.
+pub(crate) const SEMANTIC_INFERENCE_TRAVERSAL_BUDGET: usize = 4_096;
+
+impl TypeofDependencyCollector for FxHashSet<String> {
+    fn record(&mut self, value_ref: &verter_type_expr::ValueRef) {
+        if let Some(root) = value_ref.path.first() {
+            self.insert(root.clone());
         }
-        TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
-            for m in members.iter() {
-                collect_type_refs(m, out);
-            }
-        }
-        TypeExpr::Array { element, .. } => collect_type_refs(element, out),
-        TypeExpr::Object(obj) => {
-            for member in &obj.properties {
-                if let verter_type_expr::ObjectMember::Property(prop) = member {
-                    collect_type_refs(&prop.ty, out);
-                }
-            }
-        }
-        TypeExpr::Tuple { elements, .. } => {
-            for el in elements.iter() {
-                collect_type_refs(&el.ty, out);
-            }
-        }
-        TypeExpr::IndexedAccess { object, index } => {
-            collect_type_refs(object, out);
-            collect_type_refs(index, out);
-        }
-        TypeExpr::Conditional {
-            check,
-            extends,
-            true_type,
-            false_type,
-        } => {
-            collect_type_refs(check, out);
-            collect_type_refs(extends, out);
-            collect_type_refs(true_type, out);
-            collect_type_refs(false_type, out);
-        }
-        // A constructor type's signature refs are collected identically to a
-        // function type's (same `FunctionExpr` payload).
-        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
-            for param in &func.parameters {
-                collect_type_refs(&param.ty, out);
-            }
-            if let Some(ref ret) = func.return_type {
-                collect_type_refs(ret, out);
-            }
-        }
-        TypeExpr::Mapped { source, value, .. } => {
-            collect_type_refs(source, out);
-            collect_type_refs(value, out);
-        }
-        TypeExpr::KeyOf(inner) | TypeExpr::Rest(inner) | TypeExpr::Parenthesized(inner) => {
-            collect_type_refs(inner, out);
-        }
-        // Mirrors the `Ref` arm's recursion into `type_arguments`. The
-        // `specifier`/`qualifier` are a module path, not a collectable local
-        // type-ref name, so only the nested type-argument exprs are walked.
-        TypeExpr::ImportType { type_arguments, .. } => {
-            for arg in type_arguments.iter() {
-                collect_type_refs(arg, out);
-            }
-        }
-        TypeExpr::TypeOf { .. }
-        | TypeExpr::TypeParameter(_)
-        | TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::TemplateLiteral { .. }
-        | TypeExpr::Unknown { .. }
-        | TypeExpr::RecursiveRef { .. }
-        // Synthetic carriers reference no type aliases — terminal leaves.
-        | TypeExpr::SyntheticSlotBinding(_)
-        | TypeExpr::Infer { .. } => {}
     }
 }
 
-/// Collect the ROOT names of every `typeof <value>` reference reachable in
-/// `expr` (the first path segment of each `TypeOf`), so a `typeof`-bearing
-/// declaration body's import dependencies can be augmented from the imported
-/// value roots.
-pub(crate) fn collect_typeof_roots(expr: &TypeExpr, out: &mut FxHashSet<String>) {
+impl TypeofDependencyCollector for BTreeSet<TypeDependencyPathFact> {
+    fn record(&mut self, value_ref: &verter_type_expr::ValueRef) {
+        if let Some(path) = TypeDependencyPathFact::from_segments(value_ref.path.iter().cloned()) {
+            self.insert(path);
+        }
+    }
+}
+
+/// Collect every `typeof <value>` dependency reachable in `expr`. Callers
+/// choose either root-name or full typed-path retention through the collector.
+pub(crate) fn collect_typeof_roots<C: TypeofDependencyCollector>(
+    expr: &TypeExpr,
+    out: &mut C,
+) -> Result<(), verter_type_expr::facts::InferenceUnavailableReason> {
+    let mut pending = vec![expr];
+    let mut visited = 0usize;
+    while let Some(current) = pending.pop() {
+        visited = visited.saturating_add(1);
+        if visited > SEMANTIC_INFERENCE_TRAVERSAL_BUDGET {
+            return Err(verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded);
+        }
+        if let TypeExpr::TypeOf(value_ref) = current {
+            out.record(value_ref);
+        }
+        push_type_expr_children(current, &mut pending);
+    }
+    Ok(())
+}
+
+/// Whether every rendered leaf is declaration-safe. Inferred declaration
+/// splices must never hide an implicit `any`/unknown lowering inside a nested
+/// function, collection, object, or generic argument.
+pub(crate) fn type_expr_is_declaration_safe(
+    expr: &TypeExpr,
+) -> Result<bool, verter_type_expr::facts::InferenceUnavailableReason> {
+    let mut pending = vec![expr];
+    let mut visited = 0usize;
+    while let Some(current) = pending.pop() {
+        visited = visited.saturating_add(1);
+        if visited > SEMANTIC_INFERENCE_TRAVERSAL_BUDGET {
+            return Err(verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded);
+        }
+        match current {
+            TypeExpr::Primitive(
+                verter_type_expr::PrimitiveName::Any | verter_type_expr::PrimitiveName::Unknown,
+            )
+            | TypeExpr::Unknown { .. }
+            | TypeExpr::SyntheticSlotBinding(_) => return Ok(false),
+            TypeExpr::Function(function) | TypeExpr::ConstructorType(function)
+                if function.return_type.is_none() =>
+            {
+                return Ok(false);
+            }
+            _ => push_type_expr_children(current, &mut pending),
+        }
+    }
+    Ok(true)
+}
+
+fn push_type_expr_children<'a>(expr: &'a TypeExpr, pending: &mut Vec<&'a TypeExpr>) {
+    let push_type_param = |parameter: &'a verter_type_expr::TypeParam,
+                           pending: &mut Vec<&'a TypeExpr>| {
+        if let Some(constraint) = parameter.constraint.as_deref() {
+            pending.push(constraint);
+        }
+        if let Some(default) = parameter.default.as_deref() {
+            pending.push(default);
+        }
+    };
+    let push_function = |function: &'a verter_type_expr::FunctionExpr,
+                         pending: &mut Vec<&'a TypeExpr>| {
+        for parameter in &function.parameters {
+            pending.push(&parameter.ty);
+        }
+        if let Some(return_type) = function.return_type.as_deref() {
+            pending.push(return_type);
+        }
+        for parameter in &function.type_parameters {
+            push_type_param(parameter, pending);
+        }
+    };
+
     match expr {
-        TypeExpr::TypeOf(value_ref) => {
-            if let Some(root) = value_ref.path.first() {
-                out.insert(root.clone());
-            }
-        }
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-            for inner in types.iter() {
-                collect_typeof_roots(inner, out);
-            }
-        }
+        TypeExpr::TypeOf(value_ref) => pending.extend(value_ref.type_args.iter()),
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => pending.extend(types.iter()),
         TypeExpr::Array { element, .. }
         | TypeExpr::KeyOf(element)
         | TypeExpr::Rest(element)
-        | TypeExpr::Parenthesized(element) => collect_typeof_roots(element, out),
+        | TypeExpr::Parenthesized(element) => pending.push(element),
         TypeExpr::Tuple { elements, .. } => {
-            for element in elements.iter() {
-                collect_typeof_roots(&element.ty, out);
-            }
+            pending.extend(elements.iter().map(|element| &element.ty));
         }
         TypeExpr::Object(object) => {
             for member in &object.properties {
                 match member {
-                    verter_type_expr::ObjectMember::Property(prop) => {
-                        collect_typeof_roots(&prop.ty, out);
+                    verter_type_expr::ObjectMember::Property(property) => {
+                        pending.push(&property.ty);
                     }
-                    verter_type_expr::ObjectMember::IndexSignature(sig) => {
-                        collect_typeof_roots(&sig.key_type, out);
-                        collect_typeof_roots(&sig.value_type, out);
+                    verter_type_expr::ObjectMember::IndexSignature(signature) => {
+                        pending.push(&signature.key_type);
+                        pending.push(&signature.value_type);
                     }
-                    verter_type_expr::ObjectMember::CallSignature(func)
-                    | verter_type_expr::ObjectMember::ConstructSignature(func) => {
-                        collect_typeof_roots_in_function(func, out);
+                    verter_type_expr::ObjectMember::CallSignature(function)
+                    | verter_type_expr::ObjectMember::ConstructSignature(function) => {
+                        push_function(function, pending);
                     }
                     verter_type_expr::ObjectMember::Method(method) => {
-                        collect_typeof_roots_in_function(&method.function, out);
+                        push_function(&method.function, pending);
                     }
                 }
             }
         }
-        // A constructor type's typeof roots are collected identically to a
-        // function type's (same `FunctionExpr` payload).
-        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
-            collect_typeof_roots_in_function(func, out)
+        TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
+            push_function(function, pending);
         }
         TypeExpr::IndexedAccess { object, index } => {
-            collect_typeof_roots(object, out);
-            collect_typeof_roots(index, out);
+            pending.push(object);
+            pending.push(index);
         }
         TypeExpr::Conditional {
             check,
@@ -2054,10 +2504,10 @@ pub(crate) fn collect_typeof_roots(expr: &TypeExpr, out: &mut FxHashSet<String>)
             true_type,
             false_type,
         } => {
-            collect_typeof_roots(check, out);
-            collect_typeof_roots(extends, out);
-            collect_typeof_roots(true_type, out);
-            collect_typeof_roots(false_type, out);
+            pending.push(check);
+            pending.push(extends);
+            pending.push(true_type);
+            pending.push(false_type);
         }
         TypeExpr::Mapped {
             source,
@@ -2065,50 +2515,33 @@ pub(crate) fn collect_typeof_roots(expr: &TypeExpr, out: &mut FxHashSet<String>)
             name_type,
             ..
         } => {
-            collect_typeof_roots(source, out);
-            collect_typeof_roots(value, out);
+            pending.push(source);
+            pending.push(value);
             if let Some(name_type) = name_type.as_deref() {
-                collect_typeof_roots(name_type, out);
+                pending.push(name_type);
             }
         }
-        TypeExpr::TemplateLiteral { expressions, .. } => {
-            for expr in expressions.iter() {
-                collect_typeof_roots(expr, out);
+        TypeExpr::TemplateLiteral { expressions, .. } => pending.extend(expressions.iter()),
+        TypeExpr::Ref { type_arguments, .. } | TypeExpr::ImportType { type_arguments, .. } => {
+            pending.extend(type_arguments.iter())
+        }
+        TypeExpr::TypeParameter(parameter) => push_type_param(parameter, pending),
+        TypeExpr::RecursiveRef {
+            type_arguments,
+            conditional_context,
+            ..
+        } => {
+            pending.extend(type_arguments.iter());
+            for frame in conditional_context.iter() {
+                pending.push(&frame.check);
+                pending.push(&frame.extends);
             }
         }
         TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
-        | TypeExpr::Ref { .. }
-        | TypeExpr::TypeParameter(_)
         | TypeExpr::Infer { .. }
-        | TypeExpr::RecursiveRef { .. }
-        // Synthetic carriers carry no `typeof` operand — terminal leaves.
         | TypeExpr::SyntheticSlotBinding(_)
-        // An import-type carries no `typeof X` operand of its own — like the
-        // terminal `Ref` arm here, it is a no-op leaf (its module-path
-        // qualifier is not a `typeof` root).
-        | TypeExpr::ImportType { .. }
         | TypeExpr::Unknown { .. } => {}
-    }
-}
-
-fn collect_typeof_roots_in_function(
-    func: &verter_type_expr::FunctionExpr,
-    out: &mut FxHashSet<String>,
-) {
-    for param in &func.parameters {
-        collect_typeof_roots(&param.ty, out);
-    }
-    if let Some(return_type) = func.return_type.as_deref() {
-        collect_typeof_roots(return_type, out);
-    }
-    for param in &func.type_parameters {
-        if let Some(constraint) = param.constraint.as_deref() {
-            collect_typeof_roots(constraint, out);
-        }
-        if let Some(default) = param.default.as_deref() {
-            collect_typeof_roots(default, out);
-        }
     }
 }
 
@@ -2120,6 +2553,33 @@ fn collect_typeof_roots_in_function(
 mod tests {
     use super::*;
     use verter_semantic::analysis::type_eval::ValueDeclKind;
+
+    #[test]
+    fn deep_inference_type_tree_fails_with_typed_budget_without_recursion() {
+        let mut expr = TypeExpr::Primitive(verter_type_expr::PrimitiveName::String);
+        for _ in 0..=SEMANTIC_INFERENCE_TRAVERSAL_BUDGET {
+            expr = TypeExpr::Array {
+                element: Arc::new(expr),
+                readonly: false,
+            };
+        }
+
+        assert_eq!(
+            type_expr_is_declaration_safe(&expr),
+            Err(verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded),
+            "deep inferred initializer/return types fail typed instead of overflowing"
+        );
+        let mut roots = FxHashSet::default();
+        assert_eq!(
+            collect_typeof_roots(&expr, &mut roots),
+            Err(verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded),
+        );
+        assert!(roots.is_empty());
+
+        // Avoid making the test's destructor itself recursively drop the
+        // adversarial Arc chain; the production walkers never own or drop it.
+        std::mem::forget(expr);
+    }
 
     fn make_analysis(source: &str) -> Arc<AnalyzedExternalTypeSource> {
         let alloc = oxc_allocator::Allocator::new();
@@ -2140,7 +2600,7 @@ mod tests {
             "Props should be exported"
         );
         match state.export_target("Props").unwrap() {
-            ExportTarget::Local { symbol_name } => {
+            ExportTarget::Local { symbol_name, .. } => {
                 assert_eq!(symbol_name, "Props");
             }
             other => panic!("expected Local export, got {other:?}"),
@@ -2284,6 +2744,95 @@ export type Button = {
     }
 
     #[test]
+    fn qualified_import_dependencies_preserve_export_head_and_member_route() {
+        let source = r#"
+import type * as NS from './types'
+import type { Foo as F } from './named'
+export interface Props { value: NS.Value.Inner; named: F.Bar }
+"#;
+        let state = ShallowFileState::service_backed_for_test(source);
+        let props = state.type_deps("Props").expect("Props should exist");
+
+        let namespace = props
+            .external_deps
+            .iter()
+            .find(|dependency| dependency.local_name == "NS")
+            .unwrap();
+        assert_eq!(namespace.imported_name, "Value");
+        assert_eq!(
+            namespace.route,
+            RouteDemand::MemberPath(Arc::from(["Inner".to_string()])),
+        );
+        assert_ne!(namespace.imported_name, "*.Value.Inner");
+
+        let named = props
+            .external_deps
+            .iter()
+            .find(|dependency| dependency.local_name == "F")
+            .unwrap();
+        assert_eq!(named.imported_name, "Foo");
+        assert_eq!(
+            named.route,
+            RouteDemand::MemberPath(Arc::from(["Bar".to_string()])),
+        );
+    }
+
+    #[test]
+    fn bare_namespace_type_dependency_is_explicitly_unroutable() {
+        let state = ShallowFileState::service_backed_for_test(
+            "import type * as NS from './types'; export type Props = NS;",
+        );
+        let dependencies = state.type_deps("Props").unwrap();
+
+        assert_eq!(dependencies.unroutable_declaration_dependencies, ["NS"],);
+        assert!(dependencies.declaration_external_deps.is_empty());
+    }
+
+    #[test]
+    fn bare_namespace_type_query_is_a_value_import_not_an_unroutable_type_route() {
+        let state = ShallowFileState::service_backed_for_test(
+            "import * as NS from './types'; export type Props = typeof NS;",
+        );
+        let dependencies = state.type_deps("Props").unwrap();
+
+        assert!(dependencies.unroutable_declaration_dependencies.is_empty());
+        assert_eq!(dependencies.external_value_queries, ["NS"]);
+        assert!(dependencies
+            .declaration_external_deps
+            .iter()
+            .any(|dependency| dependency.local_name == "NS"));
+    }
+
+    #[test]
+    fn qualified_class_heritage_is_a_routable_value_position() {
+        let state = ShallowFileState::service_backed_for_test(
+            "import * as NS from './types'; export class Props extends NS.Base {}",
+        );
+        let dependencies = state.type_deps("Props").unwrap();
+
+        assert_eq!(dependencies.external_value_positions, ["NS"]);
+        assert!(!dependencies.has_unroutable_value_position);
+        let base = dependencies
+            .declaration_external_deps
+            .iter()
+            .find(|dependency| dependency.local_name == "NS")
+            .unwrap();
+        assert_eq!(base.imported_name, "Base");
+        assert_eq!(base.route, RouteDemand::Whole);
+    }
+
+    #[test]
+    fn call_expression_class_heritage_is_explicitly_unroutable() {
+        let state = ShallowFileState::service_backed_for_test(
+            "declare function mixin<T>(base: T): T; \
+             declare class Base {}; export class Props extends mixin(Base) {}",
+        );
+        let dependencies = state.type_deps("Props").unwrap();
+
+        assert!(dependencies.has_unroutable_value_position);
+    }
+
+    #[test]
     fn direct_export_takes_precedence_over_wildcard_route() {
         let analysis = make_analysis(
             r#"
@@ -2359,7 +2908,7 @@ export { Foo as Bar }
         );
 
         match state.export_target("Bar") {
-            Some(ExportTarget::Local { symbol_name }) => {
+            Some(ExportTarget::Local { symbol_name, .. }) => {
                 assert_eq!(
                     symbol_name, "Foo",
                     "aliased local exports should keep the underlying local target"
@@ -2386,7 +2935,7 @@ export default class Props {
         );
 
         match state.export_target("default") {
-            Some(ExportTarget::Local { symbol_name }) => {
+            Some(ExportTarget::Local { symbol_name, .. }) => {
                 assert_eq!(
                     symbol_name, "default",
                     "default-exported classes should be published under the default export name"
@@ -2457,7 +3006,7 @@ export const defaults: Props = { label: 'ok' }
         let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), analysis);
 
         match state.export_target("defaults") {
-            Some(ExportTarget::Local { symbol_name }) => assert_eq!(symbol_name, "defaults"),
+            Some(ExportTarget::Local { symbol_name, .. }) => assert_eq!(symbol_name, "defaults"),
             other => panic!("expected Local export for defaults, got {other:?}"),
         }
     }
@@ -2518,6 +3067,7 @@ export interface Props { child: Inner; data: Local }
             Some(&dep_edges),
             &crate::identity_interner::IdentityInterner::with_default_budget(),
         )
+        .expect("Props preparation should not fail")
         .expect("Props should prepare");
 
         // Local dep should resolve to same file

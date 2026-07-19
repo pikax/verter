@@ -173,7 +173,7 @@ fn is_exported_local(
 ) -> bool {
     use crate::resolver_core::shallow_file_state::ExportTarget;
     shallow.exports.iter().any(|(_exported, target)| {
-        matches!(target, ExportTarget::Local { symbol_name } if symbol_name == name)
+        matches!(target, ExportTarget::Local { symbol_name, .. } if symbol_name == name)
     })
 }
 

@@ -43,3 +43,5 @@ axum = "0.8.9"
 
 [dev-dependencies]
 verter_span = { path = "../verter_span" }
+verter_compiler = { path = "../verter_compiler" }
+verter_macro_dto = { path = "../verter_macro_dto" }

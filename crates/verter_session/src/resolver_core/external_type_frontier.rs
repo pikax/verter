@@ -137,13 +137,15 @@ pub struct ResolvedSymbol {
 fn resolve_local_frontier_body(
     state: &ShallowFileState,
     canonical_id: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     symbol_name: &str,
 ) -> (Option<NarrowFrontierBody>, Vec<NarrowTypeParam>) {
     state
-        .type_decl(symbol_name)
+        .type_decl_in(owner, symbol_name)
         .map(|lowered| {
             let anchor = AuthoredAnchor {
                 canonical_id: Arc::from(canonical_id),
+                owner,
                 symbol: Arc::from(symbol_name),
                 space: LocatorSymbolSpace::Type,
             };
@@ -460,9 +462,9 @@ impl ExternalTypeFrontier {
         target: &ExportTarget,
     ) -> ResolvedSymbol {
         match target {
-            ExportTarget::Local { symbol_name } => {
-                if state.is_import_local(symbol_name) {
-                    if let Some(import_target) = state.import_target(symbol_name) {
+            ExportTarget::Local { owner, symbol_name } => {
+                if state.is_import_local_in(*owner, symbol_name) {
+                    if let Some(import_target) = state.import_target_in(*owner, symbol_name) {
                         let resolved_canonical = (!import_target.canonical_id.is_empty())
                             .then(|| import_target.canonical_id.clone())
                             .or_else(|| {
@@ -506,8 +508,12 @@ impl ExternalTypeFrontier {
                 }
 
                 if host.route_exports_only() {
-                    let (frontier_body, type_parameters) =
-                        resolve_local_frontier_body(state, &pending.canonical_id, symbol_name);
+                    let (frontier_body, type_parameters) = resolve_local_frontier_body(
+                        state,
+                        &pending.canonical_id,
+                        *owner,
+                        symbol_name,
+                    );
 
                     return ResolvedSymbol {
                         canonical_id: pending.canonical_id.clone(),
@@ -525,16 +531,19 @@ impl ExternalTypeFrontier {
                 }
 
                 let (frontier_body, type_parameters) =
-                    resolve_local_frontier_body(state, &pending.canonical_id, symbol_name);
+                    resolve_local_frontier_body(state, &pending.canonical_id, *owner, symbol_name);
 
                 // Run route-aware closure when a route demand is present,
                 // otherwise fall back to full local closure.
                 let closure = if let Some(ref route) = pending.route {
-                    state.route_closure(symbol_name, route, self.budgets.local_closure_steps)
+                    state.route_closure_in(
+                        *owner,
+                        symbol_name,
+                        route,
+                        self.budgets.local_closure_steps,
+                    )
                 } else {
-                    state
-                        .type_view()
-                        .local_closure(symbol_name, self.budgets.local_closure_steps)
+                    state.local_closure_in(*owner, symbol_name, self.budgets.local_closure_steps)
                 };
                 self.counters.local_closure_steps += closure.steps;
 
@@ -1667,6 +1676,7 @@ mod tests {
 
         let expected_anchor = AuthoredAnchor {
             canonical_id: Arc::from("/src/types.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             symbol: Arc::from("Props"),
             space: LocatorSymbolSpace::Type,
         };

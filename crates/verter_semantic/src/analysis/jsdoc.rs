@@ -1,5 +1,10 @@
 use oxc_ast::{Comment, CommentContent};
 
+use verter_parser::utils::oxc::script::type_inventory::{
+    collect_type_dependency_facts, DeclDependencyNames,
+};
+use verter_span::Span;
+use verter_type_expr::facts::TypeDependencyPathFact;
 use verter_type_expr::TypeExpr;
 
 use crate::analysis::types::JsdocTag;
@@ -38,14 +43,44 @@ use crate::analysis::types::JsdocTag;
 /// typeinfo carries spans, not owned strings (owner directive
 /// `feedback_typeinfo_spans_not_strings`).
 pub fn parse_jsdoc_tag_type_payload(input: &str, payload_file_offset: Option<u32>) -> TypeExpr {
+    parse_jsdoc_tag_type_payload_with_dependencies(input, payload_file_offset).0
+}
+
+/// JSDoc parse product used by dependency-aware consumers. Dependency paths
+/// are captured from the synthetic OXC alias before its arena is dropped.
+#[derive(Debug, Clone)]
+pub struct ParsedJsdocTagType {
+    pub body: TypeExpr,
+    pub declaration_carrier_paths: rustc_hash::FxHashSet<TypeDependencyPathFact>,
+}
+
+pub fn parse_jsdoc_tag_type_payload_product(
+    input: &str,
+    payload_file_offset: Option<u32>,
+) -> ParsedJsdocTagType {
+    let (body, dependencies) =
+        parse_jsdoc_tag_type_payload_with_dependencies(input, payload_file_offset);
+    ParsedJsdocTagType {
+        body,
+        declaration_carrier_paths: dependencies.declaration_carrier_paths.into_iter().collect(),
+    }
+}
+
+fn parse_jsdoc_tag_type_payload_with_dependencies(
+    input: &str,
+    payload_file_offset: Option<u32>,
+) -> (TypeExpr, DeclDependencyNames) {
     use oxc_allocator::Allocator;
     use oxc_parser::Parser;
     use oxc_span::SourceType;
 
     if input.trim().is_empty() {
-        return TypeExpr::Unknown {
-            raw: input.to_string(),
-        };
+        return (
+            TypeExpr::Unknown {
+                raw: input.to_string(),
+            },
+            DeclDependencyNames::default(),
+        );
     }
 
     let wrapper = format!("type __T = {input}");
@@ -55,6 +90,7 @@ pub fn parse_jsdoc_tag_type_payload(input: &str, payload_file_offset: Option<u32
 
     for stmt in &ret.program.body {
         if let oxc_ast::ast::Statement::TSTypeAliasDeclaration(alias) = stmt {
+            let dependencies = collect_type_dependency_facts(&alias.type_annotation);
             let mut lowered = verter_type_expr_oxc::lower_ts_type(&alias.type_annotation, &wrapper);
             match payload_file_offset {
                 // Rebase wrapper-local spans into the source file's coordinates.
@@ -74,13 +110,16 @@ pub fn parse_jsdoc_tag_type_payload(input: &str, payload_file_offset: Option<u32
                 // be rebased honestly, so drop them.
                 None => lowered.clear_spans(),
             }
-            return lowered;
+            return (lowered, dependencies);
         }
     }
 
-    TypeExpr::Unknown {
-        raw: input.to_string(),
-    }
+    (
+        TypeExpr::Unknown {
+            raw: input.to_string(),
+        },
+        DeclDependencyNames::default(),
+    )
 }
 
 /// Byte length of the `type __T = ` prefix [`parse_jsdoc_tag_type_payload`]
@@ -120,8 +159,16 @@ fn split_jsdoc_brace_payload(text: &str) -> Option<(&str, &str)> {
 fn file_offset_of_subslice(source: &str, sub: &str) -> Option<u32> {
     let source_start = source.as_ptr() as usize;
     let sub_start = sub.as_ptr() as usize;
-    (sub_start >= source_start && sub_start + sub.len() <= source_start + source.len())
-        .then(|| (sub_start - source_start) as u32)
+    let sub_end = sub_start.checked_add(sub.len())?;
+    let source_end = source_start.checked_add(source.len())?;
+    (sub_start >= source_start && sub_end <= source_end)
+        .then(|| u32::try_from(sub_start - source_start).ok())?
+}
+
+fn file_span_of_subslice(source: &str, sub: &str) -> Option<Span> {
+    let start = file_offset_of_subslice(source, sub)?;
+    let len = u32::try_from(sub.len()).ok()?;
+    Some(Span::new(start, start.checked_add(len)?))
 }
 
 /// Lower a JSDoc tag's leading `{Type}` brace payload — taken as a **slice of
@@ -141,7 +188,10 @@ fn file_offset_of_subslice(source: &str, sub: &str) -> Option<u32> {
 /// type: the returned `TypeExpr` is stored on the same shallow-analysis carrier
 /// a TS annotation populates, so it resolves through the shared dispatch with no
 /// JSDoc-specific resolution path.
-fn lower_jsdoc_tag_type<'a>(source: &str, source_tag_text: &'a str) -> Option<(TypeExpr, &'a str)> {
+fn lower_jsdoc_tag_type<'a>(
+    source: &str,
+    source_tag_text: &'a str,
+) -> Option<(TypeExpr, DeclDependencyNames, &'a str)> {
     let (payload, rest) = split_jsdoc_brace_payload(source_tag_text)?;
     if payload.is_empty() {
         return None;
@@ -151,13 +201,13 @@ fn lower_jsdoc_tag_type<'a>(source: &str, source_tag_text: &'a str) -> Option<(T
         // JSDoc line decorations to recover a lowerable single-line type and
         // drop the (un-rebasable) spans.
         let reconstructed = reconstruct_multiline_jsdoc_payload(payload);
-        parse_jsdoc_tag_type_payload(&reconstructed, None)
+        parse_jsdoc_tag_type_payload_with_dependencies(&reconstructed, None)
     } else {
         // Single-line payload: its position in the file is exact.
         let offset = file_offset_of_subslice(source, payload);
-        parse_jsdoc_tag_type_payload(payload, offset)
+        parse_jsdoc_tag_type_payload_with_dependencies(payload, offset)
     };
-    Some((lowered, rest))
+    Some((lowered.0, lowered.1, rest))
 }
 
 /// Reconstruct a single-line type string from a multi-line JSDoc `{Type}`
@@ -205,7 +255,7 @@ fn lower_first_jsdoc_tag_type(
         let Some(text) = tag_text_slice(source, tag) else {
             continue;
         };
-        if let Some((lowered, _rest)) = lower_jsdoc_tag_type(source, text) {
+        if let Some((lowered, _, _rest)) = lower_jsdoc_tag_type(source, text) {
             return Some(lowered);
         }
     }
@@ -259,7 +309,7 @@ pub fn extract_jsdoc_param_types_at_offset(
         let Some(text) = tag_text_slice(source, tag) else {
             continue;
         };
-        let Some((lowered, rest)) = lower_jsdoc_tag_type(source, text) else {
+        let Some((lowered, _, rest)) = lower_jsdoc_tag_type(source, text) else {
             continue;
         };
         // The parameter name is the first whitespace-delimited token after the
@@ -294,9 +344,18 @@ pub fn extract_jsdoc_param_types_at_offset(
 pub struct JsdocTypedef {
     /// The typedef's declared name (the identifier after the `{T}` payload).
     pub name: String,
+    /// Parser-authored attachment target of the containing comment.
+    pub attached_to: u32,
+    /// Exact source span of the containing JSDoc comment.
+    pub comment_span: Span,
+    /// Exact source span of the typedef name token.
+    pub name_span: Span,
     /// The typedef's body, lowered from its `{T}` payload via
     /// [`parse_jsdoc_tag_type_payload`].
     pub body: TypeExpr,
+    /// Typed dependency facts captured from the synthetic OXC alias before
+    /// its arena is dropped.
+    pub dependencies: DeclDependencyNames,
 }
 
 /// Recover every `@typedef {T} Name` declaration from the program's JSDoc block
@@ -336,7 +395,7 @@ pub fn collect_jsdoc_typedefs(comments: &[Comment], source: &str) -> Vec<JsdocTy
             };
             // `@typedef {T} Name` — the body is the `{T}` payload, the name is
             // the first identifier token after the closing brace.
-            let Some((body, rest)) = lower_jsdoc_tag_type(source, text) else {
+            let Some((body, dependencies, rest)) = lower_jsdoc_tag_type(source, text) else {
                 continue;
             };
             let Some(raw_name) = rest.split_whitespace().next() else {
@@ -346,9 +405,16 @@ pub fn collect_jsdoc_typedefs(comments: &[Comment], source: &str) -> Vec<JsdocTy
             if name.is_empty() || !is_jsdoc_typedef_name(name) {
                 continue;
             }
+            let Some(name_span) = file_span_of_subslice(source, name) else {
+                continue;
+            };
             typedefs.push(JsdocTypedef {
                 name: name.to_string(),
+                attached_to: comment.attached_to,
+                comment_span: comment.span.into(),
+                name_span,
                 body,
+                dependencies,
             });
         }
     }
@@ -364,7 +430,18 @@ pub fn collect_jsdoc_typedefs(comments: &[Comment], source: &str) -> Vec<JsdocTy
 /// address them, while the payload body lowers only when that demand
 /// arrives. Mirrors the same tag scan and name-token rules, so the two
 /// walks always agree on which names exist.
-pub fn collect_jsdoc_typedef_names(comments: &[Comment], source: &str) -> Vec<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsdocTypedefName {
+    pub name: String,
+    pub attached_to: u32,
+    pub comment_span: Span,
+    pub name_span: Span,
+}
+
+pub fn collect_jsdoc_typedef_name_records(
+    comments: &[Comment],
+    source: &str,
+) -> Vec<JsdocTypedefName> {
     let mut names = Vec::new();
     for comment in comments {
         if !comment.is_block()
@@ -405,10 +482,25 @@ pub fn collect_jsdoc_typedef_names(comments: &[Comment], source: &str) -> Vec<St
             if name.is_empty() || !is_jsdoc_typedef_name(name) {
                 continue;
             }
-            names.push(name.to_string());
+            let Some(name_span) = file_span_of_subslice(source, name) else {
+                continue;
+            };
+            names.push(JsdocTypedefName {
+                name: name.to_string(),
+                attached_to: comment.attached_to,
+                comment_span: comment.span.into(),
+                name_span,
+            });
         }
     }
     names
+}
+
+pub fn collect_jsdoc_typedef_names(comments: &[Comment], source: &str) -> Vec<String> {
+    collect_jsdoc_typedef_name_records(comments, source)
+        .into_iter()
+        .map(|typedef| typedef.name)
+        .collect()
 }
 
 /// Whether `name` is a plain identifier usable as a `@typedef` name (the

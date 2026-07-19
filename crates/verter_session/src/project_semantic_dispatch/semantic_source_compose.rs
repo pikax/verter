@@ -56,6 +56,7 @@ impl ProjectSemanticDispatch<'_> {
             .unwrap_or_default();
         NodeScopeId::File {
             canonical_id: Arc::from(ctx.scope_canonical_id),
+            owner: ctx.scope_owner,
             whole_hash,
             local_scope: None,
         }

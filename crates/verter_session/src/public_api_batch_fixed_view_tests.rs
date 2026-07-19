@@ -131,10 +131,12 @@ fn id_refs(ids: &[String]) -> Vec<&str> {
 /// normalized). Returns the batch responses for further content assertions.
 fn assert_scalar_equals_batch(host: &VerterHost, ids: &[String]) -> Vec<Option<TscResponse>> {
     let refs = id_refs(ids);
-    let batch = host.get_public_api_batch(&refs);
+    let batch = public_api_batch(host, &refs);
     assert_eq!(batch.len(), ids.len(), "one batch slot per input id");
     for (id, slot) in ids.iter().zip(batch.iter()) {
-        let scalar = host.get_public_api(id);
+        let scalar = host
+            .get_public_api(id)
+            .expect("scalar public API projection");
         match (scalar.as_ref(), slot.as_ref()) {
             (Some(s), Some(b)) => {
                 assert_eq!(
@@ -154,6 +156,13 @@ fn assert_scalar_equals_batch(host: &VerterHost, ids: &[String]) -> Vec<Option<T
         }
     }
     batch
+}
+
+fn public_api_batch(host: &VerterHost, ids: &[&str]) -> Vec<Option<TscResponse>> {
+    host.get_public_api_batch(ids)
+        .into_iter()
+        .map(|slot| slot.expect("batch public API projection"))
+        .collect()
 }
 
 // ── (1) THE perf proof / hard gate ──────────────────────────────────────────
@@ -184,7 +193,7 @@ fn warm_public_api_batch_from_host_calls_are_o1_not_per_item() {
     let refs = id_refs(&ids);
 
     // Cold pass: populate the extract + transitive-dep caches.
-    let cold = host.get_public_api_batch(&refs);
+    let cold = public_api_batch(&host, &refs);
     assert_eq!(cold.len(), N, "one slot per input");
     assert!(
         cold.iter().all(|slot| slot.is_some()),
@@ -195,7 +204,7 @@ fn warm_public_api_batch_from_host_calls_are_o1_not_per_item() {
     host.provenance()
         .store_view_from_host_reads
         .store(0, Relaxed);
-    let warm = host.get_public_api_batch(&refs);
+    let warm = public_api_batch(&host, &refs);
     let warm_from_host = host.provenance().store_view_from_host_reads.load(Relaxed);
 
     assert_eq!(warm.len(), N);
@@ -232,10 +241,10 @@ fn warm_public_api_batch_sweeps_stay_o1() {
     let refs = id_refs(&ids);
 
     // Cold pass warms the manager's base view + the result caches.
-    let _ = host.get_public_api_batch(&refs);
+    let _ = public_api_batch(&host, &refs);
 
     COHERENT_BUILD_SWEEPS_THIS_THREAD.with(|c| c.set(0));
-    let _ = host.get_public_api_batch(&refs);
+    let _ = public_api_batch(&host, &refs);
     let warm_sweeps = COHERENT_BUILD_SWEEPS_THIS_THREAD.with(std::cell::Cell::get);
 
     assert!(
@@ -660,7 +669,7 @@ defineEmits<DepBEmits>()
 #[test]
 fn empty_public_api_batch_is_empty() {
     let host = make_host();
-    let batch = host.get_public_api_batch(&[]);
+    let batch = public_api_batch(&host, &[]);
     assert!(batch.is_empty(), "an empty batch returns no slots");
 }
 
@@ -685,7 +694,7 @@ defineProps<OProps>()
     upsert_ts(&host, "/src/plain.ts", "export const x = 1;\n");
     // Order: [Vue, plain-ts (no public API), missing].
     let refs = ["/src/Ok.vue", "/src/plain.ts", "/src/Missing.vue"];
-    let batch = host.get_public_api_batch(&refs);
+    let batch = public_api_batch(&host, &refs);
     assert_eq!(batch.len(), 3, "one slot per input id, in order");
     assert!(batch[0].is_some(), "the Vue SFC renders a slot");
     assert!(
@@ -694,7 +703,10 @@ defineProps<OProps>()
     );
     assert!(batch[2].is_none(), "a missing canonical projects no slot");
     // The rendered slot is byte-identical to the scalar render.
-    let scalar = host.get_public_api("/src/Ok.vue").expect("scalar renders");
+    let scalar = host
+        .get_public_api("/src/Ok.vue")
+        .expect("scalar public API projection")
+        .expect("scalar renders");
     assert_eq!(
         norm_response(batch[0].as_ref().unwrap()),
         norm_response(&scalar),

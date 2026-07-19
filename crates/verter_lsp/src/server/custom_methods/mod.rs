@@ -293,7 +293,16 @@ impl VerterLanguageServer {
         if let Some(canonical_id) = self.documents.get_canonical_id(&parsed_uri) {
             self.documents.host().ensure_loaded(&canonical_id);
         }
-        let response = self.documents.get_virtual_files(&parsed_uri);
+        let response = match self.documents.get_virtual_files(&parsed_uri) {
+            Ok(response) => response,
+            Err(error) => {
+                return Err(crate::public_api_projection_jsonrpc_error(
+                    "getVirtualFiles",
+                    &uri_to_canonical_id(&parsed_uri),
+                    error,
+                ));
+            }
+        };
         tracing::info!("getVirtualFiles EXIT {uri}");
         Ok(response)
     }

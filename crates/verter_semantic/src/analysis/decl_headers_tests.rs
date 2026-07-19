@@ -19,14 +19,237 @@ fn index_for(source: &str) -> DeclHeaderIndex {
     build_decl_header_index(&ret.program, source)
 }
 
+#[test]
+fn owner_scoped_headers_do_not_merge_same_name_declarations() {
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+    use verter_type_expr::{DeclKey, TopLevelOwnerId};
+
+    let source = r#"
+interface Shared { moduleA: string }
+interface Shared { instance: number }
+interface Shared { moduleB: boolean }
+namespace Ns { export class C { value!: string } }
+"#;
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+    assert!(!parsed.panicked, "fixture must parse");
+    let module = TopLevelOwnerId::module(0);
+    let instance = TopLevelOwnerId::instance(0);
+    let owners = TopLevelOwnerTable::try_from_statement_owners(
+        parsed.program.body.len(),
+        [module, instance, module, instance],
+    )
+    .expect("validated owner table");
+
+    let index = build_decl_header_index_with_owners(&parsed.program, source, &owners);
+    let module_header = index
+        .type_headers
+        .get(&DeclKey::new(module, "Shared"))
+        .expect("module Shared");
+    let instance_header = index
+        .type_headers
+        .get(&DeclKey::new(instance, "Shared"))
+        .expect("instance Shared");
+
+    assert_eq!(module_header.contributors.len(), 2);
+    assert_eq!(module_header.contributors[0].anchor.owner, module);
+    assert_eq!(module_header.contributors[0].anchor.owner_local_ordinal, 0);
+    assert_eq!(module_header.contributors[1].anchor.owner_local_ordinal, 1);
+    assert_eq!(instance_header.contributors.len(), 1);
+    assert_eq!(instance_header.contributors[0].anchor.owner, instance);
+    assert_eq!(
+        instance_header.contributors[0].anchor.owner_local_ordinal,
+        0
+    );
+
+    let namespaced = DeclKey::new(instance, "Ns.C");
+    assert!(index.type_headers.contains_key(&namespaced));
+    assert!(index.value_headers.contains_key(&namespaced));
+}
+
+#[test]
+fn ordinary_header_entry_point_uses_module_zero_owner() {
+    use verter_type_expr::{DeclKey, TopLevelOwnerId};
+
+    let index = index_for("interface Props { value: string }");
+    let key = DeclKey::new(TopLevelOwnerId::ordinary_file(), "Props");
+    let header = index.type_headers.get(&key).expect("ordinary Props");
+    assert_eq!(header.contributors[0].anchor.owner, key.owner);
+    assert_eq!(header.contributors[0].anchor.owner_local_ordinal, 0);
+}
+
+#[test]
+fn default_export_aliases_are_scoped_by_lexical_owner() {
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+    use verter_type_expr::{DeclKey, TopLevelOwnerId};
+
+    let source = r#"
+export default interface ModuleDefault { module: string }
+export default interface InstanceDefault { instance: number }
+"#;
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+    assert!(!parsed.panicked, "fixture must parse");
+    let module = TopLevelOwnerId::module(0);
+    let instance = TopLevelOwnerId::instance(0);
+    let owners = TopLevelOwnerTable::try_from_statement_owners(
+        parsed.program.body.len(),
+        [module, instance],
+    )
+    .expect("validated owner table");
+
+    let index = build_decl_header_index_with_owners(&parsed.program, source, &owners);
+    let module_default = index
+        .type_headers
+        .get(&DeclKey::new(module, "default"))
+        .expect("module default alias");
+    let instance_default = index
+        .type_headers
+        .get(&DeclKey::new(instance, "default"))
+        .expect("instance default alias");
+    assert_eq!(module_default.contributors[0].anchor.owner, module);
+    assert_eq!(instance_default.contributors[0].anchor.owner, instance);
+    assert_ne!(module_default.name_span, instance_default.name_span);
+}
+
+#[test]
+fn jsdoc_typedef_headers_use_attachment_or_explicit_region_owner() {
+    use crate::analysis::top_level_owners::{TopLevelOwnerRegion, TopLevelOwnerTable};
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+    use verter_span::Span;
+    use verter_type_expr::{DeclKey, TopLevelOwnerId};
+
+    let source = r#"
+/** @typedef {string} Shared */
+const moduleMarker = 0;
+/** @typedef {number} Shared */
+const instanceMarker = 0;
+"#;
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+    let module = TopLevelOwnerId::module(0);
+    let instance = TopLevelOwnerId::instance(0);
+    let owners = TopLevelOwnerTable::try_from_statement_owners(
+        parsed.program.body.len(),
+        [module, instance],
+    )
+    .expect("validated owner table");
+    let index = build_decl_header_index_with_owners(&parsed.program, source, &owners);
+
+    let module_header = index
+        .type_headers
+        .get(&DeclKey::new(module, "Shared"))
+        .expect("module typedef");
+    let instance_header = index
+        .type_headers
+        .get(&DeclKey::new(instance, "Shared"))
+        .expect("instance typedef");
+    let module_typedef = module_header.jsdoc_typedef.expect("module locator");
+    let instance_typedef = instance_header.jsdoc_typedef.expect("instance locator");
+    assert_eq!(module_typedef.owner_local_ordinal, Some(0));
+    assert_eq!(instance_typedef.owner_local_ordinal, Some(0));
+    assert_ne!(module_typedef.comment_span, instance_typedef.comment_span);
+
+    let regional_source = "/** @typedef {boolean} Regional */";
+    let regional_allocator = Allocator::default();
+    let regional = Parser::new(&regional_allocator, regional_source, SourceType::ts()).parse();
+    let regional_owners = TopLevelOwnerTable::try_from_statement_owners(
+        regional.program.body.len(),
+        std::iter::empty(),
+    )
+    .expect("empty statement table")
+    .try_with_regions([TopLevelOwnerRegion {
+        owner: instance,
+        span: Span::new(0, regional_source.len() as u32),
+    }])
+    .expect("explicit owner region");
+    let regional_index =
+        build_decl_header_index_with_owners(&regional.program, regional_source, &regional_owners);
+    assert!(regional_index
+        .type_headers
+        .contains_key(&DeclKey::new(instance, "Regional")));
+
+    let unowned = TopLevelOwnerTable::try_from_statement_owners(1, [instance])
+        .expect("single carrier owner is not an implicit region");
+    let unowned_source = "const marker = 0;\n/** @typedef {boolean} Unowned */";
+    let unowned_allocator = Allocator::default();
+    let unowned_program = Parser::new(&unowned_allocator, unowned_source, SourceType::ts()).parse();
+    let unowned_index =
+        build_decl_header_index_with_owners(&unowned_program.program, unowned_source, &unowned);
+    assert!(!unowned_index
+        .type_headers
+        .contains_key(&DeclKey::new(instance, "Unowned")));
+
+    let ordinary = index_for("/** @typedef {string} Ordinary */");
+    assert!(ordinary
+        .type_headers
+        .contains_key(&DeclKey::new(TopLevelOwnerId::ordinary_file(), "Ordinary")));
+}
+
+#[test]
+fn augmentation_contributors_retain_lexical_owner() {
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    use crate::analysis::type_eval::AugmentationScopeKind;
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+    use verter_type_expr::{DeclKey, TopLevelOwnerId};
+
+    let source = r#"
+declare module "pkg" { interface Config { module: string } }
+declare module "pkg" { interface Config { instance: number } }
+"#;
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+    let module = TopLevelOwnerId::module(0);
+    let instance = TopLevelOwnerId::instance(0);
+    let owners = TopLevelOwnerTable::try_from_statement_owners(
+        parsed.program.body.len(),
+        [module, instance],
+    )
+    .expect("validated owner table");
+    let index = build_decl_header_index_with_owners(&parsed.program, source, &owners);
+    let scoped = index
+        .augmentation_type_headers
+        .get(&AugmentationScopeKind::Module("pkg".to_string()))
+        .expect("pkg augmentation");
+
+    let module_header = scoped
+        .get(&DeclKey::new(module, "Config"))
+        .expect("module Config");
+    let instance_header = scoped
+        .get(&DeclKey::new(instance, "Config"))
+        .expect("instance Config");
+    assert_eq!(module_header.contributors.len(), 1);
+    assert_eq!(instance_header.contributors.len(), 1);
+    assert_eq!(module_header.contributors[0].anchor.owner, module);
+    assert_eq!(instance_header.contributors[0].anchor.owner, instance);
+}
+
 /// Build both walks over one source and assert the NAME sets agree in
 /// every table (the core addressing-parity invariant).
 fn assert_name_parity(source: &str) {
     let env = parse_and_build_env(source);
     let index = index_for(source);
 
-    let mut env_types: Vec<&str> = env.type_symbols.keys().map(String::as_str).collect();
-    let mut index_types: Vec<&str> = index.type_headers.keys().map(String::as_str).collect();
+    let mut env_types: Vec<&str> = env
+        .type_symbols
+        .keys()
+        .map(|key| key.name.as_ref())
+        .collect();
+    let mut index_types: Vec<&str> = index
+        .type_headers
+        .keys()
+        .map(|key| key.name.as_ref())
+        .collect();
     env_types.sort_unstable();
     index_types.sort_unstable();
     assert_eq!(
@@ -34,8 +257,16 @@ fn assert_name_parity(source: &str) {
         "type-symbol names must match the env walk for source:\n{source}"
     );
 
-    let mut env_values: Vec<&str> = env.value_symbols.keys().map(String::as_str).collect();
-    let mut index_values: Vec<&str> = index.value_headers.keys().map(String::as_str).collect();
+    let mut env_values: Vec<&str> = env
+        .value_symbols
+        .keys()
+        .map(|key| key.name.as_ref())
+        .collect();
+    let mut index_values: Vec<&str> = index
+        .value_headers
+        .keys()
+        .map(|key| key.name.as_ref())
+        .collect();
     env_values.sort_unstable();
     index_values.sort_unstable();
     assert_eq!(
@@ -46,7 +277,7 @@ fn assert_name_parity(source: &str) {
     let mut env_aug_types: Vec<(String, &str)> = env
         .augmentation_scopes
         .keys()
-        .map(|(scope, name)| (format!("{scope:?}"), name.as_str()))
+        .map(|(scope, key)| (format!("{scope:?}"), key.name.as_ref()))
         .collect();
     let mut index_aug_types: Vec<(String, &str)> = index
         .augmentation_type_headers
@@ -54,7 +285,7 @@ fn assert_name_parity(source: &str) {
         .flat_map(|(scope, names)| {
             names
                 .keys()
-                .map(move |name| (format!("{scope:?}"), name.as_str()))
+                .map(move |key| (format!("{scope:?}"), key.name.as_ref()))
         })
         .collect();
     env_aug_types.sort();
@@ -67,7 +298,7 @@ fn assert_name_parity(source: &str) {
     let mut env_aug_values: Vec<(String, &str)> = env
         .augmentation_value_scopes
         .keys()
-        .map(|(scope, name)| (format!("{scope:?}"), name.as_str()))
+        .map(|(scope, key)| (format!("{scope:?}"), key.name.as_ref()))
         .collect();
     let mut index_aug_values: Vec<(String, &str)> = index
         .augmentation_value_headers
@@ -75,7 +306,7 @@ fn assert_name_parity(source: &str) {
         .flat_map(|(scope, names)| {
             names
                 .keys()
-                .map(move |name| (format!("{scope:?}"), name.as_str()))
+                .map(move |key| (format!("{scope:?}"), key.name.as_ref()))
         })
         .collect();
     env_aug_values.sort();
@@ -117,7 +348,11 @@ interface Merged { b: number }
     let index = index_for(source);
     let header = index.type_header("Merged").expect("Merged header");
     assert_eq!(
-        header.contributors,
+        header
+            .contributors
+            .iter()
+            .map(|contributor| contributor.anchor.contributor_index)
+            .collect::<Vec<_>>(),
         vec![0, 2],
         "both contributing statements must be recorded in source order"
     );
@@ -135,7 +370,10 @@ interface Merged { b: number }
         index
             .type_header("Unrelated")
             .expect("Unrelated")
-            .contributors,
+            .contributors
+            .iter()
+            .map(|contributor| contributor.anchor.contributor_index)
+            .collect::<Vec<_>>(),
         vec![1]
     );
 }
@@ -475,8 +713,22 @@ fn merged_enum_unions_member_names_across_declarations() {
         "merged exported enum F must union both declarations' members in source order"
     );
     // Every contributing statement is recorded in source order.
-    assert_eq!(index.enum_headers["E"].contributors, vec![0, 1]);
-    assert_eq!(index.enum_headers["F"].contributors, vec![2, 3]);
+    assert_eq!(
+        index.enum_headers["E"]
+            .contributors
+            .iter()
+            .map(|contributor| contributor.anchor.contributor_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    assert_eq!(
+        index.enum_headers["F"]
+            .contributors
+            .iter()
+            .map(|contributor| contributor.anchor.contributor_index)
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
 }
 
 #[test]
@@ -491,7 +743,14 @@ fn merged_enum_dedups_repeated_member_name_defensively() {
         vec!["A", "B", "C"],
         "a repeated member name across declarations is deduped, order preserved"
     );
-    assert_eq!(index.enum_headers["E"].contributors, vec![0, 1]);
+    assert_eq!(
+        index.enum_headers["E"]
+            .contributors
+            .iter()
+            .map(|contributor| contributor.anchor.contributor_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
 }
 
 #[test]
@@ -512,8 +771,16 @@ fn from_eval_env_populates_enum_headers_matching_index_enum() {
     let production = index_for(source);
 
     // Same enum-symbol key set (the `enum_symbol_names()` authority).
-    let mut seeded_keys: Vec<&str> = seeded.enum_headers.keys().map(String::as_str).collect();
-    let mut prod_keys: Vec<&str> = production.enum_headers.keys().map(String::as_str).collect();
+    let mut seeded_keys: Vec<&str> = seeded
+        .enum_headers
+        .keys()
+        .map(|key| key.name.as_ref())
+        .collect();
+    let mut prod_keys: Vec<&str> = production
+        .enum_headers
+        .keys()
+        .map(|key| key.name.as_ref())
+        .collect();
     seeded_keys.sort_unstable();
     prod_keys.sort_unstable();
     assert_eq!(
@@ -574,8 +841,16 @@ fn from_eval_env_enum_headers_include_unfoldable_and_computed_member_names() {
     let production = index_for(source);
 
     // Same enum-symbol key set as the production walk.
-    let mut seeded_keys: Vec<&str> = seeded.enum_headers.keys().map(String::as_str).collect();
-    let mut prod_keys: Vec<&str> = production.enum_headers.keys().map(String::as_str).collect();
+    let mut seeded_keys: Vec<&str> = seeded
+        .enum_headers
+        .keys()
+        .map(|key| key.name.as_ref())
+        .collect();
+    let mut prod_keys: Vec<&str> = production
+        .enum_headers
+        .keys()
+        .map(|key| key.name.as_ref())
+        .collect();
     seeded_keys.sort_unstable();
     prod_keys.sort_unstable();
     assert_eq!(seeded_keys, prod_keys);
@@ -638,15 +913,15 @@ interface Merged { b: number }
     let whole = build_eval_env(&ret.program, source, &build_ctx);
 
     let mut scratch = EvalEnv::new();
-    for stmt_index in &index.type_header("Merged").expect("Merged").contributors {
+    for contributor in &index.type_header("Merged").expect("Merged").contributors {
         // Selective lowering passes the statement's ORIGINAL top-level index
         // (the recorded contributor locator), never a renumbered position.
         crate::analysis::type_eval_build::lower_top_level_statement(
-            &ret.program.body[*stmt_index as usize],
-            crate::analysis::type_eval_build::StatementLowerCtx {
-                build: &build_ctx,
-                contributor_index: *stmt_index,
-            },
+            &ret.program.body[contributor.anchor.contributor_index as usize],
+            crate::analysis::type_eval_build::StatementLowerCtx::from_contributor_anchor(
+                &build_ctx,
+                contributor.anchor,
+            ),
             source,
             &mut scratch,
         );

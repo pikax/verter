@@ -112,6 +112,7 @@ fn route_db_eviction_visible_via_both_handles_after_close() {
         rk("/seeded/provider.ts", "Seeded"),
         RouteResult::Resolved {
             defining_canonical: "/seeded/provider.ts".to_string(),
+            defining_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             defining_symbol: "Seeded".to_string(),
         },
     );
@@ -659,6 +660,7 @@ fn augmentation_probe_rejects_stale_artifact_the_authority_gate_rejects() {
             vec![crate::resolver_core::shallow_file_state::WildcardReexport {
                 source_specifier: "./real_aug".to_string(),
                 canonical_id: real_aug.to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             }],
             rustc_hash::FxHashSet::default(),
             FxHashMap::default(),

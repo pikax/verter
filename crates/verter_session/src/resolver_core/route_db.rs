@@ -37,7 +37,11 @@ mod effective_export_set;
 /// the key (the entries are still validated value-side by their fact
 /// signature; the version is the coarse "the resolver itself changed
 /// shape" rail, mirroring `RESOLVED_IMPORT_FACTS_RESOLVER_VERSION`).
-pub const ROUTE_DB_RESOLVER_VERSION: u32 = 1;
+///
+/// Bumped 1 → 2: resolved routes now retain the exact lexical owner of the
+/// defining declaration. A version-1 result cannot distinguish same-name
+/// module and instance declarations.
+pub const ROUTE_DB_RESOLVER_VERSION: u32 = 2;
 
 /// Query-identity key for a single named-export route lookup
 /// `(provider, exported_name)` (R5 query-identity family, R6 content-free,
@@ -134,6 +138,7 @@ pub enum RouteResult {
     /// Route resolved to a defining file and symbol.
     Resolved {
         defining_canonical: String,
+        defining_owner: verter_type_expr::TopLevelOwnerId,
         defining_symbol: String,
     },
     /// Stable miss — symbol is not exported by this provider.
@@ -145,12 +150,13 @@ impl RouteResult {
         matches!(self, RouteResult::Miss)
     }
 
-    pub fn resolved(&self) -> Option<(&str, &str)> {
+    pub fn resolved(&self) -> Option<(&str, verter_type_expr::TopLevelOwnerId, &str)> {
         match self {
             RouteResult::Resolved {
                 defining_canonical,
+                defining_owner,
                 defining_symbol,
-            } => Some((defining_canonical, defining_symbol)),
+            } => Some((defining_canonical, *defining_owner, defining_symbol)),
             RouteResult::Miss => None,
         }
     }
@@ -1050,6 +1056,7 @@ fn emit_export_route_resolved_event(
     if let RouteResult::Resolved {
         defining_canonical,
         defining_symbol,
+        ..
     } = result
     {
         crate::host_manage::push_structured_event(
@@ -1161,6 +1168,7 @@ mod tests {
             rk("index.ts", "Foo"),
             RouteResult::Resolved {
                 defining_canonical: "foo.ts".to_owned(),
+                defining_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 defining_symbol: "Foo".to_owned(),
             },
         );
@@ -1170,6 +1178,36 @@ mod tests {
         let route = result.unwrap();
         assert!(
             matches!(&*route, RouteResult::Resolved { defining_canonical, .. } if defining_canonical == "foo.ts")
+        );
+    }
+
+    #[test]
+    fn route_resolver_v1_entry_is_rejected_by_v2_key() {
+        const PREVIOUS_ROUTE_RESOLVER_VERSION: u32 = 1;
+        assert_eq!(
+            ROUTE_DB_RESOLVER_VERSION,
+            PREVIOUS_ROUTE_RESOLVER_VERSION + 1
+        );
+
+        let db = RouteDb::new();
+        let view = TestView::accepting_all(1);
+        let current = rk("index.ts", "OwnerExact");
+        let stale = RouteNameKey {
+            resolver_version: PREVIOUS_ROUTE_RESOLVER_VERSION,
+            ..current.clone()
+        };
+        db.insert_route(stale.clone(), RouteResult::Miss);
+
+        assert!(db.get_route(&stale, &view).is_some());
+        assert!(
+            db.get_route(&current, &view).is_none(),
+            "the owner-exact v2 key rejects a v1 route value"
+        );
+
+        db.insert_route(current.clone(), RouteResult::Miss);
+        assert!(
+            db.get_route(&current, &view).is_some(),
+            "a v2 route value roundtrips under the current key"
         );
     }
 
@@ -1207,6 +1245,7 @@ mod tests {
                 Some((
                     RouteResult::Resolved {
                         defining_canonical: "bar.ts".to_owned(),
+                        defining_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         defining_symbol: "Bar".to_owned(),
                     },
                     vec![dummy_fact.clone()],
@@ -1241,6 +1280,7 @@ mod tests {
             Some((
                 RouteResult::Resolved {
                     defining_canonical: "bar.ts".to_owned(),
+                    defining_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     defining_symbol: "Bar".to_owned(),
                 },
                 Vec::new(),
@@ -1296,10 +1336,12 @@ mod tests {
         let resolves = std::sync::atomic::AtomicU32::new(0);
         let superseded = RouteResult::Resolved {
             defining_canonical: "superseded.ts".to_owned(),
+            defining_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             defining_symbol: "Foo".to_owned(),
         };
         let live = RouteResult::Resolved {
             defining_canonical: "live.ts".to_owned(),
+            defining_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             defining_symbol: "Foo".to_owned(),
         };
         let live_fact = FactVersionRef::FileWholeHash {
@@ -1434,6 +1476,7 @@ mod tests {
             rk("a.ts", "X"),
             RouteResult::Resolved {
                 defining_canonical: "x.ts".to_owned(),
+                defining_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 defining_symbol: "X".to_owned(),
             },
         );

@@ -46,7 +46,7 @@ use verter_type_expr::{MemberVisibility, TypeExpr};
 /// The symbol space a declaration contributes to. Type declarations
 /// (interface / type-alias / class / enum) live in `Type`; value declarations
 /// (`const`/`let`/`var`, `function`) live in `Value`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SymbolSpace {
     Type,
     Value,

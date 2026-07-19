@@ -44,7 +44,11 @@ fn resolve_decl_dedups_across_repeated_queries() {
     upsert_ts(&host, "/w/types.ts", "export type Foo = { x: number }");
     let dispatch = ProjectSemanticDispatch::new(&host);
 
-    let key = resolve_decl_key("/w/types.ts", "Foo");
+    let key = resolve_decl_key(
+        "/w/types.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "Foo",
+    );
     let first = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(key.clone()));
     let second = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(key.clone()));
 
@@ -64,7 +68,11 @@ fn resolve_decl_misses_for_unknown_name() {
     let host = host();
     upsert_ts(&host, "/w/types.ts", "export type Foo = { x: number }");
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let key = resolve_decl_key("/w/types.ts", "Missing");
+    let key = resolve_decl_key(
+        "/w/types.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "Missing",
+    );
     match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(key)) {
         QueryResult::Error(QueryError::Miss) => {}
         other => panic!("expected Miss, got {other:?}"),
@@ -113,7 +121,11 @@ fn resolve_decl_resolves_rune_name_in_rune_module_and_misses_in_plain_ts() {
     // RUNE module: `$state` is locally present via the effective header lookup
     // → dispatch resolves it to a value node (the DeclPlaceholder), NOT a miss
     // and NOT an unresolved re-export fall-through.
-    let rune_key = resolve_decl_key("/w/r.svelte.ts", "$state");
+    let rune_key = resolve_decl_key(
+        "/w/r.svelte.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "$state",
+    );
     match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(rune_key)) {
         QueryResult::Value(_) => {}
         other => panic!(
@@ -125,7 +137,11 @@ fn resolve_decl_resolves_rune_name_in_rune_module_and_misses_in_plain_ts() {
     // PLAIN `.ts`: `$state` is not declared/imported/exported → dispatch falls
     // through and MISSES (per-file scoping — the effective lookup is
     // rune-module-gated, so a plain file behaves exactly as the raw probe).
-    let plain_key = resolve_decl_key("/w/plain.ts", "$state");
+    let plain_key = resolve_decl_key(
+        "/w/plain.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "$state",
+    );
     match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(plain_key)) {
         QueryResult::Error(QueryError::Miss) => {}
         other => panic!(
@@ -142,7 +158,11 @@ fn resolve_decl_warm_node_survives_between_execute_calls() {
     let host = host();
     upsert_ts(&host, "/w/a.ts", "export type A = { a: number }");
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let key = resolve_decl_key("/w/a.ts", "A");
+    let key = resolve_decl_key(
+        "/w/a.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "A",
+    );
 
     let first = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(key.clone()));
     let QueryResult::Value(SemanticQueryOutput {
@@ -171,8 +191,16 @@ fn resolve_decl_disambiguates_by_scope() {
     upsert_ts(&host, "/w/a.ts", "export type Foo = { a: number }");
     upsert_ts(&host, "/w/b.ts", "export type Foo = { b: number }");
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let a_key = resolve_decl_key("/w/a.ts", "Foo");
-    let b_key = resolve_decl_key("/w/b.ts", "Foo");
+    let a_key = resolve_decl_key(
+        "/w/a.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "Foo",
+    );
+    let b_key = resolve_decl_key(
+        "/w/b.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "Foo",
+    );
 
     let (a_id, b_id) = match (
         dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(a_key)),
@@ -195,7 +223,11 @@ fn resolve_decl_dep_signature_captures_file_hash_and_project_gen() {
     let host = host();
     upsert_ts(&host, "/w/a.ts", "export type A = { a: number }");
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let key = resolve_decl_key("/w/a.ts", "A");
+    let key = resolve_decl_key(
+        "/w/a.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "A",
+    );
     let _ = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(key.clone()));
 
     let warm = host
@@ -236,7 +268,11 @@ fn resolve_decl_recognises_import_local_bindings() {
 
     // `Foo` is not a top-level declaration in owner.ts — it is only an
     // import-local binding. The dispatch must still return a value.
-    let key = resolve_decl_key("/w/owner.ts", "Foo");
+    let key = resolve_decl_key(
+        "/w/owner.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "Foo",
+    );
     match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(key)) {
         QueryResult::Value(_) => {}
         other => panic!("expected value for import-local binding, got {other:?}"),
@@ -618,12 +654,15 @@ fn base_member_admission_fact_fast_path_is_inconclusive_for_present_members() {
     // Recover the class declaration's content-version identity from the resolved
     // placeholder so the constructed `DeclRef` keys the same content-addressed
     // artifact the fact lookup reads.
-    let placeholder = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(
-        resolve_decl_key("/w/fact_cls.ts", "C"),
-    )) {
-        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
-        other => panic!("ResolveDecl(C) must resolve, got {other:?}"),
-    };
+    let placeholder =
+        match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
+            "/w/fact_cls.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "C",
+        ))) {
+            QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+            other => panic!("ResolveDecl(C) must resolve, got {other:?}"),
+        };
     let whole_hash = match graph.node_data(placeholder).as_deref() {
         Some(SemanticNodeData::Opaque(QueryError::DeclPlaceholder { whole_hash, .. })) => {
             *whole_hash
@@ -633,6 +672,7 @@ fn base_member_admission_fact_fast_path_is_inconclusive_for_present_members() {
     let declref = graph.intern_node(SemanticNodeData::DeclRef {
         identity: DeclIdentity {
             canonical_id: Arc::from("/w/fact_cls.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash,
             decl_name: Arc::from("C"),
         },
@@ -933,6 +973,7 @@ fn indexed_access_intermediate_hop_stays_navigate_only_terminal_expands() {
     // intermediate-shell arm with a pending `['b']` segment.
     let root = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
         "/w/nested.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         "Root",
     ))) {
         QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
@@ -1020,6 +1061,7 @@ fn indexed_access_intermediate_hop_stays_navigate_only_terminal_expands() {
     // the outer eager-reduces straight to a bare `number`.
     let mixed = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
         "/w/nested.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         "MixedNested",
     ))) {
         QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
@@ -1029,6 +1071,7 @@ fn indexed_access_intermediate_hop_stays_navigate_only_terminal_expands() {
         crate::semantic_query::InstantiateKey::new(
             crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("/w/nested.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("MixedNested"),
             ),
             Arc::from(Vec::new().into_boxed_slice()),
@@ -1187,6 +1230,7 @@ fn raise_path_indexed_access_intermediate_stays_navigate_terminal_expands() {
     let mid_expanded = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
         crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from("/w/rnested.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Mid"),
         ),
         Arc::from(Vec::new().into_boxed_slice()),
@@ -1197,7 +1241,11 @@ fn raise_path_indexed_access_intermediate_stays_navigate_terminal_expands() {
         ),
     ));
     let _ = whole_hash;
-    let leaf_resolve = SemanticQueryKey::ResolveDecl(resolve_decl_key("/w/rnested.ts", "Leaf"));
+    let leaf_resolve = SemanticQueryKey::ResolveDecl(resolve_decl_key(
+        "/w/rnested.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "Leaf",
+    ));
     // Precondition: the raise has not run yet, so neither over-expansion
     // artifact is present (guards against a false PASS where some earlier
     // query already warmed the slots).
@@ -1458,6 +1506,7 @@ fn type_of_resolves_value_binding() {
     let value_key = ValueRootKey {
         scope: ScopeId {
             canonical_id: Arc::from("/w/v.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         },
         name: Arc::from("foo"),
@@ -1471,6 +1520,7 @@ fn type_of_resolves_value_binding() {
     let miss_key = ValueRootKey {
         scope: ScopeId {
             canonical_id: Arc::from("/w/v.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         },
         name: Arc::from("notThere"),
@@ -1489,7 +1539,11 @@ fn repeated_asks_do_not_grow_memo() {
     let host = host();
     upsert_ts(&host, "/w/a.ts", "export type A = { a: number }");
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let key = resolve_decl_key("/w/a.ts", "A");
+    let key = resolve_decl_key(
+        "/w/a.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "A",
+    );
     let before = host
         .project_type_store()
         .semantic_graph()
@@ -1619,11 +1673,13 @@ fn dispatch_host_adapter_routes_per_base_scope() {
 
     let scope_a = NodeScopeId::File {
         canonical_id: Arc::from("/w/scope_a.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [1u8; 16],
         local_scope: None,
     };
     let scope_b = NodeScopeId::File {
         canonical_id: Arc::from("/w/scope_b.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [2u8; 16],
         local_scope: Some(5),
     };
@@ -1683,7 +1739,11 @@ fn resolve_decl_records_file_scope_in_sidecar() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
-    let key = resolve_decl_key("/w/types.ts", "Foo");
+    let key = resolve_decl_key(
+        "/w/types.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "Foo",
+    );
     let node = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(key)) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -1736,6 +1796,7 @@ fn resolve_decl_anchor(
 ) -> SemanticNodeId {
     match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
         canonical_id,
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         name,
     ))) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -1756,6 +1817,7 @@ fn decl_identity(
     // whole_hash from `ensure_indexed_ready` at value-compute time.
     crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
         Arc::from(canonical_id),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from(name),
     )
 }
@@ -1776,6 +1838,7 @@ fn decl_identity_value(
         .unwrap_or([0u8; 16]);
     crate::semantic_query::DeclIdentity {
         canonical_id: Arc::from(canonical_id),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash,
         decl_name: Arc::from(name),
     }
@@ -4200,6 +4263,7 @@ fn utility_identity(
 ) -> crate::semantic_query::ResolvedDeclSlotIdentity {
     crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
         Arc::from("/w/lib.ts"),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from(name),
     )
 }
@@ -6322,6 +6386,7 @@ fn union_index_distribution_preserves_carrier_valued_member_arms() {
     let string_node = primitive(&graph, PrimitiveKind::String);
     let carrier = graph.intern_node(SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
         canonical_id: Arc::from("/w/unresolved-import.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         name: Arc::from("UnresolvedImport"),
         whole_hash: HashValue::default(),
     }));
@@ -6854,6 +6919,7 @@ fn tuple_spread_normalization_splices_collapses_and_preserves_carriers() {
     let open = graph.intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity {
             canonical_id: Arc::from("/w/open.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: crate::semantic_query::HashValue::default(),
             decl_name: Arc::from("T"),
         },
@@ -6950,6 +7016,7 @@ fn tuple_sole_rest_collapse_replacement_array_preserves_origin_scope() {
 
     let origin_scope = NodeScopeId::File {
         canonical_id: Arc::from("/w/origin.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [7u8; 16],
         local_scope: None,
     };
@@ -7115,6 +7182,7 @@ fn promise_carrier(
     graph.intern_node(SemanticNodeData::InstantiationRef {
         base: crate::semantic_query::DeclIdentity {
             canonical_id: Arc::from("__builtin__"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: crate::semantic_query::HashValue::default(),
             decl_name: Arc::from("Promise"),
         },
@@ -7394,6 +7462,7 @@ fn return_type_of_typeof_local_fn_resolves_via_dispatch() {
         ValueRootKey {
             scope: ScopeId {
                 canonical_id: Arc::from("/w/fns.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
             },
             name: Arc::from("makeLabel"),
@@ -8199,10 +8268,12 @@ fn typeparam_identity_discriminates_distinct_mapped_binders_in_same_file() {
     // Ensure declarations are indexed via ResolveDecl.
     let _ = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
         "/w/two_mapped.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         "A",
     )));
     let _ = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
         "/w/two_mapped.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         "B",
     )));
     let _ = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
@@ -8289,6 +8360,7 @@ fn substitute_preserves_scope_on_shell_rebuilds() {
     // Ensure declaration is indexed.
     let _ = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
         "/w/scope_pres.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         "Wrap",
     )));
     let num = primitive(&graph, PrimitiveKind::Number);
@@ -8341,6 +8413,7 @@ fn unresolved_typeparameter_references_alias_by_name_within_same_file() {
     // Ensure declaration is indexed.
     let _ = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
         "/w/unresolved.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         "Has",
     )));
     let num = primitive(&graph, PrimitiveKind::Number);
@@ -8806,7 +8879,11 @@ fn navigate_lowering_pick_omit_preserve_carrier_other_utilities_unchanged() {
         .expect("gen.ts must have shallow file state");
     let wrap_body = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
         crate::semantic_query::InstantiateKey::new(
-            dispatch.type_slot_for(Arc::from("/gen.ts"), Arc::from("Wrap")),
+            dispatch.type_slot_for(
+                Arc::from("/gen.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("Wrap"),
+            ),
             Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             crate::semantic_query::InstantiateContext::non_file(
                 crate::semantic_query::ProjectionReductionContext::published(
@@ -8981,6 +9058,7 @@ fn open_pick_omit_carrier_stops_in_expanded_and_structural_transit() {
         ] {
             let base = ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("__builtin__"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from(util),
             );
             let result = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
@@ -9649,6 +9727,7 @@ fn carrier_type_args_open_node_judges_bareref_and_typeof_open_over_outer_generic
         crate::semantic_query::ValueRootKey {
             scope: crate::semantic_query::ScopeId {
                 canonical_id: Arc::from("/w/open_carrier.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
             },
             name: Arc::from("make"),
@@ -9707,6 +9786,7 @@ fn mapped_key_domain_judges_instantiations_per_argument_not_by_arg_openness() {
     let foo_of_t = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity {
             canonical_id: Arc::from("/types.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
             decl_name: Arc::from("Foo"),
         },
@@ -9803,6 +9883,7 @@ fn repeated_open_type_param_argument_stays_open_on_revisit() {
     let foo_t_t = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity {
             canonical_id: Arc::from("/types.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
             decl_name: Arc::from("Foo"),
         },
@@ -9813,6 +9894,7 @@ fn repeated_open_type_param_argument_stays_open_on_revisit() {
     )));
     let builtin_pick = DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from("Pick"),
     };
@@ -9864,11 +9946,13 @@ fn key_domain_classifier_ignores_mapped_value_positions_and_binds_mapper_binder(
     )));
     let decl = |name: &str| DeclIdentity {
         canonical_id: Arc::from("/types.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from(name),
     };
     let builtin = |name: &str| DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from(name),
     };
@@ -9929,6 +10013,7 @@ fn index_signature_key_type_opens_domain_concrete_key_stays_closed() {
     )));
     let builtin_pick = DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from("Pick"),
     };
@@ -10017,6 +10102,7 @@ fn nested_instantiation_wrappers_apply_per_argument_key_domain_rule() {
     )));
     let builtin_omit = DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from("Omit"),
     };
@@ -10024,6 +10110,7 @@ fn nested_instantiation_wrappers_apply_per_argument_key_domain_rule() {
         graph.intern_node(SemanticNodeData::InstantiationRef {
             base: DeclIdentity {
                 canonical_id: Arc::from("/types.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from(name),
             },
@@ -10076,6 +10163,7 @@ fn nested_instantiation_wrappers_apply_per_argument_key_domain_rule() {
         crate::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("__builtin__"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("Omit"),
             ),
             Arc::from(vec![wrapper_of_t("AliasOuter"), items_lit].into_boxed_slice()),
@@ -10143,12 +10231,14 @@ fn k_only_remapped_mapped_alias_closes_on_prepared_decl_route() {
     )));
     let builtin_pick = DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from("Pick"),
     };
     let remapped_ref = graph.intern_node(SemanticNodeData::DeclRef {
         identity: DeclIdentity {
             canonical_id: Arc::from("/types.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
             decl_name: Arc::from("Remapped"),
         },
@@ -10172,6 +10262,7 @@ fn k_only_remapped_mapped_alias_closes_on_prepared_decl_route() {
     let remapped_outer_of_t = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity {
             canonical_id: Arc::from("/types.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
             decl_name: Arc::from("RemappedOuter"),
         },
@@ -10194,6 +10285,7 @@ fn k_only_remapped_mapped_alias_closes_on_prepared_decl_route() {
         crate::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("__builtin__"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("Pick"),
             ),
             Arc::from(vec![remapped_ref, ona_lit].into_boxed_slice()),
@@ -10260,6 +10352,7 @@ fn capitalize_remap_closes_but_returntype_source_opens_on_prepared_decl_route() 
     )));
     let builtin_pick = DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from("Pick"),
     };
@@ -10270,6 +10363,7 @@ fn capitalize_remap_closes_but_returntype_source_opens_on_prepared_decl_route() 
     let cap_ref = graph.intern_node(SemanticNodeData::DeclRef {
         identity: DeclIdentity {
             canonical_id: Arc::from("/cap.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
             decl_name: Arc::from("CapRemap"),
         },
@@ -10291,6 +10385,7 @@ fn capitalize_remap_closes_but_returntype_source_opens_on_prepared_decl_route() 
     let ret_source_of_t = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity {
             canonical_id: Arc::from("/cap.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
             decl_name: Arc::from("RetSource"),
         },
@@ -10345,12 +10440,14 @@ fn import_type_source_closes_on_prepared_decl_route_matching_node_route() {
     )));
     let builtin_pick = DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from("Pick"),
     };
     let use_of_t = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity {
             canonical_id: Arc::from("/use.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
             decl_name: Arc::from("Use"),
         },
@@ -10404,12 +10501,14 @@ fn self_referential_import_type_source_terminates_on_prepared_decl_route() {
             )));
             let builtin_pick = DeclIdentity {
                 canonical_id: Arc::from("__builtin__"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from("Pick"),
             };
             let self_of_t = graph.intern_node(SemanticNodeData::InstantiationRef {
                 base: DeclIdentity {
                     canonical_id: Arc::from("/self.ts"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash: HashValue::default(),
                     decl_name: Arc::from("SelfRec"),
                 },
@@ -10474,12 +10573,14 @@ fn zero_arg_self_import_type_source_terminates_via_decl_hop() {
             )));
             let builtin_pick = DeclIdentity {
                 canonical_id: Arc::from("__builtin__"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from("Pick"),
             };
             let selfish = graph.intern_node(SemanticNodeData::DeclRef {
                 identity: DeclIdentity {
                     canonical_id: Arc::from("/selfish.ts"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash: HashValue::default(),
                     decl_name: Arc::from("Selfish"),
                 },
@@ -10548,6 +10649,7 @@ fn mapped_key_remap_inherits_declaration_site_only_for_identity_produced_names()
     let src_ref = graph.intern_node(SemanticNodeData::DeclRef {
         identity: DeclIdentity {
             canonical_id: Arc::from("/remap_origin.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
             decl_name: Arc::from("Src"),
         },
@@ -10556,6 +10658,7 @@ fn mapped_key_remap_inherits_declaration_site_only_for_identity_produced_names()
         crate::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("/remap_origin.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from(alias),
             ),
             Arc::from(vec![src_ref].into_boxed_slice()),
@@ -10688,6 +10791,7 @@ fn one_to_many_remap_with_non_finite_arm_fails_closed_to_mapped_carrier() {
     let src_ref = graph.intern_node(SemanticNodeData::DeclRef {
         identity: DeclIdentity {
             canonical_id: Arc::from("/remap_non_finite.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
             decl_name: Arc::from("Src"),
         },
@@ -10696,6 +10800,7 @@ fn one_to_many_remap_with_non_finite_arm_fails_closed_to_mapped_carrier() {
         crate::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("/remap_non_finite.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("NonFiniteFanout"),
             ),
             Arc::from(vec![src_ref].into_boxed_slice()),
@@ -10767,6 +10872,7 @@ fn nested_builtin_object_filter_key_domain_judged_by_family_semantics() {
     )));
     let builtin = |name: &str| DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from(name),
     };
@@ -10863,6 +10969,7 @@ fn conditional_key_domain_classifies_only_the_oracle_selected_branch() {
     )));
     let builtin_omit = DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from("Omit"),
     };
@@ -10870,6 +10977,7 @@ fn conditional_key_domain_classifies_only_the_oracle_selected_branch() {
         graph.intern_node(SemanticNodeData::InstantiationRef {
             base: DeclIdentity {
                 canonical_id: Arc::from("/types.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from(name),
             },
@@ -10922,6 +11030,7 @@ fn conditional_key_domain_classifies_only_the_oracle_selected_branch() {
         graph.intern_node(SemanticNodeData::DeclRef {
             identity: DeclIdentity {
                 canonical_id: Arc::from("/shapes.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from(name),
             },
@@ -10952,6 +11061,7 @@ fn conditional_key_domain_classifies_only_the_oracle_selected_branch() {
         crate::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("__builtin__"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("Omit"),
             ),
             Arc::from(vec![source_of_t("Source"), x_lit].into_boxed_slice()),
@@ -11028,11 +11138,13 @@ fn value_sensitive_operands_judge_instantiations_by_any_open_argument() {
     };
     let decl = |name: &str| DeclIdentity {
         canonical_id: Arc::from("/types.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from(name),
     };
     let builtin = |name: &str| DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from(name),
     };
@@ -11127,6 +11239,7 @@ fn value_sensitive_operands_judge_instantiations_by_any_open_argument() {
         crate::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("__builtin__"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("Omit"),
             ),
             Arc::from(vec![inst("Sel", vec![t_param]), lit("x")].into_boxed_slice()),
@@ -11186,11 +11299,13 @@ fn builtin_key_domain_verdict_is_route_independent() {
     )));
     let decl = |name: &str| DeclIdentity {
         canonical_id: Arc::from("/types.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from(name),
     };
     let builtin_pick = DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from("Pick"),
     };
@@ -11204,6 +11319,7 @@ fn builtin_key_domain_verdict_is_route_independent() {
             graph.intern_node(SemanticNodeData::InstantiationRef {
                 base: DeclIdentity {
                     canonical_id: Arc::from("__builtin__"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash: HashValue::default(),
                     decl_name: Arc::from("Partial"),
                 },
@@ -11251,6 +11367,7 @@ fn builtin_key_domain_verdict_is_route_independent() {
                 graph.intern_node(SemanticNodeData::InstantiationRef {
                     base: DeclIdentity {
                         canonical_id: Arc::from("__builtin__"),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         whole_hash: HashValue::default(),
                         decl_name: Arc::from("Partial"),
                     },
@@ -11319,6 +11436,7 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
     )));
     let builtin_omit = DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from("Omit"),
     };
@@ -11326,6 +11444,7 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
         graph.intern_node(SemanticNodeData::InstantiationRef {
             base: DeclIdentity {
                 canonical_id: Arc::from("/types.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from(name),
             },
@@ -11421,6 +11540,7 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
         crate::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("__builtin__"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("Omit"),
             ),
             Arc::from(vec![inst("InferSel"), x_lit].into_boxed_slice()),
@@ -11487,11 +11607,13 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
     )));
     let decl = |name: &str| DeclIdentity {
         canonical_id: Arc::from("/types.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from(name),
     };
     let builtin_omit = DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from("Omit"),
     };
@@ -11673,6 +11795,7 @@ fn defaulted_type_parameters_bind_their_default_identity() {
     };
     let builtin_omit = DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from("Omit"),
     };
@@ -11680,6 +11803,7 @@ fn defaulted_type_parameters_bind_their_default_identity() {
         graph.intern_node(SemanticNodeData::InstantiationRef {
             base: DeclIdentity {
                 canonical_id: Arc::from("/types.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from(name),
             },
@@ -11726,6 +11850,7 @@ fn defaulted_type_parameters_bind_their_default_identity() {
         crate::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("__builtin__"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("Omit"),
             ),
             Arc::from(vec![inst("SourceDefault", vec![t_param]), lit("x")].into_boxed_slice()),
@@ -11791,11 +11916,13 @@ fn closed_named_ref_operands_select_through_the_shared_oracle() {
     )));
     let decl = |name: &str| DeclIdentity {
         canonical_id: Arc::from("/types.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from(name),
     };
     let builtin_omit = DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from("Omit"),
     };
@@ -11851,6 +11978,7 @@ fn closed_named_ref_operands_select_through_the_shared_oracle() {
         crate::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("__builtin__"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("Omit"),
             ),
             Arc::from(vec![inst("OuterNamed", vec![t_param]), x_lit].into_boxed_slice()),
@@ -11927,6 +12055,7 @@ fn mapped_name_remap_is_judged_by_key_domain_policy() {
     let foo_of_t = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity {
             canonical_id: Arc::from("/types.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
             decl_name: Arc::from("FooFix"),
         },
@@ -11979,12 +12108,14 @@ fn mapped_name_remap_is_judged_by_key_domain_policy() {
     // must agree with the node-route mapped predicate above.
     let builtin_omit = DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from("Omit"),
     };
     let remap_decl_of_t = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity {
             canonical_id: Arc::from("/types.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
             decl_name: Arc::from("RemapDecl"),
         },
@@ -12035,6 +12166,7 @@ fn tuple_and_array_elements_are_value_positions_on_both_routes() {
     };
     let builtin_omit = DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from("Omit"),
     };
@@ -12042,6 +12174,7 @@ fn tuple_and_array_elements_are_value_positions_on_both_routes() {
         graph.intern_node(SemanticNodeData::InstantiationRef {
             base: DeclIdentity {
                 canonical_id: Arc::from("/types.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from(name),
             },
@@ -12153,6 +12286,7 @@ fn binding_identity_selects_conditionals_through_concrete_arguments() {
     };
     let builtin_omit = DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from("Omit"),
     };
@@ -12160,6 +12294,7 @@ fn binding_identity_selects_conditionals_through_concrete_arguments() {
         graph.intern_node(SemanticNodeData::InstantiationRef {
             base: DeclIdentity {
                 canonical_id: Arc::from("/types.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from(name),
             },
@@ -12195,6 +12330,7 @@ fn binding_identity_selects_conditionals_through_concrete_arguments() {
         crate::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("__builtin__"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("Omit"),
             ),
             Arc::from(
@@ -12255,6 +12391,7 @@ fn node_keyof_operand_resets_to_key_domain_position() {
     )));
     let decl = |name: &str| DeclIdentity {
         canonical_id: Arc::from("/types.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from(name),
     };
@@ -12265,6 +12402,7 @@ fn node_keyof_operand_resets_to_key_domain_position() {
     };
     let builtin_pick = DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from("Pick"),
     };
@@ -12328,6 +12466,7 @@ fn value_sensitive_all_closed_instantiation_requires_resolvable_base() {
     )));
     let decl = |name: &str| DeclIdentity {
         canonical_id: Arc::from("/types.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from(name),
     };
@@ -12338,6 +12477,7 @@ fn value_sensitive_all_closed_instantiation_requires_resolvable_base() {
     };
     let builtin_pick = DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from("Pick"),
     };
@@ -12426,6 +12566,7 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
     };
     let builtin = |name: &str| DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from(name),
     };
@@ -12455,6 +12596,7 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
     // fallback of the TypeExpr classifier).
     let rec_decl = |name: &str| DeclIdentity {
         canonical_id: Arc::from("/types.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from(name),
     };
@@ -12540,6 +12682,7 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
         crate::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("__builtin__"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("Omit"),
             ),
             Arc::from(vec![record_of_t, lit("x")].into_boxed_slice()),
@@ -12605,6 +12748,7 @@ fn mapped_role_split_pins_key_production_and_walks_value_bodies() {
     };
     let builtin_omit = DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from("Omit"),
     };
@@ -12619,6 +12763,7 @@ fn mapped_role_split_pins_key_production_and_walks_value_bodies() {
     };
     let decl = |name: &str| DeclIdentity {
         canonical_id: Arc::from("/types.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from(name),
     };
@@ -12736,6 +12881,7 @@ fn variadic_tuple_rest_elements_open_the_key_domain_on_both_routes() {
     };
     let builtin_omit = DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
         decl_name: Arc::from("Omit"),
     };
@@ -12743,6 +12889,7 @@ fn variadic_tuple_rest_elements_open_the_key_domain_on_both_routes() {
         graph.intern_node(SemanticNodeData::InstantiationRef {
             base: DeclIdentity {
                 canonical_id: Arc::from("/types.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from(name),
             },
@@ -12854,6 +13001,7 @@ fn open_pick_carrier_invalidates_when_cross_file_closedness_dependency_flips() {
     let domain = graph.intern_node(SemanticNodeData::DeclRef {
         identity: DeclIdentity {
             canonical_id: Arc::from("/dep.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
             decl_name: Arc::from("Source"),
         },
@@ -12865,6 +13013,7 @@ fn open_pick_carrier_invalidates_when_cross_file_closedness_dependency_flips() {
     let run = || {
         let base = ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from("__builtin__"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Pick"),
         );
         match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
@@ -12955,6 +13104,7 @@ fn mapped_type_self_roots_and_origin_edges_include_name_remap() {
         },
         NodeScopeId::File {
             canonical_id: Arc::clone(&remap_origin),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: remap_hash,
             local_scope: None,
         },
@@ -13225,6 +13375,7 @@ fn synthetic_macro_owner(
     // `ensure_indexed_ready` at value-compute time.
     crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
         Arc::from(canonical),
+        verter_type_expr::TopLevelOwnerId::instance(0),
         Arc::from("<sfc-script-setup>"),
     )
 }
@@ -14717,7 +14868,11 @@ fn execute_read_preserves_dep_signature_on_success() {
     let dispatch = ProjectSemanticDispatch::new(&host);
 
     // ResolveDecl carries a real dep_signature anchored to /w/types.ts.
-    let key = SemanticQueryKey::ResolveDecl(resolve_decl_key("/w/types.ts", "Foo"));
+    let key = SemanticQueryKey::ResolveDecl(resolve_decl_key(
+        "/w/types.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "Foo",
+    ));
     let read = dispatch.execute_read(key);
 
     // Discriminating: the dep_signature MUST contain at least one
@@ -15880,6 +16035,7 @@ fn backfill_member_index_surface_carries_prepared_member_spans_and_origin() {
     let env: rustc_hash::FxHashMap<String, SemanticNodeId> = rustc_hash::FxHashMap::default();
     let scope = NodeScopeId::File {
         canonical_id: Arc::from(origin),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash,
         local_scope: None,
     };
@@ -15981,6 +16137,7 @@ fn constructor_type_lowers_function_like_not_opaque_miss() {
         rustc_hash::FxHashMap::default();
     let scope = NodeScopeId::File {
         canonical_id: Arc::from(origin),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [0u8; 16],
         local_scope: None,
     };
@@ -16093,6 +16250,7 @@ fn multi_segment_import_type_with_generic_args_fails_loud_not_silent_drop() {
         rustc_hash::FxHashMap::default();
     let scope = NodeScopeId::File {
         canonical_id: Arc::from(origin),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [0u8; 16],
         local_scope: None,
     };
@@ -16236,6 +16394,7 @@ fn typeof_import_value_member_applies_generic_instantiation_args() {
         rustc_hash::FxHashMap::default();
     let scope = NodeScopeId::File {
         canonical_id: Arc::from(origin),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [0u8; 16],
         local_scope: None,
     };
@@ -16423,6 +16582,7 @@ fn cross_file_omit_heritage_carrier_preserves_construct_and_index_signatures() {
         crate::semantic_query::ResolveDeclKey {
             scope: ScopeId {
                 canonical_id: Arc::from("/consumer.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
             },
             name: Arc::from("Derived"),
@@ -16506,12 +16666,15 @@ fn omit_over_union_source_is_common_keys_minus_k_not_distributive() {
     let dispatch = ProjectSemanticDispatch::new(&host);
 
     let surface_of = |name: &str| {
-        let node = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(
-            resolve_decl_key("/union_omit.ts", name),
-        )) {
-            QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
-            other => panic!("ResolveDecl({name}) failed: {other:?}"),
-        };
+        let node =
+            match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
+                "/union_omit.ts",
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                name,
+            ))) {
+                QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+                other => panic!("ResolveDecl({name}) failed: {other:?}"),
+            };
         dispatch
             .resolve_typeinfo_surface_view(
                 node,
@@ -16603,7 +16766,9 @@ fn multi_level_omit_heritage_carriers_compose_through_all_levels() {
     let dispatch = ProjectSemanticDispatch::new(&host);
 
     let a = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
-        "/a.ts", "A",
+        "/a.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "A",
     ))) {
         QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
         other => panic!("ResolveDecl(A) failed: {other:?}"),
@@ -16811,7 +16976,10 @@ fn projection_budget_counts_instantiate_and_conditional() {
     let type_of = SemanticQueryKey::TypeOf {
         value_root: crate::semantic_query::ValueRootSlotIdentity::new(
             crate::semantic_query::ValueRootKey {
-                scope: crate::semantic_query::ScopeId::file(Arc::from("/budget/value.ts")),
+                scope: crate::semantic_query::ScopeId::file(
+                    Arc::from("/budget/value.ts"),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
                 name: Arc::from("sample"),
             },
             0,
@@ -17112,6 +17280,7 @@ fn identity_mapped_build_without_projectable_source_publishes_addressable_carrie
     let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity {
             canonical_id: Arc::from("<utility>"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: crate::semantic_query::HashValue::default(),
             decl_name: Arc::from("<utility-mapper>"),
         },
@@ -18160,6 +18329,7 @@ fn reexported_class_static_surface_composes_heritage_under_origin_scope() {
             let key = SemanticQueryKey::ResolveClassSurface {
                 decl_slot: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
                     Arc::from(canonical),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     Arc::from("ReClass"),
                     project_identity,
                     env.type_env_hash,
@@ -18204,6 +18374,7 @@ fn barrel_keyed_class_surface_composes_under_export_target_identity() {
     let key = SemanticQueryKey::ResolveClassSurface {
         decl_slot: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
             Arc::from(barrel),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("ReClass"),
             project_identity,
             env.type_env_hash,
@@ -18258,7 +18429,10 @@ fn typeof_value_node(
     let key = SemanticQueryKey::TypeOf {
         value_root: crate::semantic_query::ValueRootSlotIdentity::new(
             ValueRootKey {
-                scope: ScopeId::file(Arc::from(canonical)),
+                scope: ScopeId::file(
+                    Arc::from(canonical),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
                 name: Arc::from(name),
             },
             project_identity,
@@ -18848,6 +19022,7 @@ fn substitute_and_walker_descend_carrier_type_args() {
         crate::semantic_query::ValueRootKey {
             scope: crate::semantic_query::ScopeId {
                 canonical_id: Arc::from("/w/carrier_args.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
             },
             name: Arc::from("factory"),
@@ -18986,6 +19161,7 @@ fn absorb_conditional_detects_infer_in_bareref_and_typeof_carrier_type_args() {
         crate::semantic_query::ValueRootKey {
             scope: crate::semantic_query::ScopeId {
                 canonical_id: Arc::from("/w/absorb_carrier.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
             },
             name: Arc::from("make"),
@@ -19058,6 +19234,7 @@ fn is_deferred_classifies_bareref_and_importtype_carriers_as_deferred_roots() {
         crate::semantic_query::ValueRootKey {
             scope: crate::semantic_query::ScopeId {
                 canonical_id: Arc::from("/w/deferred.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
             },
             name: Arc::from("make"),
@@ -20070,6 +20247,7 @@ fn build_enclosed_demand_partial_taints_enclosing_frame() {
         .expect("/demand_types.ts must index");
     let scope = NodeScopeId::File {
         canonical_id: Arc::from("/demand_types.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: shallow.whole_hash,
         local_scope: None,
     };
@@ -20215,6 +20393,7 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     };
     let slot0 = dispatch.type_slot_for(
         Arc::clone(&base0.canonical_id),
+        base0.owner,
         Arc::clone(&base0.decl_name),
     );
     let inst_ctx = dispatch.instantiate_context_for(&base0.canonical_id, navigate);
@@ -20233,6 +20412,7 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     };
     let slot1 = dispatch.type_slot_for(
         Arc::clone(&base1.canonical_id),
+        base1.owner,
         Arc::clone(&base1.decl_name),
     );
     let level2 = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
@@ -20417,6 +20597,7 @@ fn carrier_subject_normalization_fenced_serve_suppresses_caching() {
         .expect("/dep.ts must index");
     let scope = crate::semantic_query::NodeScopeId::File {
         canonical_id: Arc::from("/dep.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: shallow.whole_hash,
         local_scope: None,
     };
@@ -20500,6 +20681,7 @@ fn frameless_complete_with_cache_suppress_trips_build_frame_escape_assert() {
         .expect("/dep.ts must index");
     let scope = NodeScopeId::File {
         canonical_id: Arc::from("/dep.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: shallow.whole_hash,
         local_scope: None,
     };
@@ -20588,6 +20770,7 @@ fn evaluate_deferred_memo_refuses_complete_with_cache_suppress() {
         .expect("/dep.ts must index");
     let scope = NodeScopeId::File {
         canonical_id: Arc::from("/dep.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: shallow.whole_hash,
         local_scope: None,
     };
@@ -20703,6 +20886,7 @@ fn import_type_arm_threads_nested_read_cache_suppress_into_outcome() {
         .expect("/owner.ts must index");
     let owner_scope = NodeScopeId::File {
         canonical_id: Arc::from("/owner.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: owner_shallow.whole_hash,
         local_scope: None,
     };
@@ -20794,6 +20978,7 @@ fn carrier_direct_serve_fence_refuses_evaluate_deferred_memo_and_recomputes() {
         .expect("/dep.ts must index");
     let scope = NodeScopeId::File {
         canonical_id: Arc::from("/dep.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: shallow.whole_hash,
         local_scope: None,
     };
@@ -20876,6 +21061,7 @@ fn carrier_direct_serve_unfenced_publishes_into_evaluate_deferred_memo() {
         .expect("/dep.ts must index");
     let scope = NodeScopeId::File {
         canonical_id: Arc::from("/dep.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: shallow.whole_hash,
         local_scope: None,
     };
@@ -20930,6 +21116,7 @@ fn carrier_unresolved_name_stays_cacheable_even_with_fence_armed() {
         .expect("/dep.ts must index");
     let scope = NodeScopeId::File {
         canonical_id: Arc::from("/dep.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: shallow.whole_hash,
         local_scope: None,
     };
@@ -20998,6 +21185,7 @@ fn single_segment_import_type_direct_serve_fence_refuses_evaluate_deferred_memo(
         .expect("/owner.ts must index");
     let owner_scope = NodeScopeId::File {
         canonical_id: Arc::from("/owner.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: owner_shallow.whole_hash,
         local_scope: None,
     };
@@ -21137,6 +21325,7 @@ fn intern_file_scoped_object(
         }),
         NodeScopeId::File {
             canonical_id: Arc::from("/w/fastpath_origin.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: crate::semantic_query::HashValue::default(),
             local_scope: None,
         },
