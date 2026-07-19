@@ -365,6 +365,18 @@ pub fn process_script_setup<'alloc>(
         is_ts,
         macro_state.has_companion_default || macro_state.options_expr.is_some(),
     );
+    // Official inline `buildDestructureElements`: inject `attrs: $attrs` /
+    // `slots: $slots` into the setup context destructure WHEN the template
+    // uses them (on-use), so inline template references resolve to the
+    // destructured bindings instead of `_ctx.*`.
+    let (uses_attrs, uses_slots) = if options.inline_template {
+        match options.template_used_vars.as_ref() {
+            Some(vars) => (vars.contains("$attrs"), vars.contains("$slots")),
+            None => (false, false),
+        }
+    } else {
+        (false, false)
+    };
     let wrapper_start = build_setup_wrapper_start(
         options.component_name,
         parse_result.is_async,
@@ -374,6 +386,8 @@ pub fn process_script_setup<'alloc>(
         macro_state.emits_section.as_deref(),
         macro_state.options_expr.as_deref(),
         macro_state.has_companion_default,
+        uses_attrs,
+        uses_slots,
         wrap,
     );
 
@@ -603,6 +617,8 @@ fn build_setup_wrapper_start(
     emits_section: Option<&str>,
     options_expr: Option<&str>,
     has_companion_default: bool,
+    uses_attrs: bool,
+    uses_slots: bool,
     wrap: ComponentWrap,
 ) -> String {
     let mut s = String::with_capacity(256);
@@ -669,12 +685,27 @@ fn build_setup_wrapper_start(
         s.push_str("  setup(__props");
     }
 
-    // Add destructured context if needed
-    if has_expose || has_emit {
+    // Add destructured context if needed. Official order: expose, attrs,
+    // slots, emit (attrs/slots only for inline template mode, on-use).
+    if has_expose || has_emit || uses_attrs || uses_slots {
         s.push_str(", { ");
         let mut first = true;
         if has_expose {
             s.push_str("expose: __expose");
+            first = false;
+        }
+        if uses_attrs {
+            if !first {
+                s.push_str(", ");
+            }
+            s.push_str("attrs: $attrs");
+            first = false;
+        }
+        if uses_slots {
+            if !first {
+                s.push_str(", ");
+            }
+            s.push_str("slots: $slots");
             first = false;
         }
         if has_emit {

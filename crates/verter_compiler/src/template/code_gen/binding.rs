@@ -193,6 +193,13 @@ impl<'alloc> BindingResolver<'alloc> {
                 None => "_ctx.",
             };
         }
+        // Inline template mode: `$attrs`/`$slots` resolve to the setup-context
+        // destructure (official `buildDestructureElements` injects them into
+        // `setup(__props, { attrs: $attrs, slots: $slots })` on template use),
+        // so they are referenced BARE — never `_ctx.$attrs` / `_ctx.$slots`.
+        if self.is_inline && (ident == "$attrs" || ident == "$slots") {
+            return "";
+        }
         match self.bindings.get(ident) {
             Some(bt) if bt.is_props() => {
                 if self.is_inline {

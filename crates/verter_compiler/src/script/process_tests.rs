@@ -37,6 +37,8 @@ fn build_wrapper_start_plain_js_no_define_component() {
         Some("['save']"),
         None,
         false,
+        false,
+        false,
         ComponentWrap::Plain,
     );
     assert!(
@@ -66,6 +68,8 @@ fn build_wrapper_start_object_assign_merges_options() {
         None,
         None,
         Some("{ inheritAttrs: false }"),
+        false,
+        false,
         false,
         ComponentWrap::ObjectAssign,
     );
@@ -98,6 +102,8 @@ fn build_wrapper_start_object_assign_companion_default_target() {
         None,
         None,
         true,
+        false,
+        false,
         ComponentWrap::ObjectAssign,
     );
     assert!(
@@ -119,6 +125,8 @@ fn build_wrapper_start_object_assign_both_sources_official_order() {
         None,
         Some("{ inheritAttrs: false }"),
         true,
+        false,
+        false,
         ComponentWrap::ObjectAssign,
     );
     assert!(
@@ -153,6 +161,8 @@ fn build_wrapper_start_basic() {
         None,
         None,
         false,
+        false,
+        false,
         ComponentWrap::DefineComponent,
     );
     assert!(result.contains("__name: 'Test'"));
@@ -171,6 +181,8 @@ fn build_wrapper_start_async() {
         None,
         None,
         false,
+        false,
+        false,
         ComponentWrap::DefineComponent,
     );
     assert!(result.contains("async setup(__props"));
@@ -186,6 +198,8 @@ fn build_wrapper_start_no_name() {
         None,
         None,
         None,
+        false,
+        false,
         false,
         ComponentWrap::DefineComponent,
     );
@@ -203,6 +217,8 @@ fn build_wrapper_start_with_props() {
         None,
         None,
         false,
+        false,
+        false,
         ComponentWrap::DefineComponent,
     );
     assert!(result.contains("props: { title: String }"));
@@ -218,6 +234,8 @@ fn build_wrapper_start_with_emits() {
         None,
         Some("['click']"),
         None,
+        false,
+        false,
         false,
         ComponentWrap::DefineComponent,
     );
@@ -236,6 +254,8 @@ fn build_wrapper_start_with_expose() {
         None,
         None,
         false,
+        false,
+        false,
         ComponentWrap::DefineComponent,
     );
     assert!(result.contains("expose: __expose"));
@@ -251,6 +271,8 @@ fn build_wrapper_start_with_expose_and_emit() {
         None,
         None,
         None,
+        false,
+        false,
         false,
         ComponentWrap::DefineComponent,
     );
@@ -268,6 +290,8 @@ fn build_wrapper_start_with_options() {
         None,
         None,
         Some("{ inheritAttrs: false }"),
+        false,
+        false,
         false,
         ComponentWrap::DefineComponent,
     );
@@ -290,6 +314,8 @@ fn build_wrapper_start_ts_companion_default_spread() {
         None,
         None,
         true,
+        false,
+        false,
         ComponentWrap::DefineComponent,
     );
     assert!(
@@ -311,6 +337,8 @@ fn build_wrapper_start_ts_both_spreads_official_order() {
         None,
         Some("{ inheritAttrs: false }"),
         true,
+        false,
+        false,
         ComponentWrap::DefineComponent,
     );
     let default_pos = result.find("...__default__").unwrap();

@@ -16362,3 +16362,67 @@ fn noninline_dynamic_ref_with_setup_binding_not_hoisted() {
         tpl
     );
 }
+
+// =========================================================================
+// D4 — inline setup context: attrs/slots destructure
+// =========================================================================
+//
+// Official inline injects `attrs: $attrs` / `slots: $slots` into the setup
+// context destructure WHEN the template uses `$attrs`/`$slots` (on-use;
+// `buildDestructureElements` runs only for inlineTemplate). Template
+// references then resolve to the destructured binding (bare), not `_ctx.*`.
+
+#[test]
+fn inline_template_using_attrs_destructures_attrs() {
+    let result = compile_sfc_inline(
+        "<script setup>\nconst x = 1\n</script>\n<template><div v-bind=\"$attrs\">x</div></template>",
+    );
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("setup(__props, { attrs: $attrs })"),
+        "inline setup must destructure attrs on template use, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("$attrs") && !code.contains("_ctx.$attrs"),
+        "template $attrs references resolve to the destructured binding, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn inline_template_using_slots_destructures_slots() {
+    let result = compile_sfc_inline(
+        "<script setup>\nconst x = 1\n</script>\n<template><div :class=\"$slots.default ? 'y' : 'n'\">x</div></template>",
+    );
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("setup(__props, { slots: $slots })"),
+        "inline setup must destructure slots on template use, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("$slots.default") && !code.contains("_ctx.$slots.default"),
+        "template $slots references resolve to the destructured binding, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn inline_plain_template_no_attrs_slots_destructure() {
+    // On-use condition: no $attrs/$slots usage → no destructure (official).
+    let result = compile_sfc_inline(
+        "<script setup>\nconst x = 1\n</script>\n<template><div>{{ x }}</div></template>",
+    );
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("setup(__props)"),
+        "no attrs/slots destructure without template use, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("attrs: $attrs") && !code.contains("slots: $slots"),
+        "got:\n{}",
+        code
+    );
+}
