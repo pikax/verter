@@ -221,6 +221,13 @@ pub(super) async fn handle_hover(
                         // freshly captured surface; a second failure fails
                         // closed. Provider-neutral — this sits above the
                         // per-route provider trait.
+                        //
+                        // Fail-closed-on-persistent is the INTENDED semantics:
+                        // after the bounded retry the handler returns `None`
+                        // (no tooltip), never a fabrication and never a spin.
+                        // A persistently failing provider is a sync/health
+                        // concern (the B10/B12 family), not something hover
+                        // may paper over with invented content.
                         tracing::warn!(
                             "hover type provider error: {} — resyncing and retrying once",
                             e

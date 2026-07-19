@@ -223,8 +223,6 @@ pub fn svelte_directive_keyword_hover(
     None
 }
 
-/// the resolved directive binding's hover (setup binding or import), never a
-/// fabrication — an unknown directive is silent.
 /// Typed hover for a CUSTOM directive NAME token (`v-my-thing`, `v-focus`):
 /// the resolved directive binding's hover (setup binding or import), never a
 /// fabrication — an unknown directive is silent.
