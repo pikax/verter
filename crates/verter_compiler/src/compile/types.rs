@@ -309,6 +309,12 @@ pub struct VerterCompileResult {
     pub tsc: Option<VerterTsxBlock>,
     /// Raw template data for cross-file analysis. Present when `extract_template_data` is true.
     pub template_data: Option<super::template_data::RawTemplateData>,
+    /// Whether the render function was inlined into `setup()` (official
+    /// production topology, `compileScript({ inlineTemplate: true })`). When
+    /// true, `script` contains the complete component (render closure inside
+    /// `setup`) and `template` is `None` — host assembly must NOT attach a
+    /// standalone render function or filter the setup return.
+    pub inline: bool,
     /// The compile cache mode the caller requested. Carried as the
     /// audit-leaf tag type so this struct stays decoupled from the
     /// session-layer `CompileCacheMode` enum (the host maps its enum to

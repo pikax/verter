@@ -124,7 +124,12 @@ pub fn assemble_vue_main_module(
         // This prevents type-only imports (e.g. `import { TypeName }`) from
         // appearing as value references in the return statement, which would
         // block esbuild from eliding them and cause Rollup "not exported" errors.
-        if script.setup {
+        //
+        // INLINE topology: setup returns the render closure (already merged
+        // into setup by the compiler), not a `__returned__` bindings object —
+        // there is nothing to filter, and the render's own `return` lines
+        // must not be mistaken for the bindings return.
+        if script.setup && !compiled.inline {
             let template_code = compiled.template.as_ref().map(|t| t.code.as_str());
             filter_setup_return(&mut script_code, template_code);
         }
@@ -1053,6 +1058,90 @@ mod tests {
         assert!(
             assembled.contains("export default _sfc_main"),
             "template-only SFC must export, got:\n{}",
+            assembled
+        );
+    }
+
+    /// @ai-generated - Inline topology: assembly emits no standalone render
+    /// function — the render closure already lives inside `setup()`, and the
+    /// setup return filter is skipped.
+    #[test]
+    fn assemble_main_module_inline_topology() {
+        use oxc_allocator::Allocator;
+        use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
+        use verter_compiler::framework_common::{
+            CarrierCompiler, ParseOptions, RuntimeCompileOptions,
+        };
+
+        let source = "<script setup>\nimport { ref } from 'vue'\nconst msg = ref('hello')\n</script>\n<template><div>{{ msg }}</div></template>";
+        let alloc = Allocator::new();
+        let compiler = VueCarrierCompiler::default();
+        let provenance = crate::types::MetaProvenance::default();
+        let artifact = crate::parse::parse_carrier_counted(
+            &provenance,
+            &compiler,
+            source,
+            &ParseOptions::default(),
+        );
+        let result = compiler
+            .compile_bundle(
+                source,
+                &artifact,
+                &RuntimeCompileOptions {
+                    force_js: true,
+                    inline: Some(true),
+                    ..RuntimeCompileOptions::default()
+                },
+                &alloc,
+            )
+            .expect("vue carrier produces a runtime bundle");
+
+        // Inline compile: no separate template block, topology flag set.
+        assert!(result.inline, "bundle must carry the inline topology flag");
+        assert!(
+            result.template.is_none(),
+            "inline compile must not emit a template block"
+        );
+
+        let profile = CompileProfile::default();
+        let meta = FileMeta {
+            has_script: true,
+            has_template: true,
+            ..FileMeta::default()
+        };
+        let assembled = assemble_vue_main_module("App.vue", &result, &meta, &profile);
+
+        // The render closure is inside setup — no standalone render attach.
+        assert!(
+            assembled.contains("return (_ctx,_cache) => {"),
+            "render must be inlined into setup, got:\n{}",
+            assembled
+        );
+        assert!(
+            !assembled.contains("function render("),
+            "inline assembly must not emit a standalone render fn, got:\n{}",
+            assembled
+        );
+        assert!(
+            !assembled.contains("_sfc_main.render = render"),
+            "inline assembly must not attach render, got:\n{}",
+            assembled
+        );
+        // No __returned__ bindings object in inline mode.
+        assert!(
+            !assembled.contains("__returned__"),
+            "inline assembly must not contain __returned__, got:\n{}",
+            assembled
+        );
+        // Component object + final export still present.
+        assert!(
+            assembled.contains("const _sfc_main = {"),
+            "assembled module must define _sfc_main, got:\n{}",
+            assembled
+        );
+        assert!(
+            assembled.trim_end().ends_with("export default _sfc_main"),
+            "assembled module must end with the default export, got:\n{}",
             assembled
         );
     }

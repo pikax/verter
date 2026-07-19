@@ -1228,6 +1228,14 @@ pub struct CompileProfile {
     pub force_vapor: bool,
     /// Strip TypeScript type annotations from compiled output.
     pub force_js: bool,
+    /// Inline the render function inside `setup()` (Vue production topology,
+    /// official `compileScript({ inlineTemplate: true })`). `None` resolves to
+    /// `is_production` — matching the official default (inline in prod
+    /// builds). VDOM-only; Vapor inline and inline SSR are deferred (the
+    /// compiler falls back to non-inline). A compile-output policy dimension,
+    /// so it participates in this profile's exact equality/hash like every
+    /// other codegen knob.
+    pub inline: Option<bool>,
     /// Generate source maps for compiled output.
     pub source_map: bool,
     /// Controls which compilation steps run.
@@ -1293,6 +1301,7 @@ impl Default for CompileProfile {
             types_module_name: None,
             force_vapor: false,
             force_js: false,
+            inline: None,
             source_map: false,
             target: verter_compiler::compile::CompileTarget::BUNDLER,
             embed_ambient_types: false,

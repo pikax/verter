@@ -125,6 +125,8 @@ fn test_script_setup_basic_dev() {
 
 #[test]
 fn test_script_setup_prod_template() {
+    // Official production default is INLINE: the render is merged into
+    // setup() as a returned closure — no separate template block.
     let input =
         "<script setup>\nconst msg = 'Hello'\n</script>\n<template><div>hi</div></template>";
     let allocator = Allocator::new();
@@ -136,14 +138,15 @@ fn test_script_setup_prod_template() {
         ..Default::default()
     };
     let result = compile(input, &options, &verter_opts, &allocator);
-    let template = result
-        .template
-        .as_ref()
-        .expect("should have template block");
     assert!(
-        template.code.contains("function render("),
-        "Template should use function render form (non-inline), got:\n{}",
-        template.code
+        result.template.is_none(),
+        "production inlines the render into setup — no template block"
+    );
+    let script = result.script.as_ref().expect("should have script block");
+    assert!(
+        script.code.contains("return (_ctx,_cache) => {"),
+        "production inlines the render as a setup-returned closure, got:\n{}",
+        script.code
     );
 }
 
@@ -1335,6 +1338,8 @@ const x = CONST_VAL
 
 #[test]
 fn test_prod_template_has_render_function() {
+    // Official production default is INLINE: render is a setup-returned
+    // closure, not a standalone `function render(` in a template block.
     let input =
         "<script setup>\nconst msg = 'Hello'\n</script>\n<template><div>{{ msg }}</div></template>";
     let allocator = Allocator::new();
@@ -1346,20 +1351,22 @@ fn test_prod_template_has_render_function() {
         ..Default::default()
     };
     let result = compile(input, &options, &verter_opts, &allocator);
-    let template = result
-        .template
-        .as_ref()
-        .expect("should have template block");
-    // With is_inline: false, the template block always uses `function render(` form
     assert!(
-        template.code.contains("function render("),
-        "Template should have function render, got:\n{}",
-        template.code
+        result.template.is_none(),
+        "production inlines the render — no template block"
+    );
+    let script = result.script.as_ref().expect("should have script block");
+    assert!(
+        script.code.contains("return (_ctx,_cache) => {"),
+        "production inlines the render into setup, got:\n{}",
+        script.code
     );
 }
 
 #[test]
 fn test_prod_template_before_script() {
+    // Official production default is INLINE — holds for template-before-script
+    // block order too (TS keeps the _defineComponent wrapper, V1a gate).
     let input = "<template><div class=\"text-sm\">{{ msg }}</div></template>\n<script setup lang=\"ts\">\nconst msg = ref('Hello')\n</script>";
     let allocator = Allocator::new();
     let options = CodegenOptions::new()
@@ -1370,14 +1377,20 @@ fn test_prod_template_before_script() {
         ..Default::default()
     };
     let result = compile(input, &options, &verter_opts, &allocator);
-    let template = result
-        .template
-        .as_ref()
-        .expect("should have template block");
     assert!(
-        template.code.contains("function render("),
-        "Template-before-script should have function render, got:\n{}",
-        template.code
+        result.template.is_none(),
+        "production inlines the render — no template block"
+    );
+    let script = result.script.as_ref().expect("should have script block");
+    assert!(
+        script.code.contains("return (_ctx,_cache) => {"),
+        "template-before-script production inlines the render, got:\n{}",
+        script.code
+    );
+    assert!(
+        script.code.contains("/*@__PURE__*/_defineComponent({"),
+        "TS inline keeps the _defineComponent wrapper, got:\n{}",
+        script.code
     );
 }
 
@@ -1398,8 +1411,8 @@ fn test_dev_template_before_script() {
 
 #[test]
 fn test_prod_script_has_return_statement() {
-    // With is_inline: false (hardcoded in new pipeline), production mode
-    // still uses const __returned__ = { ... }; return __returned__;
+    // Official production default is INLINE: setup returns the render closure
+    // directly — there is no `__returned__` bindings object.
     let input =
         "<script setup>\nconst msg = 'Hello'\n</script>\n<template><div>{{ msg }}</div></template>";
     let allocator = Allocator::new();
@@ -1413,8 +1426,13 @@ fn test_prod_script_has_return_statement() {
     let result = compile(input, &options, &verter_opts, &allocator);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
-        script.code.contains("const __returned__ = {"),
-        "Non-inline production mode should have __returned__ statement, got:\n{}",
+        !script.code.contains("__returned__"),
+        "inline production mode must not have a __returned__ object, got:\n{}",
+        script.code
+    );
+    assert!(
+        script.code.contains("return (_ctx,_cache) => {"),
+        "inline production setup returns the render closure, got:\n{}",
         script.code
     );
 }
@@ -1444,6 +1462,8 @@ fn test_prod_options_api_uses_function_render() {
 
 #[test]
 fn test_prod_script_setup_template_has_render() {
+    // Official production default is INLINE: render is a setup-returned
+    // closure — no separate template block.
     let input =
         "<script setup>\nconst count = 0\n</script>\n<template><div>{{ count }}</div></template>";
     let allocator = Allocator::new();
@@ -1455,14 +1475,15 @@ fn test_prod_script_setup_template_has_render() {
         ..Default::default()
     };
     let result = compile(input, &options, &verter_opts, &allocator);
-    let template = result
-        .template
-        .as_ref()
-        .expect("should have template block");
     assert!(
-        template.code.contains("function render("),
-        "Script setup in production should have function render in template block, got:\n{}",
-        template.code
+        result.template.is_none(),
+        "production inlines the render — no template block"
+    );
+    let script = result.script.as_ref().expect("should have script block");
+    assert!(
+        script.code.contains("return (_ctx,_cache) => {"),
+        "script setup in production inlines the render into setup, got:\n{}",
+        script.code
     );
 }
 

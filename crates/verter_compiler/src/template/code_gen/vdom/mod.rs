@@ -401,6 +401,15 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             preamble
         };
 
+        // Inline mode: hoisted constants are MODULE-scope (official emits them
+        // in the module preamble, prepended by compileScript) — not inside the
+        // setup closure. Emit them as a file-top prepend on the shared CT; the
+        // orchestrator's import-line prepend lands before them (official
+        // order: imports, hoists, user code).
+        if self.options.is_inline && !hoisted_preamble.is_empty() {
+            out.prepend_alloc(0, &hoisted_preamble);
+        }
+
         // Function signature prefix. Official `@vue/compiler-core` emits the
         // full `(_ctx, _cache, $props, $setup, $data, $options)` form only when
         // binding metadata exists (a script block) and the template is not
@@ -442,7 +451,9 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
 
         // Combined preamble: hoisted constants + function signature + resolved components
         let full_prefix = {
-            let mut s = if hoisted_preamble.is_empty() {
+            // Inline keeps hoists OUT of the render chunk (they were emitted
+            // at module scope above) — the chunk starts at the arrow.
+            let mut s = if self.options.is_inline || hoisted_preamble.is_empty() {
                 fn_sig.to_string()
             } else {
                 let mut p = hoisted_preamble;

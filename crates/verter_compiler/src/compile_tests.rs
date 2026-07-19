@@ -13623,6 +13623,9 @@ fn test_slot_cache_text_run_flags_not_inside_text_content() {
     let options = CodegenOptions {
         filename: Some("App.vue".to_string()),
         is_production: true,
+        // Pin the standalone template lane — this test targets template
+        // codegen details, not the (inline) production default topology.
+        inline: Some(false),
         ..Default::default()
     };
     let verter_opts = VerterCompileOptions {
@@ -13739,6 +13742,9 @@ fn test_slot_cached_elements_hoisted_flag_production() {
     let options = CodegenOptions {
         filename: Some("App.vue".to_string()),
         is_production: true,
+        // Pin the standalone template lane — this test targets template
+        // codegen details, not the (inline) production default topology.
+        inline: Some(false),
         ..Default::default()
     };
     let verter_opts = VerterCompileOptions {
@@ -15523,5 +15529,260 @@ console.log(foo)
         tsx.code.contains("foo: foo as unknown as typeof foo"),
         "script-used `foo` must keep its value-read unwrap entry.\nTSX:\n{}",
         tsx.code
+    );
+}
+
+// =========================================================================
+// Inline-template (official production topology)
+// =========================================================================
+//
+// Official `@vue/compiler-sfc` `compileScript({ inlineTemplate: true })`
+// inlines the render function into `setup()` as a returned closure that
+// references setup bindings DIRECTLY (no `$setup.` prefix, `.value` unwrap
+// for refs). Hoisted statics live at module scope. This is the production
+// default (`resolve_inline` = `inline.unwrap_or(is_production)`); VDOM-only
+// (Vapor inline is deferred).
+
+fn compile_sfc_inline(source: &str) -> VerterCompileResult {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        inline: Some(true),
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    compile(source, &options, &verter_opts, &alloc)
+}
+
+#[test]
+fn inline_template_merges_render_into_setup_closure() {
+    let result = compile_sfc_inline(
+        r#"<script setup>
+import { ref } from 'vue'
+const msg = ref('hello')
+</script>
+
+<template>
+  <div id="app" :title="msg">{{ msg }}</div>
+</template>
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let script = result.script.as_ref().expect("script block");
+
+    // Render is inlined into setup as a returned closure (official topology).
+    assert!(
+        script.code.contains("return (_ctx,_cache) => {"),
+        "render must be inlined as a returned closure, got:\n{}",
+        script.code
+    );
+    // Setup bindings are referenced DIRECTLY with .value unwrap — no $setup.
+    assert!(
+        script.code.contains("title: msg.value"),
+        "inline render must reference setup bindings directly, got:\n{}",
+        script.code
+    );
+    assert!(
+        !script.code.contains("$setup."),
+        "inline render must not use $setup prefixes, got:\n{}",
+        script.code
+    );
+    // No __returned__ bindings object in inline mode.
+    assert!(
+        !script.code.contains("__returned__"),
+        "inline mode must not emit __returned__, got:\n{}",
+        script.code
+    );
+    // Hoisted statics live at module scope, BEFORE the component object.
+    let hoisted_pos = script
+        .code
+        .find("const _hoisted_1")
+        .expect("hoisted const present");
+    let component_pos = script
+        .code
+        .find("const __sfc__")
+        .expect("component object present");
+    assert!(
+        hoisted_pos < component_pos,
+        "hoists must precede the component object:\n{}",
+        script.code
+    );
+    // The render closure sits inside setup (after the component object opens).
+    let render_pos = script.code.find("return (_ctx,_cache) => {").unwrap();
+    assert!(
+        render_pos > component_pos,
+        "render closure must be inside setup:\n{}",
+        script.code
+    );
+    // No separate template block / standalone render function.
+    assert!(
+        result.template.is_none(),
+        "inline mode must not emit a separate template block"
+    );
+    // The merged module is valid JS (single deduped vue import line).
+    let alloc = Allocator::new();
+    let parsed = oxc_parser::Parser::new(&alloc, &script.code, oxc_span::SourceType::mjs()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "inline output must parse as valid JS: {:?}\n---\n{}",
+        parsed.errors,
+        script.code
+    );
+}
+
+#[test]
+fn inline_template_ts_keeps_define_component_wrapper() {
+    let result = compile_sfc_inline(
+        r#"<script setup lang="ts">
+const msg = 'hi'
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let script = result.script.as_ref().expect("script block");
+    // The V1a gate holds for inline too: TS → _defineComponent wrap + import.
+    assert!(
+        script.code.contains("/*@__PURE__*/_defineComponent({"),
+        "TS inline keeps the _defineComponent wrapper, got:\n{}",
+        script.code
+    );
+    assert!(
+        script.code.contains("defineComponent as _defineComponent"),
+        "TS inline tracks the helper import, got:\n{}",
+        script.code
+    );
+    assert!(
+        script.code.contains("return (_ctx,_cache) => {"),
+        "got:\n{}",
+        script.code
+    );
+}
+
+#[test]
+fn inline_template_js_plain_object_no_define_component() {
+    // V1a gate holds for inline: JS → plain object, no _defineComponent import.
+    let result = compile_sfc_inline(
+        r#"<script setup>
+const msg = 'hi'
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#,
+    );
+    let script = result.script.as_ref().expect("script block");
+    assert!(
+        script.code.contains("const __sfc__ = {"),
+        "JS inline emits a plain object, got:\n{}",
+        script.code
+    );
+    assert!(
+        !script.code.contains("_defineComponent"),
+        "JS inline must not reference _defineComponent, got:\n{}",
+        script.code
+    );
+}
+
+#[test]
+fn inline_template_dev_default_stays_non_inline() {
+    // resolve_inline: None → is_production (dev = non-inline, unchanged).
+    let result = compile_sfc(
+        r#"<script setup>
+const msg = 'hi'
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#,
+    );
+    let script = result.script.as_ref().expect("script block");
+    assert!(
+        !script.code.contains("return (_ctx,_cache) => {"),
+        "dev default must stay non-inline, got:\n{}",
+        script.code
+    );
+    assert!(
+        result.template.is_some(),
+        "non-inline keeps the separate template block"
+    );
+}
+
+#[test]
+fn inline_template_production_default_inlines() {
+    // resolve_inline: None + is_production → inline (official prod default).
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        is_production: true,
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    let result = compile(
+        "<script setup>\nconst msg = 'hi'\n</script>\n<template><div>{{ msg }}</div></template>",
+        &options,
+        &verter_opts,
+        &alloc,
+    );
+    let script = result.script.as_ref().expect("script block");
+    assert!(
+        script.code.contains("return (_ctx,_cache) => {"),
+        "production default must inline, got:\n{}",
+        script.code
+    );
+}
+
+#[test]
+fn inline_template_template_only_sfc_falls_back_to_non_inline() {
+    // No <script setup> to inline into — template-only stays non-inline even
+    // when inline is requested (same as official).
+    let result = compile_sfc_inline("<template><div>hello</div></template>");
+    assert!(
+        result.template.is_some(),
+        "template-only SFC keeps the separate template block"
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(
+        tpl.code.contains("function render(_ctx, _cache)"),
+        "template-only render keeps the standalone 2-param form, got:\n{}",
+        tpl.code
+    );
+}
+
+#[test]
+fn inline_template_vapor_never_inlines() {
+    // Vapor inline is deferred — forcing vapor + inline falls back to the
+    // separate template block.
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        inline: Some(true),
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        force_vapor: true,
+        ..Default::default()
+    };
+    let result = compile(
+        "<script setup>\nconst msg = 'hi'\n</script>\n<template><div>{{ msg }}</div></template>",
+        &options,
+        &verter_opts,
+        &alloc,
+    );
+    assert!(
+        result.template.is_some(),
+        "vapor must keep the separate template block (inline deferred)"
     );
 }

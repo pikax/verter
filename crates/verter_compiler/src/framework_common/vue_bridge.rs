@@ -444,10 +444,13 @@ impl CarrierCompiler for VueCarrierCompiler {
         let core_opts = CodegenOptions {
             filename: opts.filename.clone(),
             is_production: opts.is_production,
-            // The host always assembles a standalone `function render()` via
-            // its main-module assembly, so inline mode is off (otherwise the
-            // template emits bare identifiers missing the `$setup.` prefix).
-            inline: Some(false),
+            // Inline-template topology flows from the runtime options (`None`
+            // resolves to `is_production`, matching the official default:
+            // inline in prod builds). The compiler falls back to non-inline
+            // for Vapor / SSR / template-only / script-only SFCs; the bundle
+            // carries the RESOLVED topology (`inline`) so the host assembly
+            // never sniffs source text.
+            inline: opts.inline,
             component_id: opts.component_id.clone(),
             delimiters: opts.delimiters.clone(),
             custom_elements: opts.custom_elements.clone(),
@@ -567,6 +570,10 @@ pub fn vue_result_to_runtime_bundle(
         // Vue always emits a runtime surface (or a genuine compile error); it never
         // fails closed on an unsupported runtime surface the way Svelte does.
         runtime_surface_refused: false,
+        // The RESOLVED inline topology — the compiler already merged the
+        // render into `setup()` when true, so host assembly takes the inline
+        // branch (no render attach, no setup-return filter).
+        inline: result.inline,
     }
 }
 
