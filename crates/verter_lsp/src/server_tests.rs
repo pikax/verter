@@ -6936,6 +6936,80 @@ async fn contract_kebab_prop_rename_executes_merged_edit_spanning_script_and_tem
     drop(service);
 }
 
+/// A provider on a case-insensitive filesystem (tsgo/tsserver on Windows)
+/// reports paths fully case-folded (`d:/…/app.vue`). The current-carrier
+/// rename leg must still classify as the current carrier and re-anchor to the
+/// AUTHORED request URI — never echo the provider's folded path as a second
+/// URI (clients key edits case-sensitively and silently drop them).
+#[tokio::test]
+async fn contract_rename_provider_case_folded_carrier_path_reanchors_to_authored_uri() {
+    let app_source = "<script setup lang=\"ts\">\nconst vueTsTitle: string = \"x\"\n</script>\n<template><section>{{ vueTsTitle }}</section></template>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server(&[("src/App.vue", "vue", app_source)]).await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &app_uri, "{{ vueTsTitle }}", 3);
+
+    server.ensure_provider_synced(&app_uri).await;
+    let ctx = synced_type_provider_context(server, &app_uri);
+    let usage_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("usage position should map into TSX");
+    // Seed the provider's answer: the CURRENT CARRIER path in fully-folded
+    // case (the Windows tsgo spelling), offsets in carrier coordinates.
+    let carrier_path = crate::documents::uri_to_canonical_id(&app_uri);
+    let folded_carrier_path = carrier_path.to_lowercase();
+    let carrier_token_start = app_source.find("{{ vueTsTitle }}").unwrap() as u32 + 3;
+    provider.set_rename_locations(
+        &ctx.tsx_path,
+        usage_offset,
+        vec![crate::type_provider::protocol::RenameLocation {
+            path: folded_carrier_path.clone(),
+            start: carrier_token_start,
+            end: carrier_token_start + "vueTsTitle".len() as u32,
+        }],
+    );
+
+    let edit = super::nav_features_navigation::handle_rename(
+        server,
+        RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: app_uri.clone(),
+                },
+                position,
+            },
+            new_name: "renamedTitle".into(),
+            work_done_progress_params: Default::default(),
+        },
+    )
+    .await
+    .expect("rename request should succeed")
+    .expect("rename must return the merged edit");
+
+    let changes = edit.changes.expect("workspace edit must carry changes");
+    for key in changes.keys() {
+        assert_eq!(
+            key.as_str(),
+            app_uri.as_str(),
+            "every edit must be keyed under the AUTHORED uri, never the provider's folded path: {changes:?}"
+        );
+    }
+    let edits = &changes[&app_uri];
+    assert_eq!(
+        edits.len(),
+        2,
+        "script declaration + template use must both be edited: {changes:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
 #[tokio::test]
 async fn contract_kebab_prop_references_include_child_declaration() {
     // Find-references at the kebab usage must include the child's camel

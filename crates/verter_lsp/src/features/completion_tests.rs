@@ -3182,31 +3182,37 @@ fn test_svelte_snippet_slot_name_completions_from_child_snippet_props() {
 fn test_svelte_render_callee_completions_in_scope_snippets() {
     let source = "<ul>\n  {@render \n</ul>";
 
-    let mut parent = FileAnalysisSnapshot::default();
-    let mut template = TemplateAnalysisSnapshot::default();
-    template.snippet_definitions = vec![
-        SnippetDefinition {
-            name: "row".to_string(),
-            span: verter_span::Span::new(0, 3),
-            params_text: Some("item: number".to_string()),
-        },
-        SnippetDefinition {
-            name: "cell".to_string(),
-            span: verter_span::Span::new(10, 14),
-            params_text: None,
-        },
-    ];
-    template.prop_definitions = vec![AnalyzedPropDefinition {
-        name: "actions".to_string(),
-        type_annotation: Some("import(\"svelte\").Snippet".to_string()),
-        has_default: false,
-        is_required: false,
-        is_boolean: false,
-        used_in_template: false,
-        used_in_script: false,
-        span: verter_span::Span::new(0, 0),
-    }];
-    parent.template = Some(template.into());
+    let parent = FileAnalysisSnapshot {
+        template: Some(
+            TemplateAnalysisSnapshot {
+                snippet_definitions: vec![
+                    SnippetDefinition {
+                        name: "row".to_string(),
+                        span: verter_span::Span::new(0, 3),
+                        params_text: Some("item: number".to_string()),
+                    },
+                    SnippetDefinition {
+                        name: "cell".to_string(),
+                        span: verter_span::Span::new(10, 14),
+                        params_text: None,
+                    },
+                ],
+                prop_definitions: vec![AnalyzedPropDefinition {
+                    name: "actions".to_string(),
+                    type_annotation: Some("import(\"svelte\").Snippet".to_string()),
+                    has_default: false,
+                    is_required: false,
+                    is_boolean: false,
+                    used_in_template: false,
+                    used_in_script: false,
+                    span: verter_span::Span::new(0, 0),
+                }],
+                ..Default::default()
+            }
+            .into(),
+        ),
+        ..Default::default()
+    };
 
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);

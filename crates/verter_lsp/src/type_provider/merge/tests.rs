@@ -29,9 +29,13 @@ use crate::type_provider::protocol::{
 /// Rename edits are returned under the shared filesystem identity, not the raw provider spelling.
 /// On case-insensitive hosts, test lookups must therefore fold synthetic path case as production
 /// does before constructing the expected URI.
+/// The rename-edit URI contract: each edit is keyed by a REAL member spelling
+/// of its target path (the provider-reported path's own case, or — when the
+/// initiating document is in the group — the initiating URI), never the
+/// case-folded filesystem-identity string. LSP URIs are case-sensitive, so
+/// clients must be able to key edits by the exact URI they know.
 fn rename_identity_uri(path: &str) -> Uri {
-    let identity = verter_span::InjectedPathKey::new(path);
-    path_to_uri(identity.as_str()).expect("fixture path produces a file URI")
+    path_to_uri(path).expect("fixture path produces a file URI")
 }
 
 // ── Position mapping tests ─────────────────────────────────────

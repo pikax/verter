@@ -1683,6 +1683,7 @@ fn slot_owner_tag_name(
 /// (defineSlots fields, template defined-slots fallback), never a document
 /// word fallback. Already-used slot names are filtered with Vue's kebab↔camel
 /// equivalence; `default` is offered while unused and undeclared.
+#[allow(clippy::type_complexity)]
 fn slot_name_completions(
     offset: usize,
     source: &str,
@@ -1848,6 +1849,7 @@ fn slot_name_completions(
 /// D5 Svelte: `{#snippet |` inside a component completes the snippet-slot
 /// names the CHILD accepts — its snippet-typed props (e.g.
 /// `header?: import("svelte").Snippet<…>`) — with used slots filtered.
+#[allow(clippy::type_complexity)]
 fn svelte_snippet_slot_completions(
     offset: usize,
     source: &str,

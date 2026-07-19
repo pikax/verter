@@ -31,8 +31,9 @@ pub use definition::{
 pub use diagnostics::merge_diagnostics;
 
 pub use feature_merges::{
-    dedupe_rename_workspace_edit, merge_code_actions, merge_document_highlights, merge_inlay_hints,
-    merge_references, merge_rename_locations, merge_semantic_tokens, merge_signature_help,
+    dedupe_rename_workspace_edit, dedupe_rename_workspace_edit_with_preferred, merge_code_actions,
+    merge_document_highlights, merge_inlay_hints, merge_references, merge_rename_locations,
+    merge_semantic_tokens, merge_signature_help,
 };
 
 pub use hover::merge_hover;
