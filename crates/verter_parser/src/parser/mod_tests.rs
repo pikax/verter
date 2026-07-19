@@ -565,6 +565,44 @@ fn directive_with_arg_and_modifiers() {
     }
 }
 
+#[test]
+fn v_pre_is_recorded_as_a_directive_fact() {
+    // D6: the v-pre prepass owns the subtree skip (pure tokenizer state), but
+    // the v-pre token itself must survive the AST as a typed directive fact —
+    // the IDE's directive-name doc hover reads exactly that fact.
+    let input = "<template><div v-pre>{{ raw }}</div></template>";
+    let opts = SyntaxPluginOptions::default();
+    let ctx = make_ctx(input, &opts);
+    let mut syn = Syntax::new(false);
+
+    tokenize_and_feed(&mut syn, input, &ctx);
+
+    let ast = syn.template_ast.as_ref().unwrap();
+    let div_id = ast.root.content.as_ref().unwrap().children[0];
+    let div = &ast.nodes[div_id.0];
+    if let AstNodeKind::Element(el) = &div.kind {
+        let prop = el
+            .props
+            .iter()
+            .find(|p| p.is_directive)
+            .expect("v-pre must be recorded as a directive fact");
+        assert_eq!(span_str(input, prop.start, prop.name_end), "v-pre");
+        assert!(prop.arg_start.is_none());
+        assert!(prop.value_start.is_none());
+        // The subtree skip is unchanged: the interpolation stays plain text.
+        let has_interpolation = ast
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, AstNodeKind::Interpolation(_)));
+        assert!(
+            !has_interpolation,
+            "v-pre subtree must remain uncompiled (no interpolation nodes)"
+        );
+    } else {
+        panic!("expected Element, got {:?}", div.kind);
+    }
+}
+
 // ========================================================================
 // 11. Mismatched tags — strict mode
 // ========================================================================
