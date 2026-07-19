@@ -131,9 +131,9 @@ pub use carrier_discovery::{decide_carrier_discovery, CarrierDiscoveryMode};
 pub use changes::{ChangeResult, OwnedFileInfo, OwnershipDiff, WorkspaceChange};
 #[cfg(not(target_arch = "wasm32"))]
 pub use config::{
-    discover_tsconfigs, has_solution_style_tsconfig, load_compiler_options,
-    load_project_membership, load_project_references, normalize_path_buf, parse_tsconfig_json,
-    raw_paths_json, resolve_tsconfig_extends, strip_json_comments, ParsedTsConfig, TsConfigEntry,
+    discover_tsconfigs, load_compiler_options, load_project_membership, load_project_references,
+    normalize_path_buf, parse_tsconfig_json, raw_paths_json, resolve_tsconfig_extends,
+    strip_json_comments, ParsedTsConfig, TsConfigEntry,
 };
 pub use engine::SVELTE_RUNE_AMBIENT_PARSER_FLAG;
 pub use error::{DirEntry, VfsError};

@@ -210,6 +210,40 @@ pub(super) async fn handle_initialize(
     })
 }
 
+/// Compute the structured provider recommendation for the active serving route.
+///
+/// tsgo-preferred model: any tsserver-family serving (managed workspace
+/// tsserver or the editor-owned tsserver plugin) recommends TSGO. TSGO-family
+/// serving and verter-only mode carry NO recommendation — the server never
+/// nags users already on the preferred provider, and a no-provider session
+/// gets the dedicated degraded-mode warning instead.
+///
+/// Content rules: portable facts only (no editor-product names, no client
+/// settings keys — clients render remediation in their own idiom), and every
+/// `known_gaps` entry must be a tree-evidenced real gap of the recommended
+/// provider, never marketing over evidence.
+pub(super) fn provider_recommendation(
+    kind: &crate::TypeProviderKind,
+) -> Option<ProviderRecommendation> {
+    let route = match kind {
+        crate::TypeProviderKind::Tsserver => "workspace TypeScript (tsserver)",
+        crate::TypeProviderKind::EditorTsserver => "the editor-owned tsserver plugin",
+        crate::TypeProviderKind::Tsgo | crate::TypeProviderKind::None => return None,
+    };
+    Some(ProviderRecommendation {
+        preferred: "tsgo".into(),
+        reason: format!(
+            "This workspace is served by {route}. TSGO (the native TypeScript \
+             engine) is Verter's recommended type provider."
+        ),
+        known_gaps: vec![
+            "TSGO does not yet provide the 'remove unused declaration' quick fix \
+             (TS6133); other quick fixes are unaffected."
+                .into(),
+        ],
+    })
+}
+
 pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: InitializedParams) {
     tracing::info!("verter-lsp initialized");
 
@@ -253,6 +287,9 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
 
     // Send type provider status notification — tells the extension which
     // provider is active (or why none could be started) for the status bar.
+    // The structured `recommendation` carries the tsgo-preferred flip:
+    // tsserver-family serving recommends TSGO with honest known gaps; the
+    // client owns presentation (dismissal, settings gate, notification UI).
     {
         let kind = server.type_provider_kind.to_string().to_lowercase();
         let reason = server.type_provider_reason.clone();
@@ -261,6 +298,7 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
             .send_notification::<TypeProviderStatus>(TypeProviderStatusParams {
                 kind,
                 reason: reason.clone(),
+                recommendation: provider_recommendation(&server.type_provider_kind),
             })
             .await;
         // When no type provider is available, also show a warning message
@@ -279,32 +317,6 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
             };
             server.client.show_message(MessageType::WARNING, msg).await;
         }
-    }
-
-    // Suggest switching to TSGO if auto mode chose tsserver
-    if server.suggest_tsgo {
-        server.client
-            .show_message(
-                MessageType::INFO,
-                "Verter: Using workspace TypeScript (tsserver) for type checking. \
-                 For faster performance, install TSGO and set verter.typeProvider to \"tsgo\" in VS Code settings.",
-            )
-            .await;
-    }
-
-    // Warn about TSGO limitations
-    if matches!(server.type_provider_kind, crate::TypeProviderKind::Tsgo) {
-        server
-            .client
-            .show_message(
-                MessageType::WARNING,
-                "Verter: TSGO has known limitations — (1) re-exported .vue components \
-                 (e.g. barrel files) may lose their typing; (2) path aliases from \
-                 composite/referenced tsconfig files (e.g. tsconfig.app.json) are not \
-                 resolved. If you experience issues, switch to tsserver: set \
-                 verter.typeProvider to \"tsserver\".",
-            )
-            .await;
     }
 
     // Notify extension of MCP HTTP port (dynamic, OS-assigned).
@@ -1268,5 +1280,112 @@ pub(super) async fn handle_did_delete_files(
         server.documents.host().remove(&canonical_id);
         server.cached_verter_diags.remove(uri.as_str());
         tracing::debug!("did_delete_files: removed {}", file.uri);
+    }
+}
+
+#[cfg(test)]
+mod provider_recommendation_tests {
+    use super::*;
+    use crate::TypeProviderKind;
+
+    /// Serving on the workspace-tsserver route recommends the preferred TSGO
+    /// provider — the tsgo-preferred flip. The payload is portable facts only:
+    /// no editor-specific remediation strings in server-side content.
+    #[test]
+    fn tsserver_route_recommends_tsgo_with_portable_wording() {
+        let rec = provider_recommendation(&TypeProviderKind::Tsserver)
+            .expect("tsserver serving must carry a tsgo recommendation");
+        assert_eq!(rec.preferred, "tsgo");
+        assert!(
+            rec.reason.contains("tsserver"),
+            "reason names the active route"
+        );
+        // Editor-agnostic discipline: presentation belongs to the client.
+        assert!(
+            !rec.reason.contains("VS Code"),
+            "no VS-Code-specific strings server-side"
+        );
+        assert!(
+            !rec.reason.contains("verter.typeProvider"),
+            "no client settings-key strings server-side"
+        );
+    }
+
+    /// The one tree-evidenced real TSGO gap (unported TS6133 remove-unused
+    /// quick fix) stays honestly disclosed inside the recommendation payload.
+    #[test]
+    fn recommendation_discloses_the_real_ts6133_gap_honestly() {
+        let rec = provider_recommendation(&TypeProviderKind::Tsserver).unwrap();
+        assert!(
+            !rec.known_gaps.is_empty(),
+            "known gaps must not be marketing-empty"
+        );
+        assert!(
+            rec.known_gaps.iter().any(|g| g.contains("TS6133")),
+            "the unported remove-unused quick fix must be disclosed: {:?}",
+            rec.known_gaps
+        );
+        // Negative: the two STALE claims must NOT reappear as gaps.
+        for gap in &rec.known_gaps {
+            assert!(
+                !gap.contains("barrel"),
+                "stale barrel-typing claim must stay retired"
+            );
+            assert!(
+                !gap.to_lowercase().contains("path alias"),
+                "stale path-alias claim must stay retired"
+            );
+        }
+    }
+
+    /// The editor-owned tsserver plugin route is tsserver-family serving and
+    /// carries the same recommendation.
+    #[test]
+    fn editor_tsserver_route_recommends_tsgo() {
+        let rec = provider_recommendation(&TypeProviderKind::EditorTsserver)
+            .expect("editor-tsserver serving must carry a tsgo recommendation");
+        assert_eq!(rec.preferred, "tsgo");
+    }
+
+    /// TSGO-family serving and verter-only mode carry NO recommendation —
+    /// the server never nags users already on the preferred provider, and a
+    /// no-provider session already gets the dedicated degraded-mode warning.
+    #[test]
+    fn tsgo_and_none_routes_carry_no_recommendation() {
+        assert!(provider_recommendation(&TypeProviderKind::Tsgo).is_none());
+        assert!(provider_recommendation(&TypeProviderKind::None).is_none());
+    }
+
+    /// Wire shape: the recommendation serializes camelCase (`knownGaps`) for
+    /// the TS client mirror, and an absent recommendation is omitted entirely.
+    #[test]
+    fn status_params_serialize_recommendation_camel_case_and_omit_when_absent() {
+        let with = TypeProviderStatusParams {
+            kind: "tsserver".into(),
+            reason: None,
+            recommendation: provider_recommendation(&TypeProviderKind::Tsserver),
+        };
+        let json = serde_json::to_value(&with).unwrap();
+        let rec = json.get("recommendation").expect("recommendation present");
+        assert_eq!(rec.get("preferred").unwrap(), "tsgo");
+        assert!(
+            rec.get("knownGaps").is_some(),
+            "camelCase knownGaps on the wire"
+        );
+        assert!(
+            rec.get("known_gaps").is_none(),
+            "snake_case must not leak to the wire"
+        );
+
+        let without = TypeProviderStatusParams {
+            kind: "tsgo".into(),
+            reason: None,
+            recommendation: provider_recommendation(&TypeProviderKind::Tsgo),
+        };
+        let json = serde_json::to_value(&without).unwrap();
+        assert!(
+            json.get("recommendation").is_none(),
+            "absent recommendation omitted from the wire"
+        );
     }
 }

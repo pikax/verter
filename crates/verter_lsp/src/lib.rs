@@ -91,9 +91,6 @@ pub struct LspConfig {
     pub project_sync_mode: ProjectSyncMode,
     /// Which type provider backend is active.
     pub type_provider_kind: TypeProviderKind,
-    /// When `true`, show a recommendation to switch to TSGO in VS Code settings.
-    /// Set by `auto` mode when tsserver is chosen because TS 5.x was detected.
-    pub suggest_tsgo: bool,
     /// Actual MCP HTTP port (already bound). `None` when MCP is disabled.
     /// The LSP sends a `$/verter/mcpReady` notification during `initialized()`.
     pub mcp_port: Option<u16>,

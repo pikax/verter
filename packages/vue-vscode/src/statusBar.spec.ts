@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeStatusBarState } from "./statusBar";
+import { computeProviderRecommendationNotice, computeStatusBarState } from "./statusBar";
 
 describe("computeStatusBarState", () => {
   it("shows tsserver with check icon", () => {
@@ -49,5 +49,65 @@ describe("computeStatusBarState", () => {
     expect(state.tooltip).toContain("No TypeScript type provider");
     // Negative: tooltip should not contain "undefined"
     expect(state.tooltip).not.toContain("undefined");
+  });
+});
+
+describe("computeProviderRecommendationNotice", () => {
+  const tsserverWithRecommendation = {
+    kind: "tsserver" as const,
+    recommendation: {
+      preferred: "tsgo" as const,
+      reason: "This workspace is served by workspace TypeScript (tsserver). TSGO is recommended.",
+      knownGaps: ["TSGO does not yet provide the 'remove unused declaration' quick fix (TS6133)."],
+    },
+  };
+
+  it("renders the server recommendation with honest gap details on the tsserver route", () => {
+    const notice = computeProviderRecommendationNotice(tsserverWithRecommendation, {
+      enabled: true,
+      dismissed: false,
+    });
+    expect(notice).toBeDefined();
+    expect(notice?.message).toContain("TSGO");
+    expect(notice?.message).toContain("TS6133");
+  });
+
+  it("is silent when the server sends no recommendation (tsgo routes)", () => {
+    expect(
+      computeProviderRecommendationNotice({ kind: "tsgo" }, { enabled: true, dismissed: false }),
+    ).toBeUndefined();
+    expect(
+      computeProviderRecommendationNotice({ kind: "none" }, { enabled: true, dismissed: false }),
+    ).toBeUndefined();
+  });
+
+  it("respects the user setting", () => {
+    expect(
+      computeProviderRecommendationNotice(tsserverWithRecommendation, {
+        enabled: false,
+        dismissed: false,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("respects a prior dismissal (never nags)", () => {
+    expect(
+      computeProviderRecommendationNotice(tsserverWithRecommendation, {
+        enabled: true,
+        dismissed: true,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("omits the gap sentence when the server sends no known gaps", () => {
+    const notice = computeProviderRecommendationNotice(
+      {
+        kind: "tsserver",
+        recommendation: { preferred: "tsgo", reason: "TSGO is recommended.", knownGaps: [] },
+      },
+      { enabled: true, dismissed: false },
+    );
+    expect(notice?.message).toContain("TSGO");
+    expect(notice?.message).not.toContain("Note:");
   });
 });

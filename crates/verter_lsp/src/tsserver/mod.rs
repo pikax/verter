@@ -10,4 +10,4 @@ pub mod ipc;
 pub mod resilient;
 
 // Re-export discovery helpers from verter_type_runtime
-pub use verter_type_runtime::discovery::{detect_ts_major_version, find_node, find_tsserver};
+pub use verter_type_runtime::discovery::{find_node, find_tsserver};

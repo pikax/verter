@@ -97,15 +97,14 @@
 //! keyed on [`EngineIdentity`], and mode renegotiation on editor
 //! reconnect — is owned by the live editor-attach integration.
 //!
-//! Auto-mode provider selection routes a workspace whose active TypeScript engine
-//! is tsgo/native-preview (TypeScript >= 7) to the tsgo external engine: the
-//! decision keys on the workspace-active engine
-//! (`verter_workspace::NativeIntrinsicLibrary::active_typescript_is_tsgo`), so a
-//! tsgo workspace is never dragged to a lower bundled/global `tsserver` even when
-//! the editor supplies one. For a non-tsgo workspace, `tsserver` is selected when
-//! the resolved tsserver candidate (workspace, editor `--tsdk`, or global) is
-//! TypeScript 5.x/6.x, or when a solution-style composite `tsconfig` is present
-//! (`verter_lsp::config::prefer_tsserver_backend`).
+//! Provider selection is identity-based: an attested editor-owned Native
+//! Preview rendezvous serves first, then a project-bound editor-tsserver
+//! attestation, then the pinned managed tsgo fallback. A workspace whose
+//! active TypeScript engine is tsgo/native-preview (TypeScript >= 7,
+//! `verter_workspace::NativeIntrinsicLibrary::active_typescript_is_tsgo`) is
+//! never dragged to a lower bundled/global `tsserver`; even an explicit
+//! tsserver override whose resolved candidate is a TS7+ install reclassifies
+//! to the tsgo route (the LSP's `tsserver_native_family_major` gate).
 
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;

@@ -673,60 +673,6 @@ pub fn is_project_config(
     tsconfig_declares_ownership_intent(ws, tsconfig_path)
 }
 
-/// Check if a workspace has any solution-style tsconfig.json.
-pub fn has_solution_style_tsconfig(ws: &dyn WorkspaceRead, workspace_root: &str) -> bool {
-    let tsconfig = join_paths(workspace_root, "tsconfig.json");
-    if is_solution_style_tsconfig(ws, &tsconfig) {
-        return true;
-    }
-
-    let Ok(depth1_entries) = ws.read_dir(workspace_root) else {
-        return false;
-    };
-    for d1 in &depth1_entries {
-        if !d1.is_dir {
-            continue;
-        }
-        let name = d1.path.rsplit('/').next().unwrap_or(&d1.path);
-        if name.starts_with('.') || name == "node_modules" || name == "dist" {
-            continue;
-        }
-        if is_solution_style_tsconfig(ws, &join_paths(&d1.path, "tsconfig.json")) {
-            return true;
-        }
-        let Ok(depth2_entries) = ws.read_dir(&d1.path) else {
-            continue;
-        };
-        for d2 in &depth2_entries {
-            if !d2.is_dir {
-                continue;
-            }
-            let name2 = d2.path.rsplit('/').next().unwrap_or(&d2.path);
-            if name2.starts_with('.') || name2 == "node_modules" || name2 == "dist" {
-                continue;
-            }
-            if is_solution_style_tsconfig(ws, &join_paths(&d2.path, "tsconfig.json")) {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-fn is_solution_style_tsconfig(ws: &dyn WorkspaceRead, tsconfig_path: &str) -> bool {
-    let Some(content) = ws.read_file(tsconfig_path) else {
-        return false;
-    };
-    let cleaned = strip_json_comments(&content);
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&cleaned) else {
-        return false;
-    };
-    json.get("references")
-        .and_then(|v| v.as_array())
-        .is_some_and(|refs| !refs.is_empty())
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Raw Paths Extraction (for tsserver configure_paths)
 // ═══════════════════════════════════════════════════════════════════════════
