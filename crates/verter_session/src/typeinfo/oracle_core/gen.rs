@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use verter_type_runtime::tsgo::ipc::{find_tsgo_binary, TsgoTypeProvider};
+use verter_type_runtime::tsgo::ipc::TsgoTypeProvider;
 use verter_type_runtime::{path_to_file_uri_string, TypeProvider};
 
 use super::admission::{self, AdmissionVerdict, SourceWalkResult};
@@ -513,7 +513,22 @@ async fn drive_hover(
     spec: &QuerySpec,
     synth: &Synthesized,
 ) -> Result<String, GenError> {
-    let tsgo_bin = find_tsgo_binary().map_err(|e| GenError::TsgoUnavailable(e.to_string()))?;
+    let tsgo_bin = {
+        // Resolve the engine through the toolchain resolver (shared →
+        // project-local → cache → bundled; capability-validated: bounded
+        // version probe + support policy + a `--lsp` capability smoke per
+        // candidate). Reached via the `verter_type_runtime` facade —
+        // verter_session's tsgo-generation-only guard bans a direct
+        // `verter_tsgo_api` dep.
+        let request = verter_type_runtime::tsgo::discovery::ResolutionRequest::for_environment(
+            verter_type_runtime::tsgo::validation::Capability::Lsp,
+            None,
+        );
+        verter_type_runtime::tsgo::discovery::resolve(&request)
+            .await
+            .map(|resolution| resolution.path.to_string_lossy().into_owned())
+            .map_err(|e| GenError::TsgoUnavailable(e.to_string()))?
+    };
     let sandbox = tempfile::tempdir().map_err(|e| GenError::Io(e.to_string()))?;
 
     // (a) Seed the vendored corpus. The canonical `oracle.tsconfig.json` becomes

@@ -68,7 +68,6 @@ use verter_workspace::workspace_snapshot::{
 use verter_workspace::{FilesystemOptions, FilesystemWorkspace, WorkspaceAccess, WorkspaceRead};
 
 use verter_tsgo_api::jsonrpc::{encode_message, MessageFramer};
-use verter_tsgo_api::transport::spawn::discover_tsgo;
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -78,11 +77,17 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Discover the engine, honoring `VERTER_REQUIRE_TSGO` (a skip under that env is a
+/// Resolve the engine through the 4-tier toolchain resolver (capability-validated:
+/// bounded version probe + support policy + a `--lsp` capability smoke per
+/// candidate), honoring `VERTER_REQUIRE_TSGO` (a skip under that env is a
 /// vacuous-pass failure).
-fn engine_or_skip() -> Option<PathBuf> {
-    match discover_tsgo(&workspace_root()) {
-        Ok(p) => Some(p),
+async fn engine_or_skip() -> Option<PathBuf> {
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+        verter_tsgo_api::toolchain::validation::Capability::Lsp,
+        Some(workspace_root()),
+    );
+    match verter_tsgo_api::toolchain::discovery::resolve(&request).await {
+        Ok(resolution) => Some(resolution.path),
         Err(e) => {
             if std::env::var("VERTER_REQUIRE_TSGO").is_ok() {
                 panic!("VERTER_REQUIRE_TSGO is set but tsgo was not found: {e}. A skip would be a vacuous pass.");
@@ -546,7 +551,7 @@ async fn teardown(mut h: Harness) {
 /// `ProviderPositionMapper` to the `.vue` script span (never a forged `(0,0)`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shared_provider_serves_real_vue_macro_carrier() {
-    let Some(tsgo) = engine_or_skip() else {
+    let Some(tsgo) = engine_or_skip().await else {
         return;
     };
     let h = setup(&tsgo, "macro").await;
@@ -649,7 +654,7 @@ async fn shared_provider_serves_real_vue_macro_carrier() {
 /// reference the carrier is driven, and the editor stream is asserted carrier-free.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shared_provider_carrier_never_leaks_to_editor() {
-    let Some(tsgo) = engine_or_skip() else {
+    let Some(tsgo) = engine_or_skip().await else {
         return;
     };
     let h = setup(&tsgo, "leak").await;
@@ -712,7 +717,7 @@ async fn shared_provider_carrier_never_leaks_to_editor() {
 /// first generation is unreachable under the second.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shared_provider_reconnect_mints_fresh_engine_no_split_brain() {
-    let Some(tsgo) = engine_or_skip() else {
+    let Some(tsgo) = engine_or_skip().await else {
         return;
     };
     // First live session (first editor generation).
@@ -1138,7 +1143,7 @@ async fn teardown_composite(mut h: CompositeHarness) {
 /// to the empty OWNED baseline, so no TS2322 would appear.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn composite_overlays_shared_diagnostics_via_live_resolver() {
-    let Some(tsgo) = engine_or_skip() else {
+    let Some(tsgo) = engine_or_skip().await else {
         return;
     };
     let h = setup_composite(&tsgo, "composite", Arc::new(OwnedBaselineDouble)).await;
@@ -1233,7 +1238,7 @@ async fn composite_overlays_shared_diagnostics_via_live_resolver() {
 /// semantic engine process in the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn composite_successful_shared_route_never_activates_managed_fallback() {
-    let Some(tsgo) = engine_or_skip() else {
+    let Some(tsgo) = engine_or_skip().await else {
         return;
     };
     let activation_count = Arc::new(AtomicUsize::new(0));

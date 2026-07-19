@@ -1,22 +1,24 @@
 //! verter-tsc — Vue SFC type checker (vue-tsc replacement).
 //!
 //! Generates minimal TypeScript declarations from Vue SFC macros
-//! (defineProps, defineEmits, defineModel, defineOptions) and passes them
-//! to a TypeScript compiler for type checking.
+//! (defineProps, defineEmits, defineModel, defineOptions) and type-checks them
+//! with the tsgo (TypeScript 7 native) engine.
 //!
-//! # Type checker resolution
+//! # Engine resolution
 //!
-//! The `--noEmit` TYPECHECK path drives the GATED tsgo `--api` engine (the
-//! version-pinned rc `@typescript/typescript-<platform>` native binary — the TS 7
-//! native compiler) IN-MEMORY: the generated carriers are fed as an in-memory
-//! overlay, no temp files. This path is tsgo-only and version-gated; there is NO
-//! tsc fallback for type checking. Engine discovery precedence: the explicit
-//! `VERTER_TSGO_BIN` override, then the rc engine in the project's `node_modules`.
+//! Both paths resolve the engine through the SAME 4-tier, capability-validated
+//! toolchain resolver (`verter_tsgo_api::toolchain::discovery`): the first
+//! WORKING candidate across `VERTER_TSGO_BIN` → PATH → project-local ancestor
+//! `node_modules` → the temp update cache → the bundled sidecar wins (bounded
+//! version probe + support policy + a capability smoke per candidate). Verter
+//! supports tsgo STABLE `>=7.0.2, <7.1.0` only — RCs, nightlies, and newer
+//! minors are refused — and there is no fallback to the legacy TypeScript
+//! compiler.
 //!
-//! The `--declaration` EMIT path runs `tsgo --project` over temp files (the
-//! native-preview `tsgo`, with a tsc fallback if absent), because tsgo `--api`
-//! exposes no emit surface. Its search order: `node_modules/@typescript/`
-//! `native-preview-<platform>/lib/tsgo` → `node_modules/.bin/tsgo` → PATH → npx cache.
+//! The `--noEmit` TYPECHECK path drives the gated tsgo `--api` engine IN-MEMORY
+//! (the generated carriers are fed as an in-memory overlay, no temp files).
+//! The `--declaration` EMIT path runs `tsgo --project` over temp files (tsgo
+//! `--api` exposes no emit surface).
 //!
 //! # Usage
 //!
@@ -40,10 +42,13 @@ use clap::Parser;
     version = env!("CARGO_PKG_VERSION"),
     about = "Vue SFC type checker — verter-native vue-tsc replacement",
     long_about = "Generates ComponentPublicInstance declarations from Vue SFC macros\n\
-                  and invokes tsgo (or tsc) for type checking. Faster than vue-tsc for large projects.\n\n\
+                  and type-checks them with the tsgo (TypeScript 7 native) engine.\n\
+                  Faster than vue-tsc for large projects.\n\n\
                   The --noEmit typecheck path drives tsgo in-memory via --api (no temp files);\n\
-                  the --declaration emit path runs tsgo --project over temp files.\n\
-                  Install tsgo: npm install -D @typescript/native-preview"
+                  the --declaration emit path runs tsgo --project over temp files.\n\n\
+                  Engine: tsgo STABLE 7.0.x only (>=7.0.2, <7.1.0), resolved in order via\n\
+                  VERTER_TSGO_BIN, PATH, project-local node_modules, the update cache,\n\
+                  or the bundled sidecar. Install one: npm install -D typescript@7.0.2"
 )]
 struct Cli {
     /// Path to tsconfig.json [default: tsconfig.json]
@@ -199,7 +204,28 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
+
+    // ── DISCRIMINATING (H11): the public help text must describe the SHIPPED
+    //    toolchain policy (stable 7.0.x window, the 4-tier resolver) and must
+    //    NOT point users at rejected channels (native-preview, npx, a tsc
+    //    fallback). ────────────────────────────────────────────────────────────
+    #[test]
+    fn help_text_matches_the_shipped_toolchain_policy() {
+        let help = Cli::command().render_long_help().to_string();
+        for rejected in ["native-preview", "npx", "tsc fallback", "(or tsc)"] {
+            assert!(
+                !help.contains(rejected),
+                "the help text must not reference the rejected channel `{rejected}`:\n{help}"
+            );
+        }
+        for expected in ["7.0", "VERTER_TSGO_BIN", "bundled"] {
+            assert!(
+                help.contains(expected),
+                "the help text must describe the shipped policy (`{expected}`):\n{help}"
+            );
+        }
+    }
 
     #[test]
     fn cli_accepts_composite_with_value() {

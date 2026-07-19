@@ -6,6 +6,7 @@
 //! `CARGO_MANIFEST_DIR`-relative paths from the entries, not declared here.
 
 mod config_diagnostics;
+mod declaration_fail_closed;
 mod diagnostic_set_parity;
 mod diagnostics;
 mod typecheck_fail_closed;

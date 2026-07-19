@@ -18,7 +18,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use verter_tsgo_api::attach::{SpawnOwnTsgoLsp, TsgoAttach};
-use verter_tsgo_api::transport::spawn::discover_tsgo;
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -28,11 +27,17 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Discover the engine, honoring `VERTER_REQUIRE_TSGO` (a skip under that env is a
+/// Resolve the engine through the 4-tier toolchain resolver (capability-validated:
+/// bounded version probe + support policy + a `--lsp` capability smoke per
+/// candidate), honoring `VERTER_REQUIRE_TSGO` (a skip under that env is a
 /// vacuous-pass failure).
-fn engine_or_skip() -> Option<PathBuf> {
-    match discover_tsgo(&workspace_root()) {
-        Ok(p) => Some(p),
+async fn engine_or_skip() -> Option<PathBuf> {
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+        verter_tsgo_api::toolchain::validation::Capability::Lsp,
+        Some(workspace_root()),
+    );
+    match verter_tsgo_api::toolchain::discovery::resolve(&request).await {
+        Ok(resolution) => Some(resolution.path),
         Err(e) => {
             if std::env::var("VERTER_REQUIRE_TSGO").is_ok() {
                 panic!("VERTER_REQUIRE_TSGO is set but tsgo was not found: {e}. A skip would be a vacuous pass.");
@@ -121,7 +126,7 @@ fn write_fixture(dir: &Path) -> PathBuf {
 /// checker sees the overlay + its deliberate type error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn attach_api_over_spawned_lsp_sees_didopen_overlay_carrier() {
-    let Some(exe) = engine_or_skip() else {
+    let Some(exe) = engine_or_skip().await else {
         return;
     };
 
@@ -229,7 +234,7 @@ async fn attach_api_over_spawned_lsp_sees_didopen_overlay_carrier() {
 /// on the same carrier over the ONE process, observing the SAME shared Program.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn one_process_serves_both_api_checker_and_lsp_feature() {
-    let Some(exe) = engine_or_skip() else {
+    let Some(exe) = engine_or_skip().await else {
         return;
     };
 

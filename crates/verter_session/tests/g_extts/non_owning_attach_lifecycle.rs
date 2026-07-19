@@ -256,15 +256,15 @@ fn initialize_only_in_handshake_failures(src: &str, span: (usize, usize)) -> Vec
         .collect();
     if inside == 0 {
         failures.push(
-            "lsp_handshake must originate the LSP `initialize` request (the \
-             OWNED handshake-half is its sole home)"
+            "the OWNED handshake-half (lsp_handshake_with_policy) must originate \
+             the LSP `initialize` request (its sole home)"
                 .to_string(),
         );
     }
     if !outside.is_empty() {
         failures.push(format!(
             "a Verter-originated `initialize` request exists OUTSIDE \
-             lsp_handshake (byte offsets {outside:?}) — the OWNED \
+             lsp_handshake_with_policy (byte offsets {outside:?}) — the OWNED \
              handshake-half is the ONLY place Verter initializes a connection"
         ));
     }
@@ -290,13 +290,14 @@ fn non_owning_attach_lifecycle() {
                 attach_rs().display()
             )
         });
-    let handshake_span = fn_body_span(&src, "pub async fn lsp_handshake").unwrap_or_else(|| {
-        panic!(
-            "could not extract the `pub async fn lsp_handshake` body span from \
-             {} — the OWNED handshake-half must exist",
-            attach_rs().display()
-        )
-    });
+    let handshake_span =
+        fn_body_span(&src, "async fn lsp_handshake_with_policy").unwrap_or_else(|| {
+            panic!(
+                "could not extract the `async fn lsp_handshake_with_policy` body span from \
+                 {} — the OWNED handshake-half must exist",
+                attach_rs().display()
+            )
+        });
     // `async fn shutdown` also matches inside a (violating) `pub async fn
     // shutdown`, so the span extraction works either way; the visibility
     // predicate below rejects the `pub` form.

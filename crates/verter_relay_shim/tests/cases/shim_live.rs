@@ -33,7 +33,6 @@ use verter_tsgo_api::control::{Advertisement, ControlClient};
 use verter_tsgo_api::jsonrpc::{encode_message, JsonRpcConnection, MessageFramer};
 use verter_tsgo_api::proto::types::ProjectResponse;
 use verter_tsgo_api::transport::pipe_attach::connect_attach_pipe;
-use verter_tsgo_api::transport::spawn::discover_tsgo;
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -45,9 +44,13 @@ fn workspace_root() -> PathBuf {
 
 /// Discover the engine, honoring `VERTER_REQUIRE_TSGO` (a skip under that env is
 /// a vacuous-pass failure).
-fn engine_or_skip() -> Option<PathBuf> {
-    match discover_tsgo(&workspace_root()) {
-        Ok(p) => Some(p),
+async fn engine_or_skip() -> Option<PathBuf> {
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+        verter_tsgo_api::toolchain::validation::Capability::Lsp,
+        Some(workspace_root()),
+    );
+    match verter_tsgo_api::toolchain::discovery::resolve(&request).await {
+        Ok(resolution) => Some(resolution.path),
         Err(e) => {
             if std::env::var("VERTER_REQUIRE_TSGO").is_ok() {
                 panic!("VERTER_REQUIRE_TSGO is set but tsgo was not found: {e}. A skip would be a vacuous pass.");
@@ -402,7 +405,7 @@ async fn teardown(mut h: Harness) {
 /// checker (deliberate TS2322 present; no spurious TS2307).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fake_editor_through_real_shim_and_tsgo_sees_injected_carrier() {
-    let Some(tsgo) = engine_or_skip() else {
+    let Some(tsgo) = engine_or_skip().await else {
         return;
     };
     let h = setup(&tsgo, "mechanics").await;
@@ -473,7 +476,7 @@ async fn fake_editor_through_real_shim_and_tsgo_sees_injected_carrier() {
 /// dropped (never answered) while a normal server response still reaches it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn relay_suppresses_carrier_leak_and_demuxes_verter_ids_end_to_end() {
-    let Some(tsgo) = engine_or_skip() else {
+    let Some(tsgo) = engine_or_skip().await else {
         return;
     };
     let h = setup(&tsgo, "leakdemux").await;
@@ -575,7 +578,7 @@ async fn relay_suppresses_carrier_leak_and_demuxes_verter_ids_end_to_end() {
 /// succeeds — the discriminating pair.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn control_hello_wrong_protocol_fails_closed_live() {
-    let Some(tsgo) = engine_or_skip() else {
+    let Some(tsgo) = engine_or_skip().await else {
         return;
     };
     let dir = tempdir("protomismatch");
@@ -635,7 +638,7 @@ async fn control_hello_wrong_protocol_fails_closed_live() {
 /// (a torn-down shim would have removed the advertisement + dropped its listener).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn verter_detach_is_non_destructive_shim_and_child_survive() {
-    let Some(tsgo) = engine_or_skip() else {
+    let Some(tsgo) = engine_or_skip().await else {
         return;
     };
     let mut h = setup(&tsgo, "detachlive").await;

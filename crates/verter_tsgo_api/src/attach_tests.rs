@@ -222,11 +222,11 @@ fn spawn_fake_lsp_server(
     (JsonRpcConnection::connect(cr, cw), trace, join)
 }
 
-/// A clearance minted through the REAL gate over the accepted rc channel with
-/// the in-band witness — the clearance `from_parts` stores.
+/// A clearance minted through the REAL gate over a supported stable version
+/// with the in-band witness — the clearance `from_parts` stores.
 fn test_clearance() -> GateClearance {
-    gate::validate(&ObservedEngine::from_in_band_server_info("7.0.1-rc"))
-        .expect("the rc reference version clears the gate")
+    gate::validate(&ObservedEngine::from_in_band_server_info("7.0.3"))
+        .expect("a supported stable version clears the gate")
 }
 
 fn fake_session_handle() -> ApiSessionHandle {
@@ -243,12 +243,12 @@ fn fake_session_handle() -> ApiSessionHandle {
 
 #[tokio::test]
 async fn lsp_handshake_reads_in_band_serverinfo_and_gates_accepted() {
-    let (conn, trace, join) = spawn_fake_lsp_server(init_result_with_version("7.0.1-rc"));
+    let (conn, trace, join) = spawn_fake_lsp_server(init_result_with_version("7.0.3"));
 
     let clearance = TsgoAttach::lsp_handshake(&conn, "file:///ws")
         .await
-        .expect("an in-channel serverInfo.version must clear the gate");
-    assert_eq!(clearance.observed_version, "7.0.1-rc");
+        .expect("a supported serverInfo.version must clear the gate");
+    assert_eq!(clearance.observed_version, "7.0.3");
     assert_eq!(
         clearance.witness,
         EngineVersionWitness::InBandServerInfo,
@@ -279,7 +279,7 @@ async fn lsp_handshake_fails_closed_on_unknown_serverinfo_version() {
 
     let err = TsgoAttach::lsp_handshake(&conn, "file:///ws")
         .await
-        .expect_err("an out-of-channel serverInfo.version must be refused");
+        .expect_err("an unsupported serverInfo.version must be refused");
     assert!(
         matches!(err, TsgoApiError::UnsupportedTsgoWire(ref m) if m.contains("6.9.9")),
         "the refusal must be the typed wire gate naming the version; got {err:?}"
@@ -327,7 +327,7 @@ async fn lsp_handshake_fails_closed_on_missing_serverinfo() {
 
 #[tokio::test]
 async fn attach_over_refuses_a_non_owning_connection() {
-    let (conn, trace, join) = spawn_fake_lsp_server(init_result_with_version("7.0.1-rc"));
+    let (conn, trace, join) = spawn_fake_lsp_server(init_result_with_version("7.0.3"));
     let lsp = TsgoLspConnection::new_attached(conn.clone());
     assert_eq!(lsp.ownership(), ConnectionOwnership::AttachedNonOwning);
 
@@ -352,7 +352,7 @@ async fn attach_over_refuses_a_non_owning_connection() {
     // being generally broken): the same composer over an OWNED connection DOES
     // originate `initialize` (the flow proceeds past the ownership check and
     // only fails later at the fake nonexistent pipe, which is irrelevant here).
-    let (conn2, trace2, join2) = spawn_fake_lsp_server(init_result_with_version("7.0.1-rc"));
+    let (conn2, trace2, join2) = spawn_fake_lsp_server(init_result_with_version("7.0.3"));
     let owned = TsgoLspConnection::new_owned(conn2.clone(), None);
     assert_eq!(owned.ownership(), ConnectionOwnership::Owned);
     let _ = TsgoAttach::attach_over(owned, "file:///ws").await;
@@ -366,7 +366,7 @@ async fn attach_over_refuses_a_non_owning_connection() {
 
 #[tokio::test]
 async fn attach_to_initialized_gates_supplied_version_fail_closed() {
-    let (conn, trace, join) = spawn_fake_lsp_server(init_result_with_version("7.0.1-rc"));
+    let (conn, trace, join) = spawn_fake_lsp_server(init_result_with_version("7.0.3"));
     let lsp = TsgoLspConnection::new_attached(conn.clone());
 
     let err = TsgoAttach::attach_to_initialized(lsp, "garbage")
@@ -398,11 +398,11 @@ async fn attach_to_initialized_gates_supplied_version_fail_closed() {
 /// never through the non-owning composer.
 #[tokio::test]
 async fn attach_to_initialized_refuses_owned_connection() {
-    let (conn, trace, join) = spawn_fake_lsp_server(init_result_with_version("7.0.1-rc"));
+    let (conn, trace, join) = spawn_fake_lsp_server(init_result_with_version("7.0.3"));
     let owned = TsgoLspConnection::new_owned(conn.clone(), None);
     assert_eq!(owned.ownership(), ConnectionOwnership::Owned);
 
-    let err = TsgoAttach::attach_to_initialized(owned, "7.0.1-rc")
+    let err = TsgoAttach::attach_to_initialized(owned, "7.0.3")
         .await
         .expect_err("attach_to_initialized must refuse an OWNED connection");
     assert!(
@@ -448,8 +448,7 @@ async fn open_invariant_pair<O: AttachOwnership>(attach: &TsgoAttach<O>) {
 /// ABSENT on non-owning), while the non-owning arm instead retracts its
 /// overlays via `didClose`. Returns the completed `--lsp` and `--api` traces.
 async fn teardown_flow_traces(ownership: ConnectionOwnership) -> (WireTrace, WireTrace) {
-    let (lsp_conn, lsp_trace, lsp_join) =
-        spawn_fake_lsp_server(init_result_with_version("7.0.1-rc"));
+    let (lsp_conn, lsp_trace, lsp_join) = spawn_fake_lsp_server(init_result_with_version("7.0.3"));
     let (api_conn, api_trace, api_join) = spawn_fake_lsp_server(serde_json::Value::Null);
 
     match ownership {
@@ -549,8 +548,7 @@ async fn owned_teardown_sends_exit() {
 /// `teardown()` entry point.
 #[tokio::test]
 async fn teardown_dispatches_on_ownership() {
-    let (lsp_conn, lsp_trace, lsp_join) =
-        spawn_fake_lsp_server(init_result_with_version("7.0.1-rc"));
+    let (lsp_conn, lsp_trace, lsp_join) = spawn_fake_lsp_server(init_result_with_version("7.0.3"));
     let (api_conn, _api_trace, api_join) = spawn_fake_lsp_server(serde_json::Value::Null);
 
     let lsp = TsgoLspConnection::new_attached(lsp_conn.clone());
@@ -589,8 +587,7 @@ async fn teardown_dispatches_on_ownership() {
 /// duplicate.
 #[tokio::test]
 async fn did_open_tracks_overlay_uris_for_retraction() {
-    let (lsp_conn, lsp_trace, lsp_join) =
-        spawn_fake_lsp_server(init_result_with_version("7.0.1-rc"));
+    let (lsp_conn, lsp_trace, lsp_join) = spawn_fake_lsp_server(init_result_with_version("7.0.3"));
     let (api_conn, _api_trace, api_join) = spawn_fake_lsp_server(serde_json::Value::Null);
 
     let lsp = TsgoLspConnection::new_attached(lsp_conn.clone());
@@ -644,8 +641,7 @@ async fn did_open_tracks_overlay_uris_for_retraction() {
 /// would `didClose` a document the server never opened.
 #[tokio::test]
 async fn did_open_failure_tracks_no_phantom_overlay() {
-    let (lsp_conn, _lsp_trace, lsp_join) =
-        spawn_fake_lsp_server(init_result_with_version("7.0.1-rc"));
+    let (lsp_conn, _lsp_trace, lsp_join) = spawn_fake_lsp_server(init_result_with_version("7.0.3"));
     let (api_conn, _api_trace, api_join) = spawn_fake_lsp_server(serde_json::Value::Null);
     let api_conn_keep = api_conn.clone();
 

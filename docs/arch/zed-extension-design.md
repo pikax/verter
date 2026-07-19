@@ -192,7 +192,7 @@ it would fall through to the `_ => "auto"` default). The shared `verter-editor-c
 crate's `build_server_args` **clamps** any non-`{tsgo, off}` value (including the `tgo` typo,
 `tsserver`, and `auto`) to `tsgo`, so a SDK-less client never requests a provider it cannot
 satisfy (it never passes `--tsdk`). `tsgo` is self-contained: `try_spawn_tsgo` discovers the
-native provider via `find_tsgo_binary_canonical(workspace_root)` (env → workspace
+native provider via the `verter_tsgo_api::toolchain` 4-tier resolver (`VERTER_TSGO_BIN` → shared PATH → project-local `node_modules` → update cache → bundled sidecar, validated candidates only), workspace
 `node_modules` → PATH → npm/npx cache). The extension ships no TypeScript SDK; the user
 installs TypeScript 7 (`typescript@7`, which supplies the native platform binary) per-project. `--plugin-path` and the `--mcp-*` flags
 are omitted.

@@ -18,16 +18,22 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 
 use crate::actor::{read_one_frame, DuplexTransport};
 use crate::error::{TsgoApiError, TsgoApiResult};
+use crate::process::{configure_tree_spawn, reap_child_bounded, TreeKill, REAP_BOUND};
 use crate::transport::spawn::build_sync_api_args;
 
 /// A live tsgo `--api` process and its stdio pipes.
 ///
-/// Holds the child handle so the process is killed when the transport is
-/// dropped (via tokio's `kill_on_drop`). The actor owns this transport for the
-/// session's lifetime.
+/// The child is spawned in its OWN process group / job
+/// ([`configure_tree_spawn`]) so teardown reaches the whole process tree: a
+/// descendant that inherited the pipes cannot outlive the kill. The transport
+/// holds the child handle so the process is killed when the transport is
+/// dropped (via tokio's `kill_on_drop`, the backstop behind the explicit
+/// [`TreeKill`] teardown). The actor owns this transport for the session's
+/// lifetime.
 #[derive(Debug)]
 pub struct StdioPipeTransport {
     child: Child,
+    tree: TreeKill,
     stdin: ChildStdin,
     stdout: ChildStdout,
 }
@@ -40,17 +46,19 @@ impl StdioPipeTransport {
         let cwd_str = cwd.to_string_lossy();
         let args = build_sync_api_args(&cwd_str, true);
 
-        let mut child = tokio::process::Command::new(exe)
+        let mut command = tokio::process::Command::new(exe);
+        command
             .args(&args)
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| {
-                TsgoApiError::Spawn(format!("failed to spawn tsgo at {}: {e}", exe.display()))
-            })?;
+            .kill_on_drop(true);
+        configure_tree_spawn(&mut command);
+        let mut child = command.spawn().map_err(|e| {
+            TsgoApiError::Spawn(format!("failed to spawn tsgo at {}: {e}", exe.display()))
+        })?;
+        let tree = TreeKill::arm(child.id().unwrap_or(0));
 
         let stdin = child
             .stdin
@@ -63,17 +71,19 @@ impl StdioPipeTransport {
 
         Ok(Self {
             child,
+            tree,
             stdin,
             stdout,
         })
     }
 
-    /// Best-effort terminate the child process.
+    /// Best-effort terminate the child process TREE: close stdin (the engine's
+    /// read loop sees EOF), then kill the tree and reap the direct child,
+    /// bounded — a wedged engine can never hang the caller or leak a zombie.
     pub async fn shutdown(&mut self) {
-        // Closing stdin lets the engine's read loop see EOF and exit cleanly;
-        // then ensure it is gone.
         let _ = self.stdin.shutdown().await;
-        let _ = self.child.start_kill();
+        self.tree.kill_tree();
+        let _ = reap_child_bounded(&mut self.child, REAP_BOUND).await;
     }
 }
 
@@ -91,6 +101,11 @@ impl DuplexTransport for StdioPipeTransport {
 
     async fn recv_frame(&mut self) -> TsgoApiResult<Option<Vec<u8>>> {
         read_one_frame(&mut self.stdout).await
+    }
+
+    async fn terminate(&mut self) {
+        self.tree.kill_tree();
+        let _ = reap_child_bounded(&mut self.child, REAP_BOUND).await;
     }
 }
 

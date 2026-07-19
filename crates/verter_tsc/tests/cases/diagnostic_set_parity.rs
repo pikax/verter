@@ -363,17 +363,20 @@ fn create_junction_or_symlink(src: &Path, dest: &Path) {
 // `VERTER_TSGO_BIN`. A genuinely-absent engine SKIPs — the pinned multiset is
 // engine-specific, so never assert against a missing or wrong engine.
 
-/// Resolve the gated `--api` engine: an explicit `VERTER_TSGO_BIN` override
-/// first, then the shared `verter_tsgo_api` discovery against the workspace root
-/// (where `pnpm install --frozen-lockfile` installs `typescript@7.0.2`).
+/// Resolve the gated `--api` engine through the 4-tier toolchain resolver
+/// (`VERTER_TSGO_BIN` wins; then shared PATH, project-local `node_modules`
+/// under the workspace root — where `pnpm install --frozen-lockfile` installs
+/// `typescript@7.0.2` — the update cache, and the bundled sidecar),
+/// capability-validated (bounded version probe + support policy + a `--lsp`
+/// capability smoke per candidate).
 fn resolve_gated_engine() -> Option<PathBuf> {
-    if let Some(raw) = std::env::var_os("VERTER_TSGO_BIN") {
-        let path = PathBuf::from(raw);
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-    verter_tsgo_api::transport::spawn::discover_tsgo(&workspace_root()).ok()
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+        verter_tsgo_api::toolchain::validation::Capability::Lsp,
+        Some(workspace_root()),
+    );
+    verter_tsgo_api::toolchain::discovery::resolve_blocking(&request)
+        .ok()
+        .map(|resolution| resolution.path)
 }
 
 // ── The parity oracle ───────────────────────────────────────────────────
