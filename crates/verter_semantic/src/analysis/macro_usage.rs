@@ -22,6 +22,7 @@
 //! - a consumed same-named reference (`props.x` on a shadowing local) marks
 //!   the macro member `x` used even though the macro binding was never read —
 //!   also a missed diagnostic (false NEGATIVE).
+//!
 //! Both err toward silence; a member is flagged unused only when NO
 //! same-named consumption exists anywhere in the script.
 
