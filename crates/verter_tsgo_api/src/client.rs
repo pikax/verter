@@ -13,7 +13,7 @@
 //! tests; consumers use the typed methods here.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,21 +52,29 @@ pub struct TsgoClient {
     first_validation_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
+/// The bound on the version probe inside [`TsgoClient::connect`] (mirrors the
+/// toolchain validator's probe bound).
+const CONNECT_PROBE_BOUND: Duration = Duration::from_secs(5);
+
 impl TsgoClient {
     /// Connect to a tsgo engine at `exe`, working directory `cwd`, with an
     /// initial overlay snapshot. Runs the fail-closed wire gate first: if the
     /// engine's version is not the pinned one (or its wire fingerprint diverges),
     /// returns [`TsgoApiError::UnsupportedTsgoWire`] WITHOUT spawning the actor.
     ///
+    /// The version probe is END-TO-END bounded ([`probe_engine_version_bounded`]):
+    /// a wedged candidate fails the connect within the bound instead of hanging
+    /// the caller.
+    ///
     /// `queue_depth` bounds each scheduling lane's backlog (backpressure).
-    pub fn connect(
+    pub async fn connect(
         exe: &Path,
         cwd: &Path,
         snapshot: OverlaySnapshot,
         queue_depth: usize,
     ) -> TsgoApiResult<Self> {
         // 1. Probe version + gate (fail-closed) BEFORE spawning the session.
-        let version = probe_engine_version(exe)?;
+        let version = probe_engine_version_bounded(exe, CONNECT_PROBE_BOUND).await?;
         let clearance = gate::validate(&ObservedEngine::from_codec_wire(version))?;
 
         // 2. Spawn transport + actor.
@@ -349,103 +357,98 @@ impl TsgoClient {
     }
 }
 
-/// Probe `tsgo --version`, returning the bare version string (e.g.
-/// `7.0.0-dev.20260526.1`). The output is `Version <v>`.
-pub fn probe_engine_version(exe: &Path) -> TsgoApiResult<String> {
-    let output = Command::new(exe).arg("--version").output().map_err(|e| {
-        TsgoApiError::Spawn(format!("probe `tsgo --version` at {}: {e}", exe.display()))
-    })?;
-    if !output.status.success() {
-        return Err(TsgoApiError::Spawn(format!(
-            "`tsgo --version` exited with {:?}",
-            output.status.code()
-        )));
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    parse_version(&text).ok_or_else(|| {
-        TsgoApiError::Spawn(format!(
-            "could not parse tsgo version from `{}`",
-            text.trim()
-        ))
-    })
-}
-
-/// Probe `tsgo --version` under a hard process bound. Timeout and I/O-failure
-/// paths explicitly kill and reap the probe child before returning, so provider
-/// failover cannot leak a stuck discovery process.
+/// Probe `tsgo --version` under a hard END-TO-END bound, returning the bare
+/// version string (e.g. `7.0.0-dev.20260526.1`). The output is `Version <v>`.
+///
+/// The ENTIRE probe — spawn, `wait`, AND the stdout/stderr drain — runs under
+/// ONE timeout: a candidate whose descendant inherits the pipe handles and
+/// outlives it cannot wedge the drain. On timeout (or any wait/join failure)
+/// the probe kills the whole process TREE ([`crate::process::TreeKill`] — a
+/// descendant holding the pipes dies too) and reaps the direct child, so
+/// provider failover never leaks a stuck discovery process. There is NO
+/// unbounded probe variant anywhere in the crate.
 pub async fn probe_engine_version_bounded(exe: &Path, bound: Duration) -> TsgoApiResult<String> {
-    let mut child = tokio::process::Command::new(exe)
+    use crate::process::{configure_tree_spawn, reap_child_bounded, TreeKill, REAP_BOUND};
+
+    let mut command = tokio::process::Command::new(exe);
+    command
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|error| {
-            TsgoApiError::Spawn(format!(
-                "probe `tsgo --version` at {}: {error}",
-                exe.display()
-            ))
-        })?;
+        .kill_on_drop(true);
+    configure_tree_spawn(&mut command);
+    let mut child = command.spawn().map_err(|error| {
+        TsgoApiError::Spawn(format!(
+            "probe `tsgo --version` at {}: {error}",
+            exe.display()
+        ))
+    })?;
+    let tree = TreeKill::arm(child.id().unwrap_or(0));
     let mut stdout = child.stdout.take().ok_or_else(|| {
         TsgoApiError::Transport("version probe did not expose stdout".to_string())
     })?;
     let mut stderr = child.stderr.take().ok_or_else(|| {
         TsgoApiError::Transport("version probe did not expose stderr".to_string())
     })?;
-    let stdout_task = tokio::spawn(async move {
+    let mut stdout_task = tokio::spawn(async move {
         let mut bytes = Vec::new();
         stdout.read_to_end(&mut bytes).await.map(|_| bytes)
     });
-    let stderr_task = tokio::spawn(async move {
+    let mut stderr_task = tokio::spawn(async move {
         let mut bytes = Vec::new();
         stderr.read_to_end(&mut bytes).await.map(|_| bytes)
     });
 
-    let status = match tokio::time::timeout(bound, child.wait()).await {
-        Ok(Ok(status)) => status,
-        Ok(Err(error)) => {
-            let _ = child.start_kill();
-            let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
-            return Err(TsgoApiError::Transport(format!(
+    // The whole probe — process wait AND both pipe drains — under one bound.
+    let work = async {
+        let status = child.wait().await.map_err(|error| {
+            TsgoApiError::Transport(format!(
                 "wait for `tsgo --version` at {} failed: {error}",
                 exe.display()
-            )));
+            ))
+        })?;
+        let stdout = (&mut stdout_task)
+            .await
+            .map_err(|error| TsgoApiError::Transport(format!("join version stdout: {error}")))?
+            .map_err(|error| TsgoApiError::Transport(format!("read version stdout: {error}")))?;
+        let stderr = (&mut stderr_task)
+            .await
+            .map_err(|error| TsgoApiError::Transport(format!("join version stderr: {error}")))?
+            .map_err(|error| TsgoApiError::Transport(format!("read version stderr: {error}")))?;
+        Ok::<_, TsgoApiError>((status, stdout, stderr))
+    };
+
+    let (status, stdout, stderr) = match tokio::time::timeout(bound, work).await {
+        Ok(Ok(parts)) => parts,
+        Ok(Err(error)) => {
+            // A wait/join failure: kill the tree and reap before surfacing.
+            tree.kill_tree();
+            let _ = reap_child_bounded(&mut child, REAP_BOUND).await;
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(error);
         }
         Err(_) => {
-            let _ = child.start_kill();
-            match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => {
-                    return Err(TsgoApiError::Transport(format!(
-                        "reap timed-out `tsgo --version` probe at {}: {error}",
-                        exe.display()
-                    )))
-                }
-                Err(_) => {
-                    return Err(TsgoApiError::Timeout(format!(
-                        "`tsgo --version` at {} exceeded {} ms and could not be reaped",
-                        exe.display(),
-                        bound.as_millis()
-                    )))
-                }
-            }
+            // The bound fired (possibly inside the drain, e.g. a descendant
+            // holding the pipes): kill the WHOLE TREE, reap, report bounded.
+            tree.kill_tree();
+            let reaped = reap_child_bounded(&mut child, REAP_BOUND).await;
+            stdout_task.abort();
+            stderr_task.abort();
             return Err(TsgoApiError::Timeout(format!(
-                "`tsgo --version` at {} exceeded {} ms",
+                "`tsgo --version` at {} exceeded {} ms{}",
                 exe.display(),
-                bound.as_millis()
+                bound.as_millis(),
+                if reaped {
+                    ""
+                } else {
+                    " (the process tree was killed but the child could not be reaped)"
+                }
             )));
         }
     };
 
-    let stdout = stdout_task
-        .await
-        .map_err(|error| TsgoApiError::Transport(format!("join version stdout: {error}")))?
-        .map_err(|error| TsgoApiError::Transport(format!("read version stdout: {error}")))?;
-    let stderr = stderr_task
-        .await
-        .map_err(|error| TsgoApiError::Transport(format!("join version stderr: {error}")))?
-        .map_err(|error| TsgoApiError::Transport(format!("read version stderr: {error}")))?;
     if !status.success() {
         return Err(TsgoApiError::Spawn(format!(
             "`tsgo --version` exited with {:?}: {}",
@@ -874,8 +877,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn connect_to_bogus_binary_is_typed_error() {
+    #[tokio::test]
+    async fn connect_to_bogus_binary_is_typed_error() {
         // No real engine: probing version fails with a typed Spawn error before
         // any actor is spawned. (TsgoClient is intentionally not Debug, so we
         // match on the result rather than using expect_err.)
@@ -884,7 +887,8 @@ mod tests {
             std::env::temp_dir().as_path(),
             OverlaySnapshot::builder().build(),
             8,
-        );
+        )
+        .await;
         match result {
             Ok(_) => panic!("bogus binary must not connect"),
             Err(e) => assert!(matches!(e, TsgoApiError::Spawn(_)), "got {e:?}"),

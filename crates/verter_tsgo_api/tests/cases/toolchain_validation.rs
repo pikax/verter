@@ -15,6 +15,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use verter_tsgo_api::client::probe_engine_version_bounded;
+use verter_tsgo_api::error::TsgoApiError;
+use verter_tsgo_api::process::{process_alive, terminate_process};
 use verter_tsgo_api::toolchain::discovery::{enumerate_candidates, resolve, ResolutionRequest};
 use verter_tsgo_api::toolchain::policy::VersionPolicy;
 use verter_tsgo_api::toolchain::validation::{
@@ -206,8 +209,143 @@ async fn lsp_requirement_accepts_the_api_capable_fake() {
         .expect("the API-capable fake must also validate for --lsp");
 }
 
-// ── live, real-engine coverage ───────────────────────────────────────────────
+// ── B2 wedge coverage: the version probe is END-TO-END bounded and kills the
+//    whole process tree. ──────────────────────────────────────────────────────
 
+/// The pid file the `hold-pipe` grandchild writes next to the engine copy.
+fn hold_pipe_pid_file(engine: &std::path::Path) -> PathBuf {
+    let mut name = engine.as_os_str().to_owned();
+    name.push(".child.pid");
+    PathBuf::from(name)
+}
+
+/// Kill the recorded pipe-holding grandchild on drop so even a RED run never
+/// leaks it into the host.
+struct GrandchildGuard {
+    pid_file: PathBuf,
+}
+
+impl GrandchildGuard {
+    /// The recorded grandchild pid, if the file exists yet.
+    fn pid(&self) -> Option<u32> {
+        std::fs::read_to_string(&self.pid_file)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+    }
+}
+
+impl Drop for GrandchildGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid() {
+            terminate_process(pid);
+        }
+        let _ = std::fs::remove_file(&self.pid_file);
+    }
+}
+
+// ── DISCRIMINATING (B2): an engine that prints its version and then EXITS
+//    while a grandchild keeps the stdout/stderr pipes open must make the probe
+//    return a BOUNDED error — the old "bounded" probe bounded only
+//    `child.wait()` and then hung forever awaiting the pipe readers. RED: the
+//    outer guard below fires (the probe never returns). GREEN: a Timeout error
+//    within the bound. And the tree kill must leave NO live descendant. ────────
+#[tokio::test]
+async fn version_probe_is_bounded_when_a_descendant_holds_the_pipes() {
+    let engine = fake_engine("hold-pipe");
+    let guard = GrandchildGuard {
+        pid_file: hold_pipe_pid_file(&engine),
+    };
+    let _ = std::fs::remove_file(&guard.pid_file);
+
+    // The probe bound is deliberately generous: under full-suite parallel load
+    // the fake's own startup can take a moment, and the discrimination (bounded
+    // return vs the old FOREVER hang on the reader joins) does not depend on a
+    // tight bound.
+    let probe = probe_engine_version_bounded(&engine, Duration::from_secs(3));
+    let outcome = tokio::time::timeout(Duration::from_secs(20), probe)
+        .await
+        .expect(
+            "the probe must RETURN within its bound even when a descendant \
+                 holds the pipes open (the whole probe — wait AND drain — is bounded)",
+        );
+    let err = outcome.expect_err("an undrainable pipe is a bounded probe error");
+    assert!(
+        matches!(err, TsgoApiError::Timeout(_)),
+        "the bounded failure must be a Timeout, got {err:?}"
+    );
+
+    // The process-tree kill must reach the pipe-holding grandchild. It wrote
+    // its pid before parking; the kill lands before the probe returns, but
+    // allow a moment for the OS to finish reaping it.
+    let mut pid = guard.pid();
+    for _ in 0..200 {
+        if pid.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        pid = guard.pid();
+    }
+    let pid = pid.expect("the hold-pipe grandchild registered its pid");
+    for _ in 0..100 {
+        if !process_alive(pid) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        !process_alive(pid),
+        "the pipe-holding grandchild (pid {pid}) must not survive the bounded probe"
+    );
+}
+
+// ── CONTROL (B2): a plain hanging engine is bounded too (this held even
+//    before the fix — `child.wait()` was bounded — pinned here so the fix
+//    cannot regress it). ──────────────────────────────────────────────────────
+#[tokio::test]
+async fn version_probe_times_out_on_a_hanging_engine() {
+    let engine = fake_engine("hang-version");
+    let start = std::time::Instant::now();
+    let err = probe_engine_version_bounded(&engine, Duration::from_secs(1))
+        .await
+        .expect_err("a hanging engine must fail the bounded probe");
+    assert!(
+        matches!(err, TsgoApiError::Timeout(_)),
+        "expected Timeout, got {err:?}"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "the timeout must actually bound the probe: {:?}",
+        start.elapsed()
+    );
+}
+
+// ── DISCRIMINATING (B3 rehearsal): an engine that hangs the `--lsp` handshake
+//    fails the capability smoke within the smoke bound (never a hung
+//    validation). ─────────────────────────────────────────────────────────────
+#[tokio::test]
+async fn lsp_smoke_times_out_on_a_hanging_engine() {
+    // Generous bounds: under full-suite parallel load the fake's own startup
+    // takes a moment; the discrimination (a bounded LspHandshakeFailed vs a hung
+    // validation) does not depend on a tight bound.
+    let validator = ProcessValidator::with_policy(VersionPolicy::production())
+        .with_bounds(Duration::from_secs(1), Duration::from_secs(3));
+    let start = std::time::Instant::now();
+    let err = validator
+        .validate(&fake_engine("hang-lsp"), Capability::Lsp)
+        .await
+        .expect_err("a handshake-hanging engine must fail the smoke");
+    assert!(
+        matches!(err, RejectionReason::LspHandshakeFailed { .. }),
+        "{err:?}"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(15),
+        "the smoke bound must actually fire: {:?}",
+        start.elapsed()
+    );
+}
+
+// ── live, real-engine coverage ───────────────────────────────────────────────
 /// The real engine from the worktree (project-local tier only — deterministic:
 /// no env override, no PATH, no cache, no bundled). `None` when the worktree
 /// has no node_modules engine (a source-only CI lane skips; VERTER_REQUIRE_TSGO

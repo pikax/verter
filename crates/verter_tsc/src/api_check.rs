@@ -252,7 +252,7 @@ pub fn typecheck(inputs: TypecheckInputs<'_>) -> Result<Vec<Diagnostic>, Typeche
 
     runtime.block_on(async move {
         // The wire gate runs inside `connect` (fail-closed on a diverged engine).
-        let client = match TsgoClient::connect(engine, cwd, snapshot, 16) {
+        let client = match TsgoClient::connect(engine, cwd, snapshot, 16).await {
             Ok(c) => c,
             Err(e) => {
                 return Err(TypecheckError::new(format!(

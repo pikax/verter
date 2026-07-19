@@ -43,6 +43,7 @@ pub mod gate;
 pub mod jsonrpc;
 pub mod lane;
 pub mod offset;
+pub mod process;
 pub mod proto;
 pub mod relay;
 pub mod snapshot;
