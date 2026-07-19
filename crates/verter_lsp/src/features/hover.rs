@@ -571,6 +571,23 @@ fn hover_in_template(
         return Some(hover);
     }
 
+    // D6: directive-NAME tokens. Built-ins get Volar-style doc hovers; custom
+    // directives (`v-my-thing` → `vMyThing`) get the resolved binding's typed
+    // hover. Both run BEFORE the attribute-name suppression below — the
+    // generated TSX erases/lowers directive names, so the provider can never
+    // describe the authored token.
+    if let Some(hover) = crate::features::hover_directive_names::builtin_directive_name_hover(
+        offset as u32,
+        analysis,
+    ) {
+        return Some(hover);
+    }
+    if let Some(hover) =
+        crate::features::hover_directive_names::custom_directive_name_hover(offset as u32, analysis)
+    {
+        return Some(hover);
+    }
+
     // In template, look for bindings used in expressions like {{ myVar }}
     let word = word_at_offset(source, offset)?;
 
@@ -1342,7 +1359,10 @@ fn vue_api_hover_at_offset(
     })
 }
 
-fn hover_for_word(word: &str, analysis: &FileAnalysisSnapshot) -> Option<VerterHoverResult> {
+pub(super) fn hover_for_word(
+    word: &str,
+    analysis: &FileAnalysisSnapshot,
+) -> Option<VerterHoverResult> {
     // Check bindings
     if let Some(binding) = analysis.bindings.iter().find(|b| b.name == word) {
         let vue_kind_label = reactivity_kind_label(binding);

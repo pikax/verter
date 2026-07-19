@@ -90,14 +90,30 @@ pub(super) async fn handle_hover(
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
         let blocks = scan_sfc_blocks(&doc.source);
-        hover_at_position(
+        let native = hover_at_position(
             position,
             &doc.source,
             &blocks,
             analysis.as_ref(),
             &doc.line_index,
             ssr_context,
-        )
+        );
+        // D6 Svelte: directive-KEYWORD doc hovers are verter-owned — the
+        // provider can never describe the `use:`/`transition:` keyword through
+        // the mapped projection (its local name stays provider-answered).
+        native.or_else(|| {
+            let canonical_id = server.documents.get_canonical_id(uri)?;
+            if !crate::server::carrier_language_for(&canonical_id)
+                .is_some_and(|language| language.is_svelte())
+            {
+                return None;
+            }
+            let offset = doc.line_index.position_to_offset(position)?;
+            crate::features::hover_directive_names::svelte_directive_keyword_hover(
+                offset,
+                analysis.as_ref()?,
+            )
+        })
     })();
     let vue_kind_label = verter_full.as_ref().and_then(|r| r.vue_kind_label.clone());
     let source_token = verter_full.as_ref().and_then(|r| r.source_token.clone());

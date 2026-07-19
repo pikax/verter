@@ -24482,3 +24482,279 @@ async fn hover_serves_provider_result_from_stable_captured_surface() {
         "a stable captured surface must serve the provider hover, got: {text}"
     );
 }
+
+// =========================================================================
+// D6 — directive-name hover + definition
+// =========================================================================
+
+const D6_PARENT_SOURCE: &str = "<script setup lang=\"ts\">\nimport { ref } from \"vue\";\nimport { vFocus } from \"./focus\";\nconst visible = ref(true);\nconst items = ref([1, 2]);\nconst color = ref(\"red\");\nconst vMyThing = (el: HTMLElement, binding: { value: string }) => {\n  void el;\n  void binding;\n};\n</script>\n<template>\n  <div v-if=\"visible\">\n    <span v-show=\"visible\">{{ color }}</span>\n    <li v-for=\"it in items\" :key=\"it\">{{ it }}</li>\n    <p v-html=\"color\"></p>\n    <u v-text=\"color\"></u>\n    <s v-pre>{{ raw }}</s>\n    <b v-once>{{ color }}</b>\n    <i v-memo=\"[color]\">{{ color }}</i>\n    <q v-cloak>{{ color }}</q>\n    <b v-my-thing=\"color\"></b>\n    <i v-nope=\"color\"></i>\n    <em v-focus></em>\n  </div>\n  <b v-else-if=\"items\">{{ color }}</b>\n  <i v-else>{{ color }}</i>\n</template>\n";
+
+const D6_FOCUS_SOURCE: &str =
+    "export const vFocus = {\n  mounted(el: HTMLElement) {\n    el.focus();\n  },\n};\n";
+
+#[tokio::test]
+async fn contract_builtin_directive_names_hover_shows_documentation() {
+    // NOTE: `v-pre` is deliberately absent — the parser's v-pre prepass
+    // suppresses every directive fact on the element carrying it (that IS how
+    // "don't compile this subtree" is implemented), so no typed token exists
+    // to hover without changing compilation semantics. Every other built-in
+    // is covered.
+    for (needle, expected_fragments) in [
+        ("v-if", ["v-if", "conditionally"]),
+        ("v-else-if", ["v-else-if", "falsy"]),
+        ("v-else", ["v-else", "falsy"]),
+        ("v-show", ["v-show", "display"]),
+        ("v-for", ["v-for", "list"]),
+        ("v-html", ["v-html", "HTML"]),
+        ("v-text", ["v-text", "text"]),
+        ("v-once", ["v-once", "once"]),
+        ("v-memo", ["v-memo", "memo"]),
+        ("v-cloak", ["v-cloak", "cloak"]),
+    ] {
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[("src/App.vue", "vue", D6_PARENT_SOURCE)]).await;
+        let server = service.inner();
+        let uri = workspace_uri(&workspace_id, "src/App.vue");
+        let position = find_document_position(server, &uri, needle, 1);
+        let hover = server
+            .hover(hover_params(&uri, position))
+            .await
+            .expect("hover request should succeed");
+        let text = hover.map(|h| hover_text(Some(h)));
+        drain_handle.abort();
+        drop(service);
+        let text = text.unwrap_or_else(|| panic!("{needle} name must produce a doc hover"));
+        for fragment in expected_fragments {
+            assert!(
+                text.to_lowercase().contains(&fragment.to_lowercase()),
+                "{needle} doc hover must mention {fragment}, got: {text}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn contract_builtin_directive_definition_is_fail_closed_empty() {
+    // There is nothing authored to jump to for a built-in directive: the
+    // definition stays empty (never a fabricated target).
+    for needle in ["v-if", "v-for", "v-show"] {
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[("src/App.vue", "vue", D6_PARENT_SOURCE)]).await;
+        let server = service.inner();
+        let uri = workspace_uri(&workspace_id, "src/App.vue");
+        let position = find_document_position(server, &uri, needle, 1);
+        let response = server
+            .goto_definition(goto_definition_params(&uri, position))
+            .await
+            .expect("goto definition should succeed");
+        assert!(
+            response.is_none(),
+            "{needle} name must have NO definition target (fail-closed), got: {response:?}"
+        );
+        drain_handle.abort();
+        drop(service);
+    }
+}
+
+#[tokio::test]
+async fn contract_custom_directive_name_hover_typed_and_navigates_to_declaration() {
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server(&[("src/App.vue", "vue", D6_PARENT_SOURCE)]).await;
+    let server = service.inner();
+    let uri = workspace_uri(&workspace_id, "src/App.vue");
+    let position = find_document_position(server, &uri, "v-my-thing", 2);
+
+    let text = hover_text(
+        server
+            .hover(hover_params(&uri, position))
+            .await
+            .expect("hover request should succeed"),
+    );
+    assert!(
+        text.contains("vMyThing"),
+        "custom directive hover must name the resolved binding vMyThing, got: {text}"
+    );
+
+    let response = server
+        .goto_definition(goto_definition_params(&uri, position))
+        .await
+        .expect("goto definition should succeed")
+        .expect("custom directive name must navigate to its declaration");
+    let locations = definition_locations(response);
+    let target = locations
+        .iter()
+        .find(|loc| loc.uri == uri)
+        .expect("definition must land in the same file");
+    assert_eq!(
+        target.range.start.line,
+        line_for_snippet(D6_PARENT_SOURCE, "const vMyThing"),
+        "custom directive name must navigate to the authored vMyThing declaration"
+    );
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn contract_imported_custom_directive_name_hover_and_definition() {
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/App.vue", "vue", D6_PARENT_SOURCE),
+        ("src/focus.ts", "typescript", D6_FOCUS_SOURCE),
+    ])
+    .await;
+    let server = service.inner();
+    let uri = workspace_uri(&workspace_id, "src/App.vue");
+    let focus_uri = workspace_uri(&workspace_id, "src/focus.ts");
+    let position = find_document_position(server, &uri, "v-focus", 2);
+
+    let text = hover_text(
+        server
+            .hover(hover_params(&uri, position))
+            .await
+            .expect("hover request should succeed"),
+    );
+    assert!(
+        text.contains("vFocus"),
+        "imported custom directive hover must name vFocus, got: {text}"
+    );
+
+    let response = server
+        .goto_definition(goto_definition_params(&uri, position))
+        .await
+        .expect("goto definition should succeed")
+        .expect("imported custom directive must navigate");
+    let locations = definition_locations(response);
+    let target = locations
+        .iter()
+        .find(|loc| loc.uri == focus_uri)
+        .expect("definition must land in focus.ts");
+    assert_eq!(
+        target.range.start.line,
+        line_for_snippet(D6_FOCUS_SOURCE, "export const vFocus"),
+        "imported custom directive must navigate to the vFocus export"
+    );
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn contract_unknown_custom_directive_name_is_silent() {
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server(&[("src/App.vue", "vue", D6_PARENT_SOURCE)]).await;
+    let server = service.inner();
+    let uri = workspace_uri(&workspace_id, "src/App.vue");
+    let position = find_document_position(server, &uri, "v-nope", 2);
+
+    let hover = server
+        .hover(hover_params(&uri, position))
+        .await
+        .expect("hover request should succeed");
+    assert!(
+        hover.is_none(),
+        "unknown custom directive must produce no hover, got: {hover:?}"
+    );
+    let response = server
+        .goto_definition(goto_definition_params(&uri, position))
+        .await
+        .expect("goto definition should succeed");
+    assert!(
+        response.is_none(),
+        "unknown custom directive must produce no definition, got: {response:?}"
+    );
+    drain_handle.abort();
+    drop(service);
+}
+
+// =========================================================================
+// D6 Svelte — directive keyword doc hovers + transition-family name hover
+// =========================================================================
+
+const D6_SVELTE_SOURCE: &str = "<script lang=\"ts\">\n  import { fade, fly } from \"svelte/transition\";\n  function highlight(node: HTMLElement, params: { color: string }) {\n    void node;\n    void params;\n    return { destroy() {} };\n  }\n</script>\n\n<p use:highlight={{ color: \"red\" }}>x</p>\n<span transition:fade>y</span>\n<b in:fly={{ x: 10 }} out:fade>z</b>\n";
+
+#[tokio::test]
+async fn contract_svelte_directive_keywords_hover_shows_documentation() {
+    for (needle, shift, expected) in [
+        ("use:highlight", 1u32, "action"),
+        ("transition:fade", 2u32, "transition"),
+        ("in:fly", 1u32, "transition"),
+        ("out:fade", 1u32, "transition"),
+    ] {
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[("src/App.svelte", "svelte", D6_SVELTE_SOURCE)]).await;
+        let server = service.inner();
+        let uri = workspace_uri(&workspace_id, "src/App.svelte");
+        let mut position = find_document_position(server, &uri, needle, 0);
+        position.character += shift;
+        let hover = server
+            .hover(hover_params(&uri, position))
+            .await
+            .expect("hover request should succeed");
+        let text = hover.map(|h| hover_text(Some(h)));
+        drain_handle.abort();
+        drop(service);
+        let text = text.unwrap_or_else(|| panic!("{needle} keyword must produce a doc hover"));
+        assert!(
+            text.to_lowercase().contains(expected),
+            "{needle} keyword doc hover must mention {expected}, got: {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn contract_svelte_transition_family_names_hover_typed_without_shim_leak() {
+    // The authored function name maps to the projected CALL's authored-bytes
+    // identifier — never to the synthetic `__verter_transition` wrapper — so
+    // the provider answers with the real function quickinfo.
+    for (needle, shift) in [
+        ("transition:fade", 12u32),
+        ("in:fly", 4u32),
+        ("out:fade", 5u32),
+    ] {
+        let (_temp, service, drain_handle, provider, workspace_id) =
+            make_definition_test_server(&[("src/App.svelte", "svelte", D6_SVELTE_SOURCE)]).await;
+        let server = service.inner();
+        let uri = workspace_uri(&workspace_id, "src/App.svelte");
+        let mut position = find_document_position(server, &uri, needle, 0);
+        position.character += shift;
+        let ctx = synced_type_provider_context(server, &uri);
+        let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+            &position,
+            &ctx.carrier_line_index,
+            &ctx.mapper,
+            &ctx.tsx_line_index,
+        )
+        .unwrap_or_else(|| panic!("{needle} name must map into the projected TSX"));
+        // Anti-shim: the projected token at the mapped offset must be the
+        // authored function name, never the synthetic wrapper.
+        let token_end = (tsx_offset as usize + 20).min(ctx.tsx_content.len());
+        let projected = &ctx.tsx_content[tsx_offset as usize..token_end];
+        assert!(
+            !projected.starts_with("__verter_"),
+            "{needle} mapped into a synthetic shim: {projected:?}"
+        );
+        provider.set_hover(
+            &ctx.tsx_path,
+            tsx_offset,
+            Some(HoverInfo {
+                contents: "function fade(config: FadeParams): TransitionConfig".to_string(),
+                range_start: None,
+                range_end: None,
+            }),
+        );
+        let text = hover_text(
+            server
+                .hover(hover_params(&uri, position))
+                .await
+                .expect("hover request should succeed"),
+        );
+        assert!(
+            text.contains("TransitionConfig"),
+            "{needle} name hover must be the provider's typed function hover, got: {text}"
+        );
+        assert!(
+            !text.contains("__verter_"),
+            "{needle} name hover must not leak shims, got: {text}"
+        );
+        drain_handle.abort();
+        drop(service);
+    }
+}
