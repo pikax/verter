@@ -30,7 +30,6 @@ use sha2::{Digest, Sha256};
 
 pub mod canon;
 pub mod compare;
-pub mod sourcemap;
 
 /// Root of the vendored corpus tree (`<crate>/corpus`).
 pub fn corpus_root() -> PathBuf {

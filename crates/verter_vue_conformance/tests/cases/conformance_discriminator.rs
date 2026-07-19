@@ -9,13 +9,19 @@
 //! have applied (`assert_ne` / occurrence-count checks) before its verdict is
 //! trusted.
 //!
-//! - COSMETIC mutations (waived dims: formatting, redundant parens, ordinary
-//!   comments, private-binding renames incl. helper aliases) must PASS.
+//! - COSMETIC mutations (waived dims: formatting/line numbers, redundant
+//!   parens, ordinary comments, private-binding renames incl. helper
+//!   aliases) must PASS.
 //! - BEHAVIORAL mutations (helper family, patch flags, block topology,
 //!   exported/source-authored/member names, effect/setter topology, template
 //!   payload, event delegation routing, import source, diagnostics order,
-//!   semantic comments, source-map rows) must FAIL — each on its own
-//!   detection axis so one axis cannot mask another.
+//!   semantic comments) must FAIL — each on its own detection axis so one
+//!   axis cannot mask another.
+//!
+//! Source maps are NOT a conformance dimension (a source map maps its own
+//! compiler's output, and generated positions/line numbers are cosmetic), so
+//! there are no map recipes here; Verter's source-map correctness is covered
+//! by the separate position-encoding tests.
 //!
 //! Fixtures (committed goldens, never modified on disk):
 //! - `vdom/v-for/array` — block/fragment/flags/key topology.
@@ -25,9 +31,8 @@
 //! - `vdom/script-setup/props-type-withdefaults` — `/* @__PURE__ */` semantic comment.
 
 use verter_vue_conformance::compare::{compare_modules, DiagnosticRow, DiffDim, ModuleInput};
-use verter_vue_conformance::sourcemap::{parse_map_rows, serialize_map_rows};
 
-use crate::common::{authored, compare_code, golden_code, golden_map, plant, plant_all};
+use crate::common::{authored, compare_code, golden_code, plant, plant_all};
 
 const VDOM: &str = "vdom";
 const VAPOR: &str = "vapor";
@@ -111,6 +116,14 @@ fn vue_structural_conformance_discriminates_cosmetic_from_behavioral_diffs() {
             &golden,
             &authored,
         );
+
+        // LINE-NUMBER shift: prepend blank lines and insert more between
+        // statements — generated positions/line numbers are cosmetic and
+        // must not move the verdict (ASI is safe: blank lines only extend
+        // existing line boundaries).
+        let shifted = format!("\n\n\n{golden}").replace("\nimport", "\n\n\nimport");
+        assert_ne!(shifted, golden, "line-shift recipe failed to apply");
+        pass("cosmetic: line-number shift", &shifted, &golden, &authored);
 
         // Behavior-preserving parens around a call expression.
         let parens = plant(
@@ -475,7 +488,6 @@ fn vue_structural_conformance_discriminates_cosmetic_from_behavioral_diffs() {
         };
         let input = |diagnostics: Vec<DiagnosticRow>| ModuleInput {
             code: golden.clone(),
-            source_map: None,
             diagnostics,
         };
         let ordered = compare_modules(
@@ -501,60 +513,6 @@ fn vue_structural_conformance_discriminates_cosmetic_from_behavioral_diffs() {
                     .any(|r| r.dim == DiffDim::Diagnostics),
             "reordered diagnostics must FAIL on the diagnostics dim: {:?}",
             reordered
-                .reasons
-                .iter()
-                .map(|r| r.summary())
-                .collect::<Vec<_>>()
-        );
-    }
-    {
-        // Missing source-map row is in-contract (generated positions waived).
-        let case = "v-for/array";
-        let map_json = golden_map(VDOM, case);
-        let mut rows = parse_map_rows(&map_json).expect("decode golden map");
-        assert!(!rows.rows.is_empty(), "golden map must have rows");
-        rows.rows.remove(0);
-        let mutated_map = serialize_map_rows(&rows);
-        assert_ne!(mutated_map, map_json, "map mutation failed to apply");
-
-        let authored = authored(case);
-        let code = golden_code(VDOM, case);
-        let input = |map: Option<String>| ModuleInput {
-            code: code.clone(),
-            source_map: map,
-            diagnostics: Vec::new(),
-        };
-        let missing = compare_modules(
-            &input(Some(mutated_map)),
-            &input(Some(map_json.clone())),
-            &authored,
-            64,
-        )
-        .expect("compare");
-        assert!(
-            !missing.passed() && missing.reasons.iter().any(|r| r.dim == DiffDim::SourceMap),
-            "missing source-map row must FAIL on the sourcemap dim: {:?}",
-            missing
-                .reasons
-                .iter()
-                .map(|r| r.summary())
-                .collect::<Vec<_>>()
-        );
-
-        // Control: a decode/re-encode round-trip (generated positions shift)
-        // still PASSES — original anchors are the only contract.
-        let roundtrip = serialize_map_rows(&parse_map_rows(&map_json).expect("decode"));
-        let control = compare_modules(
-            &input(Some(roundtrip)),
-            &input(Some(map_json)),
-            &authored,
-            64,
-        )
-        .expect("compare");
-        assert!(
-            control.passed(),
-            "map round-trip (generated-position shift) must PASS: {:?}",
-            control
                 .reasons
                 .iter()
                 .map(|r| r.summary())

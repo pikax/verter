@@ -12,9 +12,17 @@
 //!   side-effect sequence, attributes,
 //! - **comment** — semantic comments (PURE/license/JSDoc/bundler) anchored to
 //!   their AST occurrence node,
-//! - **sourcemap** — the multiset of original-anchor mapping rows (generated
-//!   positions waived),
-//! - **diagnostics** — the ordered diagnostic sequence.
+//! - **diagnostics** — the ordered `(severity, code, message)` sequence —
+//!   never source positions.
+//!
+//! WAIVED (never compared): trivia whitespace/formatting, redundant parens,
+//! ordinary comments, quote delimiters, empty statements, private-binding
+//! spellings (alpha), and LINE NUMBERS / generated positions generally — the
+//! two compilers structure output differently, so positions are cosmetic.
+//! Source maps are NOT a conformance dimension: a source map maps its OWN
+//! compiler's output, so Verter-map vs official-map is meaningless here.
+//! Verter's source-map CORRECTNESS is verified separately by the
+//! position-encoding tests, not by golden comparison.
 //!
 //! Cosmetic-only differences PASS. Any in-contract difference FAILS with
 //! structured reasons (`DiffReason { dim, path, detail }`); collection is
@@ -23,14 +31,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::canon::{canonicalize_module, BindingKey, Canon, ImportEntry};
-use crate::sourcemap::{canonical_rows, parse_map_rows, SourceMapRows};
 
-/// One comparison input: module code, optional source-map JSON, and the
-/// ordered diagnostic sequence recorded for the cell.
+/// One comparison input: module code and the ordered diagnostic sequence
+/// recorded for the cell.
 #[derive(Debug, Clone)]
 pub struct ModuleInput {
     pub code: String,
-    pub source_map: Option<String>,
     pub diagnostics: Vec<DiagnosticRow>,
 }
 
@@ -50,7 +56,6 @@ pub enum DiffDim {
     Identifier,
     Literal,
     Comment,
-    SourceMap,
     Diagnostics,
 }
 
@@ -62,7 +67,6 @@ impl DiffDim {
             DiffDim::Identifier => "identifier",
             DiffDim::Literal => "literal",
             DiffDim::Comment => "comment",
-            DiffDim::SourceMap => "sourcemap",
             DiffDim::Diagnostics => "diagnostics",
         }
     }
@@ -150,13 +154,6 @@ pub fn compare_modules(
         &mut total,
         max_reasons,
     );
-    diff_source_maps(
-        verter.source_map.as_deref(),
-        golden.source_map.as_deref(),
-        &mut reasons,
-        &mut total,
-        max_reasons,
-    )?;
 
     Ok(Comparison { reasons, total })
 }
@@ -649,102 +646,6 @@ fn diff_diagnostics(
                     golden_row.message,
                 ),
             );
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Source-map diff (original-anchor multiset; generated positions waived).
-// ---------------------------------------------------------------------------
-
-fn diff_source_maps(
-    verter_map: Option<&str>,
-    golden_map: Option<&str>,
-    reasons: &mut Vec<DiffReason>,
-    total: &mut usize,
-    max: usize,
-) -> Result<(), CompareError> {
-    match (verter_map, golden_map) {
-        (None, None) => Ok(()),
-        (verter, golden) => {
-            if verter.is_none() || golden.is_none() {
-                push_reason(
-                    reasons,
-                    total,
-                    max,
-                    DiffDim::SourceMap,
-                    "/map",
-                    format!(
-                        "source-map presence: verter {} vs golden {}",
-                        verter.is_some(),
-                        golden.is_some()
-                    ),
-                );
-                return Ok(());
-            }
-            let verter_rows: SourceMapRows = parse_map_rows(verter.unwrap())
-                .map_err(|e| CompareError(format!("verter source map: {e}")))?;
-            let golden_rows = parse_map_rows(golden.unwrap())
-                .map_err(|e| CompareError(format!("golden source map: {e}")))?;
-            if verter_rows.sources != golden_rows.sources {
-                push_reason(
-                    reasons,
-                    total,
-                    max,
-                    DiffDim::SourceMap,
-                    "/map/sources",
-                    format!(
-                        "sources: verter {:?} vs golden {:?}",
-                        verter_rows.sources, golden_rows.sources
-                    ),
-                );
-            }
-            if verter_rows.names != golden_rows.names {
-                push_reason(
-                    reasons,
-                    total,
-                    max,
-                    DiffDim::SourceMap,
-                    "/map/names",
-                    format!(
-                        "names: verter {:?} vs golden {:?}",
-                        verter_rows.names, golden_rows.names
-                    ),
-                );
-            }
-            let verter_canonical = canonical_rows(&verter_rows);
-            let golden_canonical = canonical_rows(&golden_rows);
-            if verter_canonical.len() != golden_canonical.len() {
-                push_reason(
-                    reasons,
-                    total,
-                    max,
-                    DiffDim::SourceMap,
-                    "/map/rows",
-                    format!(
-                        "mapping row count: verter {} vs golden {}",
-                        verter_canonical.len(),
-                        golden_canonical.len()
-                    ),
-                );
-            }
-            for (index, (verter_row, golden_row)) in verter_canonical
-                .iter()
-                .zip(golden_canonical.iter())
-                .enumerate()
-            {
-                if verter_row != golden_row {
-                    push_reason(
-                        reasons,
-                        total,
-                        max,
-                        DiffDim::SourceMap,
-                        &format!("/map/rows[{index}]"),
-                        format!("verter {verter_row:?} vs golden {golden_row:?}"),
-                    );
-                }
-            }
-            Ok(())
         }
     }
 }

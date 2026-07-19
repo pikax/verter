@@ -17,17 +17,10 @@
         "[identifier] Program[3]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#80, decl#4, slot[], Param) vs golden (scope#81, decl#4, slot[], Param)",
         "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#80, decl#5, slot[], Param) vs golden (scope#81, decl#5, slot[], Param)",
         "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression \u2014 child count: verter 6 vs golden 7",
-        "[identifier] Program[4]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#10, slot[], Function) vs golden (scope#0, decl#7, slot[], Function)",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 6 vs golden 14",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/built-ins/keep-alive.vue\", 7, 0, None) vs golden (\"cases/built-ins/keep-alive.vue\", 8, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/built-ins/keep-alive.vue\", 8, 2, None) vs golden (\"cases/built-ins/keep-alive.vue\", 8, 14, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/built-ins/keep-alive.vue\", 9, 4, None) vs golden (\"cases/built-ins/keep-alive.vue\", 8, 17, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/built-ins/keep-alive.vue\", 9, 46, None) vs golden (\"cases/built-ins/keep-alive.vue\", 8, 19, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/built-ins/keep-alive.vue\", 10, 14, None) vs golden (\"cases/built-ins/keep-alive.vue\", 8, 20, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/built-ins/keep-alive.vue\", 11, 0, None) vs golden (\"cases/built-ins/keep-alive.vue\", 9, 4, None)"
+        "[identifier] Program[4]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#10, slot[], Function) vs golden (scope#0, decl#7, slot[], Function)"
       ],
-      "total": 20,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `createVNode`, `withCtx`; official-only: \u2014); private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); template source map: Verter emits 6 original-anchor rows vs official's 14 (coarser/differently anchored); further structural divergence (see reasons)"
+      "total": 13,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `createVNode`, `withCtx`; official-only: \u2014); private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); further structural divergence (see reasons)"
     },
     {
       "case": "built-ins/keep-alive",
@@ -43,13 +36,10 @@
         "[import] /imports(vue) \u2014 missing imported helper/name `createComponent`",
         "[import] /imports(vue) \u2014 missing imported helper/name `createDynamicComponent`",
         "[import] /imports(vue) \u2014 missing imported helper/name `extend`",
-        "[structure] Program \u2014 child count: verter 8 vs golden 6",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"current\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 10",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/built-ins/keep-alive.vue\", 7, 0, None) vs golden (\"cases/built-ins/keep-alive.vue\", 8, 14, None)"
+        "[structure] Program \u2014 child count: verter 8 vs golden 6"
       ],
-      "total": 14,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `KeepAlive`, `createComponentWithFallback`, `resolveComponent`, `setInsertionState`, `template`; official-only: `VaporKeepAlive`, `createComponent`, `createDynamicComponent`, `extend`); module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 10 (coarser/differently anchored)"
+      "total": 11,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `KeepAlive`, `createComponentWithFallback`, `resolveComponent`, `setInsertionState`, `template`; official-only: `VaporKeepAlive`, `createComponent`, `createDynamicComponent`, `extend`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "built-ins/teleport",
@@ -57,19 +47,10 @@
       "reasons": [
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
         "[import] /imports(vue) \u2014 unexpected imported helper/name `withCtx`",
-        "[structure] Program \u2014 child count: verter 6 vs golden 5",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 8 vs golden 18",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/built-ins/teleport.vue\", 6, 0, None) vs golden (\"cases/built-ins/teleport.vue\", 7, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/built-ins/teleport.vue\", 7, 2, None) vs golden (\"cases/built-ins/teleport.vue\", 7, 12, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/built-ins/teleport.vue\", 8, 4, None) vs golden (\"cases/built-ins/teleport.vue\", 7, 14, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/built-ins/teleport.vue\", 8, 23, None) vs golden (\"cases/built-ins/teleport.vue\", 7, 15, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/built-ins/teleport.vue\", 8, 30, None) vs golden (\"cases/built-ins/teleport.vue\", 7, 21, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/built-ins/teleport.vue\", 8, 34, None) vs golden (\"cases/built-ins/teleport.vue\", 7, 23, None)",
-        "[sourcemap] /map/rows[6] \u2014 verter (\"cases/built-ins/teleport.vue\", 9, 13, None) vs golden (\"cases/built-ins/teleport.vue\", 7, 31, None)",
-        "[sourcemap] /map/rows[7] \u2014 verter (\"cases/built-ins/teleport.vue\", 10, 0, None) vs golden (\"cases/built-ins/teleport.vue\", 7, 34, None)"
+        "[structure] Program \u2014 child count: verter 6 vs golden 5"
       ],
-      "total": 12,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `withCtx`; official-only: \u2014); module item count differs (extra host-assembly statements); template source map: Verter emits 8 original-anchor rows vs official's 18 (coarser/differently anchored)"
+      "total": 3,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `withCtx`; official-only: \u2014); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "built-ins/teleport",
@@ -80,43 +61,20 @@
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
         "[import] /imports(vue) \u2014 missing imported helper/name `VaporTeleport`",
         "[import] /imports(vue) \u2014 missing imported helper/name `createComponent`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"open\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 8",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/built-ins/teleport.vue\", 6, 0, None) vs golden (\"cases/built-ins/teleport.vue\", 7, 12, None)"
+        "[structure] Program \u2014 child count: verter 7 vs golden 6"
       ],
-      "total": 9,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `Teleport`, `createComponentWithFallback`; official-only: `VaporTeleport`, `createComponent`); module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 8 (coarser/differently anchored)"
+      "total": 6,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `Teleport`, `createComponentWithFallback`; official-only: `VaporTeleport`, `createComponent`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "components/child-comp",
       "backend": "vdom",
       "reasons": [
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
-        "[structure] Program \u2014 child count: verter 6 vs golden 5",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 19 vs golden 30",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/components/child-comp.vue\", 12, 0, None) vs golden (\"cases/components/child-comp.vue\", 13, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/components/child-comp.vue\", 13, 2, None) vs golden (\"cases/components/child-comp.vue\", 13, 10, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/components/child-comp.vue\", 14, 4, None) vs golden (\"cases/components/child-comp.vue\", 13, 15, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/components/child-comp.vue\", 14, 31, None) vs golden (\"cases/components/child-comp.vue\", 13, 16, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/components/child-comp.vue\", 15, 4, None) vs golden (\"cases/components/child-comp.vue\", 13, 28, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/components/child-comp.vue\", 15, 6, None) vs golden (\"cases/components/child-comp.vue\", 13, 30, None)",
-        "[sourcemap] /map/rows[6] \u2014 verter (\"cases/components/child-comp.vue\", 15, 7, None) vs golden (\"cases/components/child-comp.vue\", 13, 35, None)",
-        "[sourcemap] /map/rows[7] \u2014 verter (\"cases/components/child-comp.vue\", 15, 13, None) vs golden (\"cases/components/child-comp.vue\", 13, 37, None)",
-        "[sourcemap] /map/rows[8] \u2014 verter (\"cases/components/child-comp.vue\", 15, 15, None) vs golden (\"cases/components/child-comp.vue\", 13, 44, None)",
-        "[sourcemap] /map/rows[9] \u2014 verter (\"cases/components/child-comp.vue\", 15, 17, None) vs golden (\"cases/components/child-comp.vue\", 14, 4, None)",
-        "[sourcemap] /map/rows[10] \u2014 verter (\"cases/components/child-comp.vue\", 15, 19, None) vs golden (\"cases/components/child-comp.vue\", 14, 31, None)",
-        "[sourcemap] /map/rows[11] \u2014 verter (\"cases/components/child-comp.vue\", 15, 20, None) vs golden (\"cases/components/child-comp.vue\", 14, 31, None)",
-        "[sourcemap] /map/rows[12] \u2014 verter (\"cases/components/child-comp.vue\", 15, 26, None) vs golden (\"cases/components/child-comp.vue\", 15, 4, None)",
-        "[sourcemap] /map/rows[13] \u2014 verter (\"cases/components/child-comp.vue\", 15, 28, None) vs golden (\"cases/components/child-comp.vue\", 15, 7, None)",
-        "[sourcemap] /map/rows[14] \u2014 verter (\"cases/components/child-comp.vue\", 16, 4, None) vs golden (\"cases/components/child-comp.vue\", 15, 12, None)",
-        "[sourcemap] /map/rows[15] \u2014 verter (\"cases/components/child-comp.vue\", 17, 4, None) vs golden (\"cases/components/child-comp.vue\", 15, 15, None)",
-        "[sourcemap] /map/rows[16] \u2014 verter (\"cases/components/child-comp.vue\", 17, 46, None) vs golden (\"cases/components/child-comp.vue\", 15, 17, None)",
-        "[sourcemap] /map/rows[17] \u2014 verter (\"cases/components/child-comp.vue\", 18, 11, None) vs golden (\"cases/components/child-comp.vue\", 15, 20, None)",
-        "[sourcemap] /map/rows[18] \u2014 verter (\"cases/components/child-comp.vue\", 19, 0, None) vs golden (\"cases/components/child-comp.vue\", 15, 25, None)"
+        "[structure] Program \u2014 child count: verter 6 vs golden 5"
       ],
-      "total": 22,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements); template source map: Verter emits 19 original-anchor rows vs official's 30 (coarser/differently anchored)"
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements)"
     },
     {
       "case": "components/child-comp",
@@ -125,13 +83,10 @@
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
         "[import] /imports(vue) \u2014 missing imported helper/name `child`",
         "[import] /imports(vue) \u2014 missing imported helper/name `setText`",
-        "[structure] Program \u2014 child count: verter 8 vs golden 7",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"label\", \"count\", \"onClick\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 20",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/components/child-comp.vue\", 12, 0, None) vs golden (\"cases/components/child-comp.vue\", 13, 37, Some(\"onClick\"))"
+        "[structure] Program \u2014 child count: verter 8 vs golden 7"
       ],
-      "total": 7,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `child`, `setText`); module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 20 (coarser/differently anchored)"
+      "total": 4,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `child`, `setText`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "components/component-is",
@@ -147,15 +102,10 @@
         "[identifier] Program[3]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#71, decl#4, slot[], Param) vs golden (scope#78, decl#4, slot[], Param)",
         "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#71, decl#5, slot[], Param) vs golden (scope#78, decl#5, slot[], Param)",
         "[identifier] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[1]/CallExpression[1]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#71, decl#3, slot[], Param) vs golden (scope#78, decl#3, slot[], Param)",
-        "[identifier] Program[4]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#7, slot[], Function) vs golden (scope#0, decl#6, slot[], Function)",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 4 vs golden 8",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/components/component-is.vue\", 7, 0, None) vs golden (\"cases/components/component-is.vue\", 8, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/components/component-is.vue\", 8, 2, None) vs golden (\"cases/components/component-is.vue\", 8, 18, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/components/component-is.vue\", 8, 45, None) vs golden (\"cases/components/component-is.vue\", 8, 25, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/components/component-is.vue\", 9, 0, None) vs golden (\"cases/components/component-is.vue\", 8, 27, None)"
+        "[identifier] Program[4]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#7, slot[], Function) vs golden (scope#0, decl#6, slot[], Function)"
       ],
-      "total": 16,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); template source map: Verter emits 4 original-anchor rows vs official's 8 (coarser/differently anchored)"
+      "total": 11,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift)"
     },
     {
       "case": "components/component-is",
@@ -165,28 +115,20 @@
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
         "[import] /imports(vue) \u2014 unexpected imported helper/name `resolveComponent`",
         "[import] /imports(vue) \u2014 missing imported helper/name `createDynamicComponent`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"current\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 6",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/components/component-is.vue\", 7, 0, None) vs golden (\"cases/components/component-is.vue\", 8, 18, Some(\"current\"))"
+        "[structure] Program \u2014 child count: verter 7 vs golden 6"
       ],
-      "total": 8,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `createComponentWithFallback`, `resolveComponent`; official-only: `createDynamicComponent`); module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 6 (coarser/differently anchored)"
+      "total": 5,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `createComponentWithFallback`, `resolveComponent`; official-only: `createDynamicComponent`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "components/parent-props-events",
       "backend": "vdom",
       "reasons": [
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 4 vs golden 14",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/components/parent-props-events.vue\", 6, 0, None) vs golden (\"cases/components/parent-props-events.vue\", 7, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/components/parent-props-events.vue\", 7, 2, None) vs golden (\"cases/components/parent-props-events.vue\", 7, 13, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/components/parent-props-events.vue\", 7, 58, None) vs golden (\"cases/components/parent-props-events.vue\", 7, 18, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/components/parent-props-events.vue\", 8, 0, None) vs golden (\"cases/components/parent-props-events.vue\", 7, 19, None)"
+        "[structure] Program \u2014 child count: verter 7 vs golden 6"
       ],
-      "total": 7,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements); template source map: Verter emits 4 original-anchor rows vs official's 14 (coarser/differently anchored)"
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements)"
     },
     {
       "case": "components/parent-props-events",
@@ -195,13 +137,10 @@
         "[import] /imports(vue) \u2014 unexpected imported helper/name `createComponentWithFallback`",
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
         "[import] /imports(vue) \u2014 missing imported helper/name `createComponent`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"ChildComp\", \"onSelect\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 13",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/components/parent-props-events.vue\", 6, 0, None) vs golden (\"cases/components/parent-props-events.vue\", 6, 0, Some(\"ChildComp\"))"
+        "[structure] Program \u2014 child count: verter 7 vs golden 6"
       ],
-      "total": 7,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `createComponentWithFallback`; official-only: `createComponent`); module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 13 (coarser/differently anchored)"
+      "total": 4,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `createComponentWithFallback`; official-only: `createComponent`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "components/slots",
@@ -218,22 +157,10 @@
         "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#66, decl#5, slot[], Param) vs golden (scope#67, decl#5, slot[], Param)",
         "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[1]/ComputedMemberExpression \u2014 node kind: verter `StaticMemberExpression` vs golden `ComputedMemberExpression`",
         "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ObjectExpression[0]/ObjectProperty[1]/CallExpression[1]/ArrowFunctionExpression[1]/FunctionBody[0]/ExpressionStatement[0]/ArrayExpression[0]/spread \u2014 node kind: verter `LogicalExpression` vs golden `spread`",
-        "[identifier] Program[4]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#8, slot[], Function) vs golden (scope#0, decl#7, slot[], Function)",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 26 vs golden 40",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/components/slots.vue\", 4, 0, None) vs golden (\"cases/components/slots.vue\", 5, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/components/slots.vue\", 5, 2, None) vs golden (\"cases/components/slots.vue\", 5, 13, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/components/slots.vue\", 6, 4, None) vs golden (\"cases/components/slots.vue\", 5, 18, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/components/slots.vue\", 7, 6, None) vs golden (\"cases/components/slots.vue\", 5, 19, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/components/slots.vue\", 7, 10, None) vs golden (\"cases/components/slots.vue\", 5, 28, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/components/slots.vue\", 7, 15, None) vs golden (\"cases/components/slots.vue\", 6, 15, None)",
-        "[sourcemap] /map/rows[6] \u2014 verter (\"cases/components/slots.vue\", 7, 20, None) vs golden (\"cases/components/slots.vue\", 6, 21, None)",
-        "[sourcemap] /map/rows[7] \u2014 verter (\"cases/components/slots.vue\", 9, 4, None) vs golden (\"cases/components/slots.vue\", 7, 6, None)",
-        "[sourcemap] /map/rows[8] \u2014 verter (\"cases/components/slots.vue\", 10, 6, None) vs golden (\"cases/components/slots.vue\", 7, 6, None)",
-        "[sourcemap] /map/rows[9] \u2014 verter (\"cases/components/slots.vue\", 10, 9, None) vs golden (\"cases/components/slots.vue\", 7, 10, None)",
-        "[sourcemap] /map/rows[10] \u2014 verter (\"cases/components/slots.vue\", 10, 11, None) vs golden (\"cases/components/slots.vue\", 7, 15, None)"
+        "[identifier] Program[4]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#8, slot[], Function) vs golden (scope#0, decl#7, slot[], Function)"
       ],
-      "total": 39,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); cache shape: Verter caches the child vnode directly (`_cache[i] || (_cache[i] = v)`); official spreads a cached array (`[...(_cache[i] || ...)]`); template source map: Verter emits 26 original-anchor rows vs official's 40 (coarser/differently anchored); further structural divergence (see reasons)"
+      "total": 12,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); cache shape: Verter caches the child vnode directly (`_cache[i] || (_cache[i] = v)`); official spreads a cached array (`[...(_cache[i] || ...)]`); further structural divergence (see reasons)"
     },
     {
       "case": "components/slots",
@@ -244,13 +171,10 @@
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
         "[import] /imports(vue) \u2014 unexpected imported helper/name `next`",
         "[import] /imports(vue) \u2014 missing imported helper/name `createComponent`",
-        "[structure] Program \u2014 child count: verter 11 vs golden 9",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"ChildComp\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 13",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/components/slots.vue\", 4, 0, None) vs golden (\"cases/components/slots.vue\", 4, 0, Some(\"ChildComp\"))"
+        "[structure] Program \u2014 child count: verter 11 vs golden 9"
       ],
-      "total": 9,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `child`, `createComponentWithFallback`, `next`; official-only: `createComponent`); module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 13 (coarser/differently anchored)"
+      "total": 6,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `child`, `createComponentWithFallback`, `next`; official-only: `createComponent`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "conditionals/if-else-if-else",
@@ -258,23 +182,10 @@
       "reasons": [
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
         "[import] /imports(vue) \u2014 missing imported helper/name `createCommentVNode`",
-        "[structure] Program \u2014 child count: verter 5 vs golden 8",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 20 vs golden 18",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/conditionals/if-else-if-else.vue\", 6, 0, None) vs golden (\"cases/conditionals/if-else-if-else.vue\", 7, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/conditionals/if-else-if-else.vue\", 7, 2, None) vs golden (\"cases/conditionals/if-else-if-else.vue\", 7, 11, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/conditionals/if-else-if-else.vue\", 7, 11, None) vs golden (\"cases/conditionals/if-else-if-else.vue\", 7, 17, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/conditionals/if-else-if-else.vue\", 7, 17, None) vs golden (\"cases/conditionals/if-else-if-else.vue\", 7, 33, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/conditionals/if-else-if-else.vue\", 7, 33, None) vs golden (\"cases/conditionals/if-else-if-else.vue\", 7, 40, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/conditionals/if-else-if-else.vue\", 7, 40, None) vs golden (\"cases/conditionals/if-else-if-else.vue\", 7, 44, None)",
-        "[sourcemap] /map/rows[11] \u2014 verter (\"cases/conditionals/if-else-if-else.vue\", 9, 2, None) vs golden (\"cases/conditionals/if-else-if-else.vue\", 8, 46, None)",
-        "[sourcemap] /map/rows[12] \u2014 verter (\"cases/conditionals/if-else-if-else.vue\", 9, 12, None) vs golden (\"cases/conditionals/if-else-if-else.vue\", 9, 2, None)",
-        "[sourcemap] /map/rows[13] \u2014 verter (\"cases/conditionals/if-else-if-else.vue\", 9, 18, None) vs golden (\"cases/conditionals/if-else-if-else.vue\", 9, 12, None)",
-        "[sourcemap] /map/rows[14] \u2014 verter (\"cases/conditionals/if-else-if-else.vue\", 9, 20, None) vs golden (\"cases/conditionals/if-else-if-else.vue\", 9, 18, None)",
-        "[sourcemap] /map/rows[16] \u2014 verter (\"cases/conditionals/if-else-if-else.vue\", 9, 28, None) vs golden (\"cases/conditionals/if-else-if-else.vue\", 9, 27, None)",
-        "[sourcemap] /map/rows[17] \u2014 verter (\"cases/conditionals/if-else-if-else.vue\", 9, 30, None) vs golden (\"cases/conditionals/if-else-if-else.vue\", 9, 34, None)"
+        "[structure] Program \u2014 child count: verter 5 vs golden 8"
       ],
-      "total": 16,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `createCommentVNode`); module item count differs (extra host-assembly statements); template source map: Verter emits 20 original-anchor rows vs official's 18 (coarser/differently anchored)"
+      "total": 3,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `createCommentVNode`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "conditionals/if-else-if-else",
@@ -283,13 +194,10 @@
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
         "[import] /imports(vue) \u2014 missing imported helper/name `setText`",
         "[import] /imports(vue) \u2014 missing imported helper/name `txt`",
-        "[structure] Program \u2014 child count: verter 9 vs golden 8",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"status\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 8",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/conditionals/if-else-if-else.vue\", 6, 0, None) vs golden (\"cases/conditionals/if-else-if-else.vue\", 7, 11, Some(\"status\"))"
+        "[structure] Program \u2014 child count: verter 9 vs golden 8"
       ],
-      "total": 7,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `setText`, `txt`); module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 8 (coarser/differently anchored)"
+      "total": 4,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `setText`, `txt`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "directives/html",
@@ -307,29 +215,20 @@
         "[identifier] Program[3]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#68, decl#4, slot[], Param) vs golden (scope#73, decl#4, slot[], Param)",
         "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#68, decl#5, slot[], Param) vs golden (scope#73, decl#5, slot[], Param)",
         "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression \u2014 child count: verter 5 vs golden 8",
-        "[identifier] Program[4]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#6, slot[], Function) vs golden (scope#0, decl#5, slot[], Function)",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 5 vs golden 6",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/directives/html.vue\", 6, 0, None) vs golden (\"cases/directives/html.vue\", 7, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/directives/html.vue\", 7, 2, None) vs golden (\"cases/directives/html.vue\", 7, 7, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/directives/html.vue\", 7, 20, None) vs golden (\"cases/directives/html.vue\", 7, 15, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/directives/html.vue\", 7, 26, None) vs golden (\"cases/directives/html.vue\", 7, 18, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/directives/html.vue\", 8, 0, None) vs golden (\"cases/directives/html.vue\", 7, 19, None)"
+        "[identifier] Program[4]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#6, slot[], Function) vs golden (scope#0, decl#5, slot[], Function)"
       ],
-      "total": 19,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); template source map: Verter emits 5 original-anchor rows vs official's 6 (coarser/differently anchored); further structural divergence (see reasons)"
+      "total": 13,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); further structural divergence (see reasons)"
     },
     {
       "case": "directives/html",
       "backend": "vapor",
       "reasons": [
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"raw\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 2",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/directives/html.vue\", 6, 0, None) vs golden (\"cases/directives/html.vue\", 7, 15, Some(\"raw\"))"
+        "[structure] Program \u2014 child count: verter 7 vs golden 6"
       ],
-      "total": 5,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 2 (coarser/differently anchored)"
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements)"
     },
     {
       "case": "directives/show",
@@ -345,15 +244,9 @@
         "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#70, decl#4, slot[], Param) vs golden (scope#74, decl#4, slot[], Param)",
         "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#70, decl#5, slot[], Param) vs golden (scope#74, decl#5, slot[], Param)",
         "[structure] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/CallExpression \u2014 node kind: verter `SequenceExpression` vs golden `CallExpression`",
-        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#7, slot[], Function) vs golden (scope#0, decl#6, slot[], Function)",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/directives/show.vue\", 6, 0, None) vs golden (\"cases/directives/show.vue\", 7, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/directives/show.vue\", 7, 2, None) vs golden (\"cases/directives/show.vue\", 7, 13, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/directives/show.vue\", 7, 22, None) vs golden (\"cases/directives/show.vue\", 7, 20, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/directives/show.vue\", 7, 30, None) vs golden (\"cases/directives/show.vue\", 7, 22, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/directives/show.vue\", 7, 34, None) vs golden (\"cases/directives/show.vue\", 7, 30, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/directives/show.vue\", 8, 0, None) vs golden (\"cases/directives/show.vue\", 7, 34, None)"
+        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#7, slot[], Function) vs golden (scope#0, decl#6, slot[], Function)"
       ],
-      "total": 17,
+      "total": 11,
       "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); further structural divergence (see reasons)"
     },
     {
@@ -361,13 +254,10 @@
       "backend": "vapor",
       "reasons": [
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"visible\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 2",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/directives/show.vue\", 6, 0, None) vs golden (\"cases/directives/show.vue\", 7, 13, Some(\"visible\"))"
+        "[structure] Program \u2014 child count: verter 7 vs golden 6"
       ],
-      "total": 5,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 2 (coarser/differently anchored)"
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements)"
     },
     {
       "case": "directives/text",
@@ -383,16 +273,10 @@
         "[identifier] Program[3]/FunctionDeclaration[1]/params[3]/param[0] \u2014 private binding key: verter (scope#68, decl#3, slot[], Param) vs golden (scope#76, decl#3, slot[], Param)",
         "[identifier] Program[3]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#68, decl#4, slot[], Param) vs golden (scope#76, decl#4, slot[], Param)",
         "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#68, decl#5, slot[], Param) vs golden (scope#76, decl#5, slot[], Param)",
-        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression \u2014 child count: verter 5 vs golden 8",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 5 vs golden 6",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/directives/text.vue\", 6, 0, None) vs golden (\"cases/directives/text.vue\", 7, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/directives/text.vue\", 7, 2, None) vs golden (\"cases/directives/text.vue\", 7, 5, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/directives/text.vue\", 7, 20, None) vs golden (\"cases/directives/text.vue\", 7, 13, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/directives/text.vue\", 7, 24, None) vs golden (\"cases/directives/text.vue\", 7, 18, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/directives/text.vue\", 8, 0, None) vs golden (\"cases/directives/text.vue\", 7, 19, None)"
+        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression \u2014 child count: verter 5 vs golden 8"
       ],
-      "total": 17,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `toDisplayString`); private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); template source map: Verter emits 5 original-anchor rows vs official's 6 (coarser/differently anchored); further structural divergence (see reasons)"
+      "total": 11,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `toDisplayString`); private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); further structural divergence (see reasons)"
     },
     {
       "case": "directives/text",
@@ -403,13 +287,10 @@
         "[import] /imports(vue) \u2014 missing imported helper/name `setText`",
         "[import] /imports(vue) \u2014 missing imported helper/name `toDisplayString`",
         "[import] /imports(vue) \u2014 missing imported helper/name `txt`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"plain\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 2",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/directives/text.vue\", 6, 0, None) vs golden (\"cases/directives/text.vue\", 7, 13, Some(\"plain\"))"
+        "[structure] Program \u2014 child count: verter 7 vs golden 6"
       ],
-      "total": 9,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `renderEffect`, `setText`, `toDisplayString`, `txt`); module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 2 (coarser/differently anchored)"
+      "total": 6,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `renderEffect`, `setText`, `toDisplayString`, `txt`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "elements-text/dynamic-class",
@@ -426,30 +307,20 @@
         "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#76, decl#5, slot[], Param) vs golden (scope#80, decl#5, slot[], Param)",
         "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[2]/ObjectExpression[0]/ObjectProperty[1]/CallExpression[1]/ArrayExpression[1]/ObjectExpression[0]/ObjectProperty[1]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#76, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)",
         "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[2]/ObjectExpression[0]/ObjectProperty[1]/CallExpression[1]/ArrayExpression[2]/BinaryExpression[2]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#76, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)",
-        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#6, slot[], Function) vs golden (scope#0, decl#5, slot[], Function)",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 6 vs golden 10",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/elements-text/dynamic-class.vue\", 7, 0, None) vs golden (\"cases/elements-text/dynamic-class.vue\", 8, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/elements-text/dynamic-class.vue\", 8, 2, None) vs golden (\"cases/elements-text/dynamic-class.vue\", 8, 8, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/elements-text/dynamic-class.vue\", 8, 53, None) vs golden (\"cases/elements-text/dynamic-class.vue\", 8, 13, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/elements-text/dynamic-class.vue\", 8, 59, None) vs golden (\"cases/elements-text/dynamic-class.vue\", 8, 26, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/elements-text/dynamic-class.vue\", 8, 65, None) vs golden (\"cases/elements-text/dynamic-class.vue\", 8, 32, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/elements-text/dynamic-class.vue\", 9, 0, None) vs golden (\"cases/elements-text/dynamic-class.vue\", 8, 46, None)"
+        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#6, slot[], Function) vs golden (scope#0, decl#5, slot[], Function)"
       ],
-      "total": 19,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); template source map: Verter emits 6 original-anchor rows vs official's 10 (coarser/differently anchored)"
+      "total": 12,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift)"
     },
     {
       "case": "elements-text/dynamic-class",
       "backend": "vapor",
       "reasons": [
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"active\", \"size\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 4",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/elements-text/dynamic-class.vue\", 7, 0, None) vs golden (\"cases/elements-text/dynamic-class.vue\", 8, 26, Some(\"active\"))"
+        "[structure] Program \u2014 child count: verter 7 vs golden 6"
       ],
-      "total": 5,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 4 (coarser/differently anchored)"
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements)"
     },
     {
       "case": "elements-text/dynamic-style",
@@ -466,30 +337,20 @@
         "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#76, decl#5, slot[], Param) vs golden (scope#80, decl#5, slot[], Param)",
         "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[2]/ObjectExpression[0]/ObjectProperty[1]/CallExpression[1]/ObjectExpression[0]/ObjectProperty[1]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#76, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)",
         "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[2]/ObjectExpression[0]/ObjectProperty[1]/CallExpression[1]/ObjectExpression[1]/ObjectProperty[1]/BinaryExpression[0]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#76, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)",
-        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#6, slot[], Function) vs golden (scope#0, decl#5, slot[], Function)",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 6 vs golden 10",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/elements-text/dynamic-style.vue\", 7, 0, None) vs golden (\"cases/elements-text/dynamic-style.vue\", 8, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/elements-text/dynamic-style.vue\", 8, 2, None) vs golden (\"cases/elements-text/dynamic-style.vue\", 8, 8, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/elements-text/dynamic-style.vue\", 8, 49, None) vs golden (\"cases/elements-text/dynamic-style.vue\", 8, 13, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/elements-text/dynamic-style.vue\", 8, 55, None) vs golden (\"cases/elements-text/dynamic-style.vue\", 8, 17, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/elements-text/dynamic-style.vue\", 8, 61, None) vs golden (\"cases/elements-text/dynamic-style.vue\", 8, 22, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/elements-text/dynamic-style.vue\", 9, 0, None) vs golden (\"cases/elements-text/dynamic-style.vue\", 8, 35, None)"
+        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#6, slot[], Function) vs golden (scope#0, decl#5, slot[], Function)"
       ],
-      "total": 19,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); template source map: Verter emits 6 original-anchor rows vs official's 10 (coarser/differently anchored)"
+      "total": 12,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift)"
     },
     {
       "case": "elements-text/dynamic-style",
       "backend": "vapor",
       "reasons": [
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"color\", \"top\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 4",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/elements-text/dynamic-style.vue\", 7, 0, None) vs golden (\"cases/elements-text/dynamic-style.vue\", 8, 17, Some(\"color\"))"
+        "[structure] Program \u2014 child count: verter 7 vs golden 6"
       ],
-      "total": 5,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 4 (coarser/differently anchored)"
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements)"
     },
     {
       "case": "elements-text/interpolation",
@@ -507,21 +368,10 @@
         "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[2]/CallExpression[1]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#87, decl#3, slot[], Param) vs golden (scope#94, decl#3, slot[], Param)",
         "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[2]/CallExpression[1]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#87, decl#3, slot[], Param) vs golden (scope#94, decl#3, slot[], Param)",
         "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/BinaryExpression[2]/CallExpression[1]/ConditionalExpression[0]/BinaryExpression[0]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#87, decl#3, slot[], Param) vs golden (scope#94, decl#3, slot[], Param)",
-        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#7, slot[], Function) vs golden (scope#0, decl#6, slot[], Function)",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 24 vs golden 18",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/elements-text/interpolation.vue\", 7, 0, None) vs golden (\"cases/elements-text/interpolation.vue\", 8, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/elements-text/interpolation.vue\", 8, 2, None) vs golden (\"cases/elements-text/interpolation.vue\", 8, 5, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/elements-text/interpolation.vue\", 8, 5, None) vs golden (\"cases/elements-text/interpolation.vue\", 9, 11, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/elements-text/interpolation.vue\", 9, 11, None) vs golden (\"cases/elements-text/interpolation.vue\", 9, 14, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/elements-text/interpolation.vue\", 9, 13, None) vs golden (\"cases/elements-text/interpolation.vue\", 9, 19, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/elements-text/interpolation.vue\", 9, 14, None) vs golden (\"cases/elements-text/interpolation.vue\", 9, 22, None)",
-        "[sourcemap] /map/rows[6] \u2014 verter (\"cases/elements-text/interpolation.vue\", 9, 20, None) vs golden (\"cases/elements-text/interpolation.vue\", 9, 34, None)",
-        "[sourcemap] /map/rows[7] \u2014 verter (\"cases/elements-text/interpolation.vue\", 9, 22, None) vs golden (\"cases/elements-text/interpolation.vue\", 9, 37, None)",
-        "[sourcemap] /map/rows[8] \u2014 verter (\"cases/elements-text/interpolation.vue\", 9, 34, None) vs golden (\"cases/elements-text/interpolation.vue\", 9, 44, None)",
-        "[sourcemap] /map/rows[9] \u2014 verter (\"cases/elements-text/interpolation.vue\", 9, 36, None) vs golden (\"cases/elements-text/interpolation.vue\", 9, 47, None)"
+        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#7, slot[], Function) vs golden (scope#0, decl#6, slot[], Function)"
       ],
-      "total": 32,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); template source map: Verter emits 24 original-anchor rows vs official's 18 (coarser/differently anchored)"
+      "total": 13,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift)"
     },
     {
       "case": "elements-text/interpolation",
@@ -530,41 +380,28 @@
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
         "[import] /imports(vue) \u2014 missing imported helper/name `setText`",
         "[import] /imports(vue) \u2014 missing imported helper/name `txt`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"count\", \"doubled\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 17",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/elements-text/interpolation.vue\", 7, 0, None) vs golden (\"cases/elements-text/interpolation.vue\", 7, 0, Some(\"count\"))"
+        "[structure] Program \u2014 child count: verter 7 vs golden 6"
       ],
-      "total": 7,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `setText`, `txt`); module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 17 (coarser/differently anchored)"
+      "total": 4,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `setText`, `txt`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "elements-text/multi-root",
       "backend": "vdom",
       "reasons": [
-        "[structure] Program[2]/FunctionDeclaration[1]/params \u2014 child count: verter 7 vs golden 3",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/elements-text/multi-root.vue\", 0, 0, None) vs golden (\"cases/elements-text/multi-root.vue\", 1, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/elements-text/multi-root.vue\", 1, 2, None) vs golden (\"cases/elements-text/multi-root.vue\", 1, 10, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/elements-text/multi-root.vue\", 1, 10, None) vs golden (\"cases/elements-text/multi-root.vue\", 1, 16, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/elements-text/multi-root.vue\", 1, 16, None) vs golden (\"cases/elements-text/multi-root.vue\", 1, 25, None)",
-        "[sourcemap] /map/rows[7] \u2014 verter (\"cases/elements-text/multi-root.vue\", 3, 2, None) vs golden (\"cases/elements-text/multi-root.vue\", 2, 19, None)",
-        "[sourcemap] /map/rows[8] \u2014 verter (\"cases/elements-text/multi-root.vue\", 3, 10, None) vs golden (\"cases/elements-text/multi-root.vue\", 3, 2, None)",
-        "[sourcemap] /map/rows[9] \u2014 verter (\"cases/elements-text/multi-root.vue\", 3, 16, None) vs golden (\"cases/elements-text/multi-root.vue\", 3, 10, None)",
-        "[sourcemap] /map/rows[10] \u2014 verter (\"cases/elements-text/multi-root.vue\", 3, 25, None) vs golden (\"cases/elements-text/multi-root.vue\", 3, 16, None)",
-        "[sourcemap] /map/rows[11] \u2014 verter (\"cases/elements-text/multi-root.vue\", 4, 0, None) vs golden (\"cases/elements-text/multi-root.vue\", 3, 25, None)"
+        "[structure] Program[2]/FunctionDeclaration[1]/params \u2014 child count: verter 7 vs golden 3"
       ],
-      "total": 10,
+      "total": 1,
       "note": "render signature: Verter always emits the full `(_ctx, _cache, $props, $setup, $data, $options)` form; official emits the short `(_ctx, _cache)` form for template-only SFCs (no bindings)"
     },
     {
       "case": "elements-text/multi-root",
       "backend": "vapor",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 9 vs golden 8",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 0"
+        "[structure] Program \u2014 child count: verter 9 vs golden 8"
       ],
-      "total": 2,
-      "note": "module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 0 (coarser/differently anchored)"
+      "total": 1,
+      "note": "module item count differs (extra host-assembly statements)"
     },
     {
       "case": "elements-text/static-class-style",
@@ -572,78 +409,48 @@
       "reasons": [
         "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/ObjectExpression[0]/ObjectProperty[0] \u2014 leaf kind: verter ident `color` vs golden str `color`",
         "[structure] Program[3]/FunctionDeclaration[1]/params \u2014 child count: verter 7 vs golden 3",
-        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/spread \u2014 node kind: verter `LogicalExpression` vs golden `spread`",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 8 vs golden 20",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/elements-text/static-class-style.vue\", 0, 0, None) vs golden (\"cases/elements-text/static-class-style.vue\", 1, 2, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/elements-text/static-class-style.vue\", 2, 4, None) vs golden (\"cases/elements-text/static-class-style.vue\", 1, 7, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/elements-text/static-class-style.vue\", 2, 24, None) vs golden (\"cases/elements-text/static-class-style.vue\", 1, 12, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/elements-text/static-class-style.vue\", 2, 29, None) vs golden (\"cases/elements-text/static-class-style.vue\", 1, 13, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/elements-text/static-class-style.vue\", 2, 36, None) vs golden (\"cases/elements-text/static-class-style.vue\", 1, 28, None)",
-        "[sourcemap] /map/rows[6] \u2014 verter (\"cases/elements-text/static-class-style.vue\", 3, 8, None) vs golden (\"cases/elements-text/static-class-style.vue\", 1, 29, None)",
-        "[sourcemap] /map/rows[7] \u2014 verter (\"cases/elements-text/static-class-style.vue\", 4, 0, None) vs golden (\"cases/elements-text/static-class-style.vue\", 1, 29, None)"
+        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/spread \u2014 node kind: verter `LogicalExpression` vs golden `spread`"
       ],
-      "total": 11,
-      "note": "render signature: Verter always emits the full `(_ctx, _cache, $props, $setup, $data, $options)` form; official emits the short `(_ctx, _cache)` form for template-only SFCs (no bindings); cache shape: Verter caches the child vnode directly (`_cache[i] || (_cache[i] = v)`); official spreads a cached array (`[...(_cache[i] || ...)]`); static style attribute: Verter normalizes it to a JS object with unquoted keys; official hoists the original attribute string; template source map: Verter emits 8 original-anchor rows vs official's 20 (coarser/differently anchored)"
+      "total": 3,
+      "note": "render signature: Verter always emits the full `(_ctx, _cache, $props, $setup, $data, $options)` form; official emits the short `(_ctx, _cache)` form for template-only SFCs (no bindings); cache shape: Verter caches the child vnode directly (`_cache[i] || (_cache[i] = v)`); official spreads a cached array (`[...(_cache[i] || ...)]`); static style attribute: Verter normalizes it to a JS object with unquoted keys; official hoists the original attribute string"
     },
     {
       "case": "elements-text/static-class-style",
       "backend": "vapor",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 7 vs golden 6",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 0"
+        "[structure] Program \u2014 child count: verter 7 vs golden 6"
       ],
-      "total": 2,
-      "note": "module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 0 (coarser/differently anchored)"
+      "total": 1,
+      "note": "module item count differs (extra host-assembly statements)"
     },
     {
       "case": "elements-text/static-element",
       "backend": "vdom",
       "reasons": [
         "[structure] Program[3]/FunctionDeclaration[1]/params \u2014 child count: verter 7 vs golden 3",
-        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/spread \u2014 node kind: verter `LogicalExpression` vs golden `spread`",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 8 vs golden 20",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/elements-text/static-element.vue\", 0, 0, None) vs golden (\"cases/elements-text/static-element.vue\", 1, 2, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/elements-text/static-element.vue\", 2, 4, None) vs golden (\"cases/elements-text/static-element.vue\", 1, 7, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/elements-text/static-element.vue\", 2, 7, None) vs golden (\"cases/elements-text/static-element.vue\", 1, 9, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/elements-text/static-element.vue\", 2, 18, None) vs golden (\"cases/elements-text/static-element.vue\", 1, 10, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/elements-text/static-element.vue\", 2, 22, None) vs golden (\"cases/elements-text/static-element.vue\", 1, 15, None)",
-        "[sourcemap] /map/rows[6] \u2014 verter (\"cases/elements-text/static-element.vue\", 3, 8, None) vs golden (\"cases/elements-text/static-element.vue\", 1, 16, None)",
-        "[sourcemap] /map/rows[7] \u2014 verter (\"cases/elements-text/static-element.vue\", 4, 0, None) vs golden (\"cases/elements-text/static-element.vue\", 1, 21, None)"
+        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/spread \u2014 node kind: verter `LogicalExpression` vs golden `spread`"
       ],
-      "total": 10,
-      "note": "render signature: Verter always emits the full `(_ctx, _cache, $props, $setup, $data, $options)` form; official emits the short `(_ctx, _cache)` form for template-only SFCs (no bindings); cache shape: Verter caches the child vnode directly (`_cache[i] || (_cache[i] = v)`); official spreads a cached array (`[...(_cache[i] || ...)]`); template source map: Verter emits 8 original-anchor rows vs official's 20 (coarser/differently anchored)"
+      "total": 2,
+      "note": "render signature: Verter always emits the full `(_ctx, _cache, $props, $setup, $data, $options)` form; official emits the short `(_ctx, _cache)` form for template-only SFCs (no bindings); cache shape: Verter caches the child vnode directly (`_cache[i] || (_cache[i] = v)`); official spreads a cached array (`[...(_cache[i] || ...)]`)"
     },
     {
       "case": "elements-text/static-element",
       "backend": "vapor",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 7 vs golden 6",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 0"
+        "[structure] Program \u2014 child count: verter 7 vs golden 6"
       ],
-      "total": 2,
-      "note": "module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 0 (coarser/differently anchored)"
+      "total": 1,
+      "note": "module item count differs (extra host-assembly statements)"
     },
     {
       "case": "script-setup/props-emits-runtime",
       "backend": "vdom",
       "reasons": [
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
-        "[structure] Program \u2014 child count: verter 6 vs golden 5",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 14 vs golden 12",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/script-setup/props-emits-runtime.vue\", 12, 0, None) vs golden (\"cases/script-setup/props-emits-runtime.vue\", 13, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/script-setup/props-emits-runtime.vue\", 13, 2, None) vs golden (\"cases/script-setup/props-emits-runtime.vue\", 13, 11, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/script-setup/props-emits-runtime.vue\", 13, 26, None) vs golden (\"cases/script-setup/props-emits-runtime.vue\", 13, 16, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/script-setup/props-emits-runtime.vue\", 13, 28, None) vs golden (\"cases/script-setup/props-emits-runtime.vue\", 13, 18, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/script-setup/props-emits-runtime.vue\", 13, 29, None) vs golden (\"cases/script-setup/props-emits-runtime.vue\", 13, 24, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/script-setup/props-emits-runtime.vue\", 13, 33, None) vs golden (\"cases/script-setup/props-emits-runtime.vue\", 13, 29, None)",
-        "[sourcemap] /map/rows[6] \u2014 verter (\"cases/script-setup/props-emits-runtime.vue\", 13, 35, None) vs golden (\"cases/script-setup/props-emits-runtime.vue\", 13, 32, None)",
-        "[sourcemap] /map/rows[7] \u2014 verter (\"cases/script-setup/props-emits-runtime.vue\", 13, 36, None) vs golden (\"cases/script-setup/props-emits-runtime.vue\", 13, 35, None)",
-        "[sourcemap] /map/rows[8] \u2014 verter (\"cases/script-setup/props-emits-runtime.vue\", 13, 38, None) vs golden (\"cases/script-setup/props-emits-runtime.vue\", 13, 36, None)",
-        "[sourcemap] /map/rows[10] \u2014 verter (\"cases/script-setup/props-emits-runtime.vue\", 13, 45, None) vs golden (\"cases/script-setup/props-emits-runtime.vue\", 13, 44, None)",
-        "[sourcemap] /map/rows[11] \u2014 verter (\"cases/script-setup/props-emits-runtime.vue\", 13, 47, None) vs golden (\"cases/script-setup/props-emits-runtime.vue\", 13, 56, None)"
+        "[structure] Program \u2014 child count: verter 6 vs golden 5"
       ],
-      "total": 14,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements); template source map: Verter emits 14 original-anchor rows vs official's 12 (coarser/differently anchored)"
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements)"
     },
     {
       "case": "script-setup/props-emits-runtime",
@@ -652,42 +459,19 @@
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
         "[import] /imports(vue) \u2014 missing imported helper/name `setText`",
         "[import] /imports(vue) \u2014 missing imported helper/name `txt`",
-        "[structure] Program \u2014 child count: verter 8 vs golden 7",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"onSave\", \"msg\", \"level\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 8",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/script-setup/props-emits-runtime.vue\", 12, 0, None) vs golden (\"cases/script-setup/props-emits-runtime.vue\", 13, 18, Some(\"onSave\"))"
+        "[structure] Program \u2014 child count: verter 8 vs golden 7"
       ],
-      "total": 7,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `setText`, `txt`); module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 8 (coarser/differently anchored)"
+      "total": 4,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `setText`, `txt`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "script-setup/props-type-withdefaults",
       "backend": "vdom",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 6 vs golden 5",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 19 vs golden 24",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/script-setup/props-type-withdefaults.vue\", 17, 0, None) vs golden (\"cases/script-setup/props-type-withdefaults.vue\", 18, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/script-setup/props-type-withdefaults.vue\", 18, 2, None) vs golden (\"cases/script-setup/props-type-withdefaults.vue\", 18, 8, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/script-setup/props-type-withdefaults.vue\", 19, 4, None) vs golden (\"cases/script-setup/props-type-withdefaults.vue\", 18, 13, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/script-setup/props-type-withdefaults.vue\", 19, 6, None) vs golden (\"cases/script-setup/props-type-withdefaults.vue\", 18, 15, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/script-setup/props-type-withdefaults.vue\", 19, 7, None) vs golden (\"cases/script-setup/props-type-withdefaults.vue\", 18, 19, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/script-setup/props-type-withdefaults.vue\", 19, 17, None) vs golden (\"cases/script-setup/props-type-withdefaults.vue\", 18, 28, None)",
-        "[sourcemap] /map/rows[6] \u2014 verter (\"cases/script-setup/props-type-withdefaults.vue\", 19, 19, None) vs golden (\"cases/script-setup/props-type-withdefaults.vue\", 18, 33, None)",
-        "[sourcemap] /map/rows[7] \u2014 verter (\"cases/script-setup/props-type-withdefaults.vue\", 19, 21, None) vs golden (\"cases/script-setup/props-type-withdefaults.vue\", 18, 34, None)",
-        "[sourcemap] /map/rows[8] \u2014 verter (\"cases/script-setup/props-type-withdefaults.vue\", 19, 23, None) vs golden (\"cases/script-setup/props-type-withdefaults.vue\", 18, 38, None)",
-        "[sourcemap] /map/rows[9] \u2014 verter (\"cases/script-setup/props-type-withdefaults.vue\", 19, 24, None) vs golden (\"cases/script-setup/props-type-withdefaults.vue\", 19, 7, None)",
-        "[sourcemap] /map/rows[10] \u2014 verter (\"cases/script-setup/props-type-withdefaults.vue\", 19, 29, None) vs golden (\"cases/script-setup/props-type-withdefaults.vue\", 19, 11, None)",
-        "[sourcemap] /map/rows[11] \u2014 verter (\"cases/script-setup/props-type-withdefaults.vue\", 19, 31, None) vs golden (\"cases/script-setup/props-type-withdefaults.vue\", 19, 12, None)",
-        "[sourcemap] /map/rows[12] \u2014 verter (\"cases/script-setup/props-type-withdefaults.vue\", 19, 33, None) vs golden (\"cases/script-setup/props-type-withdefaults.vue\", 19, 16, None)",
-        "[sourcemap] /map/rows[13] \u2014 verter (\"cases/script-setup/props-type-withdefaults.vue\", 19, 35, None) vs golden (\"cases/script-setup/props-type-withdefaults.vue\", 19, 19, None)",
-        "[sourcemap] /map/rows[14] \u2014 verter (\"cases/script-setup/props-type-withdefaults.vue\", 19, 36, None) vs golden (\"cases/script-setup/props-type-withdefaults.vue\", 19, 21, None)",
-        "[sourcemap] /map/rows[15] \u2014 verter (\"cases/script-setup/props-type-withdefaults.vue\", 19, 48, None) vs golden (\"cases/script-setup/props-type-withdefaults.vue\", 19, 24, None)",
-        "[sourcemap] /map/rows[16] \u2014 verter (\"cases/script-setup/props-type-withdefaults.vue\", 19, 50, None) vs golden (\"cases/script-setup/props-type-withdefaults.vue\", 19, 28, None)",
-        "[sourcemap] /map/rows[17] \u2014 verter (\"cases/script-setup/props-type-withdefaults.vue\", 20, 8, None) vs golden (\"cases/script-setup/props-type-withdefaults.vue\", 19, 31, None)",
-        "[sourcemap] /map/rows[18] \u2014 verter (\"cases/script-setup/props-type-withdefaults.vue\", 21, 0, None) vs golden (\"cases/script-setup/props-type-withdefaults.vue\", 19, 33, None)"
+        "[structure] Program \u2014 child count: verter 6 vs golden 5"
       ],
-      "total": 21,
-      "note": "module item count differs (extra host-assembly statements); template source map: Verter emits 19 original-anchor rows vs official's 24 (coarser/differently anchored)"
+      "total": 1,
+      "note": "module item count differs (extra host-assembly statements)"
     },
     {
       "case": "script-setup/props-type-withdefaults",
@@ -697,13 +481,10 @@
         "[import] /imports(vue) \u2014 missing imported helper/name `defineVaporComponent`",
         "[import] /imports(vue) \u2014 missing imported helper/name `setText`",
         "[import] /imports(vue) \u2014 missing imported helper/name `txt`",
-        "[structure] Program \u2014 child count: verter 8 vs golden 7",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"emit\", \"props\", \"item\", \"size\", \"tags\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 14",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/script-setup/props-type-withdefaults.vue\", 17, 0, None) vs golden (\"cases/script-setup/props-type-withdefaults.vue\", 18, 15, Some(\"emit\"))"
+        "[structure] Program \u2014 child count: verter 8 vs golden 7"
       ],
-      "total": 8,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `defineVaporComponent`, `setText`, `txt`); module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 14 (coarser/differently anchored)"
+      "total": 5,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `defineVaporComponent`, `setText`, `txt`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "v-bind/dynamic-arg",
@@ -719,17 +500,10 @@
         "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#76, decl#4, slot[], Param) vs golden (scope#80, decl#4, slot[], Param)",
         "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#76, decl#5, slot[], Param) vs golden (scope#80, decl#5, slot[], Param)",
         "[structure] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression \u2014 child count: verter 6 vs golden 7",
-        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#6, slot[], Function) vs golden (scope#0, decl#5, slot[], Function)",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 6 vs golden 8",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-bind/dynamic-arg.vue\", 7, 0, None) vs golden (\"cases/v-bind/dynamic-arg.vue\", 8, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/v-bind/dynamic-arg.vue\", 8, 2, None) vs golden (\"cases/v-bind/dynamic-arg.vue\", 8, 6, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/v-bind/dynamic-arg.vue\", 8, 25, None) vs golden (\"cases/v-bind/dynamic-arg.vue\", 8, 16, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/v-bind/dynamic-arg.vue\", 8, 42, None) vs golden (\"cases/v-bind/dynamic-arg.vue\", 8, 18, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/v-bind/dynamic-arg.vue\", 8, 46, None) vs golden (\"cases/v-bind/dynamic-arg.vue\", 8, 23, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/v-bind/dynamic-arg.vue\", 9, 0, None) vs golden (\"cases/v-bind/dynamic-arg.vue\", 8, 25, None)"
+        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#6, slot[], Function) vs golden (scope#0, decl#5, slot[], Function)"
       ],
-      "total": 18,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); template source map: Verter emits 6 original-anchor rows vs official's 8 (coarser/differently anchored); further structural divergence (see reasons)"
+      "total": 11,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); further structural divergence (see reasons)"
     },
     {
       "case": "v-bind/dynamic-arg",
@@ -738,13 +512,10 @@
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
         "[import] /imports(vue) \u2014 unexpected imported helper/name `setProp`",
         "[import] /imports(vue) \u2014 missing imported helper/name `setDynamicProps`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"attrName\", \"value\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 4",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-bind/dynamic-arg.vue\", 7, 0, None) vs golden (\"cases/v-bind/dynamic-arg.vue\", 8, 6, Some(\"attrName\"))"
+        "[structure] Program \u2014 child count: verter 7 vs golden 6"
       ],
-      "total": 7,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `setProp`; official-only: `setDynamicProps`); module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 4 (coarser/differently anchored)"
+      "total": 4,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `setProp`; official-only: `setDynamicProps`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "v-bind/prop-attr-modifiers",
@@ -763,16 +534,10 @@
         "[identifier] Program[3]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#79, decl#4, slot[], Param) vs golden (scope#83, decl#4, slot[], Param)",
         "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#79, decl#5, slot[], Param) vs golden (scope#83, decl#5, slot[], Param)",
         "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression \u2014 child count: verter 7 vs golden 8",
-        "[identifier] Program[4]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#6, slot[], Function) vs golden (scope#0, decl#5, slot[], Function)",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 5 vs golden 10",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-bind/prop-attr-modifiers.vue\", 7, 0, None) vs golden (\"cases/v-bind/prop-attr-modifiers.vue\", 8, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/v-bind/prop-attr-modifiers.vue\", 8, 2, None) vs golden (\"cases/v-bind/prop-attr-modifiers.vue\", 8, 8, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/v-bind/prop-attr-modifiers.vue\", 8, 54, None) vs golden (\"cases/v-bind/prop-attr-modifiers.vue\", 8, 20, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/v-bind/prop-attr-modifiers.vue\", 8, 60, None) vs golden (\"cases/v-bind/prop-attr-modifiers.vue\", 8, 27, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/v-bind/prop-attr-modifiers.vue\", 9, 0, None) vs golden (\"cases/v-bind/prop-attr-modifiers.vue\", 8, 31, None)"
+        "[identifier] Program[4]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#6, slot[], Function) vs golden (scope#0, decl#5, slot[], Function)"
       ],
-      "total": 20,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); template source map: Verter emits 5 original-anchor rows vs official's 10 (coarser/differently anchored); further structural divergence (see reasons)"
+      "total": 14,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); further structural divergence (see reasons)"
     },
     {
       "case": "v-bind/prop-attr-modifiers",
@@ -780,13 +545,10 @@
       "reasons": [
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
         "[import] /imports(vue) \u2014 missing imported helper/name `setDOMProp`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"text\", \"dataX\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 8",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-bind/prop-attr-modifiers.vue\", 7, 0, None) vs golden (\"cases/v-bind/prop-attr-modifiers.vue\", 8, 8, None)"
+        "[structure] Program \u2014 child count: verter 7 vs golden 6"
       ],
-      "total": 6,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `setDOMProp`); module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 8 (coarser/differently anchored)"
+      "total": 3,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `setDOMProp`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "v-bind/same-name-shorthand",
@@ -803,29 +565,20 @@
         "[identifier] Program[3]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#79, decl#4, slot[], Param) vs golden (scope#83, decl#4, slot[], Param)",
         "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#79, decl#5, slot[], Param) vs golden (scope#83, decl#5, slot[], Param)",
         "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression \u2014 child count: verter 7 vs golden 8",
-        "[identifier] Program[4]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#6, slot[], Function) vs golden (scope#0, decl#5, slot[], Function)",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 5 vs golden 10",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-bind/same-name-shorthand.vue\", 7, 0, None) vs golden (\"cases/v-bind/same-name-shorthand.vue\", 8, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/v-bind/same-name-shorthand.vue\", 8, 2, None) vs golden (\"cases/v-bind/same-name-shorthand.vue\", 8, 8, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/v-bind/same-name-shorthand.vue\", 8, 18, None) vs golden (\"cases/v-bind/same-name-shorthand.vue\", 8, 8, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/v-bind/same-name-shorthand.vue\", 8, 24, None) vs golden (\"cases/v-bind/same-name-shorthand.vue\", 8, 10, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/v-bind/same-name-shorthand.vue\", 9, 0, None) vs golden (\"cases/v-bind/same-name-shorthand.vue\", 8, 10, None)"
+        "[identifier] Program[4]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#6, slot[], Function) vs golden (scope#0, decl#5, slot[], Function)"
       ],
-      "total": 18,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); template source map: Verter emits 5 original-anchor rows vs official's 10 (coarser/differently anchored); further structural divergence (see reasons)"
+      "total": 12,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); further structural divergence (see reasons)"
     },
     {
       "case": "v-bind/same-name-shorthand",
       "backend": "vapor",
       "reasons": [
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"id\", \"title\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 8",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-bind/same-name-shorthand.vue\", 7, 0, None) vs golden (\"cases/v-bind/same-name-shorthand.vue\", 8, 8, None)"
+        "[structure] Program \u2014 child count: verter 7 vs golden 6"
       ],
-      "total": 5,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 8 (coarser/differently anchored)"
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements)"
     },
     {
       "case": "v-bind/static-dynamic",
@@ -844,30 +597,20 @@
         "[identifier] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[2]/ObjectExpression[1]/ObjectProperty[1]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#79, decl#3, slot[], Param) vs golden (scope#83, decl#3, slot[], Param)",
         "[identifier] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[2]/ObjectExpression[2]/ObjectProperty[1]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#79, decl#3, slot[], Param) vs golden (scope#83, decl#3, slot[], Param)",
         "[identifier] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[5] \u2014 private binding key: verter (scope#0, decl#5, slot[], Const) vs golden (scope#0, decl#4, slot[], Const)",
-        "[identifier] Program[4]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#6, slot[], Function) vs golden (scope#0, decl#5, slot[], Function)",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 6 vs golden 16",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-bind/static-dynamic.vue\", 7, 0, None) vs golden (\"cases/v-bind/static-dynamic.vue\", 8, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/v-bind/static-dynamic.vue\", 8, 2, None) vs golden (\"cases/v-bind/static-dynamic.vue\", 8, 10, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/v-bind/static-dynamic.vue\", 8, 60, None) vs golden (\"cases/v-bind/static-dynamic.vue\", 8, 14, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/v-bind/static-dynamic.vue\", 8, 62, None) vs golden (\"cases/v-bind/static-dynamic.vue\", 8, 15, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/v-bind/static-dynamic.vue\", 8, 71, None) vs golden (\"cases/v-bind/static-dynamic.vue\", 8, 23, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/v-bind/static-dynamic.vue\", 9, 0, None) vs golden (\"cases/v-bind/static-dynamic.vue\", 8, 25, None)"
+        "[identifier] Program[4]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#6, slot[], Function) vs golden (scope#0, decl#5, slot[], Function)"
       ],
-      "total": 21,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); template source map: Verter emits 6 original-anchor rows vs official's 16 (coarser/differently anchored)"
+      "total": 14,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift)"
     },
     {
       "case": "v-bind/static-dynamic",
       "backend": "vapor",
       "reasons": [
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"title\", \"disabled\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 8",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-bind/static-dynamic.vue\", 7, 0, None) vs golden (\"cases/v-bind/static-dynamic.vue\", 8, 25, None)"
+        "[structure] Program \u2014 child count: verter 7 vs golden 6"
       ],
-      "total": 5,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 8 (coarser/differently anchored)"
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements)"
     },
     {
       "case": "v-for/array",
@@ -883,20 +626,10 @@
         "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#76, decl#4, slot[], Param) vs golden (scope#80, decl#4, slot[], Param)",
         "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#76, decl#5, slot[], Param) vs golden (scope#80, decl#5, slot[], Param)",
         "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/SequenceExpression[1]/CallExpression[3]/CallExpression[1]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#76, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)",
-        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#8, slot[], Function) vs golden (scope#0, decl#7, slot[], Function)",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 10 vs golden 16",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-for/array.vue\", 6, 0, None) vs golden (\"cases/v-for/array.vue\", 7, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/v-for/array.vue\", 7, 2, None) vs golden (\"cases/v-for/array.vue\", 8, 4, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/v-for/array.vue\", 8, 42, None) vs golden (\"cases/v-for/array.vue\", 8, 15, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/v-for/array.vue\", 8, 44, None) vs golden (\"cases/v-for/array.vue\", 8, 19, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/v-for/array.vue\", 8, 50, None) vs golden (\"cases/v-for/array.vue\", 8, 23, None)",
-        "[sourcemap] /map/rows[6] \u2014 verter (\"cases/v-for/array.vue\", 8, 52, None) vs golden (\"cases/v-for/array.vue\", 8, 28, None)",
-        "[sourcemap] /map/rows[7] \u2014 verter (\"cases/v-for/array.vue\", 8, 57, None) vs golden (\"cases/v-for/array.vue\", 8, 31, None)",
-        "[sourcemap] /map/rows[8] \u2014 verter (\"cases/v-for/array.vue\", 9, 7, None) vs golden (\"cases/v-for/array.vue\", 8, 34, None)",
-        "[sourcemap] /map/rows[9] \u2014 verter (\"cases/v-for/array.vue\", 10, 0, None) vs golden (\"cases/v-for/array.vue\", 8, 36, None)"
+        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#8, slot[], Function) vs golden (scope#0, decl#7, slot[], Function)"
       ],
-      "total": 21,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); template source map: Verter emits 10 original-anchor rows vs official's 16 (coarser/differently anchored)"
+      "total": 11,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift)"
     },
     {
       "case": "v-for/array",
@@ -916,13 +649,10 @@
         "[identifier] Program[4]/FunctionDeclaration[0] \u2014 private binding key: verter (scope#0, decl#12, slot[], Function) vs golden (scope#0, decl#11, slot[], Function)",
         "[structure] Program[4]/FunctionDeclaration[1]/params \u2014 child count: verter 2 vs golden 6",
         "[structure] Program[4]/FunctionDeclaration[2]/FunctionBody \u2014 child count: verter 5 vs golden 4",
-        "[identifier] Program[5]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#12, slot[], Function) vs golden (scope#0, decl#11, slot[], Function)",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"items\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 6",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-for/array.vue\", 6, 0, None) vs golden (\"cases/v-for/array.vue\", 8, 23, Some(\"items\"))"
+        "[identifier] Program[5]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#12, slot[], Function) vs golden (scope#0, decl#11, slot[], Function)"
       ],
-      "total": 18,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `child`, `next`, `setProp`; official-only: `createFor`, `setInsertionState`); private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); render signature: Verter always emits the full `(_ctx, _cache, $props, $setup, $data, $options)` form; official emits the short `(_ctx, _cache)` form for template-only SFCs (no bindings); static style attribute: Verter normalizes it to a JS object with unquoted keys; official hoists the original attribute string; template source map: Verter emits 1 original-anchor rows vs official's 6 (coarser/differently anchored); further structural divergence (see reasons)"
+      "total": 15,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `child`, `next`, `setProp`; official-only: `createFor`, `setInsertionState`); private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); render signature: Verter always emits the full `(_ctx, _cache, $props, $setup, $data, $options)` form; official emits the short `(_ctx, _cache)` form for template-only SFCs (no bindings); static style attribute: Verter normalizes it to a JS object with unquoted keys; official hoists the original attribute string; further structural divergence (see reasons)"
     },
     {
       "case": "v-for/index-destructure",
@@ -938,23 +668,10 @@
         "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#87, decl#4, slot[], Param) vs golden (scope#91, decl#4, slot[], Param)",
         "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#87, decl#5, slot[], Param) vs golden (scope#91, decl#5, slot[], Param)",
         "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/SequenceExpression[1]/CallExpression[3]/CallExpression[1]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#87, decl#3, slot[], Param) vs golden (scope#91, decl#3, slot[], Param)",
-        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#8, slot[], Function) vs golden (scope#0, decl#7, slot[], Function)",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 14 vs golden 24",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-for/index-destructure.vue\", 9, 0, None) vs golden (\"cases/v-for/index-destructure.vue\", 10, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/v-for/index-destructure.vue\", 10, 2, None) vs golden (\"cases/v-for/index-destructure.vue\", 11, 4, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/v-for/index-destructure.vue\", 12, 6, None) vs golden (\"cases/v-for/index-destructure.vue\", 11, 18, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/v-for/index-destructure.vue\", 12, 8, None) vs golden (\"cases/v-for/index-destructure.vue\", 11, 20, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/v-for/index-destructure.vue\", 12, 15, None) vs golden (\"cases/v-for/index-destructure.vue\", 11, 22, None)",
-        "[sourcemap] /map/rows[6] \u2014 verter (\"cases/v-for/index-destructure.vue\", 12, 17, None) vs golden (\"cases/v-for/index-destructure.vue\", 11, 26, None)",
-        "[sourcemap] /map/rows[7] \u2014 verter (\"cases/v-for/index-destructure.vue\", 12, 20, None) vs golden (\"cases/v-for/index-destructure.vue\", 11, 30, None)",
-        "[sourcemap] /map/rows[8] \u2014 verter (\"cases/v-for/index-destructure.vue\", 12, 22, None) vs golden (\"cases/v-for/index-destructure.vue\", 11, 35, None)",
-        "[sourcemap] /map/rows[9] \u2014 verter (\"cases/v-for/index-destructure.vue\", 12, 28, None) vs golden (\"cases/v-for/index-destructure.vue\", 11, 40, None)",
-        "[sourcemap] /map/rows[10] \u2014 verter (\"cases/v-for/index-destructure.vue\", 12, 30, None) vs golden (\"cases/v-for/index-destructure.vue\", 11, 45, None)",
-        "[sourcemap] /map/rows[11] \u2014 verter (\"cases/v-for/index-destructure.vue\", 13, 9, None) vs golden (\"cases/v-for/index-destructure.vue\", 11, 48, None)",
-        "[sourcemap] /map/rows[12] \u2014 verter (\"cases/v-for/index-destructure.vue\", 14, 7, None) vs golden (\"cases/v-for/index-destructure.vue\", 11, 51, None)"
+        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#8, slot[], Function) vs golden (scope#0, decl#7, slot[], Function)"
       ],
-      "total": 25,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); template source map: Verter emits 14 original-anchor rows vs official's 24 (coarser/differently anchored)"
+      "total": 11,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift)"
     },
     {
       "case": "v-for/index-destructure",
@@ -974,13 +691,10 @@
         "[identifier] Program[4]/FunctionDeclaration[0] \u2014 private binding key: verter (scope#0, decl#12, slot[], Function) vs golden (scope#0, decl#11, slot[], Function)",
         "[structure] Program[4]/FunctionDeclaration[1]/params \u2014 child count: verter 2 vs golden 6",
         "[structure] Program[4]/FunctionDeclaration[2]/FunctionBody \u2014 child count: verter 5 vs golden 4",
-        "[identifier] Program[5]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#12, slot[], Function) vs golden (scope#0, decl#11, slot[], Function)",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"users\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 10",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-for/index-destructure.vue\", 9, 0, None) vs golden (\"cases/v-for/index-destructure.vue\", 11, 40, Some(\"users\"))"
+        "[identifier] Program[5]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#12, slot[], Function) vs golden (scope#0, decl#11, slot[], Function)"
       ],
-      "total": 18,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `child`, `next`, `setProp`; official-only: `createFor`, `setInsertionState`); private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); render signature: Verter always emits the full `(_ctx, _cache, $props, $setup, $data, $options)` form; official emits the short `(_ctx, _cache)` form for template-only SFCs (no bindings); static style attribute: Verter normalizes it to a JS object with unquoted keys; official hoists the original attribute string; template source map: Verter emits 1 original-anchor rows vs official's 10 (coarser/differently anchored); further structural divergence (see reasons)"
+      "total": 15,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `child`, `next`, `setProp`; official-only: `createFor`, `setInsertionState`); private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); render signature: Verter always emits the full `(_ctx, _cache, $props, $setup, $data, $options)` form; official emits the short `(_ctx, _cache)` form for template-only SFCs (no bindings); static style attribute: Verter normalizes it to a JS object with unquoted keys; official hoists the original attribute string; further structural divergence (see reasons)"
     },
     {
       "case": "v-for/object",
@@ -996,23 +710,10 @@
         "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#79, decl#4, slot[], Param) vs golden (scope#83, decl#4, slot[], Param)",
         "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#79, decl#5, slot[], Param) vs golden (scope#83, decl#5, slot[], Param)",
         "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/SequenceExpression[1]/CallExpression[3]/CallExpression[1]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#79, decl#3, slot[], Param) vs golden (scope#83, decl#3, slot[], Param)",
-        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#8, slot[], Function) vs golden (scope#0, decl#7, slot[], Function)",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 14 vs golden 22",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-for/object.vue\", 6, 0, None) vs golden (\"cases/v-for/object.vue\", 7, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/v-for/object.vue\", 7, 2, None) vs golden (\"cases/v-for/object.vue\", 8, 4, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/v-for/object.vue\", 8, 52, None) vs golden (\"cases/v-for/object.vue\", 8, 16, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/v-for/object.vue\", 8, 54, None) vs golden (\"cases/v-for/object.vue\", 8, 21, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/v-for/object.vue\", 8, 60, None) vs golden (\"cases/v-for/object.vue\", 8, 23, None)",
-        "[sourcemap] /map/rows[6] \u2014 verter (\"cases/v-for/object.vue\", 8, 62, None) vs golden (\"cases/v-for/object.vue\", 8, 27, None)",
-        "[sourcemap] /map/rows[7] \u2014 verter (\"cases/v-for/object.vue\", 8, 64, None) vs golden (\"cases/v-for/object.vue\", 8, 32, None)",
-        "[sourcemap] /map/rows[8] \u2014 verter (\"cases/v-for/object.vue\", 8, 66, None) vs golden (\"cases/v-for/object.vue\", 8, 38, None)",
-        "[sourcemap] /map/rows[9] \u2014 verter (\"cases/v-for/object.vue\", 8, 73, None) vs golden (\"cases/v-for/object.vue\", 8, 41, None)",
-        "[sourcemap] /map/rows[10] \u2014 verter (\"cases/v-for/object.vue\", 8, 75, None) vs golden (\"cases/v-for/object.vue\", 8, 44, None)",
-        "[sourcemap] /map/rows[11] \u2014 verter (\"cases/v-for/object.vue\", 8, 80, None) vs golden (\"cases/v-for/object.vue\", 8, 46, None)",
-        "[sourcemap] /map/rows[12] \u2014 verter (\"cases/v-for/object.vue\", 9, 7, None) vs golden (\"cases/v-for/object.vue\", 8, 50, None)"
+        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#8, slot[], Function) vs golden (scope#0, decl#7, slot[], Function)"
       ],
-      "total": 25,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); template source map: Verter emits 14 original-anchor rows vs official's 22 (coarser/differently anchored)"
+      "total": 11,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift)"
     },
     {
       "case": "v-for/object",
@@ -1032,13 +733,10 @@
         "[identifier] Program[4]/FunctionDeclaration[0] \u2014 private binding key: verter (scope#0, decl#12, slot[], Function) vs golden (scope#0, decl#11, slot[], Function)",
         "[structure] Program[4]/FunctionDeclaration[1]/params \u2014 child count: verter 2 vs golden 6",
         "[structure] Program[4]/FunctionDeclaration[2]/FunctionBody \u2014 child count: verter 5 vs golden 4",
-        "[identifier] Program[5]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#12, slot[], Function) vs golden (scope#0, decl#11, slot[], Function)",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"scores\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 10",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-for/object.vue\", 6, 0, None) vs golden (\"cases/v-for/object.vue\", 8, 32, Some(\"scores\"))"
+        "[identifier] Program[5]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#12, slot[], Function) vs golden (scope#0, decl#11, slot[], Function)"
       ],
-      "total": 18,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `child`, `next`, `setProp`; official-only: `createFor`, `setInsertionState`); private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); render signature: Verter always emits the full `(_ctx, _cache, $props, $setup, $data, $options)` form; official emits the short `(_ctx, _cache)` form for template-only SFCs (no bindings); static style attribute: Verter normalizes it to a JS object with unquoted keys; official hoists the original attribute string; template source map: Verter emits 1 original-anchor rows vs official's 10 (coarser/differently anchored); further structural divergence (see reasons)"
+      "total": 15,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `child`, `next`, `setProp`; official-only: `createFor`, `setInsertionState`); private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); render signature: Verter always emits the full `(_ctx, _cache, $props, $setup, $data, $options)` form; official emits the short `(_ctx, _cache)` form for template-only SFCs (no bindings); static style attribute: Verter normalizes it to a JS object with unquoted keys; official hoists the original attribute string; further structural divergence (see reasons)"
     },
     {
       "case": "v-model/checkbox",
@@ -1056,18 +754,10 @@
         "[structure] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/CallExpression[1]/CallExpression \u2014 child count: verter 5 vs golden 7",
         "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/CallExpression[2]/ArrayExpression[0]/ArrayExpression[1]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#76, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)",
         "[structure] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[1]/LogicalExpression \u2014 node kind: verter `CallExpression` vs golden `LogicalExpression`",
-        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#9, slot[], Function) vs golden (scope#0, decl#8, slot[], Function)",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 7 vs golden 14",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-model/checkbox.vue\", 6, 0, None) vs golden (\"cases/v-model/checkbox.vue\", 7, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/v-model/checkbox.vue\", 7, 2, None) vs golden (\"cases/v-model/checkbox.vue\", 7, 9, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/v-model/checkbox.vue\", 7, 9, None) vs golden (\"cases/v-model/checkbox.vue\", 7, 16, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/v-model/checkbox.vue\", 7, 51, None) vs golden (\"cases/v-model/checkbox.vue\", 7, 20, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/v-model/checkbox.vue\", 7, 57, None) vs golden (\"cases/v-model/checkbox.vue\", 7, 21, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/v-model/checkbox.vue\", 7, 65, None) vs golden (\"cases/v-model/checkbox.vue\", 7, 31, None)",
-        "[sourcemap] /map/rows[6] \u2014 verter (\"cases/v-model/checkbox.vue\", 8, 0, None) vs golden (\"cases/v-model/checkbox.vue\", 7, 41, None)"
+        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#9, slot[], Function) vs golden (scope#0, decl#8, slot[], Function)"
       ],
-      "total": 21,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); template source map: Verter emits 7 original-anchor rows vs official's 14 (coarser/differently anchored); further structural divergence (see reasons)"
+      "total": 13,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); further structural divergence (see reasons)"
     },
     {
       "case": "v-model/checkbox",
@@ -1075,13 +765,10 @@
       "reasons": [
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
         "[import] /imports(vue) \u2014 missing imported helper/name `child`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"agreed\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 4",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-model/checkbox.vue\", 6, 0, None) vs golden (\"cases/v-model/checkbox.vue\", 7, 41, Some(\"agreed\"))"
+        "[structure] Program \u2014 child count: verter 7 vs golden 6"
       ],
-      "total": 6,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `child`); module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 4 (coarser/differently anchored)"
+      "total": 3,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `child`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "v-model/input",
@@ -1097,28 +784,20 @@
         "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#70, decl#4, slot[], Param) vs golden (scope#74, decl#4, slot[], Param)",
         "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#70, decl#5, slot[], Param) vs golden (scope#74, decl#5, slot[], Param)",
         "[structure] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/CallExpression \u2014 node kind: verter `SequenceExpression` vs golden `CallExpression`",
-        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#7, slot[], Function) vs golden (scope#0, decl#6, slot[], Function)",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 4 vs golden 10",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-model/input.vue\", 6, 0, None) vs golden (\"cases/v-model/input.vue\", 7, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/v-model/input.vue\", 7, 2, None) vs golden (\"cases/v-model/input.vue\", 7, 18, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/v-model/input.vue\", 7, 50, None) vs golden (\"cases/v-model/input.vue\", 7, 18, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/v-model/input.vue\", 8, 0, None) vs golden (\"cases/v-model/input.vue\", 7, 22, None)"
+        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#7, slot[], Function) vs golden (scope#0, decl#6, slot[], Function)"
       ],
-      "total": 16,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); template source map: Verter emits 4 original-anchor rows vs official's 10 (coarser/differently anchored); further structural divergence (see reasons)"
+      "total": 11,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); further structural divergence (see reasons)"
     },
     {
       "case": "v-model/input",
       "backend": "vapor",
       "reasons": [
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"text\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 4",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-model/input.vue\", 6, 0, None) vs golden (\"cases/v-model/input.vue\", 7, 18, Some(\"text\"))"
+        "[structure] Program \u2014 child count: verter 7 vs golden 6"
       ],
-      "total": 5,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 4 (coarser/differently anchored)"
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements)"
     },
     {
       "case": "v-model/select",
@@ -1134,54 +813,29 @@
         "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#73, decl#4, slot[], Param) vs golden (scope#77, decl#4, slot[], Param)",
         "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#73, decl#5, slot[], Param) vs golden (scope#77, decl#5, slot[], Param)",
         "[structure] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/CallExpression \u2014 node kind: verter `SequenceExpression` vs golden `CallExpression`",
-        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#8, slot[], Function) vs golden (scope#0, decl#7, slot[], Function)",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 11 vs golden 22",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-model/select.vue\", 6, 0, None) vs golden (\"cases/v-model/select.vue\", 7, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/v-model/select.vue\", 7, 2, None) vs golden (\"cases/v-model/select.vue\", 7, 19, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/v-model/select.vue\", 8, 4, None) vs golden (\"cases/v-model/select.vue\", 7, 19, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/v-model/select.vue\", 8, 22, None) vs golden (\"cases/v-model/select.vue\", 7, 25, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/v-model/select.vue\", 8, 23, None) vs golden (\"cases/v-model/select.vue\", 7, 25, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/v-model/select.vue\", 9, 4, None) vs golden (\"cases/v-model/select.vue\", 8, 4, None)",
-        "[sourcemap] /map/rows[6] \u2014 verter (\"cases/v-model/select.vue\", 9, 22, None) vs golden (\"cases/v-model/select.vue\", 8, 12, None)",
-        "[sourcemap] /map/rows[7] \u2014 verter (\"cases/v-model/select.vue\", 9, 23, None) vs golden (\"cases/v-model/select.vue\", 8, 17, None)",
-        "[sourcemap] /map/rows[8] \u2014 verter (\"cases/v-model/select.vue\", 9, 32, None) vs golden (\"cases/v-model/select.vue\", 8, 18, None)",
-        "[sourcemap] /map/rows[9] \u2014 verter (\"cases/v-model/select.vue\", 10, 11, None) vs golden (\"cases/v-model/select.vue\", 8, 21, None)",
-        "[sourcemap] /map/rows[10] \u2014 verter (\"cases/v-model/select.vue\", 11, 0, None) vs golden (\"cases/v-model/select.vue\", 8, 22, None)"
+        "[identifier] Program[3]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#8, slot[], Function) vs golden (scope#0, decl#7, slot[], Function)"
       ],
-      "total": 23,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); template source map: Verter emits 11 original-anchor rows vs official's 22 (coarser/differently anchored); further structural divergence (see reasons)"
+      "total": 11,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); further structural divergence (see reasons)"
     },
     {
       "case": "v-model/select",
       "backend": "vapor",
       "reasons": [
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"picked\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 4",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-model/select.vue\", 6, 0, None) vs golden (\"cases/v-model/select.vue\", 7, 19, Some(\"picked\"))"
+        "[structure] Program \u2014 child count: verter 7 vs golden 6"
       ],
-      "total": 5,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 4 (coarser/differently anchored)"
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements)"
     },
     {
       "case": "v-on/inline",
       "backend": "vdom",
       "reasons": [
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
-        "[structure] Program \u2014 child count: verter 6 vs golden 5",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-on/inline.vue\", 6, 0, None) vs golden (\"cases/v-on/inline.vue\", 7, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/v-on/inline.vue\", 7, 2, None) vs golden (\"cases/v-on/inline.vue\", 7, 11, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/v-on/inline.vue\", 7, 27, None) vs golden (\"cases/v-on/inline.vue\", 7, 16, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/v-on/inline.vue\", 7, 34, None) vs golden (\"cases/v-on/inline.vue\", 7, 18, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/v-on/inline.vue\", 7, 36, None) vs golden (\"cases/v-on/inline.vue\", 7, 23, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/v-on/inline.vue\", 7, 37, None) vs golden (\"cases/v-on/inline.vue\", 7, 27, None)",
-        "[sourcemap] /map/rows[6] \u2014 verter (\"cases/v-on/inline.vue\", 7, 43, None) vs golden (\"cases/v-on/inline.vue\", 7, 34, None)",
-        "[sourcemap] /map/rows[7] \u2014 verter (\"cases/v-on/inline.vue\", 7, 45, None) vs golden (\"cases/v-on/inline.vue\", 7, 37, None)",
-        "[sourcemap] /map/rows[8] \u2014 verter (\"cases/v-on/inline.vue\", 7, 54, None) vs golden (\"cases/v-on/inline.vue\", 7, 42, None)",
-        "[sourcemap] /map/rows[9] \u2014 verter (\"cases/v-on/inline.vue\", 8, 0, None) vs golden (\"cases/v-on/inline.vue\", 7, 54, None)"
+        "[structure] Program \u2014 child count: verter 6 vs golden 5"
       ],
-      "total": 12,
+      "total": 2,
       "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements)"
     },
     {
@@ -1191,28 +845,20 @@
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
         "[import] /imports(vue) \u2014 missing imported helper/name `setText`",
         "[import] /imports(vue) \u2014 missing imported helper/name `txt`",
-        "[structure] Program \u2014 child count: verter 8 vs golden 7",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"count\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 6",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-on/inline.vue\", 6, 0, None) vs golden (\"cases/v-on/inline.vue\", 7, 18, Some(\"count\"))"
+        "[structure] Program \u2014 child count: verter 8 vs golden 7"
       ],
-      "total": 7,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `setText`, `txt`); module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 6 (coarser/differently anchored)"
+      "total": 4,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `setText`, `txt`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "v-on/key-modifiers",
       "backend": "vdom",
       "reasons": [
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
-        "[structure] Program \u2014 child count: verter 6 vs golden 5",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 4 vs golden 10",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-on/key-modifiers.vue\", 5, 0, None) vs golden (\"cases/v-on/key-modifiers.vue\", 6, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/v-on/key-modifiers.vue\", 6, 2, None) vs golden (\"cases/v-on/key-modifiers.vue\", 6, 10, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/v-on/key-modifiers.vue\", 6, 55, None) vs golden (\"cases/v-on/key-modifiers.vue\", 6, 15, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/v-on/key-modifiers.vue\", 7, 0, None) vs golden (\"cases/v-on/key-modifiers.vue\", 6, 23, None)"
+        "[structure] Program \u2014 child count: verter 6 vs golden 5"
       ],
-      "total": 7,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements); template source map: Verter emits 4 original-anchor rows vs official's 10 (coarser/differently anchored)"
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements)"
     },
     {
       "case": "v-on/key-modifiers",
@@ -1221,32 +867,20 @@
         "[import] /imports(vue) \u2014 unexpected imported helper/name `createInvoker`",
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
         "[import] /imports(vue) \u2014 missing imported helper/name `withVaporKeys`",
-        "[structure] Program \u2014 child count: verter 8 vs golden 7",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"onEnter\", \"onEsc\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 4",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-on/key-modifiers.vue\", 5, 0, None) vs golden (\"cases/v-on/key-modifiers.vue\", 6, 23, Some(\"onEnter\"))"
+        "[structure] Program \u2014 child count: verter 8 vs golden 7"
       ],
-      "total": 7,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `createInvoker`; official-only: `withVaporKeys`); module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 4 (coarser/differently anchored)"
+      "total": 4,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `createInvoker`; official-only: `withVaporKeys`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "v-on/method-ref",
       "backend": "vdom",
       "reasons": [
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
-        "[structure] Program \u2014 child count: verter 6 vs golden 5",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 8 vs golden 10",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-on/method-ref.vue\", 4, 0, None) vs golden (\"cases/v-on/method-ref.vue\", 5, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/v-on/method-ref.vue\", 5, 2, None) vs golden (\"cases/v-on/method-ref.vue\", 5, 9, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/v-on/method-ref.vue\", 6, 4, None) vs golden (\"cases/v-on/method-ref.vue\", 5, 15, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/v-on/method-ref.vue\", 6, 12, None) vs golden (\"cases/v-on/method-ref.vue\", 5, 17, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/v-on/method-ref.vue\", 6, 16, None) vs golden (\"cases/v-on/method-ref.vue\", 5, 25, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/v-on/method-ref.vue\", 6, 25, None) vs golden (\"cases/v-on/method-ref.vue\", 6, 4, None)",
-        "[sourcemap] /map/rows[6] \u2014 verter (\"cases/v-on/method-ref.vue\", 7, 9, None) vs golden (\"cases/v-on/method-ref.vue\", 6, 12, None)",
-        "[sourcemap] /map/rows[7] \u2014 verter (\"cases/v-on/method-ref.vue\", 8, 0, None) vs golden (\"cases/v-on/method-ref.vue\", 6, 16, None)"
+        "[structure] Program \u2014 child count: verter 6 vs golden 5"
       ],
-      "total": 11,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements); template source map: Verter emits 8 original-anchor rows vs official's 10 (coarser/differently anchored)"
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements)"
     },
     {
       "case": "v-on/method-ref",
@@ -1256,35 +890,20 @@
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
         "[import] /imports(vue) \u2014 unexpected imported helper/name `delegateEvents`",
         "[import] /imports(vue) \u2014 missing imported helper/name `on`",
-        "[structure] Program \u2014 child count: verter 8 vs golden 6",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"onSubmit\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 4",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-on/method-ref.vue\", 4, 0, None) vs golden (\"cases/v-on/method-ref.vue\", 5, 9, None)"
+        "[structure] Program \u2014 child count: verter 8 vs golden 6"
       ],
-      "total": 8,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `createInvoker`, `delegateEvents`; official-only: `on`); module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 4 (coarser/differently anchored)"
+      "total": 5,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `createInvoker`, `delegateEvents`; official-only: `on`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "v-on/modifiers",
       "backend": "vdom",
       "reasons": [
         "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 5",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 11 vs golden 24",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-on/modifiers.vue\", 6, 0, None) vs golden (\"cases/v-on/modifiers.vue\", 7, 2, None)",
-        "[sourcemap] /map/rows[1] \u2014 verter (\"cases/v-on/modifiers.vue\", 7, 2, None) vs golden (\"cases/v-on/modifiers.vue\", 7, 8, None)",
-        "[sourcemap] /map/rows[2] \u2014 verter (\"cases/v-on/modifiers.vue\", 8, 4, None) vs golden (\"cases/v-on/modifiers.vue\", 7, 13, None)",
-        "[sourcemap] /map/rows[3] \u2014 verter (\"cases/v-on/modifiers.vue\", 8, 38, None) vs golden (\"cases/v-on/modifiers.vue\", 7, 20, None)",
-        "[sourcemap] /map/rows[4] \u2014 verter (\"cases/v-on/modifiers.vue\", 8, 44, None) vs golden (\"cases/v-on/modifiers.vue\", 7, 24, None)",
-        "[sourcemap] /map/rows[5] \u2014 verter (\"cases/v-on/modifiers.vue\", 9, 4, None) vs golden (\"cases/v-on/modifiers.vue\", 8, 4, None)",
-        "[sourcemap] /map/rows[6] \u2014 verter (\"cases/v-on/modifiers.vue\", 9, 44, None) vs golden (\"cases/v-on/modifiers.vue\", 8, 13, None)",
-        "[sourcemap] /map/rows[7] \u2014 verter (\"cases/v-on/modifiers.vue\", 9, 48, None) vs golden (\"cases/v-on/modifiers.vue\", 8, 18, None)",
-        "[sourcemap] /map/rows[8] \u2014 verter (\"cases/v-on/modifiers.vue\", 9, 52, None) vs golden (\"cases/v-on/modifiers.vue\", 8, 33, None)",
-        "[sourcemap] /map/rows[9] \u2014 verter (\"cases/v-on/modifiers.vue\", 10, 8, None) vs golden (\"cases/v-on/modifiers.vue\", 8, 36, None)",
-        "[sourcemap] /map/rows[10] \u2014 verter (\"cases/v-on/modifiers.vue\", 11, 0, None) vs golden (\"cases/v-on/modifiers.vue\", 8, 38, None)"
+        "[structure] Program \u2014 child count: verter 7 vs golden 5"
       ],
-      "total": 14,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements); template source map: Verter emits 11 original-anchor rows vs official's 24 (coarser/differently anchored)"
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; module item count differs (extra host-assembly statements)"
     },
     {
       "case": "v-on/modifiers",
@@ -1296,13 +915,10 @@
         "[import] /imports(vue) \u2014 missing imported helper/name `next`",
         "[import] /imports(vue) \u2014 missing imported helper/name `withModifiers`",
         "[import] /imports(vue) \u2014 missing imported helper/name `withVaporModifiers`",
-        "[structure] Program \u2014 child count: verter 8 vs golden 7",
-        "[sourcemap] /map/names \u2014 names: verter [] vs golden [\"del\", \"open\", \"save\"]",
-        "[sourcemap] /map/rows \u2014 mapping row count: verter 1 vs golden 10",
-        "[sourcemap] /map/rows[0] \u2014 verter (\"cases/v-on/modifiers.vue\", 6, 0, None) vs golden (\"cases/v-on/modifiers.vue\", 7, 20, Some(\"save\"))"
+        "[structure] Program \u2014 child count: verter 8 vs golden 7"
       ],
-      "total": 10,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `createInvoker`; official-only: `child`, `next`, `withModifiers`, `withVaporModifiers`); module item count differs (extra host-assembly statements); template source map: Verter emits 1 original-anchor rows vs official's 10 (coarser/differently anchored)"
+      "total": 7,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `createInvoker`; official-only: `child`, `next`, `withModifiers`, `withVaporModifiers`); module item count differs (extra host-assembly statements)"
     }
   ]
 }

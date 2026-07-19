@@ -9,8 +9,9 @@
 //! the official NON-inline topology — `compileScript({inlineTemplate:false})`
 //! plus `compileTemplate(bindingMetadata)` — the same `_sfc_main` + separate
 //! render-function shape Verter ships, so the comparison is apples-to-apples
-//! per backend. Source maps are compared for every cell (both sides' maps
-//! cover the template region at matching granularity).
+//! per backend. Source maps are NOT a conformance dimension (a source map maps
+//! its own compiler's output); Verter's source-map correctness is verified by
+//! the separate position-encoding tests.
 //!
 //! Dispositions:
 //! - PASS — the comparator found no in-contract difference.
@@ -65,7 +66,6 @@ fn golden_meta(backend: Backend, case_id: &str) -> GoldenMeta {
 /// assembler's `is_production` flag gates only those suffixes).
 struct VerterCell {
     code: String,
-    template_map: Option<String>,
     diagnostics: Vec<DiagnosticRow>,
 }
 
@@ -79,7 +79,6 @@ fn compile_verter_cell(case_id: &str, backend: Backend) -> VerterCell {
     let verter_options = VerterCompileOptions {
         force_js: true,
         force_vapor: backend == Backend::Vapor,
-        source_map: true,
         ..Default::default()
     };
     // A Verter compile panic is itself a divergence signal, not a harness
@@ -99,7 +98,6 @@ fn compile_verter_cell(case_id: &str, backend: Backend) -> VerterCell {
                 .unwrap_or_else(|| "<non-string panic>".to_string());
             return VerterCell {
                 code: String::new(),
-                template_map: None,
                 diagnostics: vec![DiagnosticRow {
                     kind: "error".to_string(),
                     code: Some("VERTER_COMPILE_PANIC".to_string()),
@@ -125,10 +123,6 @@ fn compile_verter_cell(case_id: &str, backend: Backend) -> VerterCell {
         .collect();
 
     let sfc_has_script = sfc.contains("<script");
-    let template_map = result
-        .template
-        .as_ref()
-        .and_then(|t| (!t.source_map.is_empty()).then(|| t.source_map.clone()));
     let bundle =
         verter_compiler::framework_common::vue_bridge::vue_result_to_runtime_bundle(result);
     let profile = verter_session::CompileProfile {
@@ -152,7 +146,6 @@ fn compile_verter_cell(case_id: &str, backend: Backend) -> VerterCell {
 
     VerterCell {
         code: module,
-        template_map,
         diagnostics,
     }
 }
@@ -163,12 +156,8 @@ fn compare_cell(case_id: &str, backend: Backend) -> Comparison {
     let meta = golden_meta(backend, case_id);
     let authored = authored(case_id);
 
-    // Both maps cover the template region at matching granularity (the
-    // golden's map is the official compileTemplate map; Verter's is the
-    // template block map).
     let verter_input = ModuleInput {
         code: verter.code.clone(),
-        source_map: verter.template_map.clone(),
         diagnostics: verter.diagnostics.clone(),
     };
     let golden_diagnostics = meta
@@ -185,7 +174,6 @@ fn compare_cell(case_id: &str, backend: Backend) -> Comparison {
         .collect();
     let golden_input = ModuleInput {
         code: golden_code.clone(),
-        source_map: Some(crate::common::golden_map(backend.as_str(), case_id)),
         diagnostics: golden_diagnostics,
     };
 

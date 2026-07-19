@@ -18,10 +18,6 @@ pub fn golden_code(backend: &str, case_id: &str) -> String {
     read_text_normalized(&golden_path(backend, case_id, "js")).expect("read golden js")
 }
 
-pub fn golden_map(backend: &str, case_id: &str) -> String {
-    read_text_normalized(&golden_path(backend, case_id, "map.json")).expect("read golden map")
-}
-
 pub fn case_sfc_source(case_id: &str) -> String {
     read_text_normalized(&corpus_file(
         &corpus_root(),
@@ -40,12 +36,10 @@ pub fn authored(case_id: &str) -> BTreeSet<String> {
 pub fn compare_code(verter: &str, golden: &str, authored: &BTreeSet<String>) -> Comparison {
     let verter = ModuleInput {
         code: verter.to_string(),
-        source_map: None,
         diagnostics: Vec::new(),
     };
     let golden = ModuleInput {
         code: golden.to_string(),
-        source_map: None,
         diagnostics: Vec::new(),
     };
     compare_modules(&verter, &golden, authored, 64).expect("comparison must not hard-fail")
