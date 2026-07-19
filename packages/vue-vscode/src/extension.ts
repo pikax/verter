@@ -955,6 +955,9 @@ export async function activateVueLanguageServer(
     });
     if (!notice) return;
     providerRecommendationShownThisSession = true;
+    // Logged for observability (and E2E attestation of the route behavior):
+    // the notice fires exactly on tsserver-family serving, never on tsgo.
+    log.info(`Provider recommendation: ${notice.message}`);
     void window
       .showInformationMessage(notice.message, "Open Settings", "Don't show again")
       .then((choice) => {

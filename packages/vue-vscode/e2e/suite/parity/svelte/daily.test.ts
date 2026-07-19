@@ -15,6 +15,7 @@ import {
   ensureParityReady,
   failParityGap,
   openRelative,
+  pollUntil,
   settledDiagnostics,
   type TokenAnchor,
 } from "../../../lib/parityHarness";
@@ -95,6 +96,70 @@ suite(`Svelte daily surface [${FIXTURE_NAME}]`, function () {
       assert.ok(
         unused.every((diagnostic) => doc.getText(diagnostic.range) !== liveBinding),
         `${liveBinding} is live through Svelte markup projection and must not be reported unused`,
+      );
+    }
+  });
+
+  test("svelte.diagnostics.unused-snippet-prop-provider-owned", async function () {
+    onlySvelteParity(this);
+    this.timeout(90_000);
+    // An unused snippet-typed $props() member is natively TS6133-eligible
+    // (the projector keeps script chunks original): the PROVIDER owns the
+    // hint, `{@render body?.()}` keeps the rendered member live, and the
+    // Vue-macro verter/no-unused-* rules never fire on Svelte.
+    for (const relative of [
+      "src/diagnostics/UnusedSnippetProp.svelte",
+      "src/diagnostics/UnusedSnippetPropJs.svelte",
+    ]) {
+      const doc = await openRelative(relative);
+      await waitForFileReady(doc);
+      const codeOf = (diagnostic: vscode.Diagnostic): string =>
+        typeof diagnostic.code === "object" && diagnostic.code && "value" in diagnostic.code
+          ? String(diagnostic.code.value)
+          : String(diagnostic.code ?? "");
+      // These fixtures have no bare-identifier markup expression, so the
+      // readiness probe is hover-based — poll until the provider's merged
+      // 6133 actually lands instead of settling on a pre-publish empty set.
+      const diagnostics = await pollUntil(
+        `${relative} provider 6133`,
+        async () => vscode.languages.getDiagnostics(doc.uri),
+        (diags) => diags.some((diagnostic) => codeOf(diagnostic) === "6133"),
+        30_000,
+      );
+
+      const errors = diagnostics.filter(
+        (diagnostic) => diagnostic.severity === vscode.DiagnosticSeverity.Error,
+      );
+      assert.deepEqual(
+        errors.map(
+          (diagnostic) => `${diagnostic.source}:${codeOf(diagnostic)}:${diagnostic.message}`,
+        ),
+        [],
+        `${relative} must stay error-clean while carrying its unused hint`,
+      );
+
+      const unused = diagnostics.filter((diagnostic) => codeOf(diagnostic) === "6133");
+      assert.equal(
+        unused.length,
+        1,
+        `${relative}: expected exactly one provider 6133; got ${diagnostics.map((d) => `${codeOf(d)}:${d.message}`).join(" | ")}`,
+      );
+      assert.equal(
+        doc.getText(unused[0].range),
+        "header",
+        `${relative}: the unused hint maps to the authored snippet prop`,
+      );
+      assert.ok(
+        unused[0].tags?.includes(vscode.DiagnosticTag.Unnecessary),
+        `${relative}: the provider hint keeps the Unnecessary tag through the merge`,
+      );
+      assert.ok(
+        unused.every((diagnostic) => doc.getText(diagnostic.range) !== "body"),
+        `${relative}: body is live through {@render body?.()}`,
+      );
+      assert.ok(
+        diagnostics.every((diagnostic) => !codeOf(diagnostic).startsWith("verter/no-unused-")),
+        `${relative}: Vue-macro unused rules must never fire on Svelte: ${diagnostics.map((d) => `${codeOf(d)}:${d.message}`).join(" | ")}`,
       );
     }
   });
