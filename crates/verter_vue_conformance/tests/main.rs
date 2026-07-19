@@ -3,3 +3,4 @@
 //! live under `tests/cases/`).
 
 mod cases;
+mod common;

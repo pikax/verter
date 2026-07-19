@@ -4434,11 +4434,14 @@ version = "0.0.1-beta.1"
 dependencies = [
  "hex",
  "oxc_allocator",
+ "oxc_ast",
  "oxc_parser",
+ "oxc_semantic",
  "oxc_span",
  "serde",
  "serde_json",
  "sha2",
+ "verter_compiler",
 ]
 
 [[package]]

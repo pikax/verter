@@ -28,6 +28,10 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+pub mod canon;
+pub mod compare;
+pub mod sourcemap;
+
 /// Root of the vendored corpus tree (`<crate>/corpus`).
 pub fn corpus_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("corpus")
@@ -97,8 +101,35 @@ pub fn case_sfc_paths(corpus_root: &Path) -> Result<BTreeSet<String>, String> {
     Ok(out)
 }
 
+/// Source-authored identifier provenance for the comparator's alpha
+/// classification: every identifier-shaped token appearing anywhere in the
+/// SFC source (script, template, styles — a superset is safe: it can only
+/// over-mark a name as contract/exact, which is the design's conservative
+/// fallback; compiler-generated names like `_hoisted_1`, `t0`, `n0`, `_ctx`
+/// never appear in the SFC).
+///
+/// The official RC source maps ship empty `names` arrays, so maps cannot
+/// supply this provenance; the SFC identifier set is the documented
+/// substitute.
+pub fn authored_identifiers(sfc_source: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut current = String::new();
+    for ch in sfc_source.chars() {
+        let is_ident = ch == '_' || ch == '$' || ch.is_ascii_alphanumeric();
+        if is_ident {
+            current.push(ch);
+        } else if !current.is_empty() {
+            out.insert(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        out.insert(current);
+    }
+    out
+}
+
 /// The two compile backends every case is compiled for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Backend {
     Vdom,
@@ -252,5 +283,49 @@ impl GoldenMeta {
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = read_text_normalized(path)?;
         serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tracked known-divergence dispositions (the parity backlog).
+// ---------------------------------------------------------------------------
+
+/// `corpus/known-divergences.json` — the tracked known-divergence
+/// dispositions for the seed conformance run. Every cell Verter currently
+/// FAILS against the official oracle is listed with its exact divergence
+/// signature (the comparator's reason summaries); a cell that starts PASSING
+/// with an entry still present is a stale entry and fails the suite (parity
+/// improved — remove the entry). Regenerate with
+/// `VERTER_CONFORMANCE_UPDATE=1 cargo test -p verter_vue_conformance --tests seed_conformance`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct KnownDivergences {
+    pub schema: u32,
+    pub cells: Vec<KnownDivergenceCell>,
+}
+
+/// One cell's tracked divergence signature.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct KnownDivergenceCell {
+    #[serde(rename = "case")]
+    pub case_id: String,
+    pub backend: Backend,
+    /// Exact expected comparator reason summaries (`DiffReason::summary()`).
+    pub reasons: Vec<String>,
+    /// Total number of in-contract differences (≥ reasons.len() when capped).
+    pub total: usize,
+    /// Curated explanation of the divergence class (the backlog item).
+    pub note: String,
+}
+
+impl KnownDivergences {
+    pub fn load(path: &Path) -> Result<Self, String> {
+        let text = read_text_normalized(path)?;
+        serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))
+    }
+
+    pub fn find(&self, case_id: &str, backend: Backend) -> Option<&KnownDivergenceCell> {
+        self.cells
+            .iter()
+            .find(|c| c.case_id == case_id && c.backend == backend)
     }
 }
