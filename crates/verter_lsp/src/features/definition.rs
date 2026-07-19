@@ -56,6 +56,16 @@ pub fn definition_at_position(
             let (cs, ce) = b.content_range();
             offset >= cs as usize && offset < ce as usize
         }
+    }) || analysis.template.as_deref().is_some_and(|template| {
+        // The depth-ignorant SFC scanner closes the real template block at
+        // the first nested `</template>`; the typed element tree is the
+        // authority for template markup in those dead zones (D6 — custom
+        // directive navigation must not die there). Svelte has no element
+        // IR, so its behavior is unchanged.
+        template
+            .elements
+            .iter()
+            .any(|el| offset >= el.span.start as usize && offset < el.span.end as usize)
     });
     if in_template && is_inside_html_comment(source, offset) {
         return None;

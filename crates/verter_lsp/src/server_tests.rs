@@ -24870,6 +24870,22 @@ async fn contract_directive_hovers_survive_sfc_scanner_dead_zones() {
         "custom directive hover must fire in the phantom opening-tag zone, got: {text}"
     );
 
+    let response = server
+        .goto_definition(goto_definition_params(&uri, custom_position))
+        .await
+        .expect("goto definition should succeed")
+        .expect("custom directive navigation must survive the dead zone");
+    let locations = definition_locations(response);
+    let target = locations
+        .iter()
+        .find(|loc| loc.uri == uri)
+        .expect("definition must land in the same file");
+    assert_eq!(
+        target.range.start.line,
+        line_for_snippet(source, "function vMyThing"),
+        "custom directive definition must navigate to the authored declaration"
+    );
+
     drain_handle.abort();
     drop(service);
 }

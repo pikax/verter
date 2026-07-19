@@ -846,7 +846,7 @@ suite(`IDE navigation + completion [${FIXTURE_NAME}]`, function () {
         // Built-in directive NAME tokens get doc hovers.
         await assertHoverNeedles({ file: parent, token: "v-if", occurrence: 0 }, [
           "v-if",
-          "conditionally",
+          "Conditionally",
         ]);
         await assertHoverNeedles({ file: parent, token: "v-show", occurrence: 0 }, [
           "v-show",
