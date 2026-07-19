@@ -61,6 +61,15 @@ impl CompileTarget {
         self.intersects(Self::SCRIPT | Self::TEMPLATE | Self::TEMPLATE_DATA)
     }
 
+    /// Whether compilation consumes authoritative runtime macro semantics.
+    ///
+    /// Runtime codegen needs the DTO shapes themselves. IDE codegen consumes
+    /// the same DTO's public prop names to assign template binding ownership;
+    /// it must not rediscover those names from authored type syntax.
+    pub fn needs_runtime_macro_semantics(self) -> bool {
+        self.needs_script() || self.needs_tsx()
+    }
+
     /// Whether VDOM/Vapor/SSR template codegen should run.
     pub fn needs_template_codegen(self) -> bool {
         self.intersects(Self::TEMPLATE)

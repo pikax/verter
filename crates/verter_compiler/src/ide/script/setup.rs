@@ -248,6 +248,18 @@ pub(super) fn process_tsx_script_setup<'alloc>(
         bindings.insert(alloc_name, *bt);
     }
 
+    if let Some(bundle) = options.macro_runtime {
+        for entry in &bundle.entries {
+            if let verter_macro_dto::MacroRuntimeOutcome::Complete(shape) = &entry.outcome {
+                crate::script::visit_runtime_macro_binding_names(shape, |name| {
+                    bindings
+                        .entry(alloc.alloc_str(name))
+                        .or_insert(BindingType::Props);
+                });
+            }
+        }
+    }
+
     // Parse generic attribute if present.
     // If parsing fails (invalid TS syntax), fall back to the raw string so
     // TypeScript can surface the actual error to the user.

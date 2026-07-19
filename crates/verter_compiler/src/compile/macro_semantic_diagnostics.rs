@@ -60,7 +60,7 @@ pub(super) fn collect_macro_semantic_diagnostics(
     let mut diagnostics = Vec::new();
     let mut runtime_valid = true;
     let Some(setup) = prepared.setup() else {
-        if target.needs_script() {
+        if target.needs_runtime_macro_semantics() {
             runtime_valid = validate_no_runtime_slots(semantics.runtime(), &mut diagnostics);
         }
         return MacroSemanticValidation {
@@ -101,7 +101,7 @@ pub(super) fn collect_macro_semantic_diagnostics(
             model_name_span,
         };
 
-        if target.needs_script()
+        if target.needs_runtime_macro_semantics()
             && !validate_runtime_entry(semantics.runtime(), &slot, &mut diagnostics)
         {
             runtime_valid = false;
@@ -117,7 +117,7 @@ pub(super) fn collect_macro_semantic_diagnostics(
         }
     }
 
-    if target.needs_script() {
+    if target.needs_runtime_macro_semantics() {
         if let Some(bundle) = semantics.runtime() {
             for entry in &bundle.entries {
                 if !runtime_syntax_indices.contains(&entry.syntax_index) {

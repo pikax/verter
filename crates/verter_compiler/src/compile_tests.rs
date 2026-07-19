@@ -31,6 +31,20 @@ fn has_offset_comment(s: &str) -> bool {
 }
 
 fn compile_sfc(source: &str) -> VerterCompileResult {
+    compile_sfc_with_semantics(source, &VueMacroSemanticInput::Unavailable)
+}
+
+fn compile_sfc_with_runtime(
+    source: &str,
+    runtime: std::sync::Arc<verter_macro_dto::MacroRuntimeBundle>,
+) -> VerterCompileResult {
+    compile_sfc_with_semantics(source, &VueMacroSemanticInput::Runtime(runtime))
+}
+
+fn compile_sfc_with_semantics(
+    source: &str,
+    macro_semantics: &VueMacroSemanticInput,
+) -> VerterCompileResult {
     let alloc = Allocator::new();
     let options = CodegenOptions {
         filename: Some("App.vue".to_string()),
@@ -40,16 +54,17 @@ fn compile_sfc(source: &str) -> VerterCompileResult {
         force_js: true,
         ..Default::default()
     };
-    compile(
-        source,
-        &options,
-        &verter_opts,
-        &crate::compile::VueMacroSemanticInput::Unavailable,
-        &alloc,
-    )
+    compile(source, &options, &verter_opts, macro_semantics, &alloc)
 }
 
 fn compile_sfc_no_hoist(source: &str) -> VerterCompileResult {
+    compile_sfc_no_hoist_with_semantics(source, &VueMacroSemanticInput::Unavailable)
+}
+
+fn compile_sfc_no_hoist_with_semantics(
+    source: &str,
+    macro_semantics: &VueMacroSemanticInput,
+) -> VerterCompileResult {
     let alloc = Allocator::new();
     let options = CodegenOptions {
         filename: Some("App.vue".to_string()),
@@ -60,16 +75,17 @@ fn compile_sfc_no_hoist(source: &str) -> VerterCompileResult {
         force_js: true,
         ..Default::default()
     };
-    compile(
-        source,
-        &options,
-        &verter_opts,
-        &crate::compile::VueMacroSemanticInput::Unavailable,
-        &alloc,
-    )
+    compile(source, &options, &verter_opts, macro_semantics, &alloc)
 }
 
 fn compile_sfc_vapor(source: &str) -> VerterCompileResult {
+    compile_sfc_vapor_with_semantics(source, &VueMacroSemanticInput::Unavailable)
+}
+
+fn compile_sfc_vapor_with_semantics(
+    source: &str,
+    macro_semantics: &VueMacroSemanticInput,
+) -> VerterCompileResult {
     let alloc = Allocator::new();
     let options = CodegenOptions {
         filename: Some("App.vue".to_string()),
@@ -80,13 +96,7 @@ fn compile_sfc_vapor(source: &str) -> VerterCompileResult {
         force_vapor: true,
         ..Default::default()
     };
-    compile(
-        source,
-        &options,
-        &verter_opts,
-        &crate::compile::VueMacroSemanticInput::Unavailable,
-        &alloc,
-    )
+    compile(source, &options, &verter_opts, macro_semantics, &alloc)
 }
 
 #[test]
@@ -164,6 +174,193 @@ fn vmrs_runtime_bundle_is_the_only_type_based_props_authority() {
     let code = result.script.expect("script").code;
     assert!(code.contains("authoritative: { type: Boolean, required: true, skipCheck: true }"));
     assert!(!code.contains("authoritative: { type: String"));
+}
+
+#[test]
+fn vmrs_ide_uses_authoritative_runtime_props_for_template_bindings() {
+    use std::sync::Arc;
+    use verter_macro_dto::{
+        AuthoredMemberOrdinal, MacroAnchor, MacroRuntimeBundle, MacroRuntimeEntry,
+        MacroRuntimeOutcome, MacroRuntimeShape, OrderedRuntimeConstructors,
+        PropsDefaultsAssociation, PropsRuntimeShape, RuntimeConstructor, RuntimeProp,
+        RuntimePropType,
+    };
+
+    let semantics = VueMacroSemanticInput::Runtime(Arc::new(MacroRuntimeBundle {
+        entries: vec![MacroRuntimeEntry {
+            syntax_index: 0,
+            macro_index: 0,
+            outcome: MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(PropsRuntimeShape {
+                defaults: PropsDefaultsAssociation::None,
+                props: vec![RuntimeProp {
+                    name: "authoritative".to_string(),
+                    optional: false,
+                    type_shape: RuntimePropType::Resolved {
+                        constructors: OrderedRuntimeConstructors::from_ordered([
+                            RuntimeConstructor::String,
+                        ]),
+                        skip_check: false,
+                    },
+                    anchor: MacroAnchor::Authored {
+                        macro_index: 0,
+                        member_ordinal: AuthoredMemberOrdinal::new(0),
+                    },
+                }],
+            })),
+        }],
+    }));
+    let alloc = Allocator::new();
+    let result = compile(
+        r#"<script setup lang="ts">
+defineProps<{ authoritative: string }>()
+</script>
+<template>{{ authoritative }}</template>"#,
+        &CodegenOptions {
+            filename: Some("App.vue".to_string()),
+            target: CompileTarget::IDE,
+            ..Default::default()
+        },
+        &VerterCompileOptions::default(),
+        &semantics,
+        &alloc,
+    );
+
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let code = result.tsx.expect("IDE output").code;
+    assert!(
+        code.contains("__props.authoritative"),
+        "authoritative runtime props must drive IDE binding ownership: {code}"
+    );
+    assert!(
+        !code.contains("_ctx.authoritative"),
+        "an authoritative prop must not fall back to context ownership: {code}"
+    );
+}
+
+#[test]
+fn vmrs_ide_uses_authoritative_model_prop_for_template_bindings() {
+    use verter_macro_dto::RuntimeConstructor;
+
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_model_entry(
+        0,
+        0,
+        "title",
+        "titleModifiers",
+        "update:title",
+        false,
+        [RuntimeConstructor::String],
+    )]);
+    let alloc = Allocator::new();
+    let result = compile(
+        r#"<script setup lang="ts">
+defineModel<string>('title')
+</script>
+<template>{{ title }}</template>"#,
+        &CodegenOptions {
+            filename: Some("App.vue".to_string()),
+            target: CompileTarget::IDE,
+            ..Default::default()
+        },
+        &VerterCompileOptions::default(),
+        &VueMacroSemanticInput::Runtime(runtime),
+        &alloc,
+    );
+
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let code = result.tsx.expect("IDE output").code;
+    assert!(
+        code.contains("__props.title"),
+        "authoritative model props must drive IDE binding ownership: {code}"
+    );
+    assert!(
+        !code.contains("___VERTER___instance.title"),
+        "an authoritative model prop must not degrade to instance ownership: {code}"
+    );
+}
+
+#[test]
+fn vmrs_ide_rejects_noncomplete_runtime_semantics_without_registering_bindings() {
+    use std::sync::Arc;
+    use verter_macro_dto::{
+        MacroFailure, MacroPartialReason, MacroRuntimeBundle, MacroRuntimeEntry,
+        MacroRuntimeOutcome,
+    };
+
+    let source = r#"<script setup lang="ts">
+defineProps<{ title: string }>()
+</script>
+<template>{{ title }}</template>"#;
+    let cases = [
+        (
+            "unavailable",
+            VueMacroSemanticInput::Unavailable,
+            "XMissingMacroSemanticBundle",
+        ),
+        (
+            "partial",
+            VueMacroSemanticInput::Runtime(Arc::new(MacroRuntimeBundle {
+                entries: vec![MacroRuntimeEntry {
+                    syntax_index: 0,
+                    macro_index: 0,
+                    outcome: MacroRuntimeOutcome::Partial(MacroFailure::new(
+                        MacroPartialReason::IncompleteTraversal,
+                        None,
+                    )),
+                }],
+            })),
+            "XUnavailableMacroSemanticResult",
+        ),
+        (
+            "unknown syntax entry",
+            VueMacroSemanticInput::Runtime(crate::test_helpers::runtime_bundle([
+                crate::test_helpers::runtime_props_entry(
+                    1,
+                    0,
+                    verter_macro_dto::PropsDefaultsAssociation::None,
+                    [crate::test_helpers::runtime_prop(
+                        "title",
+                        false,
+                        [verter_macro_dto::RuntimeConstructor::String],
+                    )],
+                ),
+            ])),
+            "XMissingMacroSemanticBundle",
+        ),
+        (
+            "TSC-only",
+            VueMacroSemanticInput::Tsc(Arc::new(verter_macro_dto::MacroTscBundle::default())),
+            "XMissingMacroSemanticBundle",
+        ),
+    ];
+
+    for (case, semantics, expected_code) in cases {
+        let alloc = Allocator::new();
+        let result = compile(
+            source,
+            &CodegenOptions {
+                filename: Some("App.vue".to_string()),
+                target: CompileTarget::IDE,
+                ..Default::default()
+            },
+            &VerterCompileOptions::default(),
+            &semantics,
+            &alloc,
+        );
+
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|diagnostic| diagnostic.code == expected_code),
+            "{case} must fail closed with {expected_code}: {:?}",
+            result.errors
+        );
+        let code = result.tsx.expect("IDE output remains available").code;
+        assert!(
+            !code.contains("__props.title"),
+            "{case} must not publish an unvalidated prop binding: {code}"
+        );
+    }
 }
 
 #[test]
@@ -1178,6 +1375,18 @@ fn vmrs_tsc_unavailable_diagnostics_preserve_exact_outcome_reason_and_detail() {
 
 fn compile_and_validate_vapor_template(source: &str) -> String {
     let result = compile_sfc_vapor(source);
+    validate_vapor_template_result(result)
+}
+
+fn compile_and_validate_vapor_template_with_runtime(
+    source: &str,
+    runtime: std::sync::Arc<verter_macro_dto::MacroRuntimeBundle>,
+) -> String {
+    let semantics = VueMacroSemanticInput::Runtime(runtime);
+    validate_vapor_template_result(compile_sfc_vapor_with_semantics(source, &semantics))
+}
+
+fn validate_vapor_template_result(result: VerterCompileResult) -> String {
     assert!(
         result.errors.is_empty(),
         "compile errors: {:?}",
@@ -1487,6 +1696,17 @@ fn compile_and_validate_template_no_hoist(source: &str) -> String {
 /// Returns the template code string for further assertion.
 fn compile_and_validate_template(source: &str) -> String {
     let result = compile_sfc(source);
+    validate_template_result(result)
+}
+
+fn compile_and_validate_template_with_runtime(
+    source: &str,
+    runtime: std::sync::Arc<verter_macro_dto::MacroRuntimeBundle>,
+) -> String {
+    validate_template_result(compile_sfc_with_runtime(source, runtime))
+}
+
+fn validate_template_result(result: VerterCompileResult) -> String {
     assert!(
         result.errors.is_empty(),
         "compile errors: {:?}",
@@ -1732,9 +1952,18 @@ fn v_if_followed_by_sibling_valid_js() {
 /// produces enough prepends to trigger sort_unstable_by_key reordering.
 #[test]
 fn analysis_panel_regression_valid_js() {
-    let code = compile_and_validate_template(include_str!(
-        "../../../packages/playground/src/output/AnalysisPanel.vue"
-    ));
+    let source = include_str!("../../../packages/playground/src/output/AnalysisPanel.vue");
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "store",
+            false,
+            [verter_macro_dto::RuntimeConstructor::Object],
+        )],
+    )]);
+    let code = compile_and_validate_template_with_runtime(source, runtime);
     assert!(
         !code.contains(",  : _createCommentVNode"),
         "comma should not appear before ternary colon\n{}",
@@ -2317,9 +2546,20 @@ fn component_kebab_case_resolves_to_pascal_setup_binding() {
 
 #[test]
 fn type_based_define_props_resolves_to_props_prefix() {
-    let result = compile_sfc(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "store",
+            false,
+            [verter_macro_dto::RuntimeConstructor::Object],
+        )],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"<template><div>{{ store.loading }}</div></template>
 <script setup lang="ts">import type { Store } from "./store"; const props = defineProps<{ store: Store }>();</script>"#,
+        runtime,
     );
     let tpl = result.template.as_ref().expect("template block");
     assert!(
@@ -3806,7 +4046,32 @@ const props = defineProps({ context: String })
 fn with_defaults_merges_defaults_into_props() {
     // withDefaults(defineProps<{ color?: string, size?: string, label?: string }>(), { color: 'primary', size: 'md' })
     // should produce props: { color: { type: String, default: 'primary' }, size: { type: String, default: 'md' }, label: { type: String } }
-    let result = compile_sfc(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop(
+                "color",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop(
+                "size",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop(
+                "label",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+        ],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"<script setup lang="ts">
 const props = withDefaults(defineProps<{
   color?: string
@@ -3819,6 +4084,7 @@ const props = withDefaults(defineProps<{
 </script>
 
 <template><div>{{ props.color }}</div></template>"#,
+        runtime,
     );
     let script = result.script.as_ref().expect("script block");
     // Should have props section with defaults merged
@@ -3854,7 +4120,27 @@ const props = withDefaults(defineProps<{
 fn with_defaults_type_reference() {
     // withDefaults(defineProps<Props>(), { color: 'primary' })
     // where Props is a type alias — type resolution should still work
-    let result = compile_sfc(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "color",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "size",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+        ],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"<script setup lang="ts">
 type Props = {
   color?: string
@@ -3867,6 +4153,7 @@ const props = withDefaults(defineProps<Props>(), {
 </script>
 
 <template><div>{{ props.color }}</div></template>"#,
+        runtime,
     );
     let script = result.script.as_ref().expect("script block");
     // Should have props section with default
@@ -3887,7 +4174,32 @@ const props = withDefaults(defineProps<Props>(), {
 fn define_props_type_with_imported_types() {
     // defineProps<Props>() where Props has imported types — all props should
     // still appear in the runtime props section (with null type for unknown)
-    let result = compile_sfc(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [
+            crate::test_helpers::runtime_degraded_prop_at_macro_argument(
+                "pool",
+                false,
+                verter_macro_dto::MacroMemberReason::Unresolved(
+                    verter_macro_dto::UnresolvedReason::MissingDeclaration,
+                ),
+                Some("Pool is not declared in the fixture".to_owned()),
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "loading",
+                false,
+                [verter_macro_dto::RuntimeConstructor::Boolean],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "items",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Array],
+            ),
+        ],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"<script setup lang="ts">
 type Props = {
   pool: Pool
@@ -3899,6 +4211,7 @@ const props = defineProps<Props>()
 </script>
 
 <template><div>{{ props.loading }}</div></template>"#,
+        runtime,
     );
     let script = result.script.as_ref().expect("script block");
     // All props should be present (even Pool which is unresolvable)
@@ -3922,7 +4235,40 @@ const props = defineProps<Props>()
 #[test]
 fn with_defaults_imported_types_all_props_present() {
     // withDefaults with Props that has imported types — all props must be present
-    let result = compile_sfc(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_degraded_prop_at_macro_argument(
+                "pool",
+                false,
+                verter_macro_dto::MacroMemberReason::Unresolved(
+                    verter_macro_dto::UnresolvedReason::MissingDeclaration,
+                ),
+                Some("Pool is not declared in the fixture".to_owned()),
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "loading",
+                false,
+                [verter_macro_dto::RuntimeConstructor::Boolean],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "titleTokens",
+                false,
+                [verter_macro_dto::RuntimeConstructor::Array],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "color",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+        ],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"<script setup lang="ts">
 type Props = {
   pool: Pool
@@ -3937,6 +4283,7 @@ const props = withDefaults(defineProps<Props>(), {
 </script>
 
 <template><div>{{ props.loading }}</div></template>"#,
+        runtime,
     );
     let script = result.script.as_ref().expect("script block");
     eprintln!("OUTPUT:\n{}", script.code);
@@ -3962,17 +4309,28 @@ const props = withDefaults(defineProps<Props>(), {
     );
 }
 
-/// @ai-generated — withDefaults + unresolvable imported type (no declarator)
-/// should emit runtime prop declarations from the defaults variable.
-/// Vue's `mergeDefaults({}, defaults)` does NOT create new prop declarations
-/// (it only merges into existing ones), so we must create them ourselves.
-/// This is the exact pattern from oku-primitives Label.vue.
+/// A non-literal defaults expression without a declarator must merge into the
+/// authoritative prop declaration supplied by the semantic boundary.
 #[test]
-fn with_defaults_unresolvable_type_no_declarator() {
-    let result = compile_sfc(
+fn with_defaults_variable_expression_without_declarator_uses_authoritative_props() {
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        1,
+        2,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 1,
+            defaults_macro_index: 2,
+        },
+        [crate::test_helpers::runtime_prop_at_macro_argument(
+            "as",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"<script setup lang="ts">
-import type { LabelProps } from './Label.ts'
 import { DEFAULT_LABEL_PROPS } from './Label.ts'
+
+interface LabelProps { as?: string }
 
 defineOptions({
   name: 'RadixLabel',
@@ -3982,10 +4340,10 @@ defineOptions({
 withDefaults(defineProps<LabelProps>(), DEFAULT_LABEL_PROPS)
 </script>
 <template><div /></template>"#,
+        runtime,
     );
     let script = result.script.as_ref().expect("script block");
     println!("OUTPUT:\n{}", script.code);
-    // Must have props section that creates prop declarations from defaults
     assert!(
         script.code.contains("props:"),
         "should have props section.\nOutput:\n{}",
@@ -3996,26 +4354,39 @@ withDefaults(defineProps<LabelProps>(), DEFAULT_LABEL_PROPS)
         "should reference the defaults variable.\nOutput:\n{}",
         script.code
     );
-    // Must NOT use mergeDefaults (it doesn't create new prop declarations)
     assert!(
-        !script.code.contains("mergeDefaults"),
-        "should NOT use mergeDefaults (it doesn't create new props).\nOutput:\n{}",
+        script.code.contains("_mergeDefaults("),
+        "variable defaults must merge with authoritative props.\nOutput:\n{}",
         script.code
     );
 }
 
-/// @ai-generated — withDefaults + unresolvable imported type WITH declarator
-/// should emit runtime prop declarations and `const props = __props`.
+/// The same authoritative variable-defaults path preserves the declarator.
 #[test]
-fn with_defaults_unresolvable_type_with_declarator() {
-    let result = compile_sfc(
+fn with_defaults_variable_expression_with_declarator_uses_authoritative_props() {
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [crate::test_helpers::runtime_prop_at_macro_argument(
+            "as",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"<script setup lang="ts">
-import type { LabelProps } from './Label.ts'
 import { DEFAULT_LABEL_PROPS } from './Label.ts'
+
+interface LabelProps { as?: string }
 
 const props = withDefaults(defineProps<LabelProps>(), DEFAULT_LABEL_PROPS)
 </script>
 <template><div>{{ props.as }}</div></template>"#,
+        runtime,
     );
     let script = result.script.as_ref().expect("script block");
     println!("OUTPUT:\n{}", script.code);
@@ -4035,19 +4406,43 @@ const props = withDefaults(defineProps<LabelProps>(), DEFAULT_LABEL_PROPS)
         script.code
     );
     assert!(
-        !script.code.contains("mergeDefaults"),
-        "should NOT use mergeDefaults (it doesn't create new props).\nOutput:\n{}",
+        script.code.contains("_mergeDefaults("),
+        "variable defaults must merge with authoritative props.\nOutput:\n{}",
         script.code
     );
 }
 
-/// @ai-generated — withDefaults + unresolvable type + object literal defaults
-/// should emit inline prop declarations from the parsed object literal.
+/// Object-literal defaults merge into an explicit local prop contract.
 #[test]
-fn with_defaults_unresolvable_type_object_literal_defaults() {
-    let result = compile_sfc(
+fn with_defaults_object_literal_defaults_use_authoritative_local_props() {
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "zIndex",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Number],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "target",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "position",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+        ],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"<script setup lang="ts">
-import type { AffixProps } from './affix'
+interface AffixProps { zIndex?: number; target?: string; position?: string }
 const props = withDefaults(defineProps<AffixProps>(), {
   zIndex: 100,
   target: '',
@@ -4055,6 +4450,7 @@ const props = withDefaults(defineProps<AffixProps>(), {
 })
 </script>
 <template><div>{{ props.zIndex }}</div></template>"#,
+        runtime,
     );
     let script = result.script.as_ref().expect("script block");
     println!("OUTPUT:\n{}", script.code);
@@ -4076,18 +4472,32 @@ const props = withDefaults(defineProps<AffixProps>(), {
     );
 }
 
-/// @ai-generated — withDefaults + unresolvable type + function call defaults
-/// e.g., `withDefaults(defineProps<Props>(), getDefaults())`
+/// Function-call defaults merge into an explicit local prop contract.
 #[test]
-fn with_defaults_unresolvable_type_function_call_defaults() {
-    let result = compile_sfc(
+fn with_defaults_function_call_defaults_use_authoritative_local_props() {
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [crate::test_helpers::runtime_prop_at_macro_argument(
+            "foo",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"<script setup lang="ts">
-import type { Props } from './types'
 import { getDefaults } from './defaults'
+
+interface Props { foo?: string }
 
 const props = withDefaults(defineProps<Props>(), getDefaults())
 </script>
 <template><div>{{ props.foo }}</div></template>"#,
+        runtime,
     );
     let script = result.script.as_ref().expect("script block");
     println!("OUTPUT:\n{}", script.code);
@@ -4105,19 +4515,33 @@ const props = withDefaults(defineProps<Props>(), getDefaults())
 
 /// @ai-generated — withDefaults + unresolvable type without any defaults
 /// should emit empty props `{}`
-/// @ai-generated - unresolved imported defineProps inside withDefaults should not
-/// surface XInvalidMacroType when fallback props codegen can still synthesize
-/// runtime props from the defaults expression.
+/// A complete semantic result with function-call defaults compiles without a
+/// macro-boundary diagnostic.
 #[test]
-fn with_defaults_unresolvable_imported_type_with_defaults_has_no_error() {
-    let result = compile_sfc(
+fn with_defaults_authoritative_type_with_function_defaults_has_no_error() {
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [crate::test_helpers::runtime_prop_at_macro_argument(
+            "foo",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"<script setup lang="ts">
-import type { Props } from './types'
 import { getDefaults } from './defaults'
+
+interface Props { foo?: string }
 
 const props = withDefaults(defineProps<Props>(), getDefaults())
 </script>
 <template><div>{{ props.foo }}</div></template>"#,
+        runtime,
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
@@ -4161,7 +4585,27 @@ defineProps<Props>()
 /// should NOT use the IIFE pattern — should resolve types normally
 #[test]
 fn with_defaults_resolvable_type_still_works() {
-    let result = compile_sfc(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop(
+                "color",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop(
+                "size",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Number],
+            ),
+        ],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"<script setup lang="ts">
 const props = withDefaults(defineProps<{
   color?: string
@@ -4172,6 +4616,7 @@ const props = withDefaults(defineProps<{
 })
 </script>
 <template><div>{{ props.color }}</div></template>"#,
+        runtime,
     );
     let script = result.script.as_ref().expect("script block");
     println!("OUTPUT:\n{}", script.code);
@@ -4198,19 +4643,39 @@ const props = withDefaults(defineProps<{
     );
 }
 
-/// @ai-generated — withDefaults with mixed: some props have defaults, some don't
-/// with unresolvable type + object literal defaults
+/// Mixed object defaults use an explicit local prop contract.
 #[test]
-fn with_defaults_unresolvable_type_mixed_defaults() {
-    let result = compile_sfc(
+fn with_defaults_mixed_defaults_use_authoritative_local_props() {
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "method",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "action",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+        ],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"<script setup lang="ts">
-import type { FormProps } from './form'
+interface FormProps { method?: string; action?: string }
 const props = withDefaults(defineProps<FormProps>(), {
   method: 'POST',
   action: '/api/submit',
 })
 </script>
 <template><div>{{ props.method }}</div></template>"#,
+        runtime,
     );
     let script = result.script.as_ref().expect("script block");
     println!("OUTPUT:\n{}", script.code);
@@ -4226,18 +4691,33 @@ const props = withDefaults(defineProps<FormProps>(), {
     );
 }
 
-/// @ai-generated — withDefaults + unresolvable type + spread/computed property defaults
-/// Tests that the IIFE runtime approach handles any expression as defaults
+/// Spread defaults preserve the full defaults expression while merging into an
+/// explicit local prop contract.
 #[test]
-fn with_defaults_unresolvable_type_complex_expression_defaults() {
-    let result = compile_sfc(
+fn with_defaults_spread_expression_uses_authoritative_local_props() {
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [crate::test_helpers::runtime_prop_at_macro_argument(
+            "extra",
+            true,
+            [verter_macro_dto::RuntimeConstructor::Boolean],
+        )],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"<script setup lang="ts">
-import type { Props } from './types'
 import { baseDefaults } from './defaults'
+
+interface Props { extra?: boolean }
 
 withDefaults(defineProps<Props>(), { ...baseDefaults, extra: true })
 </script>
 <template><div /></template>"#,
+        runtime,
     );
     let script = result.script.as_ref().expect("script block");
     println!("OUTPUT:\n{}", script.code);
@@ -5015,6 +5495,16 @@ fn setup_returns_bindings_with_define_props() {
         source_map: false,
         ..Default::default()
     };
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "store",
+            false,
+            [verter_macro_dto::RuntimeConstructor::Unknown],
+        )],
+    )]);
     let result = compile(
         r#"<script setup lang="ts">
 import { ref, onMounted, shallowRef } from 'vue'
@@ -5042,7 +5532,7 @@ onMounted(() => {
 "#,
         &options,
         &verter_opts,
-        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &VueMacroSemanticInput::Runtime(runtime),
         &alloc,
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -5089,21 +5579,25 @@ fn optional_tuple_element_in_define_emits() {
         source_map: true,
         ..Default::default()
     };
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_emits_entry(
+        1,
+        1,
+        ["open", "select"],
+    )]);
     let result = compile(
         r#"<script lang="ts" setup>
-import type { MenuRecordRaw } from '@vben/types';
-
-import type { MenuProps } from '@vben-core/menu-ui';
-
 import { Menu } from '@vben-core/menu-ui';
 
-interface Props extends MenuProps {
-  menus?: MenuRecordRaw[];
-}
-
-const props = withDefaults(defineProps<Props>(), {
-  accordion: true,
-  menus: () => [],
+// Runtime props isolate the optional-tuple test to typed defineEmits.
+const props = defineProps({
+  accordion: Boolean,
+  collapse: Boolean,
+  collapseShowTitle: Boolean,
+  defaultActive: String,
+  menus: Array,
+  mode: String,
+  rounded: Boolean,
+  theme: String,
 });
 
 const emit = defineEmits<{
@@ -5138,7 +5632,7 @@ scroll-to-active
 "#,
         &options,
         &verter_opts,
-        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &VueMacroSemanticInput::Runtime(runtime),
         &alloc,
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -5248,7 +5742,32 @@ const state = "open";
 // @ai-generated - TDD test: type-only defineProps with type reference from companion <script> block
 #[test]
 fn cross_block_type_resolution_for_define_props() {
-    let result = compile_sfc(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "title",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "description",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "color",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+        ],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"<script lang="ts">
 export interface AlertProps {
   title?: string
@@ -5262,6 +5781,7 @@ const props = withDefaults(defineProps<AlertProps>(), {
 })
 </script>
 <template><div>{{ props.title }}</div></template>"#,
+        runtime,
     );
     let script = result.script.as_ref().expect("script block");
     // All three props should be declared in the runtime props object
@@ -5566,11 +6086,17 @@ fn event_modifier_on_component_generates_import() {
 fn type_based_define_emits_generates_emits_option() {
     // defineEmits<{ mousedown: [event: MouseEvent] }>() should generate
     // emits: ["mousedown"] in the component definition.
-    let result = compile_sfc(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_emits_entry(
+        0,
+        0,
+        ["mousedown"],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"<script setup lang="ts">
 const emit = defineEmits<{ mousedown: [event: MouseEvent] }>()
 </script>
 <template><div>test</div></template>"#,
+        runtime,
     );
     let script = result.script.as_ref().expect("script block");
     assert!(
@@ -5589,11 +6115,17 @@ const emit = defineEmits<{ mousedown: [event: MouseEvent] }>()
 fn type_based_define_emits_call_signature_generates_emits_option() {
     // defineEmits<{ (e: 'change', value: string): void }>() should generate
     // emits: ["change"] in the component definition.
-    let result = compile_sfc(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_emits_entry(
+        0,
+        0,
+        ["change"],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"<script setup lang="ts">
 const emit = defineEmits<{ (e: 'change', value: string): void }>()
 </script>
 <template><div>test</div></template>"#,
+        runtime,
     );
     let script = result.script.as_ref().expect("script block");
     assert!(
@@ -5870,7 +6402,32 @@ fn comment_between_v_if_branches_does_not_leak_in_prod() {
 /// where key spans reference the companion block, producing corrupted prop names.
 #[test]
 fn with_defaults_cross_block_type_uses_key_name() {
-    let result = compile_sfc(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "title",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "description",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "color",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+        ],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"<script lang="ts">
 export interface ExternalProps {
   title?: string
@@ -5884,6 +6441,7 @@ const props = withDefaults(defineProps<ExternalProps>(), {
 })
 </script>
 <template><div>{{ props.title }}</div></template>"#,
+        runtime,
     );
     let script = result.script.as_ref().expect("script block");
     // The withDefaults path must use key_name (pre-resolved) for cross-block types,
@@ -5912,7 +6470,27 @@ const props = withDefaults(defineProps<ExternalProps>(), {
 /// are present in the same component.
 #[test]
 fn define_model_with_defaults_resolved_type() {
-    let result = compile_sfc_keep_ts(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "placeholder",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "maxLength",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Number],
+            ),
+        ],
+    )]);
+    let result = compile_sfc_keep_ts_with_runtime(
         r#"<script setup lang="ts">
 interface ChatInputProps {
   placeholder?: string
@@ -5925,6 +6503,7 @@ const props = withDefaults(defineProps<ChatInputProps>(), DEFAULT_PROPS)
 const visible = defineModel('visible', { type: Boolean, default: false })
 </script>
 <template><div>{{ visible }}</div></template>"#,
+        runtime,
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let script = result.script.as_ref().expect("script block");
@@ -5948,15 +6527,26 @@ const visible = defineModel('visible', { type: Boolean, default: false })
     );
 }
 
-/// @ai-generated - defineModel + withDefaults with unresolvable type + runtime variable
-/// must produce valid JS (IIFE fallback). The model props must NOT be inserted inside
-/// the IIFE body — _mergeModels wraps the IIFE.
+/// defineModel + authoritative withDefaults with a runtime defaults variable
+/// composes `_mergeDefaults` inside `_mergeModels` without interleaving model rows.
 #[test]
-fn define_model_with_defaults_runtime_var_iife() {
-    // Simulate: imported type (unresolvable in standalone compile) + runtime defaults
-    let result = compile_sfc(
+fn define_model_with_authoritative_defaults_runtime_variable() {
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [crate::test_helpers::runtime_prop_at_macro_argument(
+            "placeholder",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"<script setup lang="ts">
-import type { ChatInputProps } from './types'
+interface ChatInputProps { placeholder?: string }
 
 const DEFAULT_PROPS = { placeholder: 'Type...' }
 
@@ -5964,20 +6554,19 @@ const props = withDefaults(defineProps<ChatInputProps>(), DEFAULT_PROPS)
 const visible = defineModel('visible', { type: Boolean, default: false })
 </script>
 <template><div>{{ visible }}</div></template>"#,
+        runtime,
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let script = result.script.as_ref().expect("script block");
 
-    // Even with IIFE fallback, _mergeModels must wrap the result
     assert!(
         script.code.contains("_mergeModels"),
-        "Should use _mergeModels to merge model props with withDefaults IIFE.\nGot:\n{}",
+        "Should use _mergeModels to merge model props with authoritative defaults.\nGot:\n{}",
         script.code
     );
-    // Must NOT have the invalid pattern: `return p, visible: {}`
     assert!(
         !script.code.contains("return p,"),
-        "Model props must NOT be inserted inside the IIFE body.\nGot:\n{}",
+        "Model props must not be interleaved into defaults lowering.\nGot:\n{}",
         script.code
     );
 }
@@ -6013,7 +6602,20 @@ const visible = defineModel('visible')
 /// @ai-generated - defineModel + type-based withDefaults merges correctly
 #[test]
 fn define_model_with_typed_with_defaults() {
-    let result = compile_sfc_keep_ts(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [crate::test_helpers::runtime_prop_at_macro_argument(
+            "placeholder",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let result = compile_sfc_keep_ts_with_runtime(
         r#"<script setup lang="ts">
 interface Props {
   placeholder?: string
@@ -6023,6 +6625,7 @@ const props = withDefaults(defineProps<Props>(), { placeholder: 'Type...' })
 const open = defineModel('open', { type: Boolean })
 </script>
 <template><div>{{ props.placeholder }} {{ open }}</div></template>"#,
+        runtime,
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let script = result.script.as_ref().expect("script block");
@@ -6065,7 +6668,17 @@ const visible = defineModel('visible')
 /// @ai-generated - export type inside script setup must be stripped when force_js: true
 #[test]
 fn export_type_stripped_when_force_js() {
-    let result = compile_sfc(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop_at_macro_argument(
+            "visible",
+            true,
+            [verter_macro_dto::RuntimeConstructor::Boolean],
+        )],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"<script setup lang="ts">
 import { computed } from 'vue'
 
@@ -6082,6 +6695,7 @@ const isOpen = computed(() => props.visible)
 </script>
 
 <template><div>{{ isOpen }}</div></template>"#,
+        runtime,
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let script = result.script.as_ref().expect("script block");
@@ -6101,7 +6715,24 @@ const isOpen = computed(() => props.visible)
 /// @ai-generated - export interface inside script setup must be stripped when force_js: true
 #[test]
 fn export_interface_stripped_when_force_js() {
-    let result = compile_sfc(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "title",
+                false,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "count",
+                false,
+                [verter_macro_dto::RuntimeConstructor::Number],
+            ),
+        ],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"<script setup lang="ts">
 export interface FooProps {
   title: string
@@ -6112,6 +6743,7 @@ const props = defineProps<FooProps>()
 </script>
 
 <template><div>{{ props.title }}</div></template>"#,
+        runtime,
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let script = result.script.as_ref().expect("script block");
@@ -6155,6 +6787,20 @@ const x = 1
 // ======================== export type hoisting (keep TS) ========================
 
 fn compile_sfc_keep_ts(source: &str) -> VerterCompileResult {
+    compile_sfc_keep_ts_with_semantics(source, &VueMacroSemanticInput::Unavailable)
+}
+
+fn compile_sfc_keep_ts_with_runtime(
+    source: &str,
+    runtime: std::sync::Arc<verter_macro_dto::MacroRuntimeBundle>,
+) -> VerterCompileResult {
+    compile_sfc_keep_ts_with_semantics(source, &VueMacroSemanticInput::Runtime(runtime))
+}
+
+fn compile_sfc_keep_ts_with_semantics(
+    source: &str,
+    macro_semantics: &VueMacroSemanticInput,
+) -> VerterCompileResult {
     let alloc = Allocator::new();
     let options = CodegenOptions {
         filename: Some("App.vue".to_string()),
@@ -6164,13 +6810,7 @@ fn compile_sfc_keep_ts(source: &str) -> VerterCompileResult {
         force_js: false,
         ..Default::default()
     };
-    compile(
-        source,
-        &options,
-        &verter_opts,
-        &crate::compile::VueMacroSemanticInput::Unavailable,
-        &alloc,
-    )
+    compile(source, &options, &verter_opts, macro_semantics, &alloc)
 }
 
 /// @ai-generated - export type is hoisted outside setup wrapper when keeping TS types
@@ -7477,7 +8117,17 @@ fn companion_script_type_only_import_not_in_returned() {
     // be in __returned__. This matches Vue's official compiler behavior.
     // Regression test: a type-only companion-script import must not appear in
     // __returned__ (a build failure otherwise, matching the official compiler).
-    let result = compile_sfc(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "items",
+            false,
+            [verter_macro_dto::RuntimeConstructor::Array],
+        )],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"<script lang="ts">
 import { computed, defineComponent } from "vue";
 import { CurrencyCodes, isArray } from "vue-composable";
@@ -7503,6 +8153,7 @@ function doStuff() {
 <template>
   <HButton :label="doStuff()" />
 </template>"#,
+        runtime,
     );
     assert!(
         result.errors.is_empty(),
@@ -7623,13 +8274,24 @@ const msg = "hello";
 
 #[test]
 fn class_prop_uses_bracket_notation_vdom() {
-    let code = compile_and_validate_template(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "class",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let code = compile_and_validate_template_with_runtime(
         r#"<script setup>
 defineProps<{ class?: string }>()
 </script>
 <template>
   <div :class="class"></div>
 </template>"#,
+        runtime,
     );
     // Must use bracket notation for JS reserved word "class"
     assert!(
@@ -7641,7 +8303,17 @@ defineProps<{ class?: string }>()
 
 #[test]
 fn class_prop_on_component_uses_bracket_notation_vdom() {
-    let code = compile_and_validate_template(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "class",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let code = compile_and_validate_template_with_runtime(
         r#"<script setup>
 import Comp from './Comp.vue'
 const props = defineProps<{ class?: string }>()
@@ -7649,6 +8321,7 @@ const props = defineProps<{ class?: string }>()
 <template>
   <Comp :class="class" />
 </template>"#,
+        runtime,
     );
     // Must use bracket notation for JS reserved word "class"
     assert!(
@@ -7660,13 +8333,24 @@ const props = defineProps<{ class?: string }>()
 
 #[test]
 fn class_prop_uses_bracket_notation_vapor() {
-    let code = compile_and_validate_vapor_template(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "class",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let code = compile_and_validate_vapor_template_with_runtime(
         r#"<script setup>
 defineProps<{ class?: string }>()
 </script>
 <template>
   <div :class="class"></div>
 </template>"#,
+        runtime,
     );
     // Vapor uses _ctx prefix; must use bracket notation for "class"
     assert!(
@@ -7768,7 +8452,17 @@ fn html_entity_copy_decoded() {
 
 #[test]
 fn top_level_await_produces_async_setup() {
-    let result = compile_sfc(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "id",
+            false,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"<script setup lang="ts">
 const props = defineProps<{
   id: string
@@ -7781,6 +8475,7 @@ const name = item.name
 <template>
   <div>{{ name }}</div>
 </template>"#,
+        runtime,
     );
     assert!(
         result.errors.is_empty(),
@@ -7798,6 +8493,20 @@ const name = item.name
 // ── TSX codegen integration tests ─────────────────────────────────
 
 fn compile_tsx(source: &str) -> VerterCompileResult {
+    compile_tsx_with_semantics(source, &VueMacroSemanticInput::Unavailable)
+}
+
+fn compile_tsx_with_runtime(
+    source: &str,
+    runtime: std::sync::Arc<verter_macro_dto::MacroRuntimeBundle>,
+) -> VerterCompileResult {
+    compile_tsx_with_semantics(source, &VueMacroSemanticInput::Runtime(runtime))
+}
+
+fn compile_tsx_with_semantics(
+    source: &str,
+    macro_semantics: &VueMacroSemanticInput,
+) -> VerterCompileResult {
     let alloc = Allocator::new();
     let options = CodegenOptions {
         filename: Some("App.vue".to_string()),
@@ -7808,13 +8517,7 @@ fn compile_tsx(source: &str) -> VerterCompileResult {
         source_map: true,
         ..Default::default()
     };
-    compile(
-        source,
-        &options,
-        &verter_opts,
-        &crate::compile::VueMacroSemanticInput::Unavailable,
-        &alloc,
-    )
+    compile(source, &options, &verter_opts, macro_semantics, &alloc)
 }
 
 fn compile_tsx_with_force_js(source: &str, force_js: bool) -> VerterCompileResult {
@@ -9396,21 +10099,21 @@ fn tsx_macros_v5_process_parity_matrix() {
     with_defaults_type_reference();
     define_props_type_with_imported_types();
     with_defaults_imported_types_all_props_present();
-    with_defaults_unresolvable_type_no_declarator();
-    with_defaults_unresolvable_type_with_declarator();
-    with_defaults_unresolvable_type_object_literal_defaults();
-    with_defaults_unresolvable_type_function_call_defaults();
+    with_defaults_variable_expression_without_declarator_uses_authoritative_props();
+    with_defaults_variable_expression_with_declarator_uses_authoritative_props();
+    with_defaults_object_literal_defaults_use_authoritative_local_props();
+    with_defaults_function_call_defaults_use_authoritative_local_props();
     with_defaults_unresolvable_type_no_defaults();
     with_defaults_resolvable_type_still_works();
-    with_defaults_unresolvable_type_mixed_defaults();
-    with_defaults_unresolvable_type_complex_expression_defaults();
+    with_defaults_mixed_defaults_use_authoritative_local_props();
+    with_defaults_spread_expression_uses_authoritative_local_props();
     cross_block_type_resolution_for_define_props();
     with_defaults_cross_block_type_uses_key_name();
 
     define_model_declares_prop_and_emit();
     define_model_named_declares_prop_and_emit();
     define_model_with_defaults_resolved_type();
-    define_model_with_defaults_runtime_var_iife();
+    define_model_with_authoritative_defaults_runtime_variable();
     define_model_with_define_props_object_uses_merge_models();
     define_model_with_typed_with_defaults();
     define_model_with_define_emits_uses_merge_models_for_emits();
@@ -12101,7 +12804,17 @@ const items = [1, 2]
 /// Verifies both __props declaration and valid IIFE chain in full TSX output
 #[test]
 fn tsx_v_if_with_define_props_and_whitespace() {
-    let result = compile_tsx(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "render",
+            false,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let result = compile_tsx_with_runtime(
         r#"<script setup lang="ts">
 const props = defineProps<{ render: 'svg' | 'img' }>()
 </script>
@@ -12109,6 +12822,7 @@ const props = defineProps<{ render: 'svg' | 'img' }>()
   <img v-if="render === 'svg'" class="icon" />
   <span v-else>fallback</span>
 </template>"#,
+        runtime,
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
@@ -12991,7 +13705,18 @@ const el = ref<HTMLDivElement>()
 
 /// Compile a Vue SFC to TSX and assert the output parses without errors.
 fn assert_tsx_parses(source: &str, label: &str) {
-    let result = compile_tsx(source);
+    assert_tsx_result_parses(compile_tsx(source), label);
+}
+
+fn assert_tsx_parses_with_runtime(
+    source: &str,
+    label: &str,
+    runtime: std::sync::Arc<verter_macro_dto::MacroRuntimeBundle>,
+) {
+    assert_tsx_result_parses(compile_tsx_with_runtime(source, runtime), label);
+}
+
+fn assert_tsx_result_parses(result: VerterCompileResult, label: &str) {
     assert!(
         result.errors.is_empty(),
         "[{}] compile errors: {:?}",
@@ -13346,7 +14071,16 @@ import MyComp from './MyComp.vue'
 
 #[test]
 fn tsx_parse_valid_define_model() {
-    assert_tsx_parses(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_model_entry(
+        0,
+        0,
+        "firstName",
+        "firstNameModifiers",
+        "update:firstName",
+        true,
+        [verter_macro_dto::RuntimeConstructor::String],
+    )]);
+    assert_tsx_parses_with_runtime(
         r#"<script setup lang="ts">
 const firstName = defineModel<string>('firstName')
 </script>
@@ -13354,12 +14088,18 @@ const firstName = defineModel<string>('firstName')
   <input v-model="firstName" />
 </template>"#,
         "defineModel",
+        runtime,
     );
 }
 
 #[test]
 fn tsx_parse_valid_define_emits() {
-    assert_tsx_parses(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_emits_entry(
+        0,
+        0,
+        ["change", "update"],
+    )]);
+    assert_tsx_parses_with_runtime(
         r#"<script setup lang="ts">
 const emit = defineEmits<{
   change: [value: string]
@@ -13370,12 +14110,33 @@ const emit = defineEmits<{
   <button @click="emit('change', 'hello')">go</button>
 </template>"#,
         "defineEmits typed",
+        runtime,
     );
 }
 
 #[test]
 fn tsx_parse_valid_define_props_with_defaults() {
-    assert_tsx_parses(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop(
+                "msg",
+                false,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop(
+                "count",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Number],
+            ),
+        ],
+    )]);
+    assert_tsx_parses_with_runtime(
         r#"<script setup lang="ts">
 const props = withDefaults(defineProps<{
   msg: string
@@ -13388,6 +14149,7 @@ const props = withDefaults(defineProps<{
   <div>{{ msg }} {{ count }}</div>
 </template>"#,
         "defineProps + withDefaults",
+        runtime,
     );
 }
 
@@ -13700,11 +14462,22 @@ const msg = 'hello'
 
 #[test]
 fn tsx_attrs_with_generic() {
-    let result = compile_tsx(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "items",
+            false,
+            [verter_macro_dto::RuntimeConstructor::Array],
+        )],
+    )]);
+    let result = compile_tsx_with_runtime(
         r#"<script setup lang="ts" generic="T" attrs="{ value: T }">
 defineProps<{ items: T[] }>()
 </script>
 <template><div /></template>"#,
+        runtime,
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
@@ -14377,11 +15150,22 @@ const msg = ref('hello')
 
 #[test]
 fn tsx_attrs_param_with_generics() {
-    let result = compile_tsx(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "items",
+            false,
+            [verter_macro_dto::RuntimeConstructor::Array],
+        )],
+    )]);
+    let result = compile_tsx_with_runtime(
         r#"<script setup lang="ts" generic="T extends string" attrs="{ value: T }">
 defineProps<{ items: T[] }>()
 </script>
 <template><div /></template>"#,
+        runtime,
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
@@ -14399,11 +15183,22 @@ defineProps<{ items: T[] }>()
 fn tsx_attrs_before_generic_in_source_order() {
     // When attrs appears BEFORE generic in the SFC source,
     // the generated TSX must still have generic before params.
-    let result = compile_tsx(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "value",
+            false,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let result = compile_tsx_with_runtime(
         r#"<script setup lang="ts" attrs="{ class: string }" generic="T extends string">
 defineProps<{ value: T }>()
 </script>
 <template><div /></template>"#,
+        runtime,
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
@@ -15769,6 +16564,42 @@ fn ide_no_duplicate_attrs_full_popover_with_components() {
         ..Default::default()
     };
     let verter_opts = VerterCompileOptions::default();
+    let runtime = crate::test_helpers::runtime_bundle([
+        crate::test_helpers::runtime_props_entry(
+            0,
+            1,
+            verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+                payload_macro_index: 0,
+                defaults_macro_index: 1,
+            },
+            [
+                crate::test_helpers::runtime_prop(
+                    "actions",
+                    true,
+                    [verter_macro_dto::RuntimeConstructor::Array],
+                ),
+                crate::test_helpers::runtime_prop(
+                    "actionsDirection",
+                    true,
+                    [verter_macro_dto::RuntimeConstructor::String],
+                ),
+                crate::test_helpers::runtime_prop(
+                    "showArrow",
+                    true,
+                    [verter_macro_dto::RuntimeConstructor::Boolean],
+                ),
+            ],
+        ),
+        crate::test_helpers::runtime_model_entry(
+            1,
+            2,
+            "show",
+            "showModifiers",
+            "update:show",
+            true,
+            [verter_macro_dto::RuntimeConstructor::Boolean],
+        ),
+    ]);
     let source = r#"<script setup lang="ts" attrs="{ class: string, style: string }" generic="T extends object">
 import { computed, ref, useTemplateRef } from 'vue'
 import { Popup } from '../Popup'
@@ -15832,7 +16663,7 @@ const arrowPos = ref({})
         source,
         &options,
         &verter_opts,
-        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &crate::compile::VueMacroSemanticInput::Runtime(runtime),
         &alloc,
     );
     assert!(
@@ -16672,13 +17503,14 @@ impl<'a> oxc_ast_visit::Visit<'a> for CompiledIdentifierFacts<'_> {
     }
 }
 
-fn compiled_tsx_identifier_facts<'name>(
+fn compiled_tsx_identifier_facts_with_runtime<'name>(
     source: &str,
     name: &'name str,
+    runtime: std::sync::Arc<verter_macro_dto::MacroRuntimeBundle>,
 ) -> CompiledIdentifierFacts<'name> {
     use oxc_ast_visit::Visit;
 
-    let result = compile_tsx(source);
+    let result = compile_tsx_with_runtime(source, runtime);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let code = &result.tsx.as_ref().expect("tsx block").code;
     let allocator = Allocator::new();
@@ -16703,13 +17535,26 @@ fn compiled_tsx_identifier_facts<'name>(
 
 #[test]
 fn tsx_destructured_prop_liveness_discriminates_template_use_from_true_unused() {
-    let used = compiled_tsx_identifier_facts(
+    let runtime = || {
+        crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+            0,
+            0,
+            verter_macro_dto::PropsDefaultsAssociation::None,
+            [crate::test_helpers::runtime_prop_at_macro_argument(
+                "count",
+                false,
+                [verter_macro_dto::RuntimeConstructor::Number],
+            )],
+        )])
+    };
+    let used = compiled_tsx_identifier_facts_with_runtime(
         r#"<script setup lang="ts">
 interface Props { count: number }
 const { count } = defineProps<Props>()
 </script>
 <template><div>{{ count }}</div></template>"#,
         "count",
+        runtime(),
     );
     assert_eq!(
         used.bindings, 1,
@@ -16720,13 +17565,14 @@ const { count } = defineProps<Props>()
         "a template-only use must value-read the source binding so TypeScript cannot emit a false TS6133"
     );
 
-    let unused = compiled_tsx_identifier_facts(
+    let unused = compiled_tsx_identifier_facts_with_runtime(
         r#"<script setup lang="ts">
 interface Props { count: number }
 const { count } = defineProps<Props>()
 </script>
 <template><div>static</div></template>"#,
         "count",
+        runtime(),
     );
     assert_eq!(
         unused.bindings, 1,
@@ -16826,17 +17672,30 @@ console.log(foo)
     );
 }
 
-/// Official-Vue parity lock: an optional `boolean` prop emits `{ type: Boolean }`
-/// with NO `default: undefined`, regardless of the prop name. Parameterized over
-/// several names to prove the runtime prop shape is NOT keyed on a specific
-/// spelling (`rounded` / `trueValue` must behave identically to `foo`).
+/// Official-Vue parity lock: an optional `boolean` prop emits
+/// `{ type: Boolean, required: false }` with NO `default: undefined`, regardless
+/// of the prop name. Parameterized over several names to prove the runtime prop
+/// shape is NOT keyed on a specific spelling (`rounded` / `trueValue` must behave
+/// identically to `foo`).
 #[test]
 fn optional_boolean_prop_is_official_type_boolean_no_default_for_any_name() {
     for name in ["foo", "rounded", "trueValue", "disabled", "modelValue"] {
         let src = format!(
             "<script setup lang=\"ts\">\ndefineProps<{{ {name}?: boolean }}>()\n</script>\n<template><div/></template>"
         );
-        let result = compile_sfc(&src);
+        let result = compile_sfc_with_runtime(
+            &src,
+            crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+                0,
+                0,
+                verter_macro_dto::PropsDefaultsAssociation::None,
+                [crate::test_helpers::runtime_prop(
+                    name,
+                    true,
+                    [verter_macro_dto::RuntimeConstructor::Boolean],
+                )],
+            )]),
+        );
         assert!(
             result.errors.is_empty(),
             "compile errors for {name}: {:?}",
@@ -16844,8 +17703,9 @@ fn optional_boolean_prop_is_official_type_boolean_no_default_for_any_name() {
         );
         let code = &result.script.as_ref().unwrap().code;
         assert!(
-            code.contains(&format!("{name}: {{ type: Boolean }}")),
-            "optional boolean `{name}` must emit official `{{ type: Boolean }}`, got:\n{code}"
+            code.contains(&format!("{name}: {{ type: Boolean, required: false }}")),
+            "optional boolean `{name}` must emit official \
+             `{{ type: Boolean, required: false }}`, got:\n{code}"
         );
         assert!(
             !code.contains("default: undefined"),
@@ -16854,11 +17714,26 @@ fn optional_boolean_prop_is_official_type_boolean_no_default_for_any_name() {
         );
 
         // Same parity through the withDefaults path (empty defaults object):
-        // an undeclared optional boolean stays `{ type: Boolean }` with no default.
+        // an undeclared optional boolean stays optional with no default.
         let wd_src = format!(
             "<script setup lang=\"ts\">\nwithDefaults(defineProps<{{ {name}?: boolean }}>(), {{}})\n</script>\n<template><div/></template>"
         );
-        let wd = compile_sfc(&wd_src);
+        let wd = compile_sfc_with_runtime(
+            &wd_src,
+            crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+                0,
+                1,
+                verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+                    payload_macro_index: 0,
+                    defaults_macro_index: 1,
+                },
+                [crate::test_helpers::runtime_prop(
+                    name,
+                    true,
+                    [verter_macro_dto::RuntimeConstructor::Boolean],
+                )],
+            )]),
+        );
         assert!(
             wd.errors.is_empty(),
             "wd compile errors {name}: {:?}",
@@ -16866,8 +17741,9 @@ fn optional_boolean_prop_is_official_type_boolean_no_default_for_any_name() {
         );
         let wd_code = &wd.script.as_ref().unwrap().code;
         assert!(
-            wd_code.contains(&format!("{name}: {{ type: Boolean }}")),
-            "withDefaults optional boolean `{name}` must emit `{{ type: Boolean }}`, got:\n{wd_code}"
+            wd_code.contains(&format!("{name}: {{ type: Boolean, required: false }}")),
+            "withDefaults optional boolean `{name}` must emit \
+             `{{ type: Boolean, required: false }}`, got:\n{wd_code}"
         );
         assert!(
             !wd_code.contains("default: undefined"),
@@ -16883,7 +17759,27 @@ fn optional_boolean_prop_is_official_type_boolean_no_default_for_any_name() {
 /// (`make<number>(0)`) would otherwise leak into the JS output.
 #[test]
 fn force_js_with_defaults_spread_strips_full_defaults_object() {
-    let result = compile_sfc(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "as",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "n",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Number],
+            ),
+        ],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"
 <script setup lang="ts">
 const base = { as: 'div' }
@@ -16896,6 +17792,7 @@ const props = withDefaults(defineProps<Props>(), {
 </script>
 <template><div>{{ props.as }}</div></template>
 "#,
+        runtime,
     );
     let script = result.script.as_ref().expect("script");
     let code = &script.code;
@@ -17171,7 +18068,27 @@ const count: Ref<number> = ref(0)
 /// force_js: same-file empty interface chain + withDefaults still emits pure JS.
 #[test]
 fn force_js_same_file_empty_interface_extends_chain_is_pure_js() {
-    let result = compile_sfc(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "a",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "b",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Number],
+            ),
+        ],
+    )]);
+    let result = compile_sfc_with_runtime(
         r#"
 <script setup lang="ts">
 interface A { a?: string }
@@ -17182,6 +18099,7 @@ const n = (1 as number)!
 </script>
 <template><div>{{ props.a }} {{ n }}</div></template>
 "#,
+        runtime,
     );
     let script = result.script.as_ref().expect("script");
     let code = &script.code;

@@ -389,7 +389,7 @@ impl VerterHost {
         canonical_id: &str,
         target: CompileTarget,
     ) -> VueMacroSemanticInput {
-        let demand = match (target.needs_script(), target.needs_tsc()) {
+        let demand = match (target.needs_runtime_macro_semantics(), target.needs_tsc()) {
             (true, true) => Some(VueMacroCodegenDemand::RuntimeAndTsc),
             (true, false) => Some(VueMacroCodegenDemand::Runtime),
             (false, true) => Some(VueMacroCodegenDemand::Tsc),

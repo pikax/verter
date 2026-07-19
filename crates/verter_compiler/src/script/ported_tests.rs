@@ -4,8 +4,29 @@
 //! Each test calls `compile()` directly and checks the appropriate result block
 //! (script, template, or diagnostics).
 
-use crate::compile::{compile, CodegenOptions, VerterCompileOptions};
+use crate::compile::{
+    compile, CodegenOptions, VerterCompileOptions, VerterCompileResult, VueMacroSemanticInput,
+};
 use oxc_allocator::Allocator;
+
+fn compile_force_js_with_runtime(
+    input: &str,
+    runtime: std::sync::Arc<verter_macro_dto::MacroRuntimeBundle>,
+) -> VerterCompileResult {
+    let allocator = Allocator::new();
+    let options = CodegenOptions::new().with_filename("test.vue");
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    compile(
+        input,
+        &options,
+        &verter_opts,
+        &VueMacroSemanticInput::Runtime(runtime),
+        &allocator,
+    )
+}
 
 // =========================================================================
 // Multi-script: <script setup> + <script> is valid Vue
@@ -251,19 +272,17 @@ fn test_define_props_object_arg() {
 #[test]
 fn test_define_props_typed_inline() {
     let input = "<script setup lang=\"ts\">\ndefineProps<{ title: string }>()\n</script>\n<template><div>x</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(
-        input,
-        &options,
-        &verter_opts,
-        &crate::compile::VueMacroSemanticInput::Unavailable,
-        &allocator,
-    );
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "title",
+            false,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let result = compile_force_js_with_runtime(input, runtime);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("props:"),
@@ -290,19 +309,17 @@ fn test_define_props_typed_inline() {
 #[test]
 fn test_define_props_typed_optional() {
     let input = "<script setup lang=\"ts\">\ndefineProps<{ count?: number }>()\n</script>\n<template><div>x</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(
-        input,
-        &options,
-        &verter_opts,
-        &crate::compile::VueMacroSemanticInput::Unavailable,
-        &allocator,
-    );
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "count",
+            true,
+            [verter_macro_dto::RuntimeConstructor::Number],
+        )],
+    )]);
+    let result = compile_force_js_with_runtime(input, runtime);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("count:"),
@@ -319,19 +336,17 @@ fn test_define_props_typed_optional() {
 #[test]
 fn test_define_props_string_literal_union() {
     let input = "<script setup lang=\"ts\">\ndefineProps<{ view?: 'list' | 'board' | 'calendar' }>()\n</script>\n<template><div>x</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(
-        input,
-        &options,
-        &verter_opts,
-        &crate::compile::VueMacroSemanticInput::Unavailable,
-        &allocator,
-    );
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "view",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let result = compile_force_js_with_runtime(input, runtime);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("String"),
@@ -343,19 +358,17 @@ fn test_define_props_string_literal_union() {
 #[test]
 fn test_define_props_inline_no_stale_delimiters() {
     let input = "<script setup lang=\"ts\">\ndefineProps<{ title: string }>()\n</script>\n<template><div>x</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(
-        input,
-        &options,
-        &verter_opts,
-        &crate::compile::VueMacroSemanticInput::Unavailable,
-        &allocator,
-    );
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "title",
+            false,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let result = compile_force_js_with_runtime(input, runtime);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         !script.code.contains("defineProps<"),
@@ -377,19 +390,24 @@ fn test_define_props_inline_no_stale_delimiters() {
 #[test]
 fn test_define_props_interface_ref() {
     let input = "<script setup lang=\"ts\">\ninterface Props { title: string; count?: number }\ndefineProps<Props>()\n</script>\n<template><div>x</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(
-        input,
-        &options,
-        &verter_opts,
-        &crate::compile::VueMacroSemanticInput::Unavailable,
-        &allocator,
-    );
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "title",
+                false,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "count",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Number],
+            ),
+        ],
+    )]);
+    let result = compile_force_js_with_runtime(input, runtime);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("props:"),
@@ -411,19 +429,17 @@ fn test_define_props_interface_ref() {
 #[test]
 fn test_define_props_type_alias_ref() {
     let input = "<script setup lang=\"ts\">\ntype MyProps = { message: string }\ndefineProps<MyProps>()\n</script>\n<template><div>x</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(
-        input,
-        &options,
-        &verter_opts,
-        &crate::compile::VueMacroSemanticInput::Unavailable,
-        &allocator,
-    );
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop_at_macro_argument(
+            "message",
+            false,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let result = compile_force_js_with_runtime(input, runtime);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("props:"),
@@ -499,30 +515,32 @@ fn test_define_props_empty_type_literal() {
 #[test]
 fn test_define_props_unresolvable_type_reports_error() {
     let input = "<script setup lang=\"ts\">\nimport type { ExternalProps } from './types'\ndefineProps<ExternalProps>()\n</script>\n<template><div>x</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(
-        input,
-        &options,
-        &verter_opts,
-        &crate::compile::VueMacroSemanticInput::Unavailable,
-        &allocator,
-    );
-    // An UNRESOLVABLE imported type surfaces the resolution-failure code
-    // `XUnresolvedImportedMacroType` (distinct from the `XInvalidMacroType`
-    // a resolved-but-wrong-shape type emits — only the former is softened on
-    // the render-only bundler lane).
+    let runtime = crate::test_helpers::runtime_bundle([verter_macro_dto::MacroRuntimeEntry {
+        syntax_index: 0,
+        macro_index: 0,
+        outcome: verter_macro_dto::MacroRuntimeOutcome::Unresolved(
+            verter_macro_dto::MacroFailure::new(
+                verter_macro_dto::UnresolvedReason::MissingDependency,
+                Some("imported props dependency is unavailable".to_owned()),
+            ),
+        ),
+    }]);
+    let result = compile_force_js_with_runtime(input, runtime);
+    let diagnostic = result
+        .errors
+        .iter()
+        .find(|error| error.code == "XUnavailableMacroSemanticResult")
+        .expect("unresolvable imported props type should surface a typed compiler error");
+    assert!(diagnostic.message.contains("unresolved"), "{diagnostic:?}");
     assert!(
-        result
-            .errors
-            .iter()
-            .any(|error| error.code == "XUnresolvedImportedMacroType"),
-        "unresolvable imported props type should surface a compiler error, got: {:?}",
-        result.errors
+        diagnostic.message.contains("missing-dependency"),
+        "{diagnostic:?}"
+    );
+    assert!(
+        diagnostic
+            .message
+            .contains("imported props dependency is unavailable"),
+        "{diagnostic:?}"
     );
 }
 
@@ -557,19 +575,20 @@ fn test_define_props_replaced_with_props() {
 #[test]
 fn test_with_defaults_typed_inline() {
     let input = "<script setup lang=\"ts\">\nconst props = withDefaults(defineProps<{ foo?: string }>(), { foo: 'bar' })\n</script>\n<template><div>x</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(
-        input,
-        &options,
-        &verter_opts,
-        &crate::compile::VueMacroSemanticInput::Unavailable,
-        &allocator,
-    );
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [crate::test_helpers::runtime_prop(
+            "foo",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let result = compile_force_js_with_runtime(input, runtime);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("props:"),
@@ -591,19 +610,27 @@ fn test_with_defaults_typed_inline() {
 #[test]
 fn test_with_defaults_interface_ref() {
     let input = "<script setup lang=\"ts\">\ninterface Props { foo?: string; bar?: number }\nconst props = withDefaults(defineProps<Props>(), { foo: 'hello' })\n</script>\n<template><div>x</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(
-        input,
-        &options,
-        &verter_opts,
-        &crate::compile::VueMacroSemanticInput::Unavailable,
-        &allocator,
-    );
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "foo",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "bar",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Number],
+            ),
+        ],
+    )]);
+    let result = compile_force_js_with_runtime(input, runtime);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("props:"),
@@ -634,19 +661,24 @@ fn test_with_defaults_interface_ref() {
 #[test]
 fn test_define_props_export_interface_resolves() {
     let input = "<script setup lang=\"ts\">\nexport interface Props {\n  foo: string\n  bar?: number\n}\nconst props = defineProps<Props>()\n</script>\n<template><div>{{ props.foo }}</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(
-        input,
-        &options,
-        &verter_opts,
-        &crate::compile::VueMacroSemanticInput::Unavailable,
-        &allocator,
-    );
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "foo",
+                false,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "bar",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Number],
+            ),
+        ],
+    )]);
+    let result = compile_force_js_with_runtime(input, runtime);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("props:"),
@@ -677,19 +709,17 @@ fn test_define_props_export_interface_resolves() {
 #[test]
 fn test_define_props_export_type_alias_resolves() {
     let input = "<script setup lang=\"ts\">\nexport type Props = {\n  bar: number\n}\ndefineProps<Props>()\n</script>\n<template><div>x</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(
-        input,
-        &options,
-        &verter_opts,
-        &crate::compile::VueMacroSemanticInput::Unavailable,
-        &allocator,
-    );
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop_at_macro_argument(
+            "bar",
+            false,
+            [verter_macro_dto::RuntimeConstructor::Number],
+        )],
+    )]);
+    let result = compile_force_js_with_runtime(input, runtime);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("props:"),
@@ -715,19 +745,27 @@ fn test_define_props_export_type_alias_resolves() {
 #[test]
 fn test_with_defaults_export_interface() {
     let input = "<script setup lang=\"ts\">\nexport interface Props {\n  size?: number\n  color?: string\n}\nconst props = withDefaults(defineProps<Props>(), {\n  size: 16,\n  color: 'red',\n})\n</script>\n<template><div>{{ props.size }}</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(
-        input,
-        &options,
-        &verter_opts,
-        &crate::compile::VueMacroSemanticInput::Unavailable,
-        &allocator,
-    );
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "size",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Number],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "color",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+        ],
+    )]);
+    let result = compile_force_js_with_runtime(input, runtime);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("props:"),

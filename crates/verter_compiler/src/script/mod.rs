@@ -58,6 +58,24 @@ pub struct ScriptCodeGenOptions<'a> {
     pub template_used_vars: Option<rustc_hash::FxHashSet<String>>,
 }
 
+/// Visit every public binding name supplied by one authoritative runtime macro
+/// shape. Runtime and IDE codegen share this projection so binding ownership
+/// cannot diverge between their independent output lanes.
+pub(crate) fn visit_runtime_macro_binding_names(
+    shape: &verter_macro_dto::MacroRuntimeShape,
+    mut visit: impl FnMut(&str),
+) {
+    match shape {
+        verter_macro_dto::MacroRuntimeShape::Props(props) => {
+            for prop in &props.props {
+                visit(&prop.name);
+            }
+        }
+        verter_macro_dto::MacroRuntimeShape::Model(model) => visit(&model.prop.name),
+        verter_macro_dto::MacroRuntimeShape::Emits(_) => {}
+    }
+}
+
 /// Shared mutable context for script processing functions.
 ///
 /// Bundles the common state passed through `process_script_setup`,

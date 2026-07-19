@@ -754,7 +754,7 @@ fn define_model_replaces_with_use_model() {
 
     let output = ct.build_string();
     assert!(
-        output.contains("_useModel(__props, 'modelValue')"),
+        output.contains("_useModel(__props, \"modelValue\")"),
         "should replace defineModel with _useModel. output: {}",
         output
     );
@@ -793,8 +793,8 @@ fn define_model_named_replaces_with_use_model() {
 
     let output = ct.build_string();
     assert!(
-        output.contains("_useModel(__props, 'show')"),
-        "should replace defineModel('show') with _useModel(__props, 'show'). output: {}",
+        output.contains("_useModel(__props, \"show\")"),
+        "should replace defineModel('show') with a safely quoted _useModel call. output: {}",
         output
     );
     assert!(
@@ -1363,17 +1363,17 @@ fn multiple_define_model_deduplicates_imports() {
 
     // All three models should be replaced
     assert!(
-        output.contains("_useModel(__props, 'modelValue')"),
+        output.contains("_useModel(__props, \"modelValue\")"),
         "default model. output: {}",
         output
     );
     assert!(
-        output.contains("_useModel(__props, 'title')"),
+        output.contains("_useModel(__props, \"title\")"),
         "title model. output: {}",
         output
     );
     assert!(
-        output.contains("_useModel(__props, 'count')"),
+        output.contains("_useModel(__props, \"count\")"),
         "count model. output: {}",
         output
     );
@@ -1408,10 +1408,10 @@ fn async_setup_produces_async_wrapper() {
     );
 }
 
-// ── Test 34: withDefaults method shorthand produces valid arrow function ──
+// ── Test 34: withDefaults method shorthand remains valid method syntax ──
 
 #[test]
-fn with_defaults_method_shorthand_produces_arrow_function() {
+fn with_defaults_method_shorthand_produces_valid_default_method() {
     let alloc = Allocator::default();
     let content = r#"
 withDefaults(defineProps<{
@@ -1422,6 +1422,26 @@ withDefaults(defineProps<{
   color: 'primary'
 })
 "#;
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop(
+                "validateOn",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Array],
+            ),
+            crate::test_helpers::runtime_prop(
+                "color",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+        ],
+    )]);
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
@@ -1433,21 +1453,23 @@ withDefaults(defineProps<{
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "FormTest",
+            macro_runtime: Some(&runtime),
             ..Default::default()
         },
     );
 
     let output = ct.build_string();
 
-    // Method shorthand should be converted to arrow function
+    // The authored method body remains method syntax under the synthesized
+    // `default` key. `default: () {}` would be invalid JavaScript.
     assert!(
         !output.contains("default: () {"),
         "should NOT contain invalid method shorthand 'default: () {{'. output: {}",
         output
     );
     assert!(
-        output.contains("default: () => {"),
-        "method shorthand should be converted to arrow function. output: {}",
+        output.contains("\"default\"() {"),
+        "method shorthand should remain a valid default method. output: {}",
         output
     );
 
@@ -1497,6 +1519,26 @@ fn with_defaults_force_js_strips_ts_from_object_defaults() {
     // section; a `[] as string[]` default must lose its TS cast in force-js.
     let alloc = Allocator::default();
     let content = "\ninterface Props { items?: string[]; color?: string }\nconst props = withDefaults(defineProps<Props>(), { items: [] as string[], color: 'primary' })\n";
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "items",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Array],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "color",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+        ],
+    )]);
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
@@ -1508,6 +1550,7 @@ fn with_defaults_force_js_strips_ts_from_object_defaults() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "WD",
+            macro_runtime: Some(&runtime),
             ..Default::default()
         },
     );
@@ -1532,6 +1575,26 @@ fn with_defaults_force_js_strips_satisfies_and_non_null() {
     // output invalid JS, so the mjs parse is the strongest guard here.
     let alloc = Allocator::default();
     let content = "\ninterface Props { count?: number; label?: string }\nconst defaultLabel = 'fallback'\nconst props = withDefaults(defineProps<Props>(), { count: 0 satisfies number, label: defaultLabel! })\n";
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "count",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Number],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "label",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+        ],
+    )]);
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
@@ -1543,6 +1606,7 @@ fn with_defaults_force_js_strips_satisfies_and_non_null() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "WD",
+            macro_runtime: Some(&runtime),
             ..Default::default()
         },
     );
@@ -1567,11 +1631,25 @@ fn with_defaults_force_js_strips_satisfies_and_non_null() {
 }
 
 #[test]
-fn with_defaults_force_js_strips_ts_from_unresolved_variable_ref_defaults() {
-    // Unresolvable props type + non-object defaults → runtime IIFE that wraps the
-    // defaults expression verbatim. A `defaults as T` cast must be stripped.
+fn with_defaults_force_js_strips_ts_from_variable_ref_defaults() {
+    // This fixture isolates rewriting a non-object defaults expression. The
+    // locally declared prop type makes the runtime projection authoritative;
+    // unresolved macro semantics are covered by the fail-closed boundary tests.
     let alloc = Allocator::default();
-    let content = "\nconst baseDefaults = { color: 'primary' }\nconst props = withDefaults(defineProps<ImportedProps>(), baseDefaults as ImportedProps)\n";
+    let content = "\ninterface Props { color?: string }\nconst baseDefaults = { color: 'primary' }\nconst props = withDefaults(defineProps<Props>(), baseDefaults as Props)\n";
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [crate::test_helpers::runtime_prop_at_macro_argument(
+            "color",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
@@ -1583,19 +1661,20 @@ fn with_defaults_force_js_strips_ts_from_unresolved_variable_ref_defaults() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "WD",
+            macro_runtime: Some(&runtime),
             ..Default::default()
         },
     );
 
     let output = ct.build_string();
     assert!(
-        output.contains("((d)=>"),
-        "unresolved variable-ref defaults should build the runtime IIFE. output:\n{}",
+        output.contains("_mergeDefaults("),
+        "variable-ref defaults should merge with authoritative runtime props. output:\n{}",
         output
     );
     assert!(
-        !output.contains("as ImportedProps"),
-        "force-js must strip the `as ImportedProps` cast from the IIFE argument. output:\n{}",
+        !output.contains("as Props"),
+        "force-js must strip the `as Props` cast from the defaults argument. output:\n{}",
         output
     );
     assert_valid_js(&output);
@@ -1745,14 +1824,31 @@ fn define_props_array_dynamic_element_names_nothing() {
 
 // ── Optional Boolean props: official parity (no `default: undefined`) ──
 
-/// Official plugin-vue emits `{ type: Boolean }` for an optional Boolean
-/// prop with NO default; the runtime resolves an absent optional Boolean
-/// to `false` (boolean cast). An explicit `default: undefined` diverges
-/// observably (`props.x === false` fails for unset props).
+/// In development, official plugin-vue emits
+/// `{ type: Boolean, required: false }` for an optional Boolean prop with no
+/// default. The runtime resolves an absent optional Boolean to `false`; an
+/// explicit `default: undefined` diverges observably.
 #[test]
 fn optional_boolean_prop_emits_no_default_type_based() {
     let alloc = Allocator::default();
     let content = "\nconst props = defineProps<{ disabled?: boolean, label?: string }>()\n";
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [
+            crate::test_helpers::runtime_prop(
+                "disabled",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Boolean],
+            ),
+            crate::test_helpers::runtime_prop(
+                "label",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+        ],
+    )]);
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
@@ -1764,22 +1860,23 @@ fn optional_boolean_prop_emits_no_default_type_based() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "BoolTest",
+            macro_runtime: Some(&runtime),
             ..Default::default()
         },
     );
 
     let output = ct.build_string();
     assert!(
-        output.contains("disabled: { type: Boolean }"),
-        "optional Boolean prop must emit the bare official shape, got:\n{output}"
+        output.contains("disabled: { type: Boolean, required: false }"),
+        "optional Boolean prop must emit the official dev shape, got:\n{output}"
     );
     assert!(
         !output.contains("default: undefined"),
         "no prop may carry `default: undefined` (official emits no default), got:\n{output}"
     );
     assert!(
-        output.contains("label: { type: String }"),
-        "optional non-Boolean prop keeps its bare shape, got:\n{output}"
+        output.contains("label: { type: String, required: false }"),
+        "optional non-Boolean prop keeps the official dev shape, got:\n{output}"
     );
 }
 
@@ -1790,6 +1887,26 @@ fn optional_boolean_prop_emits_no_default_type_based() {
 fn optional_boolean_prop_emits_no_default_with_defaults_path() {
     let alloc = Allocator::default();
     let content = "\nconst props = withDefaults(defineProps<{ disabled?: boolean, color?: string }>(), { color: 'red' })\n";
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop(
+                "disabled",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Boolean],
+            ),
+            crate::test_helpers::runtime_prop(
+                "color",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+        ],
+    )]);
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
@@ -1801,14 +1918,15 @@ fn optional_boolean_prop_emits_no_default_with_defaults_path() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "BoolTest",
+            macro_runtime: Some(&runtime),
             ..Default::default()
         },
     );
 
     let output = ct.build_string();
     assert!(
-        output.contains("disabled: { type: Boolean }"),
-        "optional Boolean without a declared default must stay bare, got:\n{output}"
+        output.contains("disabled: { type: Boolean, required: false }"),
+        "optional Boolean without a declared default keeps the official dev shape, got:\n{output}"
     );
     assert!(
         !output.contains("default: undefined"),
@@ -1830,6 +1948,19 @@ fn merge_defaults_spread_pushes_runtime_import() {
     let alloc = Allocator::default();
     let content =
         "\nconst props = withDefaults(defineProps<{ a?: string }>(), { ...SHARED_DEFAULTS })\n";
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [crate::test_helpers::runtime_prop(
+            "a",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
@@ -1841,6 +1972,7 @@ fn merge_defaults_spread_pushes_runtime_import() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "MergeTest",
+            macro_runtime: Some(&runtime),
             ..Default::default()
         },
     );
@@ -1863,6 +1995,19 @@ fn merge_defaults_spread_pushes_runtime_import() {
 fn merge_defaults_variable_pushes_runtime_import() {
     let alloc = Allocator::default();
     let content = "\nconst props = withDefaults(defineProps<{ a?: string }>(), DEFAULTS)\n";
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [crate::test_helpers::runtime_prop(
+            "a",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
@@ -1874,6 +2019,7 @@ fn merge_defaults_variable_pushes_runtime_import() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "MergeTest",
+            macro_runtime: Some(&runtime),
             ..Default::default()
         },
     );
@@ -1959,6 +2105,11 @@ fn define_emits_props_only_surface_does_not_invent_emits() {
 fn define_emits_named_tuple_property_form_still_produces_emits() {
     let alloc = Allocator::default();
     let content = "\nconst emit = defineEmits<{ change: [id: number], close: [] }>()\n";
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_emits_entry(
+        0,
+        0,
+        ["change", "close"],
+    )]);
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
@@ -1970,6 +2121,7 @@ fn define_emits_named_tuple_property_form_still_produces_emits() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "EmitsTest",
+            macro_runtime: Some(&runtime),
             ..Default::default()
         },
     );
@@ -2083,7 +2235,8 @@ fn force_js_mixed_type_value_import_has_no_ghost_body_fragment() {
     let input = r#"
 <script setup lang="ts">
 import { type RadioProps, radioEmits, radioPropsDefaults } from './radio'
-const props = withDefaults(defineProps<RadioProps>(), radioPropsDefaults)
+// Runtime-syntax macros isolate mixed-import rewriting from typed macro handoff.
+const props = defineProps(radioPropsDefaults)
 const emit = defineEmits(radioEmits)
 </script>
 <template><div /></template>
@@ -2146,6 +2299,26 @@ const props = withDefaults(defineProps<Props>(), {
   visible: false,
 })
 "#;
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "visible",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Boolean],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "onUpdate:visible",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Function],
+            ),
+        ],
+    )]);
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
     let _ = gen_script(
@@ -2156,6 +2329,7 @@ const props = withDefaults(defineProps<Props>(), {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "Test",
+            macro_runtime: Some(&runtime),
             ..Default::default()
         },
     );
@@ -2184,6 +2358,31 @@ const props = withDefaults(defineProps<Props>(), {
   value: 'on',
 })
 "#;
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "as",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "disabled",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Boolean],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "value",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+        ],
+    )]);
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
     let _ = gen_script(
@@ -2194,6 +2393,7 @@ const props = withDefaults(defineProps<Props>(), {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "Test",
+            macro_runtime: Some(&runtime),
             ..Default::default()
         },
     );

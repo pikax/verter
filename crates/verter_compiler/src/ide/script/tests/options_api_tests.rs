@@ -31,6 +31,7 @@ fn types_module_custom_override() {
             scope_id: "data-v-abc123",
             has_scoped_style: false,
             runtime_module_name: "vue",
+            macro_runtime: None,
             types_module_name: "@custom/types",
             is_vapor: false,
             embed_ambient_types: true,

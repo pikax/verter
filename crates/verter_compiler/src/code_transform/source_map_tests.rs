@@ -89,87 +89,70 @@ fn sourcemap_resolver_is_built_once_and_reused_across_maps() {
     );
 }
 
-/// The source-map token buffer is reserved up front to a true upper bound on
-/// the emitted token count, so `generate_map` never reallocates it during
-/// population. Proven directly against the production map path: the capacity
-/// captured at the reservation point must cover the final token count, across
-/// inputs whose token totals are dominated by different chunk kinds — including
-/// a moved overwrite whose replacement text injects newlines absent from the
-/// original source.
-///
-/// Discriminates three regressions at once: dropping the `Vec::with_capacity`
-/// reservation (the captured capacity collapses to 0); an estimate that counts
-/// only original-source newlines (it under-reserves the moved-overwrite
-/// fixture); and a constant estimate (it cannot cover both fixtures, whose
-/// token totals differ).
+fn assert_exact_sourcemap_token_reservation(ct: &CodeTransform<'_>, label: &str) -> usize {
+    let estimate = ct.estimate_sourcemap_token_capacity_for_test(true);
+    let map = ct.generate_map(SourceMapOptions::new().with_source("t.js"));
+    let actual = map.get_tokens().count();
+    let reserved = ct.last_reserved_token_capacity_for_test();
+
+    assert!(actual > 0, "{label} must emit representative tokens");
+    assert!(
+        reserved >= actual,
+        "{label}: reserved capacity ({reserved}) must cover every emitted token ({actual})"
+    );
+    assert_eq!(
+        estimate, actual,
+        "{label}: per-variant accounting must neither under-reserve nor materially over-reserve"
+    );
+
+    actual
+}
+
+/// The source-map token buffer is reserved up front from the exact per-variant
+/// emission formula. The mixed fixture covers authored line starts, explicit
+/// boundaries, overwritten and inserted chunks, an interior-offset mapped
+/// insertion, and nonempty intro/outro. The moved-replacement fixture proves
+/// replacement-text newlines do not inflate capacity: that variant emits one
+/// mapping token total, exactly like a stationary overwrite.
 #[test]
 fn sourcemap_token_buffer_reservation_covers_every_emitted_token() {
     let allocator = Allocator::default();
 
-    // Fixture 1 — multi-line source with an overwrite and a mapped insertion:
-    // the token total is dominated by Original chunks and original-source
-    // newlines.
+    // Fixture 1 — mixed mapped and unmapped chunk kinds, with both a line-start
+    // boundary (which shares its newline token) and an interior boundary.
     {
         let source = "line1\nline2\nline3\nline4\nline5";
         let mut ct = CodeTransform::new(source, &allocator);
-        ct.overwrite(6, 11, "XXXXX"); // overwrite "line2"
+        ct.prepend("// intro\n");
+        ct.append("\n// outro");
+        ct.overwrite(6, 11, "XXXXX");
+        ct.prepend_left(24, "/* unmapped */");
         ct.batch_prepend_left_with_source_map(&[(18, Some((0, 3)), "(pfx)mapped")]);
+        ct.try_add_sourcemap_location(12)
+            .expect("line-start boundary is valid");
+        ct.try_add_sourcemap_location(14)
+            .expect("interior boundary is valid");
 
-        let map = ct.generate_map(SourceMapOptions::new().with_source("t.js"));
-        let actual = map.get_tokens().count();
-        let reserved = ct.last_reserved_token_capacity_for_test();
-
-        assert!(actual > 0, "representative input must emit tokens");
+        let actual = assert_exact_sourcemap_token_reservation(&ct, "mixed fixture");
         assert!(
-            reserved >= actual,
-            "reserved capacity ({reserved}) must cover the emitted token count \
-             ({actual}) so the buffer never reallocates"
+            actual >= 10,
+            "mixed fixture must exercise a nontrivial token population, got {actual}"
         );
     }
 
-    // Fixture 2 — a moved overwrite whose replacement text carries newlines that
-    // do NOT exist in the original source. When the overwrite is relocated it
-    // becomes a Moved chunk, and each interior newline of its replacement text
-    // emits its own token. An estimate that counts only original-source newlines
-    // under-reserves here.
+    // Fixture 2 — replacement text keeps non-linear mapping identity after a
+    // move, so its many generated newlines still produce one mapping token.
     {
-        let source = "abcd"; // zero newlines in the original
+        let source = "abcd";
         let mut ct = CodeTransform::new(source, &allocator);
-        // Replace "bc" with text holding ten interior newlines, then relocate it:
-        // the overwrite becomes a Moved chunk carrying that replacement text.
-        ct.overwrite(1, 3, "L0\nL1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nLA");
+        let replacement = "L0\nL1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nLA";
+        ct.overwrite(1, 3, replacement);
         ct.move_wrapped(1, 3, 0, "", "");
 
-        let estimate = ct.estimate_sourcemap_token_capacity();
-        let chunk_count = ct.chunk_count();
-        let original_newlines = source.matches('\n').count();
-        // An estimate blind to moved replacement-text newlines would yield this:
-        let original_newline_only_estimate = chunk_count + original_newlines + 2;
-
-        let map = ct.generate_map(SourceMapOptions::new().with_source("t.js"));
-        let actual = map.get_tokens().count();
-        let reserved = ct.last_reserved_token_capacity_for_test();
-
-        // The moved replacement text emits one token per interior newline, so the
-        // emitted total outruns the original-newline-only estimate — confirming
-        // this fixture genuinely exercises the moved replacement-text term.
+        let actual = assert_exact_sourcemap_token_reservation(&ct, "moved-replacement fixture");
         assert!(
-            actual > original_newline_only_estimate,
-            "moved-overwrite fixture must emit more tokens ({actual}) than an \
-             original-newline-only estimate ({original_newline_only_estimate})"
-        );
-        // The estimate must therefore count those moved replacement-text newlines.
-        assert!(
-            estimate > original_newline_only_estimate,
-            "estimate ({estimate}) must count moved replacement-text newlines, \
-             not only original-source newlines ({original_newline_only_estimate})"
-        );
-        // And the captured reservation must still cover the full emitted count,
-        // even with newlines injected by the moved overwrite.
-        assert!(
-            reserved >= actual,
-            "reserved capacity ({reserved}) must cover the emitted token count \
-             ({actual}) even when a moved overwrite injects newlines"
+            actual < replacement.matches('\n').count(),
+            "replacement newlines must not be mistaken for mapping-token boundaries"
         );
     }
 }

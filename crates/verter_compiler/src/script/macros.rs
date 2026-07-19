@@ -157,13 +157,6 @@ fn render_runtime_props(
     out
 }
 
-fn register_runtime_props<'a>(shape: &PropsRuntimeShape, ctx: &mut ScriptContext<'a>) {
-    for prop in &shape.props {
-        ctx.bindings
-            .insert(ctx.alloc.alloc_str(&prop.name), BindingType::Props);
-    }
-}
-
 fn render_model_options(
     model: &ModelRuntimeShape,
     syntax_options: Option<&str>,
@@ -408,8 +401,11 @@ pub(super) fn process_macro_item<'a>(
 
             if type_params.is_some() {
                 state.props_section = match runtime_shape(runtime_bundle, syntax_index) {
-                    Some(MacroRuntimeShape::Props(shape)) => {
-                        register_runtime_props(shape, ctx);
+                    Some(runtime_shape @ MacroRuntimeShape::Props(shape)) => {
+                        super::visit_runtime_macro_binding_names(runtime_shape, |name| {
+                            ctx.bindings
+                                .insert(ctx.alloc.alloc_str(name), BindingType::Props);
+                        });
                         Some(render_runtime_props(shape, runtime_profile, None))
                     }
                     _ => None,
@@ -515,11 +511,13 @@ pub(super) fn process_macro_item<'a>(
                 options_span.map(|span| section_text(span.start, span.end, content_str, stripped));
 
             if type_params.is_some() {
-                if let Some(MacroRuntimeShape::Model(model)) =
+                if let Some(runtime_shape @ MacroRuntimeShape::Model(model)) =
                     runtime_shape(runtime_bundle, syntax_index)
                 {
-                    ctx.bindings
-                        .insert(ctx.alloc.alloc_str(&model.prop.name), BindingType::Props);
+                    super::visit_runtime_macro_binding_names(runtime_shape, |name| {
+                        ctx.bindings
+                            .insert(ctx.alloc.alloc_str(name), BindingType::Props);
+                    });
                     state.models.push(ModelSection {
                         prop_name: model.prop.name.clone(),
                         prop_options: render_model_options(model, options_src, is_production),
@@ -562,8 +560,14 @@ pub(super) fn process_macro_item<'a>(
                     runtime_shape(runtime_bundle, syntax_index),
                     defaults_arg_span,
                 ) {
-                    (Some(MacroRuntimeShape::Props(shape)), Some(defaults_span)) => {
-                        register_runtime_props(shape, ctx);
+                    (
+                        Some(runtime_shape @ MacroRuntimeShape::Props(shape)),
+                        Some(defaults_span),
+                    ) => {
+                        super::visit_runtime_macro_binding_names(runtime_shape, |name| {
+                            ctx.bindings
+                                .insert(ctx.alloc.alloc_str(name), BindingType::Props);
+                        });
                         if let Some(static_defaults) = defaults.as_ref().and_then(|defaults| {
                             render_static_defaults(defaults, content_str, stripped)
                         }) {

@@ -16,6 +16,13 @@ pub fn gen_tsx_script_full(source: &str) -> (String, FxHashMap<String, BindingTy
     gen_tsx_script_full_with_opts(source, "App", "App.vue", vec![])
 }
 
+pub fn gen_tsx_script_full_with_runtime(
+    source: &str,
+    runtime: &verter_macro_dto::MacroRuntimeBundle,
+) -> (String, FxHashMap<String, BindingType>, String) {
+    gen_tsx_script_full_with_opts_and_runtime(source, "App", "App.vue", vec![], Some(runtime))
+}
+
 /// Compute the AST-driven `template_used_vars` set the production IDE pipeline
 /// plumbs into `IdeScriptOptions`, so codegen unit tests exercise the real
 /// unused-binding liveness decision instead of the conservative `None` fallback.
@@ -107,6 +114,7 @@ pub fn gen_tsx_script_unwrap(source: &str) -> (String, FxHashMap<String, Binding
         scope_id: "data-v-abc123",
         has_scoped_style: false,
         runtime_module_name: "vue",
+        macro_runtime: None,
         types_module_name: "@verter/types",
         is_vapor: false,
         embed_ambient_types: true,
@@ -177,6 +185,16 @@ pub fn gen_tsx_script_full_with_opts(
     filename: &str,
     css_modules: Vec<CssModuleInfo>,
 ) -> (String, FxHashMap<String, BindingType>, String) {
+    gen_tsx_script_full_with_opts_and_runtime(source, component_name, filename, css_modules, None)
+}
+
+fn gen_tsx_script_full_with_opts_and_runtime(
+    source: &str,
+    component_name: &str,
+    filename: &str,
+    css_modules: Vec<CssModuleInfo>,
+    macro_runtime: Option<&verter_macro_dto::MacroRuntimeBundle>,
+) -> (String, FxHashMap<String, BindingType>, String) {
     let alloc = Allocator::new();
     let mut ct = CodeTransform::new(source, &alloc);
 
@@ -203,6 +221,7 @@ pub fn gen_tsx_script_full_with_opts(
         scope_id: "data-v-abc123",
         has_scoped_style: false,
         runtime_module_name: "vue",
+        macro_runtime,
         types_module_name: "@verter/types",
         is_vapor: false,
         embed_ambient_types: true,
@@ -275,6 +294,14 @@ pub fn gen_tsx_script(source: &str) -> (String, FxHashMap<String, BindingType>) 
     (code, bindings)
 }
 
+pub fn gen_tsx_script_with_runtime(
+    source: &str,
+    runtime: &verter_macro_dto::MacroRuntimeBundle,
+) -> (String, FxHashMap<String, BindingType>) {
+    let (code, bindings, _) = gen_tsx_script_full_with_runtime(source, runtime);
+    (code, bindings)
+}
+
 /// Generate IDE TSX and its source-map JSON (carrying the `x_verter_helper_preamble_end` boundary),
 /// mirroring the production compile pipeline's IDE source-map step. Returns `(code, sourcemap_json)`.
 /// Used to pin that IDE codegen publishes the typed helper-import-preamble boundary end-to-end.
@@ -304,6 +331,7 @@ pub fn gen_tsx_script_with_sourcemap(source: &str) -> (String, String) {
         scope_id: "data-v-abc123",
         has_scoped_style: false,
         runtime_module_name: "vue",
+        macro_runtime: None,
         types_module_name: "@verter/types",
         is_vapor: false,
         embed_ambient_types: true,
@@ -374,6 +402,20 @@ pub fn gen_tsx_script_with_sourcemap(source: &str) -> (String, String) {
 
 /// Like gen_tsx_script_full but with conditional_root_narrowing enabled.
 pub fn gen_tsx_script_narrowing(source: &str) -> String {
+    gen_tsx_script_narrowing_with_optional_runtime(source, None)
+}
+
+pub fn gen_tsx_script_narrowing_with_runtime(
+    source: &str,
+    runtime: &verter_macro_dto::MacroRuntimeBundle,
+) -> String {
+    gen_tsx_script_narrowing_with_optional_runtime(source, Some(runtime))
+}
+
+fn gen_tsx_script_narrowing_with_optional_runtime(
+    source: &str,
+    macro_runtime: Option<&verter_macro_dto::MacroRuntimeBundle>,
+) -> String {
     let alloc = Allocator::new();
     let mut ct = CodeTransform::new(source, &alloc);
 
@@ -398,6 +440,7 @@ pub fn gen_tsx_script_narrowing(source: &str) -> String {
         scope_id: "data-v-abc123",
         has_scoped_style: false,
         runtime_module_name: "vue",
+        macro_runtime,
         types_module_name: "@verter/types",
         is_vapor: false,
         embed_ambient_types: true,
@@ -558,6 +601,7 @@ pub fn gen_jsx_script(source: &str) -> (String, String) {
         scope_id: "data-v-abc123",
         has_scoped_style: false,
         runtime_module_name: "vue",
+        macro_runtime: None,
         types_module_name: "@verter/types",
         is_vapor: false,
         embed_ambient_types: true,

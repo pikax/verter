@@ -1013,6 +1013,7 @@ fn compile_inner(
             scope_id: &scope_id_full,
             has_scoped_style,
             runtime_module_name: options.runtime_module_name.as_deref().unwrap_or("vue"),
+            macro_runtime: validated_runtime,
             types_module_name: options
                 .types_module_name
                 .as_deref()

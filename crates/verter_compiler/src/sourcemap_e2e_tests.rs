@@ -32,6 +32,16 @@ fn compile_with_sourcemap(source: &str) -> VerterCompileResult {
 }
 
 fn compile_tsx_with_sourcemap(source: &str) -> VerterCompileResult {
+    compile_tsx_with_sourcemap_and_semantics(
+        source,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+    )
+}
+
+fn compile_tsx_with_sourcemap_and_semantics(
+    source: &str,
+    macro_semantics: &crate::compile::VueMacroSemanticInput,
+) -> VerterCompileResult {
     let alloc = Allocator::new();
     let options = CodegenOptions {
         filename: Some("App.vue".to_string()),
@@ -42,13 +52,7 @@ fn compile_tsx_with_sourcemap(source: &str) -> VerterCompileResult {
         source_map: true,
         ..Default::default()
     };
-    compile(
-        source,
-        &options,
-        &verter_opts,
-        &crate::compile::VueMacroSemanticInput::Unavailable,
-        &alloc,
-    )
+    compile(source, &options, &verter_opts, macro_semantics, &alloc)
 }
 
 // ── Position conversion helpers ────────────────────────────────────
@@ -836,6 +840,21 @@ mod tsx_tests {
     /// Helper: compile TSX and return (sm, lookup, code) tuple.
     fn compile_and_parse_tsx(source: &str) -> (String, oxc_sourcemap::OwnedSourceMap) {
         let result = compile_tsx_with_sourcemap(source);
+        parse_tsx_result(result)
+    }
+
+    fn compile_and_parse_tsx_with_runtime(
+        source: &str,
+        runtime: std::sync::Arc<verter_macro_dto::MacroRuntimeBundle>,
+    ) -> (String, oxc_sourcemap::OwnedSourceMap) {
+        let result = compile_tsx_with_sourcemap_and_semantics(
+            source,
+            &crate::compile::VueMacroSemanticInput::Runtime(runtime),
+        );
+        parse_tsx_result(result)
+    }
+
+    fn parse_tsx_result(result: VerterCompileResult) -> (String, oxc_sourcemap::OwnedSourceMap) {
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let tsx = result.tsx.expect("tsx block");
         let sm = oxc_sourcemap::OwnedSourceMap::from_json_string(&tsx.source_map)
@@ -941,7 +960,25 @@ defineProps<{ msg: string; count: number }>()
   <div>{{ msg }}</div>
 </template>
 "#;
-        let (code, sm) = compile_and_parse_tsx(source);
+        let runtime =
+            crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+                0,
+                0,
+                verter_macro_dto::PropsDefaultsAssociation::None,
+                [
+                    crate::test_helpers::runtime_prop(
+                        "msg",
+                        false,
+                        [verter_macro_dto::RuntimeConstructor::String],
+                    ),
+                    crate::test_helpers::runtime_prop(
+                        "count",
+                        false,
+                        [verter_macro_dto::RuntimeConstructor::Number],
+                    ),
+                ],
+            )]);
+        let (code, sm) = compile_and_parse_tsx_with_runtime(source, runtime);
         let lookup = build_lookup_table(&sm);
 
         // The type parameter content should map back to original positions
@@ -961,7 +998,21 @@ const props = withDefaults(defineProps<{ msg: string }>(), {
   <div>{{ props.msg }}</div>
 </template>
 "#;
-        let (code, sm) = compile_and_parse_tsx(source);
+        let runtime =
+            crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+                0,
+                1,
+                verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+                    payload_macro_index: 0,
+                    defaults_macro_index: 1,
+                },
+                [crate::test_helpers::runtime_prop(
+                    "msg",
+                    false,
+                    [verter_macro_dto::RuntimeConstructor::String],
+                )],
+            )]);
+        let (code, sm) = compile_and_parse_tsx_with_runtime(source, runtime);
         let lookup = build_lookup_table(&sm);
 
         assert_maps_to_source_line(&sm, &lookup, &code, source, "withDefaults", 0);
