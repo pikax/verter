@@ -4369,6 +4369,7 @@ dependencies = [
  "verter_compiler",
  "verter_session",
  "verter_span",
+ "verter_tsc",
  "verter_tsgo_api",
  "verter_workspace",
  "walkdir",
@@ -4386,6 +4387,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "verter_span",
+ "verter_tsgo_api",
  "windows-sys",
 ]
 

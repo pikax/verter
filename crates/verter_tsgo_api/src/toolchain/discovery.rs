@@ -28,7 +28,6 @@ use super::bundle::bundled_tsgo_path;
 use super::platform::{host_platform, TsgoPlatform};
 use super::policy::{TsgoVersion, VersionPolicy, SUPPORTED_POLICY_ID};
 use super::validation::{CandidateValidator, Capability, ProcessValidator, RejectionReason};
-use crate::client::probe_engine_version;
 
 /// The explicit engine-override environment variable (tier 1).
 pub const ENV_OVERRIDE_VAR: &str = "VERTER_TSGO_BIN";
@@ -280,52 +279,24 @@ pub async fn resolve_with(
     })
 }
 
-/// Synchronous version-checked resolution: the same tier-ordered enumeration
-/// and version+policy validation, WITHOUT the capability smoke. For
-/// bootstrap/test callers whose own connect path re-validates the engine
-/// end-to-end (e.g. [`crate::client::TsgoClient::connect`] re-gates).
-pub fn find_version_checked(request: &ResolutionRequest) -> Result<Resolution, ResolveError> {
-    let enumeration = enumerate_candidates(request);
-    let policy = VersionPolicy::from_env();
-    let mut rejections = Vec::new();
-    for candidate in enumeration.candidates {
-        let outcome = probe_engine_version(&candidate.path)
-            .map_err(|e| RejectionReason::VersionProbeFailed {
-                detail: e.to_string(),
-            })
-            .and_then(|probe| {
-                policy
-                    .check_str(&probe)
-                    .map_err(|rejection| RejectionReason::PolicyRejected {
-                        version: probe,
-                        rejection,
-                    })
-            });
-        match outcome {
-            Ok(version) => {
-                return Ok(Resolution {
-                    path: candidate.path,
-                    version,
-                    provenance: candidate.provenance,
-                    rejections,
-                });
-            }
-            Err(reason) => {
-                if candidate.provenance == Provenance::Bundled {
-                    return Err(ResolveError::ProductIntegrity {
-                        path: candidate.path,
-                        reason: Box::new(reason),
-                    });
-                }
-                rejections.push(CandidateRejection { candidate, reason });
-            }
-        }
-    }
-    Err(ResolveError::NoUsableCandidate {
-        rejections,
-        notes: enumeration.notes,
-        requirement: request.requirement,
-    })
+/// Blocking form of [`resolve`] for SYNC callers outside any async runtime
+/// context (it builds a private current-thread runtime). Panics if called from
+/// within a tokio runtime context — call [`resolve`] instead there.
+///
+/// This is the ONLY resolution path: there is deliberately no version-only
+/// variant. A candidate that merely passes `--version` + policy can mask a
+/// working candidate behind a broken one, so every caller — production or
+/// test — resolves through the same first-working, capability-VALIDATED walk.
+pub fn resolve_blocking(request: &ResolutionRequest) -> Result<Resolution, ResolveError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| ResolveError::NoUsableCandidate {
+            rejections: Vec::new(),
+            notes: vec![format!("failed to start the tsgo resolution runtime: {e}")],
+            requirement: request.requirement,
+        })?;
+    runtime.block_on(resolve(request))
 }
 
 /// Enumerate the tier-ordered candidates for `request` (pure discovery — no

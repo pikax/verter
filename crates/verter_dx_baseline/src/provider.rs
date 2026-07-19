@@ -217,31 +217,35 @@ pub fn resolve_with(
 }
 
 /// Production resolution: wires the real `verter_type_runtime` discovery.
-pub fn resolve(
+pub async fn resolve(
     provider: ProviderName,
     tool_root: &ToolRoot,
     workspace_root: &str,
     strict: bool,
 ) -> Result<Resolution, ProviderInitError> {
+    // The 4-tier toolchain resolver (`VERTER_TSGO_BIN` → shared PATH →
+    // project-local `node_modules` → update cache → bundled),
+    // capability-validated (bounded version probe + support policy + a `--lsp`
+    // capability smoke per candidate). Passing the workspace root lets a
+    // project that pins `typescript@>=7` resolve its own engine. Evaluated
+    // EAGERLY (the resolver is async) before `resolve_with`'s sync closures.
+    let tsgo = {
+        let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+            verter_tsgo_api::toolchain::validation::Capability::Lsp,
+            Some(Path::new(workspace_root).to_path_buf()),
+        );
+        verter_tsgo_api::toolchain::discovery::resolve(&request)
+            .await
+            .ok()
+            .map(|resolution| resolution.path.to_string_lossy().into_owned())
+    };
     resolve_with(
         provider,
         tool_root,
         workspace_root,
         strict,
         &|| verter_type_runtime::find_node(),
-        &|| {
-            // The 4-tier toolchain resolver (`VERTER_TSGO_BIN` → shared PATH →
-            // project-local `node_modules` → update cache → bundled),
-            // version-checked. Passing the workspace root lets a project that
-            // pins `typescript@>=7` resolve its own engine.
-            let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
-                verter_tsgo_api::toolchain::validation::Capability::Lsp,
-                Some(Path::new(workspace_root).to_path_buf()),
-            );
-            verter_tsgo_api::toolchain::discovery::find_version_checked(&request)
-                .ok()
-                .map(|resolution| resolution.path.to_string_lossy().into_owned())
-        },
+        &|| tsgo.clone(),
         &|tsdk, ws| {
             verter_type_runtime::find_tsserver(Some(tsdk), Some(ws))
                 .map(|p| p.to_string_lossy().to_string())

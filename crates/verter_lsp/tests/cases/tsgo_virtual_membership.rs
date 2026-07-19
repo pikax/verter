@@ -71,12 +71,12 @@ fn workspace_root() -> PathBuf {
 
 /// Discover the engine, honoring `VERTER_REQUIRE_TSGO` (a skip under that env is
 /// a vacuous-pass failure).
-fn engine_or_skip() -> Option<PathBuf> {
+async fn engine_or_skip() -> Option<PathBuf> {
     let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
         verter_tsgo_api::toolchain::validation::Capability::Lsp,
         Some(workspace_root()),
     );
-    match verter_tsgo_api::toolchain::discovery::find_version_checked(&request) {
+    match verter_tsgo_api::toolchain::discovery::resolve(&request).await {
         Ok(resolution) => Some(resolution.path),
         Err(e) => {
             if std::env::var("VERTER_REQUIRE_TSGO").is_ok() {
@@ -181,7 +181,7 @@ fn carrier_is_root(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn vue_specific_include_companion_becomes_member_via_virtualization() {
-    let Some(exe) = engine_or_skip() else {
+    let Some(exe) = engine_or_skip().await else {
         return;
     };
 

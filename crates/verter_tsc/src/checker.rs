@@ -271,9 +271,11 @@ fn build_host_config() -> HostConfig {
 /// ([`run_declaration_stage`]) because tsgo `--api` exposes no emit surface.
 ///
 /// Returns [`Err`] when the in-memory `--api` typecheck stage cannot run (engine
-/// absent, or a connect/init/updateSnapshot/protocol/project-not-found failure) —
-/// the caller surfaces it as a non-zero process exit. This fail-closed contract
-/// is why a broken/missing engine can never masquerade as a clean typecheck.
+/// absent, or a connect/init/updateSnapshot/protocol/project-not-found failure),
+/// or when the declaration/emit stage fails (engine unresolvable, invocation
+/// failure, or an error exit with no parseable diagnostics) — the caller surfaces
+/// it as a non-zero process exit. This fail-closed contract is why a
+/// broken/missing engine can never masquerade as a clean typecheck or a clean emit.
 pub fn run(
     config: &TsConfig,
     tsconfig_path: &Path,
@@ -310,9 +312,11 @@ pub fn run(
     let mut diagnostics = run_inmemory_typecheck(&host, config, tsconfig_path)?;
 
     // ── Declaration/emit stage: temp-file `tsgo --project` (tsgo `--api` has no
-    //    emit surface). Only when `--declaration` is requested. ──
+    //    emit surface). Only when `--declaration` is requested. FAIL-CLOSED: an
+    //    engine that cannot run the emit is a hard error, never silent success. ──
     let emitted_files = if opts.declaration {
-        let (decl_diagnostics, emitted) = run_declaration_stage(&host, config, tsconfig_path, opts);
+        let (decl_diagnostics, emitted) =
+            run_declaration_stage(&host, config, tsconfig_path, opts)?;
         diagnostics.extend(decl_diagnostics);
         emitted
     } else {
@@ -387,6 +391,12 @@ fn ambient_shim_carriers(base: &Path) -> Vec<(String, String)> {
 /// temp update cache → bundled sidecar; the first WORKING candidate wins
 /// (bounded version probe + support policy + capability smoke per candidate).
 /// A resolution failure carries the actionable tier report.
+///
+/// This is the ONLY resolution path verter-tsc uses — BOTH the in-memory
+/// typecheck stage and the declaration/emit stage resolve through it (a
+/// `--version`-only selection can mask a working candidate behind a broken one
+/// and is banned). Sync wrapper: builds a private runtime; call the async
+/// [`verter_tsgo_api::toolchain::discovery::resolve`] from async contexts.
 fn resolve_tsgo_engine(
     root: &Path,
     requirement: verter_tsgo_api::toolchain::validation::Capability,
@@ -395,6 +405,18 @@ fn resolve_tsgo_engine(
         requirement,
         Some(root.to_path_buf()),
     );
+    resolve_tsgo_engine_for(&request).map(|resolution| resolution.path)
+}
+
+/// The injectable seam of [`resolve_tsgo_engine`]: the full capability-validated
+/// resolution over an EXPLICIT request (tests drive it without touching the
+/// process environment).
+fn resolve_tsgo_engine_for(
+    request: &verter_tsgo_api::toolchain::discovery::ResolutionRequest,
+) -> Result<
+    verter_tsgo_api::toolchain::discovery::Resolution,
+    verter_tsgo_api::toolchain::discovery::ResolveError,
+> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -404,12 +426,10 @@ fn resolve_tsgo_engine(
                 notes: vec![format!(
                     "verter-tsc: failed to start the tsgo resolution runtime: {e}"
                 )],
-                requirement,
+                requirement: request.requirement,
             },
         )?;
-    runtime
-        .block_on(verter_tsgo_api::toolchain::discovery::resolve(&request))
-        .map(|resolution| resolution.path)
+    runtime.block_on(verter_tsgo_api::toolchain::discovery::resolve(request))
 }
 
 /// The in-memory tsgo `--api` typecheck stage: generate the validation carriers
@@ -529,27 +549,31 @@ fn run_inmemory_typecheck(
 
 /// The temp-file `--declaration` emit stage (retained permanently — tsgo `--api`
 /// exposes no emit surface). Generates the minimal `.tsc.tsx` carriers + the
-/// vue-shims ambient on disk, runs `tsgo --project --declaration` (tsc fallback if
-/// tsgo is absent), remaps diagnostics, and post-processes `.tsc.tsx.d.ts` →
-/// `.vue.d.ts`. Returns `(declaration diagnostics, emitted .d.ts files)`.
+/// vue-shims ambient on disk, runs `tsgo --project --declaration` (resolved
+/// through the SAME capability-validated first-working resolver as the
+/// typecheck stage — no `--version`-only selection), remaps diagnostics, and
+/// post-processes `.tsc.tsx.d.ts` → `.vue.d.ts`.
+///
+/// FAIL-CLOSED: a resolution failure, a staging failure, an invocation failure
+/// (spawn/timeout), or an engine that exits in error producing NO parseable
+/// diagnostics is a hard [`api_check::TypecheckError`] (→ non-zero process
+/// exit) — never a silent `Ok` with zero declarations, which would masquerade
+/// as a clean emit. A non-zero engine exit WITH parseable diagnostics is an
+/// ordinary type-error run (the diagnostics surface; the process exits 1).
 fn run_declaration_stage(
     host: &VerterHost,
     config: &TsConfig,
     tsconfig_path: &Path,
     opts: &EmitOptions,
-) -> (Vec<Diagnostic>, Vec<PathBuf>) {
+) -> Result<(Vec<Diagnostic>, Vec<PathBuf>), api_check::TypecheckError> {
     // The temp dir MUST be inside the project root so tsc resolves node_modules
     // (e.g. `import("vue")`) from the generated `.tsc.tsx` files.
-    let temp_dir = match TempDir::new_in(&config.root_dir) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!(
-                "verter-tsc: failed to create temp directory for declaration emit in {}: {e}",
-                config.root_dir.display()
-            );
-            return (Vec::new(), Vec::new());
-        }
-    };
+    let temp_dir = TempDir::new_in(&config.root_dir).map_err(|e| {
+        api_check::TypecheckError::new(format!(
+            "verter-tsc: failed to create temp directory for declaration emit in {}: {e}",
+            config.root_dir.display()
+        ))
+    })?;
 
     // Minimal macro-only `.tsc.tsx` carriers (declaration codegen), on disk.
     let decl_dir = temp_dir.path().join("_tsc");
@@ -580,28 +604,28 @@ fn run_declaration_stage(
         tsc_tsx_paths.push(ts_path.clone());
     }
 
-    // Resolve the checker for the temp-file path. The declaration stage drives
-    // the engine as a plain CLI compiler (`tsc --project … --declaration`), so
-    // the resolver's bounded `--version` probe IS its capability check and the
-    // support policy keeps unsupported engines out; `invoke_checker` is the
-    // functional gate. (No legacy tsc fallback — an unsupported engine is
-    // refused by the version policy.)
+    // Resolve the checker for the temp-file path through the SAME first-working,
+    // capability-VALIDATED resolver as the typecheck stage. `Capability::Lsp`
+    // is the closest validated surface to the CLI-compiler invocation: it
+    // proves the binary spawns and completes a real handshake, so a candidate
+    // that merely answers `--version` can no longer mask a working one. A
+    // resolution failure is a HARD failure (fail-closed).
     let root = strip_unc_prefix(&config.root_dir);
-    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+    let checker_bin = match resolve_tsgo_engine(
+        &root,
         verter_tsgo_api::toolchain::validation::Capability::Lsp,
-        Some(root.clone()),
-    );
-    let checker_bin = match verter_tsgo_api::toolchain::discovery::find_version_checked(&request) {
-        Ok(resolution) => {
+    ) {
+        Ok(path) => {
             eprintln!(
                 "verter-tsc: declaration emit using tsgo at {}",
-                resolution.path.display()
+                path.display()
             );
-            strip_unc_prefix(&resolution.path)
+            strip_unc_prefix(&path)
         }
         Err(e) => {
-            eprintln!("verter-tsc: {e}");
-            return (Vec::new(), Vec::new());
+            return Err(api_check::TypecheckError::new(format!(
+                "verter-tsc: declaration emit cannot run: {e}"
+            )));
         }
     };
 
@@ -610,30 +634,39 @@ fn run_declaration_stage(
         declaration: true,
         declaration_dir: opts.declaration_dir.clone(),
     };
-    let decl_tsconfig = match write_temp_tsconfig(
+    let decl_tsconfig = write_temp_tsconfig(
         temp_dir.path(),
         tsconfig_path,
         &tsc_tsx_paths,
         &decl_opts,
         &config.root_dir,
-    ) {
-        Ok(tc) => tc,
-        Err(e) => {
-            eprintln!("verter-tsc: failed to write declaration tsconfig: {e}");
-            return (Vec::new(), Vec::new());
-        }
-    };
+    )
+    .map_err(|e| {
+        api_check::TypecheckError::new(format!(
+            "verter-tsc: failed to write declaration tsconfig: {e}"
+        ))
+    })?;
 
-    let invocation = match invoke_checker(&checker_bin, &decl_tsconfig, &decl_opts) {
-        Ok(inv) => inv,
-        Err(e) => {
-            eprintln!("verter-tsc: declaration stage failed: {e}");
-            return (Vec::new(), Vec::new());
-        }
-    };
+    let invocation = invoke_checker(&checker_bin, &decl_tsconfig, &decl_opts).map_err(|e| {
+        api_check::TypecheckError::new(format!("verter-tsc: declaration stage failed: {e}"))
+    })?;
 
     let raw_diags = reporter::parse_tsc_output(&invocation.output);
     let diagnostics = remap_diagnostics(raw_diags, &tsx_to_vue);
+
+    if !invocation.success && diagnostics.is_empty() {
+        // FAIL-CLOSED: the engine exited in error and produced NO parseable
+        // diagnostics — it did not typecheck/emit anything. This is an engine
+        // failure, not a clean run: surface it (non-zero exit) rather than
+        // returning an empty diagnostic set + zero declarations (a broken
+        // engine masquerading as a successful emit).
+        return Err(api_check::TypecheckError::new(format!(
+            "verter-tsc: declaration stage failed: the engine at {} exited in error \
+             producing no diagnostics and no declarations — the declaration emit did \
+             not run (fail-closed: a failed emit is never a silent success)",
+            checker_bin.display()
+        )));
+    }
 
     if !invocation.success {
         eprintln!(
@@ -653,7 +686,7 @@ fn run_declaration_stage(
         .map(|d| collect_dts_files(d))
         .unwrap_or_default();
 
-    (diagnostics, emitted)
+    Ok((diagnostics, emitted))
 }
 
 /// Invoke the type-checker binary and return its combined stdout+stderr output
@@ -1938,6 +1971,69 @@ mod tests {
     use super::*;
     use crate::tsconfig::load_tsconfig;
 
+    /// The minimal `--lsp` handshake arm (POSIX sh) spliced into every mock
+    /// checker script: the capability-validated resolver spawns each candidate
+    /// with `--lsp --stdio` and requires an `initialize` response whose
+    /// `serverInfo.version` agrees with the `--version` probe. The arm answers
+    /// every framed request carrying an `id` with that serverInfo, then serves
+    /// until EOF (the smoke kills the process after the handshake).
+    const MOCK_LSP_HANDSHAKE_SH: &str = r#"
+for arg in "$@"; do
+  if [ "$arg" = "--lsp" ]; then
+    while IFS= read -r line; do
+      line=${line%$'\r'}
+      len=0
+      while [ -n "$line" ]; do
+        case "$line" in
+          [Cc]ontent-[Ll]ength:*) len=$(printf '%s' "${line#*:}" | tr -d ' ') ;;
+        esac
+        IFS= read -r line || exit 0
+        line=${line%$'\r'}
+      done
+      [ "$len" -gt 0 ] || continue
+      body=$(dd bs=1 count="$len" 2>/dev/null)
+      id=$(printf '%s' "$body" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)
+      [ -n "$id" ] || continue
+      resp="{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"capabilities\":{},\"serverInfo\":{\"name\":\"mock-tsc\",\"version\":\"7.0.2\"}}}"
+      printf 'Content-Length: %s\r\n\r\n%s' "${#resp}" "$resp"
+    done
+    exit 0
+  fi
+done
+"#;
+
+    /// The same handshake arm (PowerShell) for the Windows mock scripts.
+    const MOCK_LSP_HANDSHAKE_PS1: &str = r#"
+if ($Args -contains '--lsp') {
+    $reader = [System.Console]::In
+    $writer = [System.Console]::Out
+    while ($true) {
+        $len = 0
+        $line = $reader.ReadLine()
+        if ($null -eq $line) { exit 0 }
+        while ($line -ne '') {
+            if ($line -match 'Content-Length:\s*(\d+)') { $len = [int]$Matches[1] }
+            $line = $reader.ReadLine()
+            if ($null -eq $line) { exit 0 }
+        }
+        if ($len -le 0) { continue }
+        $buf = New-Object char[] $len
+        $off = 0
+        while ($off -lt $len) {
+            $n = $reader.Read($buf, $off, $len - $off)
+            if ($n -le 0) { exit 0 }
+            $off += $n
+        }
+        $body = -join $buf
+        if ($body -match '"id"\s*:\s*(\d+)') {
+            $resp = '{"jsonrpc":"2.0","id":' + $Matches[1] + ',"result":{"capabilities":{},"serverInfo":{"name":"mock-tsc","version":"7.0.2"}}}'
+            $writer.Write("Content-Length: " + $resp.Length + "`r`n`r`n" + $resp)
+            $writer.Flush()
+        }
+    }
+}
+"#;
+
     /// Discriminating gate for the `build_host_config()` seam: the production
     /// `verter-tsc` host MUST construct through the Batch typecheck preset
     /// (BUILD analysis scope + `Build` query profile + lazily-spawned
@@ -2001,12 +2097,15 @@ mod tests {
         assert_ne!(host.query_profile(), full.query_profile);
     }
 
-    /// Install a mock checker the DECLARATION stage discovers as `tsgo` (so
-    /// `find_tsgo` short-circuits to it before any real tsgo on PATH/npx). It is a
-    /// `--project`/`--declaration` subprocess mock only — it does NOT speak the
-    /// `--api` wire, so the in-memory typecheck stage's `TsgoClient::connect`
-    /// probe fails and that stage fail-closes to zero diagnostics, leaving the
-    /// declaration-stage diagnostics as the only ones these tests observe.
+    /// Install a mock checker the DECLARATION stage resolves through the
+    /// toolchain resolver's project-local `.bin` shim tier. Its `--version` +
+    /// `--lsp` handshake arms make it pass the capability smoke (version
+    /// `7.0.2`, matching `serverInfo`); its `--project`/`--declaration`
+    /// behavior is the fixture under test. It does NOT speak the `--api`
+    /// wire, so the in-memory typecheck stage cannot run against it — these
+    /// tests drive [`run_declaration_stage`] directly (see
+    /// [`run_declaration_only`]), leaving the declaration-stage diagnostics as
+    /// the only ones they observe.
     fn write_mock_tsc(project_root: &Path, mode: &str) {
         let bin_dir = project_root.join("node_modules").join(".bin");
         fs::create_dir_all(&bin_dir).unwrap();
@@ -2024,6 +2123,8 @@ if ($Args -contains '--version') {
     Write-Output 'Version 7.0.2'
     exit 0
 }
+
+__MOCK_LSP_HANDSHAKE_PS1__
 
 $project = ''
 $declaration = $false
@@ -2066,7 +2167,8 @@ New-Item -ItemType Directory -Force -Path $declarationDir | Out-Null
 $emitted = Join-Path $declarationDir ($tscTsx.Name + '.d.ts')
 Set-Content -Path $emitted -Value 'export declare const ok: number;'
 exit 0
-"#,
+"#
+                .replace("__MOCK_LSP_HANDSHAKE_PS1__", MOCK_LSP_HANDSHAKE_PS1),
             )
             .unwrap();
             fs::write(
@@ -2092,6 +2194,8 @@ for arg in "$@"; do
     exit 0
   fi
 done
+
+__MOCK_LSP_HANDSHAKE_SH__
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -2128,7 +2232,8 @@ fi
 
 mkdir -p "$declaration_dir"
 printf "export declare const ok: number;\n" > "$declaration_dir/$(basename "$tsc_tsx").d.ts"
-"#,
+"#
+                .replace("__MOCK_LSP_HANDSHAKE_SH__", MOCK_LSP_HANDSHAKE_SH),
             )
             .unwrap();
 
@@ -2159,6 +2264,8 @@ if ($Args -contains '--version') {
     Write-Output 'Version 7.0.2'
     exit 0
 }
+
+__MOCK_LSP_HANDSHAKE_PS1__
 
 $project = ''
 $declaration = $false
@@ -2225,6 +2332,8 @@ for arg in "$@"; do
   fi
 done
 
+__MOCK_LSP_HANDSHAKE_SH__
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --project)
@@ -2259,7 +2368,8 @@ printf "export declare const ok: number;\n" > "$declaration_dir/$(basename "$tsc
 # Report an error from a different file
 printf "src/other.ts(5,10): error TS2304: Cannot find name 'SomeMissingType'.\n"
 exit 1
-"#,
+"#
+                .replace("__MOCK_LSP_HANDSHAKE_SH__", MOCK_LSP_HANDSHAKE_SH),
             )
             .unwrap();
 
@@ -2298,6 +2408,7 @@ exit 1
             });
         }
         run_declaration_stage(&host, config, tsconfig_path, opts)
+            .expect("the declaration stage must run against the validating mock checker")
     }
 
     fn create_run_fixture(

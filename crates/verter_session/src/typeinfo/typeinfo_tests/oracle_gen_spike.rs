@@ -91,7 +91,7 @@ async fn spawn_with(
             verter_type_runtime::tsgo::validation::Capability::Lsp,
             None,
         );
-        match verter_type_runtime::tsgo::discovery::find_version_checked(&request) {
+        match verter_type_runtime::tsgo::discovery::resolve(&request).await {
             Ok(resolution) => resolution.path.to_string_lossy().into_owned(),
             Err(e) => {
                 eprintln!("oracle_gen_spike: SKIP — tsgo binary not found: {e}");

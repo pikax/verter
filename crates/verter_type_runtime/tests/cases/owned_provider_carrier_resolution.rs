@@ -40,15 +40,16 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Resolve the engine through the 4-tier toolchain resolver (version-checked).
-/// Honors `VERTER_REQUIRE_TSGO` (a skip under that env is a vacuous-pass
-/// failure).
-fn engine_or_skip() -> Option<PathBuf> {
+/// Resolve the engine through the 4-tier toolchain resolver (capability-validated:
+/// bounded version probe + support policy + a `--lsp` capability smoke per
+/// candidate). Honors `VERTER_REQUIRE_TSGO` (a skip under that env is a
+/// vacuous-pass failure).
+async fn engine_or_skip() -> Option<PathBuf> {
     let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
         verter_tsgo_api::toolchain::validation::Capability::Lsp,
         Some(workspace_root()),
     );
-    match verter_tsgo_api::toolchain::discovery::find_version_checked(&request) {
+    match verter_tsgo_api::toolchain::discovery::resolve(&request).await {
         Ok(resolution) => Some(resolution.path),
         Err(e) => {
             if std::env::var("VERTER_REQUIRE_TSGO").is_ok() {
@@ -161,7 +162,7 @@ async fn open_b_companions(provider: &TsgoOwnedProvider, src_dir: &Path) {
 /// the `.d.vue.ts` declaration carrier (which wins tsgo's basename-append probe).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owned_bare_vue_import_resolves_to_declaration_carrier_and_public_member_flows() {
-    let Some(exe) = engine_or_skip() else {
+    let Some(exe) = engine_or_skip().await else {
         return;
     };
     let dir = tempdir();
@@ -230,7 +231,7 @@ async fn owned_bare_vue_import_resolves_to_declaration_carrier_and_public_member
 /// genuinely breaks resolution; opening it (D4) fixes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owned_bare_vue_import_fails_closed_when_declaration_carrier_didopen_suppressed() {
-    let Some(exe) = engine_or_skip() else {
+    let Some(exe) = engine_or_skip().await else {
         return;
     };
     let dir = tempdir();

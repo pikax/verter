@@ -198,7 +198,8 @@ impl Bridge {
 
     async fn on_hello(&mut self, h: HelloRequest) -> Response {
         let resolution =
-            match provider::resolve(h.provider, &h.tool_root, &h.workspace_root, h.strict_ci) {
+            match provider::resolve(h.provider, &h.tool_root, &h.workspace_root, h.strict_ci).await
+            {
                 Ok(r) => r,
                 Err(e) => return Response::error(e.kind(), e.to_string()),
             };

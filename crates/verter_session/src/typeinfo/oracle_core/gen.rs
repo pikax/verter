@@ -515,14 +515,17 @@ async fn drive_hover(
 ) -> Result<String, GenError> {
     let tsgo_bin = {
         // Resolve the engine through the toolchain resolver (shared →
-        // project-local → cache → bundled; version-checked). Reached via the
-        // `verter_type_runtime` facade — verter_session's
-        // tsgo-generation-only guard bans a direct `verter_tsgo_api` dep.
+        // project-local → cache → bundled; capability-validated: bounded
+        // version probe + support policy + a `--lsp` capability smoke per
+        // candidate). Reached via the `verter_type_runtime` facade —
+        // verter_session's tsgo-generation-only guard bans a direct
+        // `verter_tsgo_api` dep.
         let request = verter_type_runtime::tsgo::discovery::ResolutionRequest::for_environment(
             verter_type_runtime::tsgo::validation::Capability::Lsp,
             None,
         );
-        verter_type_runtime::tsgo::discovery::find_version_checked(&request)
+        verter_type_runtime::tsgo::discovery::resolve(&request)
+            .await
             .map(|resolution| resolution.path.to_string_lossy().into_owned())
             .map_err(|e| GenError::TsgoUnavailable(e.to_string()))?
     };

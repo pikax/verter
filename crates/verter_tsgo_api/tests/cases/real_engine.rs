@@ -67,7 +67,7 @@ async fn req_json<T: serde::de::DeserializeOwned>(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_engine_initialize_update_snapshot_and_diagnostics() {
-    let Some(exe) = common::engine_or_skip() else {
+    let Some(exe) = common::engine_or_skip().await else {
         return;
     };
 
@@ -223,7 +223,7 @@ async fn real_engine_initialize_update_snapshot_and_diagnostics() {
 async fn typed_client_connects_through_gate_and_serves_typed_ops() {
     use verter_tsgo_api::TsgoClient;
 
-    let Some(exe) = common::engine_or_skip() else {
+    let Some(exe) = common::engine_or_skip().await else {
         return;
     };
 
@@ -300,7 +300,7 @@ async fn typed_client_connects_through_gate_and_serves_typed_ops() {
 async fn program_getter_surfaces_non_root_imported_error_that_per_file_misses() {
     use verter_tsgo_api::TsgoClient;
 
-    let Some(exe) = common::engine_or_skip() else {
+    let Some(exe) = common::engine_or_skip().await else {
         return;
     };
 
@@ -450,7 +450,7 @@ async fn program_getter_surfaces_non_root_imported_error_that_per_file_misses() 
 async fn config_file_parsing_getter_surfaces_bad_target_and_none_on_clean() {
     use verter_tsgo_api::TsgoClient;
 
-    let Some(exe) = common::engine_or_skip() else {
+    let Some(exe) = common::engine_or_skip().await else {
         return;
     };
 

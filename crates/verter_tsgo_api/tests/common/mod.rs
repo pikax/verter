@@ -14,19 +14,19 @@ pub fn workspace_root() -> PathBuf {
 }
 
 /// Resolve the tsgo engine through the 4-tier toolchain resolver
-/// (version-checked, no capability smoke — the tests' own connect paths
-/// re-gate), honoring the `VERTER_REQUIRE_TSGO` gate.
+/// (capability-validated: bounded version probe + support policy + a `--lsp`
+/// capability smoke per candidate), honoring the `VERTER_REQUIRE_TSGO` gate.
 ///
 /// Returns `Some(path)` when the engine is found. Returns `None` ONLY when the
 /// engine is genuinely absent AND `VERTER_REQUIRE_TSGO` is not set (a no-engine
 /// environment may hermetic-skip). When `VERTER_REQUIRE_TSGO` is set and the
 /// engine is absent, this panics — a skip in the gate is a vacuous-pass failure.
-pub fn engine_or_skip() -> Option<PathBuf> {
+pub async fn engine_or_skip() -> Option<PathBuf> {
     let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
         verter_tsgo_api::toolchain::validation::Capability::Lsp,
         Some(workspace_root()),
     );
-    match verter_tsgo_api::toolchain::discovery::find_version_checked(&request) {
+    match verter_tsgo_api::toolchain::discovery::resolve(&request).await {
         Ok(resolution) => Some(resolution.path),
         Err(e) => {
             if std::env::var("VERTER_REQUIRE_TSGO").is_ok() {

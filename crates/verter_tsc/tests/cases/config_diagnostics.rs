@@ -28,14 +28,14 @@ fn workspace_root() -> PathBuf {
 
 /// Resolve the gated rc `--api` engine through the 4-tier toolchain resolver
 /// (`VERTER_TSGO_BIN` wins; then shared PATH, project-local `node_modules`,
-/// the update cache, and the bundled sidecar), version-checked against the
-/// support policy.
+/// the update cache, and the bundled sidecar), capability-validated (bounded
+/// version probe + support policy + a `--lsp` capability smoke per candidate).
 fn resolve_rc_engine() -> Option<PathBuf> {
     let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
         verter_tsgo_api::toolchain::validation::Capability::Lsp,
         Some(workspace_root()),
     );
-    verter_tsgo_api::toolchain::discovery::find_version_checked(&request)
+    verter_tsgo_api::toolchain::discovery::resolve_blocking(&request)
         .ok()
         .map(|resolution| resolution.path)
 }

@@ -18,9 +18,10 @@
 //! | `v710`           | `7.1.0`                  | handshake ok, `serverInfo` = `7.0.9`-style match |
 //! | `rc`             | `7.0.2-rc.1`             | handshake ok, matching serverInfo                |
 //! | `nightly`        | `7.0.0-dev.20260703.1`   | handshake ok, matching serverInfo                |
-//! | `apiok`          | `7.0.2`                  | full surface: handshake + WORKING `--api` pipe (integer snapshot handle, staged project echoed) |
+//! | `apiok`          | `7.0.2`                  | full surface: handshake + WORKING `--api` pipe (integer snapshot handle, staged project echoed) + standalone `--api` MessagePack surface |
 //! | `apihollow`      | `7.0.2`                  | full surface BUT `updateSnapshot` returns a hollow `projects: []` |
-//! | `declfail`       | `7.0.2`                  | full surface; `--project <cfg>` exits 2 with NO output |
+//! | `declfail`       | `7.0.2`                  | full surface (incl. standalone `--api`); `--project <cfg>` exits 2 with NO output |
+//! | `declhang`       | `7.0.2`                  | `--project <cfg>` spawns a pipe-holding grandchild and hangs forever |
 //! | `hang-version`   | hangs forever            | (unused)                                         |
 //! | `hold-pipe`      | prints `7.0.2`, then spawns a child that HOLDS the stdout/stderr pipes open and exits 0 |
 //! | `hang-lsp`       | `7.0.2`                  | hangs forever (never answers `initialize`)       |
@@ -46,6 +47,7 @@ enum Scenario {
     ApiOk,
     ApiHollow,
     DeclFail,
+    DeclHang,
     HangVersion,
     HoldPipe,
     HangLsp,
@@ -53,28 +55,50 @@ enum Scenario {
 }
 
 impl Scenario {
-    fn from_argv0() -> Self {
-        let exe = std::env::current_exe().unwrap_or_default();
-        let stem = exe
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        match stem.strip_prefix("verter-tsgo-fake-") {
-            Some("mismatch") => Self::Mismatch,
-            Some("noserverinfo") => Self::NoServerInfo,
-            Some("exit") => Self::Exit,
-            Some("v710") => Self::V710,
-            Some("rc") => Self::Rc,
-            Some("nightly") => Self::Nightly,
-            Some("apiok") => Self::ApiOk,
-            Some("apihollow") => Self::ApiHollow,
-            Some("declfail") => Self::DeclFail,
-            Some("hang-version") => Self::HangVersion,
-            Some("hold-pipe") => Self::HoldPipe,
-            Some("hang-lsp") => Self::HangLsp,
-            Some("hang-api") => Self::HangApi,
-            _ => Self::Ok,
-        }
+    /// The scenario: the binary's file name first (`verter-tsgo-fake-<x>`),
+    /// then the `VERTER_TSGO_FAKE_SCENARIO` env var. The env fallback exists
+    /// for engines planted under a FIXED name the enumeration contract
+    /// requires (e.g. the platform package's `lib/tsc`): the test drives the
+    /// child's environment hermetically, so parallel tests never share it.
+    fn current() -> Self {
+        Self::from_name(
+            std::env::current_exe()
+                .unwrap_or_default()
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default()
+                .as_str(),
+        )
+        .or_else(|| {
+            Self::from_name(
+                std::env::var("VERTER_TSGO_FAKE_SCENARIO")
+                    .unwrap_or_default()
+                    .as_str(),
+            )
+        })
+        .unwrap_or(Self::Ok)
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        let scenario = match name.strip_prefix("verter-tsgo-fake-").unwrap_or(name) {
+            "ok" => Self::Ok,
+            "mismatch" => Self::Mismatch,
+            "noserverinfo" => Self::NoServerInfo,
+            "exit" => Self::Exit,
+            "v710" => Self::V710,
+            "rc" => Self::Rc,
+            "nightly" => Self::Nightly,
+            "apiok" => Self::ApiOk,
+            "apihollow" => Self::ApiHollow,
+            "declfail" => Self::DeclFail,
+            "declhang" => Self::DeclHang,
+            "hang-version" => Self::HangVersion,
+            "hold-pipe" => Self::HoldPipe,
+            "hang-lsp" => Self::HangLsp,
+            "hang-api" => Self::HangApi,
+            _ => return None,
+        };
+        Some(scenario)
     }
 
     /// The version this fake reports via `--version` (and, unless
@@ -137,7 +161,7 @@ pub fn main() {
         hang_forever();
     }
 
-    let scenario = Scenario::from_argv0();
+    let scenario = Scenario::current();
 
     if args.iter().any(|a| a == "--version") {
         match scenario {
@@ -154,19 +178,30 @@ pub fn main() {
             }
         }
     }
-    // The standalone `--api` MessagePack stdio surface: only `hang-api` is
-    // defined here (it never writes a frame); every other scenario refuses.
+    // The standalone `--api` MessagePack stdio surface: `hang-api`/`declhang`
+    // never write a frame; `apiok`/`declfail` serve the tuple wire; every
+    // other scenario refuses.
     if args.iter().any(|a| a == "--api") {
-        if scenario == Scenario::HangApi {
-            hang_forever();
+        match scenario {
+            Scenario::HangApi | Scenario::DeclHang => hang_forever(),
+            Scenario::ApiOk | Scenario::DeclFail => serve_api_stdio(scenario),
+            _ => std::process::exit(2),
         }
-        std::process::exit(2);
+        return;
     }
     // The declaration-stage CLI surface (`tsc --project <cfg> --declaration`):
-    // `declfail` dies INSTANTLY with no output — an engine that validated but
-    // fails the real invocation.
+    // `apiok` exits 0 cleanly (its emit is a no-op); `declfail` dies INSTANTLY
+    // with no output — an engine that validated but fails the real invocation;
+    // `declhang` wedges with a grandchild holding the pipes.
     if args.iter().any(|a| a == "--project") {
-        std::process::exit(2);
+        match scenario {
+            Scenario::ApiOk => return,
+            Scenario::DeclHang => {
+                spawn_pipe_holder();
+                hang_forever();
+            }
+            _ => std::process::exit(2),
+        }
     }
     if args.iter().any(|a| a == "--lsp") {
         match scenario {
@@ -453,4 +488,127 @@ fn write_frame(writer: &mut impl Write, message: &serde_json::Value) {
     let _ = write!(writer, "Content-Length: {}\r\n\r\n", body.len());
     let _ = writer.write_all(&body);
     let _ = writer.flush();
+}
+
+// ── standalone `--api` MessagePack tuple wire ────────────────────────────────
+
+const MSGPACK_FIXARRAY3: u8 = 0x93;
+const MSGPACK_BIN8: u8 = 0xc4;
+const MSGPACK_BIN16: u8 = 0xc5;
+const MSGPACK_BIN32: u8 = 0xc6;
+const MSGPACK_UINT8: u8 = 0xcc;
+/// Child → parent response (`MSG_RESPONSE`).
+const MSG_RESPONSE: u8 = 4;
+
+/// Serve the standalone `--api` MessagePack tuple wire on stdio until EOF:
+/// `initialize`, `updateSnapshot` (integer handle + the scenario's projects),
+/// empty diagnostics for the diagnostics getters, `null` for everything else.
+fn serve_api_stdio(scenario: Scenario) {
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut reader = BufReader::new(stdin.lock());
+    while let Some((_, name, payload)) = read_tuple(&mut reader) {
+        let method = String::from_utf8_lossy(&name).into_owned();
+        let body: Vec<u8> = match method.as_str() {
+            "initialize" => serde_json::to_vec(
+                &serde_json::json!({ "useCaseSensitiveFileNames": true, "currentDirectory": "/" }),
+            )
+            .unwrap(),
+            "updateSnapshot" => {
+                let params: serde_json::Value =
+                    serde_json::from_slice(&payload).unwrap_or(serde_json::Value::Null);
+                let config = params
+                    .get("openProjects")
+                    .and_then(|o| o.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let projects = scenario.snapshot_projects(&config);
+                serde_json::to_vec(&serde_json::json!({ "snapshot": 1, "projects": projects }))
+                    .unwrap()
+            }
+            "getSemanticDiagnostics"
+            | "getSyntacticDiagnostics"
+            | "getConfigFileParsingDiagnostics" => b"[]".to_vec(),
+            // `release` and anything else: an empty (null-ish) payload resolves
+            // the fire-and-forget callers without a wire error.
+            _ => Vec::new(),
+        };
+        write_tuple(&mut stdout.lock(), MSG_RESPONSE, &name, &body);
+    }
+}
+
+/// Read one `[0x93, type, name-bin, payload-bin]` tuple frame; `None` on EOF.
+fn read_tuple(reader: &mut impl BufRead) -> Option<(u8, Vec<u8>, Vec<u8>)> {
+    let mut marker = [0u8; 1];
+    match reader.read(&mut marker) {
+        Ok(0) => return None,
+        Ok(_) => {}
+        Err(_) => return None,
+    }
+    if marker[0] != MSGPACK_FIXARRAY3 {
+        return None;
+    }
+    let msg_type = read_tuple_u8(reader)?;
+    let name = read_tuple_bin(reader)?;
+    let payload = read_tuple_bin(reader)?;
+    Some((msg_type, name, payload))
+}
+
+fn read_tuple_u8(reader: &mut impl BufRead) -> Option<u8> {
+    let mut b = [0u8; 1];
+    reader.read_exact(&mut b).ok()?;
+    if b[0] == MSGPACK_UINT8 {
+        reader.read_exact(&mut b).ok()?;
+    }
+    Some(b[0])
+}
+
+fn read_tuple_bin(reader: &mut impl BufRead) -> Option<Vec<u8>> {
+    let mut marker = [0u8; 1];
+    reader.read_exact(&mut marker).ok()?;
+    let len = match marker[0] {
+        MSGPACK_BIN8 => {
+            let mut b = [0u8; 1];
+            reader.read_exact(&mut b).ok()?;
+            b[0] as usize
+        }
+        MSGPACK_BIN16 => {
+            let mut b = [0u8; 2];
+            reader.read_exact(&mut b).ok()?;
+            u16::from_be_bytes(b) as usize
+        }
+        MSGPACK_BIN32 => {
+            let mut b = [0u8; 4];
+            reader.read_exact(&mut b).ok()?;
+            u32::from_be_bytes(b) as usize
+        }
+        _ => return None,
+    };
+    let mut body = vec![0u8; len];
+    reader.read_exact(&mut body).ok()?;
+    Some(body)
+}
+
+fn write_tuple(writer: &mut impl Write, msg_type: u8, name: &[u8], payload: &[u8]) {
+    let mut out = vec![MSGPACK_FIXARRAY3, msg_type];
+    write_bin_field(&mut out, name);
+    write_bin_field(&mut out, payload);
+    let _ = writer.write_all(&out);
+    let _ = writer.flush();
+}
+
+fn write_bin_field(out: &mut Vec<u8>, bytes: &[u8]) {
+    if bytes.len() <= u8::MAX as usize {
+        out.push(MSGPACK_BIN8);
+        out.push(bytes.len() as u8);
+    } else if bytes.len() <= u16::MAX as usize {
+        out.push(MSGPACK_BIN16);
+        out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+    } else {
+        out.push(MSGPACK_BIN32);
+        out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    }
+    out.extend_from_slice(bytes);
 }

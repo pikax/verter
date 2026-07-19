@@ -567,13 +567,13 @@ fn test_build_paths_config_payload_includes_paths_only() {
     );
 }
 
-fn tsgo_bin_or_skip() -> Option<String> {
+async fn tsgo_bin_or_skip() -> Option<String> {
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
         verter_tsgo_api::toolchain::validation::Capability::Lsp,
         Some(repo_root),
     );
-    match verter_tsgo_api::toolchain::discovery::find_version_checked(&request) {
+    match verter_tsgo_api::toolchain::discovery::resolve(&request).await {
         Ok(resolution) => Some(resolution.path.to_string_lossy().into_owned()),
         Err(err) => {
             if std::env::var("VERTER_REQUIRE_TSGO")
@@ -763,7 +763,7 @@ fn test_offset_to_position() {
 /// @ai-generated — TSGO process spawns and initializes successfully
 #[tokio::test]
 async fn test_tsgo_spawn_and_initialize() {
-    let Some(tsgo_bin) = tsgo_bin_or_skip() else {
+    let Some(tsgo_bin) = tsgo_bin_or_skip().await else {
         return;
     };
 
@@ -787,7 +787,7 @@ async fn test_tsgo_spawn_and_initialize() {
 /// @ai-generated — TSGO processes open_file and hover for a .ts file
 #[tokio::test]
 async fn test_tsgo_hover_on_ts_file() {
-    let Some(tsgo_bin) = tsgo_bin_or_skip() else {
+    let Some(tsgo_bin) = tsgo_bin_or_skip().await else {
         return;
     };
 
@@ -837,7 +837,7 @@ async fn test_tsgo_hover_on_ts_file() {
 /// the connection survives by waiting for tsgo to settle, then making a request.
 #[tokio::test]
 async fn test_tsgo_survives_workspace_configuration() {
-    let Some(tsgo_bin) = tsgo_bin_or_skip() else {
+    let Some(tsgo_bin) = tsgo_bin_or_skip().await else {
         return;
     };
 
@@ -3085,7 +3085,7 @@ async fn stale_completion_request_detected_by_generation_counter() {
 /// @ai-generated — E2E: real TSGO concurrent requests complete without deadlock.
 #[tokio::test]
 async fn e2e_concurrent_requests_complete_without_deadlock() {
-    let Some(tsgo_bin) = tsgo_bin_or_skip() else {
+    let Some(tsgo_bin) = tsgo_bin_or_skip().await else {
         return;
     };
 

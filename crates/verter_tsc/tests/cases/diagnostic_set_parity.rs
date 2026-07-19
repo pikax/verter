@@ -367,13 +367,14 @@ fn create_junction_or_symlink(src: &Path, dest: &Path) {
 /// (`VERTER_TSGO_BIN` wins; then shared PATH, project-local `node_modules`
 /// under the workspace root — where `pnpm install --frozen-lockfile` installs
 /// `typescript@7.0.2` — the update cache, and the bundled sidecar),
-/// version-checked against the support policy.
+/// capability-validated (bounded version probe + support policy + a `--lsp`
+/// capability smoke per candidate).
 fn resolve_gated_engine() -> Option<PathBuf> {
     let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
         verter_tsgo_api::toolchain::validation::Capability::Lsp,
         Some(workspace_root()),
     );
-    verter_tsgo_api::toolchain::discovery::find_version_checked(&request)
+    verter_tsgo_api::toolchain::discovery::resolve_blocking(&request)
         .ok()
         .map(|resolution| resolution.path)
 }
