@@ -10,11 +10,13 @@ import { FIXTURE_NAME, sleep } from "../../../helpers";
 import {
   assertDefinitionTargetsFile,
   assertDefinitionTargetsToken,
+  assertHoverNeedles,
   completionsAtOffset,
   ensureParityReady,
   findOffset,
   openRelative,
   pollUntil,
+  registerFrameworkTest,
   failParityGap,
 } from "../../../lib/parityHarness";
 import {
@@ -751,6 +753,166 @@ suite(`IDE navigation + completion [${FIXTURE_NAME}]`, function () {
       );
     } finally {
       await reopenFresh(parentFile(fw!)).catch(() => undefined);
+    }
+  });
+
+  // ── Hover: slot names, slot-props destructure, directive names (D3/D4/D6) ──
+
+  test("ide.hover.slot-name", async function () {
+    const fw = parityFramework();
+    if (!fw) throw new Error("TEST_DEFECT: parity suite loaded for an inapplicable fixture");
+    const parent = parentFile(fw);
+    try {
+      if (fw === "vue") {
+        // `#header` — typed from the child's defineSlots surface. The declared
+        // return type is `any` (truthful), so the any-forbid is relaxed here.
+        await assertHoverNeedles(
+          { file: parent, token: "#header", occurrence: 0, caretOffset: 2 },
+          ["header", "title", "string", "count", "number"],
+          { forbidAny: false },
+        );
+        // `#default` — same typed surface for the default slot.
+        await assertHoverNeedles(
+          { file: parent, token: "#default", occurrence: 0, caretOffset: 2 },
+          ["default", "body", "string"],
+          { forbidAny: false },
+        );
+        // Kebab `#my-slot` resolves the camel-declared `mySlot` signature.
+        await assertHoverNeedles(
+          { file: parent, token: "#my-slot", occurrence: 0, caretOffset: 2 },
+          ["mySlot", "note", "string"],
+          { forbidAny: false },
+        );
+      } else {
+        // `{#snippet header(` name — typed snippet hover.
+        await assertHoverNeedles({ file: parent, token: "header", occurrence: 0 }, ["Snippet"]);
+        // `{@render header(...)}` callsite in the child — typed snippet hover.
+        await assertHoverNeedles({ file: childFile(fw), token: "header", occurrence: 1 }, [
+          "Snippet",
+        ]);
+      }
+    } catch (err) {
+      failParityGap(
+        this,
+        "ide.hover.slot-name",
+        fw === "vue" ? "ISSUE-vue-ide-hover-slot-name" : "ISSUE-svelte-ide-hover-slot-name",
+        `Slot name hover failed: ${String(err)}`,
+        "product-gap",
+      );
+    }
+  });
+
+  test("ide.hover.slot-prop-pattern", async function () {
+    const fw = parityFramework();
+    if (!fw) throw new Error("TEST_DEFECT: parity suite loaded for an inapplicable fixture");
+    const parent = parentFile(fw);
+    try {
+      // Pattern positions (the destructure) must hover exactly like a
+      // standalone-TS destructured parameter; usage positions match.
+      await assertHoverNeedles({ file: parent, token: "title", occurrence: 0 }, [
+        "title",
+        "string",
+      ]);
+      await assertHoverNeedles({ file: parent, token: "slotCount", occurrence: 0 }, [
+        "slotCount",
+        "number",
+      ]);
+      await assertHoverNeedles({ file: parent, token: "title", occurrence: 1 }, [
+        "title",
+        "string",
+      ]);
+      await assertHoverNeedles({ file: parent, token: "slotCount", occurrence: 1 }, [
+        "slotCount",
+        "number",
+      ]);
+    } catch (err) {
+      failParityGap(
+        this,
+        "ide.hover.slot-prop-pattern",
+        fw === "vue"
+          ? "ISSUE-vue-ide-hover-slot-prop-pattern"
+          : "ISSUE-svelte-ide-hover-slot-prop-pattern",
+        `Slot-prop destructure hover failed: ${String(err)}`,
+        "product-gap",
+      );
+    }
+  });
+
+  test("ide.hover.directive-doc", async function () {
+    const fw = parityFramework();
+    if (!fw) throw new Error("TEST_DEFECT: parity suite loaded for an inapplicable fixture");
+    const parent = parentFile(fw);
+    try {
+      if (fw === "vue") {
+        // Built-in directive NAME tokens get doc hovers.
+        await assertHoverNeedles({ file: parent, token: "v-if", occurrence: 0 }, [
+          "v-if",
+          "Conditionally",
+        ]);
+      } else {
+        // Svelte directive KEYWORD tokens get doc hovers.
+        await assertHoverNeedles({ file: parent, token: "use:highlight", occurrence: 0 }, [
+          "action",
+        ]);
+        await assertHoverNeedles({ file: parent, token: "transition:fade", occurrence: 0 }, [
+          "transition",
+        ]);
+        // Local names get the real function hover (never the shim).
+        await assertHoverNeedles(
+          { file: parent, token: "use:highlight", occurrence: 0, caretOffset: 5 },
+          ["highlight", "HTMLElement"],
+        );
+        await assertHoverNeedles({ file: parent, token: "fade", occurrence: 1 }, [
+          "fade",
+          "TransitionConfig",
+        ]);
+      }
+    } catch (err) {
+      failParityGap(
+        this,
+        "ide.hover.directive-doc",
+        fw === "vue" ? "ISSUE-vue-ide-hover-directive-doc" : "ISSUE-svelte-ide-hover-directive-doc",
+        `Directive doc hover failed: ${String(err)}`,
+        "product-gap",
+      );
+    }
+  });
+
+  registerFrameworkTest("vue", "ide.hover.custom-directive", async function () {
+    const fw = parityFramework();
+    if (!fw) throw new Error("TEST_DEFECT: parity suite loaded for an inapplicable fixture");
+    const parent = parentFile(fw);
+    try {
+      // `v-my-thing` → typed hover naming the resolved `vMyThing` binding.
+      await assertHoverNeedles({ file: parent, token: "v-my-thing", occurrence: 0 }, ["vMyThing"]);
+      // …and Ctrl+click to the authored declaration.
+      await assertDefinitionTargetsToken(
+        { file: parent, token: "v-my-thing", occurrence: 0 },
+        { file: parent, token: "vMyThing", occurrence: 0 },
+      );
+      // Unknown directive → silent (no hover at all).
+      const doc = await openRelative(parent);
+      const at = findOffset(doc, "v-nope") + 2;
+      const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
+        "vscode.executeHoverProvider",
+        doc.uri,
+        doc.positionAt(at),
+      );
+      if (hovers && hovers.length > 0) {
+        const text = hovers
+          .flatMap((h) => h.contents)
+          .map((c) => (typeof c === "string" ? c : (c as vscode.MarkdownString).value))
+          .join("\n");
+        throw new Error(`unknown directive v-nope must stay silent, got hover: ${text}`);
+      }
+    } catch (err) {
+      failParityGap(
+        this,
+        "ide.hover.custom-directive",
+        "ISSUE-vue-ide-hover-custom-directive",
+        `Custom directive hover/definition failed: ${String(err)}`,
+        "product-gap",
+      );
     }
   });
 });

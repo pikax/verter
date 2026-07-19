@@ -635,16 +635,30 @@ fn walk_element<'a, 'alloc>(
     //   → <>{"header"}{(({ title }) => (<>children</>))(CALL)}</>
     let slot_iife_info = build_slot_iife_info(id, el, ctx.source, ctx.ast);
     if let Some(ref slot_info) = slot_iife_info {
-        // Emit slot IIFE opening: {((params) => (<>
-        if has_isolated_slot_body {
-            // The generated mapped `</Tag>` sits at the same anchor. Keep both
-            // emissions in the ordered prepend channel so the empty pair closes
-            // before the slot IIFE begins.
-            ctx.out
-                .prepend_ordered_unmapped(el.tag_open.end - 1, &slot_info.open_text);
+        // Emit slot IIFE opening in three ordered parts through the mapped
+        // prepend channel (insertion order is preserved within one anchor):
+        //   unmapped `{(() => { const ` + MAPPED authored pattern + unmapped
+        //   ` = extractArgumentsFromRenderSlot(...); return (<>`.
+        // The pattern bytes are verbatim-authored, so they carry a source-map
+        // token — pattern-position hover maps into the generated destructure
+        // and the provider answers with the typed binding quickinfo (D4).
+        let anchor = if has_isolated_slot_body {
+            // The generated mapped `</Tag>` sits at the same anchor. Keep all
+            // emissions in the ordered prepend channel so the empty pair
+            // closes before the slot IIFE begins.
+            el.tag_open.end - 1
         } else {
-            ctx.out.prepend_alloc(el.tag_open.end, &slot_info.open_text);
-        }
+            el.tag_open.end
+        };
+        ctx.out
+            .prepend_ordered_unmapped(anchor, &slot_info.open_prefix);
+        ctx.out.prepend_alloc_mapped(
+            anchor,
+            slot_info.params_start,
+            &ctx.source[slot_info.params_start as usize..slot_info.params_end as usize],
+        );
+        ctx.out
+            .prepend_ordered_unmapped(anchor, &slot_info.open_suffix);
     }
 
     // Walk children — children inherit the condition scopes from this element
@@ -845,8 +859,18 @@ fn isolate_vue_slot_body(
 
 /// Info for generating a v-slot scoped parameter IIFE wrapper.
 struct SlotIifeInfo {
-    /// Text to prepend after the open tag: `{((params) => (<>`
-    open_text: String,
+    /// Unmapped open prefix prepended after the open tag: `{(() => { const `
+    open_prefix: String,
+    /// Authored byte range of the destructure pattern — emitted between
+    /// `open_prefix` and `open_suffix` as a SOURCE-MAPPED prepend so IDE
+    /// features (hover on the destructured bindings) resolve the provider's
+    /// typed quickinfo at the authored pattern positions instead of landing
+    /// in an unmapped synthetic region (D4).
+    params_start: u32,
+    params_end: u32,
+    /// Unmapped open suffix prepended after the pattern:
+    /// ` = ___VERTER___extractArgumentsFromRenderSlot(...); return (<>`
+    open_suffix: String,
     /// Text to prepend before the close tag: `</>)(___VERTER___extractArgumentsFromRenderSlot(...))}`
     close_text: String,
 }
@@ -870,8 +894,6 @@ fn build_slot_iife_info(
         _ => return None, // No params
     };
 
-    let params = &source[vs as usize..ve as usize];
-
     // Determine the slot name
     let slot_name = if let (Some(arg_start), Some(arg_end)) = (v_slot.arg_start, v_slot.arg_end) {
         &source[arg_start as usize..arg_end as usize]
@@ -888,13 +910,17 @@ fn build_slot_iife_info(
         source[(el.tag_open.start + 1) as usize..el.tag_open.name_end as usize].to_string()
     };
 
-    let open_text = format!(
-        "{{(() => {{ const {params} = ___VERTER___extractArgumentsFromRenderSlot(___VERTER___instantiateComponent({comp_tag}, {{}}), \"{slot_name}\"); return (<>"
+    let open_prefix = "{(() => { const ".to_string();
+    let open_suffix = format!(
+        " = ___VERTER___extractArgumentsFromRenderSlot(___VERTER___instantiateComponent({comp_tag}, {{}}), \"{slot_name}\"); return (<>"
     );
     let close_text = "</>); })()}".to_string();
 
     Some(SlotIifeInfo {
-        open_text,
+        open_prefix,
+        params_start: vs,
+        params_end: ve,
+        open_suffix,
         close_text,
     })
 }

@@ -141,9 +141,10 @@ pub use self::protocol_types::*;
 mod server_utils;
 use self::server_utils::*;
 pub(crate) use self::server_utils::{
-    carrier_language_for, compute_verter_diagnostics_for_with_views,
-    is_default_export_component_carrier, prepare_non_carrier_provider_sync, self_file_language_for,
-    sync_self_file_shadow_state,
+    attr_name_match_rank, carrier_language_for, compute_verter_diagnostics_for_with_views,
+    is_default_export_component_carrier, prepare_non_carrier_provider_sync,
+    select_best_ranked_candidate, self_file_language_for, sync_self_file_shadow_state,
+    to_pascal_case,
 };
 
 #[path = "../background_drain.rs"]

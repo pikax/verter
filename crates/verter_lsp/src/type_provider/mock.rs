@@ -135,6 +135,12 @@ mod inner {
         /// that kind was (wrongly) closed.
         fail_sync_paths: std::collections::HashSet<String>,
         hover_responses: Vec<(String, u32, Option<HoverInfo>)>,
+        /// Scripted transient hover failures: while > 0, each `get_hover`
+        /// RECORDS its call and returns `Err` (simulating a provider/transport
+        /// failure), decrementing the counter. Pins the no-silent-empty
+        /// recovery contract: a failed provider hover must resync+retry,
+        /// never vanish silently.
+        fail_next_hovers: usize,
         completion_responses: Vec<(String, u32, Vec<Completion>)>,
         diagnostic_responses: Vec<(String, Vec<TypeDiagnostic>)>,
         definition_responses: Vec<(String, u32, Vec<TypeLocation>)>,
@@ -250,6 +256,14 @@ mod inner {
         pub fn set_hover(&self, path: &str, offset: u32, info: Option<HoverInfo>) {
             let mut state = self.state.lock().unwrap();
             state.hover_responses.push((path.to_string(), offset, info));
+        }
+
+        /// Script the next `count` `get_hover` calls to fail with `Err`
+        /// (transient provider/transport failure) before normal responses
+        /// resume.
+        pub fn fail_next_hovers(&self, count: usize) {
+            let mut state = self.state.lock().unwrap();
+            state.fail_next_hovers = count;
         }
 
         /// Configure completions for a specific path and offset.
@@ -909,12 +923,18 @@ mod inner {
         }
 
         fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
-            let (result, on_query) = {
+            let (result, on_query, fail) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetHover {
                     path: path.to_string(),
                     offset,
                 });
+                let fail = if state.fail_next_hovers > 0 {
+                    state.fail_next_hovers -= 1;
+                    true
+                } else {
+                    false
+                };
                 let result = state
                     .hover_responses
                     .iter()
@@ -926,14 +946,21 @@ mod inner {
                     }
                     _ => None,
                 };
-                (result, on_query)
+                (result, on_query, fail)
             };
             // Run the one-shot mid-request seam AFTER releasing the state lock
             // (a callback that re-enters the mock must not deadlock).
             if let Some(callback) = on_query {
                 callback();
             }
-            Box::pin(async move { Ok(result) })
+            Box::pin(async move {
+                if fail {
+                    return Err(TypeProviderError::new(
+                        "scripted transient hover failure".to_string(),
+                    ));
+                }
+                Ok(result)
+            })
         }
 
         fn get_diagnostics(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {

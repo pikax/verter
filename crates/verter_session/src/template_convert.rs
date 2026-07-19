@@ -7,8 +7,8 @@
 use verter_compiler::compile::template_data::RawTemplateData;
 use verter_semantic::analysis::template::{
     BindingUsageKind, CommentDirective, CommentDirectiveKind, DefinedSlot, ElementNamespace,
-    IfChain, PropValueConstness, TemplateAnalysisSnapshot, TemplateAttribute,
-    TemplateBindingOccurrence, TemplateComponentBinding, TemplateComponentEvent,
+    IfChain, PropValueConstness, SnippetDefinition, SvelteDirectiveInfo, TemplateAnalysisSnapshot,
+    TemplateAttribute, TemplateBindingOccurrence, TemplateComponentBinding, TemplateComponentEvent,
     TemplateComponentUsage, TemplateComponentVModel, TemplateDirective, TemplateElement,
     TemplateEventHandler, TemplatePropUsage, TemplateRef, TemplateTextSegment, UnresolvedBinding,
     VForDirective, VModelDirective,
@@ -489,6 +489,27 @@ pub fn convert_raw_to_analysis(
         v_if_v_for_conflicts,
         comment_directives,
         css_var_names,
+        snippet_definitions: raw
+            .snippet_definitions
+            .iter()
+            .map(|snippet| SnippetDefinition {
+                name: snippet.name.clone(),
+                span: snippet.name_span,
+                params_text: snippet.params_text.clone(),
+            })
+            .collect(),
+        svelte_directives: raw
+            .svelte_directives
+            .iter()
+            .map(|directive| SvelteDirectiveInfo {
+                keyword: directive.keyword.clone(),
+                local: directive.local.clone(),
+                span: directive.span,
+                keyword_end: directive.keyword_end,
+                local_span: directive.local_span,
+                value_span: directive.value_span,
+            })
+            .collect(),
         // prop/emit definitions and type_enhancements come from script analysis.
         ..Default::default()
     }

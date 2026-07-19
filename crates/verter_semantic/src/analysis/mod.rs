@@ -97,10 +97,11 @@ pub use template::{
     extract_dynamic_class_names, extract_dynamic_class_names_rich, parse_string_literal_union,
     unwrap_reactive_type, AnalyzedEmitDefinition, AnalyzedMacroUsage, AnalyzedPropDefinition,
     BindingUsageKind, CommentDirective, CommentDirectiveKind, DefinedSlot, DynamicClassName,
-    ElementNamespace, IfChain, MacroKind, PropValueConstness, TemplateAnalysisSnapshot,
-    TemplateAttribute, TemplateBindingOccurrence, TemplateComponentUsage, TemplateDirective,
-    TemplateElement, TemplateEventHandler, TemplatePropUsage, TemplateRef,
-    TemplateTypeEnhancements, TypeMismatch, UnresolvedBinding, VForDirective, VModelDirective,
+    ElementNamespace, IfChain, MacroKind, PropValueConstness, SnippetDefinition,
+    SvelteDirectiveInfo, TemplateAnalysisSnapshot, TemplateAttribute, TemplateBindingOccurrence,
+    TemplateComponentUsage, TemplateDirective, TemplateElement, TemplateEventHandler,
+    TemplatePropUsage, TemplateRef, TemplateTypeEnhancements, TypeMismatch, UnresolvedBinding,
+    VForDirective, VModelDirective,
 };
 pub use types::hash_16;
 pub use types::{

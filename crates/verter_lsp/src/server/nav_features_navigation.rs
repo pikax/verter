@@ -1034,7 +1034,7 @@ pub(super) async fn handle_rename(
     // result is returned untouched. See `gate_cross_file_child_prop_rename`.
     Ok(
         gate_cross_file_child_prop_rename(result, &rename_class, new_name).map(|mut edit| {
-            merge::dedupe_rename_workspace_edit(&mut edit);
+            merge::dedupe_rename_workspace_edit_with_preferred(&mut edit, Some(uri));
             edit
         }),
     )

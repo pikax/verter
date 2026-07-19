@@ -151,6 +151,48 @@ fn bare_star_include_resolves_carrier_source_to_project_binding() {
     }
 }
 
+/// D7: a lax-JS tree configured by `jsconfig.json` (never a `tsconfig.json`)
+/// owns its `.vue` / `.svelte` carriers — the resolver treats the jsconfig as
+/// the configured-project authority exactly like a tsconfig (tsserver/tsgo
+/// honor it natively). Without this the tsgo carrier gate fails closed and
+/// every carrier feature (hover/completion/definition/diagnostics) silently
+/// empties while plain `.js` files keep working.
+#[test]
+fn jsconfig_owned_lax_tree_resolves_vue_and_svelte_carriers_to_project_binding() {
+    let ws = workspace_with(&[
+        (
+            "d:/ws/src/js-lax/jsconfig.json",
+            r#"{ "compilerOptions": { "allowJs": true, "checkJs": false }, "include": ["."] }"#,
+        ),
+        ("d:/ws/src/js-lax/DomEventHandler.vue", "<script></script>"),
+        ("d:/ws/src/js-lax/List.svelte", "<script></script>"),
+    ]);
+    let snap = snapshot_from_tsconfigs(&ws, &["d:/ws/src/js-lax/jsconfig.json"]);
+    let resolver = WorkspaceProjectResolver::new(
+        &snap,
+        &ws,
+        "7.0.1",
+        &(test_env_dims as fn(&str) -> EnvDims),
+        true,
+    );
+
+    for source in [
+        "d:/ws/src/js-lax/DomEventHandler.vue",
+        "d:/ws/src/js-lax/List.svelte",
+    ] {
+        match resolver.resolve(source, None) {
+            CarrierOwnershipResolution::Bound(binding) => {
+                assert_eq!(
+                    binding.tsconfig_uri(),
+                    "d:/ws/src/js-lax/jsconfig.json",
+                    "the jsconfig must be the owning configured project for {source}"
+                );
+            }
+            other => panic!("jsconfig-owned carrier {source} must bind ⇒ Bound, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn extension_specific_include_does_not_own_carrier_source() {
     let exts = carrier_exts();

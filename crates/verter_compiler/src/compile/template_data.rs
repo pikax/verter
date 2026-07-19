@@ -24,7 +24,41 @@ pub struct RawTemplateData {
     pub v_model_directives: Vec<RawVModelData>,
     pub if_chains: Vec<RawIfChain>,
     pub comment_directives: Vec<RawCommentDirective>,
+    /// Svelte `{#snippet name(params)}` declarations (empty for Vue).
+    pub snippet_definitions: Vec<RawSnippetDef>,
+    /// Svelte element directives (`use:x`, `transition:fn`, `bind:prop`, …) —
+    /// empty for Vue. Powers the D6 directive-keyword doc hovers.
+    pub svelte_directives: Vec<RawSvelteDirective>,
     pub max_nesting_depth: u16,
+}
+
+/// A Svelte element directive attribute (`use:action`, `transition:fn`,
+/// `bind:prop`, `class:name`, `style:prop`, `on:event`, `let:item`, …).
+#[derive(Debug, Clone)]
+pub struct RawSvelteDirective {
+    /// The keyword (`use`, `transition`, `in`, `out`, `animate`, `bind`,
+    /// `class`, `style`, `on`, `let`, or the unrecognised prefix verbatim).
+    pub keyword: String,
+    /// The local name (the part after the `:`, before any `|modifier`).
+    pub local: String,
+    /// The full attribute span (keyword + local + modifiers + value).
+    pub span: Span,
+    /// Byte offset end of the keyword (before the `:`).
+    pub keyword_end: u32,
+    /// The local name span.
+    pub local_span: Span,
+    /// The value expression span, if present.
+    pub value_span: Option<Span>,
+}
+
+/// A Svelte `{#snippet name(params)}` declaration.
+#[derive(Debug, Clone)]
+pub struct RawSnippetDef {
+    pub name: String,
+    /// SFC-absolute byte span of the snippet name.
+    pub name_span: Span,
+    /// The `(params)` text without the parens, when present.
+    pub params_text: Option<String>,
 }
 
 /// A component usage in the template.

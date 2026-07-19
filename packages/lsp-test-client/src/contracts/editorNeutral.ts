@@ -507,6 +507,51 @@ const LAX_DOM_EVENT_HANDLERS: readonly LaxDomEventContractSpec[] = [
   },
 ];
 
+const LAX_JSCONFIG_DOM_EVENT_HANDLERS: readonly LaxDomEventContractSpec[] = [
+  {
+    id: "vue-js-dom-event-policy-lax-jsconfig",
+    framework: "vue",
+    document: "src/policy/lax-jsconfig/vue/JsConfigEventHandler.vue",
+    eventAnchor: {
+      text: "e.pointerId;",
+      occurrence: 0,
+      token: "e.pointerId",
+    },
+    declarationAnchor: {
+      text: "function myClick(e) {",
+      occurrence: 0,
+      token: "e",
+    },
+    completionAnchor: {
+      text: "e.pointerId;",
+      occurrence: 0,
+      token: ".",
+      offset: 1,
+    },
+  },
+  {
+    id: "svelte-js-dom-event-policy-lax-jsconfig",
+    framework: "svelte",
+    document: "src/policy/lax-jsconfig/svelte/JsConfigEventHandler.svelte",
+    eventAnchor: {
+      text: "e.pointerId;",
+      occurrence: 0,
+      token: "e.pointerId",
+    },
+    declarationAnchor: {
+      text: "function myClick(e) {",
+      occurrence: 0,
+      token: "e",
+    },
+    completionAnchor: {
+      text: "e.pointerId;",
+      occurrence: 0,
+      token: ".",
+      offset: 1,
+    },
+  },
+];
+
 /** Construct the exact contract inventory. The returned list is stable and deduplicated. */
 export function createEditorNeutralContractInventory(): readonly EditorNeutralContractCase[] {
   const cases: EditorNeutralContractCase[] = [];
@@ -705,6 +750,70 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
       },
     );
   }
+
+  // D7: the same lax-JS carrier family, but configured by `jsconfig.json`
+  // (never a `tsconfig.json`) — the exact project shape of the reported
+  // js-lax repro. A plain `.js` sibling carrying the SAME JSDoc-annotated
+  // member-access shape is the discriminating control: it hovers through the
+  // ungated plain-file lane, while the carriers exercise the jsconfig-owned
+  // carrier binding — the A/B isolates the carrier lane, never the typing
+  // mechanism.
+  for (const handler of LAX_JSCONFIG_DOM_EVENT_HANDLERS) {
+    const base = {
+      framework: handler.framework,
+      language: "js" as const,
+      providers: ALL_PROVIDERS,
+      surface: "standard-lsp" as const,
+    };
+    cases.push(
+      {
+        ...base,
+        id: `${handler.id}.diagnostics.clean`,
+        feature: "diagnostics-clean",
+        document: handler.document,
+      },
+      {
+        ...base,
+        id: `${handler.id}.hover`,
+        feature: "hover",
+        document: handler.document,
+        anchor: handler.eventAnchor,
+        requiredHoverFragments: ["PointerEvent"],
+        forbiddenHoverPatterns: [/\bany\b/i, /\bunknown\b/i],
+      },
+      {
+        ...base,
+        id: `${handler.id}.completion`,
+        feature: "completion",
+        document: handler.document,
+        anchor: handler.completionAnchor,
+        expectedCompletion: "pointerId",
+      },
+      {
+        ...base,
+        id: `${handler.id}.definition`,
+        feature: "definition",
+        document: handler.document,
+        anchor: handler.eventAnchor,
+        expectedDefinitionDocument: handler.document,
+        expectedDefinitionAnchor: handler.declarationAnchor,
+      },
+    );
+  }
+  cases.push({
+    id: "plain-js-lax-jsconfig-control.hover",
+    surface: "standard-lsp",
+    feature: "plain-control-hover",
+    document: "src/policy/lax-jsconfig/plain-control.js",
+    anchor: {
+      text: "e.pointerId;",
+      occurrence: 0,
+      token: "e.pointerId",
+    },
+    requiredHoverFragments: ["PointerEvent"],
+    forbiddenHoverPatterns: [/\bany\b/i, /\bunknown\b/i],
+    providers: ALL_PROVIDERS,
+  });
 
   cases.push(
     {

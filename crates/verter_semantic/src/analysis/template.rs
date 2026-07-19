@@ -79,6 +79,50 @@ pub struct TemplateAnalysisSnapshot {
     /// All CSS variable names set in template inline styles (static + dynamic, deduped).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub css_var_names: Vec<String>,
+
+    /// Svelte `{#snippet name(params)}` declarations in this component's
+    /// template (empty for Vue). Powers `{@render |}` callee completion (D5).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub snippet_definitions: Vec<SnippetDefinition>,
+
+    /// Svelte element directives (`use:x`, `transition:fn`, `bind:prop`, …) in
+    /// this component's template (empty for Vue). Powers the D6
+    /// directive-keyword doc hovers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub svelte_directives: Vec<SvelteDirectiveInfo>,
+}
+
+/// A Svelte `{#snippet name(params)}` declaration (typed template IR).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SnippetDefinition {
+    /// Snippet name (`"row"`, `"header"`).
+    pub name: String,
+    /// SFC-absolute byte span of the snippet name.
+    pub span: Span,
+    /// The `(params)` text without the parens, when present (e.g. `"item: number"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params_text: Option<String>,
+}
+
+/// A Svelte element directive attribute (`use:action`, `transition:fn`,
+/// `bind:prop`, `class:name`, `style:prop`, `on:event`, `let:item`, …) as
+/// typed template IR. Powers the D6 directive-keyword doc hovers.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SvelteDirectiveInfo {
+    /// The keyword (`use`, `transition`, `in`, `out`, `animate`, `bind`,
+    /// `class`, `style`, `on`, `let`, or an unrecognised prefix verbatim).
+    pub keyword: String,
+    /// The local name (the part after the `:`, before any `|modifier`).
+    pub local: String,
+    /// The full attribute span.
+    pub span: Span,
+    /// Byte offset end of the keyword (before the `:`).
+    pub keyword_end: u32,
+    /// The local name span.
+    pub local_span: Span,
+    /// The value expression span, if present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_span: Option<Span>,
 }
 
 // =============================================================================

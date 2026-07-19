@@ -966,9 +966,12 @@ fn discover_tsconfigs_skips_node_modules_and_dot_dirs() {
 }
 
 #[test]
-fn discover_tsconfigs_matches_tsconfig_named_files_only() {
-    // Pin the filename predicate: `tsconfig.json` and
-    // `tsconfig.<suffix>.json` are matched; anything else is not.
+fn discover_tsconfigs_matches_tsconfig_and_jsconfig_named_files() {
+    // Pin the filename predicate: `tsconfig.json`, `tsconfig.<suffix>.json`,
+    // and the JavaScript project config `jsconfig.json` are matched; anything
+    // else is not. `jsconfig.json` is the configured-project authority for
+    // JS-only trees (tsserver/tsgo honor it natively); a carrier under a
+    // jsconfig-only directory must resolve a configured owner (D7).
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();
     let touch = |rel: &str| {
@@ -979,34 +982,44 @@ fn discover_tsconfigs_matches_tsconfig_named_files_only() {
     touch("tsconfig.json");
     touch("tsconfig.app.json");
     touch("tsconfig.node.test.json");
+    touch("js-only/jsconfig.json");
     // Negative: similar names that must NOT match.
-    touch("jsconfig.json");
+    touch("jsconfig.app.json"); // no suffixed jsconfig variants exist
     touch("tsconfig.txt");
     touch("a-tsconfig.json"); // filename does not start with `tsconfig.`
     touch("tsconfigjson"); // missing dot before extension
     touch("subdir/tsconfig.json");
 
     let entries = super::discover_tsconfigs(root);
-    let mut names: Vec<String> = entries
-        .iter()
-        .map(|e| {
-            std::path::Path::new(&e.path)
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect();
+    let mut paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
+    paths.sort();
+    let file_name = |path: &str| {
+        std::path::Path::new(path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    };
+    assert!(
+        paths.iter().any(|p| file_name(p) == "jsconfig.json"),
+        "jsconfig.json must be discovered as a configured project: {paths:?}",
+    );
+    assert!(
+        !paths.iter().any(|p| file_name(p) == "jsconfig.app.json"),
+        "suffixed jsconfig variants must NOT match: {paths:?}",
+    );
+    let mut names: Vec<String> = paths.iter().map(|p| file_name(p)).collect();
     names.sort();
     names.dedup();
     let expected: Vec<String> = vec![
+        "jsconfig.json".into(),
         "tsconfig.app.json".into(),
         "tsconfig.json".into(),
         "tsconfig.node.test.json".into(),
     ];
     assert_eq!(
         names, expected,
-        "must match only tsconfig[.suffix].json files"
+        "must match tsconfig[.suffix].json and jsconfig.json files"
     );
     assert_eq!(
         entries
@@ -1015,6 +1028,39 @@ fn discover_tsconfigs_matches_tsconfig_named_files_only() {
             .count(),
         2, // root/tsconfig.json + subdir/tsconfig.json
         "should find both root and nested user-source tsconfig.json",
+    );
+}
+
+#[test]
+fn discover_tsconfigs_prefers_tsconfig_json_over_jsconfig_json_in_the_same_directory() {
+    // TypeScript ignores a `jsconfig.json` sitting next to a `tsconfig.json`;
+    // discovering both would make every file in the directory multiply-owned
+    // (Ambiguous) and fail every carrier feature closed.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    std::fs::write(root.join("tsconfig.json"), "{}").unwrap();
+    std::fs::write(root.join("jsconfig.json"), "{}").unwrap();
+    std::fs::create_dir_all(root.join("js-only")).unwrap();
+    std::fs::write(root.join("js-only").join("jsconfig.json"), "{}").unwrap();
+
+    let entries = super::discover_tsconfigs(root);
+    let mut paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
+    paths.sort();
+    assert_eq!(
+        paths.len(),
+        2,
+        "same-dir jsconfig must be suppressed, standalone jsconfig kept: {paths:?}"
+    );
+    assert!(paths
+        .iter()
+        .any(|p| p.ends_with("/tsconfig.json") || p.ends_with("\\tsconfig.json")));
+    assert!(paths.iter().any(|p| p.contains("js-only")));
+    assert!(
+        !paths.iter().any(
+            |p| (p.ends_with("/jsconfig.json") || p.ends_with("\\jsconfig.json"))
+                && !p.contains("js-only")
+        ),
+        "the jsconfig next to a tsconfig.json must not be discovered: {paths:?}"
     );
 }
 
@@ -1087,6 +1133,28 @@ fn has_configured_ts_project_anywhere_rejects_workspace_with_no_tsconfig() {
     );
     // A root-only gate agrees here (no root tsconfig) — this case is not the discriminator.
     assert!(!root_only_gate(root));
+}
+
+/// A JS-only workspace configured by `jsconfig.json` (the JavaScript project
+/// config tsserver/tsgo honor natively) HAS a configured project: owned tsgo
+/// must spawn and bind its carriers (D7 — a jsconfig-only tree is not an
+/// inferred project).
+#[test]
+fn has_configured_ts_project_anywhere_accepts_jsconfig_only_workspace() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let touch = |rel: &str| {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "{}").unwrap();
+    };
+    touch("jsconfig.json");
+    touch("src/main.js");
+
+    assert!(
+        super::has_configured_ts_project_anywhere(root),
+        "a jsconfig.json-only workspace HAS a configured JS project"
+    );
 }
 
 /// The precondition prunes `node_modules` + `.git` + framework-GENERATED dot-dirs

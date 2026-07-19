@@ -120,7 +120,7 @@ describe("parity inventory", () => {
     );
     expect(inventory.literalRegistrationCount).toBe(derivedLiteralCount);
     expect(discovered).toHaveLength(40);
-    expect(derivedLiteralCount).toBe(242);
+    expect(derivedLiteralCount).toBe(247);
   });
 
   it("attests all 73 unique matrix IDs and every authored anchor", () => {
@@ -143,7 +143,7 @@ describe("parity inventory", () => {
       suiteRoot,
       matrixCasesFile: resolve(libRoot, "matrixCases.ts"),
     });
-    expect(inventory.literalRegistrationCount).toBe(242);
+    expect(inventory.literalRegistrationCount).toBe(247);
     expect(inventory.matrixCaseCount).toBe(73);
     expect(inventory.matrixCaseCount).toBe(VUE_MATRIX_CASES.length + SVELTE_MATRIX_CASES.length);
     for (const ids of Object.values(inventory.testIdsByFixture)) {
@@ -226,6 +226,7 @@ describe("parity inventory", () => {
       "shared.js-jsdoc.dom-event.member-definition",
       "shared.js-jsdoc.dom-event.parameter-hover-concrete",
       "shared.js-lax.dom-event.diagnostics-follow-config",
+      "shared.js-lax.dom-event.plain-js-control-hover",
       "shared.js-lax.dom-event.unannotated-remains-any",
       "shared.js.dom-event.checked-diagnostics-follow-config",
       "shared.js.dom-event.classic-or-legacy-not-contextual",
