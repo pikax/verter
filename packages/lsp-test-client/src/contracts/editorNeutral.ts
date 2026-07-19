@@ -753,9 +753,11 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
 
   // D7: the same lax-JS carrier family, but configured by `jsconfig.json`
   // (never a `tsconfig.json`) — the exact project shape of the reported
-  // js-lax repro. A plain `.js` sibling in the same jsconfig project is the
-  // discriminating control: it hovers through the ungated plain-file lane,
-  // while the carriers exercise the jsconfig-owned carrier binding.
+  // js-lax repro. A plain `.js` sibling carrying the SAME JSDoc-annotated
+  // member-access shape is the discriminating control: it hovers through the
+  // ungated plain-file lane, while the carriers exercise the jsconfig-owned
+  // carrier binding — the A/B isolates the carrier lane, never the typing
+  // mechanism.
   for (const handler of LAX_JSCONFIG_DOM_EVENT_HANDLERS) {
     const base = {
       framework: handler.framework,
