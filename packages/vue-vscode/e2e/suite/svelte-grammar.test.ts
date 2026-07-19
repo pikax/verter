@@ -8,7 +8,9 @@ import {
   openVueFile,
   waitForFileReady,
   FIXTURE_NAME,
+  TYPE_PROVIDER,
 } from "../helpers";
+import { pollUntil, semanticTokensExist } from "../lib/parityHarness";
 
 // Svelte syntax-colorization packaging: a `.svelte` document opens under the
 // `svelte` language id, and the RUNNING Verter extension contributes both the
@@ -125,23 +127,45 @@ suite(`Svelte grammar packaging [${FIXTURE_NAME}]`, function () {
       console.log("    svelte fixtures only in single-project — N/A");
       return;
     }
+    this.timeout(60_000);
     expect(isLspReady(), "LSP must be ready").to.be.true;
     await ensureTypeProviderSynced();
     const doc = await openVueFile(SVELTE_CHILD);
     await waitForFileReady(doc);
-    // The probe itself must not throw with the grammar contributed. Semantic
-    // tokens are additive (VS Code layers them ABOVE TextMate scopes); their
-    // presence depends on the provider, so log rather than hard-assert counts.
-    const legend = await vscode.commands.executeCommand<vscode.SemanticTokensLegend | undefined>(
-      "vscode.provideDocumentSemanticTokensLegend",
-      doc.uri,
-    );
-    const tokens = await vscode.commands.executeCommand<vscode.SemanticTokens | undefined>(
-      "vscode.provideDocumentSemanticTokens",
-      doc.uri,
-    );
-    console.log(
-      `    semantic tokens: legend=${legend ? "yes" : "no"} data=${tokens?.data?.length ?? 0}`,
-    );
+    // Semantic tokens are additive (VS Code layers them ABOVE TextMate scopes).
+    // Where the product serves `.svelte` semantic-token DATA (the shared-tsgo
+    // lane), hard-assert a non-empty legend AND non-empty token data via the
+    // shared hard predicate (`semanticTokensExist`) — an absent/empty provider
+    // result FAILS this test instead of degrading to a log line.
+    //
+    // tsserver / managed-tsgo do not produce `.svelte` token data yet — the
+    // ledgered product gap ISSUE-lsp-semantic-tokens (e2e/ISSUES.md), owned and
+    // hard-failed by the parity suite (`lsp.semantic-tokens.present`). On those
+    // routes this packaging suite still asserts the discriminating packaging
+    // fact it owns: the provider REGISTRATION (legend) survives the grammar
+    // contribution.
+    if (TYPE_PROVIDER === "shared-tsgo") {
+      const present = await pollUntil(
+        "svelte semantic tokens (non-empty legend + data)",
+        () => semanticTokensExist(SVELTE_CHILD),
+        (ok) => ok,
+        20_000,
+      );
+      expect(present, "semantic tokens must be present (non-empty legend + non-empty data)").to.be
+        .true;
+    } else {
+      const legend = await vscode.commands.executeCommand<vscode.SemanticTokensLegend | undefined>(
+        "vscode.provideDocumentSemanticTokensLegend",
+        doc.uri,
+      );
+      expect(
+        legend,
+        "a semantic-token provider (legend) must stay registered for .svelte documents",
+      ).to.not.be.undefined;
+      expect(legend!.tokenTypes, "legend must be non-empty").to.have.length.greaterThan(0);
+      console.log(
+        `    token DATA not asserted on ${TYPE_PROVIDER}: ledgered gap ISSUE-lsp-semantic-tokens`,
+      );
+    }
   });
 });
