@@ -57,7 +57,8 @@ describe("computeProviderRecommendationNotice", () => {
     kind: "tsserver" as const,
     recommendation: {
       preferred: "tsgo" as const,
-      reason: "This workspace is served by workspace TypeScript (tsserver). TSGO is recommended.",
+      reason:
+        "This workspace is served by a tsserver-family TypeScript service. TSGO is recommended.",
       knownGaps: ["TSGO does not yet provide the 'remove unused declaration' quick fix (TS6133)."],
     },
   };

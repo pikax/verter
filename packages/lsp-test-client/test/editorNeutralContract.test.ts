@@ -308,7 +308,8 @@ describe("editor-neutral fail-closed validation", () => {
       startedKinds: ["tsserver"],
       recommendation: {
         preferred: "tsgo",
-        reason: "This workspace is served by workspace TypeScript (tsserver). TSGO is recommended.",
+        reason:
+          "This workspace is served by a tsserver-family TypeScript service. TSGO is recommended.",
         knownGaps: ["The 'remove unused declaration' quick fix (TS6133) is not yet available."],
       },
     });

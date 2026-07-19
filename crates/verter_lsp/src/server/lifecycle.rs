@@ -225,8 +225,12 @@ pub(super) async fn handle_initialize(
 pub(super) fn provider_recommendation(
     kind: &crate::TypeProviderKind,
 ) -> Option<ProviderRecommendation> {
+    // Route wording must stay accurate for EVERY serving arrangement of the
+    // kind: `Tsserver` covers both the managed workspace tsserver and the
+    // extension-hosted TypeScript language service (Experiment E), so it
+    // names the family, not a specific install.
     let route = match kind {
-        crate::TypeProviderKind::Tsserver => "workspace TypeScript (tsserver)",
+        crate::TypeProviderKind::Tsserver => "a tsserver-family TypeScript service",
         crate::TypeProviderKind::EditorTsserver => "the editor-owned tsserver plugin",
         crate::TypeProviderKind::Tsgo | crate::TypeProviderKind::None => return None,
     };
@@ -1325,15 +1329,27 @@ mod provider_recommendation_tests {
             "the unported remove-unused quick fix must be disclosed: {:?}",
             rec.known_gaps
         );
-        // Negative: the two STALE claims must NOT reappear as gaps.
+        // Negative: the two claims of the retired startup warning must NOT
+        // reappear as gaps — (a) "barrel re-exported .vue loses typing" and
+        // (b) "referenced-tsconfig (composite) path aliases unresolved on
+        // hover". Both were disproven by real-provider evidence; the
+        // one-time pull-diagnostics path-alias gap was ALSO freshly
+        // disproven (`carrier_diagnostics_resolve_path_alias_tsgo` runs
+        // un-ignored and green). This negative pins only the RETIRED claim
+        // wording: a future tree-evidenced gap that happens to involve path
+        // aliases may still be honestly disclosed.
         for gap in &rec.known_gaps {
             assert!(
                 !gap.contains("barrel"),
                 "stale barrel-typing claim must stay retired"
             );
+            let lower = gap.to_lowercase();
             assert!(
-                !gap.to_lowercase().contains("path alias"),
-                "stale path-alias claim must stay retired"
+                !(lower.contains("path alias")
+                    && (lower.contains("referenced tsconfig")
+                        || lower.contains("composite")
+                        || lower.contains("hover"))),
+                "the retired composite-hover path-alias claim must stay retired: {gap}"
             );
         }
     }
