@@ -1403,8 +1403,11 @@ fn compile_inner(
         template_data: extracted_template_data,
         // True when the render function was inlined into `setup()` (official
         // production topology) — the script block already contains the full
-        // component, and no separate template block was emitted.
-        inline: inline_active,
+        // component, and no separate template block was emitted. Gated on the
+        // runtime script lane actually running: the IDE/TSX-only target emits
+        // no runtime inline body, so the flag must not be set merely because
+        // the option is on.
+        inline: inline_active && options.target.needs_script(),
         // The compiler is cache-mode agnostic — it produces output for a
         // single direct invocation. The host's cache routing wraps this
         // call; a bare `compile()` reports the default Session mode with

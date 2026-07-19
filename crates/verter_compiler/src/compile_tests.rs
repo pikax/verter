@@ -16426,3 +16426,47 @@ fn inline_plain_template_no_attrs_slots_destructure() {
         code
     );
 }
+
+// =========================================================================
+// D7 — result.inline reflects the runtime inline ACTUALLY happening
+// =========================================================================
+
+#[test]
+fn result_inline_false_for_ide_target() {
+    // IDE emits only TSX (no runtime inline body) — result.inline must not
+    // be set merely because the option is on.
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        inline: Some(true),
+        target: CompileTarget::IDE,
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    let result = compile(
+        "<script setup>\nconst msg = 'hi'\n</script>\n<template><div>{{ msg }}</div></template>",
+        &options,
+        &verter_opts,
+        &alloc,
+    );
+    assert!(result.tsx.is_some(), "IDE target emits TSX");
+    assert!(
+        !result.inline,
+        "result.inline must be false for the IDE target (no runtime inline)"
+    );
+}
+
+#[test]
+fn result_inline_true_when_runtime_inline_happens() {
+    let result = compile_sfc_inline(
+        "<script setup>\nconst msg = 'hi'\n</script>\n<template><div>{{ msg }}</div></template>",
+    );
+    assert!(
+        result.inline,
+        "result.inline true when the runtime inline happened"
+    );
+    assert!(result.template.is_none());
+}
