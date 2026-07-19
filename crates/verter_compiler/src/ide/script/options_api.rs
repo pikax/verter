@@ -24,9 +24,10 @@ use crate::template::code_gen::types::CodeGenOutput;
 use crate::utils::oxc::vue::{parse_script, DefaultExportType, ScriptItem, ScriptMode};
 
 use super::{
-    apply_template_ref_call_inference, collect_binding_names, directive_accessor_declaration,
-    emit_helper_imports, emit_helper_imports_with_define_component, emit_type_constructs,
-    instance_declaration_ambient, should_infer_function_types,
+    apply_template_ref_call_inference, collect_binding_names, collect_global_component_fallbacks,
+    directive_accessor_declaration, emit_global_component_fallbacks, emit_helper_imports,
+    emit_helper_imports_with_define_component, emit_type_constructs, instance_declaration_ambient,
+    should_infer_function_types,
 };
 
 // ── Companion Script Processing ──────────────────────────────────
@@ -137,6 +138,7 @@ pub(super) fn process_tsx_script_only<'alloc>(
     _alloc: &'alloc Allocator,
     options: &IdeScriptOptions<'_>,
     builtin_components: &[&str],
+    template_component_fallbacks: &mut Vec<String>,
 ) {
     let content_span = match &script.content {
         Some(span) => span,
@@ -188,6 +190,26 @@ pub(super) fn process_tsx_script_only<'alloc>(
     // so the template JSX `<Alias />` resolves to the imported component.
     let component_aliases = extract_component_aliases(&parser_ret.program, content_str);
 
+    // Register alias names as template-visible bindings: the emitted alias const
+    // behaves exactly like an import for template purposes (a file-scope binding
+    // referenced directly), so kebab tag rewriting and event typing resolve it.
+    for (alias, _) in &component_aliases {
+        let alloc_alias = out.alloc_str(alias);
+        bindings
+            .entry(alloc_alias)
+            .or_insert(BindingType::SetupImport);
+    }
+
+    // Collect the GlobalComponents fallback consts for unresolved template
+    // components — the SAME inventory the `<script setup>` arm builds. Alias
+    // names count as bound (their alias const owns the name). Emission happens
+    // in the `</script>` close string below; the close string precedes the
+    // template JSX in output order for BOTH SFC layouts (a template-first SFC's
+    // JSX is relocated after the script close by the compile pipeline), so the
+    // consts are in scope with no TDZ hazard.
+    let global_fallbacks =
+        collect_global_component_fallbacks(template_ast, source, |n| bindings.contains_key(n));
+
     // Detect if the default export is a plain object (needs defineComponent wrapping
     // for type inference). Only applies to JS mode — TS uses native type syntax.
     let needs_define_component_wrap = options.is_jsx
@@ -210,6 +232,11 @@ pub(super) fn process_tsx_script_only<'alloc>(
         for (alias, value) in &component_aliases {
             close.push_str(&format!("const {alias} = {value};\n"));
         }
+        // GlobalComponents fallback consts for unresolved template components.
+        emit_global_component_fallbacks(&mut close, &global_fallbacks, options.is_jsx);
+        if !global_fallbacks.is_empty() {
+            close.push('\n');
+        }
         // Ambient instance declaration for template property access.
         close.push_str(&instance_declaration_ambient(
             options.filename,
@@ -218,6 +245,10 @@ pub(super) fn process_tsx_script_only<'alloc>(
         ));
         close.push_str(&directive_accessor_declaration(options.is_jsx));
         out.overwrite(tag_close.start, tag_close.end, &close);
+        // Hand the inventory to template codegen only when the consts were
+        // actually emitted (an unclosed `<script>` has no close string to
+        // carry them — the file is already in error recovery).
+        *template_component_fallbacks = global_fallbacks;
     }
 
     // Convert `export default` to `const __sfc__ =`

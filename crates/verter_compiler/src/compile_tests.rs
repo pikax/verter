@@ -9352,6 +9352,9 @@ const items = [1]
 
 #[test]
 fn tsx_component_kebab_and_mixed_case_names_are_preserved() {
+    // Kebab component tags REWRITE to their PascalCase fallback const (a
+    // lowercase JSX identifier is an intrinsic lookup that never consults the
+    // const); camelCase tags keep their authored identifier form.
     let result = compile_tsx(
         r#"<template>
   <item-render></item-render>
@@ -9363,13 +9366,19 @@ fn tsx_component_kebab_and_mixed_case_names_are_preserved() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains("<item-render></item-render>"),
-        "kebab-case component tag should be preserved, got:\n{}",
+        tsx.code.contains("<ItemRender></ItemRender>"),
+        "kebab-case component tag should rewrite to its Pascal const, got:\n{}",
         tsx.code
     );
     assert!(
-        tsx.code.contains("<hello-moto />") || tsx.code.contains("<hello-moto/>"),
-        "lower-kebab component tag should be preserved, got:\n{}",
+        tsx.code
+            .contains("const ItemRender = {} as ___VERTER___GlobalComponentType<'ItemRender'>"),
+        "the ItemRender fallback const must back the rewritten tag, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("<HelloMoto />") || tsx.code.contains("<HelloMoto/>"),
+        "lower-kebab component tag should rewrite to its Pascal const, got:\n{}",
         tsx.code
     );
     assert!(
@@ -9377,9 +9386,17 @@ fn tsx_component_kebab_and_mixed_case_names_are_preserved() {
         "mixed camelCase component tag should be preserved, got:\n{}",
         tsx.code
     );
+    // `hello-moto` and `Hello-Moto` PascalCase to ONE shared const.
+    assert_eq!(
+        tsx.code.matches("const HelloMoto").count(),
+        1,
+        "one shared HelloMoto const for both kebab spellings, got:\n{}",
+        tsx.code
+    );
+    // Negative: no kebab identifier survives into the JSX for resolvable tags.
     assert!(
-        tsx.code.contains("<Hello-Moto />") || tsx.code.contains("<Hello-Moto/>"),
-        "mixed Pascal-kebab component tag should be preserved, got:\n{}",
+        !tsx.code.contains("<item-render") && !tsx.code.contains("<hello-moto"),
+        "no intrinsic kebab tag may survive for a rewritten component, got:\n{}",
         tsx.code
     );
 }
@@ -15005,8 +15022,8 @@ return (_openBlock(), _createElementBlock("p", { title: $setup.msg }, _toDisplay
 // strip-prone) trailing whitespace while the golden still pins the exact bytes.
 const TS_OVERLAY_GOLDEN_TSX: &str = concat!(
     r#"/** @jsxImportSource vue */
-import type { Prettify as ___VERTER___Prettify, ExtractComponentProps as ___VERTER___ExtractComponentProps, ExtractLeafElement as ___VERTER___ExtractLeafElement } from "@verter/types";
-import { shallowUnwrapRef as ___VERTER___shallowUnwrapRef, enhanceElementWithProps as ___VERTER___enhanceElementWithProps, extractRenderComponent as ___VERTER___extractRenderComponent, instantiateComponent as ___VERTER___instantiateComponent, extractArgumentsFromRenderSlot as ___VERTER___extractArgumentsFromRenderSlot, runCustomDirective as ___VERTER___runCustomDirective, retrieveSetupDirectives as ___VERTER___retrieveSetupDirectives, strictRenderSlot as ___VERTER___strictRenderSlot, checkRequiredSlots as ___VERTER___checkRequiredSlots } from "@verter/types";
+import type { Prettify as ___VERTER___Prettify, ExtractComponentProps as ___VERTER___ExtractComponentProps, ExtractLeafElement as ___VERTER___ExtractLeafElement, GlobalComponentType as ___VERTER___GlobalComponentType } from "@verter/types";
+import { shallowUnwrapRef as ___VERTER___shallowUnwrapRef, enhanceElementWithProps as ___VERTER___enhanceElementWithProps, extractRenderComponent as ___VERTER___extractRenderComponent, instantiateComponent as ___VERTER___instantiateComponent, extractArgumentsFromRenderSlot as ___VERTER___extractArgumentsFromRenderSlot, runCustomDirective as ___VERTER___runCustomDirective, retrieveSetupDirectives as ___VERTER___retrieveSetupDirectives, strictRenderSlot as ___VERTER___strictRenderSlot, checkRequiredSlots as ___VERTER___checkRequiredSlots, globalComponentsNav as ___VERTER___globalComponentsNav } from "@verter/types";
 ;export function ___VERTER___TemplateBindingFN() {
 
 const msg = 'hi'
@@ -15230,13 +15247,18 @@ function onPing(s: string) { void s; }
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     // Script generation emits the GlobalComponents fallback const for the unimported
-    // component (the only place `import('vue').GlobalComponents` is allowed — a
-    // `extends ... infer` conditional, NEVER an indexed event-type query).
+    // component through the @verter/types helper (a REAL import statement the tsgo
+    // provider resolves from the virtual TSX — never an `import('vue')` type query).
     assert!(
         tsx.code.contains(
-            "const GlobalEmitComp = {} as import('vue').GlobalComponents extends { GlobalEmitComp: infer C } ? C : unknown;"
+            "const GlobalEmitComp = {} as ___VERTER___GlobalComponentType<'GlobalEmitComp'>;"
         ),
         "must emit the GlobalComponents fallback const: {}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("import('vue').GlobalComponents"),
+        "the import('vue') type-query form is retired from the virtual TSX: {}",
         tsx.code
     );
     // The duplicate-spread `$event` resolves through that same fallback const.
@@ -15300,7 +15322,7 @@ function onPick(n: number) { void n; }
     // An imported component must NOT also get a GlobalComponents fallback const.
     assert!(
         !tsx.code
-            .contains("const EmitChild = {} as import('vue').GlobalComponents"),
+            .contains("const EmitChild = {} as ___VERTER___GlobalComponentType"),
         "imported component must NOT get a fallback const: {}",
         tsx.code
     );
@@ -15324,8 +15346,9 @@ function handlePing(e) { void e; }
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code
-            .contains("const GlobalEmitComp = {} as import('vue').GlobalComponents"),
+        tsx.code.contains(
+            "const GlobalEmitComp = {} as ___VERTER___GlobalComponentType<'GlobalEmitComp'>"
+        ),
         "must emit the fallback const: {}",
         tsx.code
     );

@@ -578,7 +578,7 @@ import Foo from './Foo.vue'
     );
     // Negative: no global fallback for imported component
     assert!(
-        !code.contains("as import('vue').GlobalComponents"),
+        !code.contains("___VERTER___GlobalComponentType<'Foo'>"),
         "imported component should not get GlobalComponents fallback: {}",
         code
     );
@@ -593,10 +593,23 @@ const x = 1
 </script>
 <template><RouterLink to="/" /></template>"#,
     );
-    // Positive: global fallback for unresolved component
+    // Positive: global fallback for unresolved component, resolved through the
+    // @verter/types helper (a REAL import statement the tsgo provider can resolve
+    // from the virtual TSX — never an `import('vue')` type query).
     assert!(
-        code.contains("const RouterLink = {} as import('vue').GlobalComponents extends { RouterLink: infer C } ? C : unknown"),
+        code.contains("const RouterLink = {} as ___VERTER___GlobalComponentType<'RouterLink'>"),
         "unresolved component should get GlobalComponents fallback: {}",
+        code
+    );
+    assert!(
+        code.contains("GlobalComponentType as ___VERTER___GlobalComponentType"),
+        "the type-import line should carry the GlobalComponentType helper: {}",
+        code
+    );
+    // Negative: the tsgo-unresolvable `import('vue')` type-query form is retired.
+    assert!(
+        !code.contains("import('vue').GlobalComponents"),
+        "the fallback const must not use the import('vue') type-query form: {}",
         code
     );
     // Negative: RouterLink should NOT be in the destructuring
@@ -626,15 +639,15 @@ const x = 1
         "RouterView should get fallback const: {}",
         code
     );
-    // Both should use GlobalComponents
+    // Both should use the GlobalComponentType helper
     assert!(
-        code.contains("RouterLink: infer C"),
-        "RouterLink fallback should use GlobalComponents infer: {}",
+        code.contains("___VERTER___GlobalComponentType<'RouterLink'>"),
+        "RouterLink fallback should use the GlobalComponentType helper: {}",
         code
     );
     assert!(
-        code.contains("RouterView: infer C"),
-        "RouterView fallback should use GlobalComponents infer: {}",
+        code.contains("___VERTER___GlobalComponentType<'RouterView'>"),
+        "RouterView fallback should use the GlobalComponentType helper: {}",
         code
     );
 }
@@ -656,7 +669,7 @@ const x = 1
     );
     // Negative: no GlobalComponents fallback for builtins
     assert!(
-        !code.contains("as import('vue').GlobalComponents extends { Transition"),
+        !code.contains("___VERTER___GlobalComponentType<'Transition'>"),
         "builtin component should not get GlobalComponents fallback: {}",
         code
     );
@@ -685,8 +698,151 @@ import Foo from './Foo.vue'
     );
     // Negative: no GlobalComponents fallback since Foo is imported
     assert!(
-        !code.contains("as import('vue').GlobalComponents extends { Foo"),
+        !code.contains("___VERTER___GlobalComponentType<'Foo'>"),
         "imported Foo should not get GlobalComponents fallback: {}",
+        code
+    );
+}
+
+// ── IDE: GlobalComponents fallback across ALL script arms ─────────
+
+/// The Options-API arm emits the SAME GlobalComponents fallback consts as the
+/// `<script setup>` arm: an unimported template component must not lower to a
+/// bare unresolved JSX identifier (TS2304 → silent `any` cascade).
+#[test]
+fn options_api_emits_global_component_fallbacks() {
+    let (code, _, _) = gen_tsx_script_full(
+        r#"<script lang="ts">
+export default { name: 'Consumer' }
+</script>
+<template><VIcon size="24" /></template>"#,
+    );
+    assert!(
+        code.contains("const VIcon = {} as ___VERTER___GlobalComponentType<'VIcon'>"),
+        "Options-API arm must emit the GlobalComponents fallback const: {}",
+        code
+    );
+    assert!(
+        code.contains("GlobalComponentType as ___VERTER___GlobalComponentType"),
+        "Options-API arm must import the GlobalComponentType helper: {}",
+        code
+    );
+    assert!(
+        !code.contains("import('vue').GlobalComponents"),
+        "no import('vue') type-query form in the Options-API arm: {}",
+        code
+    );
+}
+
+/// Options-API `components: { Alias: Imported }` aliases stay the LOCAL binding —
+/// no shadowing GlobalComponents fallback const is emitted for them (a duplicate
+/// `const Alias` would be invalid TS).
+#[test]
+fn options_api_alias_not_shadowed_by_fallback() {
+    let (code, _, _) = gen_tsx_script_full(
+        r#"<script lang="ts">
+import Imported from './Imported.vue'
+export default { components: { AliasComp: Imported } }
+</script>
+<template><AliasComp /></template>"#,
+    );
+    assert!(
+        code.contains("const AliasComp = Imported;"),
+        "alias const must be emitted: {}",
+        code
+    );
+    assert!(
+        !code.contains("___VERTER___GlobalComponentType<'AliasComp'>"),
+        "aliased component must NOT get a shadowing fallback const: {}",
+        code
+    );
+    assert_eq!(
+        code.matches("const AliasComp").count(),
+        1,
+        "exactly one AliasComp const: {}",
+        code
+    );
+}
+
+/// The no-script arm (template-only SFC) also emits the fallback consts.
+#[test]
+fn no_script_emits_global_component_fallbacks() {
+    let (code, _, _) = gen_tsx_script_full(r#"<template><RouterView /></template>"#);
+    assert!(
+        code.contains("const RouterView = {} as ___VERTER___GlobalComponentType<'RouterView'>"),
+        "no-script arm must emit the GlobalComponents fallback const: {}",
+        code
+    );
+}
+
+/// The JS Options-API arm emits the fail-closed JSDoc `unknown` fallback const
+/// (never a bare unresolved identifier, never silent `any`).
+#[test]
+fn options_api_js_emits_unknown_fallbacks() {
+    let (code, _) = gen_jsx_script(
+        r#"<script>
+export default { name: 'Consumer' }
+</script>
+<template><VIcon /></template>"#,
+    );
+    assert!(
+        code.contains("const VIcon = /** @type {unknown} */ ({});"),
+        "JS Options-API arm must emit the JSDoc unknown fallback const: {}",
+        code
+    );
+}
+
+/// A self-referencing `<script setup>` component emits exactly ONE binding const:
+/// the self-import const owns the name; the GlobalComponents fallback must not
+/// duplicate it (duplicate block-scoped `const` = invalid TS).
+#[test]
+fn self_reference_no_duplicate_fallback_const() {
+    let source = r#"<script setup lang="ts">
+const items = [1, 2, 3]
+</script>
+<template><div><TreeNode /></div></template>"#;
+    let (code, _, _) = gen_tsx_script_full_with_opts(source, "TreeNode", "TreeNode.vue", vec![]);
+    assert_eq!(
+        code.matches("const TreeNode").count(),
+        1,
+        "exactly one TreeNode const (self-import owns the name): {}",
+        code
+    );
+    assert!(
+        code.contains("as typeof import('./TreeNode.vue').default"),
+        "the surviving const must be the self-import form: {}",
+        code
+    );
+    assert!(
+        !code.contains("___VERTER___GlobalComponentType<'TreeNode'>"),
+        "no GlobalComponents fallback for the self name: {}",
+        code
+    );
+}
+
+/// `<component>` itself never gets a fallback const (its tag is rewritten by the
+/// template arm); a STATIC `is="..."` naming a non-native component collects one.
+#[test]
+fn component_is_static_target_gets_fallback_not_component() {
+    let (code, _) = gen_tsx_script(
+        r#"<script setup lang="ts">
+const x = 1
+</script>
+<template><component is="GlobalWidget" /><component is="div" /></template>"#,
+    );
+    assert!(
+        !code.contains("___VERTER___GlobalComponentType<'Component'>"),
+        "the literal `component` tag must not collect a fallback const: {}",
+        code
+    );
+    assert!(
+        code.contains("const GlobalWidget = {} as ___VERTER___GlobalComponentType<'GlobalWidget'>"),
+        "a static is=\"GlobalWidget\" target must collect a fallback const: {}",
+        code
+    );
+    assert!(
+        !code.contains("___VERTER___GlobalComponentType<'Div'>"),
+        "a native static is=\"div\" target must not collect a fallback const: {}",
         code
     );
 }

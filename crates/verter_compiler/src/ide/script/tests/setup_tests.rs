@@ -1591,3 +1591,56 @@ const extra = 3
     assert_kept_live(&code, "base");
     assert_kept_live(&code, "extra");
 }
+
+/// The @verter/types surface (ambient module + standalone stub) carries the
+/// GlobalComponents machinery: the `GlobalComponentType` helper backing the
+/// per-tag fallback consts, and the `ExtractRenderComponent` string branch that
+/// resolves a registered global name passed to `<component :is="'Name'">`
+/// BEFORE falling through to the native-element chain.
+#[test]
+fn verter_types_surface_carries_global_components_machinery() {
+    let helper = r#"export type GlobalComponentType<N> = N extends keyof import("vue").GlobalComponents ? import("vue").GlobalComponents[N] : unknown;"#;
+    let string_branch = r#"T extends keyof import("vue").GlobalComponents ? ExtractRenderComponent<import("vue").GlobalComponents[T]> : T extends keyof import("vue").NativeElements"#;
+
+    for (name, surface) in [
+        ("ambient", VERTER_TYPES_AMBIENT_MODULE),
+        ("standalone", VERTER_TYPES_STANDALONE_DTS),
+    ] {
+        assert!(
+            surface.contains(helper),
+            "{name} @verter/types surface must export GlobalComponentType"
+        );
+        assert!(
+            surface.contains(string_branch),
+            "{name} ExtractRenderComponent must consult GlobalComponents before NativeElements"
+        );
+        // Negative: the registered-component branch must come BEFORE the
+        // native-element branch (runtime resolveDynamicComponent order).
+        let gc = surface
+            .find(r#"T extends keyof import("vue").GlobalComponents"#)
+            .expect("GlobalComponents branch present");
+        let ne = surface
+            .find(r#"T extends keyof import("vue").NativeElements"#)
+            .expect("NativeElements branch present");
+        assert!(
+            gc < ne,
+            "{name}: GlobalComponents branch must precede NativeElements"
+        );
+        // The surface guarantees the augmentable GlobalComponents interface
+        // exists on EVERY Vue version (Vue <3.5 exports none): without this
+        // augmentation, `import("vue").GlobalComponents` is error-`any` on
+        // such projects — a silent fail-OPEN for every unregistered tag.
+        assert!(
+            surface.contains("declare module \"vue\"")
+                && surface.contains("interface GlobalComponents {}"),
+            "{name}: must ship the empty vue GlobalComponents augmentation"
+        );
+        // And the nav helper backing tag go-to-definition.
+        assert!(
+            surface.contains(
+                r#"export declare function globalComponentsNav(): import("vue").GlobalComponents;"#
+            ),
+            "{name}: must export the globalComponentsNav probe helper"
+        );
+    }
+}

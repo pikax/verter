@@ -122,3 +122,69 @@ const msg = 'hello'
         "helper imports should be before wrapper function"
     );
 }
+
+// ── GlobalComponents fallback NAV-PROBE locator ───────────────────
+
+/// The locator and the emitter share one emission contract: locating the const
+/// NAME span inside REAL emitted output must return the probe MEMBER offset.
+#[test]
+fn nav_probe_locator_roundtrips_real_emission() {
+    let mut buf = String::from("PREAMBLE;");
+    super::super::wrapper::emit_global_component_fallbacks(
+        &mut buf,
+        &["GlobalEmitComp".to_string(), "ElButton".to_string()],
+        false,
+    );
+    for name in ["GlobalEmitComp", "ElButton"] {
+        let decl = format!("const {name} = ");
+        let name_start = (buf.find(&decl).expect("const emitted") + "const ".len()) as u32;
+        let name_end = name_start + name.len() as u32;
+        let probe = global_component_nav_probe_offset(&buf, name_start, name_end)
+            .unwrap_or_else(|| panic!("locator must resolve the {name} probe:\n{buf}"));
+        assert_eq!(
+            &buf[probe as usize..probe as usize + name.len()],
+            name,
+            "probe offset must point at the member identifier"
+        );
+        assert_eq!(
+            &buf[probe as usize - 2..probe as usize],
+            ").",
+            "probe member must be a property access on the GlobalComponents nav call"
+        );
+    }
+    // The emitted probe rides the imported @verter/types nav helper, never an
+    // import('vue') type query and never a new top-level `vue` import.
+    assert!(
+        buf.contains("void ___VERTER___globalComponentsNav().GlobalEmitComp;"),
+        "nav probe emitted: {buf}"
+    );
+    assert!(
+        !buf.contains("import('vue')"),
+        "no import('vue') query: {buf}"
+    );
+}
+
+/// Fail-closed: a span that is NOT a fallback const (foreign text, tampered
+/// emission, a JS-mode const) locates nothing.
+#[test]
+fn nav_probe_locator_fails_closed_on_foreign_spans() {
+    // A user const that shadows the shape but lacks the probe line.
+    let tsx =
+        "const GlobalEmitComp = {} as ___VERTER___GlobalComponentType<'GlobalEmitComp'>;\nother();";
+    let start = "const ".len() as u32;
+    let end = start + "GlobalEmitComp".len() as u32;
+    assert_eq!(global_component_nav_probe_offset(tsx, start, end), None);
+
+    // JS-mode emission has no probe.
+    let mut js = String::new();
+    super::super::wrapper::emit_global_component_fallbacks(&mut js, &["VIcon".to_string()], true);
+    assert!(!js.contains("___VERTER___globalComponentsNav()"));
+    let js_start = (js.find("const VIcon").expect("js const") + "const ".len()) as u32;
+    assert_eq!(
+        global_component_nav_probe_offset(&js, js_start, js_start + "VIcon".len() as u32),
+        None
+    );
+
+    // A garbage span never resolves.
+    assert_eq!(global_component_nav_probe_offset("abc", 0, 2), None);
+}

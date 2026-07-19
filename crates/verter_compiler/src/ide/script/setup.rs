@@ -56,11 +56,20 @@ pub(super) fn process_tsx_script_setup<'alloc>(
     let content_span = match &setup.content {
         Some(span) => span,
         None => {
-            // Self-closing <script setup />
-            return (
-                emit_minimal_wrapper(out, options, setup.tag_open.start, template_end),
-                None,
+            // Self-closing <script setup /> — the template may still reference
+            // globally-registered components; collect + emit their fallback
+            // consts into the minimal wrapper.
+            let global_fallbacks =
+                super::collect_global_component_fallbacks(template_ast, source, |_| false);
+            let close = emit_minimal_wrapper(
+                out,
+                options,
+                setup.tag_open.start,
+                template_end,
+                &global_fallbacks,
             );
+            *template_component_fallbacks = global_fallbacks;
+            return (close, None);
         }
     };
 
@@ -634,19 +643,10 @@ pub(super) fn process_tsx_script_setup<'alloc>(
             .map(|(name, bt)| (*name, *bt))
             .collect();
 
-        // Collect, then emit, global component fallback consts BEFORE the block scope.
-        // These provide types for globally registered components (e.g. RouterLink,
-        // RouterView) that aren't imported. They must be declared before the block
-        // scope so the template JSX inside can reference them without TDZ errors.
-        // The collected list is also handed back to the template-typing inventory so a
-        // global component's `@event` payload resolves through the same `InstanceType<typeof
-        // Pascal>["$props"]` const that is emitted here.
-        let global_fallbacks =
-            collect_global_component_fallbacks(template_ast, source, |n| bindings.contains_key(n));
-        emit_global_component_fallbacks(&mut wrapper_end, &global_fallbacks, options.is_jsx);
-        *template_component_fallbacks = global_fallbacks;
-
-        // Emit self-referencing component declaration (#28).
+        // Emit self-referencing component declaration (#28) BEFORE collecting the
+        // GlobalComponents fallbacks, so the inserted self binding dedupes the
+        // fallback collection (a second `const <SelfName>` would be an invalid
+        // duplicate block-scoped declaration).
         // When a component's template uses its own name (e.g., <TreeNode /> inside
         // TreeNode.vue), this const provides the binding so TypeScript resolves
         // the JSX element. Only emitted when:
@@ -685,6 +685,18 @@ pub(super) fn process_tsx_script_setup<'alloc>(
                 ));
             }
         }
+
+        // Collect, then emit, global component fallback consts BEFORE the block scope.
+        // These provide types for globally registered components (e.g. RouterLink,
+        // RouterView) that aren't imported. They must be declared before the block
+        // scope so the template JSX inside can reference them without TDZ errors.
+        // The collected list is also handed back to the template-typing inventory so a
+        // global component's tag JSX and `@event` payload resolve through the same
+        // `InstanceType<typeof Pascal>["$props"]` const that is emitted here.
+        let global_fallbacks =
+            collect_global_component_fallbacks(template_ast, source, |n| bindings.contains_key(n));
+        emit_global_component_fallbacks(&mut wrapper_end, &global_fallbacks, options.is_jsx);
+        *template_component_fallbacks = global_fallbacks;
 
         // Emit CSS module declarations (#76).
         // When <style module> exists, inject a typed $style binding so template

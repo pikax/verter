@@ -3245,6 +3245,98 @@ fn component_dynamic_is_removes_is_directive() {
     );
 }
 
+// ── Kebab component tags rewrite to their PascalCase binding ──────
+//
+// A resolvable kebab tag must reference the in-scope PascalCase const (local
+// binding or GlobalComponents fallback) — a lowercase JSX identifier is an
+// INTRINSIC lookup that never consults the emitted const.
+
+#[test]
+fn kebab_component_tag_rewrites_to_fallback_const() {
+    let source = r#"<template><el-button size="small">go</el-button></template>"#;
+    let output = gen_tsx_template_with_components(source, &[], &["ElButton"]);
+
+    assert!(
+        output.contains("<ElButton"),
+        "kebab open tag must rewrite to the PascalCase const: {output}"
+    );
+    assert!(
+        output.contains("</ElButton>"),
+        "kebab close tag must rewrite to the PascalCase const: {output}"
+    );
+    assert!(
+        !output.contains("<el-button"),
+        "the intrinsic kebab tag must not survive: {output}"
+    );
+}
+
+#[test]
+fn kebab_component_tag_rewrites_to_local_binding() {
+    let source = r#"<template><my-comp /></template>"#;
+    let output =
+        gen_tsx_template_with_components(source, &[("MyComp", BindingType::SetupImport)], &[]);
+
+    assert!(
+        output.contains("<MyComp"),
+        "kebab tag must rewrite to the local import binding: {output}"
+    );
+    assert!(
+        !output.contains("<my-comp"),
+        "the intrinsic kebab tag must not survive: {output}"
+    );
+}
+
+#[test]
+fn kebab_component_tag_without_binding_stays_authored() {
+    let source = r#"<template><never-registered /></template>"#;
+    let output = gen_tsx_template_with_components(source, &[], &[]);
+
+    assert!(
+        output.contains("<never-registered"),
+        "an unresolvable kebab tag stays as-authored (fail-closed intrinsic): {output}"
+    );
+    assert!(
+        !output.contains("<NeverRegistered"),
+        "no invented Pascal rewrite without a binding: {output}"
+    );
+}
+
+#[test]
+fn kebab_component_tag_with_body_rewrites_isolated_close() {
+    // Body content routes through the isolated Vue slot-body fragment: the
+    // typed empty pair must close with the REWRITTEN Pascal name.
+    let source = r#"<template><el-button><span>x</span></el-button></template>"#;
+    let output = gen_tsx_template_with_components(source, &[], &["ElButton"]);
+
+    assert!(
+        output.contains("<ElButton"),
+        "kebab open tag must rewrite: {output}"
+    );
+    assert!(
+        output.contains("></ElButton>"),
+        "the isolated empty pair must close with the Pascal name: {output}"
+    );
+    assert!(
+        !output.contains("el-button"),
+        "no kebab remnant anywhere in the JSX: {output}"
+    );
+}
+
+#[test]
+fn component_static_is_kebab_resolves_through_inventory() {
+    let source = r#"<template><component is="el-button" /></template>"#;
+    let output = gen_tsx_template_with_components(source, &[], &["ElButton"]);
+
+    assert!(
+        output.contains("<ElButton"),
+        "static is=\"el-button\" must rewrite to the resolvable Pascal const: {output}"
+    );
+    assert!(
+        !output.contains("<el-button"),
+        "the intrinsic kebab rewrite must not survive: {output}"
+    );
+}
+
 // ── Bug 2: Class/Style merge ──
 
 #[test]
@@ -9016,6 +9108,7 @@ fn dynamic_component_is_setup_ref_keeps_value_unmapped() {
         source,
         &mut out,
         &resolver,
+        &TemplateComponentBindings::default(),
         &[],
         EmitContext::JsxChildren,
     );

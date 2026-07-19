@@ -373,6 +373,11 @@ fn walk_element<'a, 'alloc>(
     // Track whether dynamic <component :is> needs IIFE closing after element
     let mut needs_component_is_iife_close = false;
 
+    // Track whether a kebab component tag was rewritten to its PascalCase
+    // binding (open AND close), so the later close-tag case-mismatch fix does
+    // not double-overwrite the already-rewritten close name.
+    let mut kebab_tag_rewritten = false;
+
     // Convert tag for components
     match el.tag_type {
         TagType::Component => {
@@ -385,11 +390,51 @@ fn walk_element<'a, 'alloc>(
                     ctx.source,
                     ctx.out,
                     ctx.resolver,
+                    ctx.components,
                     &ctx.ts_directives_for_component_is,
                     emit_ctx,
                 ) {
                     emitted_tag_name = rewrite.tag_name;
                     needs_component_is_iife_close = rewrite.needs_iife_close;
+                }
+            } else if tag_name.contains('-') {
+                // Rewrite a resolvable kebab component tag to its in-scope
+                // PascalCase binding (a local script binding or a
+                // GlobalComponents fallback const). A lowercase JSX identifier
+                // is an INTRINSIC-element lookup that never consults the
+                // emitted const — the rewrite makes the tag reference it, with
+                // the generated name mapped onto the authored kebab spans (a
+                // mapped CodeTransform overwrite) so hover/definition/rename
+                // keep working from the source tag. An unresolvable kebab tag
+                // stays as-authored (fail-closed intrinsic diagnostic).
+                if let Some(binding) = ctx
+                    .components
+                    .resolve(tag_name, el.tag_type, |n| ctx.resolver.get(n).is_some())
+                {
+                    if binding != tag_name {
+                        let pascal = ctx.out.alloc_str(&binding);
+                        // Mapped overwrite of the open tag-name span.
+                        ctx.out
+                            .overwrite(el.tag_open.start + 1, el.tag_open.name_end, pascal);
+                        // Rewrite the authored close name only when the body
+                        // will NOT be isolated: `isolate_vue_slot_body` deletes
+                        // the whole authored close span and emits the mapped
+                        // `</Pascal>` pair-close from `emitted_tag_name`, so a
+                        // second overwrite inside that span would conflict.
+                        let will_isolate = el
+                            .content
+                            .as_ref()
+                            .is_some_and(|content| !content.children.is_empty())
+                            && el.tag_close.is_some();
+                        if !will_isolate {
+                            if let Some(tag_close) = &el.tag_close {
+                                ctx.out
+                                    .overwrite(tag_close.start + 2, tag_close.name_end, pascal);
+                            }
+                        }
+                        emitted_tag_name = pascal;
+                        kebab_tag_rewritten = true;
+                    }
                 }
             }
         }
@@ -712,13 +757,18 @@ fn walk_element<'a, 'alloc>(
 
     // Fix closing tag case mismatch: Vue is case-insensitive for closing tags
     // (e.g., <Button>...</button>) but JSX requires exact case match. Rewrite the
-    // closing tag name to match the opening tag when they differ.
-    if let Some(tag_close) = &el.tag_close {
-        let open_name = &ctx.source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
-        let close_name = &ctx.source[tag_close.start as usize + 2..tag_close.name_end as usize];
-        if open_name != close_name && open_name.eq_ignore_ascii_case(close_name) {
-            ctx.out
-                .overwrite(tag_close.start + 2, tag_close.name_end, open_name);
+    // closing tag name to match the opening tag when they differ. Skipped when a
+    // kebab tag was rewritten to its PascalCase binding — that path already
+    // overwrote (or isolated) the close name.
+    if !kebab_tag_rewritten {
+        if let Some(tag_close) = &el.tag_close {
+            let open_name =
+                &ctx.source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
+            let close_name = &ctx.source[tag_close.start as usize + 2..tag_close.name_end as usize];
+            if open_name != close_name && open_name.eq_ignore_ascii_case(close_name) {
+                ctx.out
+                    .overwrite(tag_close.start + 2, tag_close.name_end, open_name);
+            }
         }
     }
 
@@ -1675,12 +1725,14 @@ struct ComponentIsRewrite<'a> {
 ///
 /// `ts_directives`: TS directive comment texts (e.g., `"@ts-expect-error"`) to inject
 /// inside the IIFE before `return`, so they suppress errors on the resolved component.
+#[allow(clippy::too_many_arguments)]
 fn rewrite_component_is<'alloc>(
     el: &ElementNode,
     oxc_el: Option<&OxcParsedElement<'alloc>>,
     source: &'alloc str,
     out: &mut CodeGenOutput<'alloc>,
     resolver: &BindingResolver<'alloc>,
+    components: &TemplateComponentBindings,
     ts_directives: &[String],
     emit_ctx: EmitContext,
 ) -> Option<ComponentIsRewrite<'alloc>> {
@@ -1705,13 +1757,26 @@ fn rewrite_component_is<'alloc>(
             return None;
         }
 
-        rewrite_component_tag_name(el, target_tag, out);
+        // Resolve the target through the shared component inventory first: a
+        // kebab or PascalCase COMPONENT name (local binding or GlobalComponents
+        // fallback const) rewrites to its in-scope binding so the JSX resolves
+        // the const rather than an intrinsic. A native tag (`is="div"`) or an
+        // unresolvable name keeps the verbatim target (fail-closed).
+        let resolved_target = components
+            .resolve(target_tag, TagType::Component, |n| {
+                resolver.get(n).is_some()
+            })
+            .filter(|resolved| resolved != target_tag)
+            .map(|resolved| out.alloc_str(&resolved) as &str);
+        let emit_tag = resolved_target.unwrap_or(target_tag);
+
+        rewrite_component_tag_name(el, emit_tag, out);
 
         // Remove `is="..."`
         let is_prop_end = props::get_prop_end(is_prop);
         out.overwrite(is_prop.start, is_prop_end, "");
         return Some(ComponentIsRewrite {
-            tag_name: target_tag,
+            tag_name: emit_tag,
             needs_iife_close: false,
         });
     }
