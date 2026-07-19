@@ -16175,3 +16175,77 @@ const msg = 'hi'
         script.code
     );
 }
+
+// =========================================================================
+// D1 — defineOptions() must not reference setup-local bindings
+// =========================================================================
+//
+// Official `@vue/compiler-sfc` (3.6.0-rc.1) emits a compile ERROR when a
+// `defineOptions()` argument references a locally declared (setup) variable,
+// because the argument is hoisted outside `setup()`:
+//   "`defineOptions()` in <script setup> cannot reference locally declared
+//    variables because it will be hoisted outside of the setup() function.
+//    If your component options require initialization in the module scope,
+//    use a separate normal <script> to export the options instead."
+// Literal-const bindings and imports stay valid.
+
+const D1_OFFICIAL_MESSAGE: &str = "in <script setup> cannot reference locally declared variables";
+
+#[test]
+fn define_options_setup_local_ref_is_compile_error() {
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst someRef = ref('x')\ndefineOptions({ name: someRef })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(D1_OFFICIAL_MESSAGE)),
+        "setup-local defineOptions reference must be a compile error (official), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_options_setup_local_call_result_is_compile_error() {
+    // Any non-literal setup binding is invalid (const opts = { ... }).
+    let result = compile_sfc(
+        "<script setup>\nconst opts = { name: 'x' }\ndefineOptions(opts)\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(D1_OFFICIAL_MESSAGE)),
+        "setup-local options object must be a compile error (official), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_options_literal_const_reference_stays_valid() {
+    // Official exempts literal-const bindings (they are hoistable constants).
+    let result = compile_sfc(
+        "<script setup>\nconst compName = 'MyComp'\ndefineOptions({ name: compName })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "literal-const reference must stay valid (official exemption), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_options_imported_reference_stays_valid() {
+    // Imports are module scope — `defineOptions(importedOpts)` is valid and
+    // becomes the Object.assign target (official).
+    let code = compile_sfc_script_code(
+        "<script setup>\nimport importedOpts from './opts'\ndefineOptions(importedOpts)\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        code.contains("/*@__PURE__*/Object.assign(importedOpts, {"),
+        "imported options must be the Object.assign target, got:\n{}",
+        code
+    );
+}

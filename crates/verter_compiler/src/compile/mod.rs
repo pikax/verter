@@ -58,7 +58,9 @@ use crate::tokenizer::byte::{tokenize_sfc, tokenize_sfc_with_delimiters};
 use crate::tsc;
 
 use helpers::{empty_sfc_script_block, extract_attrs, extract_block_ranges};
-use macro_type_diagnostics::collect_invalid_macro_type_diagnostics;
+use macro_type_diagnostics::{
+    collect_invalid_macro_type_diagnostics, collect_invalid_options_scope_diagnostics,
+};
 
 // ── Orchestrator ───────────────────────────────────────────────────
 
@@ -295,6 +297,9 @@ fn compile_inner(
     let mut all_diagnostics = parsed.clone_diagnostics();
     let has_parse_errors = parsed.has_errors();
     all_diagnostics.extend(collect_invalid_macro_type_diagnostics(&prepared_script));
+    // Official `checkInvalidScopeReference`: `defineOptions()` arguments are
+    // hoisted outside `setup()` — reject setup-scope references.
+    all_diagnostics.extend(collect_invalid_options_scope_diagnostics(&prepared_script));
 
     // ── 2. Extract metadata ───────────────────────────────────────
     let component_name = options

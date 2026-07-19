@@ -225,3 +225,94 @@ pub(super) fn collect_invalid_macro_type_diagnostics(prepared: &PreparedScript) 
 
     diagnostics
 }
+
+// ── defineOptions() scope-reference validation ────────────────────────────
+
+use oxc_ast::ast::{Expression, Statement};
+use rustc_hash::FxHashMap;
+
+use crate::template::code_gen::binding::BindingType;
+use crate::utils::oxc::bindings::collect_expression_free_ref_spans;
+
+/// The official `@vue/compiler-sfc` rejection message for a setup-scoped
+/// `defineOptions()` argument reference (3.6.0-rc.1, verbatim).
+const DEFINE_OPTIONS_SCOPE_MESSAGE: &str = "`defineOptions()` in <script setup> cannot reference locally declared variables because it will be hoisted outside of the setup() function. If your component options require initialization in the module scope, use a separate normal <script> to export the options instead.";
+
+/// `defineOptions()` scope-reference validation (official
+/// `checkInvalidScopeReference` for `optionsRuntimeDecl`): the argument is
+/// hoisted outside `setup()`, so a reference to a locally declared
+/// (setup-scope) variable breaks at runtime — the official compiler rejects
+/// the SFC. Exemptions match official: literal-const bindings (hoistable
+/// constants) and imports (module scope).
+pub(super) fn collect_invalid_options_scope_diagnostics(
+    prepared: &PreparedScript,
+) -> Vec<Diagnostic> {
+    let Some(setup) = prepared.setup() else {
+        return Vec::new();
+    };
+    let content_str = setup.content_str();
+    let parse_result = setup.parse_result();
+
+    // Name → BindingType map. Binding spans are content-relative for setup
+    // declarations, but the setup parse also folds the companion block's type
+    // inventory in — those spans reference the companion's coordinates and can
+    // be out of bounds for the setup content slice; skip them (they are not
+    // setup-local declarations).
+    let mut binding_types: FxHashMap<&str, BindingType> = FxHashMap::default();
+    for (span, bt) in &parse_result.bindings {
+        let (start, end) = (span.start as usize, span.end as usize);
+        if end > content_str.len() {
+            continue;
+        }
+        let name = &content_str[start..end];
+        binding_types.insert(name, *bt);
+    }
+
+    let mut diagnostics = Vec::new();
+    // Top-level `defineOptions(...)` calls (the same statements the macro
+    // parser surfaces — defineOptions is a bare statement macro).
+    for stmt in &setup.program().body {
+        let Statement::ExpressionStatement(es) = stmt else {
+            continue;
+        };
+        let Expression::CallExpression(call) = &es.expression else {
+            continue;
+        };
+        let Expression::Identifier(callee) = &call.callee else {
+            continue;
+        };
+        if callee.name.as_str() != "defineOptions" {
+            continue;
+        }
+        let Some(arg) = call.arguments.first().and_then(|a| a.as_expression()) else {
+            continue;
+        };
+
+        // Walk every free identifier reference in the argument (complete
+        // Visit walker — nested calls/member chains included, property keys
+        // excluded) and reject setup-scope references.
+        let mut spans = FxHashSet::default();
+        collect_expression_free_ref_spans(arg, &FxHashSet::default(), &mut spans);
+        for span in &spans {
+            let name = &content_str[span.start as usize..span.end as usize];
+            let is_setup_local = binding_types.get(name).is_some_and(|bt| {
+                bt.is_setup() && *bt != BindingType::LiteralConst && *bt != BindingType::SetupImport
+            });
+            if is_setup_local {
+                // Identifier spans are content-relative (the prepared parse
+                // runs over the content slice), already the content-local
+                // shape the public diagnostics use.
+                let local_span = Span::new(span.start, span.end);
+                diagnostics.push(
+                    Diagnostic::error_with_message(
+                        "script",
+                        CompilerErrorCode::XInvalidMacroScopeReference,
+                        DEFINE_OPTIONS_SCOPE_MESSAGE.to_string(),
+                    )
+                    .with_span(local_span),
+                );
+            }
+        }
+    }
+    diagnostics
+}
