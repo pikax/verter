@@ -16249,3 +16249,116 @@ fn define_options_imported_reference_stays_valid() {
         code
     );
 }
+
+// =========================================================================
+// D2 — template ref binding
+// =========================================================================
+//
+// Official inline (compileScript({ inlineTemplate: true })): a static
+// `ref="el"` whose name matches a setup-let/setup-ref/setup-maybe-ref binding
+// compiles to `{ ref_key: "el", ref: el }` — the setup binding receives the
+// element. A dynamic `:ref="elRef"` resolves in scope (`{ ref: elRef.value }`
+// inline / `{ ref: $setup.elRef }` non-inline) and is NEVER hoisted out of
+// setup. Non-inline static refs stay `{ ref: "el" }`.
+
+#[test]
+fn inline_static_ref_with_setup_binding_emits_ref_key_binding() {
+    let result = compile_sfc_inline(
+        "<script setup>\nimport { ref } from 'vue'\nconst el = ref(null)\n</script>\n<template><div ref=\"el\">x</div></template>",
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("ref_key: \"el\""),
+        "inline static ref to a setup binding must emit ref_key, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("ref: el"),
+        "inline static ref to a setup binding must reference the binding directly, got:\n{}",
+        code
+    );
+    // The ref pair must live INSIDE setup (the render closure), never hoisted
+    // to module scope (would be a ReferenceError).
+    let setup_pos = code.find("setup(__props").expect("setup present");
+    let ref_pos = code.find("ref_key: \"el\"").expect("ref_key present");
+    assert!(
+        ref_pos > setup_pos,
+        "ref_key/ref must be inside setup (the render closure), got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("const _hoisted_"),
+        "the ref props object must not be hoisted to module scope, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn inline_static_ref_without_binding_stays_hoisted_string() {
+    // No matching setup binding → official keeps `{ ref: "el" }` (hoisted string).
+    let result = compile_sfc_inline(
+        "<script setup>\nconst x = 1\n</script>\n<template><div ref=\"el\">x</div></template>",
+    );
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("{ ref: \"el\" }"),
+        "static ref without a setup binding stays a string, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn inline_dynamic_ref_with_setup_binding_not_hoisted() {
+    // Dynamic :ref resolves in setup scope (elRef.value), never hoisted
+    // (hoisting to module scope was a ReferenceError).
+    let result = compile_sfc_inline(
+        "<script setup>\nimport { ref } from 'vue'\nconst elRef = ref(null)\n</script>\n<template><div :ref=\"elRef\">x</div></template>",
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("{ ref: elRef.value }"),
+        "inline dynamic ref resolves in setup scope, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("const _hoisted_"),
+        "dynamic ref props object must not be hoisted to module scope, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn noninline_static_ref_with_setup_binding_stays_string() {
+    // Non-inline static ref matches official: `{ ref: "el" }` (string).
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst el = ref(null)\n</script>\n<template><div ref=\"el\">x</div></template>",
+    );
+    let tpl = &result.template.as_ref().expect("template block").code;
+    assert!(
+        tpl.contains("{ ref: \"el\" }"),
+        "non-inline static ref stays a string (official), got:\n{}",
+        tpl
+    );
+}
+
+#[test]
+fn noninline_dynamic_ref_with_setup_binding_not_hoisted() {
+    // Non-inline was ALSO broken: `{ ref: $setup.elRef }` hoisted to module
+    // scope ($setup is a render parameter — ReferenceError at module load).
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst elRef = ref(null)\n</script>\n<template><div :ref=\"elRef\">x</div></template>",
+    );
+    let tpl = &result.template.as_ref().expect("template block").code;
+    assert!(
+        tpl.contains("{ ref: $setup.elRef }"),
+        "non-inline dynamic ref resolves via $setup in the render fn, got:\n{}",
+        tpl
+    );
+    assert!(
+        !tpl.contains("const _hoisted_1 = { ref: $setup"),
+        "dynamic ref props object must not be hoisted to module scope, got:\n{}",
+        tpl
+    );
+}
