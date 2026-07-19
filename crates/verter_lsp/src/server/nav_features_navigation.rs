@@ -47,16 +47,16 @@ fn host_export_location(
         start: li.offset_to_position(start)?,
         end: li.offset_to_position(end)?,
     };
+    // Absolute paths only (POSIX-rooted or Windows-drive); relative/virtual ids
+    // never become locations. The shared owner util percent-encodes, so a path
+    // with spaces/non-ASCII still parses into a valid `Uri` instead of silently
+    // dropping this definition leg.
     let normalized = resolved_id.replace('\\', "/");
-    let uri_str = if normalized.starts_with('/') {
-        format!("file://{normalized}")
-    } else if normalized.chars().nth(1) == Some(':') {
-        format!("file:///{normalized}")
-    } else {
+    if !normalized.starts_with('/') && normalized.chars().nth(1) != Some(':') {
         return None;
-    };
+    }
     Some(Location {
-        uri: uri_str.parse().ok()?,
+        uri: crate::uri::path_to_file_uri(&resolved_id)?,
         range,
     })
 }
