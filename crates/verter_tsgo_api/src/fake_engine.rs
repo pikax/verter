@@ -251,7 +251,11 @@ fn hang_forever() -> ! {
 }
 
 /// Spawn the pipe-holding grandchild (inherits this process's stdout/stderr so
-/// the pipes stay open after this process exits) and return immediately.
+/// the pipes stay open after this process exits) and return immediately. The
+/// grandchild is deliberately never `wait()`ed on — holding the pipes open
+/// after the direct child exits IS the wedge under test; the bounded probe's
+/// tree kill reaps it.
+#[allow(clippy::zombie_processes)]
 fn spawn_pipe_holder() {
     let exe = std::env::current_exe().expect("current exe");
     let _ = std::process::Command::new(exe)

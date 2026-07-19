@@ -117,7 +117,7 @@ fn run_declaration(
 //    `verter-tsgo-fake-mismatch`. GREEN: stderr names `verter-tsgo-fake-apiok`.
 #[test]
 fn declaration_resolution_skips_a_version_passing_but_invalid_candidate() {
-    let (temp, tsconfig) = temp_project();
+    let (_temp, tsconfig) = temp_project();
     let project_root = tsconfig.parent().unwrap().to_path_buf();
     let masked = fake_engine("mismatch");
     let working = plant_project_local_engine(&project_root, &fake_engine("apiok"));
@@ -157,7 +157,7 @@ fn declaration_resolution_skips_a_version_passing_but_invalid_candidate() {
 //    RED: today the invocation failure is swallowed into `Ok` → exit 0.
 #[test]
 fn declaration_invocation_failure_exits_nonzero_never_silent_success() {
-    let (temp, tsconfig) = temp_project();
+    let (_temp, tsconfig) = temp_project();
     let project_root = tsconfig.parent().unwrap().to_path_buf();
     let engine = fake_engine("declfail");
     let out_dir = project_root.join("out");

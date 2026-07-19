@@ -48,5 +48,8 @@ tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "io-util", "pro
 [dev-dependencies]
 # Self dev-dependency: enables `test-fake-engine` for THIS crate's test builds
 # only, so the fake-engine shim bin exists for `cargo test` (CARGO_BIN_EXE_)
-# while default/release builds never produce it.
+# while default/release builds never produce it. Cargo prints a cosmetic
+# "ignoring invalid dependency … missing a lib target" warning for this
+# bin-only crate's self-dep — the feature activation it performs is exactly
+# what the test lane needs, and there is no lib to link either way.
 verter_tsc = { path = ".", features = ["test-fake-engine"] }

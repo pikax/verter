@@ -596,10 +596,12 @@ impl TsgoAttach<Owned> {
     }
 
     /// OWNED full teardown — PRIVATE: reachable only through the owned
-    /// [`TsgoAttach::teardown`]. Sends `exit`, closes the connection, and kills
-    /// + reaps the child process TREE (bounded). Keeping this private (and
-    /// owned-only) makes the teardown DISPATCH structural: no
-    /// lifecycle/teardown path sends `exit` on an editor-owned connection.
+    /// [`TsgoAttach::teardown`]. Sends `exit`, closes the connection, and
+    /// kills + reaps the child process TREE (bounded).
+    ///
+    /// Keeping this private (and owned-only) makes the teardown DISPATCH
+    /// structural: no lifecycle/teardown path sends `exit` on an editor-owned
+    /// connection.
     async fn shutdown(mut self) -> TsgoApiResult<()> {
         let _ = self.api.close().await;
         let _ = self.lsp.conn.notify("exit", serde_json::Value::Null).await;

@@ -2066,6 +2066,7 @@ mod tests {
     /// `serverInfo.version` agrees with the `--version` probe. The arm answers
     /// every framed request carrying an `id` with that serverInfo, then serves
     /// until EOF (the smoke kills the process after the handshake).
+    #[cfg(not(target_os = "windows"))]
     const MOCK_LSP_HANDSHAKE_SH: &str = r#"
 for arg in "$@"; do
   if [ "$arg" = "--lsp" ]; then
@@ -2092,6 +2093,7 @@ done
 "#;
 
     /// The same handshake arm (PowerShell) for the Windows mock scripts.
+    #[cfg(target_os = "windows")]
     const MOCK_LSP_HANDSHAKE_PS1: &str = r#"
 if ($Args -contains '--lsp') {
     $reader = [System.Console]::In
