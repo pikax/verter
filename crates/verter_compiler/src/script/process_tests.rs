@@ -36,6 +36,7 @@ fn build_wrapper_start_plain_js_no_define_component() {
         Some("{ title: String }"),
         Some("['save']"),
         None,
+        false,
         ComponentWrap::Plain,
     );
     assert!(
@@ -56,7 +57,7 @@ fn build_wrapper_start_plain_js_no_define_component() {
 
 #[test]
 fn build_wrapper_start_object_assign_merges_options() {
-    // JS + defineOptions/companion default → Object.assign(options, runtime) merge.
+    // JS + defineOptions → Object.assign(<raw defineOptions expr>, runtime).
     let result = build_setup_wrapper_start(
         "Test",
         false,
@@ -64,7 +65,8 @@ fn build_wrapper_start_object_assign_merges_options() {
         false,
         None,
         None,
-        Some("inheritAttrs: false"),
+        Some("{ inheritAttrs: false }"),
+        false,
         ComponentWrap::ObjectAssign,
     );
     assert!(
@@ -78,10 +80,54 @@ fn build_wrapper_start_object_assign_merges_options() {
         "merge wrapper must not reference _defineComponent, got:\n{}",
         result
     );
-    // Runtime sections live in the second (merged-into) object.
+    // Runtime sections live in the last (merged-into) object.
     assert!(result.contains("__name: 'Test'"));
     // Options must NOT be inlined into the runtime object a second time.
     assert_eq!(result.matches("inheritAttrs").count(), 1);
+}
+
+#[test]
+fn build_wrapper_start_object_assign_companion_default_target() {
+    // JS + companion `export default <expr>` → `__default__` is the merge target.
+    let result = build_setup_wrapper_start(
+        "Test",
+        false,
+        false,
+        false,
+        None,
+        None,
+        None,
+        true,
+        ComponentWrap::ObjectAssign,
+    );
+    assert!(
+        result.starts_with("const __sfc__ = /*@__PURE__*/Object.assign(__default__, {\n"),
+        "companion default must be the Object.assign target, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn build_wrapper_start_object_assign_both_sources_official_order() {
+    // JS + companion default + defineOptions → Object.assign(__default__, <expr>, runtime).
+    let result = build_setup_wrapper_start(
+        "Test",
+        false,
+        false,
+        false,
+        None,
+        None,
+        Some("{ inheritAttrs: false }"),
+        true,
+        ComponentWrap::ObjectAssign,
+    );
+    assert!(
+        result.starts_with(
+            "const __sfc__ = /*@__PURE__*/Object.assign(__default__, { inheritAttrs: false }, {\n"
+        ),
+        "official order: __default__, defineOptions, runtime, got:\n{}",
+        result
+    );
 }
 
 #[test]
@@ -106,6 +152,7 @@ fn build_wrapper_start_basic() {
         None,
         None,
         None,
+        false,
         ComponentWrap::DefineComponent,
     );
     assert!(result.contains("__name: 'Test'"));
@@ -123,6 +170,7 @@ fn build_wrapper_start_async() {
         None,
         None,
         None,
+        false,
         ComponentWrap::DefineComponent,
     );
     assert!(result.contains("async setup(__props"));
@@ -138,6 +186,7 @@ fn build_wrapper_start_no_name() {
         None,
         None,
         None,
+        false,
         ComponentWrap::DefineComponent,
     );
     assert!(!result.contains("__name"));
@@ -153,6 +202,7 @@ fn build_wrapper_start_with_props() {
         Some("{ title: String }"),
         None,
         None,
+        false,
         ComponentWrap::DefineComponent,
     );
     assert!(result.contains("props: { title: String }"));
@@ -168,6 +218,7 @@ fn build_wrapper_start_with_emits() {
         None,
         Some("['click']"),
         None,
+        false,
         ComponentWrap::DefineComponent,
     );
     assert!(result.contains("emits: ['click']"));
@@ -184,6 +235,7 @@ fn build_wrapper_start_with_expose() {
         None,
         None,
         None,
+        false,
         ComponentWrap::DefineComponent,
     );
     assert!(result.contains("expose: __expose"));
@@ -199,6 +251,7 @@ fn build_wrapper_start_with_expose_and_emit() {
         None,
         None,
         None,
+        false,
         ComponentWrap::DefineComponent,
     );
     assert!(result.contains("expose: __expose, emit: __emit"));
@@ -206,6 +259,7 @@ fn build_wrapper_start_with_expose_and_emit() {
 
 #[test]
 fn build_wrapper_start_with_options() {
+    // TS + defineOptions → official spread of the raw expression before __name.
     let result = build_setup_wrapper_start(
         "Test",
         false,
@@ -213,14 +267,59 @@ fn build_wrapper_start_with_options() {
         false,
         None,
         None,
-        Some("inheritAttrs: false"),
+        Some("{ inheritAttrs: false }"),
+        false,
         ComponentWrap::DefineComponent,
     );
-    assert!(result.contains("inheritAttrs: false"));
+    assert!(result.contains("...{ inheritAttrs: false },"));
     // Options should come before __name
     let opts_pos = result.find("inheritAttrs").unwrap();
     let name_pos = result.find("__name").unwrap();
     assert!(opts_pos < name_pos);
+}
+
+#[test]
+fn build_wrapper_start_ts_companion_default_spread() {
+    // TS + companion default → `...__default__` spread before runtime options.
+    let result = build_setup_wrapper_start(
+        "Test",
+        false,
+        false,
+        false,
+        None,
+        None,
+        None,
+        true,
+        ComponentWrap::DefineComponent,
+    );
+    assert!(
+        result.contains("/*@__PURE__*/_defineComponent({\n  ...__default__,\n"),
+        "TS must spread __default__ first, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn build_wrapper_start_ts_both_spreads_official_order() {
+    // TS + companion default + defineOptions → both spreads, official order.
+    let result = build_setup_wrapper_start(
+        "Test",
+        false,
+        false,
+        false,
+        None,
+        None,
+        Some("{ inheritAttrs: false }"),
+        true,
+        ComponentWrap::DefineComponent,
+    );
+    let default_pos = result.find("...__default__").unwrap();
+    let options_pos = result.find("...{ inheritAttrs: false }").unwrap();
+    assert!(
+        default_pos < options_pos,
+        "official order: __default__ spread before defineOptions spread, got:\n{}",
+        result
+    );
 }
 
 #[test]

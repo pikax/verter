@@ -15786,3 +15786,392 @@ fn inline_template_vapor_never_inlines() {
         "vapor must keep the separate template block (inline deferred)"
     );
 }
+
+// =========================================================================
+// Companion default export + defineOptions merging (official 3.6.0-rc.1)
+// =========================================================================
+//
+// Official `@vue/compiler-sfc` non-inline gates on `defaultExport ||
+// definedOptions` PRESENCE — the companion default export (ANY expression)
+// is rebound to `const __default__ = <expr>` and merged, never dropped:
+// - JS: `Object.assign(__default__, <definedOptions>?, { <runtime> })`
+// - TS: `_defineComponent({ ...__default__, ...<definedOptions>?, <runtime> })`
+
+/// Compiles an SFC and returns the script block code, asserting no errors
+/// and valid-JS output.
+fn compile_sfc_script_code(source: &str) -> String {
+    let result = compile_sfc(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let script = result.script.as_ref().expect("script block");
+    let alloc = Allocator::new();
+    let parsed = oxc_parser::Parser::new(&alloc, &script.code, oxc_span::SourceType::mjs()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "output must be valid JS: {:?}\n---\n{}",
+        parsed.errors,
+        script.code
+    );
+    script.code.clone()
+}
+
+#[test]
+fn companion_nonliteral_default_var_ref_preserved() {
+    // BLOCKER: JS <script setup> + companion `export default baseOptions`
+    // (non-literal). Official rebinds to `const __default__ = baseOptions`
+    // and merges via Object.assign — the options are NEVER dropped.
+    let code = compile_sfc_script_code(
+        r#"<script>
+const baseOptions = { inheritAttrs: false }
+export default baseOptions
+</script>
+
+<script setup>
+const msg = 'hi'
+</script>
+
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("const __default__ = baseOptions"),
+        "non-literal companion default must be bound as __default__, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("/*@__PURE__*/Object.assign(__default__, {"),
+        "__default__ must be the Object.assign target, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("__name: 'App'"),
+        "runtime options merged in, got:\n{}",
+        code
+    );
+    assert_eq!(
+        code.matches("export default").count(),
+        1,
+        "exactly one default export (the component), got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn companion_nonliteral_default_call_preserved() {
+    // BLOCKER: companion `export default makeOptions()` (call expression).
+    let code = compile_sfc_script_code(
+        r#"<script>
+function makeOptions() { return { inheritAttrs: false } }
+export default makeOptions()
+</script>
+
+<script setup>
+const msg = 'hi'
+</script>
+
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("const __default__ = makeOptions()"),
+        "call-expression companion default must be bound verbatim, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("/*@__PURE__*/Object.assign(__default__, {"),
+        "__default__ must be the Object.assign target, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn companion_literal_default_merges_via_default_binding() {
+    // Official: literal companion default is ALSO bound as `const __default__`
+    // and used as the Object.assign target (not inlined).
+    let code = compile_sfc_script_code(
+        r#"<script>
+export default {
+  inheritAttrs: false,
+};
+</script>
+
+<script setup>
+const msg = 'hi'
+</script>
+
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("const __default__ = {"),
+        "literal companion default must be bound as __default__, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("inheritAttrs: false"),
+        "companion options preserved, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("/*@__PURE__*/Object.assign(__default__, {"),
+        "__default__ must be the Object.assign target, got:\n{}",
+        code
+    );
+    assert_eq!(
+        code.matches("export default").count(),
+        1,
+        "exactly one default export, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn companion_default_and_define_options_merge_both() {
+    // HIGH: companion default AND defineOptions — official merges BOTH:
+    // Object.assign(__default__, <definedOptions>, { <runtime> }).
+    let code = compile_sfc_script_code(
+        r#"<script>
+export default { name: 'FromScript' }
+</script>
+
+<script setup>
+defineOptions({ inheritAttrs: false })
+const msg = 'hi'
+</script>
+
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("const __default__ = { name: 'FromScript' }"),
+        "companion default bound, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("/*@__PURE__*/Object.assign(__default__, { inheritAttrs: false }, {"),
+        "both option sources merge in official order (default, defineOptions, runtime), got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("name: 'FromScript'") && code.contains("inheritAttrs: false"),
+        "neither option source is dropped, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn companion_define_component_call_preserved() {
+    // HIGH: companion `export default defineComponent({ ... })` — official
+    // keeps the CALL RESULT as the merge target (does not unwrap the call).
+    let code = compile_sfc_script_code(
+        r#"<script>
+import { defineComponent } from 'vue'
+export default defineComponent({ name: 'Kept' })
+</script>
+
+<script setup>
+const msg = 'hi'
+</script>
+
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("const __default__ = defineComponent({"),
+        "the defineComponent(...) call must be preserved as __default__, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("/*@__PURE__*/Object.assign(__default__, {"),
+        "the call result is the Object.assign target, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("name: 'Kept'"),
+        "companion options preserved, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn ts_companion_default_spread_into_define_component() {
+    // TS + companion default: official spreads `...__default__` inside
+    // _defineComponent (the binding is still emitted).
+    let code = compile_sfc_script_code(
+        r#"<script lang="ts">
+export default { inheritAttrs: false }
+</script>
+
+<script setup lang="ts">
+const msg = 'hi'
+</script>
+
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("const __default__ = { inheritAttrs: false }"),
+        "TS companion default bound as __default__, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("/*@__PURE__*/_defineComponent({\n  ...__default__,"),
+        "TS spreads __default__ inside _defineComponent, got:\n{}",
+        code
+    );
+    assert_eq!(
+        code.matches("export default").count(),
+        1,
+        "exactly one default export, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn ts_companion_nonliteral_default_preserved() {
+    // BLOCKER for TS too: non-literal companion default must not be dropped.
+    let code = compile_sfc_script_code(
+        r#"<script lang="ts">
+const baseOptions = { inheritAttrs: false }
+export default baseOptions
+</script>
+
+<script setup lang="ts">
+const msg = 'hi'
+</script>
+
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("const __default__ = baseOptions"),
+        "TS non-literal companion default bound, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("...__default__"),
+        "TS spreads __default__ into the wrapper, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn ts_define_options_spread_shape() {
+    // TS + defineOptions only: official spreads `...<definedOptions>` inside
+    // _defineComponent (not inlined properties).
+    let code = compile_sfc_script_code(
+        r#"<script setup lang="ts">
+defineOptions({ inheritAttrs: false })
+const msg = 'hi'
+</script>
+
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("/*@__PURE__*/_defineComponent({\n  ...{ inheritAttrs: false },"),
+        "TS defineOptions emits the official spread shape, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn ts_companion_and_define_options_merge_both() {
+    // TS with BOTH: official emits both spreads in order.
+    let code = compile_sfc_script_code(
+        r#"<script lang="ts">
+export default { name: 'FromScript' }
+</script>
+
+<script setup lang="ts">
+defineOptions({ inheritAttrs: false })
+const msg = 'hi'
+</script>
+
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("...__default__,"),
+        "companion spread present, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("...{ inheritAttrs: false },"),
+        "defineOptions spread present, got:\n{}",
+        code
+    );
+    let default_pos = code.find("...__default__").unwrap();
+    let options_pos = code.find("...{ inheritAttrs: false }").unwrap();
+    assert!(
+        default_pos < options_pos,
+        "official order: __default__ spread before defineOptions spread, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn self_closing_setup_with_companion_default_merges_via_default_binding() {
+    // Edge case in the companion family: `<script setup />` + companion
+    // `export default <expr>` must not produce duplicate default exports —
+    // official rebinds to `const __default__` and merges via Object.assign.
+    let code = compile_sfc_script_code(
+        r#"<script>
+export default { inheritAttrs: false }
+</script>
+
+<script setup />
+
+<template><div>hi</div></template>"#,
+    );
+    assert!(
+        code.contains("const __default__ = { inheritAttrs: false }"),
+        "companion default must be bound as __default__, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("/*@__PURE__*/Object.assign(__default__, {"),
+        "__default__ must merge into the minimal component, got:\n{}",
+        code
+    );
+    assert_eq!(
+        code.matches("export default").count(),
+        1,
+        "exactly one default export, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn companion_default_merges_in_inline_template_mode() {
+    // The companion merge holds on the inline (production) topology too:
+    // `__default__` bound + Object.assign + render inlined into setup.
+    let result = compile_sfc_inline(
+        r#"<script>
+export default { inheritAttrs: false }
+</script>
+
+<script setup>
+const msg = 'hi'
+</script>
+
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let script = result.script.as_ref().expect("script block");
+    assert!(
+        script
+            .code
+            .contains("const __default__ = { inheritAttrs: false }"),
+        "companion default bound in inline mode, got:\n{}",
+        script.code
+    );
+    assert!(
+        script
+            .code
+            .contains("/*@__PURE__*/Object.assign(__default__, {"),
+        "Object.assign merge in inline mode, got:\n{}",
+        script.code
+    );
+    assert!(
+        script.code.contains("return (_ctx,_cache) => {"),
+        "render inlined into setup, got:\n{}",
+        script.code
+    );
+    assert_eq!(
+        script.code.matches("export default").count(),
+        1,
+        "exactly one default export, got:\n{}",
+        script.code
+    );
+}

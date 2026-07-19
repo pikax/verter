@@ -127,9 +127,27 @@ fn empty_script_setup_produces_wrapper() {
     );
 
     let output = ct.build_string();
-    // Should contain component wrapper
-    assert!(output.contains("const __sfc__"), "output: {}", output);
+    // Official JS shape for an empty `<script setup>`: a plain component
+    // object (no `_defineComponent`, no `Object.assign`) carrying `__name`,
+    // a `setup` function, and the default export.
+    assert!(
+        output.contains("const __sfc__ = {"),
+        "plain object open, output: {}",
+        output
+    );
+    assert!(!output.contains("_defineComponent"), "output: {}", output);
+    assert!(!output.contains("Object.assign"), "output: {}", output);
     assert!(output.contains("__name: 'Test'"), "output: {}", output);
+    assert!(
+        output.contains("setup(__props)"),
+        "empty setup still emits the setup function, output: {}",
+        output
+    );
+    assert!(
+        output.contains("\n}};\n"),
+        "plain object closes without a call, output: {}",
+        output
+    );
     assert!(
         output.contains("export default __sfc__"),
         "output: {}",

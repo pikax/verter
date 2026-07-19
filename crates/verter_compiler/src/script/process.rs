@@ -85,8 +85,21 @@ pub fn process_script_setup<'alloc>(
     is_ts: bool,
 ) {
     if setup.content.is_none() {
-        // Self-closing <script setup /> — emit empty component
-        emit_minimal_component(setup, ctx, options, is_ts);
+        // Self-closing <script setup /> — emit empty component. The companion
+        // <script> still needs its codegen (its `export default <expr>` must
+        // be rebound to `__default__` and merged — never dropped, and never
+        // left as a duplicate default export).
+        let mut macro_state = MacroState::new();
+        if let Some(companion) = prepared.companion() {
+            process_companion_script(companion, &mut ctx.out, &mut macro_state);
+        }
+        emit_minimal_component(
+            setup,
+            ctx,
+            options,
+            is_ts,
+            macro_state.has_companion_default,
+        );
         return;
     }
 
@@ -111,9 +124,7 @@ pub fn process_script_setup<'alloc>(
     // names for template resolution. Its type inventory was already folded into
     // the setup parse, so only the import names flow back here.
     let companion_import_names = match prepared.companion() {
-        Some(companion) => {
-            process_companion_script(companion, ctx.source, &mut ctx.out, &mut macro_state)
-        }
+        Some(companion) => process_companion_script(companion, &mut ctx.out, &mut macro_state),
         None => Vec::new(),
     };
 
@@ -350,7 +361,10 @@ pub fn process_script_setup<'alloc>(
     // keep `_defineComponent`; JS components are plain object literals unless
     // a companion `export default` / `defineOptions` forces the
     // `Object.assign` merge path.
-    let wrap = component_wrap(is_ts, macro_state.options_section.is_some());
+    let wrap = component_wrap(
+        is_ts,
+        macro_state.has_companion_default || macro_state.options_expr.is_some(),
+    );
     let wrapper_start = build_setup_wrapper_start(
         options.component_name,
         parse_result.is_async,
@@ -358,7 +372,8 @@ pub fn process_script_setup<'alloc>(
         macro_state.has_emit,
         macro_state.props_section.as_deref(),
         macro_state.emits_section.as_deref(),
-        macro_state.options_section.as_deref(),
+        macro_state.options_expr.as_deref(),
+        macro_state.has_companion_default,
         wrap,
     );
 
@@ -488,11 +503,19 @@ fn emit_minimal_component(
     ctx: &mut ScriptContext<'_>,
     options: &ScriptCodeGenOptions<'_>,
     is_ts: bool,
+    has_companion_default: bool,
 ) {
-    let mut s = String::with_capacity(128);
-    // Official gate: TS keeps `_defineComponent`; JS emits a plain object.
+    let mut s = String::with_capacity(160);
+    // Official gate: TS keeps `_defineComponent` (spreading `__default__`);
+    // JS emits a plain object — or the `Object.assign(__default__, …)` merge
+    // when a companion default exists.
     if is_ts {
         s.push_str("const __sfc__ = /*@__PURE__*/_defineComponent({\n");
+        if has_companion_default {
+            s.push_str("  ...__default__,\n");
+        }
+    } else if has_companion_default {
+        s.push_str("const __sfc__ = /*@__PURE__*/Object.assign(__default__, {\n");
     } else {
         s.push_str("const __sfc__ = {\n");
     }
@@ -501,7 +524,7 @@ fn emit_minimal_component(
         s.push_str(options.component_name);
         s.push_str("',\n");
     }
-    if is_ts {
+    if is_ts || has_companion_default {
         s.push_str("});\n");
     } else {
         s.push_str("};\n");
@@ -531,13 +554,16 @@ fn emit_minimal_component(
 
 /// Build the opening part of the setup wrapper with sections.
 ///
-/// TS (`ComponentWrap::DefineComponent`):
+/// TS (`ComponentWrap::DefineComponent`) — official spreads the companion
+/// default (`...__default__`) and `defineOptions` (`...<expr>`) before the
+/// runtime options:
 /// ```js
 /// const __sfc__ = /*@__PURE__*/_defineComponent({
-///   inheritAttrs: false,           // from defineOptions
+///   ...__default__,                  // from companion <script> export default
+///   ...{ inheritAttrs: false },      // from defineOptions
 ///   __name: 'ComponentName',
-///   props: { title: String },      // from defineProps
-///   emits: ['click'],              // from defineEmits
+///   props: { title: String },        // from defineProps
+///   emits: ['click'],                // from defineEmits
 ///   setup(__props, { expose: __expose, emit: __emit }) {
 /// ```
 ///
@@ -550,9 +576,20 @@ fn emit_minimal_component(
 /// ```
 ///
 /// JS with companion default / defineOptions (`ComponentWrap::ObjectAssign`)
-/// — official merges via `Object.assign` (options object is the target):
+/// — official merges via `Object.assign` (official order: `__default__`,
+/// `<definedOptions>`, runtime object):
 /// ```js
-/// const __sfc__ = /*@__PURE__*/Object.assign({ inheritAttrs: false }, {
+/// const __sfc__ = /*@__PURE__*/Object.assign(__default__, { inheritAttrs: false }, {
+///   __name: 'ComponentName',
+///   setup(__props) {
+/// ```
+///
+/// TS (`ComponentWrap::DefineComponent`) — official spreads both option
+/// sources inside `_defineComponent`:
+/// ```js
+/// const __sfc__ = /*@__PURE__*/_defineComponent({
+///   ...__default__,
+///   ...{ inheritAttrs: false },
 ///   __name: 'ComponentName',
 ///   setup(__props) {
 /// ```
@@ -564,36 +601,44 @@ fn build_setup_wrapper_start(
     has_emit: bool,
     props_section: Option<&str>,
     emits_section: Option<&str>,
-    options_section: Option<&str>,
+    options_expr: Option<&str>,
+    has_companion_default: bool,
     wrap: ComponentWrap,
 ) -> String {
     let mut s = String::with_capacity(256);
     match wrap {
         ComponentWrap::DefineComponent => {
             s.push_str("const __sfc__ = /*@__PURE__*/_defineComponent({\n");
+            // Official spreads the companion default and defineOptions, in
+            // order, before the runtime options.
+            if has_companion_default {
+                s.push_str("  ...__default__,\n");
+            }
+            if let Some(expr) = options_expr {
+                s.push_str("  ...");
+                s.push_str(expr);
+                s.push_str(",\n");
+            }
         }
         ComponentWrap::Plain => {
             s.push_str("const __sfc__ = {\n");
         }
         ComponentWrap::ObjectAssign => {
-            // The options object is the merge target; runtime sections go
-            // into the object being merged in (official shape).
-            let options = options_section
-                .expect("ObjectAssign wrap implies a defineOptions/companion section");
-            s.push_str("const __sfc__ = /*@__PURE__*/Object.assign({ ");
-            s.push_str(options);
-            s.push_str(" }, {\n");
-        }
-    }
-
-    // defineOptions / companion-default content (before __name) — inlined
-    // into the wrapped object only for the TS `_defineComponent` shape; the
-    // Object.assign path already consumed it as the merge target.
-    if wrap == ComponentWrap::DefineComponent {
-        if let Some(opts) = options_section {
-            s.push_str("  ");
-            s.push_str(opts);
-            s.push_str(",\n");
+            // Official merge targets, in order: `__default__` (companion),
+            // the raw defineOptions expression, then the runtime object.
+            s.push_str("const __sfc__ = /*@__PURE__*/Object.assign(");
+            let mut first = true;
+            if has_companion_default {
+                s.push_str("__default__");
+                first = false;
+            }
+            if let Some(expr) = options_expr {
+                if !first {
+                    s.push_str(", ");
+                }
+                s.push_str(expr);
+            }
+            s.push_str(", {\n");
         }
     }
 
