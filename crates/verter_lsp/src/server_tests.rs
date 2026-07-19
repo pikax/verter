@@ -24568,11 +24568,9 @@ const D6_FOCUS_SOURCE: &str =
 
 #[tokio::test]
 async fn contract_builtin_directive_names_hover_shows_documentation() {
-    // NOTE: `v-pre` is deliberately absent — the parser's v-pre prepass
-    // suppresses every directive fact on the element carrying it (that IS how
-    // "don't compile this subtree" is implemented), so no typed token exists
-    // to hover without changing compilation semantics. Every other built-in
-    // is covered.
+    // Every built-in with a doc-table entry hovers on its NAME token — including
+    // `v-pre`, whose directive fact the parser records even though the subtree
+    // stays uncompiled.
     for (needle, expected_fragments) in [
         ("v-if", ["v-if", "conditionally"]),
         ("v-else-if", ["v-else-if", "falsy"]),
@@ -24581,6 +24579,7 @@ async fn contract_builtin_directive_names_hover_shows_documentation() {
         ("v-for", ["v-for", "list"]),
         ("v-html", ["v-html", "HTML"]),
         ("v-text", ["v-text", "text"]),
+        ("v-pre", ["v-pre", "compilation"]),
         ("v-once", ["v-once", "once"]),
         ("v-memo", ["v-memo", "memo"]),
         ("v-cloak", ["v-cloak", "cloak"]),
@@ -24611,7 +24610,7 @@ async fn contract_builtin_directive_names_hover_shows_documentation() {
 async fn contract_builtin_directive_definition_is_fail_closed_empty() {
     // There is nothing authored to jump to for a built-in directive: the
     // definition stays empty (never a fabricated target).
-    for needle in ["v-if", "v-for", "v-show"] {
+    for needle in ["v-if", "v-for", "v-show", "v-pre"] {
         let (_temp, service, drain_handle, _provider, workspace_id) =
             make_definition_test_server(&[("src/App.vue", "vue", D6_PARENT_SOURCE)]).await;
         let server = service.inner();
@@ -24742,7 +24741,7 @@ async fn contract_unknown_custom_directive_name_is_silent() {
 // D6 Svelte — directive keyword doc hovers + transition-family name hover
 // =========================================================================
 
-const D6_SVELTE_SOURCE: &str = "<script lang=\"ts\">\n  import { fade, fly } from \"svelte/transition\";\n  function highlight(node: HTMLElement, params: { color: string }) {\n    void node;\n    void params;\n    return { destroy() {} };\n  }\n</script>\n\n<p use:highlight={{ color: \"red\" }}>x</p>\n<span transition:fade>y</span>\n<b in:fly={{ x: 10 }} out:fade>z</b>\n";
+const D6_SVELTE_SOURCE: &str = "<script lang=\"ts\">\n  import { fade, fly } from \"svelte/transition\";\n  import { flip } from \"svelte/animate\";\n  function highlight(node: HTMLElement, params: { color: string }) {\n    void node;\n    void params;\n    return { destroy() {} };\n  }\n</script>\n\n<p use:highlight={{ color: \"red\" }}>x</p>\n<span transition:fade>y</span>\n<b in:fly={{ x: 10 }} out:fade>z</b>\n<li animate:flip>w</li>\n";
 
 #[tokio::test]
 async fn contract_svelte_directive_keywords_hover_shows_documentation() {
@@ -24751,6 +24750,7 @@ async fn contract_svelte_directive_keywords_hover_shows_documentation() {
         ("transition:fade", 2u32, "transition"),
         ("in:fly", 1u32, "transition"),
         ("out:fade", 1u32, "transition"),
+        ("animate:flip", 1u32, "animation"),
     ] {
         let (_temp, service, drain_handle, _provider, workspace_id) =
             make_definition_test_server(&[("src/App.svelte", "svelte", D6_SVELTE_SOURCE)]).await;
@@ -24782,6 +24782,7 @@ async fn contract_svelte_transition_family_names_hover_typed_without_shim_leak()
         ("transition:fade", 12u32),
         ("in:fly", 4u32),
         ("out:fade", 5u32),
+        ("animate:flip", 9u32),
     ] {
         let (_temp, service, drain_handle, provider, workspace_id) =
             make_definition_test_server(&[("src/App.svelte", "svelte", D6_SVELTE_SOURCE)]).await;
@@ -24828,6 +24829,44 @@ async fn contract_svelte_transition_family_names_hover_typed_without_shim_leak()
             !text.contains("__verter_"),
             "{needle} name hover must not leak shims, got: {text}"
         );
+        drain_handle.abort();
+        drop(service);
+    }
+}
+
+#[tokio::test]
+async fn contract_svelte_transition_family_names_definition_navigates_to_authored_function() {
+    // The authored function name keeps its source map inside the synthetic
+    // wrapper, so go-to-definition resolves range-exact to the authored
+    // declaration — never the shim, never fail-open.
+    let source = "<script lang=\"ts\">\n  function slideAway(node: HTMLElement, params: { duration: number }) {\n    void node;\n    void params;\n    return { duration: 100 };\n  }\n  function enterOnly(node: HTMLElement) {\n    void node;\n    return { duration: 50 };\n  }\n  function exitOnly(node: HTMLElement) {\n    void node;\n    return { duration: 50 };\n  }\n  function shuffleFlip(node: HTMLElement) {\n    void node;\n    return { duration: 200 };\n  }\n</script>\n\n<span transition:slideAway>y</span>\n<b in:enterOnly out:exitOnly>z</b>\n<li animate:shuffleFlip>w</li>\n";
+    for (query, target) in [
+        (("transition:slideAway", 16usize), "slideAway"),
+        (("in:enterOnly", 4usize), "enterOnly"),
+        (("out:exitOnly", 5usize), "exitOnly"),
+        (("animate:shuffleFlip", 9usize), "shuffleFlip"),
+    ] {
+        let (_temp, service, drain_handle, provider, workspace_id) =
+            make_definition_test_server(&[("src/App.svelte", "svelte", source)]).await;
+        let server = service.inner();
+        let uri = workspace_uri(&workspace_id, "src/App.svelte");
+        assert_svelte_same_file_definition(server, &provider, &uri, query, target).await;
+        drain_handle.abort();
+        drop(service);
+    }
+}
+
+#[tokio::test]
+async fn contract_svelte_transition_family_keyword_definition_fails_closed() {
+    // The keyword token (`transition`, `animate`) is overwritten by synthetic
+    // text in the projection: there is no authored target, so definition must
+    // fail closed empty — never a fabricated link.
+    for query in [("transition:fade", 2usize), ("animate:flip", 2usize)] {
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[("src/App.svelte", "svelte", D6_SVELTE_SOURCE)]).await;
+        let server = service.inner();
+        let uri = workspace_uri(&workspace_id, "src/App.svelte");
+        assert_svelte_token_fails_closed(server, &uri, query).await;
         drain_handle.abort();
         drop(service);
     }
