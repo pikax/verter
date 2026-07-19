@@ -146,6 +146,36 @@ impl Backend {
     }
 }
 
+/// The emission topology a cell compares against: the default NON-inline
+/// shape (`_sfc_main` + separate `function render` + attach) or the official
+/// production INLINE shape (`compileScript({ inlineTemplate: true })` — the
+/// render closure returned from `setup()`). Inline cells exist only for VDOM
+/// script-setup cases (Vapor inline is deferred; template-only SFCs have no
+/// `setup()` to inline into).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, serde::Serialize, Default,
+)]
+pub enum Topology {
+    /// `_sfc_main` + separate `function render` + `_sfc_main.render = render`.
+    #[default]
+    #[serde(rename = "non-inline")]
+    NonInline,
+    /// Render closure inlined into `setup()` (official production shape).
+    #[serde(rename = "inline")]
+    Inline,
+}
+
+impl Topology {
+    pub const ALL: [Topology; 2] = [Topology::NonInline, Topology::Inline];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Topology::NonInline => "non-inline",
+            Topology::Inline => "inline",
+        }
+    }
+}
+
 /// Per-cell outcome recorded by the oracle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -182,6 +212,11 @@ pub struct CaseEntry {
     pub id: String,
     pub sfc: String,
     pub backends: BTreeMap<Backend, BackendCell>,
+    /// Inline-topology cells (official production shape). Only VDOM
+    /// script-setup cases carry entries; absent for template-only cases and
+    /// always empty for Vapor (inline deferred).
+    #[serde(default, rename = "inlineBackends")]
+    pub inline_backends: BTreeMap<Backend, BackendCell>,
 }
 
 /// `corpus/manifest.json` — the generated case/artifact index.
@@ -268,6 +303,10 @@ pub struct GoldenMeta {
     pub schema: u32,
     pub case_id: String,
     pub backend: Backend,
+    /// The emission topology this golden was generated with (`non-inline`
+    /// default; `inline` for the official production shape).
+    #[serde(default)]
+    pub topology: Topology,
     pub generator: GeneratorInfo,
     pub versions: BTreeMap<String, String>,
     pub source: SourceRef,
@@ -308,6 +347,10 @@ pub struct KnownDivergenceCell {
     #[serde(rename = "case")]
     pub case_id: String,
     pub backend: Backend,
+    /// The emission topology this cell compares against (`non-inline`
+    /// default; `inline` for the official production shape).
+    #[serde(default)]
+    pub topology: Topology,
     /// Exact expected comparator reason summaries (`DiffReason::summary()`).
     pub reasons: Vec<String>,
     /// Total number of in-contract differences (≥ reasons.len() when capped).
@@ -322,9 +365,14 @@ impl KnownDivergences {
         serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))
     }
 
-    pub fn find(&self, case_id: &str, backend: Backend) -> Option<&KnownDivergenceCell> {
+    pub fn find(
+        &self,
+        case_id: &str,
+        backend: Backend,
+        topology: Topology,
+    ) -> Option<&KnownDivergenceCell> {
         self.cells
             .iter()
-            .find(|c| c.case_id == case_id && c.backend == backend)
+            .find(|c| c.case_id == case_id && c.backend == backend && c.topology == topology)
     }
 }

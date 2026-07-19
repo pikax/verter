@@ -1,8 +1,8 @@
 {
-  "schema": 1,
+  "schema": 2,
   "generator": {
     "name": "@verter/vue-conformance-oracle",
-    "version": 2
+    "version": 3
   },
   "vueVersion": "3.6.0-rc.1",
   "packages": {
@@ -29,6 +29,14 @@
           "map": "goldens/3.6.0-rc.1/vapor/built-ins/keep-alive.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/built-ins/keep-alive.meta.json"
         }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/built-ins/keep-alive.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/built-ins/keep-alive.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/built-ins/keep-alive.meta.json"
+        }
       }
     },
     {
@@ -46,6 +54,14 @@
           "golden": "goldens/3.6.0-rc.1/vapor/built-ins/teleport.js",
           "map": "goldens/3.6.0-rc.1/vapor/built-ins/teleport.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/built-ins/teleport.meta.json"
+        }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/built-ins/teleport.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/built-ins/teleport.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/built-ins/teleport.meta.json"
         }
       }
     },
@@ -65,6 +81,14 @@
           "map": "goldens/3.6.0-rc.1/vapor/components/child-comp.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/components/child-comp.meta.json"
         }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/components/child-comp.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/components/child-comp.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/components/child-comp.meta.json"
+        }
       }
     },
     {
@@ -82,6 +106,14 @@
           "golden": "goldens/3.6.0-rc.1/vapor/components/component-is.js",
           "map": "goldens/3.6.0-rc.1/vapor/components/component-is.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/components/component-is.meta.json"
+        }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/components/component-is.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/components/component-is.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/components/component-is.meta.json"
         }
       }
     },
@@ -101,6 +133,14 @@
           "map": "goldens/3.6.0-rc.1/vapor/components/parent-props-events.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/components/parent-props-events.meta.json"
         }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/components/parent-props-events.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/components/parent-props-events.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/components/parent-props-events.meta.json"
+        }
       }
     },
     {
@@ -118,6 +158,14 @@
           "golden": "goldens/3.6.0-rc.1/vapor/components/slots.js",
           "map": "goldens/3.6.0-rc.1/vapor/components/slots.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/components/slots.meta.json"
+        }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/components/slots.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/components/slots.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/components/slots.meta.json"
         }
       }
     },
@@ -137,6 +185,14 @@
           "map": "goldens/3.6.0-rc.1/vapor/conditionals/if-else-if-else.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/conditionals/if-else-if-else.meta.json"
         }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/conditionals/if-else-if-else.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/conditionals/if-else-if-else.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/conditionals/if-else-if-else.meta.json"
+        }
       }
     },
     {
@@ -154,6 +210,14 @@
           "golden": "goldens/3.6.0-rc.1/vapor/directives/html.js",
           "map": "goldens/3.6.0-rc.1/vapor/directives/html.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/directives/html.meta.json"
+        }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/directives/html.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/directives/html.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/directives/html.meta.json"
         }
       }
     },
@@ -173,6 +237,14 @@
           "map": "goldens/3.6.0-rc.1/vapor/directives/show.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/directives/show.meta.json"
         }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/directives/show.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/directives/show.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/directives/show.meta.json"
+        }
       }
     },
     {
@@ -190,6 +262,14 @@
           "golden": "goldens/3.6.0-rc.1/vapor/directives/text.js",
           "map": "goldens/3.6.0-rc.1/vapor/directives/text.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/directives/text.meta.json"
+        }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/directives/text.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/directives/text.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/directives/text.meta.json"
         }
       }
     },
@@ -209,6 +289,14 @@
           "map": "goldens/3.6.0-rc.1/vapor/elements-text/dynamic-class.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/elements-text/dynamic-class.meta.json"
         }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/elements-text/dynamic-class.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/elements-text/dynamic-class.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/elements-text/dynamic-class.meta.json"
+        }
       }
     },
     {
@@ -227,6 +315,14 @@
           "map": "goldens/3.6.0-rc.1/vapor/elements-text/dynamic-style.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/elements-text/dynamic-style.meta.json"
         }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/elements-text/dynamic-style.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/elements-text/dynamic-style.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/elements-text/dynamic-style.meta.json"
+        }
       }
     },
     {
@@ -244,6 +340,14 @@
           "golden": "goldens/3.6.0-rc.1/vapor/elements-text/interpolation.js",
           "map": "goldens/3.6.0-rc.1/vapor/elements-text/interpolation.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/elements-text/interpolation.meta.json"
+        }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/elements-text/interpolation.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/elements-text/interpolation.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/elements-text/interpolation.meta.json"
         }
       }
     },
@@ -317,6 +421,14 @@
           "map": "goldens/3.6.0-rc.1/vapor/script-setup/props-emits-runtime.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/script-setup/props-emits-runtime.meta.json"
         }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/script-setup/props-emits-runtime.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/script-setup/props-emits-runtime.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/script-setup/props-emits-runtime.meta.json"
+        }
       }
     },
     {
@@ -334,6 +446,14 @@
           "golden": "goldens/3.6.0-rc.1/vapor/script-setup/props-type-withdefaults.js",
           "map": "goldens/3.6.0-rc.1/vapor/script-setup/props-type-withdefaults.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/script-setup/props-type-withdefaults.meta.json"
+        }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/script-setup/props-type-withdefaults.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/script-setup/props-type-withdefaults.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/script-setup/props-type-withdefaults.meta.json"
         }
       }
     },
@@ -353,6 +473,14 @@
           "map": "goldens/3.6.0-rc.1/vapor/v-bind/dynamic-arg.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/v-bind/dynamic-arg.meta.json"
         }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/v-bind/dynamic-arg.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/v-bind/dynamic-arg.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/v-bind/dynamic-arg.meta.json"
+        }
       }
     },
     {
@@ -370,6 +498,14 @@
           "golden": "goldens/3.6.0-rc.1/vapor/v-bind/prop-attr-modifiers.js",
           "map": "goldens/3.6.0-rc.1/vapor/v-bind/prop-attr-modifiers.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/v-bind/prop-attr-modifiers.meta.json"
+        }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/v-bind/prop-attr-modifiers.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/v-bind/prop-attr-modifiers.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/v-bind/prop-attr-modifiers.meta.json"
         }
       }
     },
@@ -389,6 +525,14 @@
           "map": "goldens/3.6.0-rc.1/vapor/v-bind/same-name-shorthand.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/v-bind/same-name-shorthand.meta.json"
         }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/v-bind/same-name-shorthand.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/v-bind/same-name-shorthand.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/v-bind/same-name-shorthand.meta.json"
+        }
       }
     },
     {
@@ -406,6 +550,14 @@
           "golden": "goldens/3.6.0-rc.1/vapor/v-bind/static-dynamic.js",
           "map": "goldens/3.6.0-rc.1/vapor/v-bind/static-dynamic.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/v-bind/static-dynamic.meta.json"
+        }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/v-bind/static-dynamic.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/v-bind/static-dynamic.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/v-bind/static-dynamic.meta.json"
         }
       }
     },
@@ -425,6 +577,14 @@
           "map": "goldens/3.6.0-rc.1/vapor/v-for/array.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/v-for/array.meta.json"
         }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/v-for/array.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/v-for/array.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/v-for/array.meta.json"
+        }
       }
     },
     {
@@ -442,6 +602,14 @@
           "golden": "goldens/3.6.0-rc.1/vapor/v-for/index-destructure.js",
           "map": "goldens/3.6.0-rc.1/vapor/v-for/index-destructure.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/v-for/index-destructure.meta.json"
+        }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/v-for/index-destructure.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/v-for/index-destructure.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/v-for/index-destructure.meta.json"
         }
       }
     },
@@ -461,6 +629,14 @@
           "map": "goldens/3.6.0-rc.1/vapor/v-for/object.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/v-for/object.meta.json"
         }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/v-for/object.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/v-for/object.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/v-for/object.meta.json"
+        }
       }
     },
     {
@@ -478,6 +654,14 @@
           "golden": "goldens/3.6.0-rc.1/vapor/v-model/checkbox.js",
           "map": "goldens/3.6.0-rc.1/vapor/v-model/checkbox.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/v-model/checkbox.meta.json"
+        }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/v-model/checkbox.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/v-model/checkbox.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/v-model/checkbox.meta.json"
         }
       }
     },
@@ -497,6 +681,14 @@
           "map": "goldens/3.6.0-rc.1/vapor/v-model/input.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/v-model/input.meta.json"
         }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/v-model/input.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/v-model/input.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/v-model/input.meta.json"
+        }
       }
     },
     {
@@ -514,6 +706,14 @@
           "golden": "goldens/3.6.0-rc.1/vapor/v-model/select.js",
           "map": "goldens/3.6.0-rc.1/vapor/v-model/select.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/v-model/select.meta.json"
+        }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/v-model/select.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/v-model/select.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/v-model/select.meta.json"
         }
       }
     },
@@ -533,6 +733,14 @@
           "map": "goldens/3.6.0-rc.1/vapor/v-on/inline.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/v-on/inline.meta.json"
         }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/v-on/inline.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/v-on/inline.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/v-on/inline.meta.json"
+        }
       }
     },
     {
@@ -550,6 +758,14 @@
           "golden": "goldens/3.6.0-rc.1/vapor/v-on/key-modifiers.js",
           "map": "goldens/3.6.0-rc.1/vapor/v-on/key-modifiers.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/v-on/key-modifiers.meta.json"
+        }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/v-on/key-modifiers.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/v-on/key-modifiers.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/v-on/key-modifiers.meta.json"
         }
       }
     },
@@ -569,6 +785,14 @@
           "map": "goldens/3.6.0-rc.1/vapor/v-on/method-ref.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/v-on/method-ref.meta.json"
         }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/v-on/method-ref.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/v-on/method-ref.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/v-on/method-ref.meta.json"
+        }
       }
     },
     {
@@ -586,6 +810,14 @@
           "golden": "goldens/3.6.0-rc.1/vapor/v-on/modifiers.js",
           "map": "goldens/3.6.0-rc.1/vapor/v-on/modifiers.map.json",
           "meta": "goldens/3.6.0-rc.1/vapor/v-on/modifiers.meta.json"
+        }
+      },
+      "inlineBackends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom-inline/v-on/modifiers.js",
+          "map": "goldens/3.6.0-rc.1/vdom-inline/v-on/modifiers.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom-inline/v-on/modifiers.meta.json"
         }
       }
     }

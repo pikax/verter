@@ -1,10 +1,11 @@
 {
-  "schema": 1,
+  "schema": 2,
   "caseId": "elements-text/dynamic-class",
   "backend": "vdom",
+  "topology": "non-inline",
   "generator": {
     "name": "@verter/vue-conformance-oracle",
-    "version": 2
+    "version": 3
   },
   "versions": {
     "vue": "3.6.0-rc.1",

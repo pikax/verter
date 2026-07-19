@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/components/child-comp.vue"
+  ],
+  "names": [],
+  "mappings": ";;;;;;;;;;;;;AAKA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;AAEb,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AACnB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AACf;;;wBAIE,oBAKS;IALD,KAAK,EAAC,YAAY;IAAE,OAAK,EAAE,OAAO;;IACxC,YAA2B;qBAAA,GAC3B,oBAAG,aAAK,IAAG,IAAE,oBAAG,aAAK,IAAG,IACxB;IAAA,YAAa;IACb,YAA0C,yBAArB,KAAK,EAAE,aAAK",
+  "sourcesContent": [
+    "<script setup>\ndefineProps({\n  label: { type: String, required: true },\n  count: { type: Number, default: 0 },\n})\nconst emit = defineEmits([\"select\"])\n\nfunction onClick() {\n  emit(\"select\")\n}\n</script>\n\n<template>\n  <button class=\"child-comp\" @click=\"onClick\">\n    <slot name=\"header\"></slot>\n    {{ label }} ({{ count }})\n    <slot></slot>\n    <slot name=\"footer\" :total=\"count\"></slot>\n  </button>\n</template>\n"
+  ]
+}

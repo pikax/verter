@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-for/array.vue"
+  ],
+  "names": [],
+  "mappings": ";;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;AAExB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;wBAI/B,oBAEK;uBADH,oBAAqD,6BAAlC,WAAK,GAAb,IAAI;4BAAf,oBAAqD,QAA1B,GAAG,EAAE,IAAI,qBAAK,IAAI",
+  "sourcesContent": [
+    "<script setup>\nimport { ref } from \"vue\"\n\nconst items = ref([\"a\", \"b\", \"c\"])\n</script>\n\n<template>\n  <ul>\n    <li v-for=\"item in items\" :key=\"item\">{{ item }}</li>\n  </ul>\n</template>\n"
+  ]
+}

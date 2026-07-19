@@ -31,6 +31,7 @@ use verter_compiler::compile::{CodegenOptions, CompileDiagnosticSeverity, Verter
 use verter_vue_conformance::compare::{compare_modules, Comparison, DiagnosticRow, ModuleInput};
 use verter_vue_conformance::{
     corpus_file, corpus_root, Backend, GoldenMeta, KnownDivergenceCell, KnownDivergences, Manifest,
+    Topology,
 };
 
 use crate::common::{authored, case_sfc_source, golden_code};
@@ -41,12 +42,22 @@ fn dispositions_path() -> std::path::PathBuf {
     corpus_root().join("known-divergences.json")
 }
 
-fn golden_meta(backend: Backend, case_id: &str) -> GoldenMeta {
+/// Golden directory for one (backend, topology) pair: non-inline cells live
+/// under `goldens/<ver>/<backend>/…`, inline cells under
+/// `goldens/<ver>/<backend>-inline/…`.
+fn golden_dir(backend: Backend, topology: Topology) -> String {
+    match topology {
+        Topology::NonInline => backend.as_str().to_string(),
+        Topology::Inline => format!("{}-inline", backend.as_str()),
+    }
+}
+
+fn golden_meta(backend: Backend, topology: Topology, case_id: &str) -> GoldenMeta {
     let path = corpus_file(
         &corpus_root(),
         &format!(
             "goldens/3.6.0-rc.1/{}/{case_id}.meta.json",
-            backend.as_str()
+            golden_dir(backend, topology)
         ),
     );
     GoldenMeta::load(&path).expect("load golden meta")
@@ -69,11 +80,17 @@ struct VerterCell {
     diagnostics: Vec<DiagnosticRow>,
 }
 
-fn compile_verter_cell(case_id: &str, backend: Backend) -> VerterCell {
+fn compile_verter_cell(case_id: &str, backend: Backend, topology: Topology) -> VerterCell {
     let sfc = case_sfc_source(case_id);
     let alloc = oxc_allocator::Allocator::new();
     let options = CodegenOptions {
         filename: Some(format!("cases/{case_id}.vue")),
+        // Inline cells compile Verter in the inline topology (the render is
+        // merged into `setup()`); non-inline cells keep the default.
+        inline: match topology {
+            Topology::NonInline => None,
+            Topology::Inline => Some(true),
+        },
         ..Default::default()
     };
     let verter_options = VerterCompileOptions {
@@ -150,10 +167,10 @@ fn compile_verter_cell(case_id: &str, backend: Backend) -> VerterCell {
     }
 }
 
-fn compare_cell(case_id: &str, backend: Backend) -> Comparison {
-    let verter = compile_verter_cell(case_id, backend);
-    let golden_code = golden_code(backend.as_str(), case_id);
-    let meta = golden_meta(backend, case_id);
+fn compare_cell(case_id: &str, backend: Backend, topology: Topology) -> Comparison {
+    let verter = compile_verter_cell(case_id, backend, topology);
+    let golden_code = golden_code(&golden_dir(backend, topology), case_id);
+    let meta = golden_meta(backend, topology, case_id);
     let authored = authored(case_id);
 
     let verter_input = ModuleInput {
@@ -180,8 +197,9 @@ fn compare_cell(case_id: &str, backend: Backend) -> Comparison {
     let debug = std::env::var("VERTER_CONFORMANCE_DEBUG").unwrap_or_default();
     if !debug.is_empty() && case_id.contains(&debug) {
         eprintln!(
-            "===== VERTER {} {case_id} =====\n{}\n===== GOLDEN =====\n{}",
+            "===== VERTER {} {} {case_id} =====\n{}\n===== GOLDEN =====\n{}",
             backend.as_str(),
+            topology.as_str(),
             verter.code,
             golden_code
         );
@@ -209,25 +227,39 @@ fn reason_summaries(comparison: &Comparison) -> Vec<String> {
 
 /// The seed conformance run: every cell's outcome must match its tracked
 /// disposition (PASS with no entry, or KNOWN-DIVERGENCE with an exact
-/// signature match).
+/// signature match). Cells are keyed case × backend × topology — non-inline
+/// cells for every case × backend, plus inline (official production shape)
+/// cells for VDOM script-setup cases.
 #[test]
 fn seed_conformance_matches_tracked_dispositions() {
     let manifest = Manifest::load(&corpus_root()).expect("load manifest");
     let update = std::env::var("VERTER_CONFORMANCE_UPDATE").is_ok();
     let path = dispositions_path();
 
-    let mut outcomes: Vec<(String, Backend, Comparison)> = Vec::new();
+    let mut outcomes: Vec<(String, Backend, Topology, Comparison)> = Vec::new();
     for case in &manifest.cases {
         for backend in Backend::ALL {
-            let comparison = compare_cell(&case.id, backend);
-            outcomes.push((case.id.clone(), backend, comparison));
+            let comparison = compare_cell(&case.id, backend, Topology::NonInline);
+            outcomes.push((case.id.clone(), backend, Topology::NonInline, comparison));
+        }
+        for backend in case.inline_backends.keys() {
+            let comparison = compare_cell(&case.id, *backend, Topology::Inline);
+            outcomes.push((case.id.clone(), *backend, Topology::Inline, comparison));
         }
     }
 
     // Per-case report (visible with --nocapture).
-    let pass = outcomes.iter().filter(|(_, _, c)| c.passed()).count();
+    let pass = outcomes.iter().filter(|(_, _, _, c)| c.passed()).count();
+    let inline_pass = outcomes
+        .iter()
+        .filter(|(_, _, t, c)| *t == Topology::Inline && c.passed())
+        .count();
+    let inline_total = outcomes
+        .iter()
+        .filter(|(_, _, t, _)| *t == Topology::Inline)
+        .count();
     eprintln!(
-        "vue-conformance seed run: {pass}/{} cells PASS",
+        "vue-conformance seed run: {pass}/{} cells PASS ({inline_pass}/{inline_total} inline)",
         outcomes.len()
     );
 
@@ -237,17 +269,18 @@ fn seed_conformance_matches_tracked_dispositions() {
             cells: Vec::new(),
         });
         let mut cells = Vec::new();
-        for (case_id, backend, comparison) in &outcomes {
+        for (case_id, backend, topology, comparison) in &outcomes {
             if comparison.passed() {
                 continue;
             }
             let note = existing
-                .find(case_id, *backend)
+                .find(case_id, *backend, *topology)
                 .map(|c| c.note.clone())
                 .unwrap_or_else(|| "TODO: triage this divergence".to_string());
             cells.push(KnownDivergenceCell {
                 case_id: case_id.clone(),
                 backend: *backend,
+                topology: *topology,
                 reasons: reason_summaries(comparison),
                 total: comparison.total,
                 note,
@@ -266,16 +299,16 @@ fn seed_conformance_matches_tracked_dispositions() {
 
     let dispositions = KnownDivergences::load(&path).expect("load known-divergences.json");
     let mut failures: Vec<String> = Vec::new();
-    for (case_id, backend, comparison) in &outcomes {
-        let entry = dispositions.find(case_id, *backend);
+    for (case_id, backend, topology, comparison) in &outcomes {
+        let entry = dispositions.find(case_id, *backend, *topology);
         match (comparison.passed(), entry) {
             (true, None) => {}
             (true, Some(_)) => failures.push(format!(
-                "{case_id} [{backend:?}]: STALE divergence entry — the cell now PASSES; \
+                "{case_id} [{backend:?} {topology:?}]: STALE divergence entry — the cell now PASSES; \
                  remove the entry (parity improved)"
             )),
             (false, None) => failures.push(format!(
-                "{case_id} [{backend:?}]: UNTRACKED divergence ({} differences): {:?}",
+                "{case_id} [{backend:?} {topology:?}]: UNTRACKED divergence ({} differences): {:?}",
                 comparison.total,
                 reason_summaries(comparison)
             )),
@@ -283,7 +316,7 @@ fn seed_conformance_matches_tracked_dispositions() {
                 let actual = reason_summaries(comparison);
                 if actual != entry.reasons || comparison.total != entry.total {
                     failures.push(format!(
-                        "{case_id} [{backend:?}]: divergence signature CHANGED\n  expected ({}): \
+                        "{case_id} [{backend:?} {topology:?}]: divergence signature CHANGED\n  expected ({}): \
                          {:?}\n  actual ({}): {:?}\n  (review, then regenerate with \
                          VERTER_CONFORMANCE_UPDATE=1)",
                         entry.total, entry.reasons, comparison.total, actual
@@ -300,7 +333,7 @@ fn seed_conformance_matches_tracked_dispositions() {
 }
 
 /// The dispositions file itself: well-formed, minimal, and in bijection with
-/// (case × backend) cells that actually diverge.
+/// (case × backend × topology) cells that actually diverge.
 #[test]
 fn known_divergences_file_is_well_formed() {
     let manifest = Manifest::load(&corpus_root()).expect("load manifest");
@@ -316,30 +349,48 @@ fn known_divergences_file_is_well_formed() {
             cell.case_id
         );
         assert!(
-            seen.insert((cell.case_id.as_str(), cell.backend)),
-            "duplicate dispositions entry for {} [{:?}]",
+            seen.insert((cell.case_id.as_str(), cell.backend, cell.topology)),
+            "duplicate dispositions entry for {} [{:?} {:?}]",
             cell.case_id,
-            cell.backend
+            cell.backend,
+            cell.topology
         );
         assert!(
             !cell.reasons.is_empty(),
-            "{} [{:?}]: divergence entry must carry its reason signature",
+            "{} [{:?} {:?}]: divergence entry must carry its reason signature",
             cell.case_id,
-            cell.backend
+            cell.backend,
+            cell.topology
         );
         assert!(
             cell.total >= cell.reasons.len(),
-            "{} [{:?}]: total {} < reasons {}",
+            "{} [{:?} {:?}]: total {} < reasons {}",
             cell.case_id,
             cell.backend,
+            cell.topology,
             cell.total,
             cell.reasons.len()
         );
         assert!(
             !cell.note.trim().is_empty() && !cell.note.starts_with("TODO"),
-            "{} [{:?}]: divergence entry needs a curated note (the backlog item)",
+            "{} [{:?} {:?}]: divergence entry needs a curated note (the backlog item)",
             cell.case_id,
-            cell.backend
+            cell.backend,
+            cell.topology
         );
+        // Inline cells exist only for VDOM script-setup cases (Vapor inline
+        // deferred; template-only SFCs have no setup to inline into).
+        if cell.topology == Topology::Inline {
+            let case = manifest
+                .cases
+                .iter()
+                .find(|c| c.id == cell.case_id)
+                .expect("inline cell case exists");
+            assert!(
+                cell.backend == Backend::Vdom && case.inline_backends.contains_key(&Backend::Vdom),
+                "{}: inline divergence entry but the case declares no vdom inline cell",
+                cell.case_id
+            );
+        }
     }
 }

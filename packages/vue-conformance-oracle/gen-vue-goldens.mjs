@@ -20,7 +20,8 @@
  * regenerates everything in-memory and fails on any missing / drifted /
  * stale committed artifact.
  *
- * TOPOLOGY: the goldens use the official NON-inline emission — the same
+ * TOPOLOGY: the goldens cover BOTH official emission topologies. The default
+ * (`non-inline`) cells use the official NON-inline emission — the same
  * `_sfc_main`-shaped module with a SEPARATE render function that Verter
  * ships at runtime (`verter_session::assemble_vue_main_module`). Script-setup
  * cells: `compileScript({ inlineTemplate: false })` for the component object
@@ -30,12 +31,19 @@
  * function just like VDOM's), assembled as
  * `[render import line][script component object][function render][_sfc_main.render
  * = render][export default _sfc_main]`. Template-only cells get the
- * bundler-equivalent `const _sfc_main = {}` + attach wrapper. The official
- * `inlineTemplate: true` topology (setup returns the render closure) is a
- * DIFFERENT, behaviorally equivalent shape Verter does not emit (tracked as
- * a future feature in `docs/arch/next/vue-inline-template-runtime.md`) —
- * comparing against it makes every cell fail on assembly topology, not real
- * divergence. The vendored `.map.json` is the render-fn (compileTemplate)
+ * bundler-equivalent `const _sfc_main = {}` + attach wrapper.
+ *
+ * The `inline` cells (VDOM script-setup cases only — Vapor inline is
+ * deferred) use the official PRODUCTION topology: a single
+ * `compileScript({ inlineTemplate: true, vapor: false })` call whose content
+ * already carries the render closure inside `setup()` (official does NOT
+ * split compileTemplate for inline), with `export default` rebound to
+ * `const _sfc_main =` and a trailing `export default _sfc_main` — the same
+ * module shape Verter's inline assembly ships. Inline goldens live under
+ * `goldens/<ver>/vdom-inline/…`; each cell's `.meta.json` records
+ * `topology` and `inlineTemplate`. The vendored inline `.map.json` is the
+ * whole-module `compileScript` map (already SFC-absolute; no re-anchor).
+ * The vendored non-inline `.map.json` is the render-fn (compileTemplate)
  * map; the script block's own map is not vendored.
  *
  * Guarantees:
@@ -330,6 +338,78 @@ function splitRenderImport(code) {
 }
 
 /**
+ * Assemble the official INLINE module in the shape a bundler host (and
+ * Verter's inline `assemble_vue_main_module`) ships: the single
+ * `compileScript({ inlineTemplate: true })` content (which already carries
+ * helper imports, module-scope hoists, and the render closure inside
+ * `setup()`) with `export default` rebound to `const _sfc_main =` and a
+ * trailing default export.
+ */
+function assembleInline({ scriptCode }) {
+  return scriptCode.replace("export default", "const _sfc_main =") + "\nexport default _sfc_main";
+}
+
+/**
+ * Compile one SFC source for the INLINE topology (VDOM script-setup only).
+ * Official production shape: ONE `compileScript({ inlineTemplate: true })`
+ * call — no separate compileTemplate, no bindingMetadata split.
+ */
+async function compileInlineCell({ caseId, source }) {
+  const filename = `cases/${caseId}.vue`;
+  const diagnostics = [];
+
+  const { descriptor, errors: parseErrors } = parse(source, { filename });
+  for (const error of parseErrors) {
+    pushDiagnostic(diagnostics, "parse-error", error);
+  }
+
+  let code = null;
+  let map = null;
+  let pipeline = null;
+  let postprocess = null;
+
+  try {
+    pipeline = "compileScript:inlineTemplate";
+    const script = compileScript(descriptor, {
+      id: caseId,
+      vapor: false,
+      inlineTemplate: true,
+      fs: hermeticCompileFs,
+    });
+    let scriptCode = script.content;
+    // Mirror the official SFC-loader TS strip for `lang="ts"` cells (same
+    // post-process the non-inline cells get).
+    if (descriptor.scriptSetup.lang === "ts") {
+      const stripped = await transform(scriptCode, { loader: "ts" });
+      scriptCode = stripped.code;
+      postprocess = {
+        tool: "esbuild",
+        version: ESBUILD_VERSION,
+        options: { loader: "ts" },
+        reason:
+          "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)",
+      };
+    }
+    code = assembleInline({ scriptCode });
+    // The compileScript map is the whole-module map and already SFC-absolute
+    // (no template-relative re-anchor needed).
+    map = script.map ?? null;
+  } catch (error) {
+    pushDiagnostic(diagnostics, "thrown", error);
+  }
+
+  const rejected = code === null || diagnostics.some((d) => ERROR_KINDS.has(d.kind));
+
+  return {
+    code: rejected ? null : code,
+    map: rejected ? null : map,
+    diagnostics,
+    pipeline,
+    postprocess,
+  };
+}
+
+/**
  * Assemble the official NON-inline module in the shape a bundler host (and
  * Verter's `assemble_vue_main_module`) ships: the template helper import
  * line first, then the component object, then the separate render function,
@@ -498,6 +578,7 @@ async function buildArtifacts(versions) {
   const totals = {
     vdom: { compiled: 0, rejected: 0 },
     vapor: { compiled: 0, rejected: 0 },
+    vdomInline: { compiled: 0, rejected: 0 },
   };
 
   const caseIds = await discoverCases();
@@ -514,6 +595,7 @@ async function buildArtifacts(versions) {
   for (const caseId of caseIds) {
     const { source, sha: sourceSha } = sourceShas.get(caseId);
     const backends = {};
+    const inlineBackends = {};
 
     for (const backend of BACKENDS) {
       const { code, map, diagnostics, pipeline, postprocess } = await compileCell({
@@ -565,6 +647,7 @@ async function buildArtifacts(versions) {
         schema: META_SCHEMA_VERSION,
         caseId,
         backend,
+        topology: "non-inline",
         generator: {
           name: "@verter/vue-conformance-oracle",
           version: GENERATOR_VERSION,
@@ -587,7 +670,88 @@ async function buildArtifacts(versions) {
       };
     }
 
-    manifestCases.push({ id: caseId, sfc: `cases/${caseId}.vue`, backends });
+    // Inline topology cells (official production shape): VDOM + script-setup
+    // cases only — Vapor inline is deferred, and template-only SFCs have no
+    // `setup()` to inline into (their production shape IS the non-inline
+    // shape, so an inline cell would be a byte-for-byte duplicate).
+    const { descriptor: topologyProbe } = parse(source, { filename: `cases/${caseId}.vue` });
+    if (topologyProbe.scriptSetup) {
+      const { code, map, diagnostics, pipeline, postprocess } = await compileInlineCell({
+        caseId,
+        source,
+      });
+      const disposition = code === null ? "rejected" : "compiled";
+      totals.vdomInline[disposition] += 1;
+
+      const base = `crates/verter_vue_conformance/corpus/goldens/${VUE_ORACLE_VERSION}/vdom-inline/${caseId}`;
+      const optionsSummary = {
+        backend: "vdom",
+        vapor: false,
+        filename: `cases/${caseId}.vue`,
+        id: caseId,
+        pipeline,
+        topology: "inline",
+        inlineTemplate: true,
+        bindingMetadata: false,
+        sourceMap: true,
+        postprocess,
+      };
+      const optionsSha = sha256(stableStringify(optionsSummary));
+
+      let goldenRel = null;
+      let mapRel = null;
+      const artifacts = { code: null, map: null };
+      if (disposition === "compiled") {
+        goldenRel = `${base}.js`;
+        mapRel = `${base}.map.json`;
+        const goldenBytes = withTrailingNewline(code);
+        const mapBytes = withTrailingNewline(JSON.stringify(map, null, 2));
+        files.set(goldenRel, goldenBytes);
+        files.set(mapRel, mapBytes);
+        artifacts.code = {
+          path: goldenRel.replace("crates/verter_vue_conformance/corpus/", ""),
+          sha256: sha256(goldenBytes),
+          bytes: Buffer.byteLength(goldenBytes, "utf8"),
+        };
+        artifacts.map = {
+          path: mapRel.replace("crates/verter_vue_conformance/corpus/", ""),
+          sha256: sha256(mapBytes),
+        };
+      }
+
+      const metaRel = `${base}.meta.json`;
+      const meta = {
+        schema: META_SCHEMA_VERSION,
+        caseId,
+        backend: "vdom",
+        topology: "inline",
+        generator: {
+          name: "@verter/vue-conformance-oracle",
+          version: GENERATOR_VERSION,
+        },
+        versions,
+        source: { path: `cases/${caseId}.vue`, sha256: sourceSha },
+        options: { sha256: optionsSha, summary: optionsSummary },
+        artifacts,
+        disposition,
+        diagnostics,
+        helpers: disposition === "compiled" ? helperInventory(code) : [],
+      };
+      files.set(metaRel, withTrailingNewline(JSON.stringify(meta, null, 2)));
+
+      inlineBackends.vdom = {
+        disposition,
+        golden: artifacts.code?.path ?? null,
+        map: artifacts.map?.path ?? null,
+        meta: metaRel.replace("crates/verter_vue_conformance/corpus/", ""),
+      };
+    }
+
+    const entry = { id: caseId, sfc: `cases/${caseId}.vue`, backends };
+    if (Object.keys(inlineBackends).length > 0) {
+      entry.inlineBackends = inlineBackends;
+    }
+    manifestCases.push(entry);
   }
 
   const manifest = {
@@ -703,7 +867,7 @@ async function main() {
     `vue conformance oracle: ${ORACLE_PACKAGES.map((p) => `${p}@${versions[p]}`).join(", ")}, esbuild@${versions.esbuild}`,
   );
   const artifacts = await buildArtifacts(versions);
-  const { vdom, vapor } = artifacts.totals;
+  const { vdom, vapor, vdomInline } = artifacts.totals;
   if (CHECK_MODE) {
     await checkMode(artifacts);
   } else {
@@ -711,7 +875,8 @@ async function main() {
     console.log(
       `generated ${artifacts.caseCount} cases ` +
         `(vdom: ${vdom.compiled} compiled / ${vdom.rejected} rejected, ` +
-        `vapor: ${vapor.compiled} compiled / ${vapor.rejected} rejected) ` +
+        `vapor: ${vapor.compiled} compiled / ${vapor.rejected} rejected, ` +
+        `vdom-inline: ${vdomInline.compiled} compiled / ${vdomInline.rejected} rejected) ` +
         `-> ${toPosixRelative(GOLDENS_ROOT)}`,
     );
   }
