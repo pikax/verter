@@ -22,6 +22,7 @@ export const Fragment: unique symbol;
 export interface HTMLAttributes { class?: string }
 export interface NativeElements { div: HTMLAttributes; [name: string]: unknown }
 export interface Directive<T = any, V = any, M extends string = string, A = any> {}
+export interface GlobalComponents {}
 export interface GlobalDirectives {}
 declare global { namespace JSX { interface Element {} } }
 `;
@@ -32,6 +33,7 @@ import type {
   ExtractComponentProps,
   ExtractLeafElement,
   ExtractRenderComponent,
+  GlobalComponentType,
 } from "@verter/types";
 import {
   shallowUnwrapRef,
@@ -43,6 +45,7 @@ import {
   retrieveSetupDirectives,
   strictRenderSlot,
   checkRequiredSlots,
+  globalComponentsNav,
 } from "@verter/types";
 
 declare const Component: new () => { $props: { label: string }; $el: HTMLDivElement };
@@ -53,10 +56,26 @@ const invalid: Props = { label: 1 };
 declare const leaf: ExtractLeafElement<typeof Component>;
 const element: HTMLDivElement = leaf;
 declare const rendered: ExtractRenderComponent<"div">;
+// The NAV-PROBE shape the generated TSX emits per fallback const, against a
+// registered augmentation member (the unregistered case lives in dropped
+// synthetic text in the real carrier).
+declare module "vue" {
+  interface GlobalComponents {
+    SomeName: new () => { $props: {} };
+  }
+}
+void globalComponentsNav().SomeName;
+// An unregistered global name resolves fail-closed to \`unknown\`, never \`any\`.
+declare const globalMiss: GlobalComponentType<"NotRegistered">;
+const failClosed: unknown = globalMiss;
+// @ts-expect-error unknown (not any) — a fail-open \`any\` here would compile
+const failOpen: { $props: {} } = globalMiss;
 void valid;
 void invalid;
 void element;
 void rendered;
+void failClosed;
+void failOpen;
 void shallowUnwrapRef;
 void enhanceElementWithProps;
 void extractRenderComponent;
