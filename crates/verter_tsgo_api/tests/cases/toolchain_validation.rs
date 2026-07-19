@@ -346,6 +346,28 @@ async fn lsp_smoke_times_out_on_a_hanging_engine() {
     );
 }
 
+// ── DISCRIMINATING (B6): a VALID integer snapshot handle with a HOLLOW
+//    `projects: []` FAILS the --api smoke — the snapshot must actually CONTAIN
+//    the staged configured project, not merely return an integer. An
+//    incompatible engine that echoes a bare handle without opening the project
+//    is refused. RED: the hollow response passes the smoke today. ──────────────
+#[tokio::test]
+async fn api_smoke_rejects_a_hollow_projects_response() {
+    let err = production_validator()
+        .validate(&fake_engine("apihollow"), Capability::Api)
+        .await
+        .expect_err("a hollow `projects: []` snapshot must fail the --api smoke");
+    match err {
+        RejectionReason::ApiSmokeFailed { detail } => {
+            assert!(
+                detail.contains("configured project"),
+                "the rejection must name the missing configured project: {detail}"
+            );
+        }
+        other => panic!("expected ApiSmokeFailed, got {other:?}"),
+    }
+}
+
 // ── DISCRIMINATING (B3): a hung STANDALONE `--api` request returns a bounded
 //    error and tears the engine down — the request path (actor wait) is no
 //    longer unbounded. RED: `initialize` hangs past the outer guard. GREEN: a

@@ -14,7 +14,9 @@
 //!    - [`Capability::Api`] — additionally attach an `--api` session and open
 //!      a minimal configured project, requiring a bare-integer snapshot handle
 //!      (the version-lie-immune rail in
-//!      [`crate::gate::require_integer_snapshot_handle`]).
+//!      [`crate::gate::require_integer_snapshot_handle`]) AND the snapshot's
+//!      `projects` to actually CONTAIN the staged configured project (a bare
+//!      handle with a hollow project set speaks a different surface).
 //!
 //! The resolver walks candidates through the [`CandidateValidator`] seam so
 //! ordering tests can script acceptance without spawning processes.
@@ -46,7 +48,7 @@ pub enum Capability {
     Lsp,
     /// The `--api` checker surface: the LSP handshake PLUS attach an `--api`
     /// session and open a minimal configured project, requiring a bare-integer
-    /// snapshot handle.
+    /// snapshot handle AND the snapshot to contain that staged project.
     Api,
 }
 
@@ -326,13 +328,33 @@ impl ProcessValidator {
             });
         }
         let tsconfig = staged.tsconfig_string();
-        let result = attach
-            .update_snapshot(&tsconfig)
-            .await
-            .map(|_| ())
-            .map_err(|e| RejectionReason::ApiSmokeFailed {
+        let result = match attach.update_snapshot(&tsconfig).await {
+            Ok(snapshot) => {
+                // The integer handle alone proves nothing: the snapshot must
+                // actually CONTAIN the staged configured project. A hollow
+                // `projects: []` (or a foreign project set) means the engine
+                // does not speak the configured-project `--api` surface.
+                if snapshot
+                    .project_for_config(|config| {
+                        verter_span::path::fs_paths_equal(config, &tsconfig)
+                    })
+                    .is_some()
+                {
+                    Ok(())
+                } else {
+                    Err(RejectionReason::ApiSmokeFailed {
+                        detail: format!(
+                            "the configured-project snapshot did not contain the staged \
+                             configured project {tsconfig} (the engine returned a bare integer \
+                             handle with an empty/foreign project set)"
+                        ),
+                    })
+                }
+            }
+            Err(e) => Err(RejectionReason::ApiSmokeFailed {
                 detail: e.to_string(),
-            });
+            }),
+        };
         let _ = attach.teardown().await;
         result
     }
