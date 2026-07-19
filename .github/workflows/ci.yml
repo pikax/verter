@@ -773,6 +773,15 @@ jobs:
       - name: Run endurance subset on all three provider routes
         env:
           VERTER_ENDURANCE_RECEIPT: ${{ runner.temp }}/verter-endurance
+          VERTER_ENDURANCE_SYNTHETIC_SCALE: "1"
+          VERTER_ENDURANCE_SCALE_CORPUS_FILES: "8"
+          VERTER_ENDURANCE_SCALE_OPEN_FILES: "16"
+          VERTER_ENDURANCE_HEAVY_UPDATE_CYCLES: "3"
+          VERTER_ENDURANCE_STORM_MS: "12000"
+          VERTER_ENDURANCE_STORM_WORKERS: "4"
+          VERTER_ENDURANCE_SOAK_MS: "5000"
+          VERTER_ENDURANCE_WINDOW_MS: "1000"
+          VERTER_ENDURANCE_TYPING_CPS: "24"
         run: |
           set -e
           for route in tsserver tsgo shared-tsgo; do
