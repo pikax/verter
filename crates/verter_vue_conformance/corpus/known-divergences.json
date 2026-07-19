@@ -1,0 +1,745 @@
+{
+  "schema": 1,
+  "cells": [
+    {
+      "case": "built-ins/keep-alive",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `createVNode`",
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — unexpected imported helper/name `withCtx`",
+        "[structure] Program — child count: verter 6 vs golden 3"
+      ],
+      "total": 4,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `createVNode`, `withCtx`; official-only: —); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "built-ins/keep-alive",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `KeepAlive`",
+        "[import] /imports(vue) — unexpected imported helper/name `createComponentWithFallback`",
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — unexpected imported helper/name `resolveComponent`",
+        "[import] /imports(vue) — unexpected imported helper/name `setInsertionState`",
+        "[import] /imports(vue) — unexpected imported helper/name `template`",
+        "[import] /imports(vue) — missing imported helper/name `VaporKeepAlive`",
+        "[import] /imports(vue) — missing imported helper/name `createComponent`",
+        "[import] /imports(vue) — missing imported helper/name `createDynamicComponent`",
+        "[import] /imports(vue) — missing imported helper/name `extend`",
+        "[structure] Program — child count: verter 8 vs golden 3"
+      ],
+      "total": 11,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `KeepAlive`, `createComponentWithFallback`, `resolveComponent`, `setInsertionState`, `template`; official-only: `VaporKeepAlive`, `createComponent`, `createDynamicComponent`, `extend`); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "built-ins/teleport",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — unexpected imported helper/name `withCtx`",
+        "[structure] Program — child count: verter 6 vs golden 2"
+      ],
+      "total": 3,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `withCtx`; official-only: —); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "built-ins/teleport",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `Teleport`",
+        "[import] /imports(vue) — unexpected imported helper/name `createComponentWithFallback`",
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — missing imported helper/name `VaporTeleport`",
+        "[import] /imports(vue) — missing imported helper/name `createComponent`",
+        "[structure] Program — child count: verter 7 vs golden 3"
+      ],
+      "total": 6,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `Teleport`, `createComponentWithFallback`; official-only: `VaporTeleport`, `createComponent`); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "components/child-comp",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 6 vs golden 2"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "components/child-comp",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — missing imported helper/name `child`",
+        "[import] /imports(vue) — missing imported helper/name `setText`",
+        "[structure] Program — child count: verter 8 vs golden 4"
+      ],
+      "total": 4,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: —; official-only: `child`, `setText`); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "components/component-is",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 6 vs golden 3"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "components/component-is",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `createComponentWithFallback`",
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — unexpected imported helper/name `resolveComponent`",
+        "[import] /imports(vue) — missing imported helper/name `createDynamicComponent`",
+        "[structure] Program — child count: verter 7 vs golden 3"
+      ],
+      "total": 5,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `createComponentWithFallback`, `resolveComponent`; official-only: `createDynamicComponent`); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "components/parent-props-events",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 7 vs golden 3"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "components/parent-props-events",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `createComponentWithFallback`",
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — missing imported helper/name `createComponent`",
+        "[structure] Program — child count: verter 7 vs golden 3"
+      ],
+      "total": 4,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `createComponentWithFallback`; official-only: `createComponent`); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "components/slots",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 6 vs golden 3"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "components/slots",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `child`",
+        "[import] /imports(vue) — unexpected imported helper/name `createComponentWithFallback`",
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — unexpected imported helper/name `next`",
+        "[import] /imports(vue) — missing imported helper/name `createComponent`",
+        "[structure] Program — child count: verter 11 vs golden 6"
+      ],
+      "total": 6,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `child`, `createComponentWithFallback`, `next`; official-only: `createComponent`); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "conditionals/if-else-if-else",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — missing imported helper/name `createCommentVNode`",
+        "[comment] Program[1]/VariableDeclaration[1]/VariableDeclarator — child count: verter 3 vs golden 2",
+        "[structure] Program[2]/VariableDeclaration — node kind: verter `FunctionDeclaration` vs golden `VariableDeclaration`",
+        "[structure] Program[3]/VariableDeclaration — node kind: verter `ExpressionStatement` vs golden `VariableDeclaration`",
+        "[structure] Program[4]/ExportDefaultDeclaration[0] — node kind `ObjectExpression` vs leaf `ident` `_sfc_main`"
+      ],
+      "total": 6,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: —; official-only: `createCommentVNode`); further structural codegen divergence (see reasons)"
+    },
+    {
+      "case": "conditionals/if-else-if-else",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — missing imported helper/name `setText`",
+        "[import] /imports(vue) — missing imported helper/name `txt`",
+        "[structure] Program — child count: verter 9 vs golden 5"
+      ],
+      "total": 4,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: —; official-only: `setText`, `txt`); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "directives/html",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 6 vs golden 3"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "directives/html",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 7 vs golden 3"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "directives/show",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 5 vs golden 2"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "directives/show",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 7 vs golden 3"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "directives/text",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — missing imported helper/name `toDisplayString`",
+        "[structure] Program — child count: verter 6 vs golden 3"
+      ],
+      "total": 3,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: —; official-only: `toDisplayString`); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "directives/text",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — missing imported helper/name `renderEffect`",
+        "[import] /imports(vue) — missing imported helper/name `setText`",
+        "[import] /imports(vue) — missing imported helper/name `toDisplayString`",
+        "[import] /imports(vue) — missing imported helper/name `txt`",
+        "[structure] Program — child count: verter 7 vs golden 3"
+      ],
+      "total": 6,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: —; official-only: `renderEffect`, `setText`, `toDisplayString`, `txt`); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "elements-text/dynamic-class",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 5 vs golden 2"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "elements-text/dynamic-class",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 7 vs golden 3"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "elements-text/dynamic-style",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 5 vs golden 2"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "elements-text/dynamic-style",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 7 vs golden 3"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "elements-text/interpolation",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 5 vs golden 2"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "elements-text/interpolation",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — missing imported helper/name `setText`",
+        "[import] /imports(vue) — missing imported helper/name `txt`",
+        "[structure] Program — child count: verter 7 vs golden 3"
+      ],
+      "total": 4,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: —; official-only: `setText`, `txt`); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "elements-text/multi-root",
+      "backend": "vdom",
+      "reasons": [
+        "[structure] Program[1]/ExportNamedDeclaration[0]/FunctionDeclaration[1]/params — child count: verter 7 vs golden 3",
+        "[sourcemap] /map/rows[0] — verter (\"cases/elements-text/multi-root.vue\", 0, 0, None) vs golden (\"cases/elements-text/multi-root.vue\", 1, 2, None)",
+        "[sourcemap] /map/rows[1] — verter (\"cases/elements-text/multi-root.vue\", 1, 2, None) vs golden (\"cases/elements-text/multi-root.vue\", 1, 10, None)",
+        "[sourcemap] /map/rows[2] — verter (\"cases/elements-text/multi-root.vue\", 1, 10, None) vs golden (\"cases/elements-text/multi-root.vue\", 1, 16, None)",
+        "[sourcemap] /map/rows[3] — verter (\"cases/elements-text/multi-root.vue\", 1, 16, None) vs golden (\"cases/elements-text/multi-root.vue\", 1, 25, None)",
+        "[sourcemap] /map/rows[7] — verter (\"cases/elements-text/multi-root.vue\", 3, 2, None) vs golden (\"cases/elements-text/multi-root.vue\", 2, 19, None)",
+        "[sourcemap] /map/rows[8] — verter (\"cases/elements-text/multi-root.vue\", 3, 10, None) vs golden (\"cases/elements-text/multi-root.vue\", 3, 2, None)",
+        "[sourcemap] /map/rows[9] — verter (\"cases/elements-text/multi-root.vue\", 3, 16, None) vs golden (\"cases/elements-text/multi-root.vue\", 3, 10, None)",
+        "[sourcemap] /map/rows[10] — verter (\"cases/elements-text/multi-root.vue\", 3, 25, None) vs golden (\"cases/elements-text/multi-root.vue\", 3, 16, None)",
+        "[sourcemap] /map/rows[11] — verter (\"cases/elements-text/multi-root.vue\", 4, 0, None) vs golden (\"cases/elements-text/multi-root.vue\", 3, 25, None)"
+      ],
+      "total": 10,
+      "note": "render signature: Verter `(_ctx, _cache, $props, $setup, $data, $options)` vs official `(_ctx, _cache)`; template source-map original-anchor rows/count differ from official"
+    },
+    {
+      "case": "elements-text/multi-root",
+      "backend": "vapor",
+      "reasons": [
+        "[structure] Program — child count: verter 9 vs golden 5",
+        "[sourcemap] /map/rows — mapping row count: verter 1 vs golden 0"
+      ],
+      "total": 2,
+      "note": "module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`); template source-map original-anchor rows/count differ from official"
+    },
+    {
+      "case": "elements-text/static-class-style",
+      "backend": "vdom",
+      "reasons": [
+        "[identifier] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/ObjectExpression[0]/ObjectProperty[0] — leaf kind: verter ident `color` vs golden str `color`",
+        "[structure] Program[2]/ExportNamedDeclaration[0]/FunctionDeclaration[1]/params — child count: verter 7 vs golden 3",
+        "[structure] Program[2]/ExportNamedDeclaration[0]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/spread — node kind: verter `LogicalExpression` vs golden `spread`",
+        "[sourcemap] /map/rows — mapping row count: verter 8 vs golden 20",
+        "[sourcemap] /map/rows[0] — verter (\"cases/elements-text/static-class-style.vue\", 0, 0, None) vs golden (\"cases/elements-text/static-class-style.vue\", 1, 2, None)",
+        "[sourcemap] /map/rows[2] — verter (\"cases/elements-text/static-class-style.vue\", 2, 4, None) vs golden (\"cases/elements-text/static-class-style.vue\", 1, 7, None)",
+        "[sourcemap] /map/rows[3] — verter (\"cases/elements-text/static-class-style.vue\", 2, 24, None) vs golden (\"cases/elements-text/static-class-style.vue\", 1, 12, None)",
+        "[sourcemap] /map/rows[4] — verter (\"cases/elements-text/static-class-style.vue\", 2, 29, None) vs golden (\"cases/elements-text/static-class-style.vue\", 1, 13, None)",
+        "[sourcemap] /map/rows[5] — verter (\"cases/elements-text/static-class-style.vue\", 2, 36, None) vs golden (\"cases/elements-text/static-class-style.vue\", 1, 28, None)",
+        "[sourcemap] /map/rows[6] — verter (\"cases/elements-text/static-class-style.vue\", 3, 8, None) vs golden (\"cases/elements-text/static-class-style.vue\", 1, 29, None)",
+        "[sourcemap] /map/rows[7] — verter (\"cases/elements-text/static-class-style.vue\", 4, 0, None) vs golden (\"cases/elements-text/static-class-style.vue\", 1, 29, None)"
+      ],
+      "total": 11,
+      "note": "render signature: Verter `(_ctx, _cache, $props, $setup, $data, $options)` vs official `(_ctx, _cache)`; cache shape: Verter caches the child vnode directly (`_cache[i] || (_cache[i] = v)`); official spreads a cached array (`[...(_cache[i] || ...)]`); static style attribute: Verter normalizes it to a JS object with unquoted keys; official hoists the original attribute string; template source-map original-anchor rows/count differ from official"
+    },
+    {
+      "case": "elements-text/static-class-style",
+      "backend": "vapor",
+      "reasons": [
+        "[structure] Program — child count: verter 7 vs golden 3",
+        "[sourcemap] /map/rows — mapping row count: verter 1 vs golden 0"
+      ],
+      "total": 2,
+      "note": "module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`); template source-map original-anchor rows/count differ from official"
+    },
+    {
+      "case": "elements-text/static-element",
+      "backend": "vdom",
+      "reasons": [
+        "[structure] Program[2]/ExportNamedDeclaration[0]/FunctionDeclaration[1]/params — child count: verter 7 vs golden 3",
+        "[structure] Program[2]/ExportNamedDeclaration[0]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/spread — node kind: verter `LogicalExpression` vs golden `spread`",
+        "[sourcemap] /map/rows — mapping row count: verter 8 vs golden 20",
+        "[sourcemap] /map/rows[0] — verter (\"cases/elements-text/static-element.vue\", 0, 0, None) vs golden (\"cases/elements-text/static-element.vue\", 1, 2, None)",
+        "[sourcemap] /map/rows[2] — verter (\"cases/elements-text/static-element.vue\", 2, 4, None) vs golden (\"cases/elements-text/static-element.vue\", 1, 7, None)",
+        "[sourcemap] /map/rows[3] — verter (\"cases/elements-text/static-element.vue\", 2, 7, None) vs golden (\"cases/elements-text/static-element.vue\", 1, 9, None)",
+        "[sourcemap] /map/rows[4] — verter (\"cases/elements-text/static-element.vue\", 2, 18, None) vs golden (\"cases/elements-text/static-element.vue\", 1, 10, None)",
+        "[sourcemap] /map/rows[5] — verter (\"cases/elements-text/static-element.vue\", 2, 22, None) vs golden (\"cases/elements-text/static-element.vue\", 1, 15, None)",
+        "[sourcemap] /map/rows[6] — verter (\"cases/elements-text/static-element.vue\", 3, 8, None) vs golden (\"cases/elements-text/static-element.vue\", 1, 16, None)",
+        "[sourcemap] /map/rows[7] — verter (\"cases/elements-text/static-element.vue\", 4, 0, None) vs golden (\"cases/elements-text/static-element.vue\", 1, 21, None)"
+      ],
+      "total": 10,
+      "note": "render signature: Verter `(_ctx, _cache, $props, $setup, $data, $options)` vs official `(_ctx, _cache)`; cache shape: Verter caches the child vnode directly (`_cache[i] || (_cache[i] = v)`); official spreads a cached array (`[...(_cache[i] || ...)]`); template source-map original-anchor rows/count differ from official"
+    },
+    {
+      "case": "elements-text/static-element",
+      "backend": "vapor",
+      "reasons": [
+        "[structure] Program — child count: verter 7 vs golden 3",
+        "[sourcemap] /map/rows — mapping row count: verter 1 vs golden 0"
+      ],
+      "total": 2,
+      "note": "module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`); template source-map original-anchor rows/count differ from official"
+    },
+    {
+      "case": "script-setup/props-emits-runtime",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 6 vs golden 2"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "script-setup/props-emits-runtime",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — missing imported helper/name `setText`",
+        "[import] /imports(vue) — missing imported helper/name `txt`",
+        "[structure] Program — child count: verter 8 vs golden 4"
+      ],
+      "total": 4,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: —; official-only: `setText`, `txt`); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "script-setup/props-type-withdefaults",
+      "backend": "vdom",
+      "reasons": [
+        "[structure] Program — child count: verter 6 vs golden 2"
+      ],
+      "total": 1,
+      "note": "module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "script-setup/props-type-withdefaults",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — missing imported helper/name `defineVaporComponent`",
+        "[import] /imports(vue) — missing imported helper/name `setText`",
+        "[import] /imports(vue) — missing imported helper/name `txt`",
+        "[structure] Program — child count: verter 8 vs golden 4"
+      ],
+      "total": 5,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: —; official-only: `defineVaporComponent`, `setText`, `txt`); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-bind/dynamic-arg",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 5 vs golden 2"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-bind/dynamic-arg",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — unexpected imported helper/name `setProp`",
+        "[import] /imports(vue) — missing imported helper/name `setDynamicProps`",
+        "[structure] Program — child count: verter 7 vs golden 3"
+      ],
+      "total": 4,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `setProp`; official-only: `setDynamicProps`); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-bind/prop-attr-modifiers",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 6 vs golden 3"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-bind/prop-attr-modifiers",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — missing imported helper/name `setDOMProp`",
+        "[structure] Program — child count: verter 7 vs golden 3"
+      ],
+      "total": 3,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: —; official-only: `setDOMProp`); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-bind/same-name-shorthand",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 6 vs golden 3"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-bind/same-name-shorthand",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 7 vs golden 3"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-bind/static-dynamic",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 6 vs golden 3"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-bind/static-dynamic",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 7 vs golden 3"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-for/array",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 5 vs golden 2"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-for/array",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `child`",
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — unexpected imported helper/name `next`",
+        "[import] /imports(vue) — unexpected imported helper/name `setProp`",
+        "[import] /imports(vue) — missing imported helper/name `createFor`",
+        "[import] /imports(vue) — missing imported helper/name `setInsertionState`",
+        "[structure] Program — child count: verter 7 vs golden 4"
+      ],
+      "total": 7,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `child`, `next`, `setProp`; official-only: `createFor`, `setInsertionState`); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-for/index-destructure",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 5 vs golden 2"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-for/index-destructure",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `child`",
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — unexpected imported helper/name `next`",
+        "[import] /imports(vue) — unexpected imported helper/name `setProp`",
+        "[import] /imports(vue) — missing imported helper/name `createFor`",
+        "[import] /imports(vue) — missing imported helper/name `setInsertionState`",
+        "[structure] Program — child count: verter 7 vs golden 4"
+      ],
+      "total": 7,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `child`, `next`, `setProp`; official-only: `createFor`, `setInsertionState`); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-for/object",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 5 vs golden 2"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-for/object",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `child`",
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — unexpected imported helper/name `next`",
+        "[import] /imports(vue) — unexpected imported helper/name `setProp`",
+        "[import] /imports(vue) — missing imported helper/name `createFor`",
+        "[import] /imports(vue) — missing imported helper/name `setInsertionState`",
+        "[structure] Program — child count: verter 7 vs golden 4"
+      ],
+      "total": 7,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `child`, `next`, `setProp`; official-only: `createFor`, `setInsertionState`); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-model/checkbox",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 5 vs golden 2"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-model/checkbox",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — missing imported helper/name `child`",
+        "[structure] Program — child count: verter 7 vs golden 3"
+      ],
+      "total": 3,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: —; official-only: `child`); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-model/input",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 5 vs golden 2"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-model/input",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 7 vs golden 3"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-model/select",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 5 vs golden 2"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-model/select",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 7 vs golden 3"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-on/inline",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 6 vs golden 2"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-on/inline",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — missing imported helper/name `setText`",
+        "[import] /imports(vue) — missing imported helper/name `txt`",
+        "[structure] Program — child count: verter 8 vs golden 4"
+      ],
+      "total": 4,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: —; official-only: `setText`, `txt`); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-on/key-modifiers",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 6 vs golden 2"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-on/key-modifiers",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `createInvoker`",
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — missing imported helper/name `withVaporKeys`",
+        "[structure] Program — child count: verter 8 vs golden 4"
+      ],
+      "total": 4,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `createInvoker`; official-only: `withVaporKeys`); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-on/method-ref",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 6 vs golden 2"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-on/method-ref",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `createInvoker`",
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — unexpected imported helper/name `delegateEvents`",
+        "[import] /imports(vue) — missing imported helper/name `on`",
+        "[structure] Program — child count: verter 8 vs golden 3"
+      ],
+      "total": 5,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `createInvoker`, `delegateEvents`; official-only: `on`); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-on/modifiers",
+      "backend": "vdom",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[structure] Program — child count: verter 7 vs golden 2"
+      ],
+      "total": 2,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    },
+    {
+      "case": "v-on/modifiers",
+      "backend": "vapor",
+      "reasons": [
+        "[import] /imports(vue) — unexpected imported helper/name `createInvoker`",
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — missing imported helper/name `child`",
+        "[import] /imports(vue) — missing imported helper/name `next`",
+        "[import] /imports(vue) — missing imported helper/name `withModifiers`",
+        "[import] /imports(vue) — missing imported helper/name `withVaporModifiers`",
+        "[structure] Program — child count: verter 8 vs golden 4"
+      ],
+      "total": 7,
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)`; official RC.1 emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: `createInvoker`; official-only: `child`, `next`, `withModifiers`, `withVaporModifiers`); module assembly: Verter host-assembled (template helper import line + `_sfc_main` block + separate `function render` + `_sfc_main.render = render` + `export default _sfc_main`) vs official inlineTemplate (render closure returned from `setup`; vapor render body inline in `setup`)"
+    }
+  ]
+}

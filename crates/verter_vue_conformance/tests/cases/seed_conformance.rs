@@ -1,0 +1,387 @@
+//! Seed conformance run — Verter Vapor + VDOM output vs the vendored
+//! official Vue 3.6 RC goldens for all 32 seed SFCs (64 cells).
+//!
+//! Per case per backend, the harness compiles the SFC with Verter
+//! (`verter_compiler::compile`, `force_vapor` for the vapor cell), assembles
+//! the module the same shape the host does (template helper import line,
+//! script block with `__sfc__` → `_sfc_main`, template block appended,
+//! `_sfc_main.render = render`, `export default _sfc_main`; template-only
+//! cases mirror the official `compileTemplate` shape with
+//! `export function render`), and runs the structural comparator against the
+//! vendored golden (code + diagnostics; source maps for template-only cells
+//! where both maps cover the same render function — script-setup cells mix
+//! script+template mappings at different granularity, so the map dim is not
+//! applicable there and is exercised by the discriminator guard instead).
+//!
+//! Dispositions:
+//! - PASS — the comparator found no in-contract difference.
+//! - KNOWN-DIVERGENCE — the comparator's failure signature exactly matches a
+//!   tracked entry in `corpus/known-divergences.json` (the parity backlog).
+//! - otherwise the suite FAILS: new/changed divergences, or a stale entry
+//!   for a cell that now passes (parity improved — remove the entry).
+//!
+//! `VERTER_CONFORMANCE_UPDATE=1` regenerates the dispositions file from the
+//! actual results (curated `note`s are preserved); review the diff before
+//! committing. `VERTER_CONFORMANCE_DEBUG=<case-id-substring>` prints one
+//! cell's assembled Verter module, golden, and comparator reasons.
+
+use std::collections::BTreeSet;
+
+use verter_compiler::compile::{
+    format_import_specifier, CodegenOptions, CompileDiagnosticSeverity, VerterCompileOptions,
+};
+use verter_vue_conformance::compare::{compare_modules, Comparison, DiagnosticRow, ModuleInput};
+use verter_vue_conformance::{
+    corpus_file, corpus_root, Backend, GoldenMeta, KnownDivergenceCell, KnownDivergences, Manifest,
+};
+
+use crate::common::{authored, case_sfc_source, golden_code};
+
+const MAX_REASONS: usize = 24;
+
+fn dispositions_path() -> std::path::PathBuf {
+    corpus_root().join("known-divergences.json")
+}
+
+fn golden_meta(backend: Backend, case_id: &str) -> GoldenMeta {
+    let path = corpus_file(
+        &corpus_root(),
+        &format!(
+            "goldens/3.6.0-rc.1/{}/{case_id}.meta.json",
+            backend.as_str()
+        ),
+    );
+    GoldenMeta::load(&path).expect("load golden meta")
+}
+
+/// The assembled Verter module + the comparison-relevant side channels.
+struct VerterCell {
+    code: String,
+    template_map: Option<String>,
+    diagnostics: Vec<DiagnosticRow>,
+    /// True when the SFC carries its own `<script>`/`<script setup>` block
+    /// (as opposed to a Verter-synthesized script block or none at all).
+    sfc_has_script: bool,
+}
+
+fn compile_verter_cell(case_id: &str, backend: Backend) -> VerterCell {
+    let sfc = case_sfc_source(case_id);
+    let sfc_has_script = sfc.contains("<script");
+    let alloc = oxc_allocator::Allocator::new();
+    let options = CodegenOptions {
+        filename: Some(format!("cases/{case_id}.vue")),
+        ..Default::default()
+    };
+    let verter_options = VerterCompileOptions {
+        force_js: true,
+        force_vapor: backend == Backend::Vapor,
+        source_map: true,
+        ..Default::default()
+    };
+    // A Verter compile panic is itself a divergence signal, not a harness
+    // crash — keep the suite able to report every cell. (`AssertUnwindSafe`:
+    // the oxc allocator is not `UnwindSafe`; a panic mid-compile poisons
+    // nothing we reuse — the allocator is dropped right after.)
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        verter_compiler::compile::compile(&sfc, &options, &verter_options, &alloc)
+    }));
+    let result = match result {
+        Ok(result) => result,
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                .unwrap_or_else(|| "<non-string panic>".to_string());
+            return VerterCell {
+                code: String::new(),
+                template_map: None,
+                diagnostics: vec![DiagnosticRow {
+                    kind: "error".to_string(),
+                    code: Some("VERTER_COMPILE_PANIC".to_string()),
+                    message,
+                }],
+                sfc_has_script,
+            };
+        }
+    };
+
+    let diagnostics = result
+        .errors
+        .iter()
+        .map(|d| DiagnosticRow {
+            kind: match d.severity {
+                CompileDiagnosticSeverity::Error => "error",
+                CompileDiagnosticSeverity::Warning => "warning",
+                CompileDiagnosticSeverity::Info => "info",
+            }
+            .to_string(),
+            code: Some(d.code.clone()),
+            message: d.message.clone(),
+        })
+        .collect();
+
+    // Assemble the module (host-shaped; see header).
+    let mut module = String::new();
+    if let Some(template) = &result.template {
+        if !template.imports.is_empty() {
+            module.push_str("import { ");
+            for (index, name) in template.imports.iter().enumerate() {
+                if index > 0 {
+                    module.push_str(", ");
+                }
+                module.push_str(&format_import_specifier(name));
+            }
+            module.push_str(" } from \"vue\"\n");
+        }
+    }
+    if let Some(script) = &result.script {
+        let code = script
+            .code
+            .replace("__sfc__", "_sfc_main")
+            .replace("export default _sfc_main;\n", "");
+        module.push_str(&code);
+        if !code.ends_with('\n') {
+            module.push('\n');
+        }
+    }
+    if let Some(template) = &result.template {
+        module.push('\n');
+        let mut code = template.code.clone();
+        if result.script.is_none() {
+            // Mirror the official compileTemplate module shape for
+            // template-only SFCs: `export function render(...)`.
+            code = code.replace("function render(", "export function render(");
+        }
+        module.push_str(&code);
+        if !code.ends_with('\n') {
+            module.push('\n');
+        }
+        if result.script.is_some() {
+            if code.contains("function render(") {
+                module.push_str("_sfc_main.render = render\n");
+            }
+            module.push_str("export default _sfc_main\n");
+        }
+    }
+
+    let template_map = result
+        .template
+        .as_ref()
+        .and_then(|t| (!t.source_map.is_empty()).then(|| t.source_map.clone()));
+    VerterCell {
+        code: module,
+        template_map,
+        diagnostics,
+        sfc_has_script,
+    }
+}
+
+fn compare_cell(case_id: &str, backend: Backend) -> Comparison {
+    let verter = compile_verter_cell(case_id, backend);
+    let golden_code = golden_code(backend.as_str(), case_id);
+    let meta = golden_meta(backend, case_id);
+    let authored = authored(case_id);
+
+    // Source maps are compared only for template-only cells, where both maps
+    // cover exactly the render function (script-setup cells mix script and
+    // template mappings at different granularity — dim not applicable).
+    let maps_comparable = !verter.sfc_has_script;
+    let verter_input = ModuleInput {
+        code: verter.code.clone(),
+        source_map: if maps_comparable {
+            verter.template_map.clone()
+        } else {
+            None
+        },
+        diagnostics: verter.diagnostics.clone(),
+    };
+    let golden_diagnostics = meta
+        .diagnostics
+        .iter()
+        .map(|d| DiagnosticRow {
+            kind: d.kind.clone(),
+            code: d.code.as_ref().map(|c| match c {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            }),
+            message: d.message.clone(),
+        })
+        .collect();
+    let golden_input = ModuleInput {
+        code: golden_code.clone(),
+        source_map: if maps_comparable {
+            let map = crate::common::golden_map(backend.as_str(), case_id);
+            Some(map)
+        } else {
+            None
+        },
+        diagnostics: golden_diagnostics,
+    };
+
+    let debug = std::env::var("VERTER_CONFORMANCE_DEBUG").unwrap_or_default();
+    if !debug.is_empty() && case_id.contains(&debug) {
+        eprintln!(
+            "===== VERTER {} {case_id} =====\n{}\n===== GOLDEN =====\n{}",
+            backend.as_str(),
+            verter.code,
+            golden_code
+        );
+    }
+
+    match compare_modules(&verter_input, &golden_input, &authored, MAX_REASONS) {
+        Ok(comparison) => comparison,
+        Err(error) => {
+            // A hard failure (e.g. Verter emitted unparseable JS) is itself
+            // the divergence signature.
+            let mut reasons = Vec::new();
+            reasons.push(verter_vue_conformance::compare::DiffReason {
+                dim: verter_vue_conformance::compare::DiffDim::Structure,
+                path: "/".to_string(),
+                detail: format!("comparator hard failure: {error}"),
+            });
+            Comparison { reasons, total: 1 }
+        }
+    }
+}
+
+fn reason_summaries(comparison: &Comparison) -> Vec<String> {
+    comparison.reasons.iter().map(|r| r.summary()).collect()
+}
+
+/// The seed conformance run: every cell's outcome must match its tracked
+/// disposition (PASS with no entry, or KNOWN-DIVERGENCE with an exact
+/// signature match).
+#[test]
+fn seed_conformance_matches_tracked_dispositions() {
+    let manifest = Manifest::load(&corpus_root()).expect("load manifest");
+    let update = std::env::var("VERTER_CONFORMANCE_UPDATE").is_ok();
+    let path = dispositions_path();
+
+    let mut outcomes: Vec<(String, Backend, Comparison)> = Vec::new();
+    for case in &manifest.cases {
+        for backend in Backend::ALL {
+            let comparison = compare_cell(&case.id, backend);
+            outcomes.push((case.id.clone(), backend, comparison));
+        }
+    }
+
+    // Per-case report (visible with --nocapture).
+    let pass = outcomes.iter().filter(|(_, _, c)| c.passed()).count();
+    eprintln!(
+        "vue-conformance seed run: {pass}/{} cells PASS",
+        outcomes.len()
+    );
+
+    if update {
+        let existing = KnownDivergences::load(&path).unwrap_or(KnownDivergences {
+            schema: 1,
+            cells: Vec::new(),
+        });
+        let mut cells = Vec::new();
+        for (case_id, backend, comparison) in &outcomes {
+            if comparison.passed() {
+                continue;
+            }
+            let note = existing
+                .find(case_id, *backend)
+                .map(|c| c.note.clone())
+                .unwrap_or_else(|| "TODO: triage this divergence".to_string());
+            cells.push(KnownDivergenceCell {
+                case_id: case_id.clone(),
+                backend: *backend,
+                reasons: reason_summaries(comparison),
+                total: comparison.total,
+                note,
+            });
+        }
+        let dispositions = KnownDivergences { schema: 1, cells };
+        let json = serde_json::to_string_pretty(&dispositions).expect("serialize dispositions");
+        std::fs::write(&path, format!("{json}\n")).expect("write known-divergences.json");
+        eprintln!(
+            "VERTER_CONFORMANCE_UPDATE: wrote {} divergence cells to {}",
+            dispositions.cells.len(),
+            path.display()
+        );
+        return;
+    }
+
+    let dispositions = KnownDivergences::load(&path).expect("load known-divergences.json");
+    let mut failures: Vec<String> = Vec::new();
+    for (case_id, backend, comparison) in &outcomes {
+        let entry = dispositions.find(case_id, *backend);
+        match (comparison.passed(), entry) {
+            (true, None) => {}
+            (true, Some(_)) => failures.push(format!(
+                "{case_id} [{backend:?}]: STALE divergence entry — the cell now PASSES; \
+                 remove the entry (parity improved)"
+            )),
+            (false, None) => failures.push(format!(
+                "{case_id} [{backend:?}]: UNTRACKED divergence ({} differences): {:?}",
+                comparison.total,
+                reason_summaries(comparison)
+            )),
+            (false, Some(entry)) => {
+                let actual = reason_summaries(comparison);
+                if actual != entry.reasons || comparison.total != entry.total {
+                    failures.push(format!(
+                        "{case_id} [{backend:?}]: divergence signature CHANGED\n  expected ({}): \
+                         {:?}\n  actual ({}): {:?}\n  (review, then regenerate with \
+                         VERTER_CONFORMANCE_UPDATE=1)",
+                        entry.total, entry.reasons, comparison.total, actual
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "seed conformance disposition mismatches:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// The dispositions file itself: well-formed, minimal, and in bijection with
+/// (case × backend) cells that actually diverge.
+#[test]
+fn known_divergences_file_is_well_formed() {
+    let manifest = Manifest::load(&corpus_root()).expect("load manifest");
+    let dispositions = KnownDivergences::load(&dispositions_path()).expect("load dispositions");
+    assert_eq!(dispositions.schema, 1, "dispositions schema version");
+
+    let case_ids: BTreeSet<&str> = manifest.cases.iter().map(|c| c.id.as_str()).collect();
+    let mut seen = BTreeSet::new();
+    for cell in &dispositions.cells {
+        assert!(
+            case_ids.contains(cell.case_id.as_str()),
+            "dispositions entry for unknown case {}",
+            cell.case_id
+        );
+        assert!(
+            seen.insert((cell.case_id.as_str(), cell.backend)),
+            "duplicate dispositions entry for {} [{:?}]",
+            cell.case_id,
+            cell.backend
+        );
+        assert!(
+            !cell.reasons.is_empty(),
+            "{} [{:?}]: divergence entry must carry its reason signature",
+            cell.case_id,
+            cell.backend
+        );
+        assert!(
+            cell.total >= cell.reasons.len(),
+            "{} [{:?}]: total {} < reasons {}",
+            cell.case_id,
+            cell.backend,
+            cell.total,
+            cell.reasons.len()
+        );
+        assert!(
+            !cell.note.trim().is_empty() && !cell.note.starts_with("TODO"),
+            "{} [{:?}]: divergence entry needs a curated note (the backlog item)",
+            cell.case_id,
+            cell.backend
+        );
+    }
+}
