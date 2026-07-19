@@ -3246,3 +3246,102 @@ fn test_svelte_render_callee_completions_in_scope_snippets() {
         row.detail
     );
 }
+
+#[test]
+fn test_is_snippet_type_annotation_classifies_root_reference() {
+    for typed in [
+        "Snippet",
+        "Snippet<[item: number]>",
+        "import(\"svelte\").Snippet",
+        "import(\"svelte\").Snippet<[{ title: string }]>",
+        "svelte.Snippet",
+        "Snippet<[{ title: string }]> | undefined",
+    ] {
+        assert!(
+            is_snippet_type_annotation(typed),
+            "{typed} must classify as snippet-typed"
+        );
+    }
+    for not_snippet in [
+        "NotSnippet",
+        "SnippetExtra",
+        "string",
+        "Array<Snippet>",
+        "() => Snippet",
+        "string | undefined",
+    ] {
+        assert!(
+            !is_snippet_type_annotation(not_snippet),
+            "{not_snippet} must NOT classify as snippet-typed"
+        );
+    }
+}
+
+#[test]
+fn test_svelte_snippet_slot_completions_reject_non_snippet_root_types() {
+    let source = "<script>\n  import IdeSurfaceChild from './IdeSurfaceChild.svelte';\n</script>\n<IdeSurfaceChild>\n  {#snippet \n</IdeSurfaceChild>";
+    let cursor = source.find("{#snippet ").unwrap() + "{#snippet ".len();
+
+    let mut parent = FileAnalysisSnapshot::default();
+    let mut template = TemplateAnalysisSnapshot::default();
+    template.components.push(d5_component(
+        "IdeSurfaceChild",
+        "./IdeSurfaceChild.svelte",
+        vec![],
+    ));
+    parent.template = Some(template.into());
+
+    let d5_prop = |name: &str, ty: &str| AnalyzedPropDefinition {
+        name: name.to_string(),
+        type_annotation: Some(ty.to_string()),
+        has_default: false,
+        is_required: false,
+        is_boolean: false,
+        used_in_template: false,
+        used_in_script: false,
+        span: verter_span::Span::new(0, 0),
+    };
+    let child_template = TemplateAnalysisSnapshot {
+        prop_definitions: vec![
+            d5_prop("header", "import(\"svelte\").Snippet<[{ title: string }]>"),
+            d5_prop("notHeader", "import(\"svelte\").NotSnippet"),
+            d5_prop("extras", "SnippetExtra"),
+        ],
+        ..Default::default()
+    };
+    let child = FileAnalysisSnapshot {
+        template: Some(child_template.into()),
+        ..Default::default()
+    };
+
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let pos = line_index.offset_to_position(cursor as u32).unwrap();
+    let resolve: Box<dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>> =
+        Box::new(move |_, _| Some(child.clone()));
+    let result = completions_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&parent),
+        &line_index,
+        Some(&*resolve),
+        None,
+        Some("file:///ws/src/Parent.svelte"),
+        false,
+    );
+    let items = result
+        .expect("snippet-slot completion must produce items")
+        .items;
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        labels.contains(&"header"),
+        "snippet-typed prop must be offered, got: {labels:?}"
+    );
+    for rejected in ["notHeader", "extras"] {
+        assert!(
+            !labels.contains(&rejected),
+            "non-snippet root type must not be offered as a snippet slot, got: {labels:?}"
+        );
+    }
+}

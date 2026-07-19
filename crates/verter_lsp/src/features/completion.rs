@@ -1846,6 +1846,27 @@ fn slot_name_completions(
     Some(items)
 }
 
+/// Classify a captured type annotation as Svelte's `Snippet` prop type by its
+/// ROOT type-reference name — the typed-IR classification of the annotation,
+/// not a substring sniff. `Snippet`, `Snippet<…>`, `svelte.Snippet`, and
+/// `import("svelte").Snippet<…>` classify; `NotSnippet`, `SnippetExtra`, or a
+/// payload that merely mentions `Snippet` inside generic arguments do not.
+fn is_snippet_type_annotation(type_annotation: &str) -> bool {
+    let mut root = type_annotation.trim();
+    // An `import("…")` qualifier prefixes the type-reference path.
+    if let Some(rest) = root.strip_prefix("import(") {
+        if let Some(close) = rest.find(')') {
+            root = rest[close + 1..].trim_start_matches('.').trim();
+        }
+    }
+    // The root type-reference name ends where generic arguments, unions,
+    // intersections, arrays, or function parameters begin.
+    let cut = root.find(['<', '|', '&', '[', '(']).unwrap_or(root.len());
+    let root = root[..cut].trim();
+    // Qualified roots (`svelte.Snippet`) classify on their trailing segment.
+    root.rsplit('.').next().unwrap_or(root).trim() == "Snippet"
+}
+
 /// D5 Svelte: `{#snippet |` inside a component completes the snippet-slot
 /// names the CHILD accepts — its snippet-typed props (e.g.
 /// `header?: import("svelte").Snippet<…>`) — with used slots filtered.
@@ -1878,7 +1899,7 @@ fn svelte_snippet_slot_completions(
             let is_snippet = prop_def
                 .type_annotation
                 .as_deref()
-                .is_some_and(|ty| ty.contains("Snippet"));
+                .is_some_and(is_snippet_type_annotation);
             if !is_snippet || is_used(&prop_def.name) {
                 continue;
             }
@@ -1932,7 +1953,7 @@ fn svelte_render_callee_completions(
         let is_snippet = prop_def
             .type_annotation
             .as_deref()
-            .is_some_and(|ty| ty.contains("Snippet"));
+            .is_some_and(is_snippet_type_annotation);
         if !is_snippet || !seen.insert(prop_def.name.clone()) {
             continue;
         }
