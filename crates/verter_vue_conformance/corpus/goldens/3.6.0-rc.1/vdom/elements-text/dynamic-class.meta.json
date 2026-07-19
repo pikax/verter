@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "caseId": "elements-text/dynamic-class",
+  "backend": "vdom",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 1
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/elements-text/dynamic-class.vue",
+    "sha256": "7a99d35d56d203457ef4ff1dbd0080b631df455b0978386995d1c2708d722c13"
+  },
+  "options": {
+    "sha256": "f79eb151931dc1110cdedf6f4f7927d4fc4e5366bfd534060468bebf6e16bf68",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/elements-text/dynamic-class.vue",
+      "id": "elements-text/dynamic-class",
+      "pipeline": "compileScript:inlineTemplate",
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vdom/elements-text/dynamic-class.js",
+      "sha256": "79e08630ef84ae6a9c715c249def93d295c2169d49262e56539868d29840bcfd",
+      "bytes": 469
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vdom/elements-text/dynamic-class.map.json",
+      "sha256": "51b308300a67c22ef107fa5b3acff98bee48638671da5487835a8f63b4d21b17"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createElementBlock",
+      "alias": "_createElementBlock"
+    },
+    {
+      "imported": "normalizeClass",
+      "alias": "_normalizeClass"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    }
+  ]
+}

@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "caseId": "v-for/array",
+  "backend": "vapor",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 1
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/v-for/array.vue",
+    "sha256": "b33fe7618fa189ecf317c17a53d18cbca609dba31fe97362e45f9a166afa41ea"
+  },
+  "options": {
+    "sha256": "a7f3b5dff61cdb7e25811d032dfa1714d66142bc21b61dd050d7a1234a9a3bb0",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/v-for/array.vue",
+      "id": "v-for/array",
+      "pipeline": "compileScript:inlineTemplate",
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vapor/v-for/array.js",
+      "sha256": "dc10e7dcc37f94ec0b99a8084cc1f7ed639610591f686f867345a96d2408a94c",
+      "bytes": 738
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vapor/v-for/array.map.json",
+      "sha256": "1bba954554a6500c884266ce2314da014145e1891f4ac7d7c010200b0736ac3b"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createFor",
+      "alias": "_createFor"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "renderEffect",
+      "alias": "_renderEffect"
+    },
+    {
+      "imported": "setInsertionState",
+      "alias": "_setInsertionState"
+    },
+    {
+      "imported": "setText",
+      "alias": "_setText"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    },
+    {
+      "imported": "txt",
+      "alias": "_txt"
+    }
+  ]
+}

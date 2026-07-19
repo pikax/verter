@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "caseId": "script-setup/props-emits-runtime",
+  "backend": "vdom",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 1
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/script-setup/props-emits-runtime.vue",
+    "sha256": "e8300a565d35d56de7b1ca2c25fbb4d1e4a0b48ad2fea3b5afc8e63b21eae91a"
+  },
+  "options": {
+    "sha256": "fde8aaad307f9db1da774f8a9505da39d5d76110c7805e22424ddee4aed954f6",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/script-setup/props-emits-runtime.vue",
+      "id": "script-setup/props-emits-runtime",
+      "pipeline": "compileScript:inlineTemplate",
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vdom/script-setup/props-emits-runtime.js",
+      "sha256": "96432879a140af37055aabef1cb8a0f63a7a1d9d8473227e12ddd48ad39f31d2",
+      "bytes": 629
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vdom/script-setup/props-emits-runtime.map.json",
+      "sha256": "3d480a5213486a9d0971db4d9ee57e8e4ad8ca079a4fcf2a78b480f438fb4ce1"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createElementBlock",
+      "alias": "_createElementBlock"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "caseId": "components/component-is",
+  "backend": "vapor",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 1
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/components/component-is.vue",
+    "sha256": "31c53b42eb6aa4f69f6b6c80d78d9ab22adfcf73ed7878a5e397b97956252541"
+  },
+  "options": {
+    "sha256": "e0574bd94d60b5c88bd33940eb0dcc1f05f3cccfdce616a9533d23eb0f7b0072",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/components/component-is.vue",
+      "id": "components/component-is",
+      "pipeline": "compileScript:inlineTemplate",
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vapor/components/component-is.js",
+      "sha256": "f19e77ee2faef4997b3ebc7ce44b1733a366ed0c936d312160574a5c344e5fe6",
+      "bytes": 382
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vapor/components/component-is.map.json",
+      "sha256": "d15856760eaa405b70baf3e38701405ef1779113bb3e72864d10b19c851732f7"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createDynamicComponent",
+      "alias": "_createDynamicComponent"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    }
+  ]
+}

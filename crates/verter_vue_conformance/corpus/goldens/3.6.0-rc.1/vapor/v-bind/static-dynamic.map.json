@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-bind/static-dynamic.vue"
+  ],
+  "names": [],
+  "mappings": ";;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;;AAExB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AACzB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;iBAID,OAAK,EAAE,WAAK;iBAAG,UAAQ,EAAE,cAAQ",
+  "sourcesContent": [
+    "<script setup>\nimport { ref } from \"vue\"\n\nconst title = ref(\"Hello\")\nconst disabled = ref(false)\n</script>\n\n<template>\n  <button type=\"button\" :title=\"title\" :disabled=\"disabled\">Go</button>\n</template>\n"
+  ]
+}

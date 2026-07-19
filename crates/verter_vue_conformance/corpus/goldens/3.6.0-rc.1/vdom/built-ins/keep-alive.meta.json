@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "caseId": "built-ins/keep-alive",
+  "backend": "vdom",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 1
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/built-ins/keep-alive.vue",
+    "sha256": "f8656d432bf8e4314133871d1e264c0a7ffeebc40e763ce1b6d75bfe955966ce"
+  },
+  "options": {
+    "sha256": "15e81bdf0af2276fb7ea6728c4424cf9d7b0cfe5821907665d4999e0e3d6a429",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/built-ins/keep-alive.vue",
+      "id": "built-ins/keep-alive",
+      "pipeline": "compileScript:inlineTemplate",
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vdom/built-ins/keep-alive.js",
+      "sha256": "7296e121cfedc8ab9bb468a835883f91526bd76899782510c97fc84cff5b0bda",
+      "bytes": 552
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vdom/built-ins/keep-alive.map.json",
+      "sha256": "758dd6f4d2249e165c6370f6a134882721f181cc46ebaa14d2ca29ec160f913c"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createBlock",
+      "alias": "_createBlock"
+    },
+    {
+      "imported": "KeepAlive",
+      "alias": "_KeepAlive"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "resolveDynamicComponent",
+      "alias": "_resolveDynamicComponent"
+    }
+  ]
+}

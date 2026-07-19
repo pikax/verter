@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "caseId": "v-bind/same-name-shorthand",
+  "backend": "vdom",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 1
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/v-bind/same-name-shorthand.vue",
+    "sha256": "1393bcea7e94a84fc8454fec728129e94580d7ca006435a17820735fd795e6fc"
+  },
+  "options": {
+    "sha256": "c471206b2ab4369b4fc537361c066a68ae00c21a04aac06fb11d5bad9b91a4d5",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/v-bind/same-name-shorthand.vue",
+      "id": "v-bind/same-name-shorthand",
+      "pipeline": "compileScript:inlineTemplate",
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vdom/v-bind/same-name-shorthand.js",
+      "sha256": "a5fce93b9e41272f6b9750a3988784643b9bcc4e7f2468840c62816290459db8",
+      "bytes": 437
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vdom/v-bind/same-name-shorthand.map.json",
+      "sha256": "8f191662f17f70d63f48021ae32ed672245310a55e818e814c1d2fa077607946"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createElementBlock",
+      "alias": "_createElementBlock"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    }
+  ]
+}

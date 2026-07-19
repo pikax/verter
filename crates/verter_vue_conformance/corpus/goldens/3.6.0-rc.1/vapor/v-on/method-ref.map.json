@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-on/method-ref.vue"
+  ],
+  "names": [],
+  "mappings": ";;;;;;;;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;UAIZ,QAAM,EAAE,QAAQ",
+  "sourcesContent": [
+    "<script setup>\nfunction onSubmit() {}\n</script>\n\n<template>\n  <form @submit=\"onSubmit\">\n    <button>Send</button>\n  </form>\n</template>\n"
+  ]
+}

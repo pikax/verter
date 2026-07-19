@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-on/key-modifiers.vue"
+  ],
+  "names": [],
+  "mappings": ";;;;;;;;;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AACpB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;2BAIK,OAAO;6BAAgB,KAAK",
+  "sourcesContent": [
+    "<script setup>\nfunction onEnter() {}\nfunction onEsc() {}\n</script>\n\n<template>\n  <input @keyup.enter=\"onEnter\" @keydown.esc=\"onEsc\" />\n</template>\n"
+  ]
+}

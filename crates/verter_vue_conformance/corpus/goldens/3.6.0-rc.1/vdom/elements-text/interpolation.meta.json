@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "caseId": "elements-text/interpolation",
+  "backend": "vdom",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 1
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/elements-text/interpolation.vue",
+    "sha256": "d5a746ea6ccadf139d39911059ecccaf9e3de60ace571b5f0b1c5575e0bacd57"
+  },
+  "options": {
+    "sha256": "805fed04c4880cc4fecac2abfa60d8f3e9a3e573b7689c494cd3e34e6597f985",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/elements-text/interpolation.vue",
+      "id": "elements-text/interpolation",
+      "pipeline": "compileScript:inlineTemplate",
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vdom/elements-text/interpolation.js",
+      "sha256": "af31df4d8543ebe5598e725421278458c0583cd62785d4d8d39502acace95217",
+      "bytes": 619
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vdom/elements-text/interpolation.map.json",
+      "sha256": "e3800fd73630ffce9fafb1af30886025b020b8bff540d8a025818eac09ea513f"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "computed",
+      "alias": "computed"
+    },
+    {
+      "imported": "createElementBlock",
+      "alias": "_createElementBlock"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    }
+  ]
+}

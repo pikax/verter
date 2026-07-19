@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "caseId": "v-on/key-modifiers",
+  "backend": "vapor",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 1
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/v-on/key-modifiers.vue",
+    "sha256": "bb18debcb574d88cf9b171a17c2df6bddd74434735c3c2e6e02d48775e94be8a"
+  },
+  "options": {
+    "sha256": "67c822c624c5238b6cc59556c2222f0fb470114befd0b90eab3087ac5af65312",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/v-on/key-modifiers.vue",
+      "id": "v-on/key-modifiers",
+      "pipeline": "compileScript:inlineTemplate",
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vapor/v-on/key-modifiers.js",
+      "sha256": "e4860a6da0e8c92ea508ee18e4a65bf20c7b2fdc25ded843c45e6eaeeac1983b",
+      "bytes": 433
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vapor/v-on/key-modifiers.map.json",
+      "sha256": "858482f5f63d2e3e286f1357258490327486c778b7fcda6374c19e47ae524056"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "delegateEvents",
+      "alias": "_delegateEvents"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    },
+    {
+      "imported": "withVaporKeys",
+      "alias": "_withKeys"
+    }
+  ]
+}

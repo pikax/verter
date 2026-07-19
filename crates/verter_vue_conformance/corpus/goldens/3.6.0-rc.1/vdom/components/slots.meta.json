@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "caseId": "components/slots",
+  "backend": "vdom",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 1
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/components/slots.vue",
+    "sha256": "653c9c0f7f09121a2bc54d6b579438f2c6636f32fef90a00b781b3da30603ddd"
+  },
+  "options": {
+    "sha256": "2783ad760aae46f68b9dcbb7d7bc6c86fd5d415f2a7bf4412dbdd6cd12ce997a",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/components/slots.vue",
+      "id": "components/slots",
+      "pipeline": "compileScript:inlineTemplate",
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vdom/components/slots.js",
+      "sha256": "94945124f1e591d60030b67840b62849297818a03e7ec6274eafaff2de676a17",
+      "bytes": 819
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vdom/components/slots.map.json",
+      "sha256": "c83ecf8c9ac0986dd2362722f28adf3299a3b0ce8c583d10c4722bed4aae1d50"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createBlock",
+      "alias": "_createBlock"
+    },
+    {
+      "imported": "createElementVNode",
+      "alias": "_createElementVNode"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    },
+    {
+      "imported": "withCtx",
+      "alias": "_withCtx"
+    }
+  ]
+}

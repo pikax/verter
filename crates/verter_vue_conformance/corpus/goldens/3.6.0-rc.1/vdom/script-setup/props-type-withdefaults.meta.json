@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "caseId": "script-setup/props-type-withdefaults",
+  "backend": "vdom",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 1
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/script-setup/props-type-withdefaults.vue",
+    "sha256": "dea7b00c5a9bc412e9c4e2e02d9ef55436a4e827f80e8fc0e14e96b0a0fce377"
+  },
+  "options": {
+    "sha256": "24777bd34b50b9366a986b1297b8f4124efde9977700dec00f7ad6b9e42d40a6",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/script-setup/props-type-withdefaults.vue",
+      "id": "script-setup/props-type-withdefaults",
+      "pipeline": "compileScript:inlineTemplate",
+      "sourceMap": true,
+      "postprocess": {
+        "tool": "esbuild",
+        "version": "0.28.0",
+        "options": {
+          "loader": "ts",
+          "sourcemap": true,
+          "sourcefile": "cases/script-setup/props-type-withdefaults.vue"
+        },
+        "reason": "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)"
+      }
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vdom/script-setup/props-type-withdefaults.js",
+      "sha256": "5a2d462d320e83c79e240d63e7c9838e6e2dc2710aa0e5eb72f0287711e7d2d4",
+      "bytes": 955
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vdom/script-setup/props-type-withdefaults.map.json",
+      "sha256": "3f5739efc0277c088db29c18e0c80599f2deb064e9b67b0ba935f5098e496c09"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createElementBlock",
+      "alias": "_createElementBlock"
+    },
+    {
+      "imported": "defineComponent",
+      "alias": "_defineComponent"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    }
+  ]
+}

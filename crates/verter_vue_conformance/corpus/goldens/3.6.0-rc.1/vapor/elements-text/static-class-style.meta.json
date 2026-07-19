@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "caseId": "elements-text/static-class-style",
+  "backend": "vapor",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 1
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/elements-text/static-class-style.vue",
+    "sha256": "f6ac1360dcea4407df709122debbb8cd4c8e225e372fce719739413a15838783"
+  },
+  "options": {
+    "sha256": "fce06c49916d732d2abef1fc8f9758487046150d4364a9fd4a565a0065ee1da6",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/elements-text/static-class-style.vue",
+      "id": "elements-text/static-class-style",
+      "pipeline": "compileTemplate",
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vapor/elements-text/static-class-style.js",
+      "sha256": "5014fc1a7e4f161d57f549531999ebfe200762b46c262221955c264e5729eb69",
+      "bytes": 257
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vapor/elements-text/static-class-style.map.json",
+      "sha256": "89ef6bbc523fd5c6ff76d0a65231f25c0c3691bf363aff5f220f6936ed5fe4ba"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "template",
+      "alias": "_template"
+    }
+  ]
+}

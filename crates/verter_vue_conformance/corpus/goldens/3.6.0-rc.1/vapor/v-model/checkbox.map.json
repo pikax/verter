@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-model/checkbox.vue"
+  ],
+  "names": [],
+  "mappings": ";;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;;AAExB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;iCAIiB,YAAM,cAAN,qBAAM",
+  "sourcesContent": [
+    "<script setup>\nimport { ref } from \"vue\"\n\nconst agreed = ref(false)\n</script>\n\n<template>\n  <label><input type=\"checkbox\" v-model=\"agreed\" /> Agree</label>\n</template>\n"
+  ]
+}

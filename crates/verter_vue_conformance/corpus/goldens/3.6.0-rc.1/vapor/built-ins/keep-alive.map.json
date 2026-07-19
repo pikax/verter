@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/built-ins/keep-alive.vue"
+  ],
+  "names": [],
+  "mappings": ";AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AACxB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;;AAEnD,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;iDAIf,GAAG,EAAE,CAAC;8CACA,aAAO,KAAE,KAAK,EAAC,QAAQ",
+  "sourcesContent": [
+    "<script setup>\nimport { ref } from \"vue\"\nimport ChildComp from \"../components/child-comp.vue\"\n\nconst current = ref(ChildComp)\n</script>\n\n<template>\n  <KeepAlive :max=\"2\">\n    <component :is=\"current\" label=\"Cached\" />\n  </KeepAlive>\n</template>\n"
+  ]
+}

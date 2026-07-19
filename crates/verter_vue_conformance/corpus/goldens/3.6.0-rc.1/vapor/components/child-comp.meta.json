@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "caseId": "components/child-comp",
+  "backend": "vapor",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 1
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/components/child-comp.vue",
+    "sha256": "ccec2f3e27465b962543d548e1cebee609ac84bae1ed48fc544c591b55211e05"
+  },
+  "options": {
+    "sha256": "3474e1fca99f53234af014eb11bb25e3a46f492dfbc9d3ee59e416fea771a548",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/components/child-comp.vue",
+      "id": "components/child-comp",
+      "pipeline": "compileScript:inlineTemplate",
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vapor/components/child-comp.js",
+      "sha256": "e76df1dcb9cf605a56eb5f2961d2d60a9fd2dd7471280179e6f8fb76b3f87413",
+      "bytes": 1098
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vapor/components/child-comp.map.json",
+      "sha256": "5f3d3169de090926a53d416b2bf1ed9fe85c61935fb87dd3307edc05d293c4a5"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "child",
+      "alias": "_child"
+    },
+    {
+      "imported": "createInvoker",
+      "alias": "_createInvoker"
+    },
+    {
+      "imported": "createSlot",
+      "alias": "_createSlot"
+    },
+    {
+      "imported": "delegateEvents",
+      "alias": "_delegateEvents"
+    },
+    {
+      "imported": "renderEffect",
+      "alias": "_renderEffect"
+    },
+    {
+      "imported": "setInsertionState",
+      "alias": "_setInsertionState"
+    },
+    {
+      "imported": "setText",
+      "alias": "_setText"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    }
+  ]
+}

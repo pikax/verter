@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-for/index-destructure.vue"
+  ],
+  "names": [],
+  "mappings": ";;;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;;AAExB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AAClB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AACxB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AACvB,CAAC;;;;;+BAKuC,WAAK;;;sDACpC,eAAK,IAAG,KAAG,oBAAG,qBAAI;;+BAD0B,EAAE",
+  "sourcesContent": [
+    "<script setup>\nimport { ref } from \"vue\"\n\nconst users = ref([\n  { id: 1, name: \"Ada\" },\n  { id: 2, name: \"Bo\" },\n])\n</script>\n\n<template>\n  <ul>\n    <li v-for=\"({ id, name }, index) in users\" :key=\"id\">\n      {{ index }} — {{ name }}\n    </li>\n  </ul>\n</template>\n"
+  ]
+}

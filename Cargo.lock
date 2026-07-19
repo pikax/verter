@@ -4429,6 +4429,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_vue_conformance"
+version = "0.0.1-beta.1"
+dependencies = [
+ "hex",
+ "oxc_allocator",
+ "oxc_parser",
+ "oxc_span",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "verter_wasm"
 version = "0.0.1-beta.1"
 dependencies = [

@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "caseId": "components/parent-props-events",
+  "backend": "vapor",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 1
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/components/parent-props-events.vue",
+    "sha256": "2fa6376bb5b1a4e614993a255b11541c9592b0f2429e09320920f4be022a4482"
+  },
+  "options": {
+    "sha256": "275215fdfe4aac6933a6819b81f89e3d13d3a231a1a843cac63d861969a7549f",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/components/parent-props-events.vue",
+      "id": "components/parent-props-events",
+      "pipeline": "compileScript:inlineTemplate",
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vapor/components/parent-props-events.js",
+      "sha256": "c6560274920d633594e4f4293b6eacaf752f046302347c75f737b1397d2b000b",
+      "bytes": 354
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vapor/components/parent-props-events.map.json",
+      "sha256": "b8addf5d620e8262278940653f3701b2a305c0432e9dd3b1e6feb0740e2b4332"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createComponent",
+      "alias": "_createComponent"
+    }
+  ]
+}

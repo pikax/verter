@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-model/select.vue"
+  ],
+  "names": [],
+  "mappings": ";;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;;AAExB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;+BAIH,YAAM,cAAN,qBAAM",
+  "sourcesContent": [
+    "<script setup>\nimport { ref } from \"vue\"\n\nconst picked = ref(\"a\")\n</script>\n\n<template>\n  <select v-model=\"picked\">\n    <option value=\"a\">A</option>\n    <option value=\"b\">B</option>\n  </select>\n</template>\n"
+  ]
+}

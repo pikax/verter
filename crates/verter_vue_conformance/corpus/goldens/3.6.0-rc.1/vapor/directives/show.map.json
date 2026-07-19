@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/directives/show.vue"
+  ],
+  "names": [],
+  "mappings": ";;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;;AAExB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;yBAIX,aAAO",
+  "sourcesContent": [
+    "<script setup>\nimport { ref } from \"vue\"\n\nconst visible = ref(true)\n</script>\n\n<template>\n  <p v-show=\"visible\">Peekaboo</p>\n</template>\n"
+  ]
+}

@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "caseId": "directives/text",
+  "backend": "vapor",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 1
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/directives/text.vue",
+    "sha256": "c1f45b06cb448961e2990664e84f3c5ae744b3372dc979b6658463f9f31fccf5"
+  },
+  "options": {
+    "sha256": "3014dac2272ed68308547328958a602df5969f14544ca6814b118dcaee99065d",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/directives/text.vue",
+      "id": "directives/text",
+      "pipeline": "compileScript:inlineTemplate",
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vapor/directives/text.js",
+      "sha256": "07dc18e5dae35246a241c3c09f0f5244544fae7bd4e36e5ffb030bfe430f08fe",
+      "bytes": 438
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vapor/directives/text.map.json",
+      "sha256": "d95cb3f62eb5455b77d4d231be2f72170d11581b4f4aedd1be68dda8bf63e1d3"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "renderEffect",
+      "alias": "_renderEffect"
+    },
+    {
+      "imported": "setText",
+      "alias": "_setText"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    },
+    {
+      "imported": "txt",
+      "alias": "_txt"
+    }
+  ]
+}
