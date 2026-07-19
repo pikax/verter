@@ -52,7 +52,12 @@ pub const DEV_NIGHTLY_OVERRIDE_ENV: &str = "VERTER_TSGO_DEV_ALLOW_NIGHTLY";
 
 /// A strictly-parsed SemVer version. tsgo versions are TypeScript SemVer:
 /// `major.minor.patch` with an optional `-prerelease` and optional `+build`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// Equality, hash, and ordering all follow SemVer PRECEDENCE (§11): build
+/// metadata is ignored by ALL THREE (hand-rolled `PartialEq`/`Eq`/`Hash` below,
+/// so `a == b` iff `a.cmp(b) == Ordering::Equal` — derived `Eq` would include
+/// build metadata and violate the `Eq`/`Ord` consistency contract).
+#[derive(Debug, Clone)]
 pub struct TsgoVersion {
     /// SemVer major.
     pub major: u64,
@@ -96,7 +101,7 @@ impl TsgoVersion {
         let (core_and_pre, build) = match input.split('+').collect::<Vec<_>>().as_slice() {
             [head] => (*head, None),
             [head, build] => {
-                validate_identifiers(build, "build metadata").map_err(|r| malformed(&r))?;
+                validate_identifiers(build, "build metadata", false).map_err(|r| malformed(&r))?;
                 (*head, Some(build.to_string()))
             }
             _ => return Err(malformed("more than one `+` build-metadata separator")),
@@ -106,7 +111,7 @@ impl TsgoVersion {
         // contain `-`, so split at the FIRST one).
         let (core, prerelease) = match core_and_pre.split_once('-') {
             Some((core, pre)) => {
-                validate_identifiers(pre, "prerelease").map_err(|r| malformed(&r))?;
+                validate_identifiers(pre, "prerelease", true).map_err(|r| malformed(&r))?;
                 (core, Some(pre.to_string()))
             }
             None => (core_and_pre, None),
@@ -150,8 +155,34 @@ impl TsgoVersion {
     }
 }
 
-/// Validate a dot-separated SemVer identifier list (prerelease or build).
-fn validate_identifiers(list: &str, what: &str) -> Result<(), String> {
+impl PartialEq for TsgoVersion {
+    /// SemVer precedence equality (§11): build metadata is IGNORED, matching
+    /// [`Ord`] exactly (`a == b` iff `a.cmp(b) == Ordering::Equal`).
+    fn eq(&self, other: &Self) -> bool {
+        self.major == other.major
+            && self.minor == other.minor
+            && self.patch == other.patch
+            && self.prerelease == other.prerelease
+    }
+}
+
+impl Eq for TsgoVersion {}
+
+impl std::hash::Hash for TsgoVersion {
+    /// Hashes exactly the fields [`PartialEq`] compares (never build metadata),
+    /// so equal values hash equally.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.major.hash(state);
+        self.minor.hash(state);
+        self.patch.hash(state);
+        self.prerelease.hash(state);
+    }
+}
+
+/// Validate a dot-separated SemVer identifier list (prerelease or build). When
+/// `prerelease` is set, SemVer §9 applies: numeric identifiers MUST NOT carry
+/// leading zeroes (build metadata, §10, MAY).
+fn validate_identifiers(list: &str, what: &str, prerelease: bool) -> Result<(), String> {
     if list.is_empty() {
         return Err(format!("empty {what}"));
     }
@@ -165,6 +196,15 @@ fn validate_identifiers(list: &str, what: &str) -> Result<(), String> {
         {
             return Err(format!(
                 "illegal character in {what} identifier `{identifier}`"
+            ));
+        }
+        if prerelease
+            && identifier.len() > 1
+            && identifier.bytes().all(|b| b.is_ascii_digit())
+            && identifier.starts_with('0')
+        {
+            return Err(format!(
+                "numeric {what} identifier `{identifier}` must not include leading zeroes"
             ));
         }
     }
@@ -192,7 +232,10 @@ impl PartialOrd for TsgoVersion {
 
 impl Ord for TsgoVersion {
     /// SemVer §11 ordering: numeric core first; a prerelease orders BEFORE its
-    /// release; build metadata is ignored for precedence.
+    /// release; prereleases compare IDENTIFIER-BY-IDENTIFIER (numeric
+    /// identifiers numerically, alphanumeric lexically, numeric < alphanumeric,
+    /// a shorter set before a longer prefix-equal one); build metadata is
+    /// ignored for precedence.
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         use std::cmp::Ordering;
         match self.core().cmp(&other.core()) {
@@ -200,10 +243,48 @@ impl Ord for TsgoVersion {
                 (None, None) => Ordering::Equal,
                 (None, Some(_)) => Ordering::Greater,
                 (Some(_), None) => Ordering::Less,
-                (Some(a), Some(b)) => a.cmp(b),
+                (Some(a), Some(b)) => compare_prerelease(a, b),
             },
             ordering => ordering,
         }
+    }
+}
+
+/// SemVer §11.4 prerelease precedence: identifier-by-identifier left to right;
+/// when every compared identifier is equal, the SHORTER identifier set orders
+/// before the longer one.
+fn compare_prerelease(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut ai = a.split('.');
+    let mut bi = b.split('.');
+    loop {
+        match (ai.next(), bi.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => {
+                let ordering = compare_prerelease_identifier(x, y);
+                if ordering != Ordering::Equal {
+                    return ordering;
+                }
+            }
+        }
+    }
+}
+
+/// One prerelease identifier pair: numeric identifiers compare NUMERICALLY
+/// (strict parse forbids leading zeroes, so length-then-lexical IS the numeric
+/// order, with no integer overflow), and numeric identifiers order BEFORE
+/// alphanumeric ones.
+fn compare_prerelease_identifier(x: &str, y: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let x_numeric = x.bytes().all(|b| b.is_ascii_digit());
+    let y_numeric = y.bytes().all(|b| b.is_ascii_digit());
+    match (x_numeric, y_numeric) {
+        (true, true) => x.len().cmp(&y.len()).then_with(|| x.cmp(y)),
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (false, false) => x.cmp(y),
     }
 }
 
@@ -522,6 +603,96 @@ mod tests {
             TsgoVersion::parse("7.0.2-rc.1").unwrap() < TsgoVersion::parse("7.0.2").unwrap(),
             "a prerelease orders before its release"
         );
+    }
+
+    // ── DISCRIMINATING (H12): prerelease precedence is IDENTIFIER-BY-IDENTIFIER
+    //    (SemVer §11.4): numeric identifiers compare NUMERICALLY (rc.2 < rc.10 —
+    //    a whole-string compare gets this wrong), numeric < alphanumeric, and a
+    //    shorter identifier set precedes a longer one when prefix-equal. ────────
+    #[test]
+    fn prerelease_ordering_is_identifier_by_identifier() {
+        use std::cmp::Ordering;
+        // Numeric identifiers compare numerically, never as whole strings.
+        assert_eq!(
+            TsgoVersion::parse("7.0.2-rc.2")
+                .unwrap()
+                .cmp(&TsgoVersion::parse("7.0.2-rc.10").unwrap()),
+            Ordering::Less,
+            "rc.2 < rc.10 (numeric, not string, comparison)"
+        );
+        assert!(
+            TsgoVersion::parse("7.0.0-dev.20260604.9").unwrap()
+                < TsgoVersion::parse("7.0.0-dev.20260604.10").unwrap(),
+            "nightly sequence numbers compare numerically"
+        );
+        // Numeric identifiers precede alphanumeric ones.
+        assert!(
+            TsgoVersion::parse("7.0.2-rc.1").unwrap() < TsgoVersion::parse("7.0.2-rc.a").unwrap(),
+            "numeric < alphanumeric"
+        );
+        // Alphanumeric identifiers compare lexically.
+        assert!(
+            TsgoVersion::parse("7.0.2-alpha").unwrap() < TsgoVersion::parse("7.0.2-beta").unwrap()
+        );
+        // A shorter set < a longer set when all preceding identifiers are equal.
+        assert!(
+            TsgoVersion::parse("7.0.2-rc").unwrap() < TsgoVersion::parse("7.0.2-rc.1").unwrap(),
+            "a shorter identifier set precedes a longer prefix-equal one"
+        );
+        // Mixed shapes stay strictly ordered (no equality collapse).
+        assert_ne!(
+            TsgoVersion::parse("7.0.2-rc.2")
+                .unwrap()
+                .cmp(&TsgoVersion::parse("7.0.2-rc.10").unwrap()),
+            Ordering::Equal
+        );
+    }
+
+    // ── DISCRIMINATING (H12): numeric PRERELEASE identifiers with leading
+    //    zeroes are not strict SemVer (§9) and are rejected; build metadata MAY
+    //    carry them (§10), and alphanumeric identifiers are unaffected. ────────
+    #[test]
+    fn parse_rejects_leading_zero_numeric_prerelease_identifiers() {
+        for input in ["7.0.2-rc.01", "7.0.2-01", "7.0.2-rc.1.02", "7.0.2-00"] {
+            assert!(
+                TsgoVersion::parse(input).is_err(),
+                "leading-zero numeric prerelease `{input}` must be rejected"
+            );
+        }
+        // A single `0` is numeric zero — allowed.
+        assert!(TsgoVersion::parse("7.0.2-rc.0").is_ok());
+        // Alphanumeric identifiers with leading zeros are not numeric — allowed.
+        assert!(TsgoVersion::parse("7.0.2-0a").is_ok());
+        // Build metadata MAY contain leading zeros (SemVer §10).
+        assert!(TsgoVersion::parse("7.0.2+build.01").is_ok());
+    }
+
+    // ── DISCRIMINATING (H12): Eq and Ord are CONSISTENT — SemVer precedence
+    //    ignores build metadata, so BOTH ignore it: equal iff Ordering::Equal,
+    //    and Hash agrees with Eq. ──────────────────────────────────────────────
+    #[test]
+    fn equality_and_hash_are_consistent_with_ordering() {
+        use std::cmp::Ordering;
+        let a = TsgoVersion::parse("7.0.2+build.1").unwrap();
+        let b = TsgoVersion::parse("7.0.2+build.2").unwrap();
+        let bare = TsgoVersion::parse("7.0.2").unwrap();
+        assert_eq!(
+            a.cmp(&b),
+            Ordering::Equal,
+            "precedence ignores build metadata"
+        );
+        assert_eq!(a, b, "Eq must ignore build metadata exactly like Ord");
+        assert_eq!(a, bare);
+        assert!(a != TsgoVersion::parse("7.0.3").unwrap());
+        assert!(
+            a != TsgoVersion::parse("7.0.2-rc.1+build.1").unwrap(),
+            "prerelease still discriminates equality"
+        );
+        // Hash agrees with Eq (build metadata is not hashed).
+        let mut set = std::collections::HashSet::new();
+        set.insert(a.clone());
+        assert!(set.contains(&b), "equal values must hash equally");
+        assert!(set.contains(&bare));
     }
 
     // ── the supported-window constants ─────────────────────────────────────
