@@ -125,12 +125,54 @@ pub fn hover_at_position(
     // This allows hover on tags even when analysis hasn't completed.
     match classify_cursor(offset, blocks) {
         SfcCursorContext::OpeningTag { block_index } => {
-            return sfc_tag_hover(source, &blocks[block_index], offset).map(|h| h.into());
+            if let Some(hover) = sfc_tag_hover(source, &blocks[block_index], offset) {
+                return Some(hover.into());
+            }
+            // A phantom custom block from the depth-ignorant scanner (an
+            // ordinary element like `<b v-my-thing>` after a nested
+            // `</template>` closed the real template block): the SFC attr
+            // table has nothing for it, but the typed element tree still
+            // owns the position as template markup (D6).
+            if let Some(template) = analysis.and_then(|a| a.template.as_deref()) {
+                if template
+                    .elements
+                    .iter()
+                    .any(|el| offset >= el.span.start && offset < el.span.end)
+                {
+                    return hover_in_template(
+                        offset as usize,
+                        source,
+                        analysis.unwrap(),
+                        line_index,
+                    );
+                }
+            }
+            return None;
         }
         SfcCursorContext::ClosingTag { block_index } => {
             return sfc_tag_name_hover(&blocks[block_index].tag_name).map(|h| h.into());
         }
-        SfcCursorContext::RootLevel => return None,
+        SfcCursorContext::RootLevel => {
+            // Vue template markup the depth-ignorant SFC scanner leaves in a
+            // dead zone (a nested `</template>` closes the scanned block
+            // early). The typed element tree is the authority for what is
+            // still template markup (D6); Svelte has no element IR here.
+            if let Some(template) = analysis.and_then(|a| a.template.as_deref()) {
+                if template
+                    .elements
+                    .iter()
+                    .any(|el| offset >= el.span.start && offset < el.span.end)
+                {
+                    return hover_in_template(
+                        offset as usize,
+                        source,
+                        analysis.unwrap(),
+                        line_index,
+                    );
+                }
+            }
+            return None;
+        }
         SfcCursorContext::BlockContent { .. } => {} // fall through to analysis-based hover
     }
 
@@ -141,14 +183,44 @@ pub fn hover_at_position(
     let block = blocks.iter().find(|b| {
         let (content_start, content_end) = b.content_range();
         offset >= content_start as usize && offset < content_end as usize
-    })?;
+    });
 
-    match block.tag_name.as_str() {
-        "script" => hover_in_script(offset, source, analysis, ssr_context),
-        "template" => hover_in_template(offset, source, analysis, line_index),
-        "style" => crate::css::css_hover(position, source, blocks, Some(analysis), line_index)
-            .map(|h| h.into()),
-        _ => None,
+    match block {
+        Some(b) => match b.tag_name.as_str() {
+            "script" => hover_in_script(offset, source, analysis, ssr_context),
+            "template" => hover_in_template(offset, source, analysis, line_index),
+            "style" => crate::css::css_hover(position, source, blocks, Some(analysis), line_index)
+                .map(|h| h.into()),
+            _ => {
+                // A phantom custom block from the depth-ignorant scanner (a
+                // component usage after a nested `</template>` closed the real
+                // template block). Its interior is still template markup when
+                // the typed element tree owns the offset (D6).
+                let template = analysis.template.as_deref()?;
+                if template
+                    .elements
+                    .iter()
+                    .any(|el| offset >= el.span.start as usize && offset < el.span.end as usize)
+                {
+                    hover_in_template(offset, source, analysis, line_index)
+                } else {
+                    None
+                }
+            }
+        },
+        None => {
+            // No scanned block owns the offset — same dead-zone recovery.
+            let template = analysis.template.as_deref()?;
+            if template
+                .elements
+                .iter()
+                .any(|el| offset >= el.span.start as usize && offset < el.span.end as usize)
+            {
+                hover_in_template(offset, source, analysis, line_index)
+            } else {
+                None
+            }
+        }
     }
 }
 
