@@ -59,6 +59,57 @@ pub fn collect_component_usages(nodes: &[SvelteNode], source: &str, data: &mut R
     }
 }
 
+/// Collect every element directive (`use:x`, `transition:fn`, `bind:prop`,
+/// `class:name`, `style:prop`, `on:event`, `let:item`, …) from a template
+/// node run into `data` (D6 — directive-keyword doc hovers read the typed
+/// spans instead of scanning source). Recurses element children, block
+/// children, and each block clause's children.
+pub fn collect_svelte_directives(nodes: &[SvelteNode], source: &str, data: &mut RawTemplateData) {
+    for node in nodes {
+        match node {
+            SvelteNode::Element(element) => {
+                for attr in &element.attributes {
+                    let SvelteAttributeKind::Directive(dir) = &attr.kind else {
+                        continue;
+                    };
+                    // The typed directive form is `keyword:local`; the keyword
+                    // is the attribute text up to the first `:`.
+                    let attr_text = source
+                        .get(attr.span.start as usize..attr.span.end as usize)
+                        .unwrap_or("");
+                    let keyword = attr_text.split(':').next().unwrap_or("").to_string();
+                    let keyword_end = attr.span.start + keyword.len() as u32;
+                    let local_span =
+                        Span::new(keyword_end + 1, keyword_end + 1 + dir.local.len() as u32);
+                    let value_span = match &dir.value {
+                        Some(SvelteAttributeValue::Expression(span))
+                        | Some(SvelteAttributeValue::Text(span))
+                        | Some(SvelteAttributeValue::Mixed(span)) => Some(*span),
+                        None => None,
+                    };
+                    data.svelte_directives
+                        .push(crate::compile::RawSvelteDirective {
+                            keyword,
+                            local: dir.local.clone(),
+                            span: attr.span,
+                            keyword_end,
+                            local_span,
+                            value_span,
+                        });
+                }
+                collect_svelte_directives(&element.children, source, data);
+            }
+            SvelteNode::Block(block) => {
+                collect_svelte_directives(&block.children, source, data);
+                for clause in &block.clauses {
+                    collect_svelte_directives(&clause.children, source, data);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Collect every `{#snippet name(params)}` declaration from a template node
 /// run into `data` (D5 — powers `{@render |}` callee completion with the
 /// component's in-scope snippet names). Recurses element children, block

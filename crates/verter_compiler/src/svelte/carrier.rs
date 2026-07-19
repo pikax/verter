@@ -348,6 +348,7 @@ impl CarrierCompiler for SvelteCarrierCompiler {
         // the carrier source. No structural source scan.
         super::template_facts::collect_component_usages(&parsed.template, source, &mut data);
         super::template_facts::collect_snippet_definitions(&parsed.template, source, &mut data);
+        super::template_facts::collect_svelte_directives(&parsed.template, source, &mut data);
         TemplateFacts { data }
     }
 
@@ -537,6 +538,7 @@ impl CarrierCompiler for SvelteCarrierCompiler {
             let mut data = crate::compile::RawTemplateData::default();
             super::template_facts::collect_component_usages(&parsed.template, source, &mut data);
             super::template_facts::collect_snippet_definitions(&parsed.template, source, &mut data);
+            super::template_facts::collect_svelte_directives(&parsed.template, source, &mut data);
             bundle.template_data = Some(data);
         }
 

@@ -98,9 +98,10 @@ pub use template::{
     unwrap_reactive_type, AnalyzedEmitDefinition, AnalyzedMacroUsage, AnalyzedPropDefinition,
     BindingUsageKind, CommentDirective, CommentDirectiveKind, DefinedSlot, DynamicClassName,
     ElementNamespace, IfChain, MacroKind, PropValueConstness, SnippetDefinition,
-    TemplateAnalysisSnapshot, TemplateAttribute, TemplateBindingOccurrence, TemplateComponentUsage,
-    TemplateDirective, TemplateElement, TemplateEventHandler, TemplatePropUsage, TemplateRef,
-    TemplateTypeEnhancements, TypeMismatch, UnresolvedBinding, VForDirective, VModelDirective,
+    SvelteDirectiveInfo, TemplateAnalysisSnapshot, TemplateAttribute, TemplateBindingOccurrence,
+    TemplateComponentUsage, TemplateDirective, TemplateElement, TemplateEventHandler,
+    TemplatePropUsage, TemplateRef, TemplateTypeEnhancements, TypeMismatch, UnresolvedBinding,
+    VForDirective, VModelDirective,
 };
 pub use types::hash_16;
 pub use types::{
