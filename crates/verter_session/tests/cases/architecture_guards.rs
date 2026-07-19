@@ -5130,6 +5130,13 @@ mod foundations_guards {
             // overlay/VFS state. `D14_ALLOW_LIST` carries the full per-callsite
             // rationale (tool/output I/O stays on `std::fs`).
             "crates/verter_svelte_conformance/src/generate.rs",
+            // dev/CI-only, non-published Vue conformance corpus READER —
+            // reads ONLY the crate-owned vendored/committed corpus
+            // (`env!("CARGO_MANIFEST_DIR")/corpus`: cases + official
+            // goldens + dispositions), never workspace/semantic/overlay/VFS
+            // state. Test-fixture I/O — sibling of the
+            // `verter_svelte_conformance` generator entry.
+            "crates/verter_vue_conformance/src/lib.rs",
         ]
         .into_iter()
         .map(String::from)
@@ -9481,7 +9488,11 @@ mod foundations_guards {
             "crates/verter_svelte_conformance/src/generate.rs",
             "dev/CI-only, non-published (`publish = false`) Svelte CSS-conformance corpus generator. `write_corpus` / `check_corpus` materialize and reconcile ONLY the crate-owned committed corpus under `env!(\"CARGO_MANIFEST_DIR\")/corpus` for the CLI (`cargo run -p verter_svelte_conformance -- write`) and the crate's own tests — never user workspace, semantic, overlay, or VFS state. `WorkspaceAccess` governs user workspace source/config; tool/output I/O stays on `std::fs` (the same tooling precedent as the `oracle-gen` snapshot generator and `verter_tsc`). Not a NativeFs/VFS disk-boundary bypass.",
         ),
-    ];
+            (
+            "crates/verter_vue_conformance/src/lib.rs",
+            "dev/CI-only, non-published Vue conformance corpus READER (`read_text_normalized` + case-dir enumeration) — reads ONLY the crate-owned vendored/committed corpus (`env!(\"CARGO_MANIFEST_DIR\")/corpus`: cases, official goldens, known-divergences), never workspace/semantic/VFS state. Test-fixture I/O, not a NativeFs/VFS disk-boundary bypass — sibling of the `verter_svelte_conformance/src/generate.rs` exemption.",
+        ),
+];
 
     /// Predicate the test reuses: does this file's source contain
     /// any `std::fs::` reference? Identical to guard 1's predicate

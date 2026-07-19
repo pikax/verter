@@ -12,7 +12,8 @@
 //! --check` command; both fail loudly when Node or the pinned RC toolchain is
 //! unavailable.
 //!
-//! Smoke coverage (Slice 1 — the structural comparator is a later slice):
+//! Smoke coverage (generator artifact integrity — the structural comparator
+//! itself is exercised by `seed_conformance.rs`):
 //! - the generator has produced a golden + metadata for at least one VDOM and
 //!   one Vapor case, and every committed golden is non-empty;
 //! - every committed golden parses as valid ESM JavaScript;
