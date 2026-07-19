@@ -250,9 +250,12 @@ pub fn process_script_setup<'alloc>(
     // Imports in the companion <script> block are available to the template at runtime
     // because the component factory merges both script blocks. We mark them as SetupImport
     // (not SetupConst) so they're filtered by template_used_vars — only companion imports
-    // actually referenced in the template appear in __returned__. This matches Vue's
-    // official compiler behavior and prevents type-only imports (e.g., CurrencyCodes used
-    // only as `"EUR" as CurrencyCodes`) from leaking into __returned__ as runtime references.
+    // actually referenced in the template appear in __returned__. This is an intentional,
+    // TRACKED over-elision divergence: official 3.6.0-rc.1 INCLUDES unused setup imports in
+    // __returned__ (as `get x() { return x }` getters); Verter elides them (see
+    // `docs/arch/future/vue-vdom-parity-backlog.md` D6, post-merge). The filter still keeps
+    // type-only imports (e.g., CurrencyCodes used only as `"EUR" as CurrencyCodes`) out of
+    // __returned__ — official excludes those too.
     for name in &companion_import_names {
         // Skip if setup script already declares the same name (setup takes precedence)
         let alloc_name = ctx.out.alloc_str(name);
@@ -780,7 +783,12 @@ fn build_setup_wrapper_end(
 /// Includes all setup-type bindings (not props, data, or options).
 /// `SetupImport` bindings are only included when their identifier appears in
 /// the `template_used_vars` set (AST-based, from expression bindings + component
-/// tag names). Returns a JS object literal like `{ msg, count }`.
+/// tag names) — an intentional, TRACKED over-elision divergence: official
+/// 3.6.0-rc.1 INCLUDES unused setup imports in `__returned__` (as
+/// `get x() { return x }` getters); Verter elides them (see
+/// `docs/arch/future/vue-vdom-parity-backlog.md` D6, post-merge). Type-only
+/// imports stay excluded (official excludes those too). Returns a JS object
+/// literal like `{ msg, count }`.
 fn build_returned_object(
     bindings: &FxHashMap<&str, BindingType>,
     template_used_vars: Option<&FxHashSet<String>>,
