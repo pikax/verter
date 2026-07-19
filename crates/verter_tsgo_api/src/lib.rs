@@ -37,6 +37,8 @@ pub mod client;
 pub mod control;
 mod egress;
 pub mod error;
+#[cfg(feature = "test-fake-engine")]
+pub mod fake_engine;
 pub mod gate;
 pub mod jsonrpc;
 pub mod lane;

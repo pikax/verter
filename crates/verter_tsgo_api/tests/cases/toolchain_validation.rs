@@ -1,10 +1,13 @@
 //! Process-level toolchain validation coverage.
 //!
 //! Two engines drive these tests:
-//! - the FAKE engine (`src/bin/verter_tsgo_fake_engine.rs`, exposed as
-//!   `CARGO_BIN_EXE_verter_tsgo_fake_engine`) — a deterministic stdio JSON-RPC
-//!   responder whose scenario rides its FILE NAME, so parallel tests never
-//!   share mutable environment; and
+//! - the FAKE engine (`src/fake_engine.rs`, exposed as the feature-gated
+//!   `verter_tsgo_fake_engine` bin via `CARGO_BIN_EXE_verter_tsgo_fake_engine`)
+//!   — a deterministic stdio JSON-RPC responder whose scenario rides its FILE
+//!   NAME, so parallel tests never share mutable environment. The `apiok`
+//!   scenario serves the FULL `--api` attach surface (minted pipe, integer
+//!   snapshot handle, staged project), so POSITIVE API-smoke coverage runs
+//!   hermetically against the fake; and
 //! - the REAL engine from the worktree's `node_modules`, when present
 //!   (live-gated; `VERTER_REQUIRE_TSGO=1` turns an absence into a hard
 //!   failure, matching the other live suites).
@@ -23,7 +26,8 @@ use super::common::workspace_root;
 const FAKE_ENGINE: &str = env!("CARGO_BIN_EXE_verter_tsgo_fake_engine");
 
 /// Copy the fake engine to a scenario-named path (the scenario is selected by
-/// the binary's file name). Copies are shared per process.
+/// the binary's file name). Copies are shared per process; the copy lands via
+/// an atomic rename so a parallel test never executes a partially-written file.
 fn fake_engine(scenario: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("verter-tsgo-fake-engines-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create fake engine dir");
@@ -34,7 +38,17 @@ fn fake_engine(scenario: &str) -> PathBuf {
     };
     let target = dir.join(name);
     if !target.exists() {
-        std::fs::copy(FAKE_ENGINE, &target).expect("copy the fake engine");
+        // Serialize concurrent copiers, then copy to a sibling temp name and
+        // atomically rename into place (a plain copy is observable mid-write).
+        static COPY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = COPY_LOCK.lock().unwrap();
+        if !target.exists() {
+            let tmp = dir.join(format!(".copying-{}", scenario));
+            std::fs::copy(FAKE_ENGINE, &tmp).expect("copy the fake engine");
+            // A leftover from a killed earlier run must not block the rename.
+            let _ = std::fs::remove_file(&target);
+            std::fs::rename(&tmp, &target).expect("rename the fake engine into place");
+        }
     }
     target
 }
@@ -166,6 +180,30 @@ async fn api_requirement_fails_when_the_api_surface_is_dead() {
         matches!(err, RejectionReason::ApiSmokeFailed { .. }),
         "{err:?}"
     );
+}
+
+// ── DISCRIMINATING (POSITIVE): a fake engine with a WORKING --api attach
+//    surface (LSP handshake + minted pipe + initialize + integer snapshot
+//    handle + the staged configured project) PASSES the full --api smoke.
+//    Positive API coverage no longer depends on a real engine or silently
+//    skips. ───────────────────────────────────────────────────────────────────
+#[tokio::test]
+async fn api_requirement_accepts_a_working_api_surface() {
+    let validated = production_validator()
+        .validate(&fake_engine("apiok"), Capability::Api)
+        .await
+        .expect("a fake engine serving the full --api attach surface must validate");
+    assert_eq!(validated.version_string, "7.0.2");
+}
+
+// ── DISCRIMINATING (POSITIVE, LSP): the API-capable fake also passes the
+//    cheaper --lsp requirement (its handshake + serverInfo are intact). ────────
+#[tokio::test]
+async fn lsp_requirement_accepts_the_api_capable_fake() {
+    production_validator()
+        .validate(&fake_engine("apiok"), Capability::Lsp)
+        .await
+        .expect("the API-capable fake must also validate for --lsp");
 }
 
 // ── live, real-engine coverage ───────────────────────────────────────────────
