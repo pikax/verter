@@ -16,6 +16,9 @@
 #[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct TestForceKnobs {
+    /// Injects one scheduler-counter increment inside the Vue macro-codegen
+    /// request scope so the scheduling witness is mutation-discriminating.
+    pub(crate) vue_macro_codegen_scheduler_submission_for_tests: std::sync::atomic::AtomicBool,
     /// Observations of the session-wrapper operations that runtime-render
     /// compilation must bypass. Host-backed compilation is the firing control.
     pub(crate) wrapper_source_clone_count: std::sync::atomic::AtomicUsize,

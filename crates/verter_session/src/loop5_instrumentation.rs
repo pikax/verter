@@ -907,7 +907,12 @@ mod tests {
         };
         let broad_runtime = SemanticQueryKey::ClassifyBroadRuntime {
             subject: dummy_node,
-            context: Default::default(),
+            context: crate::semantic_query::BroadRuntimeContext {
+                resolve_env_hash: Default::default(),
+                type_env_hash: Default::default(),
+                lib_env_hash: Default::default(),
+                project_identity: 0,
+            },
         };
         let apparent_type = SemanticQueryKey::ApparentType {
             base: dummy_node,

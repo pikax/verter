@@ -84,6 +84,9 @@ pub enum PropsDefaultsAssociation {
     None,
     /// The compiler merges defaults from this authored `withDefaults` call.
     WithDefaults {
+        /// Content-free source-order identity of the inner `defineProps`
+        /// payload whose semantic surface is carried by this entry.
+        payload_macro_index: u32,
         /// Content-free source-order identity of the outer defaults call.
         defaults_macro_index: u32,
     },

@@ -8888,13 +8888,13 @@ mod prepared_identity_bijection {
     use crate::locator_identity::{LocatorLoweringKey, ParseEnvHash, ResolveEnvHash};
     use crate::project_semantic_dispatch::BodySourceWitness;
     use crate::semantic_query::{
-        ApparentTypeContext, ClassSurfaceContext, ClassSurfaceSide, ContextualTypingKey,
-        EnumContext, FlowNarrowingKey, FreshnessKey, HashValue, IndexKey, InstantiateContext,
-        InstantiateKey, MacroPayloadContext, MapperKey, MapperKind, OptionalityMod,
-        OverloadSetContext, PathSegment, ProgramAnalysisContext, ProgramPointId, ProjectionMode,
-        ProjectionReductionContext, ReadonlyMod, RelationContext, RelationKind, RelationPolicy,
-        ResolveDeclKey, ResolvedDeclSlotIdentity, ScopeId, SemanticNodeId, SemanticQueryKey,
-        SemanticQueryKeyTag, SemanticSymbolSpace, SubstitutionCanonicalHash,
+        ApparentTypeContext, BroadRuntimeContext, ClassSurfaceContext, ClassSurfaceSide,
+        ContextualTypingKey, EnumContext, FlowNarrowingKey, FreshnessKey, HashValue, IndexKey,
+        InstantiateContext, InstantiateKey, MacroPayloadContext, MapperKey, MapperKind,
+        OptionalityMod, OverloadSetContext, PathSegment, ProgramAnalysisContext, ProgramPointId,
+        ProjectionMode, ProjectionReductionContext, ReadonlyMod, RelationContext, RelationKind,
+        RelationPolicy, ResolveDeclKey, ResolvedDeclSlotIdentity, ScopeId, SemanticNodeId,
+        SemanticQueryKey, SemanticQueryKeyTag, SemanticSymbolSpace, SubstitutionCanonicalHash,
         SurfaceProvenanceContext, TemplateLiteralReduceContext, TypeOfContext, ValueRootKey,
         ValueRootSlotIdentity,
     };
@@ -9241,11 +9241,21 @@ mod prepared_identity_bijection {
             SemanticQueryKeyTag::ClassifyBroadRuntime => (
                 SemanticQueryKey::ClassifyBroadRuntime {
                     subject: node(1),
-                    context: Default::default(),
+                    context: BroadRuntimeContext {
+                        resolve_env_hash: h16(0),
+                        type_env_hash: h16(0),
+                        lib_env_hash: h16(0),
+                        project_identity: 0,
+                    },
                 },
                 SemanticQueryKey::ClassifyBroadRuntime {
                     subject: node(2),
-                    context: Default::default(),
+                    context: BroadRuntimeContext {
+                        resolve_env_hash: h16(0),
+                        type_env_hash: h16(0),
+                        lib_env_hash: h16(0),
+                        project_identity: 0,
+                    },
                 },
             ),
             SemanticQueryKeyTag::ApparentType => (

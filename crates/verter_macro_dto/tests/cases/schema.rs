@@ -37,6 +37,7 @@ fn runtime_and_tsc_bundles_are_independent_contracts() {
             outcome: MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(PropsRuntimeShape {
                 root_shape: RuntimeRootShape::ObjectLike,
                 defaults: PropsDefaultsAssociation::WithDefaults {
+                    payload_macro_index: 0,
                     defaults_macro_index: 1,
                 },
                 props: vec![prop("enabled", vec![RuntimeConstructor::Boolean])],

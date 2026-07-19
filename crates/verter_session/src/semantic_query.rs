@@ -3608,7 +3608,7 @@ pub struct OverloadSetContext {
 /// The subject node carries substitution identity. Classification may settle
 /// unresolved carrier heads and global nominal types, so the key includes the
 /// complete `{R,T,L,J}` environment and no projection-mode axis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BroadRuntimeContext {
     pub resolve_env_hash: HashValue,
     pub type_env_hash: HashValue,

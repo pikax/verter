@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    BroadRuntimeClassification, BroadRuntimeContext, BroadRuntimeKind, DeclIdentity, HashValue,
-    LiteralValue, PrimitiveKind, QueryResult, SemanticNodeData, SemanticQueryApi, SemanticQueryKey,
+    BroadRuntimeClassification, BroadRuntimeKind, DeclIdentity, HashValue, LiteralValue,
+    PrimitiveKind, QueryResult, SemanticNodeData, SemanticQueryApi, SemanticQueryKey,
     SemanticQueryValue, SurfaceMember, SurfaceView,
 };
 use crate::{FileLanguage, UpsertRequest, VerterHost};
@@ -48,7 +48,7 @@ fn classify(
 ) -> BroadRuntimeClassification {
     let result = dispatch.execute(SemanticQueryKey::ClassifyBroadRuntime {
         subject,
-        context: BroadRuntimeContext::default(),
+        context: dispatch.broad_runtime_context_for(subject),
     });
     match result {
         QueryResult::Value(output) => match output.value {
@@ -211,7 +211,7 @@ fn rootless_classifier_values_are_return_only() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let key = SemanticQueryKey::ClassifyBroadRuntime {
         subject,
-        context: BroadRuntimeContext::default(),
+        context: dispatch.broad_runtime_context_for(subject),
     };
 
     let first = dispatch.execute(key.clone());

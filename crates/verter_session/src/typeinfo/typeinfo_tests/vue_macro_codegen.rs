@@ -135,8 +135,26 @@ withDefaults(defineProps<{ label?: string; count: number }>(), { label: 'ok' })
     assert_eq!(
         props.defaults,
         PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
             defaults_macro_index: 1,
         }
+    );
+    assert_eq!(
+        props
+            .props
+            .iter()
+            .map(|prop| prop.anchor)
+            .collect::<Vec<_>>(),
+        [
+            MacroAnchor::Authored {
+                macro_index: 0,
+                member_ordinal: Some(verter_macro_dto::AuthoredMemberOrdinal::new(0)),
+            },
+            MacroAnchor::Authored {
+                macro_index: 0,
+                member_ordinal: Some(verter_macro_dto::AuthoredMemberOrdinal::new(1)),
+            },
+        ]
     );
     assert_eq!(output.counters.root_shallow_demands, 1);
     assert_eq!(output.counters.runtime_classifier_calls, 2);
@@ -300,4 +318,59 @@ defineSlots<{ default(props: { deep: { value: string } }): unknown }>()
     ));
     assert_eq!(output.counters.root_shallow_demands, 0);
     assert_eq!(output.counters.runtime_classifier_calls, 0);
+}
+
+#[test]
+fn unknown_plus_number_collapses_to_no_runtime_constructors() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert(
+        &host,
+        "/src/UnknownNumber.vue",
+        r#"<script setup lang="ts">
+defineProps<{ value: number | bigint }>()
+</script>"#,
+    );
+
+    let output = produce(
+        &host,
+        "/src/UnknownNumber.vue",
+        VueMacroCodegenDemand::Runtime,
+    );
+    let runtime = output.runtime.expect("runtime bundle");
+    let MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(props)) =
+        &runtime.entries[0].outcome
+    else {
+        panic!("expected complete props shape: {runtime:?}");
+    };
+    assert!(
+        props.props[0].constructors.is_empty(),
+        "Unknown mixed with Number must collapse to Vue's no-constructor runtime shape: {:?}",
+        props.props[0].constructors.as_slice()
+    );
+    assert!(!props.props[0].skip_check);
+}
+
+#[test]
+fn scheduler_submission_counter_is_a_request_scoped_witness() {
+    use std::sync::atomic::Ordering;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert(
+        &host,
+        "/src/SchedulerWitness.vue",
+        r#"<script setup lang="ts">defineProps<{ value: string }>()</script>"#,
+    );
+    host.test_force
+        .vue_macro_codegen_scheduler_submission_for_tests
+        .store(true, Ordering::Relaxed);
+
+    let output = produce(
+        &host,
+        "/src/SchedulerWitness.vue",
+        VueMacroCodegenDemand::Runtime,
+    );
+    assert_eq!(
+        output.counters.scheduler_submissions, 1,
+        "the producer counter must report submissions occurring inside its request scope"
+    );
 }

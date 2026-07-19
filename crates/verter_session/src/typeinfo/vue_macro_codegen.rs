@@ -7,6 +7,7 @@
 //! runtime and TSC demands.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use verter_macro_dto::{
@@ -24,9 +25,9 @@ use crate::meta_resolve::projectors::{build_owner_decl_identity, resolve_macro_p
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::{FactReadSetFinalise, ResolverContext};
 use crate::semantic_query::{
-    BroadRuntimeContext, BroadRuntimeKind, PartialReasonSet, PathSegment, ProjectionMode,
-    ProjectionReductionContext, QueryResult, ResultCompleteness, SemanticQueryApi,
-    SemanticQueryKey, SemanticQueryValue, SurfaceProvenanceContext,
+    BroadRuntimeKind, PartialReasonSet, PathSegment, ProjectionMode, ProjectionReductionContext,
+    QueryResult, ResultCompleteness, SemanticQueryApi, SemanticQueryKey, SemanticQueryValue,
+    SurfaceProvenanceContext,
 };
 use crate::typeinfo::surface::TypeInfoSurface;
 use crate::VerterHost;
@@ -137,12 +138,38 @@ impl VerterHost {
         owner_canonical: &str,
         demand: VueMacroCodegenDemand,
     ) -> VueMacroCodegenOutput {
-        let (state, finalise) = crate::fact_signature_helpers::install_fact_tracer(self, || {
-            let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
-            let mut state = self.produce_vue_macro_codegen_inner(ctx, owner_canonical, demand);
-            state.completeness = crate::request_context::current_cold_compute_completeness();
-            state
-        });
+        let scheduler_submissions_before = self
+            .scheduler()
+            .counters()
+            .submit_count
+            .load(Ordering::Relaxed);
+        let (mut state, finalise) =
+            crate::fact_signature_helpers::install_fact_tracer(self, || {
+                #[cfg(test)]
+                if self
+                    .test_force
+                    .vue_macro_codegen_scheduler_submission_for_tests
+                    .load(Ordering::Relaxed)
+                {
+                    self.scheduler()
+                        .counters()
+                        .submit_count
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                let _completeness_scope =
+                    crate::request_context::ColdComputeCompletenessScope::enter();
+                let mut state = self.produce_vue_macro_codegen_inner(ctx, owner_canonical, demand);
+                state.completeness = crate::request_context::current_cold_compute_completeness();
+                state
+            });
+        let scheduler_submissions_after = self
+            .scheduler()
+            .counters()
+            .submit_count
+            .load(Ordering::Relaxed);
+        state.counters.scheduler_submissions =
+            u32::try_from(scheduler_submissions_after.saturating_sub(scheduler_submissions_before))
+                .unwrap_or(u32::MAX);
 
         let (transitive_canonicals, facts_cacheable) = fact_footprint(finalise);
         VueMacroCodegenOutput {
@@ -255,7 +282,6 @@ impl VerterHost {
                             payload,
                             mac,
                             payload_index,
-                            effective_index,
                             defaults_index,
                             &mut state.counters,
                         ),
@@ -335,7 +361,6 @@ impl VerterHost {
         payload: crate::semantic_query::SemanticNodeId,
         mac: &AnalyzedMacro,
         payload_index: usize,
-        effective_index: usize,
         defaults_index: Option<usize>,
         counters: &mut VueMacroCodegenCounters,
     ) -> MacroRuntimeOutcome {
@@ -357,7 +382,7 @@ impl VerterHost {
         let Some(surface) = surface else {
             return MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(PropsRuntimeShape {
                 root_shape: RuntimeRootShape::NonObject,
-                defaults: defaults_association(defaults_index),
+                defaults: defaults_association(payload_index, defaults_index),
                 props: Vec::new(),
             }));
         };
@@ -377,13 +402,13 @@ impl VerterHost {
                 optional: member.optional,
                 skip_check: classification.skip_check,
                 constructors: classification.constructors,
-                anchor: member_anchor(mac, payload_index, effective_index, member.name.as_ref()),
+                anchor: member_anchor(mac, payload_index, member.name.as_ref()),
             });
         }
 
         MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(PropsRuntimeShape {
             root_shape: RuntimeRootShape::ObjectLike,
-            defaults: defaults_association(defaults_index),
+            defaults: defaults_association(payload_index, defaults_index),
             props,
         }))
     }
@@ -494,7 +519,7 @@ fn classify_runtime(
     counters.runtime_classifier_calls += 1;
     let result = dispatch.execute(SemanticQueryKey::ClassifyBroadRuntime {
         subject,
-        context: BroadRuntimeContext::default(),
+        context: dispatch.broad_runtime_context_for(subject),
     });
     if crate::request_context::current_cold_compute_completeness().is_partial() {
         return Err(partial_failure());
@@ -519,13 +544,18 @@ fn classify_runtime(
             .kinds()
             .iter()
             .any(|kind| matches!(kind, BroadRuntimeKind::Boolean | BroadRuntimeKind::Function));
-    let constructors = OrderedRuntimeConstructors::from_ordered(
-        classification
-            .kinds()
-            .iter()
-            .copied()
-            .map(runtime_constructor),
-    );
+    let constructors = if classification.kinds().contains(&BroadRuntimeKind::Unknown) && !skip_check
+    {
+        OrderedRuntimeConstructors::default()
+    } else {
+        OrderedRuntimeConstructors::from_ordered(
+            classification
+                .kinds()
+                .iter()
+                .copied()
+                .map(runtime_constructor),
+        )
+    };
     Ok(RuntimeClassification {
         constructors,
         skip_check,
@@ -611,19 +641,14 @@ fn push_emit(rows: &mut Vec<RuntimeEmit>, name: &str, anchor: MacroAnchor) {
     });
 }
 
-fn member_anchor(
-    mac: &AnalyzedMacro,
-    payload_index: usize,
-    effective_index: usize,
-    name: &str,
-) -> MacroAnchor {
+fn member_anchor(mac: &AnalyzedMacro, payload_index: usize, name: &str) -> MacroAnchor {
     let Some(ordinal) = mac.prop_fields.iter().position(|field| field.name == name) else {
         return MacroAnchor::MacroArgument {
             macro_index: macro_index(payload_index),
         };
     };
     MacroAnchor::Authored {
-        macro_index: macro_index(effective_index),
+        macro_index: macro_index(payload_index),
         member_ordinal: Some(AuthoredMemberOrdinal::new(member_ordinal(ordinal))),
     }
 }
@@ -645,9 +670,13 @@ fn authored_emit_anchor(
     }
 }
 
-fn defaults_association(defaults_index: Option<usize>) -> PropsDefaultsAssociation {
+fn defaults_association(
+    payload_index: usize,
+    defaults_index: Option<usize>,
+) -> PropsDefaultsAssociation {
     defaults_index.map_or(PropsDefaultsAssociation::None, |index| {
         PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: macro_index(payload_index),
             defaults_macro_index: macro_index(index),
         }
     })
