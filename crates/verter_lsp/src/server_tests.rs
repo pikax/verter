@@ -6010,13 +6010,21 @@ async fn contract_slot_props_pattern_positions_hover_with_provider_binding_types
     // Pattern positions must map through CodeTransform into the generated TSX
     // (they are verbatim-authored bytes inside the slot IIFE) so the provider's
     // typed binding hover answers at the authored offset — identical to a
-    // standalone-TS destructured parameter.
+    // standalone-TS destructured parameter. The mock matches hovers by EXACT
+    // (path, offset), and the merged hover must equal the provider's fenced
+    // quickinfo byte-for-byte — no substring needles, no residual verter text.
     for (needle, shift, label, seeded) in [
         (
             "{ title, count: slotCount }",
             2,
             "pattern title",
             "const title: string",
+        ),
+        (
+            "count: slotCount }",
+            1,
+            "pattern source key count",
+            "(property) count: number",
         ),
         (
             "count: slotCount }",
@@ -6034,9 +6042,64 @@ async fn contract_slot_props_pattern_positions_hover_with_provider_binding_types
                 .await
                 .expect("hover request should succeed"),
         );
-        assert!(
-            text.contains(seeded),
-            "{label} hover must be the provider's typed binding hover, got: {text}"
+        let expected = format!("```typescript\n{seeded}\n```");
+        assert_eq!(
+            text, expected,
+            "{label} hover must be exactly the provider's typed binding hover"
+        );
+    }
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn contract_slot_props_pattern_positions_hover_with_provider_binding_types_js_mode() {
+    // D4 in JS mode: the slot destructure pattern is language-independent in
+    // the IDE lowering — the same exact-offset provider round trip must hold
+    // for a `<script setup>` (no lang) parent.
+    const D4_PARENT_JS_SOURCE: &str = "<script setup>\nimport MyComp from './MyComp.vue'\n</script>\n<template>\n  <MyComp>\n    <template #header=\"{ title, count: slotCount }\">\n      <span>{{ title }}:{{ slotCount }}</span>\n    </template>\n  </MyComp>\n</template>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) = make_definition_test_server(&[
+        ("src/MyComp.vue", "vue", D3_CHILD_SOURCE),
+        ("src/App.vue", "vue", D4_PARENT_JS_SOURCE),
+    ])
+    .await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+
+    for (needle, shift, label, seeded) in [
+        (
+            "{ title, count: slotCount }",
+            2,
+            "js pattern title",
+            "const title: string",
+        ),
+        (
+            "count: slotCount }",
+            1,
+            "js pattern source key count",
+            "(property) count: number",
+        ),
+        (
+            "count: slotCount }",
+            7,
+            "js pattern alias slotCount",
+            "const slotCount: number",
+        ),
+    ] {
+        let mut position = find_document_position(server, &app_uri, needle, 0);
+        position.character += shift;
+        set_type_hover_at_vue_position(server, &provider, &app_uri, position, seeded);
+        let text = hover_text(
+            server
+                .hover(hover_params(&app_uri, position))
+                .await
+                .expect("hover request should succeed"),
+        );
+        let expected = format!("```typescript\n{seeded}\n```");
+        assert_eq!(
+            text, expected,
+            "{label} hover must be exactly the provider's typed binding hover"
         );
     }
 
@@ -6176,6 +6239,46 @@ async fn contract_svelte_snippet_param_positions_hover_with_provider_binding_typ
         assert!(
             text.contains("item: number"),
             "{label} hover must be the provider's typed parameter hover, got: {text}"
+        );
+    }
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn contract_svelte_snippet_param_positions_hover_with_provider_binding_types_js_mode() {
+    // D4 Svelte JS mode: the snippet parameter pattern maps into the
+    // projection identically without a `lang="ts"` script — the same
+    // exact-offset provider round trip must hold.
+    const D4_SVELTE_JS_SOURCE: &str = "<script>\n  let items = $state([1, 2]);\n</script>\n\n{#snippet row(item)}\n  <li>{item}</li>\n{/snippet}\n\n<ul>\n  {#each items as it}\n    {@render row(it)}\n  {/each}\n</ul>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server(&[("src/List.svelte", "svelte", D4_SVELTE_JS_SOURCE)]).await;
+    let doc_uri = workspace_uri(&workspace_id, "src/List.svelte");
+    let server = service.inner();
+
+    for (needle, shift, label) in [
+        ("row(item)", 4, "js snippet parameter pattern"),
+        ("{item}", 1, "js snippet parameter usage"),
+    ] {
+        let mut position = find_document_position(server, &doc_uri, needle, 0);
+        position.character += shift;
+        set_type_hover_at_vue_position(
+            server,
+            &provider,
+            &doc_uri,
+            position,
+            "(parameter) item: any",
+        );
+        let text = hover_text(
+            server
+                .hover(hover_params(&doc_uri, position))
+                .await
+                .expect("hover request should succeed"),
+        );
+        let expected = "```typescript\n(parameter) item: any\n```";
+        assert_eq!(
+            text, expected,
+            "{label} hover must be exactly the provider's typed parameter hover"
         );
     }
     drain_handle.abort();
