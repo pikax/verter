@@ -324,11 +324,12 @@ async fn version_probe_times_out_on_a_hanging_engine() {
 //    validation). ─────────────────────────────────────────────────────────────
 #[tokio::test]
 async fn lsp_smoke_times_out_on_a_hanging_engine() {
-    // Generous bounds: under full-suite parallel load the fake's own startup
-    // takes a moment; the discrimination (a bounded LspHandshakeFailed vs a hung
-    // validation) does not depend on a tight bound.
+    // The probe leg is generous (a slow parallel suite must still pass the
+    // version probe reliably); the hang lives at the handshake, so the smoke
+    // bound is what fires. The discrimination (bounded LspHandshakeFailed vs a
+    // hung validation) does not depend on tight bounds.
     let validator = ProcessValidator::with_policy(VersionPolicy::production())
-        .with_bounds(Duration::from_secs(1), Duration::from_secs(3));
+        .with_bounds(Duration::from_secs(5), Duration::from_secs(3));
     let start = std::time::Instant::now();
     let err = validator
         .validate(&fake_engine("hang-lsp"), Capability::Lsp)

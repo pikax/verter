@@ -486,6 +486,14 @@ fn user_cache_id() -> String {
 /// Tier 3: enumerate existing cache entries, newest supported version first.
 /// Consume-only: no mutation, no network. A corrupt newest entry is simply
 /// skipped by validation and the walk tries older supported entries.
+///
+/// Trust model (execution outside the trusted tree is never allowed):
+/// - the cache root itself must be OWNER-OWNED and not group/world-writable
+///   (Unix: a foreign-owned or writable root lets another user swap engines);
+/// - the FULL resolved path to each binary — every component through
+///   `package/lib/<binary>` — must be free of symlink/reparse components;
+/// - and the canonicalized binary must stay INSIDE the canonicalized cache
+///   tree (belt-and-suspenders against any escape the component walk missed).
 fn enumerate_cache_tier(
     cache_root: &Path,
     platform: &TsgoPlatform,
@@ -495,6 +503,14 @@ fn enumerate_cache_tier(
     let v1_root = cache_root.join(CACHE_DIR_NAME);
     if !v1_root.exists() {
         return; // no cache yet — nothing to say
+    }
+    // Trust: owner + write bits on the cache root (Unix).
+    #[cfg(unix)]
+    {
+        if let Some(issue) = unix_cache_root_trust_issues(&v1_root, current_euid()) {
+            out.notes.push(issue);
+            return;
+        }
     }
     let base = v1_root
         .join(user_cache_id())
@@ -509,22 +525,11 @@ fn enumerate_cache_tier(
         ));
         return;
     }
-    // Trust: the cache root must not be writable by group/others on Unix
-    // (a writable root lets another user swap engines). World-READABLE is fine.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(metadata) = std::fs::metadata(&v1_root) {
-            if metadata.permissions().mode() & 0o022 != 0 {
-                out.notes.push(format!(
-                    "the tsgo update cache at {} is group/world-writable; skipping the \
-                     cache tier",
-                    v1_root.display()
-                ));
-                return;
-            }
-        }
-    }
+    // The canonical anchor for the per-binary in-tree assertion.
+    let canonical_base = match base.canonicalize() {
+        Ok(base) => base,
+        Err(_) => return,
+    };
     let Ok(entries) = std::fs::read_dir(&base) else {
         return;
     };
@@ -537,10 +542,17 @@ fn enumerate_cache_tier(
             let name = entry.file_name().to_string_lossy().into_owned();
             let version = policy.check_str(&name).ok()?;
             let dir = entry.path();
-            if has_symlink_components(&dir, cache_root) {
+            let binary = dir.join("package").join(platform.lib_executable_rel_path());
+            // Trust: the FULL resolved path to the binary (version dir AND
+            // package/lib/<binary>) must be reparse-free and canonicalize
+            // INSIDE the trusted cache tree.
+            if has_symlink_components(&binary, cache_root) {
                 return None;
             }
-            let binary = dir.join("package").join(platform.lib_executable_rel_path());
+            let canonical_binary = binary.canonicalize().ok()?;
+            if !canonical_binary.starts_with(&canonical_base) {
+                return None;
+            }
             if !binary.is_file() || !dir.join(READY_MARKER).is_file() {
                 return None;
             }
@@ -553,6 +565,38 @@ fn enumerate_cache_tier(
     }
 }
 
+/// The current effective uid (Unix trust check).
+#[cfg(unix)]
+fn current_euid() -> u32 {
+    unsafe { libc::geteuid() }
+}
+
+/// Unix trust verdict on the cache root: `Some(issue)` when the root is NOT
+/// owned by `euid` or is group/world-writable (another user could swap
+/// engines); `None` when it is owned and private enough to trust.
+/// World-READABLE is fine.
+#[cfg(unix)]
+fn unix_cache_root_trust_issues(v1_root: &Path, euid: u32) -> Option<String> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let metadata = std::fs::metadata(v1_root).ok()?;
+    if metadata.uid() != euid {
+        return Some(format!(
+            "the tsgo update cache at {} is owned by uid {} but the current effective \
+             uid is {euid}; skipping the cache tier",
+            v1_root.display(),
+            metadata.uid()
+        ));
+    }
+    if metadata.permissions().mode() & 0o022 != 0 {
+        return Some(format!(
+            "the tsgo update cache at {} is group/world-writable; skipping the \
+             cache tier",
+            v1_root.display()
+        ));
+    }
+    None
+}
+
 /// Whether any component of `path` below `trusted_prefix` (exclusive) is a
 /// symlink/reparse point. Non-existent components are ignored (existence is
 /// checked separately).
@@ -563,13 +607,29 @@ fn has_symlink_components(path: &Path, trusted_prefix: &Path) -> bool {
             break;
         }
         if let Ok(metadata) = std::fs::symlink_metadata(p) {
-            if metadata.file_type().is_symlink() {
+            if is_reparse_point(&metadata) {
                 return true;
             }
         }
         current = p.parent();
     }
     false
+}
+
+/// Windows: the complete reparse-point check — `FILE_ATTRIBUTE_REPARSE_POINT`
+/// covers directory junctions and mount points, which `FileType::is_symlink()`
+/// alone misses.
+#[cfg(windows)]
+fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+/// Unix/other: symlinks are the reparse-point class.
+#[cfg(not(windows))]
+fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }
 
 /// Push a candidate, deduplicated by canonical path. The FIRST tier to name a
@@ -1027,6 +1087,91 @@ mod tests {
             matches!(err, ResolveError::ProductIntegrity { .. }),
             "an invalid bundled binary must escalate to ProductIntegrity even when \
              an earlier tier named the same file: {err:?}"
+        );
+    }
+
+    // ── DISCRIMINATING (B5): a cache entry whose `package`/`lib`/binary
+    //    component is a symlink ESCAPING the trusted root is REJECTED — the
+    //    trust check covers the FULL resolved path to the binary, not merely
+    //    the version directory. RED: today only the version dir is checked and
+    //    the symlinked `package` is followed into an accepted candidate. ──────
+    #[cfg(unix)]
+    #[test]
+    fn a_cache_binary_with_a_symlinked_component_escaping_the_root_is_rejected() {
+        let f = full_fixture("cacheescape");
+        // <cache>/…/<policy>/7.0.9/package → symlink to a tree OUTSIDE the cache.
+        let version_dir = f
+            .cache_new
+            .parent() // lib
+            .and_then(Path::parent) // package
+            .and_then(Path::parent) // <version>
+            .unwrap()
+            .to_path_buf();
+        let host = host_platform().unwrap();
+        let outside = f.fixture.path("outside-tree");
+        std::fs::create_dir_all(outside.join("lib")).unwrap();
+        std::fs::write(outside.join("lib").join(host.executable), b"escaped").unwrap();
+        std::fs::remove_dir_all(version_dir.join("package")).unwrap();
+        std::os::unix::fs::symlink(&outside, version_dir.join("package")).unwrap();
+
+        let enumeration = enumerate_candidates(&f.request());
+        assert!(
+            !enumeration
+                .candidates
+                .iter()
+                .any(|c| c.path.starts_with(&version_dir)),
+            "a cache binary reached through a symlinked `package` must be rejected: {:?}",
+            enumeration.candidates
+        );
+        // The clean 7.0.3 entry still resolves (per-entry rejection, not a
+        // whole-tier skip).
+        assert!(
+            enumeration.candidates.iter().any(|c| c.path == f.cache_old),
+            "the untouched in-tree cache entry must survive: {:?}",
+            enumeration.candidates
+        );
+    }
+
+    // ── DISCRIMINATING (B5): the Unix trusted root must be OWNER-VALIDATED —
+    //    a root owned by someone else is rejected (only group/world write bits
+    //    were checked before); a clean, current-user-owned root is accepted. ──
+    #[cfg(unix)]
+    #[test]
+    fn a_cache_root_owned_by_another_user_is_rejected() {
+        let f = full_fixture("cacheowner");
+        let v1_root = f.cache_root.join(CACHE_DIR_NAME);
+        let euid = unsafe { libc::geteuid() };
+        assert_eq!(
+            unix_cache_root_trust_issues(&v1_root, euid),
+            None,
+            "a clean, current-user-owned cache root must be trusted"
+        );
+        let issue = unix_cache_root_trust_issues(&v1_root, euid + 1)
+            .expect("a root not owned by the current user must be rejected");
+        assert!(issue.contains("owned"), "{issue}");
+    }
+
+    // ── DISCRIMINATING (B5): a group/world-WRITABLE cache root skips the whole
+    //    tier with an explanatory note (another user could swap engines). ─────
+    #[cfg(unix)]
+    #[test]
+    fn a_world_writable_cache_root_skips_the_tier_with_a_note() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = full_fixture("cachemode");
+        let v1_root = f.cache_root.join(CACHE_DIR_NAME);
+        std::fs::set_permissions(&v1_root, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let enumeration = enumerate_candidates(&f.request());
+        assert!(
+            !enumeration
+                .candidates
+                .iter()
+                .any(|c| c.provenance == Provenance::TempCache),
+            "a writable cache root must not contribute candidates"
+        );
+        assert!(
+            enumeration.notes.iter().any(|n| n.contains("writable")),
+            "the skipped tier must be explained: {:?}",
+            enumeration.notes
         );
     }
 
