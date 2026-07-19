@@ -2773,8 +2773,8 @@ fn did_open_provider_sync_policy_skips_api_sync_for_tsserver_but_not_tsgo() {
     );
 }
 
-#[test]
-fn editor_tsserver_constructs_store_publication_without_a_local_provider() {
+#[tokio::test]
+async fn editor_tsserver_constructs_store_publication_without_a_local_provider() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
@@ -2795,7 +2795,12 @@ fn editor_tsserver_constructs_store_publication_without_a_local_provider() {
 
     assert!(server.type_provider.is_none());
     assert!(server.project_sync.is_none());
-    assert!(server.sync_coordinator.is_none());
+    // The debounced coordinator is ALWAYS constructed: its publish half
+    // carries Verter-owned diagnostics (lint / unused-declaration hints /
+    // template errors) on every route — the editor-owned tsserver plugin
+    // route has NO in-process provider, yet files opened after init must
+    // still receive Verter-owned pushes (the provider-sync half no-ops).
+    let _always_present: &crate::sync_coordinator::SyncCoordinatorHandle = &server.sync_coordinator;
     assert!(
         server.carrier_publish_coordinator.is_some(),
         "the editor plugin route requires the durable store publisher"
@@ -25435,4 +25440,43 @@ async fn contract_directive_hovers_survive_sfc_scanner_dead_zones() {
 
     drain_handle.abort();
     drop(service);
+}
+
+/// The committed VS Code E2E fixture stays semantically tied to the boundary
+/// path: the EXACT fixture bytes produce the three unused-declaration hints
+/// (a drift in the fixture or the pipeline breaks the E2E and this test
+/// together, pointing at the same cause).
+#[test]
+fn e2e_fixture_unused_declarations_matches_boundary_semantics() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+        "../../packages/vue-vscode/e2e/fixtures/vue-parity/src/diagnostics/UnusedDeclarations.vue",
+    );
+    let source = std::fs::read_to_string(&fixture).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("UnusedDeclarations.vue");
+    std::fs::write(&file, &source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+    let count = |code: &str| {
+        diags
+            .iter()
+            .filter(|d| matches!(d.code.as_ref(), Some(NumberOrString::String(c)) if c == code))
+            .count()
+    };
+    assert_eq!(count("verter/no-unused-props"), 1, "props");
+    assert_eq!(count("verter/no-unused-emit-declarations"), 1, "emits");
+    assert_eq!(count("verter/no-unused-slots"), 1, "slots");
 }

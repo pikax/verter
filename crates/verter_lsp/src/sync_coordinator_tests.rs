@@ -244,7 +244,7 @@ async fn sync_file_queues_pending_snapshot_sync_when_resolver_snapshot_is_missin
     let provider = Arc::new(MockTypeProvider::new());
     let deps = SyncCoordinatorDeps {
         documents,
-        project_sync: ProjectSync::new(provider, ProjectSyncMode::FullProject),
+        project_sync: Some(ProjectSync::new(provider, ProjectSyncMode::FullProject)),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
         client: make_test_client(),
@@ -288,7 +288,10 @@ async fn preserve_open_unresolved_carrier_no_ide_no_prior_commits_empty_unresolv
     let provider = Arc::new(MockTypeProvider::new());
     let deps = SyncCoordinatorDeps {
         documents,
-        project_sync: ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject),
+        project_sync: Some(ProjectSync::new(
+            provider.clone(),
+            ProjectSyncMode::FullProject,
+        )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
         client: make_test_client(),
@@ -305,7 +308,9 @@ async fn preserve_open_unresolved_carrier_no_ide_no_prior_commits_empty_unresolv
     };
 
     // No prior state in the (empty) states map; no IDE output this pass.
-    preserve_open_unresolved_carrier(&deps, "/workspace/src/App.vue", false, None).await;
+    let project_sync = deps.project_sync.clone().expect("test deps carry a sync");
+    preserve_open_unresolved_carrier(&deps, &project_sync, "/workspace/src/App.vue", false, None)
+        .await;
 
     let state = deps
         .provider_sync_states
@@ -348,7 +353,10 @@ async fn publish_merged_diagnostics_skips_type_provider_without_committed_state(
     let provider = Arc::new(MockTypeProvider::new());
     let deps = SyncCoordinatorDeps {
         documents,
-        project_sync: ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject),
+        project_sync: Some(ProjectSync::new(
+            provider.clone(),
+            ProjectSyncMode::FullProject,
+        )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
         client: make_test_client(),
@@ -424,7 +432,10 @@ async fn sync_file_preserves_open_vue_state_on_owner_none_ready_snapshot() {
 
     let deps = SyncCoordinatorDeps {
         documents,
-        project_sync: ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject),
+        project_sync: Some(ProjectSync::new(
+            provider.clone(),
+            ProjectSyncMode::FullProject,
+        )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
         client: make_test_client(),
@@ -504,7 +515,10 @@ async fn rune_module_debounced_diagnostics_map_through_self_file_projection() {
     let provider_sync_states = Arc::new(DashMap::new());
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
-        project_sync: ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject),
+        project_sync: Some(ProjectSync::new(
+            provider.clone(),
+            ProjectSyncMode::FullProject,
+        )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
         client: make_test_client(),
@@ -525,7 +539,7 @@ async fn rune_module_debounced_diagnostics_map_through_self_file_projection() {
     assert!(
         crate::server::sync_self_file_shadow_state(
             &deps.documents,
-            &deps.project_sync,
+            deps.project_sync.as_ref().expect("test deps carry a sync"),
             &deps.provider_sync_states,
             None,
             &uri,
@@ -652,7 +666,10 @@ async fn sync_file_routes_open_rune_module_through_self_file_shadow_not_carrier(
 
     let deps = SyncCoordinatorDeps {
         documents,
-        project_sync: ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject),
+        project_sync: Some(ProjectSync::new(
+            provider.clone(),
+            ProjectSyncMode::FullProject,
+        )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
         client: make_test_client(),
@@ -761,7 +778,10 @@ async fn sync_file_routes_open_plain_script_through_self_file_shadow_not_carrier
 
     let deps = SyncCoordinatorDeps {
         documents,
-        project_sync: ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject),
+        project_sync: Some(ProjectSync::new(
+            provider.clone(),
+            ProjectSyncMode::FullProject,
+        )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
         client: make_test_client(),
@@ -870,7 +890,10 @@ async fn sync_file_clears_non_open_plain_script_dependency_state_once_ready() {
 
     let deps = SyncCoordinatorDeps {
         documents,
-        project_sync: ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject),
+        project_sync: Some(ProjectSync::new(
+            provider.clone(),
+            ProjectSyncMode::FullProject,
+        )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
         client: make_test_client(),
@@ -961,7 +984,10 @@ defineProps<{ msg: string }>()
 
     let deps = SyncCoordinatorDeps {
         documents,
-        project_sync: ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject),
+        project_sync: Some(ProjectSync::new(
+            provider.clone(),
+            ProjectSyncMode::FullProject,
+        )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
         client: make_test_client(),
@@ -1034,7 +1060,10 @@ async fn coordinator_direct_ide_sync_records_carrier_ide_surface() {
 
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
-        project_sync: ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject),
+        project_sync: Some(ProjectSync::new(
+            provider.clone(),
+            ProjectSyncMode::FullProject,
+        )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
         client: make_test_client(),
@@ -1135,7 +1164,10 @@ async fn coordinator_open_unresolved_preserve_records_carrier_ide_surface() {
 
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
-        project_sync: ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject),
+        project_sync: Some(ProjectSync::new(
+            provider.clone(),
+            ProjectSyncMode::FullProject,
+        )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
         client: make_test_client(),
@@ -1211,7 +1243,10 @@ async fn make_carrier_diagnostics_fixture() -> (
 
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
-        project_sync: ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject),
+        project_sync: Some(ProjectSync::new(
+            provider.clone(),
+            ProjectSyncMode::FullProject,
+        )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
         client: make_test_client(),
@@ -1402,7 +1437,10 @@ async fn rune_diagnostics_drop_provider_results_when_shadow_surface_regenerates_
     let provider_sync_states = Arc::new(DashMap::new());
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
-        project_sync: ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject),
+        project_sync: Some(ProjectSync::new(
+            provider.clone(),
+            ProjectSyncMode::FullProject,
+        )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
         client: make_test_client(),
@@ -1420,7 +1458,7 @@ async fn rune_diagnostics_drop_provider_results_when_shadow_surface_regenerates_
     assert!(
         crate::server::sync_self_file_shadow_state(
             &deps.documents,
-            &deps.project_sync,
+            deps.project_sync.as_ref().expect("test deps carry a sync"),
             &deps.provider_sync_states,
             None,
             &uri,
@@ -1481,4 +1519,88 @@ async fn rune_diagnostics_drop_provider_results_when_shadow_surface_regenerates_
         "rune provider diagnostics produced against a superseded Shadow surface must be \
          DROPPED, got {merged:?}"
     );
+}
+
+/// Provider-less publish half: on a route with NO in-process provider (the
+/// editor-owned tsserver plugin, verter-only mode) the coordinator must still
+/// publish Verter-owned diagnostics for a signaled open file — the exact
+/// end-to-end gap the VS Code E2E exposed (unused-declaration hints never
+/// reached the editor because the coordinator did not exist on that route).
+///
+/// Discriminating: `project_sync: None` was unrepresentable before the fix
+/// (the coordinator was only spawned WITH a provider), and the observable —
+/// the recomputed verter diagnostics cache entry carrying the
+/// `verter/no-unused-props` hint — is written by `publish_merged_diagnostics`,
+/// which never ran for this route.
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_less_coordinator_still_publishes_verter_owned_diagnostics() {
+    let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
+        HostConfig::default(),
+    ))));
+    let source = "<script setup lang=\"ts\">\n\
+                  defineProps<{ deadProp: string }>();\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <div />\n\
+                  </template>\n";
+    let uri: Uri = "file:///workspace/src/UnusedHint.vue".parse().expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+    let canonical_id = documents
+        .get_canonical_id(&uri)
+        .expect("open doc has a canonical id");
+
+    let needs_provider_sync = Arc::new(DashSet::new());
+    needs_provider_sync.insert(canonical_id.clone());
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let deps = SyncCoordinatorDeps {
+        documents,
+        project_sync: None,
+        needs_provider_sync,
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: None,
+        cached_verter_diags: Arc::clone(&cached_verter_diags),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::new(DashMap::new()),
+        vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
+        type_provider_kind: crate::TypeProviderKind::EditorTsserver,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    };
+
+    let handle = spawn_sync_coordinator(deps);
+    handle.signal(canonical_id.clone(), uri.as_str().to_string());
+
+    // Debounce is 300ms; poll for the publish's recomputed verter cache entry.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(entry) = cached_verter_diags.get(uri.as_str()) {
+            let has_unused_hint = entry.2.iter().any(|d| {
+                matches!(
+                    d.code.as_ref(),
+                    Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+                )
+            });
+            if has_unused_hint {
+                break;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the provider-less coordinator must publish Verter-owned diagnostics \
+             (verter/no-unused-props) for a signaled open file; cache: {:?}",
+            cached_verter_diags
+                .get(uri.as_str())
+                .map(|entry| entry.2.clone())
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }

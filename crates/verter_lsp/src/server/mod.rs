@@ -421,8 +421,12 @@ pub struct VerterLanguageServer {
     pending_snapshot_provider_sync: Arc<DashSet<String>>,
     /// Handle for the SyncCoordinator — replaces the spawn-per-keystroke debounce.
     /// Signals are sent per keystroke; the coordinator coalesces them and syncs
-    /// after 300ms of silence. `None` when no type provider is connected.
-    sync_coordinator: Option<crate::sync_coordinator::SyncCoordinatorHandle>,
+    /// after 300ms of silence. Always spawned: the debounced PUBLISH half
+    /// (Verter-owned lint / unused-declaration / template diagnostics) never
+    /// depends on an in-process provider — routes without one (the
+    /// editor-owned tsserver plugin, verter-only mode) still publish on
+    /// open/change; only the provider-sync half is provider-gated.
+    sync_coordinator: crate::sync_coordinator::SyncCoordinatorHandle,
     /// Epoch millis of the last `did_change` call.  Used to skip non-critical TSGO requests
     /// (diagnostics, semantic tokens, inlay hints) during typing.  The debounced sync needs
     /// time to fire + TSGO needs time to process the update, so we suppress these requests
@@ -923,27 +927,28 @@ impl VerterLanguageServer {
         let carrier_transaction_coordinator =
             Arc::new(crate::external_ts::CarrierTransactionCoordinator::new());
 
-        // Create SyncCoordinator if a type provider is connected.
-        // The coordinator's debounced loop replaces the old spawn-per-keystroke pattern.
-        let sync_coordinator = project_sync.as_ref().map(|ps| {
-            crate::sync_coordinator::spawn_sync_coordinator(
-                crate::sync_coordinator::SyncCoordinatorDeps {
-                    documents: Arc::clone(&documents),
-                    project_sync: ps.clone(),
-                    needs_provider_sync: Arc::clone(&needs_deferred_sync),
-                    pending_snapshot_provider_sync: Arc::clone(&pending_snapshot_provider_sync),
-                    client: client.clone(),
-                    type_provider: config.type_provider.clone(),
-                    cached_verter_diags: Arc::clone(&cached_verter_diags),
-                    position_encoding: Arc::clone(&position_encoding),
-                    provider_sync_states: Arc::clone(&provider_sync_states),
-                    vfs_workspace: Arc::clone(&vfs_workspace),
-                    type_provider_kind: config.type_provider_kind,
-                    carrier_publish_coordinator: carrier_publish_coordinator.clone(),
-                    carrier_transaction_coordinator: Arc::clone(&carrier_transaction_coordinator),
-                },
-            )
-        });
+        // The SyncCoordinator's debounced loop replaces the old
+        // spawn-per-keystroke pattern. Spawned UNCONDITIONALLY: its publish
+        // half carries Verter-owned diagnostics on every route; the
+        // provider-sync half no-ops when no in-process provider is connected
+        // (editor-owned tsserver plugin serving, verter-only mode).
+        let sync_coordinator = crate::sync_coordinator::spawn_sync_coordinator(
+            crate::sync_coordinator::SyncCoordinatorDeps {
+                documents: Arc::clone(&documents),
+                project_sync: project_sync.clone(),
+                needs_provider_sync: Arc::clone(&needs_deferred_sync),
+                pending_snapshot_provider_sync: Arc::clone(&pending_snapshot_provider_sync),
+                client: client.clone(),
+                type_provider: config.type_provider.clone(),
+                cached_verter_diags: Arc::clone(&cached_verter_diags),
+                position_encoding: Arc::clone(&position_encoding),
+                provider_sync_states: Arc::clone(&provider_sync_states),
+                vfs_workspace: Arc::clone(&vfs_workspace),
+                type_provider_kind: config.type_provider_kind,
+                carrier_publish_coordinator: carrier_publish_coordinator.clone(),
+                carrier_transaction_coordinator: Arc::clone(&carrier_transaction_coordinator),
+            },
+        );
 
         Self {
             client,

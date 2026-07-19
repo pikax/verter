@@ -629,12 +629,12 @@ pub(super) async fn handle_did_open(
     // Signal coordinator for fresh diagnostics on open (not just on change).
     // This ensures re-opening a file after external modifications publishes
     // up-to-date merged diagnostics (Verter lint + type provider).
-    if let Some(coordinator) = &server.sync_coordinator {
-        if let Some(canonical_id) = current_canonical_id.as_ref() {
-            server.needs_ide_sync.insert(canonical_id.clone());
-            server.needs_deferred_sync.insert(canonical_id.clone());
-            coordinator.signal(canonical_id.clone(), uri.as_str().to_string());
-        }
+    if let Some(canonical_id) = current_canonical_id.as_ref() {
+        server.needs_ide_sync.insert(canonical_id.clone());
+        server.needs_deferred_sync.insert(canonical_id.clone());
+        server
+            .sync_coordinator
+            .signal(canonical_id.clone(), uri.as_str().to_string());
     }
 
     if startup_policy.publish_diagnostics {
@@ -746,9 +746,9 @@ pub(super) async fn handle_did_change(
             }
             server.needs_ide_sync.insert(canonical_id.clone());
             server.needs_deferred_sync.insert(canonical_id.clone());
-            if let Some(coordinator) = &server.sync_coordinator {
-                coordinator.signal(canonical_id.clone(), uri.as_str().to_string());
-            }
+            server
+                .sync_coordinator
+                .signal(canonical_id.clone(), uri.as_str().to_string());
 
             // Eager carrier refresh — make the freshly-edited carrier content
             // visible to the type provider immediately, so the next interactive
