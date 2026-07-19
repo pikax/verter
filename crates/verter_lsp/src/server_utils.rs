@@ -27,6 +27,11 @@ pub(super) fn is_config_file(path: &str) -> bool {
     if filename.starts_with("tsconfig") && filename.ends_with(".json") {
         return true;
     }
+    // The JavaScript project config — same ownership authority as tsconfig.json
+    // for JS-only trees; edits must rebuild the registry identically.
+    if filename == "jsconfig.json" {
+        return true;
+    }
     if filename == ".verterrc.json" || filename == "package.json" {
         return true;
     }
