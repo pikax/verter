@@ -115,6 +115,7 @@ declare module "@verter/types" {
   export declare function shallowUnwrapRef<T>(obj: T): import("vue").ShallowUnwrapRef<T>;
   export declare function globalComponentsNav(): import("vue").GlobalComponents;
   export type GlobalComponentType<N> = N extends keyof import("vue").GlobalComponents ? import("vue").GlobalComponents[N] : unknown;
+  export type GlobalComponentKebabType<N, K extends string> = N extends keyof import("vue").GlobalComponents ? import("vue").GlobalComponents[N] : K extends keyof import("vue").GlobalComponents ? import("vue").GlobalComponents[K] : K extends keyof import("vue/jsx-runtime").JSX.IntrinsicElements ? (props: import("vue/jsx-runtime").JSX.IntrinsicElements[K]) => any : (props: Record<string, any>) => any;
   export type ExtractRenderComponent<T> = T extends { new (...args: any[]): infer I; } ? I extends { $props: any } ? T : I extends HTMLElement ? (props: {}) => I : I : T extends (...args: any) => infer R ? void extends R ? typeof import("vue").Comment : R extends Array<any> ? typeof import("vue").Fragment : HTMLElement : T extends HTMLElement ? (props: {}) => T : T extends keyof import("vue").GlobalComponents ? ExtractRenderComponent<import("vue").GlobalComponents[T]> : T extends keyof import("vue").NativeElements ? (props: import("vue").NativeElements[T]) => JSX.Element : (props: {}) => JSX.Element;
   export declare function extractRenderComponent<T extends string>(t: T): ExtractRenderComponent<T>;
   export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
@@ -171,6 +172,7 @@ export declare function enhanceElementWithProps<T, P>(el: T, props: P): T & P;
 export declare function shallowUnwrapRef<T>(obj: T): import("vue").ShallowUnwrapRef<T>;
 export declare function globalComponentsNav(): import("vue").GlobalComponents;
 export type GlobalComponentType<N> = N extends keyof import("vue").GlobalComponents ? import("vue").GlobalComponents[N] : unknown;
+export type GlobalComponentKebabType<N, K extends string> = N extends keyof import("vue").GlobalComponents ? import("vue").GlobalComponents[N] : K extends keyof import("vue").GlobalComponents ? import("vue").GlobalComponents[K] : K extends keyof import("vue/jsx-runtime").JSX.IntrinsicElements ? (props: import("vue/jsx-runtime").JSX.IntrinsicElements[K]) => any : (props: Record<string, any>) => any;
 export type ExtractRenderComponent<T> = T extends { new (...args: any[]): infer I; } ? I extends { $props: any } ? T : I extends HTMLElement ? (props: {}) => I : I : T extends (...args: any) => infer R ? void extends R ? typeof import("vue").Comment : R extends Array<any> ? typeof import("vue").Fragment : HTMLElement : T extends HTMLElement ? (props: {}) => T : T extends keyof import("vue").GlobalComponents ? ExtractRenderComponent<import("vue").GlobalComponents[T]> : T extends keyof import("vue").NativeElements ? (props: import("vue").NativeElements[T]) => JSX.Element : (props: {}) => JSX.Element;
 export declare function extractRenderComponent<T extends string>(t: T): ExtractRenderComponent<T>;
 export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
@@ -292,7 +294,7 @@ fn emit_helper_imports_inner(
         if template_ast.is_some() {
             writeln!(
                 imports,
-                "import type {{ Prettify as {P}Prettify, ExtractComponentProps as {P}ExtractComponentProps, ExtractLeafElement as {P}ExtractLeafElement, GlobalComponentType as {P}GlobalComponentType }} from \"{}\";",
+                "import type {{ Prettify as {P}Prettify, ExtractComponentProps as {P}ExtractComponentProps, ExtractLeafElement as {P}ExtractLeafElement, GlobalComponentType as {P}GlobalComponentType, GlobalComponentKebabType as {P}GlobalComponentKebabType }} from \"{}\";",
                 options.types_module_name,
                 P = PREFIX,
             )

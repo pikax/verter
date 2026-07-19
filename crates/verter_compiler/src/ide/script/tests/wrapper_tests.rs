@@ -132,8 +132,26 @@ fn nav_probe_locator_roundtrips_real_emission() {
     let mut buf = String::from("PREAMBLE;");
     super::super::wrapper::emit_global_component_fallbacks(
         &mut buf,
-        &["GlobalEmitComp".to_string(), "ElButton".to_string()],
+        &[
+            crate::ide::GlobalComponentFallback::pascal_authored("GlobalEmitComp"),
+            // Kebab-authored entry — the fail-open GlobalComponentKebabType
+            // emission shape must roundtrip through the SAME locator.
+            crate::ide::GlobalComponentFallback {
+                pascal: "ElButton".to_string(),
+                authored_non_pascal: Some("el-button".to_string()),
+            },
+        ],
         false,
+    );
+    assert!(
+        buf.contains(
+            "const ElButton = {} as ___VERTER___GlobalComponentKebabType<'ElButton', 'el-button'>;"
+        ),
+        "kebab-authored const must use the fail-open kebab type: {buf}"
+    );
+    assert!(
+        !buf.contains("___VERTER___GlobalComponentType<'ElButton'>"),
+        "kebab-authored const must NOT use the fail-closed pascal type: {buf}"
     );
     for name in ["GlobalEmitComp", "ElButton"] {
         let decl = format!("const {name} = ");
@@ -177,7 +195,13 @@ fn nav_probe_locator_fails_closed_on_foreign_spans() {
 
     // JS-mode emission has no probe.
     let mut js = String::new();
-    super::super::wrapper::emit_global_component_fallbacks(&mut js, &["VIcon".to_string()], true);
+    super::super::wrapper::emit_global_component_fallbacks(
+        &mut js,
+        &[crate::ide::GlobalComponentFallback::pascal_authored(
+            "VIcon",
+        )],
+        true,
+    );
     assert!(!js.contains("___VERTER___globalComponentsNav()"));
     let js_start = (js.find("const VIcon").expect("js const") + "const ".len()) as u32;
     assert_eq!(

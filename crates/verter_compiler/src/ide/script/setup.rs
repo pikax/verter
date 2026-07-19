@@ -51,7 +51,7 @@ pub(super) fn process_tsx_script_setup<'alloc>(
     options: &IdeScriptOptions<'_>,
     builtin_components: &[&str],
     template_end: Option<u32>,
-    template_component_fallbacks: &mut Vec<String>,
+    template_component_fallbacks: &mut Vec<crate::ide::GlobalComponentFallback>,
 ) -> (Option<String>, Option<DestructuredBlockMeta>) {
     let content_span = match &setup.content {
         Some(span) => span,
@@ -59,8 +59,12 @@ pub(super) fn process_tsx_script_setup<'alloc>(
             // Self-closing <script setup /> — the template may still reference
             // globally-registered components; collect + emit their fallback
             // consts into the minimal wrapper.
-            let global_fallbacks =
-                super::collect_global_component_fallbacks(template_ast, source, |_| false);
+            let global_fallbacks = super::collect_global_component_fallbacks(
+                template_ast,
+                source,
+                options.custom_elements,
+                |_| false,
+            );
             let close = emit_minimal_wrapper(
                 out,
                 options,
@@ -177,6 +181,7 @@ pub(super) fn process_tsx_script_setup<'alloc>(
                 source,
                 content_start,
                 &available_bindings,
+                options.custom_elements,
                 out,
             );
         }
@@ -693,8 +698,12 @@ pub(super) fn process_tsx_script_setup<'alloc>(
         // The collected list is also handed back to the template-typing inventory so a
         // global component's tag JSX and `@event` payload resolve through the same
         // `InstanceType<typeof Pascal>["$props"]` const that is emitted here.
-        let global_fallbacks =
-            collect_global_component_fallbacks(template_ast, source, |n| bindings.contains_key(n));
+        let global_fallbacks = collect_global_component_fallbacks(
+            template_ast,
+            source,
+            options.custom_elements,
+            |n| bindings.contains_key(n),
+        );
         emit_global_component_fallbacks(&mut wrapper_end, &global_fallbacks, options.is_jsx);
         *template_component_fallbacks = global_fallbacks;
 

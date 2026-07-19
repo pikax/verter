@@ -138,7 +138,7 @@ pub(super) fn process_tsx_script_only<'alloc>(
     _alloc: &'alloc Allocator,
     options: &IdeScriptOptions<'_>,
     builtin_components: &[&str],
-    template_component_fallbacks: &mut Vec<String>,
+    template_component_fallbacks: &mut Vec<crate::ide::GlobalComponentFallback>,
 ) {
     let content_span = match &script.content {
         Some(span) => span,
@@ -208,7 +208,9 @@ pub(super) fn process_tsx_script_only<'alloc>(
     // JSX is relocated after the script close by the compile pipeline), so the
     // consts are in scope with no TDZ hazard.
     let global_fallbacks =
-        collect_global_component_fallbacks(template_ast, source, |n| bindings.contains_key(n));
+        collect_global_component_fallbacks(template_ast, source, options.custom_elements, |n| {
+            bindings.contains_key(n)
+        });
 
     // Detect if the default export is a plain object (needs defineComponent wrapping
     // for type inference). Only applies to JS mode — TS uses native type syntax.

@@ -156,7 +156,7 @@ pub fn generate_ide_script<'alloc>(
     // GlobalComponents fallback consts. Every script arm (`<script setup>`,
     // Options-API `<script>`, and no-script) emits them, so a globally-registered
     // component types identically regardless of the SFC's script shape.
-    let mut global_component_fallbacks: Vec<String> = Vec::new();
+    let mut global_component_fallbacks: Vec<crate::ide::GlobalComponentFallback> = Vec::new();
 
     match (script, script_setup) {
         (_, Some(setup)) => {
@@ -197,8 +197,12 @@ pub fn generate_ide_script<'alloc>(
             // Imports must come BEFORE the function wrapper (TS1232: imports
             // can only appear at the top level of a module).
             emit_helper_imports(&mut out, 0, options, &builtin_components, template_ast);
-            global_component_fallbacks =
-                collect_global_component_fallbacks(template_ast, source, |_| false);
+            global_component_fallbacks = collect_global_component_fallbacks(
+                template_ast,
+                source,
+                options.custom_elements,
+                |_| false,
+            );
             return_close = emit_minimal_wrapper(
                 &mut out,
                 options,
@@ -271,7 +275,12 @@ pub fn generate_ide_script<'alloc>(
         return_close,
         return_close_pos,
         destructured_block,
-        template_component_bindings: TemplateComponentBindings::new(global_component_fallbacks),
+        template_component_bindings: TemplateComponentBindings::new(
+            global_component_fallbacks
+                .into_iter()
+                .map(|f| f.pascal)
+                .collect(),
+        ),
     }
 }
 

@@ -9,6 +9,16 @@ export declare function globalComponentsNav(): import("vue").GlobalComponents;
 export type GlobalComponentType<N> = N extends keyof import("vue").GlobalComponents
   ? import("vue").GlobalComponents[N]
   : unknown;
+export type GlobalComponentKebabType<
+  N,
+  K extends string,
+> = N extends keyof import("vue").GlobalComponents
+  ? import("vue").GlobalComponents[N]
+  : K extends keyof import("vue").GlobalComponents
+    ? import("vue").GlobalComponents[K]
+    : K extends keyof import("vue/jsx-runtime").JSX.IntrinsicElements
+      ? (props: import("vue/jsx-runtime").JSX.IntrinsicElements[K]) => any
+      : (props: Record<string, any>) => any;
 export type ExtractRenderComponent<T> = T extends { new (...args: any[]): infer I }
   ? I extends { $props: any }
     ? T

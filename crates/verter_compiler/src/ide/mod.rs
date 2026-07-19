@@ -127,6 +127,13 @@ pub struct IdeScriptOptions<'a> {
     /// overlay, which intentionally suppresses real references for completion and
     /// would mis-report a genuinely-used binding as unused.
     pub template_used_vars: Option<rustc_hash::FxHashSet<String>>,
+    /// Configured custom-element prefixes (`CompileOptions::custom_elements`).
+    /// A matching tag is a native custom element: it is excluded from
+    /// GlobalComponents fallback collection and from the kebab component-tag
+    /// rewrite, so it stays authored and types through `JSX.IntrinsicElements`
+    /// exactly like any other intrinsic. Prefix semantics mirror
+    /// [`crate::compile::parse_sfc`]'s `is_custom_element` callback.
+    pub custom_elements: Option<&'a [String]>,
 }
 
 /// CSS module information for IDE codegen.
@@ -151,6 +158,24 @@ pub struct IdeTemplateOptions<'a> {
     /// Experimental: strict slot children type checking.
     /// Emits `strictRenderSlot` calls to enforce typed slot children.
     pub strict_slots: bool,
+    /// Configured custom-element prefixes (see
+    /// [`IdeScriptOptions::custom_elements`]). A matching tag never rewrites to
+    /// a component binding — it stays an authored intrinsic element.
+    pub custom_elements: Option<&'a [String]>,
+}
+
+/// Whether `tag_name` matches a configured custom-element prefix.
+///
+/// Mirrors the [`crate::compile::parse_sfc`] `is_custom_element` callback
+/// byte-for-byte (`starts_with` on each configured prefix) so the parse-domain
+/// diagnostic classification and the IDE codegen agree on which tags are
+/// custom elements.
+pub(crate) fn matches_custom_element(custom_elements: Option<&[String]>, tag_name: &str) -> bool {
+    custom_elements.is_some_and(|prefixes| {
+        prefixes
+            .iter()
+            .any(|prefix| tag_name.starts_with(prefix.as_str()))
+    })
 }
 
 // ── Generic info ─────────────────────────────────────────────────
@@ -455,6 +480,40 @@ pub(crate) struct TemplateComponentBindings {
     fallback_consts: Vec<String>,
 }
 
+/// One collected GlobalComponents fallback const (see
+/// [`crate::ide::script::wrapper::collect_global_component_fallbacks`]).
+///
+/// `pascal` is the emitted const NAME. `authored_non_pascal` selects the const's
+/// TYPE arm: `None` when any template occurrence authored the Pascal name itself
+/// (component intent — the const stays the fail-closed
+/// `GlobalComponentType<'Pascal'>`, an unregistered name types `unknown` and
+/// produces a real JSX diagnostic); `Some(tag)` when the name was ONLY ever
+/// authored in a non-Pascal form (kebab/lowercase tag — the const becomes the
+/// fail-open `GlobalComponentKebabType<'Pascal', 'tag'>`, which resolves a
+/// registered `GlobalComponents` member (Pascal or authored key) to its
+/// component type and degrades an UNREGISTERED tag to the intrinsic-element
+/// surface (`JSX.IntrinsicElements[tag]` props, `any` under Vue's index
+/// signature) instead of a false TS2604 — the pre-fallback behavior of an
+/// authored web-component tag).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GlobalComponentFallback {
+    /// PascalCase const name.
+    pub(crate) pascal: String,
+    /// First-seen authored tag form, only when no occurrence was Pascal-authored.
+    pub(crate) authored_non_pascal: Option<String>,
+}
+
+impl GlobalComponentFallback {
+    /// Convenience for tests / callers materialising a Pascal-authored entry.
+    #[cfg(test)]
+    pub(crate) fn pascal_authored(name: &str) -> Self {
+        Self {
+            pascal: name.to_string(),
+            authored_non_pascal: None,
+        }
+    }
+}
+
 impl TemplateComponentBindings {
     /// Build from a collected fallback list (see `collect_global_component_fallbacks`).
     pub(crate) fn new(fallback_consts: Vec<String>) -> Self {
@@ -470,8 +529,9 @@ impl TemplateComponentBindings {
     /// bindings (`local_is_known`) first and the GlobalComponents fallback consts second.
     ///
     /// Returns `None` for non-component tags and for components with neither a local binding
-    /// nor a fallback const (builtins, member-expression tags, or unregistered components —
-    /// the cases that fall through to explicit `any`).
+    /// nor a fallback const (builtins, member-expression tags, and configured custom
+    /// elements — which collection excludes — the cases that fall through to the authored
+    /// intrinsic surface).
     pub(crate) fn resolve(
         &self,
         tag_name: &str,

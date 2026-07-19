@@ -349,6 +349,7 @@ const props = defineProps<{ msg: string }>()
             style_usage_complete: true,
             css_modules: vec![],
             template_used_vars: None,
+            custom_elements: None,
         },
     );
 

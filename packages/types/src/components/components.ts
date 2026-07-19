@@ -247,6 +247,32 @@ export type GlobalComponentType<N> = N extends keyof import("vue").GlobalCompone
   ? import("vue").GlobalComponents[N]
   : unknown;
 
+/**
+ * The registered `GlobalComponents` member type for a KEBAB/lowercase-authored
+ * tag, or the fail-OPEN intrinsic-element surface when the tag is not
+ * registered.
+ *
+ * Backs the fallback consts synthesized for tags that were only ever authored
+ * in a non-Pascal form (`<my-widget>`): a registered member (looked up by the
+ * PascalCase name `N`, then the authored key `K`) resolves to its component
+ * type; an UNREGISTERED tag degrades to a function component over
+ * `JSX.IntrinsicElements[K]` — the same props surface the authored intrinsic
+ * tag had before any rewrite (a user's `IntrinsicElements` web-component
+ * augmentation keeps typing it; Vue's `[name: string]: any` index otherwise
+ * yields `any`) — never a false "no construct signatures" diagnostic on a
+ * web-component tag.
+ */
+export type GlobalComponentKebabType<
+  N,
+  K extends string,
+> = N extends keyof import("vue").GlobalComponents
+  ? import("vue").GlobalComponents[N]
+  : K extends keyof import("vue").GlobalComponents
+    ? import("vue").GlobalComponents[K]
+    : K extends keyof import("vue/jsx-runtime").JSX.IntrinsicElements
+      ? (props: import("vue/jsx-runtime").JSX.IntrinsicElements[K]) => any
+      : (props: Record<string, any>) => any;
+
 export type ExtractRenderComponent<T> = T extends {
   new (...args: any[]): infer I;
 }

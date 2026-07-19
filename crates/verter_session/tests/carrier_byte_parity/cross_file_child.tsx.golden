@@ -1,6 +1,6 @@
 /** @jsxImportSource vue */
 import type { ChildProps, ChildEmits } from './types'
-import type { Prettify as ___VERTER___Prettify, ExtractComponentProps as ___VERTER___ExtractComponentProps, ExtractLeafElement as ___VERTER___ExtractLeafElement, GlobalComponentType as ___VERTER___GlobalComponentType } from "@verter/types";
+import type { Prettify as ___VERTER___Prettify, ExtractComponentProps as ___VERTER___ExtractComponentProps, ExtractLeafElement as ___VERTER___ExtractLeafElement, GlobalComponentType as ___VERTER___GlobalComponentType, GlobalComponentKebabType as ___VERTER___GlobalComponentKebabType } from "@verter/types";
 import { shallowUnwrapRef as ___VERTER___shallowUnwrapRef, enhanceElementWithProps as ___VERTER___enhanceElementWithProps, extractRenderComponent as ___VERTER___extractRenderComponent, instantiateComponent as ___VERTER___instantiateComponent, extractArgumentsFromRenderSlot as ___VERTER___extractArgumentsFromRenderSlot, runCustomDirective as ___VERTER___runCustomDirective, retrieveSetupDirectives as ___VERTER___retrieveSetupDirectives, strictRenderSlot as ___VERTER___strictRenderSlot, checkRequiredSlots as ___VERTER___checkRequiredSlots, globalComponentsNav as ___VERTER___globalComponentsNav } from "@verter/types";
 ;export function ___VERTER___TemplateBindingFN() {
 

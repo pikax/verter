@@ -80,6 +80,7 @@ fn gen_tsx_template(source: &str) -> String {
         comments: true,
         is_jsx: false,
         strict_slots: false,
+        custom_elements: None,
     };
 
     generate_ide_template(
@@ -429,6 +430,7 @@ fn gen_tsx_template_with_components(
         comments: true,
         is_jsx: false,
         strict_slots: false,
+        custom_elements: None,
     };
 
     let components =
@@ -2856,6 +2858,7 @@ fn gen_tsx_template_with_map(
         comments: true,
         is_jsx: false,
         strict_slots: false,
+        custom_elements: None,
     };
 
     generate_ide_template(
@@ -5887,6 +5890,7 @@ fn gen_jsx_template(source: &str) -> String {
         comments: true,
         is_jsx: true,
         strict_slots: false,
+        custom_elements: None,
     };
 
     generate_ide_template(
@@ -6437,6 +6441,7 @@ fn gen_tsx_template_strict_slots_with_bindings(
         comments: true,
         is_jsx: false,
         strict_slots: true,
+        custom_elements: None,
     };
 
     generate_ide_template(
@@ -6897,6 +6902,7 @@ fn gen_tsx_template_strict_slots_with_map(
         comments: true,
         is_jsx: false,
         strict_slots: true,
+        custom_elements: None,
     };
 
     generate_ide_template(

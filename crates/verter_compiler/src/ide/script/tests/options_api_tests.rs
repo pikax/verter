@@ -40,6 +40,7 @@ fn types_module_custom_override() {
             style_usage_complete: true,
             css_modules: vec![],
             template_used_vars: None,
+            custom_elements: None,
         },
     );
     assert!(

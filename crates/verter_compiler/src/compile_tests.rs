@@ -9371,9 +9371,19 @@ fn tsx_component_kebab_and_mixed_case_names_are_preserved() {
         tsx.code
     );
     assert!(
+        tsx.code.contains(
+            "const ItemRender = {} as ___VERTER___GlobalComponentKebabType<'ItemRender', 'item-render'>"
+        ),
+        "the ItemRender fallback const must back the rewritten tag with the \
+         fail-open kebab-authored type, got:\n{}",
         tsx.code
-            .contains("const ItemRender = {} as ___VERTER___GlobalComponentType<'ItemRender'>"),
-        "the ItemRender fallback const must back the rewritten tag, got:\n{}",
+    );
+    // Negative: a kebab-only authored name must NOT get the fail-closed
+    // Pascal-authored type (that is the false-TS2604 web-component regression).
+    assert!(
+        !tsx.code
+            .contains("___VERTER___GlobalComponentType<'ItemRender'>"),
+        "kebab-only authored tag must not use the fail-closed type, got:\n{}",
         tsx.code
     );
     assert!(
@@ -9399,6 +9409,195 @@ fn tsx_component_kebab_and_mixed_case_names_are_preserved() {
         "no intrinsic kebab tag may survive for a rewritten component, got:\n{}",
         tsx.code
     );
+}
+
+fn compile_tsx_with_custom_elements(source: &str, prefixes: &[&str]) -> VerterCompileResult {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        target: CompileTarget::BUNDLER | CompileTarget::TSX,
+        custom_elements: Some(prefixes.iter().map(|p| p.to_string()).collect()),
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        source_map: true,
+        ..Default::default()
+    };
+    compile(source, &options, &verter_opts, &alloc)
+}
+
+/// A configured custom element (`custom_elements` prefix match) is a NATIVE
+/// element: the IDE surface must not invent a GlobalComponents fallback const
+/// for it and must not rewrite its tag — it stays authored and types through
+/// `JSX.IntrinsicElements`, exactly as before the fallback machinery existed.
+/// A NON-matching dashed tag in the same template still gets the (fail-open)
+/// kebab fallback + rewrite.
+#[test]
+fn tsx_custom_elements_configured_tag_stays_authored_without_fallback() {
+    let result = compile_tsx_with_custom_elements(
+        r#"<template>
+  <ion-button size="small">go</ion-button>
+  <my-widget />
+</template>"#,
+        &["ion-"],
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("<ion-button") && tsx.code.contains("</ion-button>"),
+        "the configured custom element must stay authored (intrinsic), got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("IonButton"),
+        "no Pascal rewrite and no fallback const for a configured custom element, got:\n{}",
+        tsx.code
+    );
+    // The non-matching dashed tag still resolves through the fallback machinery.
+    assert!(
+        tsx.code.contains(
+            "const MyWidget = {} as ___VERTER___GlobalComponentKebabType<'MyWidget', 'my-widget'>"
+        ),
+        "a non-matching dashed tag still gets its kebab fallback const, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("<MyWidget"),
+        "a non-matching dashed tag still rewrites, got:\n{}",
+        tsx.code
+    );
+}
+
+/// `custom_elements` wins over a same-name local binding: Vue's option contract
+/// is "skip component resolution" for matching tags, so the tag stays an
+/// authored intrinsic even when `IonButton` is imported.
+#[test]
+fn tsx_custom_elements_configured_tag_ignores_local_binding() {
+    let result = compile_tsx_with_custom_elements(
+        r#"<script setup lang="ts">
+import IonButton from './IonButton.vue'
+void IonButton
+</script>
+<template>
+  <ion-button />
+</template>"#,
+        &["ion-"],
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("<ion-button"),
+        "a configured custom element never rewrites, even with a local binding, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("<IonButton"),
+        "no component rewrite for a configured custom element, got:\n{}",
+        tsx.code
+    );
+}
+
+/// A static `<component is="…">` whose target matches `custom_elements` keeps
+/// the verbatim target tag (native element), with no fallback const.
+#[test]
+fn tsx_custom_elements_component_is_target_stays_verbatim() {
+    let result = compile_tsx_with_custom_elements(
+        r#"<template><component is="x-widget" /></template>"#,
+        &["x-"],
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("<x-widget"),
+        "the custom-element is-target must stay verbatim, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("XWidget"),
+        "no Pascal const for a custom-element is-target, got:\n{}",
+        tsx.code
+    );
+}
+
+/// Mixed authoring pins Pascal intent: a name authored BOTH as `<GlobalCountComp>`
+/// and `<global-count-comp>` shares ONE const, and that const keeps the
+/// fail-closed Pascal-authored type (the Pascal authoring is component intent —
+/// an unregistered name must keep producing a real diagnostic there).
+#[test]
+fn tsx_mixed_authoring_shares_one_fail_closed_const() {
+    let result = compile_tsx(
+        r#"<template>
+  <GlobalCountComp :count="1" />
+  <global-count-comp :count="2" />
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert_eq!(
+        tsx.code.matches("const GlobalCountComp").count(),
+        1,
+        "one shared const for both spellings, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains(
+            "const GlobalCountComp = {} as ___VERTER___GlobalComponentType<'GlobalCountComp'>"
+        ),
+        "Pascal authoring anywhere keeps the fail-closed const type, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code
+            .contains("GlobalComponentKebabType<'GlobalCountComp'"),
+        "the mixed-authored name must NOT degrade to the fail-open kebab type, got:\n{}",
+        tsx.code
+    );
+    // Both tags reference the shared const.
+    assert!(
+        tsx.code.matches("<GlobalCountComp").count() >= 2,
+        "both spellings rewrite to the shared const, got:\n{}",
+        tsx.code
+    );
+}
+
+/// Per-segment kebab rewrite emits map tokens at each segment head while the
+/// segment bodies stay original (1:1 mapped) — the structural property that
+/// keeps the tag TAIL mapped (the LSP-side acceptance lives in
+/// `verter_lsp tests/cases/kebab_tag_mapping_full_columns.rs`).
+#[test]
+fn tsx_kebab_rewrite_keeps_segment_bodies_original_in_map() {
+    let source = "<template>\n  <global-count-comp />\n</template>\n";
+    let result = compile_tsx(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("<GlobalCountComp"),
+        "rewritten: {}",
+        tsx.code
+    );
+
+    let sm = oxc_sourcemap::SourceMap::from_json_string(&tsx.source_map)
+        .expect("should parse source map");
+    let name_off = source.find("global-count-comp").unwrap();
+    let src_line = source[..name_off].matches('\n').count() as u32;
+    let src_col = (name_off - source[..name_off].rfind('\n').map(|p| p + 1).unwrap_or(0)) as u32;
+
+    // Tokens must exist mapping the SECOND and THIRD segment bodies (the
+    // original `ount`/`omp` resumes after each uppercased head) — the
+    // whole-name overwrite emitted exactly ONE token at the name start.
+    let seg2_body = src_col + "global-c".len() as u32; // 'o' of "count"
+    let seg3_body = src_col + "global-count-c".len() as u32; // 'o' of "comp"
+    for expect_col in [seg2_body, seg3_body] {
+        assert!(
+            sm.get_tokens().any(|t| {
+                t.get_source_id().is_some()
+                    && t.get_src_line() == src_line
+                    && t.get_src_col() == expect_col
+            }),
+            "per-segment emission must carry a token resuming at src col {expect_col} \
+             (segment body original chunk); whole-name overwrite has only the start token"
+        );
+    }
 }
 
 #[test]
@@ -15022,7 +15221,7 @@ return (_openBlock(), _createElementBlock("p", { title: $setup.msg }, _toDisplay
 // strip-prone) trailing whitespace while the golden still pins the exact bytes.
 const TS_OVERLAY_GOLDEN_TSX: &str = concat!(
     r#"/** @jsxImportSource vue */
-import type { Prettify as ___VERTER___Prettify, ExtractComponentProps as ___VERTER___ExtractComponentProps, ExtractLeafElement as ___VERTER___ExtractLeafElement, GlobalComponentType as ___VERTER___GlobalComponentType } from "@verter/types";
+import type { Prettify as ___VERTER___Prettify, ExtractComponentProps as ___VERTER___ExtractComponentProps, ExtractLeafElement as ___VERTER___ExtractLeafElement, GlobalComponentType as ___VERTER___GlobalComponentType, GlobalComponentKebabType as ___VERTER___GlobalComponentKebabType } from "@verter/types";
 import { shallowUnwrapRef as ___VERTER___shallowUnwrapRef, enhanceElementWithProps as ___VERTER___enhanceElementWithProps, extractRenderComponent as ___VERTER___extractRenderComponent, instantiateComponent as ___VERTER___instantiateComponent, extractArgumentsFromRenderSlot as ___VERTER___extractArgumentsFromRenderSlot, runCustomDirective as ___VERTER___runCustomDirective, retrieveSetupDirectives as ___VERTER___retrieveSetupDirectives, strictRenderSlot as ___VERTER___strictRenderSlot, checkRequiredSlots as ___VERTER___checkRequiredSlots, globalComponentsNav as ___VERTER___globalComponentsNav } from "@verter/types";
 ;export function ___VERTER___TemplateBindingFN() {
 

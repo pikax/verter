@@ -397,25 +397,36 @@ fn walk_element<'a, 'alloc>(
                     emitted_tag_name = rewrite.tag_name;
                     needs_component_is_iife_close = rewrite.needs_iife_close;
                 }
-            } else if tag_name.contains('-') {
+            } else if tag_name.contains('-')
+                && !crate::ide::matches_custom_element(ctx.options.custom_elements, tag_name)
+            {
                 // Rewrite a resolvable kebab component tag to its in-scope
                 // PascalCase binding (a local script binding or a
                 // GlobalComponents fallback const). A lowercase JSX identifier
                 // is an INTRINSIC-element lookup that never consults the
                 // emitted const — the rewrite makes the tag reference it, with
-                // the generated name mapped onto the authored kebab spans (a
-                // mapped CodeTransform overwrite) so hover/definition/rename
-                // keep working from the source tag. An unresolvable kebab tag
-                // stays as-authored (fail-closed intrinsic diagnostic).
+                // the generated name mapped onto the authored kebab spans
+                // (per-segment mapped CodeTransform edits, see
+                // [`emit_mapped_kebab_pascal_rewrite`]) so hover/definition/
+                // rename keep working from EVERY letter of the source tag,
+                // including its last column. A kebab tag absent from the
+                // inventory stays as-authored (intrinsic lookup), as does a
+                // configured custom element (`custom_elements` prefix match —
+                // native by contract, never component-resolved).
                 if let Some(binding) = ctx
                     .components
                     .resolve(tag_name, el.tag_type, |n| ctx.resolver.get(n).is_some())
                 {
                     if binding != tag_name {
                         let pascal = ctx.out.alloc_str(&binding);
-                        // Mapped overwrite of the open tag-name span.
-                        ctx.out
-                            .overwrite(el.tag_open.start + 1, el.tag_open.name_end, pascal);
+                        // Mapped rewrite of the open tag-name span.
+                        emit_mapped_kebab_pascal_rewrite(
+                            ctx.out,
+                            el.tag_open.start + 1,
+                            el.tag_open.name_end,
+                            ctx.source,
+                            pascal,
+                        );
                         // Rewrite the authored close name only when the body
                         // will NOT be isolated: `isolate_vue_slot_body` deletes
                         // the whole authored close span and emits the mapped
@@ -428,8 +439,13 @@ fn walk_element<'a, 'alloc>(
                             && el.tag_close.is_some();
                         if !will_isolate {
                             if let Some(tag_close) = &el.tag_close {
-                                ctx.out
-                                    .overwrite(tag_close.start + 2, tag_close.name_end, pascal);
+                                emit_mapped_kebab_pascal_rewrite(
+                                    ctx.out,
+                                    tag_close.start + 2,
+                                    tag_close.name_end,
+                                    ctx.source,
+                                    pascal,
+                                );
                             }
                         }
                         emitted_tag_name = pascal;
@@ -1717,6 +1733,66 @@ fn collect_sibling_negations<'alloc>(
 struct ComponentIsRewrite<'a> {
     tag_name: &'a str,
     needs_iife_close: bool,
+}
+
+/// Rewrite an authored kebab tag-name span to its PascalCase binding with
+/// PER-SEGMENT mapped edits instead of one whole-name overwrite.
+///
+/// A whole-name `Chunk::Overwritten` emits a single source-map token whose
+/// reverse run caps at the GENERATED length, so a longer kebab name rewritten
+/// to a shorter Pascal name leaves its tail columns unmapped (hover/definition/
+/// rename dead past the Pascal length). Per-segment emission keeps every
+/// unchanged byte an `Original` chunk (1:1 mapped): only each `-` separator is
+/// removed (a 1-column unmapped separator gap) and only a case-changing
+/// segment-head character is overwritten (1:1 mapped) — every LETTER of the
+/// authored tag name, including its last column, keeps a mapping.
+///
+/// The surgical path applies only when the per-segment composition reproduces
+/// `pascal` byte-for-byte (always true for `to_pascal_case`-derived bindings);
+/// any mismatch falls back to the single whole-span mapped overwrite.
+fn emit_mapped_kebab_pascal_rewrite<'alloc>(
+    out: &mut CodeGenOutput<'alloc>,
+    start: u32,
+    end: u32,
+    source: &str,
+    pascal: &'alloc str,
+) {
+    let authored = &source[start as usize..end as usize];
+
+    // Plan the per-segment ops and compose the reconstruction they produce.
+    // op = (span_start, span_end, replacement)
+    let mut ops: Vec<(u32, u32, String)> = Vec::new();
+    let mut composed = String::with_capacity(pascal.len());
+    let mut head_of_segment = true;
+    for (byte_idx, ch) in authored.char_indices() {
+        let at = start + byte_idx as u32;
+        if ch == '-' {
+            ops.push((at, at + 1, String::new()));
+            head_of_segment = true;
+            continue;
+        }
+        if head_of_segment {
+            head_of_segment = false;
+            let upper: String = ch.to_uppercase().collect();
+            if upper != ch.to_string() {
+                ops.push((at, at + ch.len_utf8() as u32, upper.clone()));
+            }
+            composed.push_str(&upper);
+        } else {
+            composed.push(ch);
+        }
+    }
+
+    if composed == pascal {
+        for (op_start, op_end, replacement) in ops {
+            let replacement = out.alloc_str(&replacement);
+            out.overwrite(op_start, op_end, replacement);
+        }
+    } else {
+        // Composition mismatch (non-`to_pascal_case` binding shape): keep the
+        // whole-name mapped overwrite.
+        out.overwrite(start, end, pascal);
+    }
 }
 
 /// Rewrite `<component :is="expr">` to use `extractRenderComponent`.
