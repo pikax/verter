@@ -132,6 +132,9 @@ Status: `open` · `partial` · `fixed`
 | ISSUE-svelte-ide-def-prop-attr | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-svelte-ide-def-slot-name | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-svelte-ide-def-slot-prop | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
+| ISSUE-svelte-ide-hover-directive-doc | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
+| ISSUE-svelte-ide-hover-slot-name | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
+| ISSUE-svelte-ide-hover-slot-prop-pattern | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-svelte-if-narrowing | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-svelte-if-narrowing-completion | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-svelte-if-narrowing-intellisense | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
@@ -274,6 +277,10 @@ Status: `open` · `partial` · `fixed`
 | ISSUE-vue-ide-def-prop-attr | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-vue-ide-def-slot-name | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-vue-ide-def-slot-prop | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
+| ISSUE-vue-ide-hover-custom-directive | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
+| ISSUE-vue-ide-hover-directive-doc | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
+| ISSUE-vue-ide-hover-slot-name | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
+| ISSUE-vue-ide-hover-slot-prop-pattern | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-vue-intrinsic-attr-hover | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-vue-intrinsic-element-hover | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |
 | ISSUE-vue-intrinsic-elements-clean | triage | open | Referenced by E2E sources; classify as product vs test defect on first red | Discriminating product or test fix | Hard-fail suite (no catch-all skip) |

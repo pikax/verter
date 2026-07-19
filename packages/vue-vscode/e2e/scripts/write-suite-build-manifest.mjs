@@ -13,7 +13,7 @@ const { buildParityTestInventory } = require(
   join(packageRoot, "out-test", "e2e", "lib", "parityTestInventory.js"),
 );
 const ACCEPTED_SUITE_COUNT = 72;
-const ACCEPTED_PARITY_LITERAL_COUNT = 242;
+const ACCEPTED_PARITY_LITERAL_COUNT = 246;
 const ACCEPTED_MATRIX_CASE_COUNT = 73;
 
 function discover(directory) {
