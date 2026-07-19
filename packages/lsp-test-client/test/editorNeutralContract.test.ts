@@ -49,15 +49,15 @@ function fixtureSource(document: string): string {
 }
 
 describe("editor-neutral LSP contract inventory", () => {
-  it("is a non-vacuous, exact 73-case cross-framework inventory", () => {
+  it("is a non-vacuous, exact 82-case cross-framework inventory", () => {
     const inventory = createEditorNeutralContractInventory();
-    expect(inventory).toHaveLength(73);
-    expect(new Set(inventory.map((testCase) => testCase.id)).size).toBe(73);
+    expect(inventory).toHaveLength(82);
+    expect(new Set(inventory.map((testCase) => testCase.id)).size).toBe(82);
 
     const standard = inventory.filter((testCase) => testCase.surface === "standard-lsp");
     const custom = inventory.filter((testCase) => testCase.surface === "verter-custom-protocol");
     const topology = inventory.filter((testCase) => testCase.surface === "provider-topology");
-    expect(standard).toHaveLength(71);
+    expect(standard).toHaveLength(80);
     expect(custom).toHaveLength(1);
     expect(topology).toHaveLength(1);
 
@@ -93,13 +93,25 @@ describe("editor-neutral LSP contract inventory", () => {
         "diagnostics-clean",
         "hover",
       ]);
+      // D7: the jsconfig-configured lax family mirrors the tsconfig one.
+      const laxJsconfigPrefix = `${framework}-js-dom-event-policy-lax-jsconfig.`;
+      const laxJsconfigCases = standard.filter((testCase) =>
+        testCase.id.startsWith(laxJsconfigPrefix),
+      );
+      expect(laxJsconfigCases).toHaveLength(4);
+      expect(laxJsconfigCases.map((testCase) => testCase.feature).sort()).toEqual([
+        "completion",
+        "definition",
+        "diagnostics-clean",
+        "hover",
+      ]);
     }
     expect(standard.filter((testCase) => testCase.feature === "consumer-diagnostics")).toHaveLength(
       1,
     );
     expect(
       standard.filter((testCase) => testCase.feature.startsWith("plain-control-")),
-    ).toHaveLength(5);
+    ).toHaveLength(6);
     expect(
       standard.filter((testCase) => /^plain-[jt]sx-pointer-event\./.test(testCase.id)),
     ).toHaveLength(4);
