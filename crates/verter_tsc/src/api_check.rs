@@ -44,6 +44,12 @@ use verter_span::path::{fs_paths_equal, InjectedPathKey};
 use crate::error_map::map_tsc_position;
 use crate::reporter::{Diagnostic, Severity};
 
+/// The hard deadline on every standalone `--api` request (initialize /
+/// updateSnapshot / diagnostics). On expiry the request fails with a bounded
+/// error and the engine is terminated (process-tree kill), so a hung engine
+/// can never block the one-shot CLI. Matches the declaration invocation bound.
+const API_REQUEST_BOUND: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// A hard failure of the in-memory `--api` typecheck path.
 ///
 /// The `--noEmit` typecheck backend is tsgo-`--api`-only with NO tsc fallback, so
@@ -252,8 +258,10 @@ pub fn typecheck(inputs: TypecheckInputs<'_>) -> Result<Vec<Diagnostic>, Typeche
 
     runtime.block_on(async move {
         // The wire gate runs inside `connect` (fail-closed on a diverged engine).
+        // Every request carries a hard deadline: a hung engine fails bounded
+        // and is torn down (never a blocked one-shot CLI).
         let client = match TsgoClient::connect(engine, cwd, snapshot, 16).await {
-            Ok(c) => c,
+            Ok(c) => c.with_request_deadline(API_REQUEST_BOUND),
             Err(e) => {
                 return Err(TypecheckError::new(format!(
                     "verter-tsc: tsgo --api unavailable ({e}); the --noEmit typecheck cannot run \

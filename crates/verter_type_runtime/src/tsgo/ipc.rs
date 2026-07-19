@@ -1364,15 +1364,19 @@ pub struct TsgoTypeProvider {
 
 impl Drop for TsgoTypeProvider {
     fn drop(&mut self) {
-        // Kill the TSGO child process to prevent orphans.
-        // start_kill() is non-blocking (sends TerminateProcess on Windows, SIGKILL on Unix).
-        // This is a belt-and-suspenders backup — kill_on_drop(true) on the Command
-        // already handles this, but an explicit Drop makes the intent clear.
+        // Kill the TSGO child process TREE to prevent orphans (a descendant
+        // holding the pipes dies too). This is a belt-and-suspenders backup —
+        // kill_on_drop(true) on the Command already handles the direct child,
+        // but an explicit Drop makes the tree kill intent clear. A child whose
+        // pid can no longer be read (already reaped) is left to kill_on_drop.
         if let Some(slot) = &mut self.child {
             let child = slot
                 .get_mut()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(child) = child {
+                if let Some(pid) = child.id() {
+                    verter_tsgo_api::process::TreeKill::arm(pid).kill_tree();
+                }
                 let _ = child.start_kill();
             }
         }
@@ -1392,19 +1396,24 @@ impl TsgoTypeProvider {
     ///
     /// When `crash_notify` is `Some`, the `Notify` is signaled when the read loop
     /// exits (EOF, I/O error), allowing the `ResilientTypeProvider` to detect the
-    /// crash and trigger a restart.
+    /// crash and trigger a restart. The child is spawned in its OWN process
+    /// group / job ([`verter_tsgo_api::process::configure_tree_spawn`]) so
+    /// teardown kills the whole tree, never just the direct child.
     pub async fn spawn_with_crash_signal(
         tsgo_bin: &str,
         root_uri: &str,
         crash_notify: Option<Arc<Notify>>,
     ) -> Result<Self, TypeProviderError> {
-        let mut child = tokio::process::Command::new(tsgo_bin)
+        let mut command = tokio::process::Command::new(tsgo_bin);
+        command
             .arg("--lsp")
             .arg("--stdio")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        verter_tsgo_api::process::configure_tree_spawn(&mut command);
+        let mut child = command
             .spawn()
             .map_err(|e| TypeProviderError::new(format!("failed to spawn tsgo: {e}")))?;
 
@@ -3159,6 +3168,7 @@ impl TypeProvider for TsgoTypeProvider {
             match tokio::time::timeout(std::time::Duration::from_secs(1), child.wait()).await {
                 Ok(Ok(_)) => Ok(()),
                 Ok(Err(error)) => {
+                    verter_tsgo_api::process::TreeKill::arm(child.id().unwrap_or(0)).kill_tree();
                     let _ = child.start_kill();
                     let _ =
                         tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await;
@@ -3167,6 +3177,7 @@ impl TypeProvider for TsgoTypeProvider {
                     )))
                 }
                 Err(_) => {
+                    verter_tsgo_api::process::TreeKill::arm(child.id().unwrap_or(0)).kill_tree();
                     let kill_error = child.start_kill().err();
                     match tokio::time::timeout(std::time::Duration::from_secs(2), child.wait())
                         .await

@@ -913,6 +913,79 @@ mod tests {
         );
     }
 
+    // ── DISCRIMINATING (B4a): a bundled sidecar that EXISTS but is
+    //    structurally invalid (a symlink/reparse component) is a
+    //    PRODUCT-INTEGRITY failure — never a soft skip that falls through to
+    //    "no provider". RED: today it degrades to a note + NoUsableCandidate. ──
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_bundled_sidecar_is_a_product_integrity_error() {
+        let f = full_fixture("bundlesymlink");
+        // Replace the bundled binary with a symlink to a real file elsewhere
+        // (a tampered install: the sidecar location is no longer a real file).
+        let target = f.fixture.file(Path::new("smuggled/engine").as_path());
+        std::fs::remove_file(&f.bundled).unwrap();
+        std::os::unix::fs::symlink(&target, &f.bundled).unwrap();
+
+        let validator = ScriptedValidator::accepting(&[]);
+        let err = resolve_with(&f.request(), &validator)
+            .await
+            .expect_err("nothing validates and the bundled sidecar is invalid");
+        match &err {
+            ResolveError::ProductIntegrity { path, reason } => {
+                assert_eq!(path, &f.bundled, "the invalid sidecar must be named");
+                assert!(
+                    matches!(reason.as_ref(), RejectionReason::UntrustedLocation { .. }),
+                    "the reason must name the structural trust failure: {reason:?}"
+                );
+            }
+            other => panic!(
+                "a present-but-invalid bundled sidecar must be ProductIntegrity (loud \
+                 reinstall signal), never a soft no-provider miss: {other:?}"
+            ),
+        }
+        let rendered = err.to_string();
+        assert!(rendered.contains("product integrity"), "{rendered}");
+        assert!(rendered.contains("Reinstall"), "{rendered}");
+    }
+
+    // ── DISCRIMINATING (B4b): canonical-path dedup must not DISCARD Bundled
+    //    provenance — PATH/VERTER_TSGO_BIN pointing AT the bundled binary still
+    //    classifies as Bundled, so an invalid one escalates to ProductIntegrity
+    //    instead of degrading to an ordinary no-provider result. RED: dedup
+    //    keeps the FIRST (tier-1) provenance today. ─────────────────────────────
+    #[tokio::test]
+    async fn dedup_with_an_earlier_tier_keeps_bundled_provenance() {
+        let f = full_fixture("bundleddup");
+        let mut req = f.request();
+        // The env override points AT the bundled sidecar (same file).
+        req.env_override = Some(f.bundled.clone());
+        let enumeration = enumerate_candidates(&req);
+        let hits: Vec<&Candidate> = enumeration
+            .candidates
+            .iter()
+            .filter(|c| c.path == f.bundled)
+            .collect();
+        assert_eq!(hits.len(), 1, "the same file dedups to one candidate");
+        assert_eq!(
+            hits[0].provenance,
+            Provenance::Bundled,
+            "a canonical path reachable as the bundled sidecar must retain Bundled \
+             provenance (integrity escalation depends on it)"
+        );
+
+        // And its validation failure escalates to ProductIntegrity, not a
+        // plain no-provider result.
+        let err = resolve_with(&req, &ScriptedValidator::accepting(&[]))
+            .await
+            .expect_err("the bundled duplicate fails validation");
+        assert!(
+            matches!(err, ResolveError::ProductIntegrity { .. }),
+            "an invalid bundled binary must escalate to ProductIntegrity even when \
+             an earlier tier named the same file: {err:?}"
+        );
+    }
+
     // ── scripted-validation resolver tests ───────────────────────────────────
 
     /// A [`CandidateValidator`] that accepts candidates whose path contains

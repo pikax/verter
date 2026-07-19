@@ -65,12 +65,21 @@ impl TreeKill {
     /// this creates the `KILL_ON_JOB_CLOSE` job and assigns the child to it;
     /// a failure degrades to a direct-child-only kill (logged by the caller's
     /// context, never silent about the tree).
+    ///
+    /// `pid == 0` arms a NO-OP kill: `kill(-0, SIGKILL)` would target the
+    /// CALLER'S OWN process group, so a caller handing over a pid it failed
+    /// to read (e.g. an already-reaped child, whose `Child::id()` is `None`)
+    /// must never become a self-kill.
     pub fn arm(pid: u32) -> Self {
         #[cfg(windows)]
         {
             Self {
                 pid,
-                job: JobHandle::create_and_assign(pid),
+                job: if pid == 0 {
+                    None
+                } else {
+                    JobHandle::create_and_assign(pid)
+                },
             }
         }
         #[cfg(not(windows))]
@@ -81,8 +90,12 @@ impl TreeKill {
 
     /// Kill the entire process tree rooted at the armed child. Does not reap
     /// the direct child — the caller reaps (`child.wait()`,
-    /// [`reap_child_bounded`]) so no zombie is left behind.
+    /// [`reap_child_bounded`]) so no zombie is left behind. A tree armed with
+    /// pid 0 is a documented no-op (see [`TreeKill::arm`]).
     pub fn kill_tree(&self) {
+        if self.pid == 0 {
+            return;
+        }
         #[cfg(unix)]
         {
             // The child leads the group (configure_tree_spawn), so the group
@@ -350,6 +363,15 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         assert!(!process_alive(pid), "a reaped child must read dead");
+    }
+
+    // ── DISCRIMINATING: pid 0 arms a NO-OP kill — `kill(-0, SIGKILL)` would
+    //    target the CALLER'S OWN process group (a caller that failed to read a
+    //    pid must never become a self-kill). If this regressed, this very test
+    //    binary would be SIGKILLed mid-run. ────────────────────────────────────
+    #[test]
+    fn tree_kill_armed_with_pid_zero_is_a_noop() {
+        TreeKill::arm(0).kill_tree();
     }
 
     // ── kill_tree_and_reap surfaces an outcome, never hangs ──────────────────

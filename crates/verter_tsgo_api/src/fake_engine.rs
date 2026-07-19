@@ -183,7 +183,10 @@ pub fn main() {
     // other scenario refuses.
     if args.iter().any(|a| a == "--api") {
         match scenario {
-            Scenario::HangApi | Scenario::DeclHang => hang_forever(),
+            Scenario::HangApi | Scenario::DeclHang => {
+                write_server_pid_file();
+                hang_forever();
+            }
             Scenario::ApiOk | Scenario::DeclFail => serve_api_stdio(scenario),
             _ => std::process::exit(2),
         }
@@ -206,12 +209,29 @@ pub fn main() {
     if args.iter().any(|a| a == "--lsp") {
         match scenario {
             Scenario::Exit => std::process::exit(1),
-            Scenario::HangLsp => hang_forever(),
+            Scenario::HangLsp => {
+                write_server_pid_file();
+                hang_forever();
+            }
             _ => serve_lsp(scenario),
         }
         return;
     }
     std::process::exit(2);
+}
+
+/// The pid file a hanging server mode writes next to the engine copy
+/// (`<exe>.server.pid`) so wedge tests can prove the bounded client/validator
+/// leaves NO live engine process behind.
+fn server_pid_file() -> PathBuf {
+    let exe = std::env::current_exe().unwrap_or_default();
+    let mut name = exe.into_os_string();
+    name.push(".server.pid");
+    PathBuf::from(name)
+}
+
+fn write_server_pid_file() {
+    let _ = std::fs::write(server_pid_file(), std::process::id().to_string());
 }
 
 /// The pid file the `hold-pipe` grandchild writes (`<exe>.child.pid`).

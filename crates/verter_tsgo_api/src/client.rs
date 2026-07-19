@@ -50,6 +50,11 @@ pub struct TsgoClient {
     /// caller runs the rail while concurrent clones wait, then take the fast
     /// path. Shared across clones (they share one engine).
     first_validation_lock: Arc<tokio::sync::Mutex<()>>,
+    /// The per-request hard deadline applied to every typed call (see
+    /// [`RequestOptions::deadline`]). `None` = unbounded waits (legacy
+    /// interactive behavior); batch/standalone drivers set it so a hung engine
+    /// fails bounded and is torn down.
+    request_deadline: Option<Duration>,
 }
 
 /// The bound on the version probe inside [`TsgoClient::connect`] (mirrors the
@@ -86,6 +91,7 @@ impl TsgoClient {
             clearance,
             first_snapshot_validated: Arc::new(AtomicBool::new(false)),
             first_validation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            request_deadline: None,
         })
     }
 
@@ -99,7 +105,19 @@ impl TsgoClient {
             clearance,
             first_snapshot_validated: Arc::new(AtomicBool::new(false)),
             first_validation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            request_deadline: None,
         }
+    }
+
+    /// Set the per-request hard deadline applied to every typed call. On
+    /// expiry a call fails with [`TsgoApiError::Timeout`] and the engine is
+    /// TORN DOWN (the single-flight wire cannot recover a wedged request), so
+    /// a hung engine never blocks the caller forever. Batch/standalone drivers
+    /// (e.g. verter-tsc) MUST set this; `None` (the default) keeps unbounded
+    /// waits for interactive lanes.
+    pub fn with_request_deadline(mut self, deadline: Duration) -> Self {
+        self.request_deadline = Some(deadline);
+        self
     }
 
     /// The capabilities the wire gate confirmed for the connected engine.
@@ -299,7 +317,7 @@ impl TsgoClient {
     pub async fn release(&self, snapshot: &OpaqueHandle) -> TsgoApiResult<()> {
         let payload = serde_json::to_vec(&serde_json::json!({ "snapshot": snapshot }))?;
         self.handle
-            .request(method::RELEASE, payload, RequestOptions::default())
+            .request(method::RELEASE, payload, self.request_options())
             .await
             .map(|_| ())
     }
@@ -310,6 +328,16 @@ impl TsgoClient {
     }
 
     // ── internal typed request helpers ──────────────────────────────────────
+
+    /// The request options for a typed call: the client's configured deadline,
+    /// default lane, no cancellation.
+    fn request_options(&self) -> RequestOptions {
+        RequestOptions {
+            deadline: self.request_deadline,
+            ..RequestOptions::default()
+        }
+    }
+
     async fn typed<P: serde::Serialize, R: serde::de::DeserializeOwned>(
         &self,
         method: &str,
@@ -318,7 +346,7 @@ impl TsgoClient {
         let payload = serde_json::to_vec(params)?;
         let bytes = self
             .handle
-            .request(method, payload, RequestOptions::default())
+            .request(method, payload, self.request_options())
             .await?;
         serde_json::from_slice(&bytes).map_err(Into::into)
     }
@@ -333,7 +361,7 @@ impl TsgoClient {
         let payload = serde_json::to_vec(params)?;
         let bytes = self
             .handle
-            .request(method, payload, RequestOptions::default())
+            .request(method, payload, self.request_options())
             .await?;
         serde_json::from_slice(&bytes).map_err(Into::into)
     }
@@ -348,7 +376,7 @@ impl TsgoClient {
         let payload = serde_json::to_vec(params)?;
         let bytes = self
             .handle
-            .request(method, payload, RequestOptions::default())
+            .request(method, payload, self.request_options())
             .await?;
         if bytes.is_empty() {
             return Ok(None);

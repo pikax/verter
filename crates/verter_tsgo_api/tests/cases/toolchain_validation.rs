@@ -345,6 +345,70 @@ async fn lsp_smoke_times_out_on_a_hanging_engine() {
     );
 }
 
+// ── DISCRIMINATING (B3): a hung STANDALONE `--api` request returns a bounded
+//    error and tears the engine down — the request path (actor wait) is no
+//    longer unbounded. RED: `initialize` hangs past the outer guard. GREEN: a
+//    Timeout within the deadline, and NO live engine process left behind. ────
+#[tokio::test]
+async fn a_hung_standalone_api_request_times_out_and_kills_the_engine() {
+    use verter_tsgo_api::snapshot::OverlaySnapshot;
+    use verter_tsgo_api::TsgoClient;
+
+    let engine = fake_engine("hang-api");
+    let pid_file = {
+        let mut name = engine.as_os_str().to_owned();
+        name.push(".server.pid");
+        PathBuf::from(name)
+    };
+    let _ = std::fs::remove_file(&pid_file);
+    // Never leak the engine even on a RED run.
+    let guard = GrandchildGuard {
+        pid_file: pid_file.clone(),
+    };
+
+    let cwd = std::env::temp_dir();
+    let client = TsgoClient::connect(&engine, &cwd, OverlaySnapshot::builder().build(), 8)
+        .await
+        .expect("connect succeeds — the engine hangs on the first REQUEST")
+        .with_request_deadline(Duration::from_secs(2));
+
+    let start = std::time::Instant::now();
+    let outcome = tokio::time::timeout(Duration::from_secs(20), client.initialize()).await;
+    let err = outcome
+        .expect("a hung engine must fail the request within its deadline (the wait is bounded)")
+        .expect_err("a hung engine cannot answer initialize");
+    assert!(
+        matches!(err, TsgoApiError::Timeout(_)),
+        "the bounded request failure must be a Timeout, got {err:?}"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "the deadline must actually fire: {:?}",
+        start.elapsed()
+    );
+
+    // The engine was torn down (process-tree kill + reap): no live child.
+    let mut pid = guard.pid();
+    for _ in 0..100 {
+        if pid.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        pid = guard.pid();
+    }
+    let pid = pid.expect("the hang-api engine registered its pid");
+    for _ in 0..100 {
+        if !process_alive(pid) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        !process_alive(pid),
+        "the hung engine (pid {pid}) must not survive the request deadline"
+    );
+}
+
 // ── live, real-engine coverage ───────────────────────────────────────────────
 /// The real engine from the worktree (project-local tier only — deterministic:
 /// no env override, no PATH, no cache, no bundled). `None` when the worktree

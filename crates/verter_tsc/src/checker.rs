@@ -689,13 +689,42 @@ fn run_declaration_stage(
     Ok((diagnostics, emitted))
 }
 
+/// The bound on one declaration-stage engine invocation. On expiry the engine
+/// process TREE is killed (a descendant holding the pipes dies too), the child
+/// is reaped, and the pipe-reader threads are drained with a bound — the call
+/// never hangs and never leaves a live/zombie process behind.
+const DECLARATION_INVOKE_BOUND: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The bound on draining the engine's pipes after exit/kill. A descendant that
+/// keeps a pipe open past this point turns the read into an error (the child
+/// is already dead, so no output is legitimately in flight).
+const PIPE_DRAIN_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Invoke the type-checker binary and return its combined stdout+stderr output
 /// plus whether the subprocess exited successfully.
+///
+/// Bounded END-TO-END: the engine is spawned in its own process group / job
+/// ([`verter_tsgo_api::process`]); on the poll deadline, a `try_wait` error,
+/// or a pipe drain overrun, the WHOLE tree is killed and the child reaped, so
+/// no error path ever leaves a live or zombie process behind.
 fn invoke_checker(
     checker_bin: &Path,
     tsconfig_path: &Path,
     opts: &EmitOptions,
 ) -> Result<CheckerInvocation, String> {
+    invoke_checker_bounded(checker_bin, tsconfig_path, opts, DECLARATION_INVOKE_BOUND)
+}
+
+/// The bound-injectable core of [`invoke_checker`] (tests drive a wedged engine
+/// against a short bound).
+fn invoke_checker_bounded(
+    checker_bin: &Path,
+    tsconfig_path: &Path,
+    opts: &EmitOptions,
+    bound: std::time::Duration,
+) -> Result<CheckerInvocation, String> {
+    use verter_tsgo_api::process::{configure_tree_spawn_std, TreeKill};
+
     let mut cmd = if cfg!(target_os = "windows")
         && !reporter::is_native_binary(checker_bin)
         && checker_bin
@@ -723,58 +752,118 @@ fn invoke_checker(
     }
 
     // Spawn with piped I/O and drain stdout/stderr in background threads to
-    // avoid deadlock (child blocks on full pipe buffer if we don't read).
+    // avoid deadlock (child blocks on full pipe buffer if we don't read). The
+    // readers report over channels so the joins are BOUNDED (recv_timeout).
+    configure_tree_spawn_std(&mut cmd);
     let mut child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to run {}: {e}", checker_bin.display()))?;
+    let tree = TreeKill::arm(child.id());
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
 
-    let stdout_handle = std::thread::spawn(move || {
+    let (stdout_tx, stdout_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
         let mut buf = Vec::new();
         std::io::Read::read_to_end(&mut std::io::BufReader::new(stdout), &mut buf).ok();
-        buf
+        let _ = stdout_tx.send(buf);
     });
-    let stderr_handle = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         let mut buf = Vec::new();
         std::io::Read::read_to_end(&mut std::io::BufReader::new(stderr), &mut buf).ok();
-        buf
+        let _ = stderr_tx.send(buf);
     });
 
-    // Poll with timeout
-    let timeout = std::time::Duration::from_secs(300); // 5 minutes
+    /// Drain both reader channels, bounded; `true` when both reported.
+    fn drain_pipes(
+        stdout_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+        stderr_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    ) -> Option<(Vec<u8>, Vec<u8>)> {
+        let stdout = stdout_rx.recv_timeout(PIPE_DRAIN_BOUND).ok()?;
+        let stderr = stderr_rx.recv_timeout(PIPE_DRAIN_BOUND).ok()?;
+        Some((stdout, stderr))
+    }
+
+    /// Kill the tree, reap the child (bounded), drain the pipes (bounded) —
+    /// the shared teardown every failure path runs so none of them can leave
+    /// a live/zombie process or a hung join behind.
+    fn teardown(
+        tree: &TreeKill,
+        child: &mut std::process::Child,
+        stdout_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+        stderr_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
+        tree.kill_tree();
+        reap_std_child_bounded(child, PIPE_DRAIN_BOUND);
+        let _ = drain_pipes(stdout_rx, stderr_rx);
+    }
+
+    // Poll with the deadline.
     let start = std::time::Instant::now();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    // Wait for reader threads to finish after kill
-                    let _ = stdout_handle.join();
-                    let _ = stderr_handle.join();
+                if start.elapsed() > bound {
+                    teardown(&tree, &mut child, &stdout_rx, &stderr_rx);
                     return Err(format!(
-                        "type checker timed out after {}s",
-                        timeout.as_secs()
+                        "type checker timed out after {}s (the engine process tree was killed and reaped)",
+                        bound.as_secs()
                     ));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            Err(e) => return Err(format!("error waiting for type checker: {e}")),
+            Err(e) => {
+                teardown(&tree, &mut child, &stdout_rx, &stderr_rx);
+                return Err(format!(
+                    "error waiting for type checker: {e} (the engine process tree was killed and reaped)"
+                ));
+            }
         }
     };
 
-    let stdout_bytes = stdout_handle.join().unwrap_or_default();
-    let stderr_bytes = stderr_handle.join().unwrap_or_default();
+    let (stdout_bytes, stderr_bytes) = match drain_pipes(&stdout_rx, &stderr_rx) {
+        Some(parts) => parts,
+        None => {
+            // The child exited but a descendant kept a pipe open past the
+            // drain bound: kill the tree and fail closed (partial output is
+            // never a legitimate clean read).
+            teardown(&tree, &mut child, &stdout_rx, &stderr_rx);
+            return Err(
+                "the engine exited but a descendant kept its pipes open; the output could \
+                 not be drained (fail-closed: the engine process tree was killed)"
+                    .to_string(),
+            );
+        }
+    };
 
     Ok(CheckerInvocation {
         output: String::from_utf8_lossy(&stdout_bytes).into_owned()
             + &String::from_utf8_lossy(&stderr_bytes),
         success: status.success(),
     })
+}
+
+/// Reap a `std` child after a kill, bounded by polling: `true` when the child
+/// was reaped. (std has no timed `wait`; the poll loop is the bounded form.)
+fn reap_std_child_bounded(child: &mut std::process::Child, bound: std::time::Duration) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {
+                if start.elapsed() > bound {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(_) => return false,
+        }
+    }
 }
 
 /// Write a synthetic tsconfig.json in `temp_dir` that:
@@ -2378,6 +2467,79 @@ exit 1
             perms.set_mode(0o755);
             fs::set_permissions(&script, perms).unwrap();
         }
+    }
+
+    // ── DISCRIMINATING (B3): a wedged declaration engine (hangs with a
+    //    grandchild holding the pipes) fails BOUNDED and leaves NO live
+    //    descendant — the invocation is bounded end-to-end with a process-tree
+    //    kill + reap, never a hung reader join or a leaked process. ────────────
+    #[cfg(unix)]
+    #[test]
+    fn invoke_checker_kills_a_wedged_engine_tree_within_the_bound() {
+        use verter_tsgo_api::process::process_alive;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let pid_file = temp.path().join("grandchild.pid");
+        let script_path = temp.path().join("wedged-engine");
+        // The engine: spawn a grandchild holding the pipes (records its pid),
+        // then hang forever. `try_wait` never reports; the readers never EOF.
+        let script = format!(
+            "#!/bin/sh\nsleep 600 &\necho $! > \"{}\"\nwait\n",
+            pid_file.display()
+        );
+        fs::write(&script_path, &script).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms).unwrap();
+        }
+
+        let opts = EmitOptions {
+            no_emit: false,
+            declaration: true,
+            declaration_dir: None,
+        };
+        let tsconfig = temp.path().join("tsconfig.json");
+        fs::write(&tsconfig, "{}").unwrap();
+
+        let start = std::time::Instant::now();
+        let result = invoke_checker_bounded(
+            &script_path,
+            &tsconfig,
+            &opts,
+            std::time::Duration::from_secs(1),
+        );
+        let err = match result {
+            Ok(_) => panic!("a wedged engine must fail the bounded invocation"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("timed out"),
+            "the bounded failure must name the timeout: {err}"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(15),
+            "the bound must actually fire (kill tree + reap + bounded drains): {:?}",
+            start.elapsed()
+        );
+
+        // The pipe-holding grandchild must not survive the tree kill.
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .expect("the grandchild registered its pid")
+            .trim()
+            .parse()
+            .expect("a pid");
+        for _ in 0..100 {
+            if !process_alive(pid) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(
+            !process_alive(pid),
+            "the pipe-holding grandchild (pid {pid}) must not survive the tree kill"
+        );
     }
 
     /// Drive ONLY the declaration/emit stage (the temp-file `tsgo --project`

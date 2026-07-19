@@ -213,13 +213,14 @@ impl TsgoLspConnection {
     }
 
     /// Terminate an OWNED throwaway connection: close the wire and kill + reap
-    /// the child. Crate-internal — used by the toolchain validator after a
-    /// capability smoke; production teardown stays on [`TsgoAttach`].
+    /// the child process TREE (bounded). Crate-internal — used by the toolchain
+    /// validator after a capability smoke; production teardown stays on
+    /// [`TsgoAttach`].
     pub(crate) async fn terminate(mut self) {
         let _ = self.conn.close().await;
         if let Some(mut child) = self.child.take() {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+            let _ =
+                crate::process::kill_tree_and_reap(&mut child, crate::process::REAP_BOUND).await;
         }
     }
 }
@@ -294,18 +295,21 @@ pub(crate) async fn spawn_own_lsp_connection(
     exe: &Path,
     cwd: &Path,
 ) -> TsgoApiResult<TsgoLspConnection> {
-    let mut child = tokio::process::Command::new(exe)
+    let mut command = tokio::process::Command::new(exe);
+    command
         .arg("--lsp")
         .arg("--stdio")
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| {
-            TsgoApiError::Spawn(format!("spawn `{} --lsp --stdio`: {e}", exe.display()))
-        })?;
+        .kill_on_drop(true);
+    // Own process group / job: the teardown tree kill reaches any descendant
+    // that inherited the pipes.
+    crate::process::configure_tree_spawn(&mut command);
+    let mut child = command.spawn().map_err(|e| {
+        TsgoApiError::Spawn(format!("spawn `{} --lsp --stdio`: {e}", exe.display()))
+    })?;
 
     let stdin = child
         .stdin
@@ -592,17 +596,17 @@ impl TsgoAttach<Owned> {
     }
 
     /// OWNED full teardown — PRIVATE: reachable only through the owned
-    /// [`TsgoAttach::teardown`]. Sends `exit`, closes the connection, and
-    /// kills the child. Keeping this private (and owned-only) makes the
-    /// teardown DISPATCH structural: no lifecycle/teardown path sends `exit`
-    /// on an editor-owned connection.
+    /// [`TsgoAttach::teardown`]. Sends `exit`, closes the connection, and kills
+    /// + reaps the child process TREE (bounded). Keeping this private (and
+    /// owned-only) makes the teardown DISPATCH structural: no
+    /// lifecycle/teardown path sends `exit` on an editor-owned connection.
     async fn shutdown(mut self) -> TsgoApiResult<()> {
         let _ = self.api.close().await;
         let _ = self.lsp.conn.notify("exit", serde_json::Value::Null).await;
         let _ = self.lsp.conn.close().await;
         if let Some(mut child) = self.lsp.child.take() {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+            let _ =
+                crate::process::kill_tree_and_reap(&mut child, crate::process::REAP_BOUND).await;
         }
         Ok(())
     }
