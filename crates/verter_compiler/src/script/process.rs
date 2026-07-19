@@ -39,6 +39,34 @@ pub(super) fn source_type_from_lang(lang: Option<&ScriptLanguage>) -> SourceType
 
 // ======================== process_script_setup ========================
 
+/// How the runtime component object is wrapped, matching the official
+/// `@vue/compiler-sfc` non-inline gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ComponentWrap {
+    /// JS with no companion `export default` / `defineOptions`:
+    /// plain object literal (`const __sfc__ = { ... }`).
+    Plain,
+    /// TS (`lang="ts"`/`"tsx"`): `/*@__PURE__*/_defineComponent({ ... })`.
+    DefineComponent,
+    /// JS with companion `export default` / `defineOptions`:
+    /// `/*@__PURE__*/Object.assign({ ...options }, { ...runtime })`.
+    ObjectAssign,
+}
+
+/// Pick the runtime wrapper for a `<script setup>` component, matching the
+/// official `@vue/compiler-sfc` non-inline gate: `isTS` → `_defineComponent`;
+/// JS with a companion default export / `defineOptions` → `Object.assign`
+/// merge; otherwise a plain object literal (no `_defineComponent` import).
+pub(super) fn component_wrap(is_ts: bool, has_options: bool) -> ComponentWrap {
+    if is_ts {
+        ComponentWrap::DefineComponent
+    } else if has_options {
+        ComponentWrap::ObjectAssign
+    } else {
+        ComponentWrap::Plain
+    }
+}
+
 /// Process a `<script setup>` block (with optional companion `<script>`).
 ///
 /// Parses the script content with OXC, then:
@@ -54,10 +82,11 @@ pub fn process_script_setup<'alloc>(
     prepared: &PreparedScript<'alloc>,
     ctx: &mut ScriptContext<'alloc>,
     options: &ScriptCodeGenOptions<'_>,
+    is_ts: bool,
 ) {
     if setup.content.is_none() {
         // Self-closing <script setup /> — emit empty component
-        emit_minimal_component(setup, ctx, options);
+        emit_minimal_component(setup, ctx, options, is_ts);
         return;
     }
 
@@ -316,7 +345,12 @@ pub fn process_script_setup<'alloc>(
         ctx.imports.push("_withAsyncContext");
     }
 
-    // Build wrapper opening (includes __name, props, emits, options sections)
+    // Build wrapper opening (includes __name, props, emits, options sections).
+    // The wrapper shape follows the official non-inline gate: TS components
+    // keep `_defineComponent`; JS components are plain object literals unless
+    // a companion `export default` / `defineOptions` forces the
+    // `Object.assign` merge path.
+    let wrap = component_wrap(is_ts, macro_state.options_section.is_some());
     let wrapper_start = build_setup_wrapper_start(
         options.component_name,
         parse_result.is_async,
@@ -325,6 +359,7 @@ pub fn process_script_setup<'alloc>(
         macro_state.props_section.as_deref(),
         macro_state.emits_section.as_deref(),
         macro_state.options_section.as_deref(),
+        wrap,
     );
 
     // Overwrite open tag with wrapper
@@ -350,6 +385,7 @@ pub fn process_script_setup<'alloc>(
         },
         options.is_vapor,
         options.ssr,
+        wrap,
     );
 
     // Handle close tag
@@ -363,8 +399,11 @@ pub fn process_script_setup<'alloc>(
         }
     }
 
-    // Track _defineComponent import
-    ctx.imports.push("_defineComponent");
+    // Track the _defineComponent import only when the wrapper emits the call
+    // (TS components). Plain-object and Object.assign shapes need no helper.
+    if wrap == ComponentWrap::DefineComponent {
+        ctx.imports.push("_defineComponent");
+    }
 }
 
 // ======================== process_script_only ========================
@@ -448,15 +487,25 @@ fn emit_minimal_component(
     setup: &RootNodeScript,
     ctx: &mut ScriptContext<'_>,
     options: &ScriptCodeGenOptions<'_>,
+    is_ts: bool,
 ) {
     let mut s = String::with_capacity(128);
-    s.push_str("const __sfc__ = /*@__PURE__*/_defineComponent({\n");
+    // Official gate: TS keeps `_defineComponent`; JS emits a plain object.
+    if is_ts {
+        s.push_str("const __sfc__ = /*@__PURE__*/_defineComponent({\n");
+    } else {
+        s.push_str("const __sfc__ = {\n");
+    }
     if !options.component_name.is_empty() {
         s.push_str("  __name: '");
         s.push_str(options.component_name);
         s.push_str("',\n");
     }
-    s.push_str("});\n");
+    if is_ts {
+        s.push_str("});\n");
+    } else {
+        s.push_str("};\n");
+    }
     if options.is_vapor {
         s.push_str("__sfc__.__vapor = true;\n");
     }
@@ -475,11 +524,14 @@ fn emit_minimal_component(
         .unwrap_or(setup.tag_open.end);
     ctx.out.overwrite(setup.tag_open.start, end, &s);
 
-    ctx.imports.push("_defineComponent");
+    if is_ts {
+        ctx.imports.push("_defineComponent");
+    }
 }
 
 /// Build the opening part of the setup wrapper with sections.
 ///
+/// TS (`ComponentWrap::DefineComponent`):
 /// ```js
 /// const __sfc__ = /*@__PURE__*/_defineComponent({
 ///   inheritAttrs: false,           // from defineOptions
@@ -487,6 +539,22 @@ fn emit_minimal_component(
 ///   props: { title: String },      // from defineProps
 ///   emits: ['click'],              // from defineEmits
 ///   setup(__props, { expose: __expose, emit: __emit }) {
+/// ```
+///
+/// JS without options (`ComponentWrap::Plain`) — official emits a plain
+/// object literal with no `_defineComponent` call or import:
+/// ```js
+/// const __sfc__ = {
+///   __name: 'ComponentName',
+///   setup(__props) {
+/// ```
+///
+/// JS with companion default / defineOptions (`ComponentWrap::ObjectAssign`)
+/// — official merges via `Object.assign` (options object is the target):
+/// ```js
+/// const __sfc__ = /*@__PURE__*/Object.assign({ inheritAttrs: false }, {
+///   __name: 'ComponentName',
+///   setup(__props) {
 /// ```
 #[allow(clippy::too_many_arguments)]
 fn build_setup_wrapper_start(
@@ -497,15 +565,36 @@ fn build_setup_wrapper_start(
     props_section: Option<&str>,
     emits_section: Option<&str>,
     options_section: Option<&str>,
+    wrap: ComponentWrap,
 ) -> String {
     let mut s = String::with_capacity(256);
-    s.push_str("const __sfc__ = /*@__PURE__*/_defineComponent({\n");
+    match wrap {
+        ComponentWrap::DefineComponent => {
+            s.push_str("const __sfc__ = /*@__PURE__*/_defineComponent({\n");
+        }
+        ComponentWrap::Plain => {
+            s.push_str("const __sfc__ = {\n");
+        }
+        ComponentWrap::ObjectAssign => {
+            // The options object is the merge target; runtime sections go
+            // into the object being merged in (official shape).
+            let options = options_section
+                .expect("ObjectAssign wrap implies a defineOptions/companion section");
+            s.push_str("const __sfc__ = /*@__PURE__*/Object.assign({ ");
+            s.push_str(options);
+            s.push_str(" }, {\n");
+        }
+    }
 
-    // defineOptions content (before __name)
-    if let Some(opts) = options_section {
-        s.push_str("  ");
-        s.push_str(opts);
-        s.push_str(",\n");
+    // defineOptions / companion-default content (before __name) — inlined
+    // into the wrapped object only for the TS `_defineComponent` shape; the
+    // Object.assign path already consumed it as the merge target.
+    if wrap == ComponentWrap::DefineComponent {
+        if let Some(opts) = options_section {
+            s.push_str("  ");
+            s.push_str(opts);
+            s.push_str(",\n");
+        }
     }
 
     if !component_name.is_empty() {
@@ -560,7 +649,8 @@ fn build_setup_wrapper_start(
 ///
 /// ```js
 ///   return { msg, count }
-/// }});
+/// }});                    // _defineComponent / Object.assign shapes
+/// }};                     // plain-object shape
 /// __sfc__.__scopeId = "data-v-xxx";
 /// export default __sfc__;
 /// ```
@@ -569,6 +659,7 @@ fn build_setup_wrapper_end(
     scope_id: Option<&str>,
     is_vapor: bool,
     ssr: bool,
+    wrap: ComponentWrap,
 ) -> String {
     let mut s = String::with_capacity(128);
     if let Some(ret) = returned {
@@ -592,7 +683,10 @@ fn build_setup_wrapper_end(
             s.push_str(";\nObject.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });\nreturn __returned__;\n");
         }
     }
-    s.push_str("\n}});\n");
+    match wrap {
+        ComponentWrap::Plain => s.push_str("\n}};\n"),
+        ComponentWrap::DefineComponent | ComponentWrap::ObjectAssign => s.push_str("\n}});\n"),
+    }
     if is_vapor {
         s.push_str("__sfc__.__vapor = true;\n");
     }

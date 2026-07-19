@@ -92,8 +92,8 @@ fn test_script_setup_basic_dev() {
     let result = compile(input, &options, &verter_opts, &allocator);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
-        script.code.contains("const __sfc__ = /*@__PURE__*/"),
-        "Should have const __sfc__ = /*@__PURE__*/, got:\n{}",
+        script.code.contains("const __sfc__ = {"),
+        "Should have plain const __sfc__ object (JS is not wrapped), got:\n{}",
         script.code
     );
     assert!(
@@ -958,9 +958,10 @@ fn test_ts_uses_define_component() {
 }
 
 #[test]
-fn test_js_uses_define_component() {
-    // NOTE: In the new AST-based pipeline, _defineComponent is used for both
-    // JS and TS script setup blocks (unlike the old pipeline which only used it for TS).
+fn test_js_uses_plain_object_without_define_component() {
+    // Official @vue/compiler-sfc non-inline: JS (no `lang="ts"`) script setup
+    // emits a PLAIN component object — no `_defineComponent` call or import.
+    // Only TS components are wrapped (see test_ts_uses_define_component).
     let input = "<script setup>\nconst x = 1\n</script>\n<template><div>x</div></template>";
     let allocator = Allocator::new();
     let options = CodegenOptions::new().with_filename("test.vue");
@@ -971,8 +972,13 @@ fn test_js_uses_define_component() {
     let result = compile(input, &options, &verter_opts, &allocator);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
-        script.code.contains("_defineComponent("),
-        "JS script setup should also use _defineComponent in the new pipeline, got:\n{}",
+        script.code.contains("const __sfc__ = {"),
+        "JS script setup should emit a plain object, got:\n{}",
+        script.code
+    );
+    assert!(
+        !script.code.contains("_defineComponent"),
+        "JS script setup must not reference _defineComponent, got:\n{}",
         script.code
     );
 }
@@ -1511,8 +1517,8 @@ fn test_scoped_style_uses_sfc_variable() {
     let result = compile(input, &options, &verter_opts, &allocator);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
-        script.code.contains("const __sfc__ = /*@__PURE__*/"),
-        "Should use const __sfc__ for scoped styles, got:\n{}",
+        script.code.contains("const __sfc__ = {"),
+        "Should use plain const __sfc__ object for scoped styles, got:\n{}",
         script.code
     );
     assert!(
@@ -1615,8 +1621,8 @@ fn test_non_scoped_setup_uses_sfc_variable() {
     let result = compile(input, &options, &verter_opts, &allocator);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
-        script.code.contains("const __sfc__ = /*@__PURE__*/"),
-        "Should use const __sfc__ pattern, got:\n{}",
+        script.code.contains("const __sfc__ = {"),
+        "Should use plain const __sfc__ object pattern, got:\n{}",
         script.code
     );
     assert!(

@@ -102,10 +102,23 @@ pub fn generate_script<'alloc>(
         alloc,
     };
 
+    // Official `@vue/compiler-sfc` wrapper gate: `isTS` when either script
+    // block declares `lang="ts"` or `lang="tsx"` — TS components keep the
+    // `_defineComponent` wrapper; JS components emit plain object literals
+    // (or the `Object.assign` merge path when options exist). This affects
+    // only the runtime (SFC→JS) output; the IDE/TSX lane has its own codegen.
+    let is_ts = [script, script_setup].into_iter().flatten().any(|s| {
+        matches!(
+            s.lang,
+            Some(crate::cursor::ScriptLanguage::TypeScript)
+                | Some(crate::cursor::ScriptLanguage::TSX)
+        )
+    });
+
     match (script, script_setup) {
         (_, Some(setup)) => {
             // <script setup> present — this is the primary block
-            process::process_script_setup(setup, prepared, &mut ctx, options);
+            process::process_script_setup(setup, prepared, &mut ctx, options, is_ts);
         }
         (Some(normal), None) => {
             // Only <script> (no setup) — Options API

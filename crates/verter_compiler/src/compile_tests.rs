@@ -138,8 +138,10 @@ const msg = 'hello'
 
 #[test]
 fn script_imports_use_as_syntax() {
+    // TS script setup keeps the `_defineComponent` wrapper, so its helper
+    // import is emitted (JS emits a plain object with no such import).
     let result = compile_sfc(
-        r#"<script setup>
+        r#"<script setup lang="ts">
 const msg = 'hello'
 </script>
 
