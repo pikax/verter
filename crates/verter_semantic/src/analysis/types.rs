@@ -219,6 +219,11 @@ pub struct ScriptAnalysisSnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub script_binding_occurrences: Vec<ScriptBindingOccurrence>,
 
+    /// Script-side usage facts for macro-declared members (unused-declaration
+    /// diagnostics). `None` for files without Vue macros.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub macro_usage: Option<crate::analysis::macro_usage::MacroUsageFacts>,
+
     /// SFC-absolute byte offset of the first top-level `await` expression (if any).
     /// Used by lint rules to detect lifecycle hooks/watchers called after await.
     #[serde(default, skip_serializing_if = "Option::is_none")]

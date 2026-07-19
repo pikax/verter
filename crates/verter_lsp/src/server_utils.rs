@@ -1403,12 +1403,18 @@ pub(crate) fn compute_verter_diagnostics_for_with_views(
             }
 
             // When lint is not explicitly configured, suppress lint diagnostics but
-            // keep component usage diagnostics (type-level, not lint rules).
+            // keep component usage diagnostics (type-level, not lint rules) and
+            // the unused-declaration diagnostics (fail-open populated, faded
+            // via Unnecessary — the default-on TS-unused experience for
+            // macro-declared members the provider cannot see).
             if !lint_explicitly_configured {
                 diags.retain(|d| match &d.code {
                     Some(NumberOrString::String(code)) => {
                         if code == "verter/unknown-prop"
                             || code == "verter/unknown-model"
+                            || code == "verter/no-unused-props"
+                            || code == "verter/no-unused-emit-declarations"
+                            || code == "verter/no-unused-slots"
                             || code == crate::features::diagnostics::TYPE_EXPANSION_BUDGET_CODE
                             || code == crate::features::diagnostics::TYPE_QUERY_DEPTH_LIMIT_CODE
                         {

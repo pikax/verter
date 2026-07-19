@@ -83,6 +83,8 @@ fn empty_input() -> CompileInput {
         script_imports: Vec::new(),
         script_macros: Vec::new(),
         script_bindings: Vec::new(),
+        script_macro_usage: None,
+        script_vue_api_calls: Vec::new(),
         framework_parse: None,
         style_v_bind_vars: Vec::new(),
     }

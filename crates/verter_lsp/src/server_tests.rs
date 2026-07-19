@@ -3314,6 +3314,7 @@ fn collect_imported_carrier_priority_ids_keeps_only_resolved_vue_imports() {
         module_references: Vec::new(),
         bindings: Vec::new(),
         macros: Vec::new(),
+        macro_usage: None,
         macro_type_deps: Vec::new(),
         flags: verter_semantic::analysis::AnalysisFlags::empty(),
         exported_functions: Vec::new(),
@@ -15327,6 +15328,209 @@ fn compute_verter_diagnostics_flags_fixture_fragment_component_data_attr() {
                     .map(|template| template.components.iter().map(|comp| comp.name.clone()).collect::<Vec<_>>())
             })
         );
+}
+
+/// Byte offset → LSP position for a plain ASCII test source.
+#[cfg(test)]
+fn ascii_position(source: &str, needle: &str) -> Position {
+    let offset = source.find(needle).expect("needle present");
+    let before = &source[..offset];
+    let line = before.matches('\n').count() as u32;
+    let character = before
+        .rsplit('\n')
+        .next()
+        .map(|tail| tail.len() as u32)
+        .unwrap_or(0);
+    Position { line, character }
+}
+
+/// Public-boundary acceptance: an unused declared prop, event, and slot each
+/// publish ONE Verter-owned diagnostic by default (no lint config), faded via
+/// `Unnecessary`, anchored on the authored member name; used members and the
+/// self-consumed `defineModel` pair stay silent.
+#[test]
+fn unused_declared_props_emits_slots_surface_by_default_with_unnecessary_tag() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script setup lang=\"ts\">\n\
+                  const props = defineProps<{ used: string; unusedProp: number }>();\n\
+                  const emit = defineEmits<{ save: []; unusedEvent: [] }>();\n\
+                  defineSlots<{ header(): unknown; unusedSlot(): unknown }>();\n\
+                  const title = defineModel<string>('title');\n\
+                  console.log(props.used, title.value);\n\
+                  emit('save');\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <div v-if=\"props.used\"><slot name=\"header\" /></div>\n\
+                  </template>\n";
+    let file = dir.path().join("Comp.vue");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+
+    let by_code = |code: &str| {
+        diags
+            .iter()
+            .filter(|diag| {
+                matches!(
+                    diag.code.as_ref(),
+                    Some(NumberOrString::String(c)) if c == code
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // ── Unused prop: exactly one, faded, on the authored member name ──
+    let unused_props = by_code("verter/no-unused-props");
+    assert_eq!(
+        unused_props.len(),
+        1,
+        "unused declared prop must surface by default, got: {diags:?}"
+    );
+    assert!(unused_props[0].message.contains("unusedProp"));
+    assert_eq!(
+        unused_props[0].tags,
+        Some(vec![DiagnosticTag::UNNECESSARY]),
+        "editors need the Unnecessary tag for the faded TS-unused look"
+    );
+    assert_eq!(
+        unused_props[0].range.start,
+        ascii_position(source, "unusedProp"),
+        "diagnostic anchors on the authored declaration member"
+    );
+
+    // ── Unused event ──
+    let unused_emits = by_code("verter/no-unused-emit-declarations");
+    assert_eq!(unused_emits.len(), 1, "got: {diags:?}");
+    assert!(unused_emits[0].message.contains("unusedEvent"));
+    assert_eq!(unused_emits[0].tags, Some(vec![DiagnosticTag::UNNECESSARY]));
+    assert_eq!(
+        unused_emits[0].range.start,
+        ascii_position(source, "unusedEvent")
+    );
+
+    // ── Unused slot ──
+    let unused_slots = by_code("verter/no-unused-slots");
+    assert_eq!(unused_slots.len(), 1, "got: {diags:?}");
+    assert!(unused_slots[0].message.contains("unusedSlot"));
+    assert_eq!(unused_slots[0].tags, Some(vec![DiagnosticTag::UNNECESSARY]));
+    assert_eq!(
+        unused_slots[0].range.start,
+        ascii_position(source, "unusedSlot")
+    );
+
+    // ── Negatives: used members and the defineModel pair are never flagged ──
+    for never_flagged in ["'used'", "'save'", "'header'", "'title'", "update:title"] {
+        assert!(
+            !diags
+                .iter()
+                .any(|diag| diag.message.contains(never_flagged)),
+            "{never_flagged} is used/self-consumed and must not be flagged: {diags:?}"
+        );
+    }
+}
+
+/// Fail-open boundary: whole-object escapes, destructured `defineProps`
+/// (provider-owned TS6133 — the merge cannot dedup across sources), and
+/// `useSlots()` each silence their WHOLE kind — zero unused-declaration
+/// diagnostics for this component.
+#[test]
+fn unused_declaration_diagnostics_fail_open_on_escapes_destructure_and_use_slots() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script setup lang=\"ts\">\n\
+                  import { useSlots } from 'vue';\n\
+                  const { neverReadProp } = defineProps<{ neverReadProp: number }>();\n\
+                  const emit = defineEmits<{ neverEmitted: [] }>();\n\
+                  const forwarded = emit;\n\
+                  defineSlots<{ neverOutlet(): unknown }>();\n\
+                  const slots = useSlots();\n\
+                  console.log(forwarded, slots);\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <div />\n\
+                  </template>\n";
+    let file = dir.path().join("FailOpen.vue");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+
+    assert!(
+        !diags.iter().any(|diag| matches!(
+            diag.code.as_ref(),
+            Some(NumberOrString::String(code))
+                if code == "verter/no-unused-props"
+                    || code == "verter/no-unused-emit-declarations"
+                    || code == "verter/no-unused-slots"
+        )),
+        "escaped/destructured/useSlots component must produce ZERO unused-declaration \
+         diagnostics (fail-open; destructured props are provider-owned TS6133), got: {diags:?}"
+    );
+}
+
+/// A legacy Svelte `<slot>` has NO declaration site — the unused-declaration
+/// diagnostics apply only to explicit type-level declarations and must never
+/// invent one for Svelte markup.
+#[test]
+fn svelte_legacy_slot_produces_no_unused_declaration_diagnostic() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script lang=\"ts\">\n\
+                  export let title: string;\n\
+                  console.log(title);\n\
+                  </script>\n\
+                  \n\
+                  <div><slot /></div>\n";
+    let file = dir.path().join("LegacySlot.svelte");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "svelte".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+
+    assert!(
+        !diags.iter().any(|diag| matches!(
+            diag.code.as_ref(),
+            Some(NumberOrString::String(code)) if code.starts_with("verter/no-unused-")
+        )),
+        "legacy <slot> has no declaration site — nothing to flag, got: {diags:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

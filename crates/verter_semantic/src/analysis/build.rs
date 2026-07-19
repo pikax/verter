@@ -609,11 +609,48 @@ fn build_script_analysis_inner(
     let nested_macro_calls = collect_nested_macro_calls(program, 0);
     let declaration_entries = collect_declaration_entries(content, program);
 
+    // Script-side usage facts for macro-declared members (unused-declaration
+    // diagnostics). One extra typed pass, only for files that use Vue macros.
+    let macro_usage = if macros.is_empty() {
+        None
+    } else {
+        let props_binding = macros
+            .iter()
+            .find(|m| {
+                matches!(
+                    m.kind,
+                    AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults
+                )
+            })
+            .and_then(|m| m.binding_name.as_deref());
+        let emit_binding = macros
+            .iter()
+            .find(|m| matches!(m.kind, AnalyzedMacroKind::DefineEmits))
+            .and_then(|m| m.binding_name.as_deref());
+        let vue_value_imports: rustc_hash::FxHashSet<String> = imports
+            .iter()
+            .filter(|imp| imp.source == "vue" && !imp.is_type_only)
+            .flat_map(|imp| {
+                imp.bindings
+                    .iter()
+                    .filter(|b| !b.is_type_only)
+                    .map(|b| b.name.clone())
+            })
+            .collect();
+        Some(crate::analysis::macro_usage::collect_macro_usage(
+            program,
+            props_binding,
+            emit_binding,
+            &vue_value_imports,
+        ))
+    };
+
     ScriptAnalysisSnapshot {
         imports,
         module_references,
         bindings,
         macros,
+        macro_usage,
         macro_type_deps,
         vue_api_calls,
         dom_query_calls,
