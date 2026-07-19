@@ -5745,6 +5745,286 @@ async fn contract_slot_prop_binding_navigates_to_child_slot_binding() {
 }
 
 // =========================================================================
+// D3 — slot-name token hover from the child's declared slots surface
+// =========================================================================
+
+const D3_CHILD_SOURCE: &str = "<script setup lang=\"ts\">\ndefineSlots<{\n  header(props: { title: string; count: number }): any;\n  default(props: { body: string }): any;\n  /** camelCase declare; template may use kebab `#my-slot` */\n  mySlot(props: { note: string }): any;\n}>()\n</script>\n<template>\n  <header><slot name=\"header\" title=\"hdr\" :count=\"1\" /></header>\n  <main><slot body=\"main\" /></main>\n</template>\n";
+
+const D3_PARENT_SOURCE: &str = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\n</script>\n<template>\n  <MyComp>\n    <template #header=\"{ title, count: slotCount }\">\n      <span>{{ title }}:{{ slotCount }}</span>\n    </template>\n    <template #default=\"{ body }\">\n      <p>{{ body }}</p>\n    </template>\n    <template #my-slot=\"{ note }\">\n      <em>{{ note }}</em>\n    </template>\n    <template #nope=\"{ ghost }\">\n      <i>{{ ghost }}</i>\n    </template>\n  </MyComp>\n  <MyComp>\n    <template v-slot:header=\"{ title }\">\n      <b>{{ title }}</b>\n    </template>\n  </MyComp>\n</template>\n";
+
+async fn d3_hover_text(needle: &str, character_shift: u32) -> Option<String> {
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/MyComp.vue", "vue", D3_CHILD_SOURCE),
+        ("src/App.vue", "vue", D3_PARENT_SOURCE),
+    ])
+    .await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+    let mut position = find_document_position(server, &app_uri, needle, 0);
+    position.character += character_shift;
+    let hover = server
+        .hover(hover_params(&app_uri, position))
+        .await
+        .expect("hover request should succeed");
+    let text = hover.map(|h| hover_text(Some(h)));
+    drain_handle.abort();
+    drop(service);
+    text
+}
+
+#[tokio::test]
+async fn contract_hash_slot_name_hover_shows_child_slot_signature() {
+    let text = d3_hover_text("#header", 1)
+        .await
+        .expect("#header must produce a hover");
+    for needle in ["header", "title", "string", "count", "number"] {
+        assert!(
+            text.contains(needle),
+            "#header hover must carry the child slot-props signature ({needle}), got: {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn contract_default_slot_name_hover_shows_child_slot_signature() {
+    let text = d3_hover_text("#default", 1)
+        .await
+        .expect("#default must produce a hover");
+    for needle in ["default", "body", "string"] {
+        assert!(
+            text.contains(needle),
+            "#default hover must carry the child slot-props signature ({needle}), got: {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn contract_kebab_slot_name_hover_resolves_camel_declared_signature() {
+    let text = d3_hover_text("#my-slot", 2)
+        .await
+        .expect("#my-slot must produce a hover");
+    for needle in ["mySlot", "note", "string"] {
+        assert!(
+            text.contains(needle),
+            "#my-slot hover must resolve the camel-declared slot ({needle}), got: {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn contract_longhand_v_slot_name_hover_shows_child_slot_signature() {
+    let text = d3_hover_text("v-slot:header", "v-slot:".len() as u32)
+        .await
+        .expect("v-slot:header must produce a hover");
+    for needle in ["header", "title", "string"] {
+        assert!(
+            text.contains(needle),
+            "v-slot:header hover must carry the child slot-props signature ({needle}), got: {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn contract_unknown_slot_name_produces_no_hover() {
+    // Negative control: a slot the child never declared must be silent —
+    // no fabricated slot hover.
+    let text = d3_hover_text("#nope", 1).await;
+    assert!(
+        text.is_none(),
+        "unknown slot name must produce no hover, got: {text:?}"
+    );
+}
+
+// =========================================================================
+// D4 — slot-props destructure hover (pattern + usage positions)
+// =========================================================================
+
+#[tokio::test]
+async fn contract_slot_props_pattern_positions_hover_with_provider_binding_types() {
+    let (_temp, service, drain_handle, provider, workspace_id) = make_definition_test_server(&[
+        ("src/MyComp.vue", "vue", D3_CHILD_SOURCE),
+        ("src/App.vue", "vue", D3_PARENT_SOURCE),
+    ])
+    .await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+
+    // Pattern positions must map through CodeTransform into the generated TSX
+    // (they are verbatim-authored bytes inside the slot IIFE) so the provider's
+    // typed binding hover answers at the authored offset — identical to a
+    // standalone-TS destructured parameter.
+    for (needle, shift, label, seeded) in [
+        (
+            "{ title, count: slotCount }",
+            2,
+            "pattern title",
+            "const title: string",
+        ),
+        (
+            "count: slotCount }",
+            7,
+            "pattern alias slotCount",
+            "const slotCount: number",
+        ),
+    ] {
+        let mut position = find_document_position(server, &app_uri, needle, 0);
+        position.character += shift;
+        set_type_hover_at_vue_position(server, &provider, &app_uri, position, seeded);
+        let text = hover_text(
+            server
+                .hover(hover_params(&app_uri, position))
+                .await
+                .expect("hover request should succeed"),
+        );
+        assert!(
+            text.contains(seeded),
+            "{label} hover must be the provider's typed binding hover, got: {text}"
+        );
+    }
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn contract_slot_props_usage_positions_hover_with_provider_binding_types() {
+    let (_temp, service, drain_handle, provider, workspace_id) = make_definition_test_server(&[
+        ("src/MyComp.vue", "vue", D3_CHILD_SOURCE),
+        ("src/App.vue", "vue", D3_PARENT_SOURCE),
+    ])
+    .await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+
+    for (needle, shift, label, seeded) in [
+        ("{{ title }}", 3, "usage title", "const title: string"),
+        (
+            "{{ slotCount }}",
+            3,
+            "usage slotCount",
+            "const slotCount: number",
+        ),
+    ] {
+        let mut position = find_document_position(server, &app_uri, needle, 0);
+        position.character += shift;
+        set_type_hover_at_vue_position(server, &provider, &app_uri, position, seeded);
+        let text = hover_text(
+            server
+                .hover(hover_params(&app_uri, position))
+                .await
+                .expect("hover request should succeed"),
+        );
+        assert!(
+            text.contains(seeded),
+            "{label} hover must be the provider's typed binding hover, got: {text}"
+        );
+    }
+
+    drain_handle.abort();
+    drop(service);
+}
+
+// =========================================================================
+// D3/D4 Svelte parity pins — snippet names, render callsites, parameters
+// (provider-rail round trips through the mapped carrier projection)
+// =========================================================================
+
+const D3_SVELTE_SOURCE: &str = "<script lang=\"ts\">\n  let items = $state([1, 2]);\n</script>\n\n{#snippet row(item: number)}\n  <li>{item}</li>\n{/snippet}\n\n<ul>\n  {#each items as it}\n    {@render row(it)}\n  {/each}\n</ul>\n";
+
+#[tokio::test]
+async fn contract_svelte_snippet_name_hover_maps_to_provider() {
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server(&[("src/List.svelte", "svelte", D3_SVELTE_SOURCE)]).await;
+    let doc_uri = workspace_uri(&workspace_id, "src/List.svelte");
+    let server = service.inner();
+    let mut position = find_document_position(server, &doc_uri, "{#snippet row(", 0);
+    position.character += "{#snippet ".len() as u32;
+    set_type_hover_at_vue_position(
+        server,
+        &provider,
+        &doc_uri,
+        position,
+        "const row: Snippet<[item: number]>",
+    );
+    let text = hover_text(
+        server
+            .hover(hover_params(&doc_uri, position))
+            .await
+            .expect("hover request should succeed"),
+    );
+    assert!(
+        text.contains("Snippet"),
+        "snippet name hover must round-trip the provider's typed snippet hover, got: {text}"
+    );
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn contract_svelte_render_callsite_hover_maps_to_provider() {
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server(&[("src/List.svelte", "svelte", D3_SVELTE_SOURCE)]).await;
+    let doc_uri = workspace_uri(&workspace_id, "src/List.svelte");
+    let server = service.inner();
+    let mut position = find_document_position(server, &doc_uri, "{@render row(", 0);
+    position.character += "{@render ".len() as u32;
+    set_type_hover_at_vue_position(
+        server,
+        &provider,
+        &doc_uri,
+        position,
+        "const row: (this: void, item: number) => void",
+    );
+    let text = hover_text(
+        server
+            .hover(hover_params(&doc_uri, position))
+            .await
+            .expect("hover request should succeed"),
+    );
+    assert!(
+        text.contains("row"),
+        "render callsite hover must round-trip the provider's typed hover, got: {text}"
+    );
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn contract_svelte_snippet_param_positions_hover_with_provider_binding_types() {
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server(&[("src/List.svelte", "svelte", D3_SVELTE_SOURCE)]).await;
+    let doc_uri = workspace_uri(&workspace_id, "src/List.svelte");
+    let server = service.inner();
+
+    for (needle, shift, label) in [
+        ("row(item: number)", 4, "snippet parameter pattern"),
+        ("{item}", 1, "snippet parameter usage"),
+    ] {
+        let mut position = find_document_position(server, &doc_uri, needle, 0);
+        position.character += shift;
+        set_type_hover_at_vue_position(
+            server,
+            &provider,
+            &doc_uri,
+            position,
+            "(parameter) item: number",
+        );
+        let text = hover_text(
+            server
+                .hover(hover_params(&doc_uri, position))
+                .await
+                .expect("hover request should succeed"),
+        );
+        assert!(
+            text.contains("item: number"),
+            "{label} hover must be the provider's typed parameter hover, got: {text}"
+        );
+    }
+    drain_handle.abort();
+    drop(service);
+}
+
+// =========================================================================
 // Template-attribute navigation: kebab↔camel, longhand, fail-closed
 // =========================================================================
 

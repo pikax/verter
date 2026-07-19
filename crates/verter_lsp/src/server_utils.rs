@@ -214,7 +214,7 @@ pub(super) fn build_workspace_components(
 /// upstream in `build_workspace_components` rather than emitting a bad name.
 ///
 /// This is identifier formatting of a filename, not semantic type logic.
-pub(super) fn to_pascal_case(s: &str) -> String {
+pub(crate) fn to_pascal_case(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut capitalize_next = true;
     for ch in s.chars() {
@@ -963,7 +963,7 @@ pub(super) fn event_name_match_rank(requested: &str, candidate: &str) -> Option<
 /// Rank an authored template attribute / directive arg name against a declaration
 /// name. Exact match wins; otherwise kebab ↔ camel equivalence (Vue's HTML-case
 /// contract) ranks as a secondary hit. Used for props, events, and slots.
-pub(super) fn attr_name_match_rank(requested: &str, candidate: &str) -> Option<u8> {
+pub(crate) fn attr_name_match_rank(requested: &str, candidate: &str) -> Option<u8> {
     if requested == candidate {
         return Some(0);
     }
@@ -977,7 +977,7 @@ pub(super) fn attr_name_match_rank(requested: &str, candidate: &str) -> Option<u
 /// defined slots, slot bindings, rename declarations) so the rank/span
 /// tie-break cannot drift between call sites. The candidate `value` rides
 /// along so a caller can keep a borrowed field instead of re-looking it up.
-pub(super) fn select_best_ranked_candidate<T>(
+pub(crate) fn select_best_ranked_candidate<T>(
     candidates: impl IntoIterator<Item = (u8, verter_span::Span, T)>,
 ) -> Option<(u8, verter_span::Span, T)> {
     let mut best: Option<(u8, verter_span::Span, T)> = None;

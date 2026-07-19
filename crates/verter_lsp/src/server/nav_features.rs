@@ -113,6 +113,12 @@ pub(super) async fn handle_hover(
         if let Some(child_hover) = server.child_hover_for_target(uri, target) {
             return Ok(Some(child_hover));
         }
+        // D3 fail-closed: an identified slot-name token on a resolved child
+        // whose slots surface declares no such slot is SILENT — never the
+        // untyped static fallback, never a fabricated signature.
+        if matches!(target, hover::ChildHoverTarget::SlotAttribute(_)) {
+            return Ok(None);
+        }
     }
 
     // Slot syntax: verter provides rich hover; type provider returns unhelpful
