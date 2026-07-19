@@ -108,6 +108,15 @@ pub enum RejectionReason {
         /// The smoke failure detail.
         detail: String,
     },
+    /// The candidate's LOCATION is structurally untrusted (a symlink/reparse
+    /// component inside a trust-boundary tree — e.g. the bundled install dir
+    /// or the update cache). Distinct from a validation failure: the file was
+    /// never executed, because its placement already violates the install
+    /// contract.
+    UntrustedLocation {
+        /// The trust violation detail.
+        detail: String,
+    },
 }
 
 impl fmt::Display for RejectionReason {
@@ -132,6 +141,13 @@ impl fmt::Display for RejectionReason {
             ),
             Self::ApiSmokeFailed { detail } => {
                 write!(f, "the `--api` capability check failed: {detail}")
+            }
+            Self::UntrustedLocation { detail } => {
+                write!(
+                    f,
+                    "the engine location is structurally untrusted (a symlink/reparse \
+                     component inside a trust-boundary tree): {detail}"
+                )
             }
         }
     }

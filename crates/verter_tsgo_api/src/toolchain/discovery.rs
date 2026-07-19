@@ -16,7 +16,8 @@
 //! 4. **bundled** — the sidecar at `<host-exe-dir>/tsgo/lib/tsc[.exe]`
 //!    (location contract in [`crate::toolchain::bundle`]; the packaged product
 //!    ships the binary). A bundled candidate that EXISTS but fails validation
-//!    is a PRODUCT-INTEGRITY failure, not a "no provider" outcome.
+//!    — or is structurally invalid (a symlink/reparse component) — is a
+//!    PRODUCT-INTEGRITY failure, not a "no provider" outcome.
 //!
 //! Resolution NEVER touches the network.
 
@@ -141,8 +142,16 @@ impl ResolutionRequest {
 #[derive(Debug, Default)]
 pub struct CandidateEnumeration {
     /// Candidates in tier order (shared → local → cache → bundled),
-    /// deduplicated by canonical path.
+    /// deduplicated by canonical path. A canonical path reachable as the
+    /// bundled sidecar ALWAYS retains [`Provenance::Bundled`] (even when an
+    /// earlier tier named the same file), so integrity escalation still fires.
     pub candidates: Vec<Candidate>,
+    /// The bundled sidecar EXISTS but is structurally invalid (a
+    /// symlink/reparse component): a product-integrity failure, recorded here
+    /// instead of degrading to a silent skip that falls through to
+    /// "no provider". `None` when there is no bundled sidecar (fine — e.g. a
+    /// source checkout) or it is structurally sound.
+    pub invalid_bundled: Option<Box<CandidateRejection>>,
     /// Human-readable notes: stale overrides, trust-skipped tiers, unsupported
     /// hosts. Surfaced in failure diagnostics.
     pub notes: Vec<String>,
@@ -271,6 +280,16 @@ pub async fn resolve_with(
                 rejections.push(CandidateRejection { candidate, reason });
             }
         }
+    }
+    // The walk reached the end without a working candidate. A present-but-
+    // structurally-invalid bundled sidecar (the offline floor) is a
+    // PRODUCT-INTEGRITY failure — loud reinstall signal, never a soft
+    // no-provider miss.
+    if let Some(invalid) = enumeration.invalid_bundled {
+        return Err(ResolveError::ProductIntegrity {
+            path: invalid.candidate.path,
+            reason: Box::new(invalid.reason),
+        });
     }
     Err(ResolveError::NoUsableCandidate {
         rejections,
@@ -410,11 +429,22 @@ pub fn enumerate_candidates(request: &ResolutionRequest) -> CandidateEnumeration
             if bundled.exists() {
                 let trusted_root = exe.parent().map(Path::to_path_buf).unwrap_or_default();
                 if has_symlink_components(&bundled, &trusted_root) {
-                    out.notes.push(format!(
-                        "the bundled tsgo sidecar at {} has a symlink/reparse-point \
-                         component; refusing to trust it",
-                        bundled.display()
-                    ));
+                    // The sidecar EXISTS but is structurally invalid: this is a
+                    // PRODUCT-INTEGRITY failure (a tampered/corrupt install),
+                    // never a soft skip that falls through to "no provider".
+                    out.invalid_bundled = Some(Box::new(CandidateRejection {
+                        candidate: Candidate {
+                            path: bundled.clone(),
+                            provenance: Provenance::Bundled,
+                        },
+                        reason: RejectionReason::UntrustedLocation {
+                            detail: format!(
+                                "the bundled tsgo sidecar at {} has a symlink/reparse-point \
+                                 component inside the install directory; refusing to trust it",
+                                bundled.display()
+                            ),
+                        },
+                    }));
                 } else {
                     push(&mut out, &mut seen, bundled, Provenance::Bundled);
                 }
@@ -542,7 +572,12 @@ fn has_symlink_components(path: &Path, trusted_prefix: &Path) -> bool {
     false
 }
 
-/// Push a candidate, deduplicated by canonical path (first tier wins).
+/// Push a candidate, deduplicated by canonical path. The FIRST tier to name a
+/// file keeps its slot (tier order), with ONE provenance rule on top: a
+/// canonical path reachable as the bundled sidecar ALWAYS carries
+/// [`Provenance::Bundled`] — the offline floor's product-integrity escalation
+/// must still fire when PATH or `VERTER_TSGO_BIN` happens to point at the
+/// bundled binary (never discarded by dedup).
 fn push(
     out: &mut CandidateEnumeration,
     seen: &mut HashSet<PathBuf>,
@@ -550,8 +585,17 @@ fn push(
     provenance: Provenance,
 ) {
     let key = path.canonicalize().unwrap_or_else(|_| path.clone());
-    if seen.insert(key) {
+    if seen.insert(key.clone()) {
         out.candidates.push(Candidate { path, provenance });
+        return;
+    }
+    if provenance == Provenance::Bundled {
+        if let Some(existing) = out.candidates.iter_mut().find(|c| {
+            c.provenance != Provenance::Bundled
+                && c.path.canonicalize().unwrap_or_else(|_| c.path.clone()) == key
+        }) {
+            existing.provenance = Provenance::Bundled;
+        }
     }
 }
 
@@ -923,7 +967,7 @@ mod tests {
         let f = full_fixture("bundlesymlink");
         // Replace the bundled binary with a symlink to a real file elsewhere
         // (a tampered install: the sidecar location is no longer a real file).
-        let target = f.fixture.file(Path::new("smuggled/engine").as_path());
+        let target = f.fixture.file(Path::new("smuggled/engine"));
         std::fs::remove_file(&f.bundled).unwrap();
         std::os::unix::fs::symlink(&target, &f.bundled).unwrap();
 
