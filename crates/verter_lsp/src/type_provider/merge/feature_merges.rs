@@ -69,7 +69,7 @@ fn resolve_pre_remapped_current_carrier_range(
     }
     let current_carrier_path = normalize_carrier_path(current_ide_path, carrier_source_exists);
     if current_carrier_path == current_ide_path
-        || !verter_span::path::fs_paths_equal(path, &current_carrier_path)
+        || !verter_span::path::fs_paths_equal(path, current_carrier_path)
     {
         return None;
     }
