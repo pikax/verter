@@ -226,7 +226,7 @@ pub(super) fn collect_invalid_macro_type_diagnostics(prepared: &PreparedScript) 
     diagnostics
 }
 
-// ── defineOptions() scope-reference validation ────────────────────────────
+// ── Macro scope-reference validation ──────────────────────────────────────
 
 use oxc_ast::ast::{Expression, Statement};
 use rustc_hash::FxHashMap;
@@ -234,16 +234,22 @@ use rustc_hash::FxHashMap;
 use crate::template::code_gen::binding::BindingType;
 use crate::utils::oxc::bindings::collect_expression_free_ref_spans;
 
-/// The official `@vue/compiler-sfc` rejection message for a setup-scoped
-/// `defineOptions()` argument reference (3.6.0-rc.1, verbatim).
-const DEFINE_OPTIONS_SCOPE_MESSAGE: &str = "`defineOptions()` in <script setup> cannot reference locally declared variables because it will be hoisted outside of the setup() function. If your component options require initialization in the module scope, use a separate normal <script> to export the options instead.";
+/// The official `@vue/compiler-sfc` rejection message template for a
+/// setup-scoped macro-argument reference (3.6.0-rc.1; the macro name is
+/// substituted in).
+fn scope_message(macro_name: &str) -> String {
+    format!(
+        "`{macro_name}()` in <script setup> cannot reference locally declared variables because it will be hoisted outside of the setup() function. If your component options require initialization in the module scope, use a separate normal <script> to export the options instead."
+    )
+}
 
-/// `defineOptions()` scope-reference validation (official
-/// `checkInvalidScopeReference` for `optionsRuntimeDecl`): the argument is
-/// hoisted outside `setup()`, so a reference to a locally declared
-/// (setup-scope) variable breaks at runtime — the official compiler rejects
-/// the SFC. Exemptions match official: literal-const bindings (hoistable
-/// constants) and imports (module scope).
+/// `defineProps` / `defineEmits` / `defineOptions` / `defineModel` (and
+/// `withDefaults` defaults) scope-reference validation (official
+/// `checkInvalidScopeReference`): runtime macro arguments are hoisted outside
+/// `setup()`, so a reference to a locally declared (setup-scope) variable
+/// breaks at runtime — the official compiler rejects the SFC. Exemptions
+/// match official: literal-const bindings (hoistable constants, incl.
+/// all-literal enums) and imports (module scope).
 pub(super) fn collect_invalid_options_scope_diagnostics(
     prepared: &PreparedScript,
 ) -> Vec<Diagnostic> {
@@ -269,50 +275,109 @@ pub(super) fn collect_invalid_options_scope_diagnostics(
     }
 
     let mut diagnostics = Vec::new();
-    // Top-level `defineOptions(...)` calls (the same statements the macro
-    // parser surfaces — defineOptions is a bare statement macro).
+    // Macro calls at top level — bare statements (defineProps/defineEmits/
+    // defineOptions, withDefaults) and assigned declarators (defineModel is
+    // `const m = defineModel(...)`; withDefaults wraps defineProps into a
+    // const).
     for stmt in &setup.program().body {
-        let Statement::ExpressionStatement(es) = stmt else {
-            continue;
-        };
-        let Expression::CallExpression(call) = &es.expression else {
-            continue;
-        };
-        let Expression::Identifier(callee) = &call.callee else {
-            continue;
-        };
-        if callee.name.as_str() != "defineOptions" {
-            continue;
-        }
-        let Some(arg) = call.arguments.first().and_then(|a| a.as_expression()) else {
-            continue;
-        };
-
-        // Walk every free identifier reference in the argument (complete
-        // Visit walker — nested calls/member chains included, property keys
-        // excluded) and reject setup-scope references.
-        let mut spans = FxHashSet::default();
-        collect_expression_free_ref_spans(arg, &FxHashSet::default(), &mut spans);
-        for span in &spans {
-            let name = &content_str[span.start as usize..span.end as usize];
-            let is_setup_local = binding_types.get(name).is_some_and(|bt| {
-                bt.is_setup() && *bt != BindingType::LiteralConst && *bt != BindingType::SetupImport
-            });
-            if is_setup_local {
-                // Identifier spans are content-relative (the prepared parse
-                // runs over the content slice), already the content-local
-                // shape the public diagnostics use.
-                let local_span = Span::new(span.start, span.end);
-                diagnostics.push(
-                    Diagnostic::error_with_message(
-                        "script",
-                        CompilerErrorCode::XInvalidMacroScopeReference,
-                        DEFINE_OPTIONS_SCOPE_MESSAGE.to_string(),
-                    )
-                    .with_span(local_span),
-                );
+        match stmt {
+            Statement::ExpressionStatement(es) => {
+                if let Expression::CallExpression(call) = &es.expression {
+                    check_macro_call(call, &binding_types, content_str, &mut diagnostics);
+                }
             }
+            Statement::VariableDeclaration(decl) => {
+                for declarator in &decl.declarations {
+                    if let Some(Expression::CallExpression(call)) = &declarator.init {
+                        check_macro_call(call, &binding_types, content_str, &mut diagnostics);
+                    }
+                }
+            }
+            _ => {}
         }
     }
     diagnostics
+}
+
+/// Apply the official scope-reference rule to one top-level macro call.
+fn check_macro_call(
+    call: &oxc_ast::ast::CallExpression,
+    binding_types: &FxHashMap<&str, BindingType>,
+    content_str: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Expression::Identifier(callee) = &call.callee else {
+        return;
+    };
+    let callee_name = callee.name.as_str();
+    match callee_name {
+        "defineProps" | "defineEmits" | "defineModel" => {
+            // Official checks the runtime declarations — every argument.
+            for arg in &call.arguments {
+                if let Some(expr) = arg.as_expression() {
+                    check_scope_references(
+                        expr,
+                        callee_name,
+                        binding_types,
+                        content_str,
+                        diagnostics,
+                    );
+                }
+            }
+        }
+        "defineOptions" => {
+            // Official checks `optionsRuntimeDecl` (the first argument).
+            if let Some(expr) = call.arguments.first().and_then(|a| a.as_expression()) {
+                check_scope_references(expr, callee_name, binding_types, content_str, diagnostics);
+            }
+        }
+        "withDefaults" => {
+            // Official checks `propsRuntimeDefaults` (the defaults
+            // argument) — reported under `defineProps()`.
+            if let Some(expr) = call.arguments.get(1).and_then(|a| a.as_expression()) {
+                check_scope_references(
+                    expr,
+                    "defineProps",
+                    binding_types,
+                    content_str,
+                    diagnostics,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Walk every free identifier reference in a macro-argument expression
+/// (complete Visit walker — nested calls/member chains included, property
+/// keys excluded) and emit the official error for setup-scope references.
+fn check_scope_references(
+    expr: &Expression,
+    macro_name: &str,
+    binding_types: &FxHashMap<&str, BindingType>,
+    content_str: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut spans = FxHashSet::default();
+    collect_expression_free_ref_spans(expr, &FxHashSet::default(), &mut spans);
+    for span in &spans {
+        let name = &content_str[span.start as usize..span.end as usize];
+        let is_setup_local = binding_types.get(name).is_some_and(|bt| {
+            bt.is_setup() && *bt != BindingType::LiteralConst && *bt != BindingType::SetupImport
+        });
+        if is_setup_local {
+            // Identifier spans are content-relative (the prepared parse
+            // runs over the content slice), already the content-local
+            // shape the public diagnostics use.
+            let local_span = Span::new(span.start, span.end);
+            diagnostics.push(
+                Diagnostic::error_with_message(
+                    "script",
+                    CompilerErrorCode::XInvalidMacroScopeReference,
+                    scope_message(macro_name),
+                )
+                .with_span(local_span),
+            );
+        }
+    }
 }

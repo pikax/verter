@@ -482,8 +482,18 @@ fn class_declaration() {
 /// @ai-generated
 #[test]
 fn enum_declaration() {
+    // Official `isAllLiteral`: an enum whose members all have no initializer
+    // or scalar-literal initializers is a literal-const binding.
     let b = classify("enum Direction { Up, Down }");
-    assert_eq!(find(&b, "Direction"), Some(BindingType::SetupConst));
+    assert_eq!(find(&b, "Direction"), Some(BindingType::LiteralConst));
+}
+
+/// @ai-generated
+#[test]
+fn enum_declaration_non_literal_member_is_setup_const() {
+    // A non-literal member (call expression) keeps the enum a setup binding.
+    let b = classify("enum E { A = make() }");
+    assert_eq!(find(&b, "E"), Some(BindingType::SetupConst));
 }
 
 // ── TypeScript-only declarations (NO binding) ────────────────────────
@@ -693,7 +703,8 @@ enum Color { Red, Green }
     assert_eq!(find(&b, "mutable"), Some(BindingType::SetupLet));
     assert_eq!(find(&b, "doSomething"), Some(BindingType::SetupConst));
     assert_eq!(find(&b, "MyClass"), Some(BindingType::SetupConst));
-    assert_eq!(find(&b, "Color"), Some(BindingType::SetupConst));
+    // All-literal enum (no member initializers) → literal-const (official).
+    assert_eq!(find(&b, "Color"), Some(BindingType::LiteralConst));
 }
 
 /// @ai-generated
@@ -838,7 +849,8 @@ interface AlsoIgnored {
         ("mutable".to_string(), BindingType::SetupLet),
         ("describe".to_string(), BindingType::SetupConst),
         ("Widget".to_string(), BindingType::SetupConst),
-        ("Mode".to_string(), BindingType::SetupConst),
+        // All-literal enum → literal-const (official `isAllLiteral`).
+        ("Mode".to_string(), BindingType::LiteralConst),
     ];
     assert_eq!(
         actual, expected,

@@ -4754,12 +4754,12 @@ const props = withDefaults(defineProps<ExternalProps>(), {
 fn define_model_with_defaults_resolved_type() {
     let result = compile_sfc_keep_ts(
         r#"<script setup lang="ts">
+import { DEFAULT_PROPS } from './defaults'
+
 interface ChatInputProps {
   placeholder?: string
   maxLength?: number
 }
-
-const DEFAULT_PROPS = { placeholder: 'Type...', maxLength: 50 }
 
 const props = withDefaults(defineProps<ChatInputProps>(), DEFAULT_PROPS)
 const visible = defineModel('visible', { type: Boolean, default: false })
@@ -4797,8 +4797,7 @@ fn define_model_with_defaults_runtime_var_iife() {
     let result = compile_sfc(
         r#"<script setup lang="ts">
 import type { ChatInputProps } from './types'
-
-const DEFAULT_PROPS = { placeholder: 'Type...' }
+import { DEFAULT_PROPS } from './defaults'
 
 const props = withDefaults(defineProps<ChatInputProps>(), DEFAULT_PROPS)
 const visible = defineModel('visible', { type: Boolean, default: false })
@@ -16558,6 +16557,123 @@ fn inline_static_ref_with_dotvue_default_import_stays_string() {
         code.contains("{ ref: \"Comp\" }") && !code.contains("ref_key"),
         "default .vue import must stay a string ref, got:\n{}",
         code
+    );
+}
+
+// =========================================================================
+// FIX2 — all-literal enum is a literal-const (valid in defineOptions)
+// =========================================================================
+
+#[test]
+fn define_options_all_literal_enum_stays_valid() {
+    // Official isAllLiteral: every member has no initializer or a static
+    // (scalar-literal) initializer → literal-const → allowed.
+    let code = compile_sfc_script_code(
+        "<script setup lang=\"ts\">\nenum E { A, B }\ndefineOptions({ x: E.A })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        code.contains("E.A"),
+        "all-literal enum must stay valid (official literal-const), got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn define_options_non_literal_enum_member_is_compile_error() {
+    let result = compile_sfc(
+        "<script setup lang=\"ts\">\nfunction someFn(): number { return 1 }\nenum E { A = someFn() }\ndefineOptions({ x: E.A })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(D1_OFFICIAL_MESSAGE)),
+        "enum with a non-literal member must be rejected (official), got: {:?}",
+        result.errors
+    );
+}
+
+// =========================================================================
+// FIX3 — scope check for defineProps / defineEmits / defineModel
+// =========================================================================
+
+#[test]
+fn define_props_local_ref_default_is_compile_error() {
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst dft = ref('x')\ndefineProps({ x: { default: dft } })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineProps()` in <script setup> cannot reference locally declared variables"
+            )),
+        "defineProps default referencing a setup-local must be rejected (official), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_props_imported_default_stays_valid() {
+    let result = compile_sfc(
+        "<script setup>\nimport { dft } from './defs'\ndefineProps({ x: { default: dft } })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "imported default must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_emits_local_ref_is_compile_error() {
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst evt = ref('save')\ndefineEmits([evt])\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineEmits()` in <script setup> cannot reference locally declared variables"
+            )),
+        "defineEmits referencing a setup-local must be rejected (official), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_model_local_ref_default_is_compile_error() {
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst dft = ref('x')\nconst m = defineModel({ default: dft })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineModel()` in <script setup> cannot reference locally declared variables"
+            )),
+        "defineModel default referencing a setup-local must be rejected (official), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn with_defaults_local_ref_default_is_compile_error() {
+    // Type-based defineProps + runtime defaults with a setup-local reference —
+    // official reports it under `defineProps()`.
+    let result = compile_sfc(
+        "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst dft = ref('x')\nwithDefaults(defineProps<{ x?: string }>(), { x: dft.value })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineProps()` in <script setup> cannot reference locally declared variables"
+            )),
+        "withDefaults defaults referencing a setup-local must be rejected (official), got: {:?}",
+        result.errors
     );
 }
 

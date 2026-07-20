@@ -81,17 +81,61 @@ fn classify_statement<'a>(
             );
         }
         // Function / class / enum declarations all bind a runtime value;
-        // the neutral inventory yields the identifier span.
-        Statement::FunctionDeclaration(_)
-        | Statement::ClassDeclaration(_)
-        | Statement::TSEnumDeclaration(_) => {
+        // the neutral inventory yields the identifier span. An all-literal
+        // enum (every member has no initializer or a static scalar-literal
+        // initializer) is a literal-const (official `isAllLiteral`).
+        Statement::FunctionDeclaration(_) | Statement::ClassDeclaration(_) => {
             if let Some(span) = declaration_binding_span(stmt) {
                 entries.push((span, BindingType::SetupConst));
+            }
+        }
+        Statement::TSEnumDeclaration(ts_enum) => {
+            if let Some(span) = declaration_binding_span(stmt) {
+                let bt = if enum_is_all_literal(ts_enum) {
+                    BindingType::LiteralConst
+                } else {
+                    BindingType::SetupConst
+                };
+                entries.push((span, bt));
             }
         }
         // TypeScript-only declarations — no runtime binding
         Statement::TSTypeAliasDeclaration(_) | Statement::TSInterfaceDeclaration(_) => {}
         _ => {}
+    }
+}
+
+/// Whether every member of a TS enum has no initializer or a static
+/// (scalar-literal) initializer — official `isAllLiteral` for enums.
+fn enum_is_all_literal(ts_enum: &oxc_ast::ast::TSEnumDeclaration) -> bool {
+    ts_enum
+        .body
+        .members
+        .iter()
+        .all(|member| member.initializer.as_ref().is_none_or(is_static_node))
+}
+
+/// Official `isStaticNode` (compiler-dom): scalar literals (string /
+/// numeric / boolean / null / bigint) and static compositions of them
+/// (unary / binary / logical / conditional / sequence / template-literal /
+/// parenthesized). Object/array expressions are NOT static.
+fn is_static_node(expr: &Expression) -> bool {
+    match expr {
+        Expression::UnaryExpression(u) => is_static_node(&u.argument),
+        Expression::LogicalExpression(b) => is_static_node(&b.left) && is_static_node(&b.right),
+        Expression::BinaryExpression(b) => is_static_node(&b.left) && is_static_node(&b.right),
+        Expression::ConditionalExpression(c) => {
+            is_static_node(&c.test) && is_static_node(&c.consequent) && is_static_node(&c.alternate)
+        }
+        Expression::SequenceExpression(s) => s.expressions.iter().all(is_static_node),
+        Expression::TemplateLiteral(t) => t.expressions.iter().all(is_static_node),
+        Expression::ParenthesizedExpression(p) => is_static_node(&p.expression),
+        Expression::StringLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BooleanLiteral(_)
+        | Expression::NullLiteral(_)
+        | Expression::BigIntLiteral(_) => true,
+        _ => false,
     }
 }
 

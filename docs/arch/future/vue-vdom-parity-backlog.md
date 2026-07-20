@@ -47,6 +47,19 @@ Stable method refs / simple handlers emit `_hoisted_1 = ["onClick"]` + `9 /* TEX
 ### v-text — expression loss  [surfaced during V1b]
 `v-text` binding expression is dropped/mishandled (a real pre-existing bug the inline path faithfully inherits). Affects both inline + non-inline. Needs the exact repro isolated from the conformance cell that surfaced it.
 
+### `ref_for: true` missing for refs inside `v-for`  [PRE-EXISTING, whole VDOM element path]
+Official emits `ref_for: true` on the props object for ANY ref (static or dynamic) inside a `v-for` scope (the runtime collects ref ARRAYS per iteration). Verter emits it nowhere — including our D2 inline `ref_key`/`ref` fix, which is still incomplete in lists: a `ref="el"` inside `v-for` binds only the LAST element instead of an array.
+- Official: `transformElement` sets `ref_for: true` (with `ref_key`/`ref` for inline bindings) whenever `hasRef && inVFor`.
+- Fix: thread the v-for scope flag into the element props emission and add `ref_for: true` (both inline and non-inline ref shapes).
+
+### Ref patch-flag taxonomy — base flag wrong  [PRE-EXISTING]
+`compute_patch_flags` (`props.rs`) maps `ref` → NEED_HYDRATION (32), but official marks ANY ref-bearing element NEED_PATCH (512) so the diffing traversal updates the ref. Our D2 fix only ORs 512 for the NEW dynamic shapes (inline `ref_key`/`ref` binding, dynamic `:ref`); the static hoisted-string case still gets 32. Runtime ref updates on stable ref elements can be skipped/mis-patched.
+- Fix: `has_ref → PATCH_NEED_PATCH` for every ref-bearing element (static hoisted-string case included), not just the dynamic shapes.
+
+### Inline `$props` / `$emit` routing  [PRE-EXISTING — broader inline-setup-context gap]
+Official inline injects `const $props = __props` (template `$props` use) and `emit: $emit` destructure (template `$emit` use, when no defineEmits) / `const $emit = __emit` (with defineEmits), and template `$props`/`$emit` references resolve to those. Verter's D4 fixed only `attrs`/`$slots`; inline `$props`/`$emit` references still route `_ctx.$props` / `_ctx.$emit`. Likely works at runtime (instance proxy) but structurally divergent from official inline.
+- Fix: extend the D4 `buildDestructureElements` port to the `$props`/`$emit` builtins (on-use), with the resolver emitting bare `$props`/`$emit` in inline mode.
+
 ---
 
 ## C. Low / infra
