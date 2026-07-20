@@ -201,8 +201,12 @@ fn classify_variable_declaration<'a>(
 
 /// Classify the initializer of a `const` declaration.
 ///
-/// Mirrors Vue's `walkDeclaration` + `canNeverBeRef` logic:
-/// - Literal primitives → `LiteralConst`
+/// Mirrors Vue's `walkDeclaration` + `canNeverBeRef` logic (the init is
+/// `unwrapTSNode`'d first, exactly as official does):
+/// - `isStaticNode(init)` → `LiteralConst`. This covers scalar primitives,
+///   static unary/binary/logical/conditional/sequence compositions of them,
+///   and expression-free template literals — object/array literals are NOT
+///   static and fall through to `SetupConst`.
 /// - Call expressions → depends on callee (ref/computed/reactive/use*)
 /// - Expressions that structurally can never be a ref (arrays, objects,
 ///   functions, classes, unary, binary, update, tagged template) → `SetupConst`
@@ -210,19 +214,24 @@ fn classify_variable_declaration<'a>(
 ///   assignment, sequence, etc.) → `SetupMaybeRef` because the result
 ///   might be a ref at runtime
 fn classify_const_init<'a>(init: &Expression<'a>) -> BindingType {
+    // Official `walkDeclaration` unwraps TS wrappers before every classification
+    // branch, so `5 as const` / `(1 + 2) satisfies number` classify like their
+    // underlying expression.
+    let init = unwrap_ts_node(init);
+
+    // Official: `isStaticNode(init)` → `literal-const` (the first branch of
+    // `walkDeclaration`, ahead of the `canNeverBeRef` / ref-call branches).
+    if is_static_node(init) {
+        return BindingType::LiteralConst;
+    }
+
     match init {
-        Expression::StringLiteral(_)
-        | Expression::NumericLiteral(_)
-        | Expression::BooleanLiteral(_)
-        | Expression::NullLiteral(_)
-        | Expression::BigIntLiteral(_) => BindingType::LiteralConst,
-
-        Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => BindingType::LiteralConst,
-
         Expression::CallExpression(call) => classify_call_expression(call),
 
         // Expressions that can never be a ref → SetupConst
-        // (matches Vue's canNeverBeRef())
+        // (matches Vue's canNeverBeRef(); the STATIC members of this family were
+        // already peeled off as LiteralConst by the isStaticNode check above, so
+        // only the non-static ones — `a + b`, `-x`, `{...}`, `[...]` — land here)
         Expression::UnaryExpression(_)
         | Expression::BinaryExpression(_)
         | Expression::ArrayExpression(_)

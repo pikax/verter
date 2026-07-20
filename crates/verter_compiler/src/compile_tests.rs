@@ -16655,6 +16655,59 @@ fn r5_fix1_enum_non_static_ts_wrapped_member_still_rejected() {
 }
 
 // =========================================================================
+// R5-FIX2 — `classify_const_init` static-node forms are `LiteralConst`
+// =========================================================================
+//
+// Official `walkDeclaration` marks a const `literal-const` when
+// `isStaticNode(unwrapTSNode(init))` — covering static unary/binary/logical
+// compositions, expression-free template literals, and TS-unwrapped scalars.
+// Object/array literals are NOT static (kept setup-const, `canNeverBeRef`).
+
+#[test]
+fn r5_fix2_static_compositions_are_literal_const() {
+    for init in [
+        "const K = 1 + 2",      // binary of literals
+        "const K = -1",         // unary of a literal
+        "const K = `x`",        // template literal, no expressions
+        "const K = !true",      // unary of a boolean literal
+        "const K = 5 as const", // TS-wrapped scalar
+        "const K = 1 + 2 * 3",  // nested static binary
+    ] {
+        let src = format!(
+            "<script setup lang=\"ts\">\n{init}\ndefineOptions({{ x: K }})\n</script>\n<template><div>x</div></template>"
+        );
+        let result = compile_sfc(&src);
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+            "static const `{init}` must be literal-const (valid in defineOptions), got: {:?}",
+            result.errors
+        );
+    }
+}
+
+#[test]
+fn r5_fix2_object_and_array_literals_stay_rejected() {
+    // Official isStaticNode is false for object/array expressions → setup-const
+    // → rejected in defineOptions. The unwrap/static widening must NOT leak here.
+    for init in ["const o = { a: 1 }", "const o = [1, 2]"] {
+        let src = format!(
+            "<script setup lang=\"ts\">\n{init}\ndefineOptions({{ x: o }})\n</script>\n<template><div>x</div></template>"
+        );
+        let result = compile_sfc(&src);
+        assert!(
+            result.errors.iter().any(|d| d.severity
+                == crate::compile::CompileDiagnosticSeverity::Error
+                && d.message.contains(D1_OFFICIAL_MESSAGE)),
+            "object/array const `{init}` must stay setup-const (rejected), got: {:?}",
+            result.errors
+        );
+    }
+}
+
+// =========================================================================
 // FIX3 — scope check for defineProps / defineEmits / defineModel
 // =========================================================================
 

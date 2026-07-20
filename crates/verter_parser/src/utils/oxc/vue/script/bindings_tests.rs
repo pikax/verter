@@ -79,6 +79,89 @@ fn const_dynamic_template_literal() {
     assert_eq!(find(&b, "x"), Some(BindingType::SetupMaybeRef));
 }
 
+// ── Static compositions + TS-unwrapped scalars → LiteralConst ─────────
+// Official `walkDeclaration`: `isStaticNode(unwrapTSNode(init))` → literal-const.
+
+/// @ai-generated — unary of a literal is static → literal-const
+#[test]
+fn const_static_unary() {
+    let b = classify("const x = -1;");
+    assert_eq!(find(&b, "x"), Some(BindingType::LiteralConst));
+}
+
+/// @ai-generated — binary of literals is static → literal-const
+#[test]
+fn const_static_binary() {
+    let b = classify("const x = 1 + 2;");
+    assert_eq!(find(&b, "x"), Some(BindingType::LiteralConst));
+}
+
+/// @ai-generated — nested static binary is still static → literal-const
+#[test]
+fn const_static_nested_binary() {
+    let b = classify("const x = 1 + 2 * 3;");
+    assert_eq!(find(&b, "x"), Some(BindingType::LiteralConst));
+}
+
+/// @ai-generated — unary of a boolean literal is static → literal-const
+#[test]
+fn const_static_logical_not() {
+    let b = classify("const x = !true;");
+    assert_eq!(find(&b, "x"), Some(BindingType::LiteralConst));
+}
+
+/// @ai-generated — `as const` over a scalar unwraps to a literal → literal-const
+#[test]
+fn const_ts_as_const_scalar() {
+    let b = classify("const x = 5 as const;");
+    assert_eq!(find(&b, "x"), Some(BindingType::LiteralConst));
+}
+
+/// @ai-generated — `satisfies` over a static composition unwraps → literal-const
+#[test]
+fn const_ts_satisfies_static_binary() {
+    let b = classify("const x = (1 + 2) satisfies number;");
+    assert_eq!(find(&b, "x"), Some(BindingType::LiteralConst));
+}
+
+/// @ai-generated — non-null `!` over a literal unwraps to a literal → literal-const
+#[test]
+fn const_ts_nonnull_scalar() {
+    let b = classify("const x = 1!;");
+    assert_eq!(find(&b, "x"), Some(BindingType::LiteralConst));
+}
+
+/// @ai-generated — a NON-static binary of free identifiers can never be a ref →
+/// setup-const (the isStaticNode widening must not leak past static operands)
+#[test]
+fn const_nonstatic_binary_stays_setup_const() {
+    let b = classify("const x = a + b;");
+    assert_eq!(find(&b, "x"), Some(BindingType::SetupConst));
+}
+
+/// @ai-generated — an object literal is NOT static (official isStaticNode) →
+/// setup-const, even under a TS wrapper
+#[test]
+fn const_object_literal_under_ts_wrapper_stays_setup_const() {
+    let b = classify("const x = { a: 1 } as const;");
+    assert_eq!(find(&b, "x"), Some(BindingType::SetupConst));
+}
+
+/// @ai-generated — an array literal is NOT static → setup-const
+#[test]
+fn const_array_literal_stays_setup_const() {
+    let b = classify("const x = [1, 2];");
+    assert_eq!(find(&b, "x"), Some(BindingType::SetupConst));
+}
+
+/// @ai-generated — a ref call under a TS cast still classifies as setup-ref
+/// (unwrapTSNode runs before the ref-call check, matching official)
+#[test]
+fn const_ref_call_under_ts_cast_is_setup_ref() {
+    let b = classify("const x = ref(0) as any;");
+    assert_eq!(find(&b, "x"), Some(BindingType::SetupRef));
+}
+
 // ── Variable declarations: reactivity helpers ────────────────────────
 
 /// @ai-generated
