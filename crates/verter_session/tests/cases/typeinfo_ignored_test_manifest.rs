@@ -2,12 +2,17 @@
 //!
 //! Two tables live in this one module:
 //!
-//! - `IgnoredTestRow` — EXACTLY 362 test-site rows total. 316 carry
+//! - `IgnoredTestRow` — EXACTLY 356 test-site rows total. 310 carry
 //!   `status: Ignored` (one per live `#[ignore = "..."]` annotation inside
 //!   `crates/verter_session/src/typeinfo/typeinfo_tests/**/*.rs`, bijective
 //!   with the source `#[ignore]`s); the remainder carry `status: Lifted` (no
 //!   live `#[ignore]`, each backed by an oracle row). The table length is
-//!   count-guarded at 362; the live-ignore count is count-guarded at 316.
+//!   count-guarded at 356; the live-ignore count is count-guarded at 310.
+//!   A guard-backed row (StructuralGuard proof) whose `#[ignore]` is
+//!   REMOVED because its contract landed as an always-running test leaves
+//!   the table entirely (the row partition drops it) — `Lifted` is
+//!   reserved for oracle-backed rows whose trace the lifted-row
+//!   mechanism-trace guard can source from `ORACLE_QUERY_SPECS`.
 //!   Each row carries the full 13-column schema: `file`, `function`,
 //!   `substrate`, `capability`, `organ`, `owning_u_block`, `block_id`,
 //!   `semantic_queries`, `proof`, `status`, `mechanism_id`,
@@ -36,7 +41,7 @@
 //! `count(IgnoredTestRow where status == Ignored)`, not a
 //! frozen literal; it tracks the live ignore set as blocks lift rows
 //! (and as same-file overload retention adds new ones) and currently
-//! resolves to 316 (362 rows total − 46 lifted).
+//! resolves to 310 (356 rows total − 46 lifted).
 //!
 //! Guards:
 //!
@@ -53,7 +58,7 @@
 //! `every_ignore_reason_meets_minimum_quality_bar`) plus the
 //! two-table manifest guards:
 //!
-//! - `ignored_test_row_table_holds_exactly_362_rows` (binding total +
+//! - `ignored_test_row_table_holds_exactly_356_rows` (binding total +
 //!   disjointness vs `AdditionalProofRow`),
 //! - `additional_proof_row_table_holds_exactly_7_rows` (closed set),
 //! - `typeinfo_parity_block_dag_is_acyclic_and_consumed_keys_and_mechanisms_are_prereqs`
@@ -163,8 +168,8 @@ enum TargetSubstrate {
 // ──────────────────────────────────────────────────────────────────
 // The two-table manifest ledger schema.
 //
-// `IgnoredTestRow` carries EXACTLY 362 test-site rows total (count-guarded):
-// 316 `Ignored` (bijective with the source `#[ignore]`s) + 46 `Lifted`.
+// `IgnoredTestRow` carries EXACTLY 356 test-site rows total (count-guarded):
+// 310 `Ignored` (bijective with the source `#[ignore]`s) + 46 `Lifted`.
 // `AdditionalProofRow` carries the CLOSED set of 7 coverage-only rows
 // (6 JSX no-new-key submatrix + 1 mapped companion) — excluded from the
 // ignored count + bijection. Both tables and the `TYPEINFO_PARITY_BLOCKS`
@@ -531,8 +536,8 @@ enum ProofRequirement {
     },
 }
 
-/// One manifest row per typeinfo test-site — EXACTLY 362 rows total
-/// (316 `Ignored` + 46 `Lifted`). 14 fields.
+/// One manifest row per typeinfo test-site — EXACTLY 356 rows total
+/// (310 `Ignored` + 46 `Lifted`). 14 fields.
 #[derive(Clone, Copy, Debug)]
 #[allow(dead_code)]
 struct IgnoredTestRow {
@@ -747,13 +752,13 @@ const fn count_ignored_rows(rows: &[IgnoredTestRow]) -> usize {
 
 /// Total ignored typeinfo test sites — DERIVED as
 /// `count(IgnoredTestRow where status == Ignored)`, NOT a frozen
-/// literal. It tracks the live ignore set — currently 316 (the 362-row
+/// literal. It tracks the live ignore set — currently 310 (the 356-row
 /// table minus the 46 `Lifted` rows), recomputed as blocks lift more
 /// rows and as same-file overload retention adds new ones. The 46 lifted
 /// rows carry `status: Lifted { .. }` and no live `#[ignore]`; every
 /// other `IgnoredTestRow` carries `status: Ignored`.
 ///
-/// Why the 362 TABLE total (not 384): the substrate's macro-driven test
+/// Why the 356 TABLE total (not 378): the substrate's macro-driven test
 /// families emit expanded `#[ignore = "..."]` annotations at their call
 /// sites; those expansion sites ARE counted (they are real ignore
 /// annotations). What the manifest does NOT count are the
@@ -761,7 +766,7 @@ const fn count_ignored_rows(rows: &[IgnoredTestRow]) -> usize {
 /// those describe how the macro expands, not the test sites
 /// themselves. The macro-defined raw count includes 22 such
 /// in-macro-body lines that are not test sites; the live tree has
-/// 316 expanded test-site ignores + 46 lifted rows = the 362-row table
+/// 310 expanded test-site ignores + 46 lifted rows = the 356-row table
 /// every guard below operates against.
 const EXPECTED_TOTAL_IGNORED_COUNT: usize = count_ignored_rows(EXPECTED_IGNORE_MANIFEST);
 
@@ -1209,15 +1214,17 @@ fn total_ignored_typeinfo_test_count_matches_expected() {
 
 #[test]
 fn manifest_length_matches_documented_total() {
-    // The table length is the documented total 362 (lifted rows STAY in the
-    // table, so the length decoupled from the now-360 live-ignore count once the
-    // first rows lifted). A row added to or removed from the generated table
-    // breaks this — discriminating against the generated manifest data.
+    // The table length is the documented total 356 (ORACLE-lifted rows STAY
+    // in the table, so the length decoupled from the live-ignore count once
+    // the first rows lifted; guard-backed rows whose `#[ignore]` was removed
+    // left the partition entirely). A row added to or removed from the
+    // generated table breaks this — discriminating against the generated
+    // manifest data.
     assert_eq!(
         EXPECTED_IGNORE_MANIFEST.len(),
-        362,
-        "the documented IgnoredTestRow table total is 362 (lifted rows stay in \
-         the table)",
+        356,
+        "the documented IgnoredTestRow table total is 356 (oracle-lifted rows \
+         stay in the table)",
     );
 }
 
@@ -1374,26 +1381,31 @@ fn dag_row_consistency_failures(
     failures
 }
 
-/// The `IgnoredTestRow` table holds EXACTLY 362 rows (the
+/// The `IgnoredTestRow` table holds EXACTLY 356 rows (the
 /// binding manifest total), DISJOINT from the `AdditionalProofRow`
 /// table; no `AdditionalProofRow` participates in the ignored count or
 /// bijection, and no `(file, function)` identity appears in both
-/// tables. An `IgnoredTestRow` count other than 362, an
+/// tables. An `IgnoredTestRow` count other than 356, an
 /// `AdditionalProofRow` in the ignored set, or a `(file, function)` in
 /// both, FAILS.
 #[test]
-fn ignored_test_row_table_holds_exactly_362_rows() {
+fn ignored_test_row_table_holds_exactly_356_rows() {
     assert_eq!(
         EXPECTED_IGNORE_MANIFEST.len(),
-        362,
-        "the `IgnoredTestRow` table must hold EXACTLY 362 binding rows \
-         (got {}). The 362 total is INVARIANT under lifts — a lifted row stays \
-         in the table with `status: Lifted`; only the derived live-ignore count \
-         (`EXPECTED_TOTAL_IGNORED_COUNT`) decreases as rows lift.",
+        356,
+        "the `IgnoredTestRow` table must hold EXACTLY 356 binding rows \
+         (got {}). The total is INVARIANT under ORACLE-BACKED lifts — a lifted \
+         row stays in the table with `status: Lifted`; only the derived \
+         live-ignore count (`EXPECTED_TOTAL_IGNORED_COUNT`) decreases as rows \
+         lift. It DECREASES only when a guard-backed (StructuralGuard-proof) \
+         row's `#[ignore]` is removed because its contract landed as an \
+         always-running test — the row then leaves the partition entirely \
+         (the 6 typeinfo footprint-attach / cache-invalidation edit-cycle \
+         rows landed this way).",
         EXPECTED_IGNORE_MANIFEST.len(),
     );
 
-    // The derived live-ignore count is 316: the table holds 362 rows, of which
+    // The derived live-ignore count is 310: the table holds 356 rows, of which
     // 46 are `Lifted` (the 19 pre-class-surface lifts — 2 index-signature
     // publication rows at U2.QUERY_VALUE_DOMAIN + 2 built-in modifier-utility
     // rows at U2.MAPPED_TEMPLATE + 2 terminal indexed-access projection rows
@@ -1414,13 +1426,16 @@ fn ignored_test_row_table_holds_exactly_362_rows() {
     // intrinsic-lookup rows at U2.INDEXED_ACCESS — plus the 2 mapped-template-era
     // lifts: the `RecordTemplateRootSlot` same-file string-literal index-chain row
     // and the `CounterHandlers` key-remap mapped-type row, both at
-    // U2.MAPPED_TEMPLATE) and 316 remain `Ignored`.
+    // U2.MAPPED_TEMPLATE) and 310 remain `Ignored` (the 6 guard-backed
+    // footprint-attach / cache-invalidation edit-cycle rows left the
+    // partition when their `#[ignore]`s were removed — see the table-length
+    // assertion above).
     // `EXPECTED_TOTAL_IGNORED_COUNT` is DERIVED as count(status == Ignored),
     // so it tracks lifts automatically.
     assert_eq!(
-        EXPECTED_TOTAL_IGNORED_COUNT, 316,
+        EXPECTED_TOTAL_IGNORED_COUNT, 310,
         "EXPECTED_TOTAL_IGNORED_COUNT is DERIVED as count(status == \
-         Ignored); with 46 rows lifted it must equal 316. Got {}.",
+         Ignored); with 46 rows lifted out of 356 it must equal 310. Got {}.",
         EXPECTED_TOTAL_IGNORED_COUNT,
     );
     // Exactly 46 rows are `Lifted` (the 19 pre-class-surface lifts + the 19

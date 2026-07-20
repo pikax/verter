@@ -5,7 +5,7 @@
  * Emits three checked-in, generated-not-hand-maintained files:
  *
  * 1. `crates/verter_session/tests/cases/manifest_data/typeinfo_ignored_test_manifest_rows.rs`
- *    — the 362 `IgnoredTestRow`s, each with the full 13-column schema.
+ *    — the 356 `IgnoredTestRow`s, each with the full 13-column schema.
  * 2. `crates/verter_session/tests/cases/manifest_data/typeinfo_additional_proof_rows.rs`
  *    — the CLOSED set of 7 coverage-only `AdditionalProofRow`s.
  * 3. `crates/verter_session/tests/cases/manifest_data/typeinfo_parity_blocks.rs`
@@ -16,7 +16,7 @@
  * authoritative machine-readable row→block partition in
  * `scripts/manifests/typeinfo-row-block-partition.json` joined with the live
  * `#[ignore = "..."]` discovery + the Capability Map — NOT hand-typed
- * 362 times. The `AdditionalProofRow` table (file 2) and the
+ * 356 times. The `AdditionalProofRow` table (file 2) and the
  * `TYPEINFO_PARITY_BLOCKS` DAG (file 3, with each block's
  * `required_guards`/`verification_labels`/prereqs/mechanisms) are
  * authored in this generator's own data maps (`buildAdditionalRows`,
@@ -522,7 +522,7 @@ const BLOCK_TO_REQUIRED_GUARDS = new Map([
     "U0ManifestSubstrate",
     [
       _DAG,
-      "ignored_test_row_table_holds_exactly_362_rows",
+      "ignored_test_row_table_holds_exactly_356_rows",
       "additional_proof_row_table_holds_exactly_7_rows",
       "semantic_query_name_mirror_matches_live_tag_set",
       "every_block_contract_row_carries_required_guards",
@@ -795,7 +795,7 @@ const BLOCK_TO_REQUIRED_GUARDS = new Map([
       "react_adapter_stop_gate_is_registered_out_of_scope",
       "bench_result_row_reports_cache_mode_sourcemap_batch_thread_hit_fallback",
       "architecture_minimizes_fallback_entry_not_fallback_cost",
-      "ignored_test_row_table_holds_exactly_362_rows",
+      "ignored_test_row_table_holds_exactly_356_rows",
       "no_landed_typeinfo_block_has_live_ignored_rows",
       "no_vacuous_parent_u_block_landing",
       "every_manifest_row_has_non_placeholder_mechanism_and_executable_proof",
@@ -2974,8 +2974,8 @@ function main(checkOnly = false) {
     });
   }
 
-  if (rows.length !== 362) {
-    process.stderr.write(`error: expected 362 IgnoredTestRows, built ${rows.length}\n`);
+  if (rows.length !== 356) {
+    process.stderr.write(`error: expected 356 IgnoredTestRows, built ${rows.length}\n`);
     return 5;
   }
 
