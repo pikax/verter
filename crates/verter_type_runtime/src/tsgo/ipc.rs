@@ -576,8 +576,55 @@ impl LspTransport {
         .await
     }
 
+    /// Enqueue an LSP notification onto `priority`'s lane WITHOUT awaiting.
+    ///
+    /// Synchronous by construction. A caller that must commit local state in the
+    /// SAME non-cancellable step as an accepted enqueue — the document-sync
+    /// ledger below — cannot express that against an async send: a dropped future
+    /// would leave the state written and the frame unsent.
+    fn try_notify_with_priority(
+        &self,
+        method: &str,
+        params: &serde_json::Value,
+        priority: ProviderPriority,
+    ) -> Result<(), TypeProviderError> {
+        let msg = jsonrpc_body(None, method, params);
+        let body = serde_json::to_string(&msg)
+            .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
+
+        let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        match self
+            .tx_for_priority(priority)
+            .try_send(StdinMessage::Frame(frame.into_bytes()))
+        {
+            Ok(()) => {
+                crate::type_runtime_trace_event!(
+                    "tsgo_transport_notify_result",
+                    format!("method={} queued=true", method),
+                );
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!("TSGO stdin channel full — refusing notification '{method}'");
+                crate::type_runtime_trace_event!(
+                    "tsgo_transport_notify_result",
+                    format!("method={} queued=false reason=full", method),
+                );
+                Err(TypeProviderError::new("channel full"))
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                crate::type_runtime_trace_event!(
+                    "tsgo_transport_notify_result",
+                    format!("method={} queued=false reason=closed", method),
+                );
+                Err(TypeProviderError::new("stdin writer closed"))
+            }
+        }
+    }
+
     /// Send an LSP notification at a specific priority (no response expected).
-    /// Uses `try_send()` to prevent backpressure from blocking the caller.
+    /// Never blocks the caller: a lane with no free slot refuses the frame rather
+    /// than applying backpressure.
     async fn notify_with_priority(
         &self,
         method: &str,
@@ -592,42 +639,7 @@ impl LspTransport {
                 priority,
                 summarize_lsp_params(&params),
             ),
-            async {
-                let msg = jsonrpc_body(None, method, &params);
-                let body = serde_json::to_string(&msg)
-                    .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
-
-                let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-                match self
-                    .tx_for_priority(priority)
-                    .try_send(StdinMessage::Frame(frame.into_bytes()))
-                {
-                    Ok(()) => {
-                        crate::type_runtime_trace_event!(
-                            "tsgo_transport_notify_result",
-                            format!("method={} queued=true", method),
-                        );
-                        Ok(())
-                    }
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        tracing::warn!(
-                            "TSGO stdin channel full — dropping notification '{method}'"
-                        );
-                        crate::type_runtime_trace_event!(
-                            "tsgo_transport_notify_result",
-                            format!("method={} queued=false reason=full", method),
-                        );
-                        Err(TypeProviderError::new("channel full"))
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                        crate::type_runtime_trace_event!(
-                            "tsgo_transport_notify_result",
-                            format!("method={} queued=false reason=closed", method),
-                        );
-                        Err(TypeProviderError::new("stdin writer closed"))
-                    }
-                }
-            }
+            async { self.try_notify_with_priority(method, &params, priority) }
         )
         .await
     }
@@ -641,6 +653,133 @@ impl LspTransport {
         self.notify_with_priority(method, params, ProviderPriority::Interactive)
             .await
     }
+}
+
+/// The LSP `languageId` for a provider path.
+fn document_language_id(path: &str) -> &'static str {
+    if path.ends_with(".tsx") {
+        "typescriptreact"
+    } else if path.ends_with(".jsx") {
+        "javascriptreact"
+    } else if path.ends_with(".js") {
+        "javascript"
+    } else {
+        "typescript"
+    }
+}
+
+/// Which notification a document sync should deliver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DocumentSyncIntent {
+    /// Always a fresh `didOpen` at version 1 — the caller knows the child does
+    /// not hold this document.
+    Open,
+    /// `didChange` when the ledger already records the document as open, else the
+    /// `didOpen` the LSP protocol requires first (a `didChange` for a document the
+    /// child never opened makes tsgo panic with "overlay not found").
+    Update,
+}
+
+/// What a document sync actually delivered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DocumentSyncMode {
+    DidOpen,
+    DidChange { version: i32 },
+}
+
+/// Deliver a `didOpen`/`didChange` for `path` and commit the local ledger ONLY
+/// once the transport has ACCEPTED the frame.
+///
+/// `versions` + `contents` are this provider's record of what the child engine was
+/// actually told: `versions` decides `didOpen` vs `didChange` on the next sync, and
+/// `contents` backs offset↔position conversion. Committing either BEFORE the
+/// transport accepts claims a sync the child never received — and a refused enqueue
+/// (a full lane behind a writer stalled on a busy child) then strands the document
+/// indefinitely, because every later sync reads the ledger, believes the document is
+/// open, and sends a `didChange` the child cannot apply.
+///
+/// Both maps are locked before the enqueue, and the commit runs in the same step as
+/// an accepted synchronous `try_send` with no `.await` between them. So there is no
+/// cancellation point at which an optimistic write could outlive a dropped future,
+/// and the read-then-write on `versions` stays mutually exclusive against a
+/// concurrent sync of the same path.
+async fn deliver_document_sync(
+    transport: &LspTransport,
+    versions: &Mutex<HashMap<String, i32>>,
+    contents: &Mutex<HashMap<String, Arc<str>>>,
+    path: &str,
+    content: &str,
+    intent: DocumentSyncIntent,
+    priority: ProviderPriority,
+) -> Result<DocumentSyncMode, TypeProviderError> {
+    let uri = TsgoTypeProvider::path_to_uri(path);
+    let mut versions_guard = versions.lock().await;
+    let mut contents_guard = contents.lock().await;
+
+    let mode = match (intent, versions_guard.get(path)) {
+        (DocumentSyncIntent::Update, Some(version)) => DocumentSyncMode::DidChange {
+            version: version + 1,
+        },
+        _ => DocumentSyncMode::DidOpen,
+    };
+    let (method, params) = match mode {
+        DocumentSyncMode::DidOpen => (
+            "textDocument/didOpen",
+            serde_json::json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": document_language_id(path),
+                    "version": 1,
+                    "text": content,
+                }
+            }),
+        ),
+        DocumentSyncMode::DidChange { version } => (
+            "textDocument/didChange",
+            serde_json::json!({
+                "textDocument": { "uri": uri, "version": version },
+                "contentChanges": [{ "text": content }]
+            }),
+        ),
+    };
+
+    transport.try_notify_with_priority(method, &params, priority)?;
+
+    let version = match mode {
+        DocumentSyncMode::DidOpen => 1,
+        DocumentSyncMode::DidChange { version } => version,
+    };
+    versions_guard.insert(path.to_string(), version);
+    contents_guard.insert(contents_key(path), Arc::from(content));
+    Ok(mode)
+}
+
+/// Deliver a `didClose` for `path` and retire the ledger entry ONLY once the
+/// transport has accepted the frame.
+///
+/// A refused `didClose` leaves the entry in place, which is the accurate record:
+/// the child still holds the document open, so the next sync must keep treating it
+/// as open rather than replaying a `didOpen` over a live buffer.
+async fn deliver_document_close(
+    transport: &LspTransport,
+    versions: &Mutex<HashMap<String, i32>>,
+    contents: &Mutex<HashMap<String, Arc<str>>>,
+    path: &str,
+    priority: ProviderPriority,
+) -> Result<(), TypeProviderError> {
+    let uri = TsgoTypeProvider::path_to_uri(path);
+    let mut versions_guard = versions.lock().await;
+    let mut contents_guard = contents.lock().await;
+
+    transport.try_notify_with_priority(
+        "textDocument/didClose",
+        &serde_json::json!({ "textDocument": { "uri": uri } }),
+        priority,
+    )?;
+
+    versions_guard.remove(path);
+    contents_guard.remove(&contents_key(path));
+    Ok(())
 }
 
 /// Drain all pending requests, sending crash error responses so callers
@@ -1866,15 +2005,6 @@ impl TsgoTypeProvider {
         priority: ProviderPriority,
     ) -> ProviderFuture<'_, ()> {
         let uri = Self::path_to_uri(path);
-        let lang_id = if path.ends_with(".tsx") {
-            "typescriptreact"
-        } else if path.ends_with(".jsx") {
-            "javascriptreact"
-        } else if path.ends_with(".js") {
-            "javascript"
-        } else {
-            "typescript"
-        };
         let content = content.to_string();
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
@@ -1890,25 +2020,17 @@ impl TsgoTypeProvider {
                     content.len()
                 ),
                 async {
-                    contents_cache
-                        .lock()
-                        .await
-                        .insert(contents_key(&path_owned), Arc::from(content.as_str()));
-                    versions.lock().await.insert(path_owned, 1);
-                    transport
-                        .notify_with_priority(
-                            "textDocument/didOpen",
-                            serde_json::json!({
-                                "textDocument": {
-                                    "uri": uri,
-                                    "languageId": lang_id,
-                                    "version": 1,
-                                    "text": content,
-                                }
-                            }),
-                            priority,
-                        )
-                        .await
+                    deliver_document_sync(
+                        &transport,
+                        &versions,
+                        &contents_cache,
+                        &path_owned,
+                        &content,
+                        DocumentSyncIntent::Open,
+                        priority,
+                    )
+                    .await
+                    .map(|_| ())
                 }
             )
             .await
@@ -1922,60 +2044,23 @@ impl TsgoTypeProvider {
         content: &str,
         priority: ProviderPriority,
     ) -> ProviderFuture<'_, ()> {
-        let uri = Self::path_to_uri(path);
-        let lang_id = if path.ends_with(".tsx") {
-            "typescriptreact"
-        } else if path.ends_with(".jsx") {
-            "javascriptreact"
-        } else if path.ends_with(".js") {
-            "javascript"
-        } else {
-            "typescript"
-        };
         let content = content.to_string();
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            contents_cache
-                .lock()
-                .await
-                .insert(contents_key(&path_owned), Arc::from(content.as_str()));
-
-            let mut vers = versions.lock().await;
-            if let Some(v) = vers.get_mut(&path_owned) {
-                *v += 1;
-                let version = *v;
-                drop(vers);
-                transport
-                    .notify_with_priority(
-                        "textDocument/didChange",
-                        serde_json::json!({
-                            "textDocument": { "uri": uri, "version": version },
-                            "contentChanges": [{ "text": content }]
-                        }),
-                        priority,
-                    )
-                    .await
-            } else {
-                vers.insert(path_owned.clone(), 1);
-                drop(vers);
-                transport
-                    .notify_with_priority(
-                        "textDocument/didOpen",
-                        serde_json::json!({
-                            "textDocument": {
-                                "uri": uri,
-                                "languageId": lang_id,
-                                "version": 1,
-                                "text": content,
-                            }
-                        }),
-                        priority,
-                    )
-                    .await
-            }
+            deliver_document_sync(
+                &transport,
+                &versions,
+                &contents_cache,
+                &path_owned,
+                &content,
+                DocumentSyncIntent::Update,
+                priority,
+            )
+            .await
+            .map(|_| ())
         })
     }
 
@@ -1985,24 +2070,19 @@ impl TsgoTypeProvider {
         path: &str,
         priority: ProviderPriority,
     ) -> ProviderFuture<'_, ()> {
-        let uri = Self::path_to_uri(path);
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            contents_cache
-                .lock()
-                .await
-                .remove(&contents_key(&path_owned));
-            versions.lock().await.remove(&path_owned);
-            transport
-                .notify_with_priority(
-                    "textDocument/didClose",
-                    serde_json::json!({ "textDocument": { "uri": uri } }),
-                    priority,
-                )
-                .await
+            deliver_document_close(
+                &transport,
+                &versions,
+                &contents_cache,
+                &path_owned,
+                priority,
+            )
+            .await
         })
     }
 }
@@ -2217,15 +2297,6 @@ impl TypeProvider for TsgoTypeProvider {
     fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         tracing::debug!("TSGO open_file: {} ({} bytes)", path, content.len());
         let uri = Self::path_to_uri(path);
-        let lang_id = if path.ends_with(".tsx") {
-            "typescriptreact"
-        } else if path.ends_with(".jsx") {
-            "javascriptreact"
-        } else if path.ends_with(".js") {
-            "javascript"
-        } else {
-            "typescript"
-        };
         let content = content.to_string();
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
@@ -2241,25 +2312,16 @@ impl TypeProvider for TsgoTypeProvider {
                     content.len()
                 ),
                 async {
-                    contents_cache
-                        .lock()
-                        .await
-                        .insert(contents_key(&path_owned), Arc::from(content.as_str()));
-                    // Mark as opened with version 1
-                    versions.lock().await.insert(path_owned, 1);
-                    transport
-                        .notify(
-                            "textDocument/didOpen",
-                            serde_json::json!({
-                                "textDocument": {
-                                    "uri": uri,
-                                    "languageId": lang_id,
-                                    "version": 1,
-                                    "text": content,
-                                }
-                            }),
-                        )
-                        .await?;
+                    deliver_document_sync(
+                        &transport,
+                        &versions,
+                        &contents_cache,
+                        &path_owned,
+                        &content,
+                        DocumentSyncIntent::Open,
+                        ProviderPriority::Interactive,
+                    )
+                    .await?;
                     crate::type_runtime_trace_event!(
                         "tsgo_open_file_result",
                         "opened=true version=1".to_string()
@@ -2304,77 +2366,37 @@ impl TypeProvider for TsgoTypeProvider {
 
     fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         tracing::debug!("TSGO update_file: {} ({} bytes)", path, content.len());
-        let uri = Self::path_to_uri(path);
-        let lang_id = if path.ends_with(".tsx") {
-            "typescriptreact"
-        } else if path.ends_with(".jsx") {
-            "javascriptreact"
-        } else if path.ends_with(".js") {
-            "javascript"
-        } else {
-            "typescript"
-        };
         let content = content.to_string();
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            contents_cache
-                .lock()
-                .await
-                .insert(contents_key(&path_owned), Arc::from(content.as_str()));
-
-            let mut vers = versions.lock().await;
-            if let Some(v) = vers.get_mut(&path_owned) {
-                // File already opened — send didChange
-                *v += 1;
-                let version = *v;
-                drop(vers);
-                transport
-                    .notify(
-                        "textDocument/didChange",
-                        serde_json::json!({
-                            "textDocument": {
-                                "uri": uri,
-                                "version": version,
-                            },
-                            "contentChanges": [{
-                                "text": content,
-                            }]
-                        }),
-                    )
-                    .await?;
-                crate::type_runtime_trace_event!(
-                    "tsgo_update_file_result",
-                    format!("path={} mode=didChange version={}", path_owned, version),
-                );
-                Ok(())
-            } else {
-                // File never opened — must send didOpen first (LSP protocol requirement).
-                // Sending didChange without didOpen causes tsgo to panic with
-                // "overlay not found for changed file".
-                vers.insert(path_owned.clone(), 1);
-                drop(vers);
-                transport
-                    .notify(
-                        "textDocument/didOpen",
-                        serde_json::json!({
-                            "textDocument": {
-                                "uri": uri,
-                                "languageId": lang_id,
-                                "version": 1,
-                                "text": content,
-                            }
-                        }),
-                    )
-                    .await?;
-                crate::type_runtime_trace_event!(
-                    "tsgo_update_file_result",
-                    format!("path={} mode=didOpen version=1", path_owned),
-                );
-                Ok(())
+            let mode = deliver_document_sync(
+                &transport,
+                &versions,
+                &contents_cache,
+                &path_owned,
+                &content,
+                DocumentSyncIntent::Update,
+                ProviderPriority::Interactive,
+            )
+            .await?;
+            match mode {
+                DocumentSyncMode::DidChange { version } => {
+                    crate::type_runtime_trace_event!(
+                        "tsgo_update_file_result",
+                        format!("path={} mode=didChange version={}", path_owned, version),
+                    );
+                }
+                DocumentSyncMode::DidOpen => {
+                    crate::type_runtime_trace_event!(
+                        "tsgo_update_file_result",
+                        format!("path={} mode=didOpen version=1", path_owned),
+                    );
+                }
             }
+            Ok(())
         })
     }
 
@@ -2390,19 +2412,14 @@ impl TypeProvider for TsgoTypeProvider {
                 "tsgo_close_file",
                 format!("path={} uri={}", path_owned, uri),
                 async {
-                    contents_cache
-                        .lock()
-                        .await
-                        .remove(&contents_key(&path_owned));
-                    versions.lock().await.remove(&path_owned);
-                    transport
-                        .notify(
-                            "textDocument/didClose",
-                            serde_json::json!({
-                                "textDocument": { "uri": uri }
-                            }),
-                        )
-                        .await?;
+                    deliver_document_close(
+                        &transport,
+                        &versions,
+                        &contents_cache,
+                        &path_owned,
+                        ProviderPriority::Interactive,
+                    )
+                    .await?;
                     crate::type_runtime_trace_event!(
                         "tsgo_close_file_result",
                         "closed=true".to_string()

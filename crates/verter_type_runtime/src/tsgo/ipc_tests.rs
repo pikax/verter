@@ -4670,3 +4670,79 @@ async fn t6_writer_stall_watchdog_fires_crash_notify_when_child_stops_reading() 
         "the writer-stall watchdog must fire crash_notify when the child stops reading stdin (pre-B12: silent park)"
     );
 }
+
+/// The local `versions` / `contents` ledger is this provider's record of what the
+/// child engine was actually told. A `didOpen` the transport REFUSED never reached
+/// the child, so recording it strands the document permanently: the next
+/// `update_file` reads the ledger, sees an "already open" entry, and sends a
+/// `didChange` for a document the engine never opened. Nothing short of a full
+/// restart re-establishes it — tsgo's `resync_open_files` is a trait no-op, and
+/// the writer-stall watchdog covers a parked `write_all`, not a refused enqueue.
+#[tokio::test]
+async fn a_refused_didopen_leaves_no_synced_entry_in_the_local_ledger() {
+    // 16-byte duplex + a child that never reads → the writer parks on its first
+    // `write_all`, so the one-frame interactive lane saturates and stays full.
+    let (provider_side, child_side) = tokio::io::duplex(16);
+    let (provider_read, provider_write) = tokio::io::split(provider_side);
+    let _child_side = child_side;
+
+    let provider = TsgoTypeProvider::from_transport_parts_configured(
+        provider_read,
+        provider_write,
+        None,
+        None,
+        1,                                  // one-frame lane
+        std::time::Duration::from_secs(30), // long watchdog: NOT the escape hatch here
+    );
+
+    // Larger than the duplex buffer, so the writer's first `write_all` cannot
+    // complete and no lane slot is ever released.
+    let payload = "x".repeat(4096);
+
+    let accepted_path = "/w/accepted.tsx";
+    provider
+        .open_file(accepted_path, &payload)
+        .await
+        .expect("the first didOpen is accepted into the empty lane");
+
+    // Keep pushing until the transport refuses one: that refusal is the subject.
+    let mut refused_path = None;
+    for index in 0..64 {
+        let path = format!("/w/refused{index}.tsx");
+        if provider.open_file(&path, &payload).await.is_err() {
+            refused_path = Some(path);
+            break;
+        }
+    }
+    let refused_path =
+        refused_path.expect("the lane must actually saturate, else this test proves nothing");
+
+    // Positive control: an ACCEPTED didOpen IS recorded, so the assertions below
+    // discriminate a refused sync from a provider that records nothing at all.
+    assert!(
+        provider.versions.lock().await.contains_key(accepted_path),
+        "an accepted didOpen must be recorded in the version ledger"
+    );
+    assert!(
+        provider
+            .contents
+            .lock()
+            .await
+            .contains_key(&contents_key(accepted_path)),
+        "an accepted didOpen must be recorded in the contents ledger"
+    );
+
+    assert!(
+        !provider.versions.lock().await.contains_key(&refused_path),
+        "a REFUSED didOpen must leave no version entry: the entry makes the next \
+         update_file send a didChange for a document the engine never opened"
+    );
+    assert!(
+        !provider
+            .contents
+            .lock()
+            .await
+            .contains_key(&contents_key(&refused_path)),
+        "a REFUSED didOpen must leave no cached contents claiming the child holds them"
+    );
+}
