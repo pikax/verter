@@ -1556,10 +1556,18 @@ impl FileArtifactStore {
         // `artifact_generation` is unchanged (no-op → no bump), caching an
         // incomplete snapshot under the unchanged token. Leaving the
         // base-equivalent current-key entry untouched closes that gap.
-        let current_key_is_base_equivalent = self
-            .artifacts
-            .get(&current_key)
-            .map(|entry| {
+        // Presence of ANY entry at the current content key, captured with
+        // the same read as the equivalence probe. Discriminates a genuine
+        // BUILD of this content version (no entry at the current key — a
+        // fresh insert or a content-changed rebuild) from a REFRESH
+        // re-insert of an already-stored version (edge-refresh materialise
+        // reusing the content-addressed payload, base-equivalent no-op):
+        // the audit `IndexedReadyBuilt` event below fires only for the
+        // former.
+        let current_key_prior_entry_present;
+        let current_key_is_base_equivalent = match self.artifacts.get(&current_key) {
+            Some(entry) => {
+                current_key_prior_entry_present = true;
                 let equivalent = base_snapshot_equivalent(&entry.value().payload, &payload);
                 if equivalent {
                     // The no-op path leaves the entry untouched below;
@@ -1569,8 +1577,12 @@ impl FileArtifactStore {
                     entry.value().record_access(tick);
                 }
                 equivalent
-            })
-            .unwrap_or(false);
+            }
+            None => {
+                current_key_prior_entry_present = false;
+                false
+            }
+        };
 
         // Legacy semantics: exactly one entry per canonical regardless of
         // content_hash. Drain every prior version EXCEPT the current key
@@ -1697,8 +1709,19 @@ impl FileArtifactStore {
             self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
         } else {
             self.live_counter.fetch_add(1, Ordering::Relaxed);
-            // Audit event fires on FRESH inserts only (matches retired
-            // FileArtifactStore::insert behaviour).
+        }
+        // Audit event fires whenever a genuinely NEW content version was
+        // built and inserted — a fresh insert OR a content-changed
+        // replacement (the edit-cycle rebuild of an already-tracked
+        // canonical): the current content key held NO entry before this
+        // insert. Re-inserts of an already-stored version record NOTHING —
+        // a base-equivalent reinsert is a literal no-op serve, and an
+        // edge-refresh re-materialise reuses the content-addressed payload
+        // (no shallow re-processing happened). `indexed_ready_builds`
+        // keeps the read-once meaning "this request BUILT the artifact for
+        // this (canonical, whole_hash)", never "this request re-served or
+        // edge-refreshed an already-built version".
+        if !current_key_prior_entry_present {
             crate::component_meta_audit::record_indexed_ready_built(
                 Arc::clone(&canonical_for_event),
                 whole_hash,

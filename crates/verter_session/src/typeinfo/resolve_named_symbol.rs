@@ -192,6 +192,16 @@ impl VerterHost {
 
         let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
         let timing_capture = self.config.audit_timing_capture && self.config.audit_enabled;
+        // Footprint-attachment pipeline: plant the per-request accumulator
+        // (and the workspace VFS audit sink) so the dispatch path's
+        // passive-observer emissions attribute to THIS request — the same
+        // scope the component-meta entry installs. Mined into the record
+        // after the request body completes.
+        let footprint_scope = crate::typeinfo::footprint_attach::TypeinfoFootprintScope::install(
+            self,
+            request_id,
+            footprint_capture,
+        );
         // Thread the host's projection-op budget so this dispatch path
         // honours the same fuse as every other resolution entry-point;
         // a tripped budget surfaces as a `BudgetExceeded` dispatch
@@ -203,7 +213,7 @@ impl VerterHost {
             RequestKind::TypeResolution,
             footprint_capture,
             timing_capture,
-            None,
+            footprint_scope.accumulator(),
             self.config.projection_op_budget,
         );
 
@@ -298,6 +308,14 @@ impl VerterHost {
             None
         };
 
+        // Finalise the footprint through the shared miner: drain THIS
+        // request's accumulator, build the per-file attribution vector,
+        // and mine the deterministic footprint. `(None, [])` when
+        // capture is off — the record then carries `footprint: None`
+        // exactly as before.
+        let (footprint, files) =
+            crate::typeinfo::footprint_attach::mine_typeinfo_footprint(self, &ctx);
+
         let record = RequestAuditRecord {
             request_id,
             canonical_id: canonical_id.to_string(),
@@ -307,9 +325,9 @@ impl VerterHost {
             timings,
             memory,
             store,
-            footprint: None,
+            footprint,
             scheduler: ctx.scheduler_audit.lock().clone(),
-            files: Vec::new(),
+            files,
             waits,
             kind_payload: RequestKindPayload::TypeResolution(payload),
             capture_state: verter_audit::AuditCaptureState::ActiveStored,

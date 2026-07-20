@@ -242,6 +242,19 @@ impl OwnerImportSurfaceDb {
         >,
     {
         if let Some(cached) = self.get_with_view(host, owner_canonical, owner_whole_hash, view) {
+            // R28 fact-bubble-up on the WARM path — mirror of
+            // `RouteDb::get_or_resolve_route_observing_facts`'s warm-hit
+            // branch. Re-observe the surface's recorded chain deps (owner
+            // + leaf `FileWholeHash` facts + route-chain facts — exactly
+            // the validated `read_set_signature`, never a broader set)
+            // into every active tracer on this thread, so an ENCLOSING
+            // traced cold compute folding this warm surface roots the
+            // same dependency facts a cold build fans out. Without this,
+            // an enclosing entry publishes without the chain deps and a
+            // later leaf edit / barrel retarget cannot invalidate it (the
+            // typeinfo published-Surface stale-warm hole). No-op when no
+            // tracer is installed (R24 warm-hit cost discipline).
+            crate::fact_signature_helpers::observe_fact_signature(&cached.read_set_signature.facts);
             return Some(cached);
         }
         self.remove_if_owner_hash_matches(owner_canonical, owner_whole_hash);
@@ -630,6 +643,87 @@ mod tests {
         assert!(
             db.get("/w/refused.ts", refused_hash).is_none(),
             "a transitive hazard must never reach owner-import storage"
+        );
+    }
+
+    /// R28 fact-bubble-up on the WARM path — the owner-import mirror of
+    /// `RouteDb::get_or_resolve_route_observing_facts`'s warm-hit branch.
+    ///
+    /// A warm `get_or_compute` hit must RE-OBSERVE the surface's recorded
+    /// chain deps (owner + leaf `FileWholeHash` facts + route-chain facts)
+    /// into every active tracer on the current thread, so an ENCLOSING
+    /// traced cold compute that folds the warm surface roots the same
+    /// dependency facts a cold build would have fanned out. Without the
+    /// re-observation the enclosing entry publishes WITHOUT the chain deps
+    /// and a later leaf edit / barrel retarget cannot invalidate it —
+    /// the typeinfo published-Surface stale-warm hole.
+    ///
+    /// Discriminating: against a validate-only `get_with_view` warm path
+    /// this test FAILS (the outer tracer finalises without the leaf fact);
+    /// with the warm-hit `observe_fact_signature` bubble it PASSES.
+    #[test]
+    fn warm_hit_reobserves_chain_facts_into_active_tracer() {
+        let host = crate::VerterHost::new_standalone(crate::types::HostConfig::default());
+        let db = OwnerImportSurfaceDb::new();
+        let view = crate::resolver_core::PermissiveStoreView;
+        let owner_hash = [7u8; 16];
+        let generation = host.project_type_store().current_project_generation();
+        let leaf_fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+            canonical_id: "/w/leaf.ts".to_string(),
+            hash: [9u8; 16],
+        };
+
+        // Cold-admit a surface whose signature carries the leaf chain fact.
+        let admitted = db
+            .get_or_compute(&host, "/w/owner.ts", owner_hash, &view, || {
+                crate::resolver_core::resolver_context::observe_fan_out(leaf_fact.clone());
+                crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                    build_owner_import_surface(
+                        Arc::from("/w/owner.ts"),
+                        owner_hash,
+                        Vec::new(),
+                        Vec::new(),
+                        generation,
+                    ),
+                )
+            })
+            .expect("cold admit must serve");
+        assert!(
+            admitted.read_set_signature.facts.contains(&leaf_fact),
+            "precondition: the admitted surface signature must carry the leaf chain fact"
+        );
+
+        // Warm hit under an OUTER tracer: the surface's chain facts must
+        // fan into it. The compute closure must NOT run (warm hit).
+        let ((), finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
+            let warm = db.get_or_compute(
+                &host,
+                "/w/owner.ts",
+                owner_hash,
+                &view,
+                || -> crate::cache_runtime::singleflight::ComputeAdmission<
+                    Arc<OwnerImportSurface>,
+                    Arc<OwnerImportSurface>,
+                > { panic!("second call must warm-hit, not recompute") },
+            );
+            assert!(warm.is_some(), "second call must serve the warm surface");
+        });
+        let crate::resolver_core::FactReadSetFinalise::Ok(outer_facts) = finalise else {
+            panic!("outer tracer must finalise Ok, got a non-cacheable/overflow finalise");
+        };
+        assert!(
+            outer_facts.contains(&leaf_fact),
+            "warm OwnerImportSurfaceDb hit must re-observe the surface's chain deps into \
+             the caller's active tracer (mirror RouteDb::get_or_resolve_route_observing_facts); \
+             outer tracer finalised {outer_facts:?}"
+        );
+        // Precision guard: the warm bubble observes EXACTLY the surface's
+        // recorded signature — the owner self-root plus the leaf chain
+        // fact — never a broader set (over-invalidation).
+        assert_eq!(
+            outer_facts.len(),
+            admitted.read_set_signature.facts.len(),
+            "warm bubble must fan exactly the surface's recorded facts, not a broader set"
         );
     }
 

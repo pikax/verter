@@ -209,18 +209,25 @@ impl VerterHost {
         // that do not carry a mode field — Conditional, KeyOf, …).
         let query_mode = query_projection_mode(&query);
 
-        // Construct a per-request context. Footprint accumulator is
-        // disabled for type-resolution requests — they do not collect
-        // semantic-footprint events the way component-meta does.
+        // Construct a per-request context. The footprint-attachment
+        // pipeline plants the per-request accumulator (and workspace VFS
+        // audit sink) so type-resolution requests attach a mined footprint
+        // when `footprint_capture=true` — the same passive-observer scope
+        // the component-meta entry installs.
         let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
         let timing_capture = self.config.audit_timing_capture && self.config.audit_enabled;
+        let footprint_scope = crate::typeinfo::footprint_attach::TypeinfoFootprintScope::install(
+            self,
+            request_id,
+            footprint_capture,
+        );
         let ctx = RequestContext::with_kind_and_timing(
             request_id,
             Arc::<str>::from(canonical_hint),
             RequestKind::TypeResolution,
             footprint_capture,
             timing_capture,
-            None,
+            footprint_scope.accumulator(),
         );
 
         // BEFORE installing the TLS guard: construct the registration.
@@ -380,6 +387,12 @@ impl VerterHost {
             None
         };
 
+        // Finalise the footprint through the shared miner (drain +
+        // per-file attribution + deterministic mine). `(None, [])` when
+        // capture is off.
+        let (footprint, files) =
+            crate::typeinfo::footprint_attach::mine_typeinfo_footprint(self, &ctx);
+
         let record = RequestAuditRecord {
             request_id,
             canonical_id: canonical_hint.to_string(),
@@ -389,9 +402,9 @@ impl VerterHost {
             timings,
             memory,
             store,
-            footprint: None,
+            footprint,
             scheduler: ctx.scheduler_audit.lock().clone(),
-            files: Vec::new(),
+            files,
             waits,
             kind_payload: RequestKindPayload::TypeResolution(payload),
             capture_state: verter_audit::AuditCaptureState::ActiveStored,
