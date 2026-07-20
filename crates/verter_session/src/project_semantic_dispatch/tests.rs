@@ -2031,6 +2031,63 @@ fn resolve_decl_produces_materialized_body() {
     );
 }
 
+/// Authored-partial preparation is declaration-wide, while Instantiate
+/// completeness is demand-local. A missing import reached only from a member
+/// value remains a nested carrier and does not poison the authoritative root
+/// object. Root aliases and surface-composition arms are authoritative and
+/// must remain partial/non-cacheable.
+#[test]
+fn instantiate_scopes_unresolved_owner_debt_by_demanded_body_role() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/debt.ts",
+        "import type { Missing } from './absent';\n\
+         export interface MemberOnly { good: string; nested: Missing }\n\
+         export type RootAlias = Missing;\n\
+         export interface Heritage extends Missing { own: string }\n\
+         export type IntersectionArm = { own: string } & Missing;\n\
+         export type UnionArm = { own: string } | Missing;",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let read = |name: &str| {
+        dispatch.execute_read(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                decl_identity(&host, "/w/debt.ts", name),
+                Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                crate::semantic_query::InstantiateContext::non_file(
+                    ProjectionReductionContext::structural_transit_with_mode(
+                        ProjectionMode::Navigate,
+                    ),
+                    Default::default(),
+                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                ),
+            ),
+        ))
+    };
+
+    let member = read("MemberOnly");
+    assert!(matches!(member.value, QueryResult::Value(_)));
+    assert!(
+        !member.result_is_partial && !member.cache_suppress,
+        "a member-value miss must stay locally classifiable; got partial={}, suppress={}",
+        member.result_is_partial,
+        member.cache_suppress,
+    );
+
+    for name in ["RootAlias", "Heritage", "IntersectionArm", "UnionArm"] {
+        let structural = read(name);
+        assert!(matches!(structural.value, QueryResult::Value(_)), "{name}");
+        assert!(
+            structural.result_is_partial && structural.cache_suppress,
+            "{name} loses an authoritative root/surface arm and must remain Partial + ReturnOnly; \
+             got partial={}, suppress={}",
+            structural.result_is_partial,
+            structural.cache_suppress,
+        );
+    }
+}
+
 /// `Instantiate(base, args)` is mode-free per Executing
 /// the key produces exactly **one** entry in the family memo,
 /// regardless of how many follow-up `ProjectPath(result, [...], mode)`

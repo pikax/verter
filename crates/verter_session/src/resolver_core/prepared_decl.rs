@@ -571,15 +571,17 @@ fn prepare_type_decl_from_lowered(
             origin,
             interner,
         );
-        insert_type_space_import_resolutions(
+        // The declaration-specific external dependency frontier was validated
+        // above. Populate this private namespace lookup with only identities
+        // that have an exact canonical owner; unrelated unresolved imports
+        // stay absent instead of failing the declaration a second time.
+        insert_resolvable_type_space_imports(
             &mut table,
-            canonical_id,
             state,
             owner,
-            dep_edges,
             import_canonicalization,
             interner,
-        )?;
+        );
         Arc::new(table)
     };
 
@@ -688,46 +690,14 @@ fn insert_file_symbol_resolutions(
     }
 }
 
-/// Insert the TYPE-space import entries: external deps resolve through import
-/// bindings → the FINAL defining file. When the import is a re-export hop,
-/// the canonicalization (precomputed at bundle materialisation through the
-/// SAME route authority the carrier fallback / dispatch fallthrough use)
-/// carries the final `(canonical, name)`; otherwise the barrel fallback
-/// applies. This keeps the eager fast-path's stored identity at the FINAL
-/// definition rather than the intermediate barrel.
-///
-/// `PreparedTypeDecl` bodies are lowered in TYPE space: preserve the same
-/// local-first precedence used by route-fact classification and the
-/// declaration-scope fallback — a same-file type header shadows an import
-/// binding with the same local spelling. Value-only imports still populate
-/// the table (including `typeof` dependencies).
-fn insert_type_space_import_resolutions(
-    table: &mut FxHashMap<Arc<str>, ResolvedRootIdentity>,
-    _canonical_id: &Arc<str>,
-    state: &ShallowFileState,
-    owner: verter_type_expr::TopLevelOwnerId,
-    _dep_edges: Option<&FxHashMap<String, String>>,
-    import_canonicalization: &ImportCanonicalization,
-    interner: &IdentityInterner,
-) -> Result<(), PreparationFailure> {
-    for (local, _target) in state.owner_import_targets.iter() {
-        if local.owner != owner || state.has_type_symbol_in(owner, local.name.as_ref()) {
-            continue;
-        }
-        let local_name = local.name.as_ref();
-        let resolved = canonicalize_import_target(import_canonicalization, local_name, owner)?;
-        table.insert(interner.intern(local_name), resolved);
-    }
-    Ok(())
-}
-
 /// Insert only import identities whose exact owner was canonicalized.
 ///
-/// This is exclusively for the projection-only authored-partial carrier. A
-/// missing entry stays absent so later lowering retains the authored bare
-/// reference; no source owner, ordinary owner, or name-only fallback is ever
-/// invented. Strict preparation continues to use
-/// [`insert_type_space_import_resolutions`] and fails on the first miss.
+/// Used by the shared TYPE-space lookup base and by the projection-only
+/// authored-partial carrier. A missing entry stays absent; the exact
+/// declaration's [`ClassifiedTypeDeps::external_deps`] is the strict
+/// dependency frontier, so an unrelated unresolved import must not prevent a
+/// declaration from preparing. No source owner, ordinary owner, or name-only
+/// fallback is ever invented.
 fn insert_resolvable_type_space_imports(
     table: &mut FxHashMap<Arc<str>, ResolvedRootIdentity>,
     state: &ShallowFileState,
@@ -866,21 +836,19 @@ fn build_type_name_resolution_base(
     canonical_id: &Arc<str>,
     state: &ShallowFileState,
     owner: verter_type_expr::TopLevelOwnerId,
-    dep_edges: Option<&FxHashMap<String, String>>,
+    _dep_edges: Option<&FxHashMap<String, String>>,
     import_canonicalization: &ImportCanonicalization,
     interner: &IdentityInterner,
 ) -> Result<FxHashMap<Arc<str>, ResolvedRootIdentity>, PreparationFailure> {
     let mut table = FxHashMap::default();
     insert_file_symbol_resolutions(&mut table, canonical_id, state, owner, interner);
-    insert_type_space_import_resolutions(
+    insert_resolvable_type_space_imports(
         &mut table,
-        canonical_id,
         state,
         owner,
-        dep_edges,
         import_canonicalization,
         interner,
-    )?;
+    );
     Ok(table)
 }
 

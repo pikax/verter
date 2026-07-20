@@ -2536,7 +2536,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             } => {
                 debug_assert_eq!(root_identity, declaration.root_identity);
                 let crate::resolver_core::prepared_decl::PreparationFailure::MissingExternalOwner {
-                    local_name,
+                    ..
                 } = failure
                 else {
                     unreachable!("AuthoredPartial is reserved for unresolved external owners")
@@ -2544,7 +2544,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let debt =
                     crate::project_semantic_dispatch::carrier::AuthoredResolutionDebtFrame::new(
                         &root_identity,
-                        &local_name,
                     );
                 (declaration, Some(debt))
             }
@@ -4101,6 +4100,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .iter()
             .filter(|(name, _)| !existing.contains(name.as_str()))
             .map(|(name, member)| {
+                // Backfilled entries are declaration OWN-body members just as
+                // surely as entries already present on the lowered Object.
+                // Stamp the same role before lowering their value so a missing
+                // nested reference stays member-local instead of being
+                // misclassified as a root/surface-composition arm.
+                let member_context = context
+                    .into_structural_provenance()
+                    .with_merge_role(crate::semantic_query::MemberMergeRole::OwnBody);
                 let value = self.lower_located_body_with_resolution_debt(
                     verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
                     prepared.kind,
@@ -4111,7 +4118,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope_payload,
                     shadowing,
                     substitutions,
-                    context.into_structural_provenance(),
+                    member_context,
                     authored_resolution_debt,
                 );
                 SurfaceMember {

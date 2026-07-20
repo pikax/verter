@@ -874,6 +874,44 @@ fn prepared_type_failure_is_not_published_as_absence() {
     );
 }
 
+/// The shared TYPE-space name-resolution base is a lookup acceleration, not
+/// the declaration dependency frontier. An unresolved import that the
+/// declaration never references must therefore be omitted from that base
+/// without preventing the exact declaration from preparing or warming.
+#[test]
+fn unrelated_unresolved_import_does_not_block_strict_type_preparation() {
+    let source = "import { computed } from 'vue';\n\
+                  export interface SideMenuProps { visible?: boolean }\n\
+                  export namespace Menu {\n\
+                    export interface NamespacedProps { open?: boolean }\n\
+                  }\n";
+    let state = ShallowFileState::service_backed_for_test(source);
+    let cache = build_prepared_type_decl_cache(
+        "/ws/Comp.vue",
+        Arc::clone(&state),
+        Arc::new(FxHashMap::default()),
+        Arc::new(ImportCanonicalization::default()),
+        &test_interner(),
+    );
+
+    let prepared = cache
+        .get("SideMenuProps")
+        .expect("an unrelated unresolved import must not fail strict preparation")
+        .expect("SideMenuProps is an authored declaration");
+    assert!(prepared.member_index.contains_key("visible"));
+    assert!(
+        cache.slot_committed_for_test("SideMenuProps"),
+        "a complete exact declaration must be admitted to its write-once slot"
+    );
+
+    let namespaced = cache
+        .get("Menu.NamespacedProps")
+        .expect("the private namespace table must omit the same unrelated unresolved import")
+        .expect("Menu.NamespacedProps is an authored declaration");
+    assert!(namespaced.member_index.contains_key("open"));
+    assert!(cache.slot_committed_for_test("Menu.NamespacedProps"));
+}
+
 /// VALUE-space counterpart of the type-slot no-warm test.
 #[test]
 fn broken_lease_prepared_value_decl_get_does_not_warm_admit_none_slot() {

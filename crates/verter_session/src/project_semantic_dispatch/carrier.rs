@@ -82,35 +82,39 @@ pub(crate) struct CarrierResolverContext<'a> {
 /// `AuthoredPartial(MissingExternalOwner)` prepared declaration.
 ///
 /// Strict preparation cannot assign a file owner to an unresolved import, but
-/// the normal demand-time reference resolver may still resolve the exact local
+/// the normal demand-time reference resolver may still resolve the demanded
 /// binding (notably through ambient external-module declarations). This frame
-/// keeps that typed debt provisional until the declaration body has traversed
-/// the normal resolver. It is deliberately local to one Instantiate call: no
-/// dispatcher field, thread-local state, query-key state, or cross-call aliasing.
-/// Nested Instantiate calls construct independent frames.
+/// starts clean and records debt only when body projection actually reaches an
+/// unresolved authored import in a root/surface-composition role. Unrelated
+/// imports and member-value references cannot poison root completeness. It is
+/// deliberately local to one Instantiate call: no dispatcher field,
+/// thread-local state, query-key state, or cross-call aliasing. Nested
+/// Instantiate calls construct independent frames.
 ///
 /// `finish` must be called on every non-panicking exit. The drop assertion makes
 /// that discipline structural while allowing unwind cleanup to remain inert.
 pub(super) struct AuthoredResolutionDebtFrame {
     canonical_id: Arc<str>,
     owner: verter_type_expr::TopLevelOwnerId,
-    local_name: Arc<str>,
     outstanding: Cell<bool>,
     finished: Cell<bool>,
 }
 
 impl AuthoredResolutionDebtFrame {
-    pub(super) fn new(root_identity: &ResolvedRootIdentity, local_name: &str) -> Self {
+    pub(super) fn new(root_identity: &ResolvedRootIdentity) -> Self {
         Self {
             canonical_id: Arc::clone(&root_identity.canonical_id),
             owner: root_identity.owner,
-            local_name: Arc::from(local_name),
-            outstanding: Cell::new(true),
+            outstanding: Cell::new(false),
             finished: Cell::new(false),
         }
     }
 
-    fn observe_exact_resolution(&self, scope: &NodeScopeId, local_name: &str) {
+    fn observe_unresolved_import_demand(
+        &self,
+        scope: &NodeScopeId,
+        context: ProjectionReductionContext,
+    ) {
         let NodeScopeId::File {
             canonical_id,
             owner,
@@ -119,11 +123,21 @@ impl AuthoredResolutionDebtFrame {
         else {
             return;
         };
-        if canonical_id.as_ref() == self.canonical_id.as_ref()
-            && *owner == self.owner
-            && local_name == self.local_name.as_ref()
-        {
-            self.outstanding.set(false);
+        if canonical_id.as_ref() == self.canonical_id.as_ref() && *owner == self.owner {
+            match context.merge_role() {
+                // A reference inside an object member's value is locally
+                // classifiable by the member consumer; it does not remove any
+                // member from the authoritative root surface.
+                crate::semantic_query::MemberMergeRole::OwnBody => {}
+                // Root aliases, authored intersection/union arms, and real
+                // interface/class heritage arms contribute to the root
+                // surface. Losing one is authoritative missing-dependency
+                // debt and must keep the Instantiate ReturnOnly.
+                crate::semantic_query::MemberMergeRole::Authored
+                | crate::semantic_query::MemberMergeRole::Heritage => {
+                    self.outstanding.set(true);
+                }
+            }
         }
     }
 
@@ -181,9 +195,9 @@ impl<'a> CarrierResolverContext<'a> {
         self
     }
 
-    fn observe_exact_owner_resolution(&self, local_name: &str) {
+    fn observe_unresolved_authored_import(&self) {
         if let Some(debt) = self.authored_resolution_debt {
-            debt.observe_exact_resolution(self.scope, local_name);
+            debt.observe_unresolved_import_demand(self.scope, self.reduction_context);
         }
     }
 
@@ -580,14 +594,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope,
                     reduction_context,
                 ) {
-                    ctx.observe_exact_owner_resolution(name.as_ref());
                     return CarrierResolutionPlan::Ready(merged);
                 }
             }
         }
 
-        if resolves_to_file {
-            ctx.observe_exact_owner_resolution(name.as_ref());
+        if !resolves_to_file && self.unresolved_head_is_authored_import(scope, name.as_ref()) {
+            ctx.observe_unresolved_authored_import();
         }
 
         let Some(resolved_root) = resolved_root else {
@@ -730,6 +743,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 context: reduction_context,
             })
         }
+    }
+
+    /// Whether this unresolved head names an authored import binding in the
+    /// exact declaration owner. This is the producer-side provenance gate for
+    /// authored-resolution debt: ambient names and unrelated file imports are
+    /// not inferred from spelling, and same-file declarations retain their
+    /// normal shadowing precedence.
+    fn unresolved_head_is_authored_import(&self, scope: &NodeScopeId, name: &str) -> bool {
+        let NodeScopeId::File {
+            canonical_id,
+            owner,
+            ..
+        } = scope
+        else {
+            return false;
+        };
+        self.ctx
+            .shallow_file_state(canonical_id.as_ref())
+            .is_some_and(|state| {
+                !state.has_type_symbol_in(*owner, name)
+                    && state.import_target_in(*owner, name).is_some()
+            })
     }
 
     /// Resolve an `ImportType` head (`import("specifier").qualifier<args>` /

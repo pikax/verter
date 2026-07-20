@@ -732,7 +732,7 @@ impl VerterHost {
     ) -> MacroTscOutcome {
         match mac.kind {
             AnalyzedMacroKind::DefineProps => {
-                if is_definitely_non_object_root(dispatch, payload) {
+                if probe_definitely_non_object_root(dispatch, payload) {
                     return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).tsc();
                 }
                 counters.root_shallow_demands += 1;
@@ -786,7 +786,7 @@ impl VerterHost {
                 }))
             }
             AnalyzedMacroKind::DefineEmits => {
-                if is_definitely_non_object_root(dispatch, payload) {
+                if probe_definitely_non_object_root(dispatch, payload) {
                     return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).tsc();
                 }
                 counters.root_shallow_demands += 1;
@@ -870,7 +870,7 @@ impl VerterHost {
         defaults_index: Option<usize>,
         counters: &mut VueMacroCodegenCounters,
     ) -> MacroRuntimeOutcome {
-        if is_definitely_non_object_root(dispatch, payload) {
+        if probe_definitely_non_object_root(dispatch, payload) {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         }
         counters.root_shallow_demands += 1;
@@ -962,7 +962,7 @@ impl VerterHost {
         effective_index: usize,
         counters: &mut VueMacroCodegenCounters,
     ) -> MacroRuntimeOutcome {
-        if is_definitely_non_object_root(dispatch, payload) {
+        if probe_definitely_non_object_root(dispatch, payload) {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         }
         counters.root_shallow_demands += 1;
@@ -2466,6 +2466,25 @@ fn is_definitely_non_object_root(
         }
     }
     false
+}
+
+/// Run the conservative non-object predicate in an exploratory completeness
+/// scope. A `false` result makes no authoritative claim: the following
+/// shallow-surface demand owns root completeness and will re-observe any real
+/// missing root/surface arm. A `true` result is authoritative and retains any
+/// partiality encountered while reaching the non-object terminal.
+fn probe_definitely_non_object_root(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    subject: crate::semantic_query::SemanticNodeId,
+) -> bool {
+    let probe_scope = crate::request_context::ColdComputeCompletenessScope::enter();
+    let definitely_non_object = is_definitely_non_object_root(dispatch, subject);
+    if definitely_non_object {
+        drop(probe_scope);
+    } else {
+        probe_scope.discard();
+    }
+    definitely_non_object
 }
 
 struct RuntimeClassification {
