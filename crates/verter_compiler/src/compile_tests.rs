@@ -16708,6 +16708,87 @@ fn r5_fix2_object_and_array_literals_stay_rejected() {
 }
 
 // =========================================================================
+// R5-FIX3 — scope-check detects setup-locals at any name length / nesting
+// =========================================================================
+//
+// Official `checkInvalidScopeReference` walks EVERY referenced identifier in
+// the macro runtime argument (nested object-property values, array elements,
+// any name length), excluding nested function-scope locals. The prior tests
+// used multi-char names; a 1-char nested default slipped the check because the
+// `Props` prop-key bindings carry FILE-relative spans that, sliced into the
+// content-relative name map, could overwrite a same-length setup binding.
+
+#[test]
+fn r5_fix3_one_char_setup_local_nested_default_is_error() {
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\ndefineProps({ x: { default: f } })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineProps()` in <script setup> cannot reference locally declared variables"
+            )),
+        "1-char setup-local nested default must be rejected (official), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn r5_fix3_one_char_setup_local_array_element_is_error() {
+    // 1-char setup-local as an array element inside defineEmits.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst e = ref('save')\ndefineEmits([e])\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineEmits()` in <script setup> cannot reference locally declared variables"
+            )),
+        "1-char setup-local array element must be rejected (official), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn r5_fix3_nested_validator_function_local_stays_valid() {
+    // A nested validator function param (`f`) shadowing the setup binding name
+    // is a function-scope local — official does NOT reject it. The reference
+    // `f > 0` resolves to the param, not the setup ref.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\ndefineProps({ x: { validator: (f) => f > 0 } })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "a nested validator function param shadowing a setup name must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn r5_fix3_setup_local_inside_nested_function_body_is_error() {
+    // A setup-local referenced INSIDE a nested function body but NOT shadowed
+    // (no param/local of that name) is still an invalid scope reference —
+    // official walkIdentifiers records it because it is not a function-scope local.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst g = ref(0)\ndefineProps({ x: { default: () => g.value } })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineProps()` in <script setup> cannot reference locally declared variables"
+            )),
+        "an un-shadowed setup-local used inside a nested function body must be rejected, got: {:?}",
+        result.errors
+    );
+}
+
+// =========================================================================
 // FIX3 — scope check for defineProps / defineEmits / defineModel
 // =========================================================================
 

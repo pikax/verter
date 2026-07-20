@@ -259,13 +259,27 @@ pub(super) fn collect_invalid_options_scope_diagnostics(
     let content_str = setup.content_str();
     let parse_result = setup.parse_result();
 
-    // Name → BindingType map. Binding spans are content-relative for setup
-    // declarations, but the setup parse also folds the companion block's type
-    // inventory in — those spans reference the companion's coordinates and can
-    // be out of bounds for the setup content slice; skip them (they are not
-    // setup-local declarations).
+    // Name → BindingType map over the SETUP-LOCAL value/import bindings only.
+    //
+    // The scope check keys names by slicing the content-relative `content_str`,
+    // so every span fed in MUST be content-relative. `parse_result.bindings`
+    // mixes coordinate systems: the setup value/import declarations
+    // (`is_setup()`) carry content-relative spans, but the `Props` family
+    // (runtime `defineProps({ x: ... })` keys, `defineProps<T>()` members) carry
+    // FILE-relative spans (offset by `content_offset` for downstream template
+    // mapping). Feeding those file-relative Props spans into a content-relative
+    // slice reads the wrong bytes and can land on — and overwrite — a genuine
+    // setup binding of the same length (e.g. a 1-char prop key shifted onto a
+    // 1-char `ref` local), silently demoting it to `Props` and skipping the
+    // error. `is_setup()` selects exactly the content-relative subset, which is
+    // also the only subset the check can flag; the `Props` prop-definition keys
+    // are never referenceable setup locals. The `end > len` guard still drops
+    // any companion-folded inventory span that lands out of bounds.
     let mut binding_types: FxHashMap<&str, BindingType> = FxHashMap::default();
     for (span, bt) in &parse_result.bindings {
+        if !bt.is_setup() {
+            continue;
+        }
         let (start, end) = (span.start as usize, span.end as usize);
         if end > content_str.len() {
             continue;
