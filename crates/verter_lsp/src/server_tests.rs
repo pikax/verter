@@ -25955,7 +25955,8 @@ async fn production_definition_handler_fails_closed_when_the_provider_wedges() {
         !config.audit_enabled,
         "T2 must exercise the production audit-off path"
     );
-    config.lsp_method_timeouts.production_request_deadline = std::time::Duration::from_millis(300);
+    config.lsp_method_timeouts.request_deadlines.goto_definition =
+        std::time::Duration::from_millis(300);
     let host = Arc::new(VerterHost::new_standalone(config));
 
     let provider = Arc::new(MockTypeProvider::new());
@@ -26035,7 +26036,8 @@ async fn get_statistics_stays_live_under_a_burst_of_wedged_definitions() {
     // their serve-loop slots long enough that a starved getStatistics would miss
     // the 1s liveness bar.
     let mut config = HostConfig::default();
-    config.lsp_method_timeouts.production_request_deadline = std::time::Duration::from_secs(2);
+    config.lsp_method_timeouts.request_deadlines.goto_definition =
+        std::time::Duration::from_secs(2);
     let host = Arc::new(VerterHost::new_standalone(config));
 
     let provider = Arc::new(MockTypeProvider::new());
@@ -26506,4 +26508,355 @@ async fn a_failed_carrier_sync_in_the_preamble_leaves_the_import_memo_cold() {
 
     drain_handle.abort();
     drop(service);
+}
+
+// ===========================================================================
+// Human-scaled request deadlines.
+//
+// A deadline is a last-resort fail-closed, not a latency budget. The previous
+// flat 15s was picked for provider safety and made an unservable request freeze
+// the editor for fifteen seconds; these pin the shipped per-kind budgets to the
+// span a person will actually wait, and prove the fail-closed happens there.
+// ===========================================================================
+
+/// Build a language server over a mock provider, with `configure` applied to the
+/// host config first.
+fn wedged_provider_server(
+    provider: Arc<MockTypeProvider>,
+    configure: impl FnOnce(&mut HostConfig),
+) -> (
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    Arc<VerterHost>,
+) {
+    let mut config = HostConfig::default();
+    assert!(
+        !config.audit_enabled,
+        "these must exercise the production audit-off path"
+    );
+    configure(&mut config);
+    let host = Arc::new(VerterHost::new_standalone(config));
+
+    let type_provider: Arc<dyn TypeProvider> = provider;
+    let host_for_server = Arc::clone(&host);
+    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider)),
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsgo,
+                mcp_port: None,
+                type_provider_reason: Some("managed tsgo".into()),
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    (service, host)
+}
+
+/// Every interactive budget must sit above the measured healthy p95 for its kind
+/// and below the span a person will wait at a keystroke. The flat 15s satisfied
+/// neither end: it was 47x the healthy hover p95, and it froze the editor for
+/// fifteen seconds whenever it was reached.
+#[test]
+fn interactive_budgets_sit_between_the_measured_healthy_path_and_human_patience() {
+    let budgets = verter_session::LspMethodBudgets::interactive_defaults();
+
+    // (row name, configured budget, measured healthy p95, human ceiling)
+    let measured: &[(
+        &str,
+        std::time::Duration,
+        std::time::Duration,
+        std::time::Duration,
+    )] = &[
+        (
+            "hover",
+            budgets.hover,
+            std::time::Duration::from_millis(318),
+            std::time::Duration::from_millis(2000),
+        ),
+        (
+            "goto_definition",
+            budgets.goto_definition,
+            std::time::Duration::from_millis(769),
+            std::time::Duration::from_millis(3000),
+        ),
+        (
+            "references",
+            budgets.references,
+            std::time::Duration::from_millis(661),
+            std::time::Duration::from_millis(4000),
+        ),
+        (
+            "completion",
+            budgets.completion,
+            std::time::Duration::from_millis(2843),
+            std::time::Duration::from_millis(8000),
+        ),
+    ];
+
+    for (name, budget, healthy_p95, human_ceiling) in measured {
+        assert!(
+            budget > healthy_p95,
+            "{name}: a budget at or below the measured healthy p95 ({healthy_p95:?}) \
+             fail-closes requests that were working; got {budget:?}"
+        );
+        assert!(
+            *budget >= *healthy_p95 * 2,
+            "{name}: {budget:?} leaves under 2x headroom over the measured healthy \
+             p95 {healthy_p95:?} — too tight to absorb a slow machine"
+        );
+        assert!(
+            budget <= human_ceiling,
+            "{name}: {budget:?} exceeds the span a person will wait for this \
+             interaction ({human_ceiling:?})"
+        );
+    }
+
+    assert!(
+        budgets.other >= std::time::Duration::from_secs(10),
+        "unenumerated kinds are batch work and keep the long absolute backstop, got {:?}",
+        budgets.other
+    );
+}
+
+/// A wedged provider must fail hover closed on the SHIPPED default budget — no
+/// test override. This is the acceptance the user feels: the editor stops
+/// waiting in about a second, not fifteen.
+#[tokio::test]
+async fn a_wedged_hover_fails_closed_on_the_shipped_default_budget() {
+    let provider = Arc::new(MockTypeProvider::new());
+    provider.hang_hover();
+    let (service, host) = wedged_provider_server(Arc::clone(&provider), |_| {});
+    let server = service.inner();
+
+    let budget = host.config().lsp_method_timeouts.request_deadlines.hover;
+
+    let source = "<script setup lang=\"ts\">\nconst count = 1\n</script>\n<template><div>{{ count }}</div></template>\n";
+    let uri = open_test_vue(server, "/workspace/src/App.vue", source);
+    let position = find_document_position(server, &uri, "{{ count", 3);
+
+    let started = std::time::Instant::now();
+    let outcome = tokio::time::timeout(
+        budget * 3,
+        super::nav_features_audit::handle_hover_with_audit(server, hover_params(&uri, position)),
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    let result = outcome.expect("hover must return on its own deadline, never wedge");
+    let err = result.expect_err("a wedged provider must fail hover closed");
+    assert_eq!(
+        err.code,
+        tower_lsp_server::jsonrpc::ErrorCode::RequestCancelled,
+        "a deadline expiry surfaces as request_cancelled, got {err:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "a wedged hover must not freeze the editor; took {elapsed:?}"
+    );
+    assert!(
+        provider
+            .calls()
+            .iter()
+            .any(|c| matches!(c, MockCall::GetHover { .. })),
+        "the handler must have reached the wedged get_hover, else the deadline is untested"
+    );
+}
+
+/// Signature help reaches the type provider on a keystroke and had NO deadline
+/// at all: it never went through the audit harness, so a wedged provider parked
+/// it forever. Every provider-backed interactive handler needs a bound, whether
+/// or not it carries an audit identity.
+#[tokio::test]
+async fn a_wedged_signature_help_fails_closed_instead_of_parking_forever() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+    provider.hang_signature_help();
+
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    let budget = server
+        .documents
+        .host()
+        .config()
+        .lsp_method_timeouts
+        .request_deadlines
+        .code_action;
+
+    let started = std::time::Instant::now();
+    let outcome = tokio::time::timeout(
+        budget * 3,
+        <VerterLanguageServer as tower_lsp_server::LanguageServer>::signature_help(
+            server,
+            SignatureHelpParams {
+                context: None,
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: uri.clone() },
+                    position,
+                },
+                work_done_progress_params: Default::default(),
+            },
+        ),
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    let result =
+        outcome.expect("signature help must return on its deadline; before this it parked forever");
+    let err = result.expect_err("a wedged provider must fail signature help closed");
+    assert_eq!(
+        err.code,
+        tower_lsp_server::jsonrpc::ErrorCode::RequestCancelled,
+        "a deadline expiry surfaces as request_cancelled, got {err:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(4),
+        "a wedged signature help must not freeze the editor; took {elapsed:?}"
+    );
+    assert!(
+        provider
+            .calls()
+            .iter()
+            .any(|c| matches!(c, MockCall::GetSignatureHelp { .. })),
+        "the handler must have reached the wedged get_signature_help, \
+         else the deadline is untested"
+    );
+}
+
+/// Two different documents must not queue behind one another. The per-document
+/// singleflight that backs the import-set memo is keyed per canonical id; if it
+/// ever collapsed to one shared lock it would serialize the whole editor —
+/// exactly the kind of stability machinery that costs more than it saves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_import_set_singleflight_does_not_serialize_across_documents() {
+    let memo = crate::server::ImportSyncMemo::default();
+
+    let first = memo.lock_for("/workspace/src/A.vue");
+    let second = memo.lock_for("/workspace/src/B.vue");
+    let same_as_first = memo.lock_for("/workspace/src/A.vue");
+
+    assert!(
+        !Arc::ptr_eq(&first, &second),
+        "different documents must get different singleflight locks, or every \
+         document serializes behind every other"
+    );
+    assert!(
+        Arc::ptr_eq(&first, &same_as_first),
+        "the same document must reuse one lock, or the singleflight coalesces nothing"
+    );
+
+    // Hold A's lock for the whole test; B must still be able to run.
+    let _held = first.lock().await;
+
+    let progressed = tokio::time::timeout(std::time::Duration::from_secs(2), second.lock()).await;
+    assert!(
+        progressed.is_ok(),
+        "a document whose sibling holds its own singleflight lock must proceed \
+         immediately, not wait behind it"
+    );
+
+    // And the same document genuinely does coalesce onto the held lock.
+    let contended =
+        tokio::time::timeout(std::time::Duration::from_millis(200), same_as_first.lock()).await;
+    assert!(
+        contended.is_err(),
+        "the same document must coalesce onto the held lock, else the \
+         singleflight is not a singleflight"
+    );
+}
+
+/// A request racing an in-flight `did_open` must resume the instant the
+/// document registers, not at the end of a polling step. The poll schedule this
+/// replaced started at 20ms and coarsened to 80ms, so a document that landed
+/// 1ms after a check still held the request for the rest of that interval —
+/// latency the request had already earned the right not to pay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_racing_an_open_resumes_the_moment_the_document_registers() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+
+    let uri: Uri = "file:///workspace/src/Late.vue".parse().unwrap();
+    let source = "<script setup lang=\"ts\">\nconst count = 1\n</script>\n<template><div>{{ count }}</div></template>\n";
+
+    // Register the document a few ms from now, mimicking a did_open that lands
+    // just after the request checked for it.
+    const REGISTER_AFTER: std::time::Duration = std::time::Duration::from_millis(5);
+
+    let started = std::time::Instant::now();
+    let waiter = server
+        .documents
+        .wait_for_registration(&uri, std::time::Duration::from_millis(300));
+
+    let opener = async {
+        tokio::time::sleep(REGISTER_AFTER).await;
+        open_test_vue(server, "/workspace/src/Late.vue", source);
+    };
+
+    let (registered, ()) = tokio::join!(waiter, opener);
+    let elapsed = started.elapsed();
+
+    assert!(
+        registered,
+        "the wait must observe the registration it was waiting for"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(20),
+        "the request resumed {elapsed:?} after the open landed at {REGISTER_AFTER:?} — \
+         it is waiting out a polling interval rather than the registration itself"
+    );
+}
+
+/// A document that is already registered must not wait at all. The wait is for
+/// a race that usually did not happen; the common case has to be free.
+#[tokio::test]
+async fn waiting_for_an_already_registered_document_returns_immediately() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+
+    let source = "<script setup lang=\"ts\">\nconst count = 1\n</script>\n<template><div>{{ count }}</div></template>\n";
+    let uri = open_test_vue(server, "/workspace/src/App.vue", source);
+
+    let started = std::time::Instant::now();
+    let registered = server
+        .documents
+        .wait_for_registration(&uri, std::time::Duration::from_millis(300))
+        .await;
+    let elapsed = started.elapsed();
+
+    assert!(registered, "an open document is registered");
+    assert!(
+        elapsed < std::time::Duration::from_millis(2),
+        "an already-registered document must cost nothing to wait for, took {elapsed:?}"
+    );
+}
+
+/// A document that never arrives must give up on its budget rather than hang.
+#[tokio::test]
+async fn waiting_for_a_document_that_never_arrives_gives_up_on_its_budget() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+
+    let uri: Uri = "file:///workspace/src/NeverOpened.vue".parse().unwrap();
+    let budget = std::time::Duration::from_millis(80);
+
+    let started = std::time::Instant::now();
+    let registered = server.documents.wait_for_registration(&uri, budget).await;
+    let elapsed = started.elapsed();
+
+    assert!(!registered, "the document was never registered");
+    assert!(
+        elapsed >= budget,
+        "the wait must use its whole budget before giving up, took {elapsed:?}"
+    );
+    assert!(
+        elapsed < budget * 4,
+        "the wait must give up ON its budget, not well past it; took {elapsed:?}"
+    );
 }

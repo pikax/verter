@@ -708,14 +708,16 @@ async fn handle_completion_attempt(
     // silence. Once the document registers, the normal path answers typed.
     if server.documents.get(uri).is_none() {
         drop(edit_fence);
-        // ~300ms total. Each request remains independent: unrelated concurrent
-        // completions cannot cancel a valid request into an empty response.
-        for wait_ms in [20u64, 20, 40, 60, 80, 80] {
-            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
-            if server.documents.get(uri).is_some() {
-                break;
-            }
-        }
+        // Wait for the open to register, bounded at 300ms. Event-driven: the
+        // completion resumes the instant the document lands, so a registration
+        // that completes in 2ms costs the request 2ms. Polling charged it the
+        // remainder of whichever step it landed in instead. Each request remains
+        // independent: unrelated concurrent completions cannot cancel a valid
+        // request into an empty response.
+        server
+            .documents
+            .wait_for_registration(uri, std::time::Duration::from_millis(300))
+            .await;
         edit_fence = server.did_change_mutex.lock().await;
     }
 

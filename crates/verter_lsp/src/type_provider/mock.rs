@@ -147,6 +147,10 @@ mod inner {
         /// deadline repro: without an always-on production request deadline the
         /// definition handler parks on this forever.
         hang_definition: bool,
+        /// As `hang_definition`, for `get_hover`.
+        hang_hover: bool,
+        /// As `hang_definition`, for `get_signature_help`.
+        hang_signature_help: bool,
         completion_responses: Vec<(String, u32, Vec<Completion>)>,
         diagnostic_responses: Vec<(String, Vec<TypeDiagnostic>)>,
         definition_responses: Vec<(String, u32, Vec<TypeLocation>)>,
@@ -279,6 +283,21 @@ mod inner {
         pub fn hang_definition(&self) {
             let mut state = self.state.lock().unwrap();
             state.hang_definition = true;
+        }
+
+        /// Wedge `get_hover` the same way [`Self::hang_definition`] wedges
+        /// definition: record the call, then never resolve.
+        pub fn hang_hover(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.hang_hover = true;
+        }
+
+        /// Wedge `get_signature_help`. Signature help reaches the provider on a
+        /// keystroke, so a wedge here parks the handler on every `(` the user
+        /// types until the request deadline fires.
+        pub fn hang_signature_help(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.hang_signature_help = true;
         }
 
         /// Configure completions for a specific path and offset.
@@ -938,7 +957,7 @@ mod inner {
         }
 
         fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
-            let (result, on_query, fail) = {
+            let (result, on_query, fail, hang) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetHover {
                     path: path.to_string(),
@@ -961,8 +980,13 @@ mod inner {
                     }
                     _ => None,
                 };
-                (result, on_query, fail)
+                (result, on_query, fail, state.hang_hover)
             };
+            if hang {
+                // A wedged provider: never resolves. The handler must fail
+                // closed on its request deadline rather than park here.
+                return Box::pin(std::future::pending());
+            }
             // Run the one-shot mid-request seam AFTER releasing the state lock
             // (a callback that re-enters the mock must not deadlock).
             if let Some(callback) = on_query {
@@ -1112,7 +1136,7 @@ mod inner {
             path: &str,
             offset: u32,
         ) -> ProviderFuture<'_, Option<SignatureHelp>> {
-            let (result, on_query) = {
+            let (result, on_query, hang) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetSignatureHelp {
                     path: path.to_string(),
@@ -1129,8 +1153,13 @@ mod inner {
                     }
                     _ => None,
                 };
-                (result, on_query)
+                (result, on_query, state.hang_signature_help)
             };
+            if hang {
+                // A wedged provider: never resolves. The handler must fail
+                // closed on its request deadline rather than park here.
+                return Box::pin(std::future::pending());
+            }
             // Run the one-shot mid-request seam AFTER releasing the state lock
             // (a callback that re-enters the mock must not deadlock).
             if let Some(callback) = on_query {

@@ -75,7 +75,6 @@ fn run_with_audit_propagates_observer_into_handler_future() {
                 LspMethodTag::Hover,
                 "/lsp_tls_probe.vue".to_string(),
                 None,
-                Duration::from_secs(5),
                 async {
                     // Mid-flight probe: `run_with_audit` constructs
                     // the session BEFORE awaiting `body`, and the
@@ -148,7 +147,6 @@ fn run_with_audit_short_circuits_when_audit_disabled() {
                 LspMethodTag::Hover,
                 "/lsp_tls_probe.vue".to_string(),
                 None,
-                Duration::from_secs(5),
                 async {
                     // `run_with_audit` checks `host.config().audit_enabled`
                     // and short-circuits to `body.await` directly when

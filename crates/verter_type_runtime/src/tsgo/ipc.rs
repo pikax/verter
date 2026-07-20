@@ -58,6 +58,93 @@ fn summarize_lsp_params(params: &serde_json::Value) -> String {
     format!("uri={} line={} character={}", uri, line, character)
 }
 
+/// In-flight requests awaiting a response, keyed by JSON-RPC id.
+///
+/// A `std::sync::Mutex`, not an async one: every critical section is a single
+/// map operation with no await inside it, and a synchronous lock is what lets
+/// [`PendingRequest::drop`] clean up. A cancelled request is dropped, not
+/// awaited to completion, so cleanup that could only run on an async path would
+/// never run at all.
+#[derive(Default)]
+struct PendingRequests {
+    map: StdMutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>,
+}
+
+impl PendingRequests {
+    fn insert(&self, id: i64, tx: oneshot::Sender<serde_json::Value>) {
+        self.map.lock().unwrap().insert(id, tx);
+    }
+
+    fn take(&self, id: i64) -> Option<oneshot::Sender<serde_json::Value>> {
+        self.map.lock().unwrap().remove(&id)
+    }
+
+    fn len(&self) -> usize {
+        self.map.lock().unwrap().len()
+    }
+
+    /// Fail every in-flight request so callers return immediately instead of
+    /// waiting out their own timeouts.
+    fn drain_with_crash_error(&self) {
+        let drained: Vec<_> = self.map.lock().unwrap().drain().collect();
+        for (_id, tx) in drained {
+            let _ = tx.send(serde_json::json!({
+                "error": { "code": -32099, "message": "tsgo process crashed" }
+            }));
+        }
+    }
+}
+
+/// One in-flight request's registration, released on drop.
+///
+/// The caller's future can be dropped at any await point — a shortened request
+/// deadline elapsing upstream is the normal case, not an exotic one. Dropping it
+/// must leave nothing behind:
+///
+/// * the pending-map entry goes, or a provider that never answers leaks an entry
+///   per abandoned request for the life of the session;
+/// * `$/cancelRequest` goes out, or the engine keeps computing an answer no one
+///   will read, stealing time from the requests that replaced it.
+///
+/// Cancellation rides the unbounded control lane, never the interactive lane the
+/// request itself used: the reason a request is being cancelled is frequently
+/// that its lane is not draining, and a cancel queued behind the work it cancels
+/// is not a cancel.
+struct PendingRequest {
+    id: i64,
+    pending: Arc<PendingRequests>,
+    control_tx: mpsc::UnboundedSender<StdinMessage>,
+    /// Cleared once the response is in hand — a completed request must not emit
+    /// a cancellation for an id the engine has already answered.
+    armed: bool,
+}
+
+impl PendingRequest {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingRequest {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.pending.take(self.id);
+        let msg = jsonrpc_body(
+            None,
+            "$/cancelRequest",
+            &serde_json::json!({ "id": self.id }),
+        );
+        if let Ok(body) = serde_json::to_string(&msg) {
+            let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+            let _ = self
+                .control_tx
+                .send(StdinMessage::Frame(frame.into_bytes()));
+        }
+    }
+}
+
 /// Message sent to the dedicated stdin writer task.
 enum StdinMessage {
     /// Write a framed LSP message to stdin.
@@ -348,7 +435,7 @@ struct LspTransport {
     /// Background-priority lane: workspace scanner, shadow graph, diagnostics.
     background_tx: mpsc::Sender<StdinMessage>,
     /// Pending request senders, keyed by request ID. Shared with the read loop.
-    pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
+    pending: Arc<PendingRequests>,
     next_id: AtomicI64,
     /// Counts consecutive request timeouts. Reset to 0 on any successful response.
     /// When this reaches `HANG_THRESHOLD`, fires `crash_notify` to trigger a restart
@@ -490,17 +577,32 @@ impl LspTransport {
                     .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
 
                 let (tx, rx) = oneshot::channel();
-                self.pending.lock().await.insert(id, tx);
+                self.pending.insert(id, tx);
+                // Armed from the instant the id is registered: every exit from
+                // here on — return, error, or the caller's future being dropped
+                // mid-await — releases the registration and cancels the engine's
+                // work through the same path.
+                let mut registration = PendingRequest {
+                    id,
+                    pending: Arc::clone(&self.pending),
+                    control_tx: self.control_tx.clone(),
+                    armed: true,
+                };
 
                 let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
                 // The lane send and the response wait SHARE one deadline so the
-                // whole round-trip is bounded by `timeout_secs`. An unbounded enqueue
-                // did an UNBOUNDED `send().await` here, so a full lane behind a
-                // writer stalled on a busy child parked the request forever —
-                // BEFORE the response timeout even started, and without counting
-                // toward hang detection. Bounding the enqueue closes that gap.
-                let deadline =
-                    tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+                // whole round-trip is bounded. An unbounded enqueue did an
+                // UNBOUNDED `send().await` here, so a full lane behind a writer
+                // stalled on a busy child parked the request forever — BEFORE the
+                // response timeout even started, and without counting toward hang
+                // detection. Bounding the enqueue closes that gap.
+                //
+                // The hop is bounded by whichever is tighter: this call site's
+                // configured timeout, or what the ambient request deadline has
+                // left. Firing inside the caller's deadline is what makes the
+                // failure attributable to the engine rather than to the handler.
+                let hop = crate::deadline::hop_budget(std::time::Duration::from_secs(timeout_secs));
+                let deadline = tokio::time::Instant::now() + hop;
                 let send_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
                 match self
                     .tx_for_priority(priority)
@@ -509,18 +611,23 @@ impl LspTransport {
                 {
                     Ok(()) => {}
                     Err(mpsc::error::SendTimeoutError::Closed(_)) => {
-                        self.pending.lock().await.remove(&id);
+                        registration.disarm();
+                        self.pending.take(id);
                         return Err(TypeProviderError::new("stdin writer closed"));
                     }
                     Err(mpsc::error::SendTimeoutError::Timeout(_)) => {
-                        self.pending.lock().await.remove(&id);
+                        // The frame never reached the engine, so there is nothing
+                        // to cancel — release the slot without emitting a cancel
+                        // for an id the engine has never seen.
+                        registration.disarm();
+                        self.pending.take(id);
                         self.note_hang_failure();
                         crate::type_runtime_trace_event!(
                             "tsgo_transport_request_error",
                             format!("method={} id={} message=stdin-enqueue-timeout", method, id),
                         );
                         return Err(TypeProviderError::new(format!(
-                            "request '{method}' stdin enqueue timed out after {timeout_secs}s"
+                            "request '{method}' stdin enqueue timed out after {hop:?}"
                         )));
                     }
                 }
@@ -529,6 +636,9 @@ impl LspTransport {
                 let result = tokio::time::timeout(rx_budget, rx).await;
                 match result {
                     Ok(Ok(val)) => {
+                        // Answered: the read loop already took the entry, and an
+                        // engine that has replied must not be told to cancel.
+                        registration.disarm();
                         // Reset consecutive failures on any successful response
                         self.consecutive_failures.store(0, Ordering::Relaxed);
                         // Check for JSON-RPC error
@@ -567,6 +677,9 @@ impl LspTransport {
                             .unwrap_or(serde_json::Value::Null))
                     }
                     Ok(Err(_)) => {
+                        // The sender was dropped (drained on crash), so the id is
+                        // already gone and the engine is not running the work.
+                        registration.disarm();
                         crate::type_runtime_trace_event!(
                             "tsgo_transport_request_error",
                             format!(
@@ -577,15 +690,17 @@ impl LspTransport {
                         Err(TypeProviderError::new("response channel closed"))
                     }
                     Err(_) => {
-                        // Timeout — clean up the pending entry to prevent leak
-                        self.pending.lock().await.remove(&id);
+                        // Timed out with the request live at the engine. Leave the
+                        // registration ARMED: dropping it is what removes the
+                        // pending entry and cancels the engine's work, on this
+                        // path and on the caller-dropped path alike.
                         self.note_hang_failure();
                         crate::type_runtime_trace_event!(
                             "tsgo_transport_request_error",
                             format!("method={} id={} message=timeout", method, id),
                         );
                         Err(TypeProviderError::new(format!(
-                            "request '{method}' timed out after {timeout_secs}s"
+                            "request '{method}' timed out after {hop:?}"
                         )))
                     }
                 }
@@ -802,13 +917,8 @@ async fn deliver_document_close(
 
 /// Drain all pending requests, sending crash error responses so callers
 /// fail immediately instead of waiting for the 10s timeout.
-async fn drain_pending(pending: &Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>) {
-    let mut guard = pending.lock().await;
-    for (_id, tx) in guard.drain() {
-        let _ = tx.send(serde_json::json!({
-            "error": { "code": -32099, "message": "tsgo process crashed" }
-        }));
-    }
+fn drain_pending(pending: &PendingRequests) {
+    pending.drain_with_crash_error();
 }
 
 /// Read loop that processes JSON-RPC messages from the child's stdout
@@ -825,7 +935,7 @@ async fn drain_pending(pending: &Mutex<HashMap<i64, oneshot::Sender<serde_json::
 /// "crashed. Restarting" notification and respawn an engine into a dying session).
 async fn read_loop(
     stdout: impl tokio::io::AsyncRead + Unpin + Send + 'static,
-    pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
+    pending: Arc<PendingRequests>,
     diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
     contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>>,
     control_tx: mpsc::UnboundedSender<StdinMessage>,
@@ -854,7 +964,7 @@ async fn read_loop(
             match reader.read_line(&mut header_buf).await {
                 Ok(0) => {
                     // EOF — child process exited
-                    drain_pending(&pending).await;
+                    drain_pending(&pending);
                     signal_crash(&crash_notify);
                     return;
                 }
@@ -871,7 +981,7 @@ async fn read_loop(
                 }
                 Err(_) => {
                     // I/O error — child likely crashed
-                    drain_pending(&pending).await;
+                    drain_pending(&pending);
                     signal_crash(&crash_notify);
                     return;
                 }
@@ -889,7 +999,7 @@ async fn read_loop(
             .await
             .is_err()
         {
-            drain_pending(&pending).await;
+            drain_pending(&pending);
             signal_crash(&crash_notify);
             return;
         }
@@ -1037,7 +1147,7 @@ async fn read_loop(
         // Response to our request: route by id
         if let Some(id_val) = msg_id {
             if let Some(id) = id_val.as_i64() {
-                if let Some(tx) = pending.lock().await.remove(&id) {
+                if let Some(tx) = pending.take(id) {
                     let _ = tx.send(msg);
                 }
             }
@@ -1870,8 +1980,7 @@ impl TsgoTypeProvider {
         R: tokio::io::AsyncRead + Unpin + Send + 'static,
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
         let (control_tx, control_rx) = mpsc::unbounded_channel::<StdinMessage>();
         let (interactive_tx, interactive_rx) = mpsc::channel::<StdinMessage>(lane_capacity);
         let (normal_tx, normal_rx) = mpsc::channel::<StdinMessage>(lane_capacity);
