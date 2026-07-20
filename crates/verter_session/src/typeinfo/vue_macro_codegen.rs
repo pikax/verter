@@ -2734,13 +2734,15 @@ fn emits_surface_has_invalid_member(
 ) -> bool {
     use crate::semantic_query::{PrimitiveKind, SemanticNodeData};
 
+    let shape_context = ProjectionReductionContext::published(ProjectionMode::Navigate)
+        .with_orthogonal_axes_from(context);
     surface
         .members
         .iter()
         .filter(|member| member.visibility.is_public())
         .any(|member| {
             let Some(node) = dispatch
-                .normalize_node_for_structural_fact_demand(member.value, context)
+                .normalize_node_for_structural_fact_demand(member.value, shape_context)
                 .into_complete_node()
             else {
                 return false;

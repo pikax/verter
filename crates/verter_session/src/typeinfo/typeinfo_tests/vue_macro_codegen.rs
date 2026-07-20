@@ -1703,6 +1703,183 @@ defineProps<WrongProps>()
     );
 }
 
+fn assert_complete_emits_across_demands(
+    host: &VerterHost,
+    canonical_id: &str,
+    expected: &[(&str, &str)],
+) {
+    for demand in [
+        VueMacroCodegenDemand::Runtime,
+        VueMacroCodegenDemand::Tsc,
+        VueMacroCodegenDemand::RuntimeAndTsc,
+    ] {
+        let output = produce(host, canonical_id, demand);
+        assert!(
+            output.dependency_failures.is_empty(),
+            "valid emit payloads must not create dependency failures: {output:?}"
+        );
+        if matches!(
+            demand,
+            VueMacroCodegenDemand::Runtime | VueMacroCodegenDemand::RuntimeAndTsc
+        ) {
+            let runtime = output.runtime.as_ref().expect("requested runtime bundle");
+            let MacroRuntimeOutcome::Complete(MacroRuntimeShape::Emits(rows)) =
+                &runtime.entries[0].outcome
+            else {
+                panic!("expected a complete runtime emits shape: {runtime:?}");
+            };
+            assert_eq!(
+                rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(),
+                expected.iter().map(|(name, _)| *name).collect::<Vec<_>>()
+            );
+        } else {
+            assert!(output.runtime.is_none());
+        }
+        if matches!(
+            demand,
+            VueMacroCodegenDemand::Tsc | VueMacroCodegenDemand::RuntimeAndTsc
+        ) {
+            let tsc = output.tsc.as_ref().expect("requested TSC bundle");
+            let MacroTscOutcome::Complete(MacroTscProjection::Emits(projection)) =
+                &tsc.entries[0].outcome
+            else {
+                panic!("expected a complete TSC emits projection: {tsc:?}");
+            };
+            assert_eq!(
+                projection
+                    .events
+                    .iter()
+                    .map(|row| (row.name.as_str(), row.emit_parameters.as_str()))
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        } else {
+            assert!(output.tsc.is_none());
+        }
+    }
+}
+
+/// Mutation recipe: normalize member payloads with the enclosing runtime
+/// surface's Shallow context instead of the terminal published Navigate
+/// context. Indexed-access tuples collapse to empty object surfaces and the
+/// runtime/combined rows fail with `InvalidEmitsShape`.
+#[test]
+fn indexed_access_tuple_emits_are_complete_and_demand_invariant() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_ts(
+        &host,
+        "/src/indexed-emits.ts",
+        r#"export type LayerEmits = {
+  escapeKeydown: [event: KeyboardEvent]
+  pointerdownOutside: [event: PointerEvent]
+}
+export type SharedEmits = {
+  escapeKeydown: LayerEmits['escapeKeydown']
+  pointerdownOutside: LayerEmits['pointerdownOutside']
+}
+"#,
+    );
+    const FILE: &str = "/src/IndexedEmits.vue";
+    upsert(
+        &host,
+        FILE,
+        r#"<script setup lang="ts">
+import type { SharedEmits } from './indexed-emits'
+defineEmits<SharedEmits>()
+</script>"#,
+    );
+
+    assert_complete_emits_across_demands(
+        &host,
+        FILE,
+        &[
+            ("escapeKeydown", "event: KeyboardEvent"),
+            ("pointerdownOutside", "event: PointerEvent"),
+        ],
+    );
+}
+
+/// Mutation recipe: bypass indexed-access normalization or accept unresolved
+/// member names through a fallback. The TSC parameter assertions then degrade
+/// to unknown payloads even if runtime event names happen to survive.
+#[test]
+fn omit_alias_of_indexed_access_tuple_emits_is_complete_and_demand_invariant() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_ts(
+        &host,
+        "/src/base-emits.ts",
+        r#"export type BaseEmits = {
+  close: []
+  escapeKeydown: [event: KeyboardEvent]
+  pointerdownOutside: [event: PointerEvent]
+}
+"#,
+    );
+    upsert_ts(
+        &host,
+        "/src/shared-emits.ts",
+        r#"import type { BaseEmits } from './base-emits'
+export type SharedEmits = {
+  close: BaseEmits['close']
+  escapeKeydown: BaseEmits['escapeKeydown']
+  pointerdownOutside: BaseEmits['pointerdownOutside']
+}
+export type SubEmits = Omit<SharedEmits, 'close'>
+"#,
+    );
+    upsert_ts(
+        &host,
+        "/src/alias-emits.ts",
+        "import type { SubEmits } from './shared-emits'\nexport type PublicEmits = SubEmits\n",
+    );
+    const FILE: &str = "/src/OmitIndexedEmits.vue";
+    upsert(
+        &host,
+        FILE,
+        r#"<script setup lang="ts">
+import type { PublicEmits } from './alias-emits'
+defineEmits<PublicEmits>()
+</script>"#,
+    );
+
+    assert_complete_emits_across_demands(
+        &host,
+        FILE,
+        &[
+            ("escapeKeydown", "event: KeyboardEvent"),
+            ("pointerdownOutside", "event: PointerEvent"),
+        ],
+    );
+}
+
+/// Mutation recipe: treat `Any`/`Unknown` primitive carriers as definitely
+/// incompatible instead of conservative open payloads. Both semantic rails
+/// then close this valid fallback surface as `InvalidEmitsShape`.
+#[test]
+fn open_emit_member_payloads_remain_conservative_and_demand_invariant() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    const FILE: &str = "/src/OpenEmits.vue";
+    upsert(
+        &host,
+        FILE,
+        r#"<script setup lang="ts">
+defineEmits<{
+  opaque: any
+  honestUnknown: unknown
+}>()
+</script>"#,
+    );
+
+    assert_complete_emits_across_demands(
+        &host,
+        FILE,
+        &[
+            ("opaque", "...args: unknown[]"),
+            ("honestUnknown", "...args: unknown[]"),
+        ],
+    );
+}
+
 /// Mutation recipe: admit every public emits member by name without checking
 /// its resolved payload node. The scalar member then reverts to a complete
 /// runtime/TSC shape and this demand matrix fails.
