@@ -205,6 +205,10 @@ pub(crate) fn v_bind_decl_target_at(
     for style in analysis.styles.iter() {
         for vb in &style.v_binds {
             if vb.start < vb.end && offset >= vb.start && offset <= vb.end {
+                // NOTE: `expr_roots` is a sorted set, so a multi-root
+                // expression (`v-bind(width ?? fallback)`) anchors on the
+                // alphabetically-first root's declaration, not the first in
+                // source order — a display-anchor choice only.
                 let root = vb.expr_roots.first()?;
                 let binding = analysis.bindings.iter().find(|b| b.name == *root)?;
                 if binding.span.start == 0 && binding.span.end == 0 {
