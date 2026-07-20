@@ -7,7 +7,7 @@ use verter_macro_dto::{
     TscScriptOwner, TscSemanticInferenceUnavailableReason, UnresolvedReason, UnsupportedReason,
 };
 
-use crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand;
+use crate::typeinfo::vue_macro_codegen::{VueMacroCodegenDemand, VueMacroDependencyFailure};
 use crate::{HostConfig, UpsertRequest, VerterHost};
 
 fn upsert(host: &VerterHost, canonical_id: &str, source: &str) {
@@ -49,6 +49,106 @@ fn constructors(prop: &RuntimeProp) -> &[RuntimeConstructor] {
         .constructors()
         .expect("fixture prop classification must be complete")
         .as_slice()
+}
+
+#[test]
+fn missing_root_dependency_is_typed_and_demand_invariant() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    const FILE: &str = "/src/MissingRoot.vue";
+    upsert(
+        &host,
+        FILE,
+        r#"<script setup lang="ts">
+import type { Props } from './missing'
+defineProps<Props>()
+</script>"#,
+    );
+
+    let outputs = [
+        VueMacroCodegenDemand::Runtime,
+        VueMacroCodegenDemand::Tsc,
+        VueMacroCodegenDemand::RuntimeAndTsc,
+    ]
+    .map(|demand| produce(&host, FILE, demand));
+    for output in &outputs {
+        assert_eq!(
+            output.dependency_failures,
+            [VueMacroDependencyFailure::MissingRoot {
+                macro_index: 0,
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
+                import_source: "./missing".to_string(),
+                type_name: "Props".to_string(),
+            }],
+            "the missing root must ride as one typed, deterministic failure"
+        );
+    }
+}
+
+#[test]
+fn unresolved_surface_arm_is_typed_and_demand_invariant() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_ts(
+        &host,
+        "/src/types.ts",
+        "import type { MissingBase } from './missing'\n\
+         export interface Props extends MissingBase { own?: string }",
+    );
+    const FILE: &str = "/src/MissingArm.vue";
+    upsert(
+        &host,
+        FILE,
+        r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>"#,
+    );
+
+    let outputs = [
+        VueMacroCodegenDemand::Runtime,
+        VueMacroCodegenDemand::Tsc,
+        VueMacroCodegenDemand::RuntimeAndTsc,
+    ]
+    .map(|demand| produce(&host, FILE, demand));
+    for output in &outputs {
+        assert_eq!(
+            output.dependency_failures,
+            [VueMacroDependencyFailure::UnresolvedSurfaceArm {
+                macro_index: 0,
+                macro_owner: verter_type_expr::TopLevelOwnerId::instance(0),
+                name: Arc::from("MissingBase"),
+                owner_canonical: Arc::from("/src/types.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            }],
+            "the dropped surface arm must ride as one typed, deterministic failure"
+        );
+    }
+}
+
+#[test]
+fn unrelated_runtime_import_does_not_create_macro_dependency_failure() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    const FILE: &str = "/src/UnrelatedRuntime.vue";
+    upsert(
+        &host,
+        FILE,
+        r#"<script setup lang="ts">
+import { runtimeOnly } from './missing-runtime'
+defineProps<{ own?: string }>()
+</script>"#,
+    );
+
+    for demand in [
+        VueMacroCodegenDemand::Runtime,
+        VueMacroCodegenDemand::Tsc,
+        VueMacroCodegenDemand::RuntimeAndTsc,
+    ] {
+        let output = produce(&host, FILE, demand);
+        assert!(
+            output.dependency_failures.is_empty(),
+            "ordinary runtime imports are outside the macro dependency channel: {:?}",
+            output.dependency_failures
+        );
+    }
 }
 
 fn props_projection(

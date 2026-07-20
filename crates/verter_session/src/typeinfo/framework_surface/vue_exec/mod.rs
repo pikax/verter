@@ -173,6 +173,8 @@ pub(crate) struct UnresolvedSurfaceArm {
     pub(crate) name: Arc<str>,
     /// Canonical id of the file whose declaration authored the arm.
     pub(crate) owner_canonical: Arc<str>,
+    /// Exact top-level lexical owner that authored the arm.
+    pub(crate) owner: verter_type_expr::TopLevelOwnerId,
 }
 
 /// Extract the unresolved SURFACE-COMPOSITION arm facts from a projection's
@@ -187,9 +189,11 @@ fn unresolved_surface_arms_from_diags(
             crate::project_semantic_dispatch::walk::ShallowDiagnostic::UnresolvedSurfaceArm {
                 name,
                 owner_canonical,
+                owner,
             } => Some(UnresolvedSurfaceArm {
                 name: Arc::clone(name),
                 owner_canonical: Arc::clone(owner_canonical),
+                owner: *owner,
             }),
             _ => None,
         })
@@ -198,6 +202,7 @@ fn unresolved_surface_arms_from_diags(
         a.name
             .cmp(&b.name)
             .then_with(|| a.owner_canonical.cmp(&b.owner_canonical))
+            .then_with(|| a.owner.cmp(&b.owner))
     });
     arms.dedup();
     arms

@@ -38,6 +38,7 @@ mod frontier_helpers;
 mod route_surface;
 mod rune_ambient;
 mod virtual_file_pipeline;
+mod vue_macro_dependency_diagnostics;
 mod vue_script_extract;
 
 #[cfg(test)]

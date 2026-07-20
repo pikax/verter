@@ -364,6 +364,24 @@ fn missing_macro_type_dependency_produces_compile_error_and_no_outputs() {
 }
 
 #[test]
+fn missing_aliased_macro_type_dependency_anchors_to_owning_import() {
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nimport type { RemoteProps as Props } from './types'\ndefineProps<Props>()\n</script>";
+    upsert_vue(&host, "/src/Alias.vue", source);
+
+    let diagnostics = compile_main_error(&host, "/src/Alias.vue");
+    let missing = find_diag(&diagnostics, "HOST_MISSING_MACRO_TYPE_DEP");
+    let import_start = source.find("import type").unwrap() as u32;
+    let import_end =
+        import_start + "import type { RemoteProps as Props } from './types'".len() as u32;
+    assert_eq!(
+        missing.span,
+        Some(Span::new(import_start, import_end)),
+        "an aliased macro root must anchor by its local binding name"
+    );
+}
+
+#[test]
 fn missing_template_src_retries_successfully_after_dependency_arrives() {
     let host = strict_host();
     let source =
@@ -5275,6 +5293,45 @@ fn found_macro_type_with_ambient_heritage_name_still_compiles() {
     assert_compiles_without_macro_type_dep_diag(&host, "/src/A.vue");
 }
 
+/// A dual-script SFC may bind the same local type name to different imports.
+/// The unresolved-arm fact must retain the exact lexical owner; an owner-blind
+/// lookup would select the setup import first and silence the companion miss.
+#[test]
+fn found_macro_type_surface_arm_uses_exact_dual_script_import_owner() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/present.ts",
+        "export interface Ghost { present?: string }",
+    );
+    upsert_vue(
+        &host,
+        "/src/types.vue",
+        r#"<script setup lang="ts">
+import type { Ghost } from './present'
+interface SetupOnly extends Ghost { setup?: string }
+</script>
+<script lang="ts">
+import type { Ghost } from './missing-setup'
+export interface Props extends Ghost { own?: string }
+</script>
+<template><div/></template>"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/A.vue",
+        &surface_arm_sfc("Props").replace("'./types'", "'./types.vue'"),
+    );
+
+    let diagnostics = ensure_compiled_error(&host, "/src/A.vue");
+    let missing = find_diag(&diagnostics, "HOST_MISSING_MACRO_TYPE_DEP");
+    assert!(
+        missing.message.contains("Ghost"),
+        "the companion-owner missing arm must remain fatal despite the setup-owner collision: {}",
+        missing.message
+    );
+}
+
 #[test]
 fn found_macro_type_with_resolvable_heritage_chain_still_compiles() {
     let host = strict_host();
@@ -5316,6 +5373,52 @@ fn found_macro_type_arm_provably_absent_behind_star_barrel_fails_compile() {
             .iter()
             .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP" && d.message.contains("Ghost")),
         "a provably-absent star-barrel arm must be fatal and name the arm: {:?}",
+        diagnostics.diagnostics
+    );
+}
+
+/// Sibling export routes receive independent cycle/path state. Both named
+/// routes converge on the same loaded module and prove `Ghost` absent; leaking
+/// the first branch's visited set into the second would make the second route
+/// spuriously unknowable and suppress the fatal diagnostic.
+#[test]
+fn found_macro_type_arm_absent_across_converging_sibling_routes_fails_compile() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/empty-mod.ts",
+        "export interface Unrelated { u?: number }",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/left.ts",
+        "export type { Ghost } from './empty-mod'",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/right.ts",
+        "export type { Ghost } from './empty-mod'",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/barrel.ts",
+        "export type { Ghost } from './left'\nexport type { Ghost } from './right'",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "import type { Ghost } from './barrel'\n\
+         export interface FoundGhostHeritage extends Ghost { a?: string }",
+    );
+    upsert_vue(&host, "/src/A.vue", &surface_arm_sfc("FoundGhostHeritage"));
+
+    let diagnostics = ensure_compiled_error(&host, "/src/A.vue");
+    assert!(
+        diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP" && d.message.contains("Ghost")),
+        "converging sibling routes that both prove absence must stay fatal: {:?}",
         diagnostics.diagnostics
     );
 }

@@ -154,6 +154,39 @@ pub(crate) struct VueMacroCodegenCounters {
     pub scheduler_submissions: u32,
 }
 
+/// Typed missing-dependency provenance produced by the same graph projection
+/// that builds the macro DTOs. Host compile converts this list to diagnostics;
+/// neither the compiler nor the host infers dependency failures from generic
+/// partiality or display text.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum VueMacroDependencyFailure {
+    /// The authored macro root is an imported surface-tier dependency whose
+    /// semantic payload could not be established.
+    MissingRoot {
+        /// Analyzer macro inventory index.
+        macro_index: usize,
+        /// Exact top-level lexical owner of the macro/import binding.
+        owner: verter_type_expr::TopLevelOwnerId,
+        /// Exact authored import source.
+        import_source: String,
+        /// Exact authored local type name.
+        type_name: String,
+    },
+    /// A resolved root dropped one imported heritage/intersection/union arm.
+    UnresolvedSurfaceArm {
+        /// Analyzer macro inventory index.
+        macro_index: usize,
+        /// Exact top-level lexical owner of the consuming macro.
+        macro_owner: verter_type_expr::TopLevelOwnerId,
+        /// Unresolved arm head.
+        name: Arc<str>,
+        /// Canonical file that authored the arm.
+        owner_canonical: Arc<str>,
+        /// Exact top-level lexical owner that authored the arm/import.
+        owner: verter_type_expr::TopLevelOwnerId,
+    },
+}
+
 /// One per-call, non-retained semantic handoff for an SFC.
 #[derive(Debug, Clone)]
 pub(crate) struct VueMacroCodegenOutput {
@@ -165,6 +198,10 @@ pub(crate) struct VueMacroCodegenOutput {
     pub tsc: Option<Arc<MacroTscBundle>>,
     /// Sorted, unique file canonicals observed by the per-call fact tracer.
     pub transitive_canonicals: Vec<String>,
+    /// Sorted, deduplicated typed missing-dependency failures. This is
+    /// demand-invariant: Runtime, TSC, and combined requests report the same
+    /// semantic failure inventory.
+    pub dependency_failures: Vec<VueMacroDependencyFailure>,
     /// Typed structural completeness observed during this invocation.
     pub completeness: ResultCompleteness,
     /// Whether the fact footprint was bounded and based only on publishable reads.
@@ -299,8 +336,34 @@ struct ProducerState {
     origin_whole_hash: Option<verter_semantic::analysis::types::Hash16>,
     runtime_entries: Vec<MacroRuntimeEntry>,
     tsc_entries: Vec<MacroTscEntry>,
+    dependency_failures: Vec<VueMacroDependencyFailure>,
     counters: VueMacroCodegenCounters,
     completeness: ResultCompleteness,
+}
+
+fn record_unresolved_surface_arms(
+    failures: &mut Vec<VueMacroDependencyFailure>,
+    macro_index: usize,
+    macro_owner: verter_type_expr::TopLevelOwnerId,
+    diagnostics: &[crate::project_semantic_dispatch::walk::ShallowDiagnostic],
+) {
+    failures.extend(diagnostics.iter().filter_map(|diagnostic| {
+        let crate::project_semantic_dispatch::walk::ShallowDiagnostic::UnresolvedSurfaceArm {
+            name,
+            owner_canonical,
+            owner,
+        } = diagnostic
+        else {
+            return None;
+        };
+        Some(VueMacroDependencyFailure::UnresolvedSurfaceArm {
+            macro_index,
+            macro_owner,
+            name: Arc::clone(name),
+            owner_canonical: Arc::clone(owner_canonical),
+            owner: *owner,
+        })
+    }));
 }
 
 fn cancelled_vue_macro_codegen_output(
@@ -399,6 +462,7 @@ fn terminal_partial_vue_macro_codegen_output(
             })
         }),
         transitive_canonicals: Vec::new(),
+        dependency_failures: Vec::new(),
         completeness,
         facts_cacheable: false,
         counters: VueMacroCodegenCounters {
@@ -520,6 +584,7 @@ impl VerterHost {
                 })
             }),
             transitive_canonicals,
+            dependency_failures: state.dependency_failures,
             completeness: state.completeness,
             facts_cacheable,
             counters: state.counters,
@@ -536,6 +601,7 @@ impl VerterHost {
             origin_whole_hash: None,
             runtime_entries: Vec::new(),
             tsc_entries: Vec::new(),
+            dependency_failures: Vec::new(),
             counters: VueMacroCodegenCounters {
                 producer_invocations: 1,
                 ..VueMacroCodegenCounters::default()
@@ -610,6 +676,24 @@ impl VerterHost {
                 expansion_kind(mac.kind),
                 &mut diagnostics,
             );
+            if payload.is_none() {
+                state.dependency_failures.extend(
+                    script_analysis
+                        .macro_type_deps
+                        .iter()
+                        .filter(|dependency| {
+                            dependency.macro_index == payload_index
+                                && dependency.macro_span == mac.span
+                                && dependency.usage.is_surface()
+                        })
+                        .map(|dependency| VueMacroDependencyFailure::MissingRoot {
+                            macro_index: payload_index,
+                            owner: mac.owner,
+                            import_source: dependency.import_source.clone(),
+                            type_name: dependency.type_name.clone(),
+                        }),
+                );
+            }
             let payload_failure =
                 if crate::request_context::current_cold_compute_completeness().is_partial() {
                     Some(partial_failure())
@@ -620,6 +704,7 @@ impl VerterHost {
                 };
 
             if demand.wants_runtime() {
+                let mut walker_diagnostics = Vec::new();
                 let outcome = {
                     let _runtime_scope =
                         crate::request_context::ColdComputeCompletenessScope::enter();
@@ -640,6 +725,7 @@ impl VerterHost {
                                         payload_index,
                                         defaults_index,
                                         &mut state.counters,
+                                        &mut walker_diagnostics,
                                     ),
                                     None => ProjectionFailure::Unsupported(
                                         UnsupportedReason::SemanticConstruct,
@@ -655,6 +741,7 @@ impl VerterHost {
                                 payload_index,
                                 effective_index,
                                 &mut state.counters,
+                                &mut walker_diagnostics,
                             ),
                             AnalyzedMacroKind::DefineModel => {
                                 match dispatch
@@ -678,6 +765,12 @@ impl VerterHost {
                         (None, None) => unreachable!("payload failure covers an absent payload"),
                     }
                 };
+                record_unresolved_surface_arms(
+                    &mut state.dependency_failures,
+                    payload_index,
+                    mac.owner,
+                    &walker_diagnostics,
+                );
                 state.runtime_entries.push(MacroRuntimeEntry {
                     syntax_index,
                     macro_index,
@@ -686,6 +779,7 @@ impl VerterHost {
             }
 
             if demand.wants_tsc() {
+                let mut walker_diagnostics = Vec::new();
                 let outcome = {
                     let _tsc_scope = crate::request_context::ColdComputeCompletenessScope::enter();
                     match (payload_failure, payload) {
@@ -699,10 +793,17 @@ impl VerterHost {
                             effective_index,
                             &tsc_scope_inventory,
                             &mut state.counters,
+                            &mut walker_diagnostics,
                         ),
                         (None, None) => unreachable!("payload failure covers an absent payload"),
                     }
                 };
+                record_unresolved_surface_arms(
+                    &mut state.dependency_failures,
+                    payload_index,
+                    mac.owner,
+                    &walker_diagnostics,
+                );
                 state.tsc_entries.push(MacroTscEntry {
                     syntax_index,
                     macro_index,
@@ -715,6 +816,8 @@ impl VerterHost {
             crate::request_context::fold_result_completeness(macro_completeness);
         }
 
+        state.dependency_failures.sort();
+        state.dependency_failures.dedup();
         state
     }
 
@@ -729,6 +832,7 @@ impl VerterHost {
         effective_index: usize,
         scope_inventory: &TscScopeInventory<'_>,
         counters: &mut VueMacroCodegenCounters,
+        walker_diagnostics: &mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
     ) -> MacroTscOutcome {
         match mac.kind {
             AnalyzedMacroKind::DefineProps => {
@@ -745,7 +849,7 @@ impl VerterHost {
                         ProjectionMode::Shallow,
                         SurfaceProvenanceContext::MacroTypeArgOwnBody,
                     ),
-                    None,
+                    Some(&mut *walker_diagnostics),
                 );
                 if crate::request_context::current_cold_compute_completeness().is_partial() {
                     return partial_failure().tsc();
@@ -799,7 +903,7 @@ impl VerterHost {
                         ProjectionMode::Shallow,
                         SurfaceProvenanceContext::Structural,
                     ),
-                    None,
+                    Some(&mut *walker_diagnostics),
                 );
                 if crate::request_context::current_cold_compute_completeness().is_partial() {
                     return partial_failure().tsc();
@@ -869,6 +973,7 @@ impl VerterHost {
         payload_index: usize,
         defaults_index: Option<usize>,
         counters: &mut VueMacroCodegenCounters,
+        walker_diagnostics: &mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
     ) -> MacroRuntimeOutcome {
         if probe_definitely_non_object_root(dispatch, payload) {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
@@ -883,7 +988,7 @@ impl VerterHost {
                 ProjectionMode::Shallow,
                 SurfaceProvenanceContext::MacroTypeArgOwnBody,
             ),
-            None,
+            Some(walker_diagnostics),
         );
         if crate::request_context::current_cold_compute_completeness().is_partial() {
             return partial_failure().runtime();
@@ -961,6 +1066,7 @@ impl VerterHost {
         payload_index: usize,
         effective_index: usize,
         counters: &mut VueMacroCodegenCounters,
+        walker_diagnostics: &mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
     ) -> MacroRuntimeOutcome {
         if probe_definitely_non_object_root(dispatch, payload) {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
@@ -976,7 +1082,7 @@ impl VerterHost {
             payload,
             Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
             runtime_context,
-            None,
+            Some(walker_diagnostics),
         );
         if crate::request_context::current_cold_compute_completeness().is_partial() {
             return partial_failure().runtime();

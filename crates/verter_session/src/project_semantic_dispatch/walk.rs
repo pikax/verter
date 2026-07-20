@@ -173,6 +173,7 @@ pub enum ShallowDiagnostic {
     UnresolvedSurfaceArm {
         name: Arc<str>,
         owner_canonical: Arc<str>,
+        owner: verter_type_expr::TopLevelOwnerId,
     },
 }
 
@@ -4176,16 +4177,21 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 };
                 let name = Arc::clone(&identity.decl_name);
                 let target_canonical = Arc::clone(&identity.canonical_id);
+                let target_owner = identity.owner;
                 drop(data);
                 // Declaring file of the AUTHORING reference (the interning
                 // scope) for the unresolved-arm report; the identity's
                 // canonical (the resolution target) is the fallback for a
                 // node with no scope sidecar.
-                let ref_owner = self
-                    .graph()
-                    .node_scope(cur)
-                    .and_then(|scope| scope.canonical_file())
-                    .or(Some(target_canonical));
+                let ref_owner = self.graph().node_scope(cur).and_then(|scope| match scope {
+                    crate::semantic_query::NodeScopeId::File {
+                        canonical_id,
+                        owner,
+                        ..
+                    } => Some((canonical_id, owner)),
+                    crate::semantic_query::NodeScopeId::Global => None,
+                });
+                let ref_owner = ref_owner.or(Some((target_canonical, target_owner)));
                 match self.execute_read_folding_partial(SemanticQueryKey::ResolveDecl(
                     ResolveDeclKey {
                         scope,
@@ -4274,14 +4280,24 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                 .unwrap_or_else(|| Arc::clone(specifier))
                         })
                     });
-                let bare_scope_owner = data
-                    .bare_ref_head()
-                    .and_then(|(_, scope)| scope.canonical_file());
+                let bare_scope_owner = data.bare_ref_head().and_then(|(_, scope)| match scope {
+                    crate::semantic_query::NodeScopeId::File {
+                        canonical_id,
+                        owner,
+                        ..
+                    } => Some((Arc::clone(canonical_id), *owner)),
+                    crate::semantic_query::NodeScopeId::Global => None,
+                });
                 drop(data);
                 let ref_owner = bare_scope_owner.or_else(|| {
-                    self.graph()
-                        .node_scope(cur)
-                        .and_then(|scope| scope.canonical_file())
+                    self.graph().node_scope(cur).and_then(|scope| match scope {
+                        crate::semantic_query::NodeScopeId::File {
+                            canonical_id,
+                            owner,
+                            ..
+                        } => Some((canonical_id, owner)),
+                        crate::semantic_query::NodeScopeId::Global => None,
+                    })
                 });
                 let resolved = self.dispatch.resolve_carrier_subject_node(
                     cur,
@@ -4491,18 +4507,19 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         &mut self,
         target: BufferTarget,
         name: Arc<str>,
-        owner_canonical: Option<Arc<str>>,
+        owner: Option<(Arc<str>, verter_type_expr::TopLevelOwnerId)>,
     ) {
         if matches!(target, BufferTarget::Root) {
             return;
         }
-        let Some(owner_canonical) = owner_canonical else {
+        let Some((owner_canonical, owner)) = owner else {
             return;
         };
         self.walker_diagnostics
             .push(ShallowDiagnostic::UnresolvedSurfaceArm {
                 name,
                 owner_canonical,
+                owner,
             });
     }
 

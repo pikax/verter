@@ -1830,10 +1830,45 @@ defineProps<{ setupOnly: string }>()
         canonical,
         verter_type_expr::TopLevelOwnerId::instance(0),
     );
-    let carrier = bare_ref_carrier(&dispatch, "Copy", setup_scope, &[PrimitiveKind::String]);
+    let carrier = bare_ref_carrier(
+        &dispatch,
+        "GenuinelyAbsent",
+        setup_scope.clone(),
+        &[PrimitiveKind::String],
+    );
     let context = ProjectionReductionContext::vue_runtime_object_surface(
         ProjectionMode::Shallow,
         SurfaceProvenanceContext::MacroTypeArgOwnBody,
+    );
+    let parent_carrier = bare_ref_carrier(
+        &dispatch,
+        "Copy",
+        setup_scope.clone(),
+        &[PrimitiveKind::String],
+    );
+    let parent_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+        base: parent_carrier,
+        path: Arc::from([]),
+        context,
+    });
+    assert!(
+        !parent_read.result_is_partial && !parent_read.cache_suppress,
+        "the validated Instance-to-Module lexical parent remains a complete fallback"
+    );
+    let parent_surface = match parent_read.value {
+        QueryResult::Value(node) => dispatch
+            .graph()
+            .node_data(node)
+            .expect("parent-fallback surface must remain addressable"),
+        other => panic!("parent-fallback carrier must produce a value: {other:?}"),
+    };
+    assert!(
+        matches!(
+            parent_surface.as_ref(),
+            SemanticNodeData::Object(view)
+                if view.members.iter().any(|member| member.name.as_ref() == "moduleOnly")
+        ),
+        "the sole validated Module companion must remain visible from setup"
     );
     let _completeness = crate::request_context::ColdComputeCompletenessScope::enter();
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {

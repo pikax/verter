@@ -2534,6 +2534,10 @@ impl VerterHost {
                     crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Runtime,
                 )
             });
+        let macro_dependency_diagnostics = macro_output
+            .as_ref()
+            .map(|output| super::vue_macro_dependency_diagnostics::collect(self, snapshot, output))
+            .unwrap_or_default();
         let transitive_macro_type_deps = macro_output
             .as_ref()
             .map(|output| output.transitive_canonicals.iter().cloned().collect())
@@ -2542,6 +2546,11 @@ impl VerterHost {
             &snapshot.canonical_id,
             &transitive_macro_type_deps,
         );
+        if !macro_dependency_diagnostics.is_empty() {
+            diagnostics =
+                diagnostics.merge(DiagnosticsSnapshot::from_vec(macro_dependency_diagnostics));
+            return Err(diagnostics);
+        }
 
         let scope = self.config.effective_scope();
 
