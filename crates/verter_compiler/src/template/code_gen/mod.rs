@@ -76,6 +76,11 @@ pub struct TemplateCodeGenOptions {
     /// when binding metadata is present and the template is not inlined;
     /// template-only SFCs get the 2-param `(_ctx, _cache)` form.
     pub has_script: bool,
+    /// Named/default user imports official marks `setup-maybe-ref` — inline
+    /// template refs to these names bind `ref_key`/`ref: name` (namespace
+    /// imports, default `.vue`-source imports, and `vue`-source imports stay
+    /// string refs). Populated by script codegen (setup + companion).
+    pub ref_bindable_imports: rustc_hash::FxHashSet<String>,
     /// Whether the SFC has `<style scoped>`. When true and in SSR mode, the
     /// template codegen emits `_scopeId` parameter and appends `${_scopeId}`
     /// to element tags and component render calls.
@@ -108,6 +113,7 @@ impl Default for TemplateCodeGenOptions {
             self_name: String::new(),
             const_props: None,
             has_script: false,
+            ref_bindable_imports: rustc_hash::FxHashSet::default(),
             has_scoped_style: false,
             hoist_static: true,
             scope_id: String::new(),
@@ -242,7 +248,13 @@ pub fn generate_template<'alloc>(
             r
         }
         CodeGenMode::Vdom => {
-            BindingResolver::new_with_const_props(bindings, options.is_inline, const_props_alloc)
+            let mut r = BindingResolver::new_with_const_props(
+                bindings,
+                options.is_inline,
+                const_props_alloc,
+            );
+            r.set_ref_bindable_imports(options.ref_bindable_imports.clone());
+            r
         }
     };
     let mut out = CodeGenOutput::new(alloc);

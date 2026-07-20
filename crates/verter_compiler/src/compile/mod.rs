@@ -460,6 +460,10 @@ fn compile_inner(
         crate::template::code_gen::binding::BindingType,
     > = rustc_hash::FxHashMap::default();
     let mut script_block: Option<VerterScriptBlock> = None;
+    // Official `setup-maybe-ref` user imports — inline template refs to
+    // these names bind `ref_key`/`ref` (populated by the script lane and
+    // threaded to the VDOM resolver).
+    let mut ref_bindable_imports: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
 
     // Inline-template (official production topology): the render function is
     // emitted INSIDE `setup()` as a returned closure that references setup
@@ -533,6 +537,13 @@ fn compile_inner(
         // Inline mode: where the render closure is spliced into `setup()`
         // (the setup close-tag position, before the wrapper end).
         let inline_inject_pos = script_result.inline_inject_pos;
+        // Official `setup-maybe-ref` user imports — inline template refs to
+        // these names bind `ref_key`/`ref` (threaded to the VDOM resolver).
+        ref_bindable_imports = script_result
+            .ref_bindable_imports
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
 
         // Remove template and style blocks from script output. Inline mode
         // keeps the template region: the render codegen runs on this same CT
@@ -643,6 +654,7 @@ fn compile_inner(
                 self_name: to_pascal_case(&component_name),
                 const_props: verter_options.prop_constness_overrides.clone(),
                 has_script: true,
+                ref_bindable_imports: ref_bindable_imports.clone(),
                 has_scoped_style,
                 hoist_static: options.resolve_hoist_static(),
                 scope_id: if has_scoped_style {
@@ -917,6 +929,7 @@ fn compile_inner(
                         // Full 6-param render signature only when the SFC has a
                         // script block (official: `bindingMetadata && !inline`).
                         has_script: parsed.script().is_some() || parsed.script_setup().is_some(),
+                        ref_bindable_imports: ref_bindable_imports.clone(),
                         has_scoped_style,
                         hoist_static: options.resolve_hoist_static(),
                         scope_id: if has_scoped_style {

@@ -8,7 +8,7 @@
 //! Also processes companion `<script>` blocks to extract `export default`
 //! options and type declarations for cross-block type resolution.
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::prepared::PreparedCompanion;
 use crate::template::code_gen::binding::BindingType;
@@ -91,6 +91,11 @@ pub(super) struct MacroState {
     /// (never dropped, never unwrapped) and merged into the component
     /// (spread for TS, first Object.assign target for JS).
     pub has_companion_default: bool,
+    /// Named/default user imports official marks `setup-maybe-ref` — inline
+    /// template refs to these names bind `ref_key`/`ref: name`. Collected
+    /// for BOTH the setup block and the companion (merged into the script
+    /// context's set).
+    pub ref_bindable_imports: FxHashSet<String>,
     /// Whether `defineExpose` was used.
     pub has_expose: bool,
     /// Whether `defineEmits` was used (needs `__emit` in setup params).
@@ -107,6 +112,7 @@ impl MacroState {
             emits_section: None,
             options_expr: None,
             has_companion_default: false,
+            ref_bindable_imports: FxHashSet::default(),
             has_expose: false,
             has_emit: false,
             model_names: Vec::new(),
@@ -604,6 +610,16 @@ pub(super) fn process_companion_script(
                     for binding in &imp.bindings {
                         if !binding.is_type_only {
                             companion_binding_names.push(binding.name.to_string());
+                            // Official `setup-maybe-ref` import bindings — inline
+                            // template refs to these names bind `ref_key`/`ref`.
+                            if super::process::is_ref_bindable_import(
+                                imp.source,
+                                binding.import_kind,
+                            ) {
+                                macro_state
+                                    .ref_bindable_imports
+                                    .insert(binding.name.to_string());
+                            }
                         }
                     }
                 }

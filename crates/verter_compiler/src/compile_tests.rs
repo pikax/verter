@@ -16470,3 +16470,114 @@ fn result_inline_true_when_runtime_inline_happens() {
     );
     assert!(result.template.is_none());
 }
+
+// =========================================================================
+// FIX1 — inline template refs: user (maybe-ref) imports bind ref_key/ref
+// =========================================================================
+//
+// Official binding metadata (compiler-sfc 3.6.0-rc.1):
+//   imported === "*" || (imported === "default" && source.endsWith(".vue"))
+//     || source === "vue"  →  "setup-const"   (string ref)
+//   everything else (named imports anywhere, default imports from
+//     non-vue non-.vue sources)              →  "setup-maybe-ref" (ref_key/ref)
+
+#[test]
+fn inline_static_ref_with_named_user_import_binds_ref_key() {
+    let result = compile_sfc_inline(
+        "<script setup>\nimport { elRef } from './refs'\n</script>\n<template><div ref=\"elRef\">x</div></template>",
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("ref_key: \"elRef\""),
+        "named user import used as a template ref must bind ref_key (official setup-maybe-ref), got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("ref: elRef"),
+        "must reference the import binding directly, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("const _hoisted_"),
+        "the ref pair must not be hoisted to module scope, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn inline_static_ref_with_default_user_import_binds_ref_key() {
+    // Default import from a non-.vue source → setup-maybe-ref (binds).
+    let result = compile_sfc_inline(
+        "<script setup>\nimport elRef from './refs'\n</script>\n<template><div ref=\"elRef\">x</div></template>",
+    );
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("ref_key: \"elRef\"") && code.contains("ref: elRef"),
+        "default user import from a non-.vue source must bind ref_key/ref (official), got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn inline_static_ref_with_vue_import_stays_string() {
+    // vue-source import → setup-const → string ref (official).
+    let result = compile_sfc_inline(
+        "<script setup>\nimport { ref } from 'vue'\nconst x = ref(1)\n</script>\n<template><div ref=\"ref\">x</div></template>",
+    );
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("{ ref: \"ref\" }") && !code.contains("ref_key"),
+        "vue-source import must stay a string ref, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn inline_static_ref_with_namespace_import_stays_string() {
+    // `import * as refs` → setup-const → string ref (official).
+    let result = compile_sfc_inline(
+        "<script setup>\nimport * as refs from './refs'\n</script>\n<template><div ref=\"refs\">x</div></template>",
+    );
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("{ ref: \"refs\" }") && !code.contains("ref_key"),
+        "namespace import must stay a string ref, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn inline_static_ref_with_dotvue_default_import_stays_string() {
+    // Default import from a .vue source → setup-const → string ref (official).
+    let result = compile_sfc_inline(
+        "<script setup>\nimport Comp from './Comp.vue'\n</script>\n<template><div ref=\"Comp\">x</div></template>",
+    );
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("{ ref: \"Comp\" }") && !code.contains("ref_key"),
+        "default .vue import must stay a string ref, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// FIX4 — inline setup destructure order: expose, emit, attrs, slots
+// =========================================================================
+
+#[test]
+fn inline_setup_destructure_official_order() {
+    // Official builds emit (__emit) BEFORE buildDestructureElements pushes
+    // attrs/slots — so emit precedes attrs/slots.
+    let result = compile_sfc_inline(
+        "<script setup>\nconst emit = defineEmits(['save'])\ndefineExpose({ x: 1 })\n</script>\n<template><div :data-a=\"$attrs\" :data-s=\"$slots.default\">x</div></template>",
+    );
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains(
+            "setup(__props, { expose: __expose, emit: __emit, attrs: $attrs, slots: $slots })"
+        ),
+        "official destructure order is expose, emit, attrs, slots, got:\n{}",
+        code
+    );
+}

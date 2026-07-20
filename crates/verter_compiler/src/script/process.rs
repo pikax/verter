@@ -21,6 +21,18 @@ use crate::utils::oxc::vue::{AsyncKind, ImportSpecifierKind, ScriptImport, Scrip
 use super::macros::{process_companion_script, process_macro_item, MacroState, StrippedSections};
 use super::{ScriptCodeGenOptions, ScriptContext};
 
+/// Whether an import binding is ref-bindable as an inline template ref
+/// (`ref_key`/`ref: name`), matching official compiler-sfc binding metadata:
+/// named imports from ANY source and default imports from non-`vue`,
+/// non-`.vue` sources are `setup-maybe-ref` (ref-bindable); namespace
+/// imports, default imports from `.vue` sources, and `vue`-source imports
+/// are `setup-const` (stay string refs).
+pub(super) fn is_ref_bindable_import(source: &str, kind: Option<ImportSpecifierKind>) -> bool {
+    !(matches!(kind, Some(ImportSpecifierKind::Namespace))
+        || (matches!(kind, Some(ImportSpecifierKind::Default)) && source.ends_with(".vue")))
+        && source != "vue"
+}
+
 /// Determine OXC SourceType from a script block's `lang` attribute.
 /// - `lang="tsx"` / `lang="jsx"` → TSX (JSX + TS superset)
 /// - `lang="ts"` or no lang → TypeScript (angle-bracket casts like `<string>0` are valid)
@@ -128,6 +140,17 @@ pub fn process_script_setup<'alloc>(
         None => Vec::new(),
     };
 
+    // Merge the companion's ref-bindable imports into the context set
+    // (companion imports are in scope at runtime — same official rule).
+    if !macro_state.ref_bindable_imports.is_empty() {
+        let names: Vec<&str> = macro_state
+            .ref_bindable_imports
+            .iter()
+            .map(|n| ctx.out.alloc_str(n))
+            .collect();
+        ctx.ref_bindable_imports.extend(names);
+    }
+
     let parse_result = prepared_setup.parse_result();
 
     // In force_js mode, compute type-stripped script content (sans imports) to
@@ -158,6 +181,18 @@ pub fn process_script_setup<'alloc>(
             ScriptItem::Import(imp) => {
                 let abs_start = content_start + imp.span.start;
                 let abs_end = content_start + imp.span.end;
+
+                // Record official `setup-maybe-ref` import bindings — inline
+                // template refs to these names bind `ref_key`/`ref: name`
+                // (named/default user imports except vue-source, default
+                // `.vue`-source, and namespace imports).
+                if !imp.is_type_only {
+                    for b in &imp.bindings {
+                        if !b.is_type_only && is_ref_bindable_import(imp.source, b.import_kind) {
+                            ctx.ref_bindable_imports.insert(ctx.out.alloc_str(b.name));
+                        }
+                    }
+                }
 
                 if !options.keep_ts_types && imp.is_type_only {
                     // Type-only import — strip entirely when not keeping TS types
@@ -688,13 +723,21 @@ fn build_setup_wrapper_start(
         s.push_str("  setup(__props");
     }
 
-    // Add destructured context if needed. Official order: expose, attrs,
-    // slots, emit (attrs/slots only for inline template mode, on-use).
+    // Add destructured context if needed. Official order: expose, emit
+    // (`emit: __emit` is pushed before buildDestructureElements), attrs,
+    // slots (attrs/slots only for inline template mode, on-use).
     if has_expose || has_emit || uses_attrs || uses_slots {
         s.push_str(", { ");
         let mut first = true;
         if has_expose {
             s.push_str("expose: __expose");
+            first = false;
+        }
+        if has_emit {
+            if !first {
+                s.push_str(", ");
+            }
+            s.push_str("emit: __emit");
             first = false;
         }
         if uses_attrs {
@@ -709,13 +752,6 @@ fn build_setup_wrapper_start(
                 s.push_str(", ");
             }
             s.push_str("slots: $slots");
-            first = false;
-        }
-        if has_emit {
-            if !first {
-                s.push_str(", ");
-            }
-            s.push_str("emit: __emit");
         }
         s.push_str(" }");
     }

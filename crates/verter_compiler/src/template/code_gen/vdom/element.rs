@@ -1080,6 +1080,10 @@ pub(crate) fn build_props_object_into(
                 // binding compiles to `{ ref_key: "el", ref: el }` so the setup
                 // binding receives the element (the props object becomes dynamic
                 // and is never hoisted). Non-inline keeps the runtime string ref.
+                // Official also binds maybe-ref USER IMPORTS (named imports from
+                // any source + default imports from non-vue non-.vue sources);
+                // vue-source, default-.vue-source, and namespace imports stay
+                // string refs.
                 let inline_binding = resolver.is_inline() && {
                     matches!(
                         resolver.get(ref_value),
@@ -1088,7 +1092,10 @@ pub(crate) fn build_props_object_into(
                                 | super::super::binding::BindingType::SetupRef
                                 | super::super::binding::BindingType::SetupMaybeRef
                         )
-                    )
+                    ) || (matches!(
+                        resolver.get(ref_value),
+                        Some(super::super::binding::BindingType::SetupImport)
+                    ) && resolver.is_ref_bindable_import(ref_value))
                 };
                 if inline_binding {
                     buf.push_str("ref_key: \"");
