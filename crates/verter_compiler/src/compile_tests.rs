@@ -16855,6 +16855,171 @@ fn define_model_local_ref_default_is_compile_error() {
     );
 }
 
+// =========================================================================
+// defineModel get/set transformers are NOT hoisted — setup-local refs valid
+// =========================================================================
+//
+// Official `processDefineModel` (3.6.0-rc.1) emits a defineModel options
+// object's `get`/`set` transformer functions back INTO setup() (they wrap the
+// model ref via `useModel`), so ONLY the non-get/set option properties are
+// hoisted and scope-checked (`runtimeOptionNodes`). A setup-local referenced
+// inside `get`/`set` is therefore VALID; a spread element or a computed key in
+// the options object defeats static analysis and the whole object is skipped.
+// (defineProps/defineEmits options ARE hoisted wholesale, so a setup-local
+// there stays correctly rejected — see the tests above.)
+
+#[test]
+fn define_model_get_set_arrow_setup_local_stays_valid() {
+    // The headline false-positive: get/set ARROW transformers referencing a
+    // setup-local ref. Official accepts (they are emitted into setup()).
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\nconst m = defineModel({ get: () => f.value, set: (v) => { f.value = v } })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "defineModel get/set arrow transformers referencing a setup-local must stay valid (official emits them into setup()), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_model_get_set_method_form_setup_local_stays_valid() {
+    // Method-shorthand form `get() { ... }` / `set(v) { ... }` — same key name,
+    // still skipped.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\nconst m = defineModel({ get() { return f.value }, set(v) { f.value = v } })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "defineModel get/set method-form transformers referencing a setup-local must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_model_get_set_string_key_setup_local_stays_valid() {
+    // String-literal keys `"get"` / `"set"` — official matches by key value.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\nconst m = defineModel({ \"get\": () => f.value, \"set\": (v) => { f.value = v } })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "defineModel string-key get/set transformers referencing a setup-local must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_model_options_spread_skips_scope_check() {
+    // A spread element defeats static analysis — official leaves
+    // `runtimeOptionNodes` empty and checks nothing (even a `get` referencing a
+    // setup-local; `...extra` is an import here, the only setup-local is `f`).
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nimport { extra } from './x'\nconst f = ref(0)\nconst m = defineModel({ ...extra, get: () => f.value })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "defineModel options with a spread element must skip the scope check (official), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_model_options_computed_key_skips_scope_check() {
+    // A computed key defeats static analysis — official skips the whole object.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst k = ref('get')\nconst f = ref(0)\nconst m = defineModel({ [k.value]: () => f.value })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "defineModel options with a computed key must skip the scope check (official), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_model_named_get_set_setup_local_stays_valid() {
+    // Named model: the options object is arg1; get/set are still skipped.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\nconst m = defineModel('count', { get: () => f.value, set: (v) => { f.value = v } })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "named defineModel get/set transformers referencing a setup-local must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_model_default_arrow_setup_local_still_errors() {
+    // `default` IS a hoisted runtime option — a setup-local reference (even
+    // behind an arrow) stays invalid. Guards against over-skipping.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\nconst m = defineModel({ default: () => f.value })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineModel()` in <script setup> cannot reference locally declared variables"
+            )),
+        "defineModel `default` arrow referencing a setup-local must STILL be rejected (hoisted), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_model_named_default_setup_local_still_errors() {
+    // Named model: `default` on arg1 is still a hoisted runtime option.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\nconst m = defineModel('count', { default: f })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineModel()` in <script setup> cannot reference locally declared variables"
+            )),
+        "named defineModel `default` referencing a setup-local must STILL be rejected, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_model_default_function_scope_local_stays_valid() {
+    // A function-scope local inside `default` is not a setup-local — valid,
+    // exactly as for defineProps.
+    let result = compile_sfc(
+        "<script setup>\nconst m = defineModel({ default: () => { const x = 1; return x } })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "defineModel `default` with only a function-scope local must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
 #[test]
 fn with_defaults_local_ref_default_is_compile_error() {
     // Type-based defineProps + runtime defaults with a setup-local reference —

@@ -228,7 +228,7 @@ pub(super) fn collect_invalid_macro_type_diagnostics(prepared: &PreparedScript) 
 
 // ── Macro scope-reference validation ──────────────────────────────────────
 
-use oxc_ast::ast::{Expression, Statement};
+use oxc_ast::ast::{Expression, ObjectPropertyKind, PropertyKey, Statement};
 use rustc_hash::FxHashMap;
 
 use crate::template::code_gen::binding::BindingType;
@@ -325,8 +325,11 @@ fn check_macro_call(
     };
     let callee_name = callee.name.as_str();
     match callee_name {
-        "defineProps" | "defineEmits" | "defineModel" => {
-            // Official checks the runtime declarations — every argument.
+        "defineProps" | "defineEmits" => {
+            // Official checks the runtime declarations — every argument. The
+            // whole `defineProps` / `defineEmits` runtime argument is hoisted
+            // out of setup(), so a setup-local reference anywhere in it is
+            // rejected.
             for arg in &call.arguments {
                 if let Some(expr) = arg.as_expression() {
                     check_scope_references(
@@ -338,6 +341,14 @@ fn check_macro_call(
                     );
                 }
             }
+        }
+        "defineModel" => {
+            // `defineModel` is NOT hoisted wholesale: its options object's
+            // `get`/`set` transformer functions are emitted back INTO setup()
+            // (they wrap the model ref via `useModel`), so a setup-local
+            // reference inside `get`/`set` is valid. Official scope-checks only
+            // the non-`get`/`set` option properties.
+            check_define_model_scope_references(call, binding_types, content_str, diagnostics);
         }
         "defineOptions" => {
             // Official checks `optionsRuntimeDecl` (the first argument).
@@ -359,6 +370,106 @@ fn check_macro_call(
             }
         }
         _ => {}
+    }
+}
+
+/// Apply the official scope-reference rule to a `defineModel` call.
+///
+/// Official `processDefineModel` (`@vue/compiler-sfc` 3.6.0-rc.1) treats a
+/// `defineModel` options object differently from `defineProps` / `defineEmits`:
+/// the `get` / `set` transformer functions are emitted back INTO `setup()` (they
+/// wrap the model ref through `useModel`), so ONLY the remaining option
+/// properties (`default`, `type`, `required`, `validator`, …) are hoisted and
+/// collected into `runtimeOptionNodes` for the scope check. A setup-local
+/// referenced inside `get` / `set` is therefore valid. If the options object has
+/// a spread element or a computed key it cannot be statically analysed, and
+/// official collects no runtime option nodes — the whole object is skipped. This
+/// mirrors that exactly.
+fn check_define_model_scope_references(
+    call: &oxc_ast::ast::CallExpression,
+    binding_types: &FxHashMap<&str, BindingType>,
+    content_str: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    // Resolve the options object, matching official argument handling:
+    //   defineModel(options)          → options = arg0
+    //   defineModel("name", options)  → options = arg1
+    // A leading string / no-substitution template literal is the model NAME
+    // (never scope-checked — a literal carries no free references).
+    let Some(arg0) = call.arguments.first().and_then(|a| a.as_expression()) else {
+        return;
+    };
+    let arg0 = unwrap_ts_node(arg0);
+    let has_name = match arg0 {
+        Expression::StringLiteral(_) => true,
+        Expression::TemplateLiteral(tpl) => tpl.expressions.is_empty(),
+        _ => false,
+    };
+    let options = if has_name {
+        // Official reads `node.arguments[1]` without unwrapping.
+        call.arguments.get(1).and_then(|a| a.as_expression())
+    } else {
+        Some(arg0)
+    };
+    // Non-object (or absent) options are not statically analysable — official
+    // leaves `runtimeOptionNodes` empty and checks nothing.
+    let Some(Expression::ObjectExpression(obj)) = options else {
+        return;
+    };
+    // A spread element or a computed key defeats static analysis — official
+    // skips the whole options object.
+    let has_spread_or_computed = obj.properties.iter().any(|p| match p {
+        ObjectPropertyKind::SpreadProperty(_) => true,
+        ObjectPropertyKind::ObjectProperty(prop) => prop.computed,
+    });
+    if has_spread_or_computed {
+        return;
+    }
+    for prop in &obj.properties {
+        let ObjectPropertyKind::ObjectProperty(prop) = prop else {
+            continue;
+        };
+        if property_key_is_get_or_set(&prop.key) {
+            // `get` / `set` transformers stay inside setup() — not hoisted.
+            continue;
+        }
+        check_scope_references(
+            &prop.value,
+            "defineModel",
+            binding_types,
+            content_str,
+            diagnostics,
+        );
+    }
+}
+
+/// Strip the TS wrapper nodes official `unwrapTSNode` peels (`as` / satisfies /
+/// non-null / type-assertion / instantiation), plus parentheses, so a wrapped
+/// options object (`defineModel({ … } as ModelOptions)`, `defineModel(({ … }))`)
+/// is analysed like its inner expression.
+fn unwrap_ts_node<'a>(expr: &'a Expression<'a>) -> &'a Expression<'a> {
+    let mut current = expr;
+    loop {
+        current = match current {
+            Expression::ParenthesizedExpression(inner) => &inner.expression,
+            Expression::TSAsExpression(inner) => &inner.expression,
+            Expression::TSSatisfiesExpression(inner) => &inner.expression,
+            Expression::TSNonNullExpression(inner) => &inner.expression,
+            Expression::TSTypeAssertion(inner) => &inner.expression,
+            Expression::TSInstantiationExpression(inner) => &inner.expression,
+            _ => break,
+        };
+    }
+    current
+}
+
+/// Whether an object-property key is `get` or `set` (identifier or string-literal
+/// form), matching official's `p.key.name`/`p.key.value` check.
+fn property_key_is_get_or_set(key: &PropertyKey) -> bool {
+    match key {
+        PropertyKey::StaticIdentifier(id) => matches!(id.name.as_str(), "get" | "set"),
+        PropertyKey::StringLiteral(s) => matches!(s.value.as_str(), "get" | "set"),
+        _ => false,
     }
 }
 
