@@ -186,16 +186,44 @@ mod tests {
         );
     }
 
+    /// EVERY genuine `.vue` carrier is a component: a macro-less SFC still
+    /// synthesises the EMPTY-instance `default` (so barrel
+    /// `export { default as X } from './X.vue'` route walks find it on the
+    /// shallow export surface), while a NON-vue language row (the typeinfo
+    /// scratch surface, routed to this leg despite its `.ts` classification)
+    /// keeps the macros-only behavior and synthesises nothing.
     #[test]
-    fn vue_synth_returns_none_without_type_based_macros() {
+    fn vue_synth_empty_default_for_macroless_vue_carrier_none_for_scratch() {
         let candidates = FrameworkScriptCandidateSet::default();
-        let cx = ComponentDefaultSynthCtx {
+        let synth = VueComponentDefaultSynth;
+
+        // Genuine `.vue` carrier, no macros → the EMPTY-instance default.
+        let vue_cx = ComponentDefaultSynthCtx {
             canonical_id: "/App.vue",
             language: &FileLanguage::vue(),
             macros: &[],
             script_candidates: &candidates,
         };
-        let synth = VueComponentDefaultSynth;
-        assert!(synth.synthesise(cx).is_none());
+        let empty_default = synth
+            .synthesise(vue_cx)
+            .expect("a macro-less genuine .vue carrier synthesises the empty default");
+        assert_eq!(
+            empty_default.kind,
+            verter_semantic::analysis::type_eval::ValueDeclKind::Class,
+            "the empty-instance default keeps the class-shaped construct contract"
+        );
+
+        // Scratch surface (`.ts` classification routed to the Vue leg):
+        // macros-only behavior — no macros, no synthesised default.
+        let scratch_cx = ComponentDefaultSynthCtx {
+            canonical_id: "/scratch.ts",
+            language: &FileLanguage::script_ts(),
+            macros: &[],
+            script_candidates: &candidates,
+        };
+        assert!(
+            synth.synthesise(scratch_cx).is_none(),
+            "a macro-less non-vue scratch surface must NOT synthesise a default"
+        );
     }
 }
