@@ -141,6 +141,12 @@ mod inner {
         /// recovery contract: a failed provider hover must resync+retry,
         /// never vanish silently.
         fail_next_hovers: usize,
+        /// When `true`, `get_definition` RECORDS its call and then returns a
+        /// future that NEVER resolves, simulating a wedged type provider (a
+        /// managed tsgo stuck in a busy dispatch loop). Drives the B12 handler
+        /// deadline repro: without an always-on production request deadline the
+        /// definition handler parks on this forever.
+        hang_definition: bool,
         completion_responses: Vec<(String, u32, Vec<Completion>)>,
         diagnostic_responses: Vec<(String, Vec<TypeDiagnostic>)>,
         definition_responses: Vec<(String, u32, Vec<TypeLocation>)>,
@@ -264,6 +270,15 @@ mod inner {
         pub fn fail_next_hovers(&self, count: usize) {
             let mut state = self.state.lock().unwrap();
             state.fail_next_hovers = count;
+        }
+
+        /// Make every subsequent `get_definition` RECORD its call and then hang
+        /// forever (a wedged type provider). The B12 handler-deadline repro uses
+        /// this to prove the definition handler now fails closed on a deadline
+        /// instead of parking.
+        pub fn hang_definition(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.hang_definition = true;
         }
 
         /// Configure completions for a specific path and offset.
@@ -992,7 +1007,7 @@ mod inner {
         }
 
         fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-            let (result, on_query) = {
+            let (result, on_query, hang) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetDefinition {
                     path: path.to_string(),
@@ -1010,8 +1025,13 @@ mod inner {
                     }
                     _ => None,
                 };
-                (result, on_query)
+                (result, on_query, state.hang_definition)
             };
+            if hang {
+                // A wedged provider: never resolves. The handler must fail closed
+                // on its production deadline rather than park here forever.
+                return Box::pin(std::future::pending());
+            }
             // Run the one-shot mid-request seam AFTER releasing the state lock
             // (a callback that re-enters the mock must not deadlock).
             if let Some(callback) = on_query {

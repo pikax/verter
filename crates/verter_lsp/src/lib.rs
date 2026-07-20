@@ -3,6 +3,16 @@
 // crate-wide so a regression fails the build, matching `verter_type_runtime`.
 #![deny(clippy::await_holding_lock)]
 
+/// Max concurrent in-flight requests the tower-lsp-server serve loop dispatches
+/// (`Server::concurrency_level`). tower-lsp-server 0.23 defaults to 4; a handful
+/// of slow semantic handlers then occupy every slot, the framed-stdin forwarder
+/// stalls, and the server stops reading client stdin entirely — so provider-free
+/// control requests (`$/verter/getStatistics`, `$/cancelRequest`) are STARVED and
+/// no client-side rescue can land. B12's always-on per-request deadline stops a
+/// handler occupying a slot forever; this generous cap additionally guarantees
+/// control requests get a slot immediately alongside a burst of semantic work.
+pub const LSP_MAX_CONCURRENCY: usize = 64;
+
 pub mod analysis;
 pub mod audit_harness;
 pub mod capabilities;

@@ -25934,3 +25934,268 @@ async fn svelte_real_pipeline_class_definition_reaches_style_rule() {
     drain_handle.abort();
     drop(service);
 }
+
+// ===========================================================================
+// B12 — always-on production request deadline (handler wedge acceptance).
+//
+// Before B12 the per-method timeout lived ONLY in the audit harness, so with
+// audit disabled (the production default) every handler body ran UNBOUNDED: a
+// wedged type provider parked the handler forever. These prove the handler now
+// fails closed on the production deadline instead of wedging.
+// ===========================================================================
+
+/// T2 — a wedged provider must not park the production definition handler.
+/// Audit is OFF (production default); the mock's `get_definition` hangs forever;
+/// the handler must return `request_cancelled` within the production deadline.
+/// Pre-B12 this WEDGES (no deadline on the audit-off path).
+#[tokio::test]
+async fn t2_production_definition_handler_fails_closed_when_provider_wedges() {
+    let mut config = HostConfig::default();
+    assert!(
+        !config.audit_enabled,
+        "T2 must exercise the production audit-off path"
+    );
+    config.lsp_method_timeouts.production_request_deadline = std::time::Duration::from_millis(300);
+    let host = Arc::new(VerterHost::new_standalone(config));
+
+    let provider = Arc::new(MockTypeProvider::new());
+    provider.hang_definition();
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host_for_server = Arc::clone(&host);
+    let provider_for_server = Arc::clone(&type_provider);
+    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&provider_for_server)),
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsgo,
+                mcp_port: None,
+                type_provider_reason: Some("managed tsgo".into()),
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let server = service.inner();
+
+    let source = "<script setup lang=\"ts\">\nconst count = 1\n</script>\n<template><div>{{ count }}</div></template>\n";
+    let uri = open_test_vue(server, "/workspace/src/App.vue", source);
+    let position = find_document_position(server, &uri, "{{ count", 3);
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        super::nav_features_audit::handle_goto_definition_with_audit(
+            server,
+            goto_definition_params(&uri, position),
+        ),
+    )
+    .await;
+
+    let result = outcome.expect(
+        "the definition handler must return within its production deadline, never wedge (pre-B12: WEDGE)",
+    );
+    let err = result.expect_err("a wedged provider must fail the request closed");
+    assert_eq!(
+        err.code,
+        tower_lsp_server::jsonrpc::ErrorCode::RequestCancelled,
+        "a deadline expiry must surface as request_cancelled, got {err:?}"
+    );
+    assert!(
+        provider
+            .calls()
+            .iter()
+            .any(|c| matches!(c, MockCall::GetDefinition { .. })),
+        "the handler must have actually reached the wedged get_definition (else the deadline is untested)"
+    );
+}
+
+/// Write one LSP `Content-Length`-framed message.
+async fn write_lsp_frame<W>(w: &Arc<tokio::sync::Mutex<W>>, msg: &serde_json::Value)
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    let body = serde_json::to_string(msg).unwrap();
+    let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+    let mut guard = w.lock().await;
+    guard.write_all(frame.as_bytes()).await.unwrap();
+    guard.flush().await.unwrap();
+}
+
+/// T3 — control requests (`$/verter/getStatistics`) must stay responsive while a
+/// burst of wedged semantic handlers is in flight. Drives the REAL tower-lsp
+/// serve loop over duplex pipes. Pre-B12 (default concurrency 4 + no per-request
+/// deadline) four wedged definition handlers exhausted every slot and the server
+/// stopped reading client stdin, so getStatistics never dispatched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn t3_get_statistics_stays_live_under_a_burst_of_wedged_definitions() {
+    use tokio::io::AsyncReadExt;
+
+    // Production audit-off path, but a 2s deadline so the wedged definitions hold
+    // their serve-loop slots long enough that a starved getStatistics would miss
+    // the 1s liveness bar.
+    let mut config = HostConfig::default();
+    config.lsp_method_timeouts.production_request_deadline = std::time::Duration::from_secs(2);
+    let host = Arc::new(VerterHost::new_standalone(config));
+
+    let provider = Arc::new(MockTypeProvider::new());
+    provider.hang_definition();
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host_for_server = Arc::clone(&host);
+    let provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::build(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&provider_for_server)),
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsgo,
+                mcp_port: None,
+                type_provider_reason: Some("managed tsgo".into()),
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    })
+    .custom_method(
+        "$/verter/getStatistics",
+        VerterLanguageServer::get_statistics,
+    )
+    .finish();
+
+    // Pre-open the document directly so definition dispatch never races didOpen.
+    let source = "<script setup lang=\"ts\">\nconst count = 1\n</script>\n<template><div>{{ count }}</div></template>\n";
+    let uri = open_test_vue(service.inner(), "/workspace/src/App.vue", source);
+    let position = find_document_position(service.inner(), &uri, "{{ count", 3);
+
+    // Wire the serve loop over duplex pipes: client writes → server stdin,
+    // server stdout → client reads.
+    let (server_stdin_read, client_to_server) = tokio::io::duplex(1 << 16);
+    let (server_to_client, client_stdout_read) = tokio::io::duplex(1 << 16);
+    tokio::spawn(async move {
+        tower_lsp_server::Server::new(server_stdin_read, server_to_client, socket)
+            .concurrency_level(crate::LSP_MAX_CONCURRENCY)
+            .serve(service)
+            .await;
+    });
+
+    let writer = Arc::new(tokio::sync::Mutex::new(client_to_server));
+
+    // Reader: parse frames, record response arrival instants by id, and
+    // auto-respond to any server→client request so nothing stalls.
+    let (resp_tx, mut resp_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(i64, std::time::Instant)>();
+    let reader_writer = Arc::clone(&writer);
+    tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(client_stdout_read);
+        loop {
+            // Read headers.
+            let mut content_length = 0usize;
+            let mut line = String::new();
+            loop {
+                line.clear();
+                use tokio::io::AsyncBufReadExt;
+                let n = match reader.read_line(&mut line).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                let _ = n;
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    break;
+                }
+                if let Some(len) = trimmed.strip_prefix("Content-Length:") {
+                    content_length = len.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            if reader.read_exact(&mut body).await.is_err() {
+                return;
+            }
+            let Ok(msg) = serde_json::from_slice::<serde_json::Value>(&body) else {
+                continue;
+            };
+            let has_method = msg.get("method").is_some();
+            let id = msg.get("id").and_then(|v| v.as_i64());
+            match (has_method, id) {
+                (true, Some(id)) => {
+                    // Server→client request: auto-respond null.
+                    let reply = serde_json::json!({"jsonrpc":"2.0","id":id,"result":null});
+                    write_lsp_frame(&reader_writer, &reply).await;
+                }
+                (false, Some(id)) => {
+                    let _ = resp_tx.send((id, std::time::Instant::now()));
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Initialize handshake.
+    write_lsp_frame(
+        &writer,
+        &serde_json::json!({
+            "jsonrpc":"2.0","id":0,"method":"initialize",
+            "params": {"processId": null, "rootUri": null, "capabilities": {}}
+        }),
+    )
+    .await;
+    // Wait for the initialize response (id=0).
+    let init_ok = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some((id, _)) = resp_rx.recv().await {
+            if id == 0 {
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(matches!(init_ok, Ok(true)), "server must answer initialize");
+    write_lsp_frame(
+        &writer,
+        &serde_json::json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+
+    // Fire a burst of definition requests (they wedge on the mock, holding slots
+    // for the full 2s production deadline), then immediately getStatistics.
+    for id in 1..=8i64 {
+        write_lsp_frame(
+            &writer,
+            &serde_json::json!({
+                "jsonrpc":"2.0","id":id,"method":"textDocument/definition",
+                "params": {
+                    "textDocument": {"uri": uri.as_str()},
+                    "position": {"line": position.line, "character": position.character}
+                }
+            }),
+        )
+        .await;
+    }
+    let stats_sent = std::time::Instant::now();
+    write_lsp_frame(
+        &writer,
+        &serde_json::json!({"jsonrpc":"2.0","id":1000,"method":"$/verter/getStatistics","params":{}}),
+    )
+    .await;
+
+    // getStatistics must answer well before the 2s definition deadlines.
+    let stats = tokio::time::timeout(std::time::Duration::from_millis(1000), async {
+        while let Some((id, at)) = resp_rx.recv().await {
+            if id == 1000 {
+                return Some(at);
+            }
+        }
+        None
+    })
+    .await;
+    let arrived = stats
+        .expect("getStatistics must not be starved by wedged definition handlers (pre-B12: never dispatched)")
+        .expect("response stream closed before getStatistics answered");
+    assert!(
+        arrived.duration_since(stats_sent) < std::time::Duration::from_secs(1),
+        "getStatistics answered too slowly ({:?}) — control requests are being starved",
+        arrived.duration_since(stats_sent)
+    );
+}
