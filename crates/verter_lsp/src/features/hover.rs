@@ -1024,6 +1024,11 @@ pub(crate) fn class_css_rule_hover(
             if cls.name != name || cls.span.start == 0 {
                 continue;
             }
+            // Module-block rules are hashed-local: never rendered for a
+            // plain class token (fail closed).
+            if !crate::css::global_classes::class_plain_addressable(style, cls.span) {
+                continue;
+            }
             let Some(si) = cls.selector_index else {
                 continue;
             };

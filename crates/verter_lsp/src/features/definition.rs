@@ -686,6 +686,11 @@ fn css_rule_definition(
                     if cls.name != *name || cls.span.start == 0 {
                         continue;
                     }
+                    // Module-block declarations are hashed-local: never a
+                    // target for a plain class token (fail closed).
+                    if !crate::css::global_classes::class_plain_addressable(style, cls.span) {
+                        continue;
+                    }
                     let rank = class_rule_match_rank(cls, css, element);
                     hits.push((rank, cls.span.start, cls.span));
                 }

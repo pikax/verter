@@ -1913,3 +1913,56 @@ fn svelte_class_token_hover_fails_closed_without_rule() {
     );
     assert!(hover.is_none(), "rule-less svelte class token: no hover");
 }
+
+/// FAIL-CLOSED: a rule inside `<style module>` never renders in plain
+/// class-token hover — module classes are hashed-local, addressable only via
+/// the TS-owned `$style.*` surface.
+#[test]
+fn module_class_rule_never_renders_in_class_token_hover() {
+    let source = "<template>\n  <div class=\"btn\"></div>\n</template>\n<style module>\n.btn { color: red; }\n</style>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
+    let (scs, sce) = style_block.content_range();
+    let style_css = &source[scs as usize..sce as usize];
+    let attr = source.find("class=\"btn\"").unwrap() as u32;
+    let analysis = FileAnalysisSnapshot {
+        template: Some(
+            (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+                elements: vec![b4_class_element(
+                    "btn",
+                    verter_span::Span::new(attr, attr + 11),
+                    verter_span::Span::new(attr - 5, attr + 13),
+                )],
+                ..Default::default()
+            })
+            .into(),
+        ),
+        styles: (vec![verter_semantic::analysis::build_css_style_analysis(
+            style_css,
+            verter_semantic::analysis::VueStyleInput::default(),
+            false,
+            true,
+            None,
+            scs,
+        )])
+        .into(),
+        ..Default::default()
+    };
+
+    let cursor = source.find("class=\"btn\"").unwrap() + 8;
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let hover = hover_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        false,
+    );
+    assert!(
+        hover.is_none(),
+        "a module-only class must not hover a rule for a plain class token"
+    );
+}

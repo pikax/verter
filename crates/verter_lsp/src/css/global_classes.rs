@@ -1,10 +1,20 @@
 //! Workspace-wide navigation for GLOBAL CSS classes.
 //!
-//! A class is GLOBAL when a style declaration for it lives in a non-scoped
-//! Vue `<style>` block, or inside a `:global(...)` pseudo of a scoped/Svelte
-//! block. Global classes get find-all-references across every host-known
-//! file: all style declarations of the class in global contexts plus all
-//! template/markup usages. Scoped classes NEVER cross the file boundary.
+//! A class is GLOBAL when a style declaration for it lives in a non-scoped,
+//! non-module Vue `<style>` block, or inside a `:global(...)` pseudo of a
+//! scoped/module/Svelte block. Global classes get find-all-references across
+//! every host-known file: all style declarations of the class in global
+//! contexts plus all template/markup usages. Scoped classes NEVER cross the
+//! file boundary.
+//!
+//! `<style module>` is FAIL-CLOSED throughout the css-native class engine:
+//! module classes compile to hashed local names, so they are neither global
+//! nor addressable by plain `class="foo"` tokens — the only escape is
+//! `:global(...)`, which opts a declaration out of module-local hashing.
+//! In-file `$style.foo` navigation is OUT of scope here by design: `$style`
+//! member access is an expression on the generated TS surface, owned by the
+//! typed `$style` TSX injection and the TypeProvider — the css-native engine
+//! serves nothing for module classes rather than something mis-mapped.
 
 use tower_lsp_server::ls_types::*;
 use verter_session::FileAnalysisSnapshot;
@@ -58,8 +68,30 @@ fn class_in_global_pseudo(
     })
 }
 
-/// Whether `analysis` declares `name` in a GLOBAL context: a non-scoped
-/// style block, or inside `:global(...)` of a scoped/Svelte block.
+/// Whether a class declaration at `class_span` in `style` is a GLOBAL
+/// declaration: a non-scoped, non-module block, or a `:global(...)` escape.
+fn class_decl_is_global(
+    style: &verter_semantic::analysis::StyleBlockAnalysis,
+    class_span: verter_span::Span,
+) -> bool {
+    (!style.scoped && !style.is_module) || class_in_global_pseudo(style, class_span)
+}
+
+/// Whether a class declaration at `class_span` in `style` is addressable by
+/// PLAIN markup class tokens (`class="foo"`). `<style module>` classes are
+/// hashed-local — addressable only through the TS-owned `$style.*` surface —
+/// so the css-native class legs fail closed on them, unless the declaration
+/// sits inside `:global(...)`.
+pub(crate) fn class_plain_addressable(
+    style: &verter_semantic::analysis::StyleBlockAnalysis,
+    class_span: verter_span::Span,
+) -> bool {
+    !style.is_module || class_in_global_pseudo(style, class_span)
+}
+
+/// Whether `analysis` declares `name` in a GLOBAL context: a non-scoped,
+/// non-module style block, or inside `:global(...)` of a scoped/module/
+/// Svelte block.
 pub(crate) fn class_declared_global(name: &str, analysis: &FileAnalysisSnapshot) -> bool {
     for style in analysis.styles.iter() {
         let Some(css) = style.css.as_ref() else {
@@ -69,7 +101,7 @@ pub(crate) fn class_declared_global(name: &str, analysis: &FileAnalysisSnapshot)
             if cls.name != name || cls.span.start == 0 {
                 continue;
             }
-            if !style.scoped || class_in_global_pseudo(style, cls.span) {
+            if class_decl_is_global(style, cls.span) {
                 return true;
             }
         }
@@ -108,7 +140,7 @@ pub(crate) fn global_class_spans_in_file(
             if cls.name != name || cls.span.start == 0 {
                 continue;
             }
-            if !style.scoped || class_in_global_pseudo(style, cls.span) {
+            if class_decl_is_global(style, cls.span) {
                 spans.push((cls.span.start, cls.span.end));
             }
         }
@@ -191,6 +223,10 @@ mod tests {
         build_css_style_analysis(source, VueStyleInput::default(), scoped, false, None, 0)
     }
 
+    fn module_style(source: &str) -> verter_semantic::analysis::StyleBlockAnalysis {
+        build_css_style_analysis(source, VueStyleInput::default(), false, true, None, 0)
+    }
+
     #[test]
     fn unscoped_declaration_is_global() {
         let analysis = FileAnalysisSnapshot {
@@ -210,6 +246,45 @@ mod tests {
             !class_declared_global("btn", &analysis),
             "a scoped class must NEVER be treated as global"
         );
+    }
+
+    #[test]
+    fn module_declaration_is_not_global() {
+        // `<style module>` scans with scoped=false, is_module=true. Module
+        // classes compile to hashed local names — maximally local, never a
+        // workspace-wide target.
+        let analysis = FileAnalysisSnapshot {
+            styles: (vec![module_style(".btn { color: red; }")]).into(),
+            ..Default::default()
+        };
+        assert!(
+            !class_declared_global("btn", &analysis),
+            "a `<style module>` class must NEVER be treated as global"
+        );
+    }
+
+    #[test]
+    fn module_declarations_never_enter_global_spans() {
+        let analysis = FileAnalysisSnapshot {
+            styles: (vec![module_style(".btn { color: red; }")]).into(),
+            ..Default::default()
+        };
+        let decls = global_class_spans_in_file("btn", ".btn { color: red; }", &analysis, true);
+        assert!(
+            decls.is_empty(),
+            "a module declaration is never a cross-file declaration target: {decls:?}"
+        );
+    }
+
+    #[test]
+    fn module_global_pseudo_inner_class_is_global() {
+        // `:global(...)` opts a class out of module-local hashing — the one
+        // module escape that IS a real global class.
+        let analysis = FileAnalysisSnapshot {
+            styles: (vec![module_style(":global(.reset) { margin: 0; }")]).into(),
+            ..Default::default()
+        };
+        assert!(class_declared_global("reset", &analysis));
     }
 
     #[test]

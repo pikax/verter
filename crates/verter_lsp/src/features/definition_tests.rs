@@ -3361,3 +3361,126 @@ fn svelte_style_class_definition_to_markup_usages() {
     };
     assert_eq!(locations.len(), 2, "both markup usages are targets");
 }
+
+/// FAIL-CLOSED: a `<style module>` rule is NOT a definition target for a
+/// plain `class="btn"` token — module classes compile to hashed local names
+/// addressable only through the TS-owned `$style.*` surface. The identical
+/// non-module block is the discriminating control.
+#[test]
+fn module_class_rule_is_not_a_same_file_definition_target() {
+    for (style_tag, module_expected_none) in [("<style module>", true), ("<style>", false)] {
+        let source = format!(
+            "<template>\n  <div class=\"btn\"></div>\n</template>\n{style_tag}\n.btn {{ color: red; }}\n</style>\n"
+        );
+        let source = source.as_str();
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
+        let (scs, sce) = style_block.content_range();
+        let style_css = &source[scs as usize..sce as usize];
+        let attr = source.find("class=\"btn\"").unwrap() as u32;
+        let div_start = source.find("<div").unwrap() as u32;
+
+        let analysis = FileAnalysisSnapshot {
+            template: Some(
+                (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+                    elements: vec![css_nav_element(
+                        "div",
+                        "btn",
+                        verter_span::Span::new(attr, attr + 11),
+                        verter_span::Span::new(div_start, div_start + 22),
+                        None,
+                        0,
+                    )],
+                    ..Default::default()
+                })
+                .into(),
+            ),
+            styles: (vec![verter_semantic::analysis::build_css_style_analysis(
+                style_css,
+                verter_semantic::analysis::VueStyleInput::default(),
+                false,
+                module_expected_none,
+                None,
+                scs,
+            )])
+            .into(),
+            ..Default::default()
+        };
+
+        let cursor = source.find("class=\"btn\"").unwrap() + 7;
+        let position = line_index.offset_to_position(cursor as u32).unwrap();
+        let result = css_only_definition_at_position(
+            &position,
+            source,
+            &blocks,
+            Some(&analysis),
+            &line_index,
+        );
+        if module_expected_none {
+            assert!(
+                result.is_none(),
+                "a module-declared class must fail closed for plain class tokens: {result:?}"
+            );
+        } else {
+            assert!(
+                result.is_some(),
+                "control: the identical non-module rule IS a definition target"
+            );
+        }
+    }
+}
+
+/// FAIL-CLOSED: a class token INSIDE a `<style module>` block is not a
+/// css-native navigation origin (style → usages stays dead); `$style.*`
+/// navigation is TS-owned.
+#[test]
+fn module_style_class_token_is_not_a_navigation_origin() {
+    let source = "<template>\n  <div class=\"btn\"></div>\n</template>\n<style module>\n.btn { color: red; }\n</style>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
+    let (scs, sce) = style_block.content_range();
+    let style_css = &source[scs as usize..sce as usize];
+    let attr = source.find("class=\"btn\"").unwrap() as u32;
+    let div_start = source.find("<div").unwrap() as u32;
+
+    let analysis = FileAnalysisSnapshot {
+        template: Some(
+            (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+                elements: vec![css_nav_element(
+                    "div",
+                    "btn",
+                    verter_span::Span::new(attr, attr + 11),
+                    verter_span::Span::new(div_start, div_start + 22),
+                    None,
+                    0,
+                )],
+                ..Default::default()
+            })
+            .into(),
+        ),
+        styles: (vec![verter_semantic::analysis::build_css_style_analysis(
+            style_css,
+            verter_semantic::analysis::VueStyleInput::default(),
+            false,
+            true,
+            None,
+            scs,
+        )])
+        .into(),
+        ..Default::default()
+    };
+
+    // Cursor on "btn" in the module block's `.btn` selector.
+    let cursor = source.find(".btn { color").unwrap() + 1;
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let result =
+        css_only_definition_at_position(&position, source, &blocks, Some(&analysis), &line_index);
+    assert!(
+        result.is_none(),
+        "a module class token must not navigate to plain-class usages: {result:?}"
+    );
+}

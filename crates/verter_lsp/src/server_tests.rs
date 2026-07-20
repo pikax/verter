@@ -25578,6 +25578,89 @@ async fn scoped_css_class_references_stay_same_file() {
     drop(service);
 }
 
+/// NEGATIVE: a `<style module>` class is NEVER a cross-file reference
+/// origin. Module classes compile to hashed local names (`$style.*` owned by
+/// the TS surface) — references from the module declaration must not reach
+/// B.vue's same-named global class or usage.
+#[tokio::test]
+async fn module_css_class_references_never_cross_files() {
+    let a_source = "<template>\n  <div class=\"btn\"></div>\n</template>\n<style module>\n.btn { color: red; }\n</style>\n";
+    let b_source = "<template>\n  <button class=\"btn\"></button>\n</template>\n<style>\n.btn { margin: 0; }\n</style>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/A.vue", "vue", a_source),
+        ("src/B.vue", "vue", b_source),
+    ])
+    .await;
+
+    let a_uri = workspace_uri(&workspace_id, "src/A.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &a_uri, ".btn { color", 1);
+
+    let response = server
+        .references(ReferenceParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: a_uri.clone() },
+                position,
+            },
+            context: ReferenceContext {
+                include_declaration: true,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .await
+        .expect("references request should succeed");
+
+    let locations = response.unwrap_or_default();
+    assert!(
+        locations.iter().all(|l| l.uri == a_uri),
+        "a `<style module>` class must never cross the file boundary: {locations:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// NEGATIVE: a `<style module>` declaration in ANOTHER file is never served
+/// as a cross-file definition target for a global class of the same name.
+#[tokio::test]
+async fn module_css_class_declaration_is_never_a_cross_file_definition_target() {
+    // A.vue declares `.shared` in a MODULE block; B.vue declares and uses a
+    // GLOBAL `.shared`. Definition from B's usage walks the workspace but
+    // must not surface A's module declaration.
+    let a_source =
+        "<template>\n  <p></p>\n</template>\n<style module>\n.shared { color: red; }\n</style>\n";
+    let b_source = "<template>\n  <div class=\"shared\"></div>\n</template>\n<style>\n.shared { margin: 0; }\n</style>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/A.vue", "vue", a_source),
+        ("src/B.vue", "vue", b_source),
+    ])
+    .await;
+
+    let a_uri = workspace_uri(&workspace_id, "src/A.vue");
+    let b_uri = workspace_uri(&workspace_id, "src/B.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &b_uri, "class=\"shared\"", 8);
+
+    let response = server
+        .goto_definition(goto_definition_params(&b_uri, position))
+        .await
+        .expect("goto definition should succeed")
+        .expect("B's own global declaration must resolve");
+    let locations = definition_locations(response);
+    assert!(
+        locations.iter().any(|l| l.uri == b_uri),
+        "own declaration present: {locations:?}"
+    );
+    assert!(
+        locations.iter().all(|l| l.uri != a_uri),
+        "a `<style module>` declaration must never be a cross-file target: {locations:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
 /// Definition on a global class usage includes global declarations from
 /// OTHER files.
 #[tokio::test]

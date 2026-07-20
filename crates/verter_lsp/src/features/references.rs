@@ -278,7 +278,10 @@ pub(crate) fn collect_css_ref_spans(
         match target {
             CssRefTarget::Class(name) => {
                 for cls in &css.classes {
-                    if cls.name == *name && cls.span.start > 0 {
+                    if cls.name == *name
+                        && cls.span.start > 0
+                        && crate::css::global_classes::class_plain_addressable(style, cls.span)
+                    {
                         spans.push((cls.span.start, cls.span.end));
                     }
                 }
@@ -554,6 +557,12 @@ pub(crate) fn find_css_target_in_style_refs(
                 && abs_end <= source.len()
                 && source[abs_start..abs_end] == cls.name
             {
+                // `<style module>` classes are not css-native navigation
+                // origins (fail closed; `$style.*` is TS-owned) unless the
+                // declaration sits inside `:global(...)`.
+                if !crate::css::global_classes::class_plain_addressable(style, cls.span) {
+                    return None;
+                }
                 return Some(CssRefTarget::Class(cls.name.clone()));
             }
         }
@@ -960,5 +969,73 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// FAIL-CLOSED: `<style module>` class declarations never enter the
+    /// collected reference spans for a plain class name; the identical
+    /// non-module block is the discriminating control.
+    #[test]
+    fn module_class_declarations_excluded_from_ref_spans() {
+        let css = ".btn { color: red; }";
+        for (is_module, expect_decl) in [(true, false), (false, true)] {
+            let style = verter_semantic::analysis::build_css_style_analysis(
+                css,
+                VueStyleInput::default(),
+                false,
+                is_module,
+                None,
+                0,
+            );
+            let analysis = FileAnalysisSnapshot {
+                styles: (vec![style]).into(),
+                ..Default::default()
+            };
+            let spans =
+                collect_css_ref_spans(&CssRefTarget::Class("btn".to_string()), css, &analysis);
+            assert_eq!(
+                !spans.is_empty(),
+                expect_decl,
+                "module={is_module}: declaration span presence must be {expect_decl}: {spans:?}"
+            );
+        }
+    }
+
+    /// FAIL-CLOSED: a class token inside a `<style module>` block is not a
+    /// reference ORIGIN (`find_css_target_in_style_refs` fails closed);
+    /// `:global(...)` inside the module block opts back in.
+    #[test]
+    fn module_style_class_token_is_not_a_reference_origin() {
+        let source =
+            "<style module>\n.btn { color: red; }\n:global(.reset) { margin: 0; }\n</style>";
+        let content_start = source.find('\n').unwrap() as u32 + 1;
+        let css_end = source.find("</style>").unwrap();
+        let css = &source[content_start as usize..css_end];
+        let style = verter_semantic::analysis::build_css_style_analysis(
+            css,
+            VueStyleInput::default(),
+            false,
+            true,
+            None,
+            content_start,
+        );
+        let analysis = FileAnalysisSnapshot {
+            styles: (vec![style]).into(),
+            ..Default::default()
+        };
+
+        let btn_offset = source.find(".btn").unwrap() + 1;
+        assert!(
+            find_css_target_in_style_refs(btn_offset, source, &analysis).is_none(),
+            "a module class token must not be a css-native navigation origin"
+        );
+
+        let reset_offset = source.find(".reset").unwrap() + 1;
+        assert!(
+            matches!(
+                find_css_target_in_style_refs(reset_offset, source, &analysis),
+                Some(CssRefTarget::Class(name)) if name == "reset"
+            ),
+            ":global(...) inside a module block stays a navigation origin"
+        );
     }
 }
