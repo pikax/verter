@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/elements-text/static-element.vue"
+  ],
+  "names": [],
+  "mappings": "",
+  "sourcesContent": [
+    "\n  <div id=\"app\" title=\"Hello\" data-role=\"root\">\n    <p>Static text</p>\n  </div>\n"
+  ]
+}

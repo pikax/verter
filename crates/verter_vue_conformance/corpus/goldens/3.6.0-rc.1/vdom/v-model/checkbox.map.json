@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-model/checkbox.vue"
+  ],
+  "names": [],
+  "mappings": ";;;wBAOE,oBAA+D;oBAAxD,oBAA0C;MAAnC,IAAI,EAAC,UAAU;mEAAU,aAAM;;wBAAN,aAAM;;+CAAI,QAAM",
+  "sourcesContent": [
+    "\n  <label><input type=\"checkbox\" v-model=\"agreed\" /> Agree</label>\n"
+  ]
+}

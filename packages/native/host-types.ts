@@ -91,6 +91,13 @@ export interface HostCompileProfile {
   sourceMap?: boolean;
   /** Compilation target preset: "bundler" (default), "ide", or "analysis". */
   target?: "bundler" | "ide" | "analysis";
+  /**
+   * Inline the render function inside `setup()` (Vue production topology,
+   * official `compileScript({ inlineTemplate: true })`). Absent resolves to
+   * `isProduction` (official default: inline in prod builds). VDOM client
+   * only; Vapor inline and inline SSR fall back to non-inline.
+   */
+  inline?: boolean;
   /** Requested compile cache mode. Defaults to "session". */
   requestedMode?: CompileCacheMode;
 }

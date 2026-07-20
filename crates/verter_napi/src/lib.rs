@@ -260,6 +260,9 @@ pub struct NapiCompileProfile {
     pub sourceMap: Option<bool>,
     /// Compilation target preset: "bundler" (default), "ide", or "analysis".
     pub target: Option<String>,
+    /// Inline the render function inside `setup()` (Vue production topology;
+    /// absent resolves to isProduction).
+    pub inline: Option<bool>,
     /// Experimental: strict slot children type checking.
     pub strictSlots: Option<bool>,
     /// Requested compile cache mode: "stateless", "content", or
@@ -284,6 +287,7 @@ impl From<NapiCompileProfile> for FfiCompileProfile {
             force_js: n.forceJs,
             source_map: n.sourceMap,
             target: n.target,
+            inline: n.inline,
             strict_slots: n.strictSlots,
             requested_mode: n.requestedMode,
         }

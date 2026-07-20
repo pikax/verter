@@ -1,0 +1,15 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-on/modifiers.vue"
+  ],
+  "names": [
+    "del",
+    "open",
+    "save"
+  ],
+  "mappings": ";;;;;;;;UAQa,OAAK,iBAAeA,QAAG;UAClB,OAAK,EAAeC,SAAI;;;;iCAFtBC,SAAI",
+  "sourcesContent": [
+    "\n  <div @click.self=\"save\">\n    <button @click.stop.prevent=\"del\">Delete</button>\n    <a href=\"/x\" @click.once.capture=\"open\">Open</a>\n  </div>\n"
+  ]
+}

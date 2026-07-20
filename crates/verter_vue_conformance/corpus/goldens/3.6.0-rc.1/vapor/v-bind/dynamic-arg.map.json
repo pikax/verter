@@ -1,0 +1,14 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-bind/dynamic-arg.vue"
+  ],
+  "names": [
+    "attrName",
+    "value"
+  ],
+  "mappings": ";;;;;+CAQMA,aAAU,GAAEC,UAAK",
+  "sourcesContent": [
+    "\n  <p :[attrName]=\"value\">Dynamic attribute</p>\n"
+  ]
+}

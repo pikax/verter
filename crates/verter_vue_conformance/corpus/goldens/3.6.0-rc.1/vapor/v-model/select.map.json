@@ -1,0 +1,13 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-model/select.vue"
+  ],
+  "names": [
+    "picked"
+  ],
+  "mappings": ";;;;;+BAOmBA,WAAM,cAANA,oBAAM",
+  "sourcesContent": [
+    "\n  <select v-model=\"picked\">\n    <option value=\"a\">A</option>\n    <option value=\"b\">B</option>\n  </select>\n"
+  ]
+}

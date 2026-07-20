@@ -1,0 +1,79 @@
+{
+  "schema": 2,
+  "caseId": "v-model/checkbox",
+  "backend": "vdom",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/v-model/checkbox.vue",
+    "sha256": "ad46747040e20ac12cdbfc92e24adedb35165f60424bf83cebc11042e1747e6a"
+  },
+  "options": {
+    "sha256": "a90a060a899d8a9e03d7ae349679a58f9f7c8dfd97ce8e18a70f3f7818677654",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/v-model/checkbox.vue",
+      "id": "v-model/checkbox",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vdom/v-model/checkbox.js",
+      "sha256": "00a6b509a6bf52e124981a7917c96c7c7da3fff6dd4f6206d5d4732dfedf626e",
+      "bytes": 1058
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vdom/v-model/checkbox.map.json",
+      "sha256": "65ae08458d13e46ae4f26c0245258f603cba25d7d3d062c8cbf898aad32ab7cf"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createElementBlock",
+      "alias": "_createElementBlock"
+    },
+    {
+      "imported": "createElementVNode",
+      "alias": "_createElementVNode"
+    },
+    {
+      "imported": "createTextVNode",
+      "alias": "_createTextVNode"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "vModelCheckbox",
+      "alias": "_vModelCheckbox"
+    },
+    {
+      "imported": "withDirectives",
+      "alias": "_withDirectives"
+    }
+  ]
+}

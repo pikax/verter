@@ -3,3 +3,9 @@
 # module. Formatting this file would diverge from ts-rs output and
 # break the `audit_ts_bindings_are_in_sync` test.
 packages/types/audit.generated.ts
+
+# Vendored official Vue RC compiler output (conformance goldens) — the
+# committed bytes ARE the oracle: metadata records SHA-256 over them and
+# `gen:vue-goldens:check` byte-compares against a fresh generator run.
+# Formatting them would diverge from the official compiler output.
+crates/verter_vue_conformance/corpus/goldens/**

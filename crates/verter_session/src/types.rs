@@ -1228,6 +1228,14 @@ pub struct CompileProfile {
     pub force_vapor: bool,
     /// Strip TypeScript type annotations from compiled output.
     pub force_js: bool,
+    /// Inline the render function inside `setup()` (Vue production topology,
+    /// official `compileScript({ inlineTemplate: true })`). `None` resolves to
+    /// `is_production` — matching the official default (inline in prod
+    /// builds). VDOM-only; Vapor inline and inline SSR are deferred (the
+    /// compiler falls back to non-inline). A compile-output policy dimension,
+    /// so it participates in this profile's exact equality/hash like every
+    /// other codegen knob.
+    pub inline: Option<bool>,
     /// Generate source maps for compiled output.
     pub source_map: bool,
     /// Controls which compilation steps run.
@@ -1293,6 +1301,7 @@ impl Default for CompileProfile {
             types_module_name: None,
             force_vapor: false,
             force_js: false,
+            inline: None,
             source_map: false,
             target: verter_compiler::compile::CompileTarget::BUNDLER,
             embed_ambient_types: false,
@@ -1943,24 +1952,24 @@ pub(crate) struct SliceHashes {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct FileMeta {
-    pub(crate) has_script: bool,
-    pub(crate) has_template: bool,
+pub struct FileMeta {
+    pub has_script: bool,
+    pub has_template: bool,
     /// True when changing a style can also change the runtime Main module
     /// (for example, Svelte's CSS scope hash is embedded in generated markup).
-    pub(crate) main_depends_on_styles: bool,
+    pub main_depends_on_styles: bool,
     /// True when any `<style scoped>` block exists. Used to expose a
     /// synthetic Script virtual node for template-only components that
     /// need `__scopeId` on the component object.
-    pub(crate) has_scoped_style: bool,
-    pub(crate) script_lang: Option<String>,
+    pub has_scoped_style: bool,
+    pub script_lang: Option<String>,
     /// Template lang attribute value (e.g., `"pug"`). `None` for native HTML.
     /// Stored for preprocessor request generation; read in tests.
     #[allow(dead_code)]
-    pub(crate) template_lang: Option<String>,
-    pub(crate) style_langs: Vec<Option<String>>,
-    pub(crate) custom_types: Vec<String>,
-    pub(crate) custom_langs: Vec<Option<String>>,
+    pub template_lang: Option<String>,
+    pub style_langs: Vec<Option<String>>,
+    pub custom_types: Vec<String>,
+    pub custom_langs: Vec<Option<String>>,
 }
 
 impl FileMeta {

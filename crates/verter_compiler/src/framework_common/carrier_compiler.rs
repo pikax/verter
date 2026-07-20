@@ -174,6 +174,12 @@ pub struct RuntimeCompileOptions {
     pub conditional_root_narrowing: bool,
     /// Experimental: strict slot children type checking (IDE codegen).
     pub strict_slots: bool,
+    /// Inline the render function inside `setup()` (Vue production topology,
+    /// official `compileScript({ inlineTemplate: true })`). `None` resolves to
+    /// `is_production` — matching the official default (inline in prod
+    /// builds). Only the client VDOM backend honors this; Vapor inline and
+    /// inline SSR are deferred (the carrier falls back to non-inline).
+    pub inline: Option<bool>,
     /// Framework-PRIVATE resolved compile inputs, opaque to the neutral
     /// surface. A carrier downcasts this to its own typed extras
     /// (`vue_bridge::VueRuntimeCompileExtras` — the host-resolved
@@ -348,6 +354,11 @@ pub struct RuntimeCompileOutput {
     /// NON-FATAL (`has_errors()` is false) so the IDE compile is not killed.
     /// A carrier that emits a runtime surface (Vue) leaves this `false`.
     pub runtime_surface_refused: bool,
+    /// Whether the render function was inlined into `setup()` (Vue production
+    /// topology). When true, `script` contains the complete component and
+    /// `template` is `None` — host assembly must NOT attach a standalone
+    /// render function or filter the setup return.
+    pub inline: bool,
 }
 
 impl RuntimeCompileOutput {

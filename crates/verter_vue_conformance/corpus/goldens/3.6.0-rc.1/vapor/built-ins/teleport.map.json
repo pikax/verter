@@ -1,0 +1,13 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/built-ins/teleport.vue"
+  ],
+  "names": [
+    "open"
+  ],
+  "mappings": ";;;;;IAOY,EAAE,EAAC,MAAM;IAAE,QAAQ,UAAGA,SAAI",
+  "sourcesContent": [
+    "\n  <Teleport to=\"body\" :disabled=\"!open\">\n    <p class=\"overlay\">Overlay</p>\n  </Teleport>\n"
+  ]
+}

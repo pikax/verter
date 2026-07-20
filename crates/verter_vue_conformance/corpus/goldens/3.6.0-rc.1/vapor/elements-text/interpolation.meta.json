@@ -1,0 +1,79 @@
+{
+  "schema": 2,
+  "caseId": "elements-text/interpolation",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/elements-text/interpolation.vue",
+    "sha256": "d5a746ea6ccadf139d39911059ecccaf9e3de60ace571b5f0b1c5575e0bacd57"
+  },
+  "options": {
+    "sha256": "93c19cf166f2b8a55e9cd2de30b5f1b896d201fae2db0c8131c06c6321eac280",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/elements-text/interpolation.vue",
+      "id": "elements-text/interpolation",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vapor/elements-text/interpolation.js",
+      "sha256": "b678b537973ade3718db42c0390575d75d0a7143db62e30f3467316322bed144",
+      "bytes": 1020
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vapor/elements-text/interpolation.map.json",
+      "sha256": "74494edf246afa056006215fcbb292df16087e73226d660307b18f17c90bfedf"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "computed",
+      "alias": "computed"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "renderEffect",
+      "alias": "_renderEffect"
+    },
+    {
+      "imported": "setText",
+      "alias": "_setText"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    },
+    {
+      "imported": "txt",
+      "alias": "_txt"
+    }
+  ]
+}

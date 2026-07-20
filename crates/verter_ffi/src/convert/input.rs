@@ -118,6 +118,7 @@ pub fn ffi_profile_to_host(
         if let Some(target) = input.target {
             out.target = ffi_target_to_compile_target(&target)?;
         }
+        out.inline = input.inline;
         if let Some(strict_slots) = input.strict_slots {
             out.strict_slots = strict_slots;
         }

@@ -1,0 +1,74 @@
+{
+  "schema": 2,
+  "caseId": "script-setup/props-type-withdefaults",
+  "backend": "vdom",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/script-setup/props-type-withdefaults.vue",
+    "sha256": "dea7b00c5a9bc412e9c4e2e02d9ef55436a4e827f80e8fc0e14e96b0a0fce377"
+  },
+  "options": {
+    "sha256": "82d91bc201defc7b638c0fe578020d6b9b4f4da36093da0d1e37e0e4917ab8d4",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/script-setup/props-type-withdefaults.vue",
+      "id": "script-setup/props-type-withdefaults",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": {
+        "tool": "esbuild",
+        "version": "0.28.0",
+        "options": {
+          "loader": "ts"
+        },
+        "reason": "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)"
+      }
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vdom/script-setup/props-type-withdefaults.js",
+      "sha256": "7319f68b49fd63cc846b7df55c13711ea39419138d07050bd02ab52b1209c250",
+      "bytes": 1183
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vdom/script-setup/props-type-withdefaults.map.json",
+      "sha256": "1ef5125d7c6de5cf55d8ae5875c346c3914eee2b9de83fd0509fb669e828f1fc"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createElementBlock",
+      "alias": "_createElementBlock"
+    },
+    {
+      "imported": "defineComponent",
+      "alias": "_defineComponent"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    }
+  ]
+}

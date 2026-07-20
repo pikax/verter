@@ -1,0 +1,14 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/elements-text/dynamic-class.vue"
+  ],
+  "names": [
+    "active",
+    "size"
+  ],
+  "mappings": ";;;;;uDAQ0BA,WAAM,cAAcC,SAAI",
+  "sourcesContent": [
+    "\n  <div :class=\"['card', { active }, 'size-' + size]\">Classy</div>\n"
+  ]
+}

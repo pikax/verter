@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-on/inline.vue"
+  ],
+  "names": [],
+  "mappings": ";;;wBAOE,oBAAoD;IAA3C,OAAK,uCAAE,YAAK;KAAI,SAAO,oBAAG,YAAK",
+  "sourcesContent": [
+    "\n  <button @click=\"count++\">Count: {{ count }}</button>\n"
+  ]
+}

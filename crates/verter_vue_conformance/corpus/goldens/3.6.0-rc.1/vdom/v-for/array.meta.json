@@ -1,0 +1,75 @@
+{
+  "schema": 2,
+  "caseId": "v-for/array",
+  "backend": "vdom",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/v-for/array.vue",
+    "sha256": "b33fe7618fa189ecf317c17a53d18cbca609dba31fe97362e45f9a166afa41ea"
+  },
+  "options": {
+    "sha256": "c9c01ba507b2fd0b0f5885afaec610912f4753a5a88e5496acdfaf7382e2deeb",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/v-for/array.vue",
+      "id": "v-for/array",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vdom/v-for/array.js",
+      "sha256": "dbde21f1f3a5897afff9f9afe2bc2d2d1edcdca58edb6ba0fe7d1b0841b7bc31",
+      "bytes": 910
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vdom/v-for/array.map.json",
+      "sha256": "36cc4d8e7b834e696491d7e6e9db80f1cecd81e05a47706997fc75d3992dd5b1"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createElementBlock",
+      "alias": "_createElementBlock"
+    },
+    {
+      "imported": "Fragment",
+      "alias": "_Fragment"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "renderList",
+      "alias": "_renderList"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    }
+  ]
+}

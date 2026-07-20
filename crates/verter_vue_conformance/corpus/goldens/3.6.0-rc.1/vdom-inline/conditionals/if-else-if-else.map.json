@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/conditionals/if-else-if-else.vue"
+  ],
+  "names": [],
+  "mappings": ";;;;;;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;AAExB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;UAIjB,YAAM;qBAAf,oBAA0C,iBAAX,SAAO;OACxB,YAAM;uBAApB,oBAA4C,iBAAV,QAAM;uBACxC,oBAAgC,iBAAtB,QAAM,oBAAG,YAAM",
+  "sourcesContent": [
+    "<script setup>\nimport { ref } from \"vue\"\n\nconst status = ref(\"loading\")\n</script>\n\n<template>\n  <p v-if=\"status === 'loading'\">Loading</p>\n  <p v-else-if=\"status === 'error'\">Failed</p>\n  <p v-else>Done: {{ status }}</p>\n</template>\n"
+  ]
+}
