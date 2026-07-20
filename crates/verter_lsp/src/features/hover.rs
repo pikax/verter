@@ -616,6 +616,20 @@ fn hover_in_template(
         return Some(hover.into());
     }
 
+    // Class-token hover: cursor on a `class="x"` entry / resolvable `:class`
+    // entry — show the declaring CSS rule(s). A recognized class token FAILS
+    // CLOSED when no rule declares it (no link, no same-named-binding hover).
+    if let Some(template) = analysis.template.as_deref() {
+        if let Some((crate::features::references::CssRefTarget::Class(name), element_idx)) =
+            crate::features::references::find_css_target_in_template_refs_with_element(
+                offset, source, template,
+            )
+        {
+            return class_css_rule_hover(&name, Some((element_idx, template)), source, analysis)
+                .map(Into::into);
+        }
+    }
+
     // Check if cursor is on a component element tag name — show prop constness info
     if let Some(hover) = component_prop_constness_hover(offset as u32, source, analysis) {
         return Some(hover.into());
@@ -923,6 +937,93 @@ fn v_slot_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hover> {
 }
 
 /// When hovering on a template element tag name, show matching CSS rules with specificity.
+/// Hover for a markup class token: render every CSS rule declaring the class
+/// (Volar-style `selector { declarations }` blocks), hierarchy-ranked against
+/// the origin element. Returns `None` when no rule declares the class.
+pub(crate) fn class_css_rule_hover(
+    name: &str,
+    element: Option<(
+        usize,
+        &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+    )>,
+    source: &str,
+    analysis: &FileAnalysisSnapshot,
+) -> Option<Hover> {
+    use crate::features::definition::class_rule_match_rank;
+
+    // (rank, source order, rendered rule)
+    let mut entries: Vec<(u8, u32, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<(usize, u32)> = std::collections::HashSet::new();
+
+    for (style_idx, style) in analysis.styles.iter().enumerate() {
+        let Some(css) = style.css.as_ref() else {
+            continue;
+        };
+        for cls in &css.classes {
+            if cls.name != name || cls.span.start == 0 {
+                continue;
+            }
+            let Some(si) = cls.selector_index else {
+                continue;
+            };
+            let Some(selector) = css.selectors.get(si as usize) else {
+                continue;
+            };
+            if !seen.insert((style_idx, si)) {
+                continue;
+            }
+            let rank = class_rule_match_rank(cls, css, element);
+            let body = selector
+                .rule_body_span
+                .and_then(|b| source.get(b.start as usize..b.end as usize))
+                .map(render_rule_body)
+                .unwrap_or_else(|| "{ … }".to_string());
+            let scope_label = if style.scoped { " (scoped)" } else { "" };
+            let rendered = format!("```css\n{} {}\n```{}", selector.text, body, scope_label);
+            entries.push((rank, cls.span.start, rendered));
+        }
+    }
+
+    if entries.is_empty() {
+        return None;
+    }
+
+    entries.sort_by_key(|e| (e.0, e.1));
+    const MAX_RULES: usize = 4;
+    let total = entries.len();
+    let mut parts: Vec<String> = entries
+        .into_iter()
+        .take(MAX_RULES)
+        .map(|(_, _, md)| md)
+        .collect();
+    if total > MAX_RULES {
+        parts.push(format!("…and {} more rule(s)", total - MAX_RULES));
+    }
+
+    Some(Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: parts.join("\n\n"),
+        }),
+        range: None,
+    })
+}
+
+/// Render a rule's brace-inclusive declaration block for hover display,
+/// truncating oversized bodies.
+fn render_rule_body(body: &str) -> String {
+    const MAX_BODY: usize = 400;
+    let trimmed = body.trim();
+    if trimmed.len() <= MAX_BODY {
+        return trimmed.to_string();
+    }
+    let mut cut = MAX_BODY;
+    while cut > 0 && !trimmed.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}\n  /* … */ }}", &trimmed[..cut])
+}
+
 fn element_css_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hover> {
     let template = analysis.template.as_deref()?;
 

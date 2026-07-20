@@ -1656,3 +1656,170 @@ const x = 1;
         "should show SFC docs for lang attribute value (not delegated)"
     );
 }
+
+// =====================================================================
+// B4: markup class-token hover — CSS rule descriptions
+// =====================================================================
+
+fn b4_class_element(
+    class_value: &str,
+    attr_span: verter_span::Span,
+    el_span: verter_span::Span,
+) -> verter_semantic::analysis::template::TemplateElement {
+    use verter_semantic::analysis::template::*;
+    TemplateElement {
+        tag: "div".to_string(),
+        namespace: ElementNamespace::Html,
+        attributes: vec![TemplateAttribute {
+            name: "class".to_string(),
+            value: Some(class_value.to_string()),
+            is_dynamic: false,
+            span: attr_span,
+            name_end: attr_span.start + 5,
+            value_span: None,
+        }],
+        span: el_span,
+        ..Default::default()
+    }
+}
+
+fn b4_hover_analysis(source: &str, scoped: bool, class_value: &str) -> FileAnalysisSnapshot {
+    let blocks = scan_sfc_blocks(source);
+    let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
+    let (scs, sce) = style_block.content_range();
+    let style_css = &source[scs as usize..sce as usize];
+    let attr_needle = format!("class=\"{class_value}\"");
+    let attr = source.find(&attr_needle).unwrap() as u32;
+    FileAnalysisSnapshot {
+        template: Some(
+            (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+                elements: vec![b4_class_element(
+                    class_value,
+                    verter_span::Span::new(attr, attr + attr_needle.len() as u32),
+                    verter_span::Span::new(attr - 5, attr + attr_needle.len() as u32 + 2),
+                )],
+                ..Default::default()
+            })
+            .into(),
+        ),
+        styles: (vec![verter_semantic::analysis::build_css_style_analysis(
+            style_css,
+            verter_semantic::analysis::VueStyleInput::default(),
+            scoped,
+            false,
+            None,
+            scs,
+        )])
+        .into(),
+        ..Default::default()
+    }
+}
+
+/// Hover on a `class="btn"` token shows the declaring rule as a css block
+/// (selector + declaration block, scoped-labelled).
+#[test]
+fn class_token_hover_shows_rule_description() {
+    let source = "<template>\n  <div class=\"btn\"></div>\n</template>\n<style scoped>\n.btn { color: red; }\n</style>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let analysis = b4_hover_analysis(source, true, "btn");
+
+    let cursor = source.find("class=\"btn\"").unwrap() + 8;
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let hover = hover_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        false,
+    )
+    .expect("class token with a rule must hover");
+    let contents = match hover.hover.contents {
+        HoverContents::Markup(m) => m.value,
+        other => panic!("expected markup, got {other:?}"),
+    };
+    assert!(
+        contents.contains("```css"),
+        "hover renders a css block: {contents}"
+    );
+    assert!(
+        contents.contains(".btn { color: red; }"),
+        "hover shows selector + declaration block: {contents}"
+    );
+    assert!(
+        contents.contains("(scoped)"),
+        "scoped label present: {contents}"
+    );
+}
+
+/// A class token with no declaring rule produces NO hover — even when a
+/// script binding shares the name (fail-closed, no mis-mapped affordance).
+#[test]
+fn class_token_hover_fails_closed_without_rule_despite_binding() {
+    let source = "<template>\n  <div class=\"primary\"></div>\n</template>\n<script setup>\nconst primary = 1\n</script>\n<style scoped>\n.unrelated { color: red; }\n</style>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let mut analysis = b4_hover_analysis(source, true, "primary");
+    let binding_start = source.find("const primary").unwrap() as u32 + 6;
+    analysis.bindings = vec![AnalyzedBinding {
+        name: "primary".to_string(),
+        kind: AnalyzedBindingKind::Const,
+        is_reactive: false,
+        reactivity_kind: ReactivityKind::None,
+        type_annotation: None,
+        initializer: None,
+        span: verter_span::Span::new(binding_start, binding_start + 7),
+        used_in_script: false,
+        used_in_style: false,
+    }];
+
+    let cursor = source.find("class=\"primary\"").unwrap() + 8;
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let hover = hover_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        false,
+    );
+    assert!(
+        hover.is_none(),
+        "a rule-less class token must produce NO hover (not the binding hover)"
+    );
+}
+
+/// With several declaring rules the hover lists each rule block.
+#[test]
+fn class_token_hover_lists_multiple_rules() {
+    let source = "<template>\n  <div class=\"btn\"></div>\n</template>\n<style>\n.btn { color: red; }\n.card .btn { color: blue; }\n</style>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let analysis = b4_hover_analysis(source, false, "btn");
+
+    let cursor = source.find("class=\"btn\"").unwrap() + 8;
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let hover = hover_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        false,
+    )
+    .expect("hover on multi-rule class");
+    let contents = match hover.hover.contents {
+        HoverContents::Markup(m) => m.value,
+        other => panic!("expected markup, got {other:?}"),
+    };
+    assert!(contents.contains(".btn { color: red; }"), "{contents}");
+    assert!(
+        contents.contains(".card .btn { color: blue; }"),
+        "{contents}"
+    );
+    assert!(
+        !contents.contains("(scoped)"),
+        "unscoped block is not scoped-labelled: {contents}"
+    );
+}

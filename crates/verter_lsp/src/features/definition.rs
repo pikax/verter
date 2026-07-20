@@ -307,10 +307,13 @@ pub fn definition_at_position(
                 }
             }
 
-            // Check if cursor is inside a class or id attribute — navigate to CSS selector
-            if let Some(result) = css_definition_from_template(offset, source, analysis, line_index)
+            // Check if cursor is inside a class or id attribute — navigate to
+            // the CSS rule(s). A recognized class token FAILS CLOSED when no
+            // rule matches: never fall through to a same-named script binding.
+            if let Some(css_result) =
+                css_definition_from_template(offset, source, analysis, line_index)
             {
-                return Some(result);
+                return css_result;
             }
 
             // Check if cursor is on a component tag — navigate to the imported component file
@@ -478,6 +481,15 @@ pub fn definition_at_position(
         }
     }
 
+    // Positional CSS class navigation for template positions the word guard
+    // misses (kebab-case class tokens have no identifier word at `-`).
+    if in_template {
+        if let Some(css_result) = css_definition_from_template(offset, source, analysis, line_index)
+        {
+            return css_result;
+        }
+    }
+
     // Check if we're in a style block — navigate from CSS selector to template usage
     let in_style = blocks.iter().any(|b| {
         b.tag_name == "style" && {
@@ -553,123 +565,134 @@ fn span_definition(
 // CSS Navigation (template ↔ style)
 // =============================================================================
 
-/// Enum for class/id navigation target.
-enum CssTarget {
-    Class(String),
-    Id(String),
-}
+use crate::features::references::{
+    find_css_target_in_style_refs, find_css_target_in_template_refs_with_element, CssRefTarget,
+};
 
-/// Detect if cursor is inside a template `class` or `id` attribute value,
-/// and navigate to the matching CSS selector in style blocks.
+/// Detect if cursor is inside a template `class`/`:class`/`id` attribute
+/// value and navigate to the matching CSS rule(s) in style blocks.
+///
+/// The OUTER `Option` is "was the cursor on a class/id token at all"; the
+/// INNER `Option` is the navigation result. A recognized class token with no
+/// matching rule yields `Some(None)` — the caller must fail closed (no
+/// fallback to same-named script bindings — a mis-mapped affordance).
 fn css_definition_from_template(
     offset: usize,
     source: &str,
     analysis: &FileAnalysisSnapshot,
     line_index: &LineIndex,
-) -> Option<GotoDefinitionResponse> {
+) -> Option<Option<GotoDefinitionResponse>> {
     let template = analysis.template.as_deref()?;
-
-    // Find which attribute (if any) contains the cursor
-    let target = find_css_target_in_template(offset, source, template)?;
-
-    // Search style blocks for matching CSS selector
-    find_css_selector_definition(&target, analysis, line_index)
+    let (target, element_idx) =
+        find_css_target_in_template_refs_with_element(offset, source, template)?;
+    Some(css_rule_definition(
+        &target,
+        Some((element_idx, template)),
+        analysis,
+        line_index,
+    ))
 }
 
-/// Find a class or id name at cursor position within template attributes.
-fn find_css_target_in_template(
-    offset: usize,
-    source: &str,
-    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
-) -> Option<CssTarget> {
-    for element in &template.elements {
-        for attr in &element.attributes {
-            // Only handle static class and id attributes
-            if attr.is_dynamic {
-                continue;
-            }
-
-            let attr_name = attr.name.as_str();
-            if attr_name != "class" && attr_name != "id" {
-                continue;
-            }
-
-            // Check if cursor is within this attribute's span
-            if (offset as u32) < attr.span.start || (offset as u32) >= attr.span.end {
-                continue;
-            }
-
-            let value = match attr.value.as_ref() {
-                Some(v) => v,
-                None => continue,
-            };
-
-            // Find the value portion within the attribute span.
-            // Attribute span covers `class="btn primary"`.
-            // Search for the value string in the source within the attribute span range.
-            let attr_text = &source[attr.span.start as usize..attr.span.end as usize];
-            let value_offset_in_attr = attr_text.find(value)?;
-            let value_start = attr.span.start as usize + value_offset_in_attr;
-            let value_end = value_start + value.len();
-
-            // Check cursor is within the value
-            if offset < value_start || offset >= value_end {
-                continue;
-            }
-
-            if attr_name == "id" {
-                return Some(CssTarget::Id(value.clone()));
-            }
-
-            // For class, split on whitespace and find which class name the cursor is on
-            let cursor_in_value = offset - value_start;
-            let mut pos = 0;
-            for class_name in value.split_whitespace() {
-                // Find position of this class_name in the remaining value
-                let name_start = value[pos..].find(class_name)? + pos;
-                let name_end = name_start + class_name.len();
-
-                if cursor_in_value >= name_start && cursor_in_value < name_end {
-                    return Some(CssTarget::Class(class_name.to_string()));
-                }
-
-                pos = name_end;
-            }
-        }
-    }
-    None
-}
-
-/// Search style blocks for a CSS class or ID selector matching the target.
-fn find_css_selector_definition(
-    target: &CssTarget,
+/// All declaration locations for a CSS class/id, hierarchy-ranked.
+///
+/// For classes, every rule declaring the class contributes its class-token
+/// span, ordered by how the rule's selector relates to the origin element
+/// (structural match first, then possible matches, then structure-less or
+/// non-matching declarations in source order).
+fn css_rule_definition(
+    target: &CssRefTarget,
+    element: Option<(
+        usize,
+        &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+    )>,
     analysis: &FileAnalysisSnapshot,
     line_index: &LineIndex,
 ) -> Option<GotoDefinitionResponse> {
-    for style in analysis.styles.iter() {
-        let css = style.css.as_ref()?;
-        match target {
-            CssTarget::Class(name) => {
+    match target {
+        CssRefTarget::Class(name) => {
+            // (rank, source order, span)
+            let mut hits: Vec<(u8, u32, verter_span::Span)> = Vec::new();
+            for style in analysis.styles.iter() {
+                let Some(css) = style.css.as_ref() else {
+                    continue;
+                };
                 for cls in &css.classes {
-                    if cls.name == *name && cls.span.start > 0 {
-                        return span_definition(cls.span.start, cls.span.end, line_index);
+                    if cls.name != *name || cls.span.start == 0 {
+                        continue;
                     }
+                    let rank = class_rule_match_rank(cls, css, element);
+                    hits.push((rank, cls.span.start, cls.span));
                 }
             }
-            CssTarget::Id(name) => {
+            hits.sort_by_key(|&(rank, order, _)| (rank, order));
+            let locations: Vec<Location> = hits
+                .into_iter()
+                .filter_map(|(_, _, span)| {
+                    let start = line_index.offset_to_position(span.start)?;
+                    let end = line_index.offset_to_position(span.end)?;
+                    Some(Location {
+                        uri: SAME_FILE_URI.clone(),
+                        range: Range { start, end },
+                    })
+                })
+                .collect();
+            match locations.len() {
+                0 => None,
+                1 => Some(GotoDefinitionResponse::Scalar(
+                    locations.into_iter().next().unwrap(),
+                )),
+                _ => Some(GotoDefinitionResponse::Array(locations)),
+            }
+        }
+        CssRefTarget::Id(name) => {
+            for style in analysis.styles.iter() {
+                let Some(css) = style.css.as_ref() else {
+                    continue;
+                };
                 for id in &css.ids {
                     if id.name == *name && id.span.start > 0 {
                         return span_definition(id.span.start, id.span.end, line_index);
                     }
                 }
             }
+            None
         }
     }
-    None
+}
+
+/// Rank a class declaration against the origin element:
+/// 0 = the rule's selector structurally matches the element,
+/// 1 = may match (dynamic classes),
+/// 2 = no derivable structure / no element context,
+/// 3 = structurally cannot match.
+pub(crate) fn class_rule_match_rank(
+    cls: &verter_semantic::analysis::style::AnalyzedCssClass,
+    css: &verter_semantic::analysis::style::CssAnalysis,
+    element: Option<(
+        usize,
+        &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+    )>,
+) -> u8 {
+    let Some((element_idx, template)) = element else {
+        return 2;
+    };
+    let Some(structure) = cls
+        .selector_index
+        .and_then(|si| css.selectors.get(si as usize))
+        .and_then(|sel| sel.structure.as_ref())
+    else {
+        return 2;
+    };
+    match match_selector(structure, element_idx, &template.elements) {
+        MatchResult::Matches => 0,
+        MatchResult::MaybeMatches => 1,
+        MatchResult::NoMatch => 3,
+    }
 }
 
 /// Navigate from a CSS selector in style to template usage.
-/// When cursor is on `.btn` in `<style>`, navigate to `class="btn"` in template.
+/// When cursor is on `.btn` in `<style>`, navigate to every `class="btn"`
+/// usage in the template (all usages, source order).
 fn css_definition_from_style(
     offset: usize,
     source: &str,
@@ -679,75 +702,28 @@ fn css_definition_from_style(
     let template = analysis.template.as_deref()?;
 
     // Find which style block contains the cursor and extract the class/id name
-    let target = find_css_target_in_style(offset, source, analysis)?;
+    let target = find_css_target_in_style_refs(offset, source, analysis)?;
 
-    // Search template elements for matching class/id attribute
-    for element in &template.elements {
-        for attr in &element.attributes {
-            if attr.is_dynamic {
-                continue;
-            }
-
-            let value = match attr.value.as_ref() {
-                Some(v) => v,
-                None => continue,
-            };
-
-            match &target {
-                CssTarget::Class(name) => {
-                    if attr.name == "class" && value.split_whitespace().any(|c| c == name) {
-                        return span_definition(attr.span.start, attr.span.end, line_index);
-                    }
-                }
-                CssTarget::Id(name) => {
-                    if attr.name == "id" && value == name {
-                        return span_definition(attr.span.start, attr.span.end, line_index);
-                    }
-                }
-            }
-        }
+    let spans =
+        crate::features::references::collect_template_css_ref_spans(&target, source, template);
+    let locations: Vec<Location> = spans
+        .into_iter()
+        .filter_map(|(start, end)| {
+            let start = line_index.offset_to_position(start)?;
+            let end = line_index.offset_to_position(end)?;
+            Some(Location {
+                uri: SAME_FILE_URI.clone(),
+                range: Range { start, end },
+            })
+        })
+        .collect();
+    match locations.len() {
+        0 => None,
+        1 => Some(GotoDefinitionResponse::Scalar(
+            locations.into_iter().next().unwrap(),
+        )),
+        _ => Some(GotoDefinitionResponse::Array(locations)),
     }
-    None
-}
-
-/// Extract class/id name at cursor position within a style block.
-fn find_css_target_in_style(
-    offset: usize,
-    source: &str,
-    analysis: &FileAnalysisSnapshot,
-) -> Option<CssTarget> {
-    for style in analysis.styles.iter() {
-        let css = match style.css.as_ref() {
-            Some(c) => c,
-            None => continue,
-        };
-
-        // Check classes
-        for cls in &css.classes {
-            let abs_start = cls.span.start as usize;
-            let abs_end = cls.span.end as usize;
-            if offset >= abs_start && offset < abs_end {
-                // Verify the source matches
-                if abs_end <= source.len() && source[abs_start..abs_end] == cls.name {
-                    return Some(CssTarget::Class(cls.name.clone()));
-                }
-            }
-        }
-
-        // Check IDs
-        for id in &css.ids {
-            let abs_start = id.span.start as usize;
-            let abs_end = id.span.end as usize;
-            if offset >= abs_start
-                && offset < abs_end
-                && abs_end <= source.len()
-                && source[abs_start..abs_end] == id.name
-            {
-                return Some(CssTarget::Id(id.name.clone()));
-            }
-        }
-    }
-    None
 }
 
 // =============================================================================
