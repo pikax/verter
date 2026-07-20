@@ -911,6 +911,13 @@ impl VerterHost {
                 let Some(surface) = surface else {
                     return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).tsc();
                 };
+                if emits_surface_has_invalid_member(
+                    dispatch,
+                    &surface,
+                    ProjectionReductionContext::published(ProjectionMode::Navigate),
+                ) {
+                    return ProjectionFailure::Invalid(MacroInvalidReason::InvalidEmitsShape).tsc();
+                }
                 let events = match tsc_emit_rows(
                     ctx,
                     dispatch,
@@ -1090,6 +1097,9 @@ impl VerterHost {
         let Some(surface) = surface else {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         };
+        if emits_surface_has_invalid_member(dispatch, &surface, runtime_context) {
+            return ProjectionFailure::Invalid(MacroInvalidReason::InvalidEmitsShape).runtime();
+        }
 
         let emits = emit_rows(
             dispatch,
@@ -2711,6 +2721,43 @@ fn emit_rows(
     }
     rows.sort_by_key(|row| authored_emit_order(row.anchor));
     rows
+}
+
+/// Decide only resolved, concrete member shapes. Open/opaque member payloads
+/// retain the existing conservative emit-name projection, while concrete
+/// scalar/object/array payloads cannot satisfy Vue's tuple/function payload
+/// contract and invalidate the enclosing macro.
+fn emits_surface_has_invalid_member(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    surface: &TypeInfoSurface,
+    context: ProjectionReductionContext,
+) -> bool {
+    use crate::semantic_query::{PrimitiveKind, SemanticNodeData};
+
+    surface
+        .members
+        .iter()
+        .filter(|member| member.visibility.is_public())
+        .any(|member| {
+            let Some(node) = dispatch
+                .normalize_node_for_structural_fact_demand(member.value, context)
+                .into_complete_node()
+            else {
+                return false;
+            };
+            match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node).as_deref() {
+                Some(SemanticNodeData::Primitive(kind)) => {
+                    !matches!(kind, PrimitiveKind::Any | PrimitiveKind::Unknown)
+                }
+                Some(
+                    SemanticNodeData::Literal(_)
+                    | SemanticNodeData::Object(_)
+                    | SemanticNodeData::Array { .. }
+                    | SemanticNodeData::TemplateLiteral { .. },
+                ) => true,
+                _ => false,
+            }
+        })
 }
 
 fn authored_emit_order(anchor: MacroAnchor) -> (u8, u32) {

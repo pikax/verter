@@ -175,6 +175,12 @@ the normalized props/emits/model shapes. TSC entries contain terminal splice
 text and are emitted directly; the compiler does not parse or reinterpret the
 splice.
 
+Resolved invalid roots cross this boundary only as closed
+`MacroInvalidReason` facts. The compiler renders their public diagnostic once,
+using the typed reason plus the parser-owned macro role and authored type span;
+authored type text is presentation data and must never be used to reclassify
+the semantic outcome. Runtime and TSC invalid outcomes share this renderer.
+
 Local declaration carriers preserve TypeInfo refusal detail through
 `TscDependencyDeclaration.declaration_failure`: structural inference budgets
 remain the closed depth/work variants, while deterministic unsupported and

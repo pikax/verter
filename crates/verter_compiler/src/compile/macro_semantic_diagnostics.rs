@@ -12,7 +12,7 @@ use crate::script::prepared::PreparedScript;
 use crate::utils::oxc::vue::{MacroTypeParams, ScriptItem, ScriptMacro};
 
 use super::{CompileTarget, VueMacroSemanticInput};
-use crate::tsc::TscUnavailableOutcome;
+use crate::tsc::{TscInvalidOutcome, TscUnavailableOutcome};
 
 pub(super) fn tsc_generation_diagnostic(error: crate::tsc::TscGenerationError) -> Diagnostic {
     Diagnostic::error_with_message(
@@ -42,6 +42,7 @@ struct RuntimeSlot<'a> {
     effective_macro_index: u32,
     role: ExpectedMacroRole,
     type_params: &'a MacroTypeParams,
+    type_text: &'a str,
     model_name: Option<String>,
     model_name_span: Option<Span>,
 }
@@ -97,6 +98,11 @@ pub(super) fn collect_macro_semantic_diagnostics(
             effective_macro_index,
             role,
             type_params,
+            type_text: macro_type_argument_text(
+                setup.content_str(),
+                setup.content_start(),
+                type_params,
+            ),
             model_name,
             model_name_span,
         };
@@ -107,13 +113,7 @@ pub(super) fn collect_macro_semantic_diagnostics(
             runtime_valid = false;
         }
         if target.needs_tsc() {
-            validate_tsc_entry(
-                semantics.tsc(),
-                current_syntax_index,
-                role,
-                slot.type_span(),
-                &mut diagnostics,
-            );
+            validate_tsc_entry(semantics.tsc(), &slot, &mut diagnostics);
         }
     }
 
@@ -171,6 +171,23 @@ fn typed_codegen_role<'a>(
         } => Some((ExpectedMacroRole::Model, type_params)),
         _ => None,
     }
+}
+
+fn macro_type_argument_text<'a>(
+    content: &'a str,
+    content_start: u32,
+    type_params: &MacroTypeParams,
+) -> &'a str {
+    let Some(start) = type_params.type_span.start.checked_sub(content_start) else {
+        return "<unknown>";
+    };
+    let Some(end) = type_params.type_span.end.checked_sub(content_start) else {
+        return "<unknown>";
+    };
+    content
+        .get(start as usize..end as usize)
+        .map(str::trim)
+        .unwrap_or("<unknown>")
 }
 
 fn model_syntax(mac: &ScriptMacro<'_>, content_start: u32) -> (Option<String>, Option<Span>) {
@@ -249,7 +266,6 @@ fn validate_runtime_entry(
                 "partial",
                 partial_reason_code(failure.reason),
                 failure.diagnostic.as_deref(),
-                false,
             );
             return false;
         }
@@ -261,7 +277,6 @@ fn validate_runtime_entry(
                 "unresolved",
                 unresolved_reason_code(failure.reason),
                 failure.diagnostic.as_deref(),
-                false,
             );
             return false;
         }
@@ -273,20 +288,11 @@ fn validate_runtime_entry(
                 "unsupported",
                 unsupported_reason_code(failure.reason),
                 failure.diagnostic.as_deref(),
-                false,
             );
             return false;
         }
         MacroRuntimeOutcome::Invalid(failure) => {
-            push_runtime_unavailable(
-                diagnostics,
-                slot.syntax_index,
-                slot.type_span(),
-                "invalid",
-                invalid_reason_code(failure.reason),
-                failure.diagnostic.as_deref(),
-                true,
-            );
+            push_invalid_macro_type(diagnostics, slot, failure);
             return false;
         }
     };
@@ -518,28 +524,30 @@ fn authored_anchor_span(
 
 fn validate_tsc_entry(
     bundle: Option<&MacroTscBundle>,
-    syntax_index: u32,
-    role: ExpectedMacroRole,
-    anchor: Span,
+    slot: &RuntimeSlot<'_>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let Some(entry) = bundle.and_then(|bundle| {
         bundle
             .entries
             .iter()
-            .find(|entry| entry.syntax_index == syntax_index)
+            .find(|entry| entry.syntax_index == slot.syntax_index)
     }) else {
-        push_missing(diagnostics, "TSC", syntax_index, anchor);
+        push_missing(diagnostics, "TSC", slot.syntax_index, slot.type_span());
         return;
     };
 
     if let Some(outcome) = TscUnavailableOutcome::from_macro_outcome(&entry.outcome) {
-        push_tsc_unavailable(diagnostics, syntax_index, anchor, &outcome);
+        if let TscUnavailableOutcome::Invalid(TscInvalidOutcome::Macro(failure)) = &outcome {
+            push_invalid_macro_type(diagnostics, slot, failure);
+        } else {
+            push_tsc_unavailable(diagnostics, slot.syntax_index, slot.type_span(), &outcome);
+        }
         return;
     }
 
     let compatible = matches!(
-        (&entry.outcome, role),
+        (&entry.outcome, slot.role),
         (
             MacroTscOutcome::Complete(MacroTscProjection::Props(_)),
             ExpectedMacroRole::Props { .. }
@@ -552,8 +560,45 @@ fn validate_tsc_entry(
         )
     );
     if !compatible {
-        push_unavailable(diagnostics, "TSC", syntax_index, anchor);
+        push_unavailable(diagnostics, "TSC", slot.syntax_index, slot.type_span());
     }
+}
+
+fn push_invalid_macro_type(
+    diagnostics: &mut Vec<Diagnostic>,
+    slot: &RuntimeSlot<'_>,
+    failure: &MacroFailure<MacroInvalidReason>,
+) {
+    let message = match (slot.role, failure.reason) {
+        (ExpectedMacroRole::Props { .. }, MacroInvalidReason::NonObjectRoot) => format!(
+            "defineProps() type argument '{}' must resolve to an object-like props type.",
+            slot.type_text
+        ),
+        (
+            ExpectedMacroRole::Emits,
+            MacroInvalidReason::NonObjectRoot | MacroInvalidReason::InvalidEmitsShape,
+        ) => format!(
+            "defineEmits() type argument '{}' must resolve to emit call signatures or a named-tuple emits object.",
+            slot.type_text
+        ),
+        _ => format!(
+            "Authoritative macro semantics for syntax index {} are invalid ({}).",
+            slot.syntax_index,
+            invalid_reason_code(failure.reason)
+        ),
+    };
+    let message = if let Some(detail) = failure.diagnostic.as_deref() {
+        format!(
+            "{message} Authoritative invalid reason: {}. {detail}",
+            invalid_reason_code(failure.reason)
+        )
+    } else {
+        message
+    };
+    diagnostics.push(
+        Diagnostic::error_with_message("script", CompilerErrorCode::XInvalidMacroType, message)
+            .with_span(slot.type_span()),
+    );
 }
 
 fn push_tsc_unavailable(
@@ -586,13 +631,7 @@ fn push_runtime_unavailable(
     kind: &str,
     reason: &str,
     detail: Option<&str>,
-    invalid: bool,
 ) {
-    let code = if invalid {
-        CompilerErrorCode::XInvalidMacroType
-    } else {
-        CompilerErrorCode::XUnavailableMacroSemanticResult
-    };
     let mut message = format!(
         "Authoritative runtime semantics for macro syntax index {syntax_index} are {kind} ({reason})."
     );
@@ -600,7 +639,14 @@ fn push_runtime_unavailable(
         message.push(' ');
         message.push_str(detail);
     }
-    diagnostics.push(Diagnostic::error_with_message("script", code, message).with_span(anchor));
+    diagnostics.push(
+        Diagnostic::error_with_message(
+            "script",
+            CompilerErrorCode::XUnavailableMacroSemanticResult,
+            message,
+        )
+        .with_span(anchor),
+    );
 }
 
 fn push_member_degraded(
@@ -706,6 +752,7 @@ const fn unsupported_reason_code(reason: UnsupportedReason) -> &'static str {
 const fn invalid_reason_code(reason: MacroInvalidReason) -> &'static str {
     match reason {
         MacroInvalidReason::NonObjectRoot => "non-object-root",
+        MacroInvalidReason::InvalidEmitsShape => "invalid-emits-shape",
     }
 }
 

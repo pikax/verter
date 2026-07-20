@@ -256,6 +256,7 @@ impl TscUnavailableOutcome {
             Self::Invalid(invalid) => match invalid {
                 TscInvalidOutcome::Macro(failure) => match failure.reason {
                     MacroInvalidReason::NonObjectRoot => "non-object-root",
+                    MacroInvalidReason::InvalidEmitsShape => "invalid-emits-shape",
                 },
                 TscInvalidOutcome::AuthoredTypeSyntax(
                     TscInvalidAuthoredTypeReason::MalformedOrRecoveredTypeSyntax,

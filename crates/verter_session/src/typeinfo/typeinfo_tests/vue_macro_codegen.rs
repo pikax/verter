@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use verter_macro_dto::{
-    MacroAnchor, MacroMemberReason, MacroPartialReason, MacroRuntimeOutcome, MacroRuntimeShape,
-    MacroTscOutcome, MacroTscProjection, PropsDefaultsAssociation, RuntimeConstructor, RuntimeProp,
-    RuntimePropType, SynthesizedRowKind, TscDeclarationFailureReason, TscInferredClassTypePosition,
-    TscScriptOwner, TscSemanticInferenceUnavailableReason, UnresolvedReason, UnsupportedReason,
+    MacroAnchor, MacroInvalidReason, MacroMemberReason, MacroPartialReason, MacroRuntimeOutcome,
+    MacroRuntimeShape, MacroTscOutcome, MacroTscProjection, PropsDefaultsAssociation,
+    RuntimeConstructor, RuntimeProp, RuntimePropType, SynthesizedRowKind,
+    TscDeclarationFailureReason, TscInferredClassTypePosition, TscScriptOwner,
+    TscSemanticInferenceUnavailableReason, UnresolvedReason, UnsupportedReason,
 };
 
 use crate::typeinfo::vue_macro_codegen::{VueMacroCodegenDemand, VueMacroDependencyFailure};
@@ -1700,6 +1701,94 @@ defineProps<WrongProps>()
         ),
         "a resolved imported primitive root must be TSC-invalid: {tsc:?}"
     );
+}
+
+/// Mutation recipe: admit every public emits member by name without checking
+/// its resolved payload node. The scalar member then reverts to a complete
+/// runtime/TSC shape and this demand matrix fails.
+#[test]
+fn resolved_imported_invalid_emits_members_are_typed_and_demand_invariant() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_ts(
+        &host,
+        "/src/wrong-emits.ts",
+        "export interface WrongEmits { broken: string }\n",
+    );
+    const FILE: &str = "/src/InvalidEmits.vue";
+    upsert(
+        &host,
+        FILE,
+        r#"<script setup lang="ts">
+import type { WrongEmits } from './wrong-emits'
+defineEmits<WrongEmits>()
+</script>"#,
+    );
+
+    for demand in [
+        VueMacroCodegenDemand::Runtime,
+        VueMacroCodegenDemand::Tsc,
+        VueMacroCodegenDemand::RuntimeAndTsc,
+    ] {
+        let output = produce(&host, FILE, demand);
+        assert!(
+            output.dependency_failures.is_empty(),
+            "a resolved wrong shape must not masquerade as a dependency failure: {output:?}"
+        );
+        if matches!(
+            demand,
+            VueMacroCodegenDemand::Runtime | VueMacroCodegenDemand::RuntimeAndTsc
+        ) {
+            let runtime = output.runtime.as_ref().expect("requested runtime bundle");
+            assert!(
+                matches!(
+                    runtime.entries[0].outcome,
+                    MacroRuntimeOutcome::Invalid(ref failure)
+                        if failure.reason == MacroInvalidReason::InvalidEmitsShape
+                ),
+                "runtime demand must retain the typed emits-shape failure: {runtime:?}"
+            );
+        } else {
+            assert!(output.runtime.is_none());
+        }
+        if matches!(
+            demand,
+            VueMacroCodegenDemand::Tsc | VueMacroCodegenDemand::RuntimeAndTsc
+        ) {
+            let tsc = output.tsc.as_ref().expect("requested TSC bundle");
+            assert!(
+                matches!(
+                    tsc.entries[0].outcome,
+                    MacroTscOutcome::Invalid(ref failure)
+                        if failure.reason == MacroInvalidReason::InvalidEmitsShape
+                ),
+                "TSC demand must retain the typed emits-shape failure: {tsc:?}"
+            );
+        } else {
+            assert!(output.tsc.is_none());
+        }
+    }
+}
+
+#[test]
+fn empty_emits_object_remains_a_valid_complete_shape_on_both_rails() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    const FILE: &str = "/src/EmptyEmits.vue";
+    upsert(
+        &host,
+        FILE,
+        r#"<script setup lang="ts">defineEmits<{}>()</script>"#,
+    );
+
+    let output = produce(&host, FILE, VueMacroCodegenDemand::RuntimeAndTsc);
+    assert!(matches!(
+        output.runtime.as_ref().expect("runtime bundle").entries[0].outcome,
+        MacroRuntimeOutcome::Complete(MacroRuntimeShape::Emits(ref rows)) if rows.is_empty()
+    ));
+    assert!(matches!(
+        output.tsc.as_ref().expect("TSC bundle").entries[0].outcome,
+        MacroTscOutcome::Complete(MacroTscProjection::Emits(ref projection))
+            if projection.events.is_empty()
+    ));
 }
 
 #[test]

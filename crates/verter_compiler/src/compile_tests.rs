@@ -496,6 +496,107 @@ fn vmrs_invalid_props_root_reports_vue_invalid_macro_type() {
     );
 }
 
+/// Mutation recipe: route typed invalid outcomes through the generic
+/// unavailable renderer or ignore the syntax-owned macro role/type argument.
+/// The exact role messages, cross-role negatives, and both semantic rails then
+/// fail together.
+#[test]
+fn vmrs_invalid_macro_shapes_render_role_specific_diagnostics_on_both_rails() {
+    use std::sync::Arc;
+    use verter_macro_dto::{
+        MacroFailure, MacroInvalidReason, MacroRuntimeBundle, MacroRuntimeEntry,
+        MacroRuntimeOutcome, MacroTscBundle, MacroTscEntry, MacroTscOutcome,
+    };
+
+    let cases = [
+        (
+            r#"<script setup lang="ts">defineProps<Props>()</script>"#,
+            "Props",
+            MacroInvalidReason::NonObjectRoot,
+            "defineProps() type argument 'Props' must resolve to an object-like props type.",
+            "defineEmits() type argument",
+        ),
+        (
+            r#"<script setup lang="ts">defineEmits<Emits>()</script>"#,
+            "Emits",
+            MacroInvalidReason::InvalidEmitsShape,
+            "defineEmits() type argument 'Emits' must resolve to emit call signatures or a named-tuple emits object.",
+            "defineProps() type argument",
+        ),
+    ];
+
+    for (source, type_text, reason, expected, wrong_role) in cases {
+        let type_start = source
+            .find(&format!("<{type_text}>"))
+            .expect("type argument") as u32
+            + 1;
+        let type_end = type_start + type_text.len() as u32;
+        let runtime = VueMacroSemanticInput::Runtime(Arc::new(MacroRuntimeBundle {
+            entries: vec![MacroRuntimeEntry {
+                syntax_index: 0,
+                macro_index: 0,
+                outcome: MacroRuntimeOutcome::Invalid(MacroFailure::new(reason, None)),
+            }],
+        }));
+        let runtime_result = compile(
+            source,
+            &CodegenOptions::default(),
+            &VerterCompileOptions {
+                force_js: true,
+                ..Default::default()
+            },
+            &runtime,
+            &Allocator::new(),
+        );
+        let runtime_diagnostic = runtime_result
+            .errors
+            .iter()
+            .find(|diagnostic| diagnostic.code == "XInvalidMacroType")
+            .expect("runtime invalid diagnostic");
+        assert_eq!(runtime_diagnostic.message, expected);
+        assert!(!runtime_diagnostic.message.contains(wrong_role));
+        assert!(!runtime_diagnostic
+            .message
+            .contains("Authoritative runtime semantics"));
+        assert_eq!(
+            runtime_diagnostic.span,
+            Some(crate::common::Span::new(type_start, type_end))
+        );
+
+        let tsc = VueMacroSemanticInput::Tsc(Arc::new(MacroTscBundle {
+            entries: vec![MacroTscEntry {
+                syntax_index: 0,
+                macro_index: 0,
+                outcome: MacroTscOutcome::Invalid(MacroFailure::new(reason, None)),
+            }],
+        }));
+        let tsc_result = compile(
+            source,
+            &CodegenOptions {
+                target: CompileTarget::TSC,
+                ..Default::default()
+            },
+            &VerterCompileOptions::default(),
+            &tsc,
+            &Allocator::new(),
+        );
+        let tsc_diagnostic = tsc_result
+            .errors
+            .iter()
+            .find(|diagnostic| diagnostic.code == "XInvalidMacroType")
+            .expect("TSC invalid diagnostic");
+        assert_eq!(tsc_diagnostic.message, expected);
+        assert!(!tsc_diagnostic.message.contains(wrong_role));
+        assert!(!tsc_diagnostic
+            .message
+            .contains("Authoritative TSC semantics"));
+        assert_eq!(
+            tsc_diagnostic.span,
+            Some(crate::common::Span::new(type_start, type_end))
+        );
+    }
+}
+
 #[test]
 fn vmrs_member_degradation_warns_and_renders_null_without_conflating_unknown() {
     use std::sync::Arc;

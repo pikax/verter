@@ -318,6 +318,7 @@ pub enum UnresolvedReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
 pub enum MacroInvalidReason {
     NonObjectRoot,
+    InvalidEmitsShape,
 }
 
 /// Row-local degradation reasons. Root failures remain on the enclosing
