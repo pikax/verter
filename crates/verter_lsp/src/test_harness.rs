@@ -322,15 +322,21 @@ impl TestSessionBuilder {
                 }
             }
             TestProviderKind::Tsgo => {
-                // Canonical discovery: explicit `VERTER_TSGO_BIN` override >
-                // repo-local workspace `node_modules` (the SAME tsgo the project
-                // pins, regardless of PATH / npm-cache state) > PATH > npm/npx
-                // cache. This is the production discovery path — the harness must
+                // The 4-tier toolchain resolver (`VERTER_TSGO_BIN` → shared
+                // PATH → repo-local workspace `node_modules` → update cache →
+                // bundled), capability-validated (bounded version probe +
+                // support policy + a `--lsp` capability smoke per candidate) —
+                // the SAME provisioning path production uses; the harness must
                 // not fork its own discovery.
                 let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-                let tsgo_bin = match crate::tsgo::ipc::find_tsgo_binary_canonical(Some(&repo_root))
+                let request =
+                    verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+                        verter_tsgo_api::toolchain::validation::Capability::Lsp,
+                        Some(repo_root),
+                    );
+                let tsgo_bin = match verter_tsgo_api::toolchain::discovery::resolve(&request).await
                 {
-                    Ok(bin) => bin,
+                    Ok(resolution) => resolution.path.to_string_lossy().into_owned(),
                     Err(err) => {
                         return handle_absent_provider(
                             self.kind,

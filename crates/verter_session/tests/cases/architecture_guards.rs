@@ -5109,14 +5109,16 @@ mod foundations_guards {
             "crates/verter_workspace/src/resolver.rs",
             "crates/verter_scheduler/src/source_loader.rs",
             "crates/verter_tsc/src/checker.rs",
-            "crates/verter_tsc/src/reporter.rs",
             "crates/verter_tsc/src/tsconfig.rs",
-            // rc tsgo-engine binary discovery (`discover_tsgo`) — real-OS
-            // pnpm-store + classic-sibling walk to locate the installed
-            // `typescript@>=7` platform binary the `--api` transport spawns;
-            // a subprocess binary is real-FS by nature, never workspace
-            // source (sibling of the `verter_type_runtime` IPC entries).
-            "crates/verter_tsgo_api/src/transport/spawn.rs",
+            // tsgo toolchain provisioning (the 4-tier resolver) — real-OS
+            // walks of PATH dirs, project `node_modules` (flat + pnpm store),
+            // the update cache, and the bundled sidecar to locate a supported
+            // tsgo engine binary, and the capability smoke's minimal temp
+            // project. A subprocess engine binary is real-FS by nature, never
+            // workspace/semantic source (sibling of the
+            // `verter_type_runtime` IPC entries).
+            "crates/verter_tsgo_api/src/toolchain/discovery.rs",
+            "crates/verter_tsgo_api/src/toolchain/validation.rs",
             // Relay-shim rendezvous advertisement — the IPC file a shim
             // writes on startup so a `verter_lsp` control client can DISCOVER
             // it (create_dir_all / write / read / read_dir / remove). An IPC
@@ -5152,6 +5154,13 @@ mod foundations_guards {
             // overlay/VFS state. `D14_ALLOW_LIST` carries the full per-callsite
             // rationale (tool/output I/O stays on `std::fs`).
             "crates/verter_svelte_conformance/src/generate.rs",
+            // dev/CI-only, non-published Vue conformance corpus READER —
+            // reads ONLY the crate-owned vendored/committed corpus
+            // (`env!("CARGO_MANIFEST_DIR")/corpus`: cases + official
+            // goldens + dispositions), never workspace/semantic/overlay/VFS
+            // state. Test-fixture I/O — sibling of the
+            // `verter_svelte_conformance` generator entry.
+            "crates/verter_vue_conformance/src/lib.rs",
         ]
         .into_iter()
         .map(String::from)
@@ -5550,6 +5559,12 @@ mod foundations_guards {
         // methods to verify the cohort's eviction invariant.
         "pub mod cache_schema",
         // verter_lsp::features::hover_provenance,
+        // `assemble_vue_main_module` — re-exported so the Vue conformance
+        // seed harness (`verter_vue_conformance/tests/cases/seed_conformance.rs`)
+        // and session assembly tests drive the GENUINE shipped runtime-Main
+        // assembly (compile → bundle → assemble) instead of a hand copy.
+        // Test-support public API (consumer: verter_vue_conformance dev-dep).
+        "pub use compile::assemble_vue_main_module",
         // verter_napi::meta, verter_wasm::tests::audit
         "pub mod component_meta_audit",
         // verter_napi::meta
@@ -9439,17 +9454,18 @@ mod foundations_guards {
             "crates/verter_tsc/src/checker.rs",
             "verter-tsc binary CLI — writes the consolidated diagnostics report file at the end of a checker run.",
         ),
-        (
-            "crates/verter_tsc/src/reporter.rs",
-            "verter-tsc binary CLI — reads the local tsgo cache directory to discover the active tsgo binary for parity reporting.",
-        ),
+
         (
             "crates/verter_tsc/src/tsconfig.rs",
             "verter-tsc binary CLI — reads tsconfig files outside the host's WorkspaceAccess (separate from the LSP/session tsconfig path). Doc comment also references `std::fs::canonicalize` behaviour for documentation.",
         ),
         (
-            "crates/verter_tsgo_api/src/transport/spawn.rs",
-            "rc tsgo-engine binary discovery (`discover_tsgo`) — walks the pnpm virtual store + classic `@typescript/` sibling layout on the REAL OS filesystem to locate the installed `typescript@>=7` platform binary (`tsc`/`tsc.exe`) the `--api` transport spawns. Real-FS by nature (a subprocess binary cannot be read through the in-memory VFS); same category as `verter_type_runtime/src/tsgo/ipc.rs` + `verter_tsc/src/reporter.rs`. Not a NativeFs/VFS disk-boundary bypass — never reads workspace/semantic state.",
+            "crates/verter_tsgo_api/src/toolchain/discovery.rs",
+            "tsgo toolchain provisioning (the 4-tier resolver) — walks PATH directories, the bound project's ancestor `node_modules` (flat + pnpm store layouts), the temp update cache, and the bundled sidecar directory on the REAL OS filesystem to locate a supported tsgo engine binary, with symlink/reparse-point and cache-root trust checks (`symlink_metadata`/`metadata`). Real-FS by nature (a subprocess engine binary cannot be enumerated through the in-memory VFS); same category as `verter_type_runtime/src/tsgo/ipc.rs`. Not a NativeFs/VFS disk-boundary bypass — never reads workspace/semantic state.",
+        ),
+        (
+            "crates/verter_tsgo_api/src/toolchain/validation.rs",
+            "tsgo candidate capability validation — stages a minimal configured project (a temp `tsconfig.json` + `index.ts`) on the REAL OS filesystem for the throwaway `--api` smoke engine to open. A subprocess engine reads real files, not the VFS; same category as `discovery.rs`. Not a NativeFs/VFS disk-boundary bypass — never reads workspace/semantic state.",
         ),
         (
             "crates/verter_tsgo_api/src/control/advertisement.rs",
@@ -9495,7 +9511,11 @@ mod foundations_guards {
             "crates/verter_svelte_conformance/src/generate.rs",
             "dev/CI-only, non-published (`publish = false`) Svelte CSS-conformance corpus generator. `write_corpus` / `check_corpus` materialize and reconcile ONLY the crate-owned committed corpus under `env!(\"CARGO_MANIFEST_DIR\")/corpus` for the CLI (`cargo run -p verter_svelte_conformance -- write`) and the crate's own tests — never user workspace, semantic, overlay, or VFS state. `WorkspaceAccess` governs user workspace source/config; tool/output I/O stays on `std::fs` (the same tooling precedent as the `oracle-gen` snapshot generator and `verter_tsc`). Not a NativeFs/VFS disk-boundary bypass.",
         ),
-    ];
+            (
+            "crates/verter_vue_conformance/src/lib.rs",
+            "dev/CI-only, non-published Vue conformance corpus READER (`read_text_normalized` + case-dir enumeration) — reads ONLY the crate-owned vendored/committed corpus (`env!(\"CARGO_MANIFEST_DIR\")/corpus`: cases, official goldens, known-divergences), never workspace/semantic/VFS state. Test-fixture I/O, not a NativeFs/VFS disk-boundary bypass — sibling of the `verter_svelte_conformance/src/generate.rs` exemption.",
+        ),
+];
 
     /// Predicate the test reuses: does this file's source contain
     /// any `std::fs::` reference? Identical to guard 1's predicate

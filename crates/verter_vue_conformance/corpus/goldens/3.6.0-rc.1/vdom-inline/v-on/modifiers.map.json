@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-on/modifiers.vue"
+  ],
+  "names": [],
+  "mappings": ";;;;;;;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AACjB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AAChB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;wBAIf,oBAGM;IAHA,OAAK,iBAAO,IAAI;;IACpB,oBAAiD;MAAxC,OAAK,iBAAe,GAAG;OAAE,QAAM;IACxC,oBAAgD;MAA7C,IAAI,EAAC,IAAI;0BAAsB,IAAI;OAAE,MAAI",
+  "sourcesContent": [
+    "<script setup>\nfunction save() {}\nfunction del() {}\nfunction open() {}\n</script>\n\n<template>\n  <div @click.self=\"save\">\n    <button @click.stop.prevent=\"del\">Delete</button>\n    <a href=\"/x\" @click.once.capture=\"open\">Open</a>\n  </div>\n</template>\n"
+  ]
+}

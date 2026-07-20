@@ -8,7 +8,7 @@
 //! Also processes companion `<script>` blocks to extract `export default`
 //! options and type declarations for cross-block type resolution.
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use verter_macro_dto::{
     MacroRuntimeBundle, MacroRuntimeOutcome, MacroRuntimeShape, ModelRuntimeShape,
     PropsRuntimeShape, RuntimeConstructor, RuntimeProp,
@@ -288,8 +288,21 @@ pub(super) struct MacroState {
     pub props_section: Option<String>,
     /// Emits section text (e.g., `['click', 'update']`).
     pub emits_section: Option<String>,
-    /// Options section text (e.g., `inheritAttrs: false`).
-    pub options_section: Option<String>,
+    /// Raw `defineOptions(...)` argument expression (e.g.,
+    /// `{ inheritAttrs: false }` or an identifier), captured verbatim.
+    /// Official spreads (TS) / Object.assigns (JS) this expression — it is
+    /// never inlined property-by-property and never dropped for non-literals.
+    pub options_expr: Option<String>,
+    /// Whether a companion `<script>` carries an `export default <expr>`.
+    /// The expression is rebound verbatim to `const __default__ = <expr>`
+    /// (never dropped, never unwrapped) and merged into the component
+    /// (spread for TS, first Object.assign target for JS).
+    pub has_companion_default: bool,
+    /// Named/default user imports official marks `setup-maybe-ref` — inline
+    /// template refs to these names bind `ref_key`/`ref: name`. Collected
+    /// for BOTH the setup block and the companion (merged into the script
+    /// context's set).
+    pub ref_bindable_imports: FxHashSet<String>,
     /// Whether `defineExpose` was used.
     pub has_expose: bool,
     /// Whether `defineEmits` was used (needs `__emit` in setup params).
@@ -310,7 +323,9 @@ impl MacroState {
         Self {
             props_section: None,
             emits_section: None,
-            options_section: None,
+            options_expr: None,
+            has_companion_default: false,
+            ref_bindable_imports: FxHashSet::default(),
             has_expose: false,
             has_emit: false,
             models: Vec::new(),
@@ -467,25 +482,20 @@ pub(super) fn process_macro_item<'a>(
             }
         }
 
-        ScriptMacro::DefineOptions {
-            span, object_arg, ..
-        } => {
+        ScriptMacro::DefineOptions { span, .. } => {
             let abs_start = content_start + span.start;
             let abs_end = content_start + span.end;
 
-            // Extract options object content (the object's inner content)
-            if let Some(obj) = object_arg {
-                // Get the content between { and }, stripping the braces
-                let obj_text = &content_str[obj.span.start as usize..obj.span.end as usize];
-                // Remove outer braces: "{ inheritAttrs: false }" → " inheritAttrs: false "
-                if obj_text.starts_with('{') && obj_text.ends_with('}') {
-                    let inner = obj_text[1..obj_text.len() - 1].trim();
-                    // Strip trailing comma to avoid double commas in the generated
-                    // object literal (we add our own comma after each section).
-                    let inner = inner.trim_end_matches(',').trim_end();
-                    if !inner.is_empty() {
-                        state.options_section = Some(inner.to_string());
-                    }
+            // Capture the RAW argument expression verbatim (official slices
+            // `optionsRuntimeDecl` the same way). Object literals keep their
+            // braces; non-literal args (identifiers, calls) are preserved
+            // too — they are spread (TS) / Object.assign-ed (JS) as-is and
+            // never dropped. The call text is `defineOptions(<arg>)`, so the
+            // argument is between the first `(` and the last `)`.
+            let call_text = &content_str[span.start as usize..span.end as usize];
+            if let Some(arg_text) = slice_call_argument(call_text, "defineOptions") {
+                if !arg_text.is_empty() {
+                    state.options_expr = Some(arg_text.to_string());
                 }
             }
 
@@ -607,15 +617,31 @@ pub(super) fn process_macro_item<'a>(
 
 // ======================== Companion script processing ========================
 
+/// Slice the single argument expression out of a macro call's source text,
+/// e.g. `defineOptions({ inheritAttrs: false })` → `{ inheritAttrs: false }`.
+/// The argument is the text between the first `(` and the last `)` of the
+/// call, trimmed. Returns `None` when the call text has no parens (cannot
+/// happen for a parsed macro call, but stay total).
+pub(super) fn slice_call_argument<'a>(call_text: &'a str, _callee: &str) -> Option<&'a str> {
+    let open = call_text.find('(')?;
+    let close = call_text.rfind(')')?;
+    if close <= open + 1 {
+        return Some("");
+    }
+    Some(call_text[open + 1..close].trim())
+}
+
 /// Apply the companion `<script>` codegen when `<script setup>` is present.
 ///
 /// The companion script's tags are already stripped by `compile.rs`, so its
 /// content remains in the output. This function:
-/// 1. Finds `export default { ... }` and removes it (to avoid duplicate exports)
-/// 2. Extracts the object's inner content as component-level options (like
-///    `defineOptions`)
-/// 3. Collects non-type import binding names for template resolution
-/// 4. Collects local runtime declarations (`const`/`let`/`function`/`class`) so
+/// 1. Rebinds `export default <expr>` to `const __default__ = <expr>` —
+///    the FULL expression is preserved verbatim (object literals, variable
+///    refs, `defineComponent(...)` / factory calls, spreads — never dropped,
+///    never unwrapped). Official merges it into the component: spread into
+///    `_defineComponent` (TS) or the first `Object.assign` target (JS).
+/// 2. Collects non-type import binding names for template resolution
+/// 3. Collects local runtime declarations (`const`/`let`/`function`/`class`) so
 ///    template expressions like `isNumber(modelValue)` (reka-ui ProgressRoot)
 ///    resolve via `$setup` instead of missing `_ctx.isNumber`
 ///
@@ -625,7 +651,6 @@ pub(super) fn process_macro_item<'a>(
 /// (imports + local declarations) that setup should expose.
 pub(super) fn process_companion_script(
     prepared: &PreparedCompanion<'_>,
-    source: &str,
     out: &mut CodeGenOutput<'_>,
     macro_state: &mut MacroState,
 ) -> Vec<String> {
@@ -643,6 +668,16 @@ pub(super) fn process_companion_script(
                     for binding in &imp.bindings {
                         if !binding.is_type_only {
                             companion_binding_names.push(binding.name.to_string());
+                            // Official `setup-maybe-ref` import bindings — inline
+                            // template refs to these names bind `ref_key`/`ref`.
+                            if super::process::is_ref_bindable_import(
+                                imp.source,
+                                binding.import_kind,
+                            ) {
+                                macro_state
+                                    .ref_bindable_imports
+                                    .insert(binding.name.to_string());
+                            }
                         }
                     }
                 }
@@ -656,26 +691,16 @@ pub(super) fn process_companion_script(
                 }
             }
             ScriptItem::DefaultExport(de) => {
+                // Rebind `export default` → `const __default__ =` (official
+                // `normalScriptDefaultVar`), preserving the expression
+                // verbatim — including `defineComponent(...)` / other calls.
+                // The component wrapper merges `__default__` in (spread or
+                // Object.assign target), so no companion option is ever lost.
                 let abs_start = content_start + de.span.start;
-                let abs_end = content_start + de.span.end;
-
-                // Extract options from `export default { inheritAttrs: false }` etc.
-                if let Some(obj_span) = &de.object_span {
-                    let obj_start = content_start + obj_span.start;
-                    let obj_end = content_start + obj_span.end;
-                    let obj_text = &source[obj_start as usize..obj_end as usize];
-                    // Strip outer braces: "{ inheritAttrs: false }" → "inheritAttrs: false"
-                    if obj_text.starts_with('{') && obj_text.ends_with('}') {
-                        let inner = obj_text[1..obj_text.len() - 1].trim();
-                        let inner = inner.trim_end_matches(',').trim_end();
-                        if !inner.is_empty() && macro_state.options_section.is_none() {
-                            macro_state.options_section = Some(inner.to_string());
-                        }
-                    }
-                }
-
-                // Remove the entire `export default { ... }` statement
-                out.overwrite(abs_start, abs_end, "");
+                let export_default_text = "export default";
+                let replace_end = abs_start + export_default_text.len() as u32;
+                out.overwrite(abs_start, replace_end, "const __default__ =");
+                macro_state.has_companion_default = true;
             }
             _ => {}
         }

@@ -15,6 +15,7 @@
 //! - [`CompileTarget::ANALYSIS`] — script + template data (MCP static analysis)
 
 mod helpers;
+mod macro_scope_check;
 mod macro_semantic_diagnostics;
 pub(crate) mod style_usage;
 pub mod template_data;
@@ -58,6 +59,7 @@ use crate::tokenizer::byte::{tokenize_sfc, tokenize_sfc_with_delimiters};
 use crate::tsc;
 
 use helpers::{empty_sfc_script_block, extract_attrs, extract_block_ranges};
+use macro_scope_check::collect_invalid_options_scope_diagnostics;
 use macro_semantic_diagnostics::{collect_macro_semantic_diagnostics, tsc_generation_diagnostic};
 
 // ── Orchestrator ───────────────────────────────────────────────────
@@ -306,6 +308,9 @@ fn compile_inner(
         .runtime_valid
         .then(|| macro_semantics.runtime())
         .flatten();
+    // Official `checkInvalidScopeReference`: runtime macro arguments are
+    // hoisted outside `setup()` — reject setup-scope references.
+    all_diagnostics.extend(collect_invalid_options_scope_diagnostics(&prepared_script));
 
     // ── 2. Extract metadata ───────────────────────────────────────
     let component_name = options
@@ -466,6 +471,23 @@ fn compile_inner(
         crate::template::code_gen::binding::BindingType,
     > = rustc_hash::FxHashMap::default();
     let mut script_block: Option<VerterScriptBlock> = None;
+    // Official `setup-maybe-ref` user imports — inline template refs to
+    // these names bind `ref_key`/`ref` (populated by the script lane and
+    // threaded to the VDOM resolver).
+    let mut ref_bindable_imports: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+
+    // Inline-template (official production topology): the render function is
+    // emitted INSIDE `setup()` as a returned closure that references setup
+    // bindings directly. Official defaults to inline in production builds
+    // (`resolve_inline`); it only applies to client VDOM with both a
+    // `<script setup>` and a template — Vapor inline and inline SSR are
+    // deferred, and template-only / script-only SFCs stay non-inline.
+    let inline_active = options.resolve_inline()
+        && !use_vapor
+        && !verter_options.ssr
+        && !has_parse_errors
+        && parsed.script_setup().is_some()
+        && parsed.template_ast().is_some();
 
     if options.target.needs_script() {
         let script_start = Instant::now();
@@ -506,7 +528,7 @@ fn compile_inner(
             component_name: &component_name,
             scope_id: &scope_id_full,
             keep_ts_types: !verter_options.force_js,
-            inline_template: false,
+            inline_template: inline_active,
             is_vapor: use_vapor,
             ssr: verter_options.ssr,
             has_scoped_style,
@@ -526,17 +548,31 @@ fn compile_inner(
 
         // Save bindings for template codegen (borrow/move happens later)
         script_bindings = script_result.bindings;
+        // Inline mode: where the render closure is spliced into `setup()`
+        // (the setup close-tag position, before the wrapper end).
+        let inline_inject_pos = script_result.inline_inject_pos;
+        // Official `setup-maybe-ref` user imports — inline template refs to
+        // these names bind `ref_key`/`ref` (threaded to the VDOM resolver).
+        ref_bindable_imports = script_result
+            .ref_bindable_imports
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
 
-        // Remove template and style blocks from script output
-        if let Some(template_ast) = parsed.template_ast() {
-            let root = &template_ast.root;
-            let tpl_start = root.tag_open.start;
-            let tpl_end = root
-                .tag_close
-                .as_ref()
-                .map(|tc| tc.end)
-                .unwrap_or(root.tag_open.end);
-            ct.remove(tpl_start, tpl_end);
+        // Remove template and style blocks from script output. Inline mode
+        // keeps the template region: the render codegen runs on this same CT
+        // below and the emitted chunk is moved into `setup()`.
+        if !inline_active {
+            if let Some(template_ast) = parsed.template_ast() {
+                let root = &template_ast.root;
+                let tpl_start = root.tag_open.start;
+                let tpl_end = root
+                    .tag_close
+                    .as_ref()
+                    .map(|tc| tc.end)
+                    .unwrap_or(root.tag_open.end);
+                ct.remove(tpl_start, tpl_end);
+            }
         }
 
         for style in parsed.style_nodes() {
@@ -605,11 +641,108 @@ fn compile_inner(
             }
         }
 
-        // Emit imports from script codegen
-        if !script_result.imports.is_empty() {
+        // Inline merge: run the template render codegen on the SAME CT (the
+        // template region was kept above), then move the emitted
+        // `return (_ctx,_cache) => { ... }` chunk into `setup()` at the inject
+        // position. Hoisted statics were emitted as a file-top prepend by the
+        // codegen itself. All template-expression source mappings stay on the
+        // single shared CT, so the merged module keeps full map fidelity.
+        let mut inline_tpl_imports: Vec<&'static str> = Vec::new();
+        if inline_active {
+            let template_ast = parsed
+                .template_ast()
+                .expect("inline_active requires a template");
+            // Reuse the runtime overlay entry (same parse facts as the
+            // used-vars lane above; completion-prefix matching off).
+            let oxc_ast = expr_store.get_or_build(
+                template_ast,
+                input,
+                allocator,
+                template_region_span(template_ast),
+                &parse_options,
+                source_type,
+                false,
+            );
+            collect_expression_errors(oxc_ast, &mut all_diagnostics);
+
+            let tpl_options = TemplateCodeGenOptions {
+                mode: CodeGenMode::Vdom,
+                is_inline: true,
+                is_production: options.is_production,
+                comments: options.comments.unwrap_or(!options.is_production),
+                force_js: verter_options.force_js,
+                self_name: to_pascal_case(&component_name),
+                const_props: verter_options.prop_constness_overrides.clone(),
+                has_script: true,
+                ref_bindable_imports: ref_bindable_imports.clone(),
+                has_scoped_style,
+                hoist_static: options.resolve_hoist_static(),
+                scope_id: if has_scoped_style {
+                    scope_id_full.clone()
+                } else {
+                    String::new()
+                },
+                ssr_css_vars: Vec::new(),
+            };
+            let tpl_imports = generate_template(
+                template_ast,
+                oxc_ast,
+                input,
+                &mut ct,
+                allocator,
+                std::mem::take(&mut script_bindings),
+                &tpl_options,
+            );
+            inline_tpl_imports = tpl_imports.vue;
+
+            // Strip TypeScript syntax from template expressions when force_js
+            // is set (same pass the standalone template lane runs).
+            if verter_options.force_js {
+                for expr in oxc_ast.iter_expressions() {
+                    if let Some(ref expression) = expr.expression {
+                        crate::strip_types::typescript::strip_typescript_from_expression(
+                            expression,
+                            &mut ct,
+                            expr.offset,
+                            &input[expr.offset as usize..],
+                        );
+                    }
+                }
+            }
+
+            // Splice the render chunk into setup: the whole template region
+            // (now the `return (...) => { ... }` statement) moves to the
+            // setup close-tag position, before the wrapper end.
+            let root = &template_ast.root;
+            let tpl_start = root.tag_open.start;
+            let tpl_end = root
+                .tag_close
+                .as_ref()
+                .map(|tc| tc.end)
+                .unwrap_or(root.tag_open.end);
+            let inject_pos = inline_inject_pos.expect("inline mode sets inline_inject_pos");
+            ct.move_slice(tpl_start, tpl_end, inject_pos);
+        }
+
+        // Emit imports from script codegen. Inline mode merges the script and
+        // template helper sets into ONE deduplicated import line (official
+        // inline output has a single `import { ... } from "vue"` statement;
+        // two statements importing the same helper would be a duplicate
+        // binding). Emitted AFTER the inline codegen's hoist prepend so the
+        // final order is imports → hoists → user code (official).
+        let all_imports: Vec<&'static str> = if inline_active {
+            let mut v = script_result.imports.clone();
+            v.extend(inline_tpl_imports);
+            v
+        } else {
+            script_result.imports.clone()
+        };
+        if !all_imports.is_empty() {
             let runtime = options.runtime_module_name.as_deref().unwrap_or("vue");
-            let specifiers: Vec<String> = script_result
-                .imports
+            let mut sorted = all_imports;
+            sorted.sort_unstable();
+            sorted.dedup();
+            let specifiers: Vec<String> = sorted
                 .iter()
                 .map(|name| format_import_specifier(name))
                 .collect();
@@ -759,7 +892,7 @@ fn compile_inner(
                     None
                 };
 
-                let template_block_inner = if needs_tpl_codegen {
+                let template_block_inner = if needs_tpl_codegen && !inline_active {
                     let tpl_alloc = Allocator::new();
                     // Use the full SFC input so AST positions (which are absolute) align correctly.
                     // The CT is initialized with the full SFC so AST positions
@@ -813,6 +946,10 @@ fn compile_inner(
                         force_js: verter_options.force_js,
                         self_name: to_pascal_case(&component_name),
                         const_props: verter_options.prop_constness_overrides.clone(),
+                        // Full 6-param render signature only when the SFC has a
+                        // script block (official: `bindingMetadata && !inline`).
+                        has_script: parsed.script().is_some() || parsed.script_setup().is_some(),
+                        ref_bindable_imports: ref_bindable_imports.clone(),
                         has_scoped_style,
                         hoist_static: options.resolve_hoist_static(),
                         scope_id: if has_scoped_style {
@@ -1307,6 +1444,13 @@ fn compile_inner(
         tsx: tsx_block,
         tsc: tsc_block,
         template_data: extracted_template_data,
+        // True when the render function was inlined into `setup()` (official
+        // production topology) — the script block already contains the full
+        // component, and no separate template block was emitted. Gated on the
+        // runtime script lane actually running: the IDE/TSX-only target emits
+        // no runtime inline body, so the flag must not be set merely because
+        // the option is on.
+        inline: inline_active && options.target.needs_script(),
         // The compiler is cache-mode agnostic — it produces output for a
         // single direct invocation. The host's cache routing wraps this
         // call; a bare `compile()` reports the default Session mode with

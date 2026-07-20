@@ -1,0 +1,17 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/script-setup/props-type-withdefaults.vue"
+  ],
+  "names": [
+    "emit",
+    "props",
+    "item",
+    "size",
+    "tags"
+  ],
+  "mappings": ";;;;;;;uCAkBeA,SAAI,SAASC,UAAK;oDAC1BC,WAAI,SAAQ,IAAE,oBAAGC,WAAI,IAAG,IAAE,oBAAGC,WAAI",
+  "sourcesContent": [
+    "\n  <div @click=\"emit('pick', props.item)\">\n    {{ item.name }} ({{ size }}) {{ tags.length }}\n  </div>\n"
+  ]
+}

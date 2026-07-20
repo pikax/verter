@@ -103,6 +103,11 @@ pub enum CompilerErrorCode {
     /// `defineProps` type or a `defineEmits` type with no call
     /// signatures). This is a genuine local misuse and is always fatal.
     XInvalidMacroType,
+    /// A `defineProps` / `defineEmits` / `defineOptions` / `defineModel`
+    /// runtime argument that references a locally declared (setup-scope)
+    /// variable. The argument is hoisted outside `setup()`, so the
+    /// reference would break at runtime — the official compiler rejects it.
+    XInvalidMacroScopeReference,
     /// An IMPORTED macro type argument (`defineProps<T>()` where `T` is
     /// imported) that could not be RESOLVED. Distinct from
     /// [`Self::XInvalidMacroType`] (a resolved-but-wrong-shape type): the
@@ -182,6 +187,9 @@ impl CompilerErrorCode {
             Self::XDuplicateDirective => "Duplicate built-in directive on the same element.",
             Self::XInvalidExpression => "Error parsing JavaScript expression.",
             Self::XInvalidMacroType => "Invalid macro type argument.",
+            Self::XInvalidMacroScopeReference => {
+                "Macro argument cannot reference locally declared variables."
+            }
             Self::XUnresolvedImportedMacroType => {
                 "Imported macro type argument could not be resolved."
             }

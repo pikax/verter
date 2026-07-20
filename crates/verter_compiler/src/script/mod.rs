@@ -13,7 +13,7 @@ pub mod process;
 mod ported_tests;
 
 use oxc_allocator::Allocator;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::code_transform::CodeTransform;
 use crate::css::types::VBindVar;
@@ -87,6 +87,12 @@ pub struct ScriptContext<'alloc> {
     pub imports: Vec<&'static str>,
     pub inline_inject_pos: Option<u32>,
     pub alloc: &'alloc Allocator,
+    /// Named/default user imports that official marks `setup-maybe-ref` —
+    /// ref-bindable as inline template refs (`ref_key`/`ref: name`). The
+    /// official rule: anything except namespace imports, default imports
+    /// from `.vue` sources, and `vue`-source imports (those are
+    /// `setup-const` and stay string refs).
+    pub ref_bindable_imports: FxHashSet<&'alloc str>,
 }
 
 /// Result of script code generation.
@@ -100,6 +106,10 @@ pub struct ScriptCodeGenResult<'alloc> {
     pub inline_inject_pos: Option<u32>,
     /// Runtime imports needed by script (e.g., `"_defineComponent"`, `"_useCssVars"`).
     pub imports: Vec<&'static str>,
+    /// Named/default user imports official marks `setup-maybe-ref` — inline
+    /// template refs to these names bind `ref_key`/`ref: name` (see
+    /// [`ScriptContext::ref_bindable_imports`]).
+    pub ref_bindable_imports: FxHashSet<&'alloc str>,
 }
 
 /// Process `<script>` and/or `<script setup>` blocks.
@@ -125,12 +135,26 @@ pub fn generate_script<'alloc>(
         imports: Vec::new(),
         inline_inject_pos: None,
         alloc,
+        ref_bindable_imports: FxHashSet::default(),
     };
+
+    // Official `@vue/compiler-sfc` wrapper gate: `isTS` when either script
+    // block declares `lang="ts"` or `lang="tsx"` — TS components keep the
+    // `_defineComponent` wrapper; JS components emit plain object literals
+    // (or the `Object.assign` merge path when options exist). This affects
+    // only the runtime (SFC→JS) output; the IDE/TSX lane has its own codegen.
+    let is_ts = [script, script_setup].into_iter().flatten().any(|s| {
+        matches!(
+            s.lang,
+            Some(crate::cursor::ScriptLanguage::TypeScript)
+                | Some(crate::cursor::ScriptLanguage::TSX)
+        )
+    });
 
     match (script, script_setup) {
         (_, Some(setup)) => {
             // <script setup> present — this is the primary block
-            process::process_script_setup(setup, prepared, &mut ctx, options);
+            process::process_script_setup(setup, prepared, &mut ctx, options, is_ts);
         }
         (Some(normal), None) => {
             // Only <script> (no setup) — Options API
@@ -153,6 +177,7 @@ pub fn generate_script<'alloc>(
         bindings: ctx.bindings,
         inline_inject_pos: ctx.inline_inject_pos,
         imports: ctx.imports,
+        ref_bindable_imports: ctx.ref_bindable_imports,
     }
 }
 

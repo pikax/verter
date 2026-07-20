@@ -1,0 +1,71 @@
+{
+  "schema": 2,
+  "caseId": "conditionals/if-else-if-else",
+  "backend": "vdom",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/conditionals/if-else-if-else.vue",
+    "sha256": "e4161885c675cfa4536f3a940b5fd6108d9ca656482a4291a26ad5bdd9f5cca7"
+  },
+  "options": {
+    "sha256": "ac7f6e48170e80ea895ebc09b1fad13e185c0a662b98022d7cdcd9992abee432",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/conditionals/if-else-if-else.vue",
+      "id": "conditionals/if-else-if-else",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vdom/conditionals/if-else-if-else.js",
+      "sha256": "0ad055db1e178643e417ec930babbe957f28042bb82d9d0ebb22ca518b2b5875",
+      "bytes": 1028
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vdom/conditionals/if-else-if-else.map.json",
+      "sha256": "7a3b748ad0a8ff322ea95c58c3a69ee0224423d889c1b0903c802fa92bb09030"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createCommentVNode",
+      "alias": "_createCommentVNode"
+    },
+    {
+      "imported": "createElementBlock",
+      "alias": "_createElementBlock"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    }
+  ]
+}

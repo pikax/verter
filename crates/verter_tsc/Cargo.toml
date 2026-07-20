@@ -12,6 +12,18 @@ description = "verter-tsc — Vue SFC type checker using Verter codegen"
 name = "verter-tsc"
 path = "src/main.rs"
 
+# TEST-ONLY fake-engine shim (integration tests drive the declaration stage
+# against deterministic engine scenarios). Never built by a default/release
+# build: the feature is enabled only by this crate's own test builds through
+# the dev-dependency on itself below.
+[[bin]]
+name = "verter_tsc_fake_engine"
+path = "src/bin/verter_tsc_fake_engine.rs"
+required-features = ["test-fake-engine"]
+
+[features]
+test-fake-engine = ["verter_tsgo_api/test-fake-engine"]
+
 [dependencies]
 verter_compiler = { path = "../verter_compiler" }
 verter_session = { path = "../verter_session" }
@@ -35,3 +47,10 @@ tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "io-util", "pro
 
 [dev-dependencies]
 verter_macro_dto = { path = "../verter_macro_dto" }
+# Self dev-dependency: enables `test-fake-engine` for THIS crate's test builds
+# only, so the fake-engine shim bin exists for `cargo test` (CARGO_BIN_EXE_)
+# while default/release builds never produce it. Cargo prints a cosmetic
+# "ignoring invalid dependency … missing a lib target" warning for this
+# bin-only crate's self-dep — the feature activation it performs is exactly
+# what the test lane needs, and there is no lib to link either way.
+verter_tsc = { path = ".", features = ["test-fake-engine"] }

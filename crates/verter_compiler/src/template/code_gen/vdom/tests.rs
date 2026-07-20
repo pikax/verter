@@ -2099,7 +2099,7 @@ fn duplicate_event_handlers_array_merge_byte_identical() {
     let expected = [
         r#"const _hoisted_1 = ["onClick"]"#,
         r#""#,
-        r#"function render(_ctx, _cache, $props, $setup, $data, $options) {"#,
+        r#"function render(_ctx, _cache) {"#,
         r#"return (_openBlock(), _createElementBlock("button", { onClick: [_ctx.a, _ctx.b] }, "x", 8 /* PROPS */, _hoisted_1))"#,
         r#"}"#,
     ]
@@ -2155,7 +2155,7 @@ fn class_style_static_dynamic_merge_byte_identical() {
         "<template><div class=\"a\" :class=\"b\" style=\"color: red\" :style=\"s\">x</div></template>",
     );
     let expected = [
-        r#"function render(_ctx, _cache, $props, $setup, $data, $options) {"#,
+        r#"function render(_ctx, _cache) {"#,
         r#"return (_openBlock(), _createElementBlock("div", { class: _normalizeClass(["a", _ctx.b]), style: _normalizeStyle([{ color: "red" }, _ctx.s]) }, "x", 6 /* CLASS, STYLE */))"#,
         r#"}"#,
     ]
@@ -2183,7 +2183,7 @@ fn single_event_handler_no_merge_byte_identical() {
     let expected = [
         r#"const _hoisted_1 = ["onClick"]"#,
         r#""#,
-        r#"function render(_ctx, _cache, $props, $setup, $data, $options) {"#,
+        r#"function render(_ctx, _cache) {"#,
         r#"return (_openBlock(), _createElementBlock("button", { onClick: _ctx.a }, "x", 8 /* PROPS */, _hoisted_1))"#,
         r#"}"#,
     ]
@@ -2198,6 +2198,53 @@ fn single_event_handler_no_merge_byte_identical() {
     assert!(
         !code.contains("onClick: ["),
         "single handler must not be array-wrapped, got:\n{code}"
+    );
+}
+
+// ── Render signature arity (official non-inline parity) ──────────
+//
+// Official @vue/compiler-core `generate()`: the full
+// `(_ctx, _cache, $props, $setup, $data, $options)` signature is emitted only
+// when binding metadata exists (a `<script>` / `<script setup>` block) and the
+// template is not inlined. Template-only SFCs get the 2-param
+// `(_ctx, _cache)` form — their bodies only ever reference `_ctx`/`_cache`.
+
+#[test]
+fn render_signature_template_only_two_params() {
+    let code = gen_vdom_template("<template><div>{{ msg }}</div></template>");
+    assert!(
+        code.contains("function render(_ctx, _cache) {"),
+        "template-only SFC should emit the 2-param render signature, got:\n{code}"
+    );
+    assert!(
+        !code.contains("$props") && !code.contains("$setup"),
+        "template-only render body must not reference dropped params, got:\n{code}"
+    );
+    assert!(
+        !code.contains("$data") && !code.contains("$options"),
+        "template-only render body must not reference dropped params, got:\n{code}"
+    );
+}
+
+#[test]
+fn render_signature_script_setup_keeps_full_params() {
+    let code = gen_vdom_template(
+        "<template><div>{{ msg }}</div></template>\n<script setup>\nconst msg = 'hi'\n</script>",
+    );
+    assert!(
+        code.contains("function render(_ctx, _cache, $props, $setup, $data, $options) {"),
+        "script-setup SFC should keep the full 6-param render signature, got:\n{code}"
+    );
+}
+
+#[test]
+fn render_signature_options_api_keeps_full_params() {
+    let code = gen_vdom_template(
+        "<script>\nexport default { data() { return { msg: 'hi' } } }\n</script>\n<template><div>{{ msg }}</div></template>",
+    );
+    assert!(
+        code.contains("function render(_ctx, _cache, $props, $setup, $data, $options) {"),
+        "Options-API SFC should keep the full 6-param render signature, got:\n{code}"
     );
 }
 

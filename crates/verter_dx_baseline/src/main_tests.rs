@@ -890,11 +890,15 @@ fn record_gate_skip(gate: &str, reason: &str) -> GateSkipRecord {
 /// failure under `DX_REQUIRE_TSGO=1`, else a structured, recorded skip
 /// returning `None` so the caller returns early. A skip is never reported as
 /// success — [`record_gate_skip`] emits a typed marker the harness detects.
-fn find_tsgo_for_gate(test_name: &str) -> Option<String> {
-    match verter_type_runtime::tsgo::find_tsgo_binary() {
-        Ok(bin) => Some(bin),
+async fn find_tsgo_for_gate(test_name: &str) -> Option<String> {
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+        verter_tsgo_api::toolchain::validation::Capability::Lsp,
+        None,
+    );
+    match verter_tsgo_api::toolchain::discovery::resolve(&request).await {
+        Ok(resolution) => Some(resolution.path.to_string_lossy().into_owned()),
         Err(e) => {
-            let reason = format!("tsgo not discoverable: {e:?}");
+            let reason = format!("tsgo not resolvable: {e:?}");
             match tsgo_absence_outcome(require_tsgo()) {
                 TsgoAbsence::HardFail => {
                     panic!("DX_REQUIRE_TSGO=1 but {test_name} cannot run: {reason}")
@@ -978,6 +982,7 @@ async fn known_good_script_setup_hover_resolves_through_tsgo_on_emitted_tsx() {
 
     let Some(tsgo_bin) =
         find_tsgo_for_gate("known_good_script_setup_hover_resolves_through_tsgo_on_emitted_tsx")
+            .await
     else {
         return;
     };
@@ -1024,6 +1029,7 @@ async fn known_good_script_setup_hover_resolves_through_tsgo_on_emitted_tsx() {
     };
     let root_str = root.to_string_lossy().to_string();
     let plan = match resolve(ProviderName::Tsgo, &tool_root, &root_str, true)
+        .await
         .expect("tsgo resolves with an explicit bin")
     {
         Resolution::Ready { plan, .. } => plan,
@@ -1075,7 +1081,7 @@ async fn provider_resolves_barrel_reexport_through_rewritten_twin() {
     use crate::provider::{resolve, spawn};
 
     let Some(tsgo_bin) =
-        find_tsgo_for_gate("provider_resolves_barrel_reexport_through_rewritten_twin")
+        find_tsgo_for_gate("provider_resolves_barrel_reexport_through_rewritten_twin").await
     else {
         return;
     };
@@ -1116,6 +1122,7 @@ async fn provider_resolves_barrel_reexport_through_rewritten_twin() {
     };
     let root_str = root.to_string_lossy().to_string();
     let plan = match resolve(ProviderName::Tsgo, &tool_root, &root_str, true)
+        .await
         .expect("tsgo resolves with an explicit bin")
     {
         Resolution::Ready { plan, .. } => plan,

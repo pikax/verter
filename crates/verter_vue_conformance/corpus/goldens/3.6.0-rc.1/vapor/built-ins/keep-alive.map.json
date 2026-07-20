@@ -1,0 +1,13 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/built-ins/keep-alive.vue"
+  ],
+  "names": [
+    "current"
+  ],
+  "mappings": ";;;iDAQc,GAAG,EAAE,CAAC;8CACAA,YAAO,KAAE,KAAK,EAAC,QAAQ",
+  "sourcesContent": [
+    "\n  <KeepAlive :max=\"2\">\n    <component :is=\"current\" label=\"Cached\" />\n  </KeepAlive>\n"
+  ]
+}

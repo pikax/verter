@@ -1,0 +1,79 @@
+{
+  "schema": 2,
+  "caseId": "v-model/checkbox",
+  "backend": "vdom",
+  "topology": "inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/v-model/checkbox.vue",
+    "sha256": "ad46747040e20ac12cdbfc92e24adedb35165f60424bf83cebc11042e1747e6a"
+  },
+  "options": {
+    "sha256": "f433f75ed70392f50eb63f836028e9594f5cb9c43254f6dc1e5b905deb747fe7",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/v-model/checkbox.vue",
+      "id": "v-model/checkbox",
+      "pipeline": "compileScript:inlineTemplate",
+      "topology": "inline",
+      "inlineTemplate": true,
+      "bindingMetadata": false,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vdom-inline/v-model/checkbox.js",
+      "sha256": "50b6e81f4944f775b96b7c42207d004ac1600df226aeff3f810832a5fc326514",
+      "bytes": 809
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vdom-inline/v-model/checkbox.map.json",
+      "sha256": "c0059df1d7f8d1cb4368f88355a5c02e8a03a7194ffd023c30d5fe17c68e7ba6"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createElementBlock",
+      "alias": "_createElementBlock"
+    },
+    {
+      "imported": "createElementVNode",
+      "alias": "_createElementVNode"
+    },
+    {
+      "imported": "createTextVNode",
+      "alias": "_createTextVNode"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "vModelCheckbox",
+      "alias": "_vModelCheckbox"
+    },
+    {
+      "imported": "withDirectives",
+      "alias": "_withDirectives"
+    }
+  ]
+}

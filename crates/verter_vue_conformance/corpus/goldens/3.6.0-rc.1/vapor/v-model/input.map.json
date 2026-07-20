@@ -1,0 +1,13 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-model/input.vue"
+  ],
+  "names": [
+    "text"
+  ],
+  "mappings": ";;;;;6BAOkBA,SAAI,cAAJA,kBAAI",
+  "sourcesContent": [
+    "\n  <input v-model=\"text\" placeholder=\"Type here\" />\n"
+  ]
+}

@@ -62,17 +62,77 @@ fn classify_statement<'a>(
             classify_expression_statement(&expr_stmt.expression, entries, ctx);
         }
         // Function / class / enum declarations all bind a runtime value;
-        // the neutral inventory yields the identifier span.
-        Statement::FunctionDeclaration(_)
-        | Statement::ClassDeclaration(_)
-        | Statement::TSEnumDeclaration(_) => {
+        // the neutral inventory yields the identifier span. An all-literal
+        // enum (every member has no initializer or a static scalar-literal
+        // initializer) is a literal-const (official `isAllLiteral`).
+        Statement::FunctionDeclaration(_) | Statement::ClassDeclaration(_) => {
             if let Some(span) = declaration_binding_span(stmt) {
                 entries.push((span, BindingType::SetupConst));
+            }
+        }
+        Statement::TSEnumDeclaration(ts_enum) => {
+            if let Some(span) = declaration_binding_span(stmt) {
+                let bt = if enum_is_all_literal(ts_enum) {
+                    BindingType::LiteralConst
+                } else {
+                    BindingType::SetupConst
+                };
+                entries.push((span, bt));
             }
         }
         // TypeScript-only declarations — no runtime binding
         Statement::TSTypeAliasDeclaration(_) | Statement::TSInterfaceDeclaration(_) => {}
         _ => {}
+    }
+}
+
+/// Whether every member of a TS enum has no initializer or a static
+/// (scalar-literal) initializer — official `isAllLiteral` for enums.
+fn enum_is_all_literal(ts_enum: &oxc_ast::ast::TSEnumDeclaration) -> bool {
+    ts_enum
+        .body
+        .members
+        .iter()
+        .all(|member| member.initializer.as_ref().is_none_or(is_static_node))
+}
+
+/// Official `unwrapTSNode`: strip the TS-only expression wrappers
+/// (`x as T` / `<T>x` / `x!` / `x satisfies T` / `x<T>` instantiation) to reach
+/// the underlying value expression. Recursive so stacked wrappers collapse.
+fn unwrap_ts_node<'a, 'b>(expr: &'b Expression<'a>) -> &'b Expression<'a> {
+    match expr {
+        Expression::TSAsExpression(e) => unwrap_ts_node(&e.expression),
+        Expression::TSSatisfiesExpression(e) => unwrap_ts_node(&e.expression),
+        Expression::TSNonNullExpression(e) => unwrap_ts_node(&e.expression),
+        Expression::TSTypeAssertion(e) => unwrap_ts_node(&e.expression),
+        Expression::TSInstantiationExpression(e) => unwrap_ts_node(&e.expression),
+        _ => expr,
+    }
+}
+
+/// Official `isStaticNode` (compiler-dom): `unwrapTSNode` first, then scalar
+/// literals (string / numeric / boolean / null / bigint) and static
+/// compositions of them (unary / binary / logical / conditional / sequence /
+/// template-literal / parenthesized). Object/array expressions are NOT static.
+/// Unwrapping first means a wrapped literal (`1 as const`, `2 satisfies number`,
+/// `x!`) is still static, matching official `isAllLiteral` / `walkDeclaration`.
+fn is_static_node(expr: &Expression) -> bool {
+    match unwrap_ts_node(expr) {
+        Expression::UnaryExpression(u) => is_static_node(&u.argument),
+        Expression::LogicalExpression(b) => is_static_node(&b.left) && is_static_node(&b.right),
+        Expression::BinaryExpression(b) => is_static_node(&b.left) && is_static_node(&b.right),
+        Expression::ConditionalExpression(c) => {
+            is_static_node(&c.test) && is_static_node(&c.consequent) && is_static_node(&c.alternate)
+        }
+        Expression::SequenceExpression(s) => s.expressions.iter().all(is_static_node),
+        Expression::TemplateLiteral(t) => t.expressions.iter().all(is_static_node),
+        Expression::ParenthesizedExpression(p) => is_static_node(&p.expression),
+        Expression::StringLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BooleanLiteral(_)
+        | Expression::NullLiteral(_)
+        | Expression::BigIntLiteral(_) => true,
+        _ => false,
     }
 }
 
@@ -114,8 +174,12 @@ fn classify_variable_declaration<'a>(
 
 /// Classify the initializer of a `const` declaration.
 ///
-/// Mirrors Vue's `walkDeclaration` + `canNeverBeRef` logic:
-/// - Literal primitives → `LiteralConst`
+/// Mirrors Vue's `walkDeclaration` + `canNeverBeRef` logic (the init is
+/// `unwrapTSNode`'d first, exactly as official does):
+/// - `isStaticNode(init)` → `LiteralConst`. This covers scalar primitives,
+///   static unary/binary/logical/conditional/sequence compositions of them,
+///   and expression-free template literals — object/array literals are NOT
+///   static and fall through to `SetupConst`.
 /// - Call expressions → depends on callee (ref/computed/reactive/use*)
 /// - Expressions that structurally can never be a ref (arrays, objects,
 ///   functions, classes, unary, binary, update, tagged template) → `SetupConst`
@@ -123,19 +187,24 @@ fn classify_variable_declaration<'a>(
 ///   assignment, sequence, etc.) → `SetupMaybeRef` because the result
 ///   might be a ref at runtime
 fn classify_const_init<'a>(init: &Expression<'a>) -> BindingType {
+    // Official `walkDeclaration` unwraps TS wrappers before every classification
+    // branch, so `5 as const` / `(1 + 2) satisfies number` classify like their
+    // underlying expression.
+    let init = unwrap_ts_node(init);
+
+    // Official: `isStaticNode(init)` → `literal-const` (the first branch of
+    // `walkDeclaration`, ahead of the `canNeverBeRef` / ref-call branches).
+    if is_static_node(init) {
+        return BindingType::LiteralConst;
+    }
+
     match init {
-        Expression::StringLiteral(_)
-        | Expression::NumericLiteral(_)
-        | Expression::BooleanLiteral(_)
-        | Expression::NullLiteral(_)
-        | Expression::BigIntLiteral(_) => BindingType::LiteralConst,
-
-        Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => BindingType::LiteralConst,
-
         Expression::CallExpression(call) => classify_call_expression(call),
 
         // Expressions that can never be a ref → SetupConst
-        // (matches Vue's canNeverBeRef())
+        // (matches Vue's canNeverBeRef(); the STATIC members of this family were
+        // already peeled off as LiteralConst by the isStaticNode check above, so
+        // only the non-static ones — `a + b`, `-x`, `{...}`, `[...]` — land here)
         Expression::UnaryExpression(_)
         | Expression::BinaryExpression(_)
         | Expression::ArrayExpression(_)

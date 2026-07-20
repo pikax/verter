@@ -12,6 +12,20 @@ fn make_script(source: &str, tag_open_str: &str, is_setup: bool) -> (RootNodeScr
 
     let full_source = format!("{}{}</script>", tag_open_str, source);
 
+    // Derive the `lang` field from the tag text so the wrapper gate (and the
+    // parse source type) see the same language the tag declares.
+    let lang = if tag_open_str.contains("lang=\"tsx\"") {
+        Some(crate::cursor::ScriptLanguage::TSX)
+    } else if tag_open_str.contains("lang=\"ts\"") {
+        Some(crate::cursor::ScriptLanguage::TypeScript)
+    } else if tag_open_str.contains("lang=\"jsx\"") {
+        Some(crate::cursor::ScriptLanguage::JSX)
+    } else if tag_open_str.contains("lang=\"js\"") {
+        Some(crate::cursor::ScriptLanguage::JavaScript)
+    } else {
+        None
+    };
+
     let script = RootNodeScript {
         tag_open: NodeTag {
             start: 0,
@@ -29,7 +43,7 @@ fn make_script(source: &str, tag_open_str: &str, is_setup: bool) -> (RootNodeScr
             name_end: close_tag_end - 1,
         }),
         is_setup,
-        lang: None,
+        lang,
         src: None,
         generic: None,
         attrs: None,
@@ -117,15 +131,223 @@ fn empty_script_setup_produces_wrapper() {
     );
 
     let output = ct.build_string();
-    // Should contain component wrapper
-    assert!(output.contains("const __sfc__"), "output: {}", output);
-    assert!(output.contains("_defineComponent"), "output: {}", output);
+    // Official JS shape for an empty `<script setup>`: a plain component
+    // object (no `_defineComponent`, no `Object.assign`) carrying `__name`,
+    // a `setup` function, and the default export.
+    assert!(
+        output.contains("const __sfc__ = {"),
+        "plain object open, output: {}",
+        output
+    );
+    assert!(!output.contains("_defineComponent"), "output: {}", output);
+    assert!(!output.contains("Object.assign"), "output: {}", output);
     assert!(output.contains("__name: 'Test'"), "output: {}", output);
-    assert!(output.contains("setup(__props)"), "output: {}", output);
+    assert!(
+        output.contains("setup(__props)"),
+        "empty setup still emits the setup function, output: {}",
+        output
+    );
+    assert!(
+        output.contains("\n}};\n"),
+        "plain object closes without a call, output: {}",
+        output
+    );
     assert!(
         output.contains("export default __sfc__"),
         "output: {}",
         output
+    );
+}
+
+// ── Component wrapper gate (official @vue/compiler-sfc non-inline) ──
+//
+// Official: `isTS` → `/*@__PURE__*/_defineComponent({ ... })`; JS with no
+// companion `export default` / `defineOptions` → plain object literal (no
+// `_defineComponent` import); JS with companion default / defineOptions →
+// `Object.assign({ ... }, { ... })` merge. Verter must match on the runtime
+// (SFC→JS) path.
+
+#[test]
+fn js_script_setup_emits_plain_object_without_define_component() {
+    let alloc = Allocator::default();
+    let content = "\nconst props = defineProps({ msg: { type: String, default: 'hi' } })\nconst emit = defineEmits(['save'])\nfunction onSave() { emit('save', props.msg) }\n";
+    let (setup, full) = make_script(content, "<script setup>", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Test",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    // Plain object literal — official does not wrap JS components.
+    assert!(
+        output.contains("const __sfc__ = {\n"),
+        "JS <script setup> should emit a plain object, got:\n{}",
+        output
+    );
+    assert!(
+        !output.contains("_defineComponent"),
+        "JS <script setup> must not reference _defineComponent, got:\n{}",
+        output
+    );
+    // Runtime options are still present.
+    assert!(output.contains("props: {"), "output: {}", output);
+    assert!(output.contains("emits: ['save']"), "output: {}", output);
+    assert!(output.contains("setup(__props"), "output: {}", output);
+    assert!(
+        output.contains("export default __sfc__"),
+        "output: {}",
+        output
+    );
+    // And the helper import is not requested.
+    assert!(
+        !result.imports.contains(&"_defineComponent"),
+        "_defineComponent import must not be tracked for JS, imports: {:?}",
+        result.imports
+    );
+}
+
+#[test]
+fn ts_script_setup_keeps_define_component() {
+    let alloc = Allocator::default();
+    let content = "\nconst props = defineProps<{ msg: string }>()\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Test",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(
+        output.contains("const __sfc__ = /*@__PURE__*/_defineComponent({"),
+        "TS <script setup> should keep the _defineComponent wrapper, got:\n{}",
+        output
+    );
+    assert!(
+        result.imports.contains(&"_defineComponent"),
+        "TS <script setup> must track the _defineComponent import, imports: {:?}",
+        result.imports
+    );
+}
+
+#[test]
+fn js_script_setup_define_options_uses_object_assign_merge() {
+    let alloc = Allocator::default();
+    let content = "\ndefineOptions({ inheritAttrs: false })\nconst msg = 'hi'\n";
+    let (setup, full) = make_script(content, "<script setup>", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Test",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(
+        output.contains("/*@__PURE__*/Object.assign({ inheritAttrs: false }, {"),
+        "JS + defineOptions should use the Object.assign merge path, got:\n{}",
+        output
+    );
+    assert!(
+        !output.contains("_defineComponent"),
+        "Object.assign path must not reference _defineComponent, got:\n{}",
+        output
+    );
+    assert!(
+        !result.imports.contains(&"_defineComponent"),
+        "Object.assign path must not track the _defineComponent import, imports: {:?}",
+        result.imports
+    );
+}
+
+#[test]
+fn js_empty_script_setup_emits_plain_object() {
+    let alloc = Allocator::default();
+    let (setup, full) = make_script("", "<script setup>", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Test",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(
+        output.contains("const __sfc__ = {"),
+        "empty JS <script setup> should emit a plain object, got:\n{}",
+        output
+    );
+    assert!(
+        !output.contains("_defineComponent"),
+        "empty JS <script setup> must not reference _defineComponent, got:\n{}",
+        output
+    );
+    assert!(
+        !result.imports.contains(&"_defineComponent"),
+        "imports: {:?}",
+        result.imports
+    );
+}
+
+#[test]
+fn ts_empty_script_setup_keeps_define_component() {
+    let alloc = Allocator::default();
+    let (setup, full) = make_script("", "<script setup lang=\"ts\">", true);
+    let mut ct = CodeTransform::new(&full, &alloc);
+
+    let result = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Test",
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+    assert!(
+        output.contains("/*@__PURE__*/_defineComponent({"),
+        "empty TS <script setup> should keep _defineComponent, got:\n{}",
+        output
+    );
+    assert!(
+        result.imports.contains(&"_defineComponent"),
+        "imports: {:?}",
+        result.imports
     );
 }
 
@@ -428,12 +650,14 @@ fn scoped_style_adds_scope_id() {
     );
 }
 
-// ── Test 12: _defineComponent is in imports ───────────────────
+// ── Test 12: _defineComponent is in imports (TS only) ─────────
 
 #[test]
 fn define_component_in_imports() {
     let alloc = Allocator::default();
-    let (setup, full) = make_script("", "<script setup>", true);
+    // TS components keep the `_defineComponent` wrapper → the helper import
+    // is tracked. JS components emit a plain object and do not import it.
+    let (setup, full) = make_script("", "<script setup lang=\"ts\">", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
     let result = gen_script(
@@ -1206,8 +1430,9 @@ fn e2e_complex_sfc_valid_js() {
         result.bindings
     );
 
-    // Verify imports
-    assert!(result.imports.contains(&"_defineComponent"));
+    // Verify imports — JS with defineOptions takes the Object.assign merge
+    // path, so no `_defineComponent` helper import is needed.
+    assert!(!result.imports.contains(&"_defineComponent"));
     assert!(result.imports.contains(&"_useCssVars"));
 }
 

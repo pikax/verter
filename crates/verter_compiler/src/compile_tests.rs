@@ -1553,8 +1553,10 @@ const msg = 'hello'
 
 #[test]
 fn script_imports_use_as_syntax() {
+    // TS script setup keeps the `_defineComponent` wrapper, so its helper
+    // import is emitted (JS emits a plain object with no such import).
     let result = compile_sfc(
-        r#"<script setup>
+        r#"<script setup lang="ts">
 const msg = 'hello'
 </script>
 
@@ -6593,12 +6595,12 @@ fn define_model_with_defaults_resolved_type() {
     )]);
     let result = compile_sfc_keep_ts_with_runtime(
         r#"<script setup lang="ts">
+import { DEFAULT_PROPS } from './defaults'
+
 interface ChatInputProps {
   placeholder?: string
   maxLength?: number
 }
-
-const DEFAULT_PROPS = { placeholder: 'Type...', maxLength: 50 }
 
 const props = withDefaults(defineProps<ChatInputProps>(), DEFAULT_PROPS)
 const visible = defineModel('visible', { type: Boolean, default: false })
@@ -6647,9 +6649,8 @@ fn define_model_with_authoritative_defaults_runtime_variable() {
     )]);
     let result = compile_sfc_with_runtime(
         r#"<script setup lang="ts">
-interface ChatInputProps { placeholder?: string }
-
-const DEFAULT_PROPS = { placeholder: 'Type...' }
+import type { ChatInputProps } from './types'
+import { DEFAULT_PROPS } from './defaults'
 
 const props = withDefaults(defineProps<ChatInputProps>(), DEFAULT_PROPS)
 const visible = defineModel('visible', { type: Boolean, default: false })
@@ -15792,6 +15793,9 @@ fn test_slot_cache_text_run_flags_not_inside_text_content() {
     let options = CodegenOptions {
         filename: Some("App.vue".to_string()),
         is_production: true,
+        // Pin the standalone template lane — this test targets template
+        // codegen details, not the (inline) production default topology.
+        inline: Some(false),
         ..Default::default()
     };
     let verter_opts = VerterCompileOptions {
@@ -15910,6 +15914,9 @@ fn test_slot_cached_elements_hoisted_flag_production() {
     let options = CodegenOptions {
         filename: Some("App.vue".to_string()),
         is_production: true,
+        // Pin the standalone template lane — this test targets template
+        // codegen details, not the (inline) production default topology.
+        inline: Some(false),
         ..Default::default()
     };
     let verter_opts = VerterCompileOptions {
@@ -18263,4 +18270,1845 @@ export { type Foo as Baz }
         "type-only export specifiers must go: {code}"
     );
     assert!(code.contains("ref(0)"), "runtime value remains: {code}");
+}
+
+// =========================================================================
+// Inline-template (official production topology)
+// =========================================================================
+//
+// Official `@vue/compiler-sfc` `compileScript({ inlineTemplate: true })`
+// inlines the render function into `setup()` as a returned closure that
+// references setup bindings DIRECTLY (no `$setup.` prefix, `.value` unwrap
+// for refs). Hoisted statics live at module scope. This is the production
+// default (`resolve_inline` = `inline.unwrap_or(is_production)`); VDOM-only
+// (Vapor inline is deferred).
+
+fn compile_sfc_inline(source: &str) -> VerterCompileResult {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        inline: Some(true),
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    compile(
+        source,
+        &options,
+        &verter_opts,
+        &VueMacroSemanticInput::Unavailable,
+        &alloc,
+    )
+}
+
+#[test]
+fn inline_template_merges_render_into_setup_closure() {
+    let result = compile_sfc_inline(
+        r#"<script setup>
+import { ref } from 'vue'
+const msg = ref('hello')
+</script>
+
+<template>
+  <div id="app" :title="msg">{{ msg }}</div>
+</template>
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let script = result.script.as_ref().expect("script block");
+
+    // Render is inlined into setup as a returned closure (official topology).
+    assert!(
+        script.code.contains("return (_ctx,_cache) => {"),
+        "render must be inlined as a returned closure, got:\n{}",
+        script.code
+    );
+    // Setup bindings are referenced DIRECTLY with .value unwrap — no $setup.
+    assert!(
+        script.code.contains("title: msg.value"),
+        "inline render must reference setup bindings directly, got:\n{}",
+        script.code
+    );
+    assert!(
+        !script.code.contains("$setup."),
+        "inline render must not use $setup prefixes, got:\n{}",
+        script.code
+    );
+    // No __returned__ bindings object in inline mode.
+    assert!(
+        !script.code.contains("__returned__"),
+        "inline mode must not emit __returned__, got:\n{}",
+        script.code
+    );
+    // Hoisted statics live at module scope, BEFORE the component object.
+    let hoisted_pos = script
+        .code
+        .find("const _hoisted_1")
+        .expect("hoisted const present");
+    let component_pos = script
+        .code
+        .find("const __sfc__")
+        .expect("component object present");
+    assert!(
+        hoisted_pos < component_pos,
+        "hoists must precede the component object:\n{}",
+        script.code
+    );
+    // The render closure sits inside setup (after the component object opens).
+    let render_pos = script.code.find("return (_ctx,_cache) => {").unwrap();
+    assert!(
+        render_pos > component_pos,
+        "render closure must be inside setup:\n{}",
+        script.code
+    );
+    // No separate template block / standalone render function.
+    assert!(
+        result.template.is_none(),
+        "inline mode must not emit a separate template block"
+    );
+    // The merged module is valid JS (single deduped vue import line).
+    let alloc = Allocator::new();
+    let parsed = oxc_parser::Parser::new(&alloc, &script.code, oxc_span::SourceType::mjs()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "inline output must parse as valid JS: {:?}\n---\n{}",
+        parsed.errors,
+        script.code
+    );
+}
+
+#[test]
+fn inline_template_ts_keeps_define_component_wrapper() {
+    let result = compile_sfc_inline(
+        r#"<script setup lang="ts">
+const msg = 'hi'
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let script = result.script.as_ref().expect("script block");
+    // The V1a gate holds for inline too: TS → _defineComponent wrap + import.
+    assert!(
+        script.code.contains("/*@__PURE__*/_defineComponent({"),
+        "TS inline keeps the _defineComponent wrapper, got:\n{}",
+        script.code
+    );
+    assert!(
+        script.code.contains("defineComponent as _defineComponent"),
+        "TS inline tracks the helper import, got:\n{}",
+        script.code
+    );
+    assert!(
+        script.code.contains("return (_ctx,_cache) => {"),
+        "got:\n{}",
+        script.code
+    );
+}
+
+#[test]
+fn inline_template_js_plain_object_no_define_component() {
+    // V1a gate holds for inline: JS → plain object, no _defineComponent import.
+    let result = compile_sfc_inline(
+        r#"<script setup>
+const msg = 'hi'
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#,
+    );
+    let script = result.script.as_ref().expect("script block");
+    assert!(
+        script.code.contains("const __sfc__ = {"),
+        "JS inline emits a plain object, got:\n{}",
+        script.code
+    );
+    assert!(
+        !script.code.contains("_defineComponent"),
+        "JS inline must not reference _defineComponent, got:\n{}",
+        script.code
+    );
+}
+
+#[test]
+fn inline_template_dev_default_stays_non_inline() {
+    // resolve_inline: None → is_production (dev = non-inline, unchanged).
+    let result = compile_sfc(
+        r#"<script setup>
+const msg = 'hi'
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#,
+    );
+    let script = result.script.as_ref().expect("script block");
+    assert!(
+        !script.code.contains("return (_ctx,_cache) => {"),
+        "dev default must stay non-inline, got:\n{}",
+        script.code
+    );
+    assert!(
+        result.template.is_some(),
+        "non-inline keeps the separate template block"
+    );
+}
+
+#[test]
+fn inline_template_production_default_inlines() {
+    // resolve_inline: None + is_production → inline (official prod default).
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        is_production: true,
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    let result = compile(
+        "<script setup>\nconst msg = 'hi'\n</script>\n<template><div>{{ msg }}</div></template>",
+        &options,
+        &verter_opts,
+        &VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
+    let script = result.script.as_ref().expect("script block");
+    assert!(
+        script.code.contains("return (_ctx,_cache) => {"),
+        "production default must inline, got:\n{}",
+        script.code
+    );
+}
+
+#[test]
+fn inline_template_template_only_sfc_falls_back_to_non_inline() {
+    // No <script setup> to inline into — template-only stays non-inline even
+    // when inline is requested (same as official).
+    let result = compile_sfc_inline("<template><div>hello</div></template>");
+    assert!(
+        result.template.is_some(),
+        "template-only SFC keeps the separate template block"
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(
+        tpl.code.contains("function render(_ctx, _cache)"),
+        "template-only render keeps the standalone 2-param form, got:\n{}",
+        tpl.code
+    );
+}
+
+#[test]
+fn inline_template_vapor_never_inlines() {
+    // Vapor inline is deferred — forcing vapor + inline falls back to the
+    // separate template block.
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        inline: Some(true),
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        force_vapor: true,
+        ..Default::default()
+    };
+    let result = compile(
+        "<script setup>\nconst msg = 'hi'\n</script>\n<template><div>{{ msg }}</div></template>",
+        &options,
+        &verter_opts,
+        &VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
+    assert!(
+        result.template.is_some(),
+        "vapor must keep the separate template block (inline deferred)"
+    );
+}
+
+// =========================================================================
+// Companion default export + defineOptions merging (official 3.6.0-rc.1)
+// =========================================================================
+//
+// Official `@vue/compiler-sfc` non-inline gates on `defaultExport ||
+// definedOptions` PRESENCE — the companion default export (ANY expression)
+// is rebound to `const __default__ = <expr>` and merged, never dropped:
+// - JS: `Object.assign(__default__, <definedOptions>?, { <runtime> })`
+// - TS: `_defineComponent({ ...__default__, ...<definedOptions>?, <runtime> })`
+
+/// Compiles an SFC and returns the script block code, asserting no errors
+/// and valid-JS output.
+fn compile_sfc_script_code(source: &str) -> String {
+    let result = compile_sfc(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let script = result.script.as_ref().expect("script block");
+    let alloc = Allocator::new();
+    let parsed = oxc_parser::Parser::new(&alloc, &script.code, oxc_span::SourceType::mjs()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "output must be valid JS: {:?}\n---\n{}",
+        parsed.errors,
+        script.code
+    );
+    script.code.clone()
+}
+
+#[test]
+fn companion_nonliteral_default_var_ref_preserved() {
+    // BLOCKER: JS <script setup> + companion `export default baseOptions`
+    // (non-literal). Official rebinds to `const __default__ = baseOptions`
+    // and merges via Object.assign — the options are NEVER dropped.
+    let code = compile_sfc_script_code(
+        r#"<script>
+const baseOptions = { inheritAttrs: false }
+export default baseOptions
+</script>
+
+<script setup>
+const msg = 'hi'
+</script>
+
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("const __default__ = baseOptions"),
+        "non-literal companion default must be bound as __default__, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("/*@__PURE__*/Object.assign(__default__, {"),
+        "__default__ must be the Object.assign target, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("__name: 'App'"),
+        "runtime options merged in, got:\n{}",
+        code
+    );
+    assert_eq!(
+        code.matches("export default").count(),
+        1,
+        "exactly one default export (the component), got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn companion_nonliteral_default_call_preserved() {
+    // BLOCKER: companion `export default makeOptions()` (call expression).
+    let code = compile_sfc_script_code(
+        r#"<script>
+function makeOptions() { return { inheritAttrs: false } }
+export default makeOptions()
+</script>
+
+<script setup>
+const msg = 'hi'
+</script>
+
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("const __default__ = makeOptions()"),
+        "call-expression companion default must be bound verbatim, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("/*@__PURE__*/Object.assign(__default__, {"),
+        "__default__ must be the Object.assign target, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn companion_literal_default_merges_via_default_binding() {
+    // Official: literal companion default is ALSO bound as `const __default__`
+    // and used as the Object.assign target (not inlined).
+    let code = compile_sfc_script_code(
+        r#"<script>
+export default {
+  inheritAttrs: false,
+};
+</script>
+
+<script setup>
+const msg = 'hi'
+</script>
+
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("const __default__ = {"),
+        "literal companion default must be bound as __default__, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("inheritAttrs: false"),
+        "companion options preserved, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("/*@__PURE__*/Object.assign(__default__, {"),
+        "__default__ must be the Object.assign target, got:\n{}",
+        code
+    );
+    assert_eq!(
+        code.matches("export default").count(),
+        1,
+        "exactly one default export, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn companion_default_and_define_options_merge_both() {
+    // HIGH: companion default AND defineOptions — official merges BOTH:
+    // Object.assign(__default__, <definedOptions>, { <runtime> }).
+    let code = compile_sfc_script_code(
+        r#"<script>
+export default { name: 'FromScript' }
+</script>
+
+<script setup>
+defineOptions({ inheritAttrs: false })
+const msg = 'hi'
+</script>
+
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("const __default__ = { name: 'FromScript' }"),
+        "companion default bound, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("/*@__PURE__*/Object.assign(__default__, { inheritAttrs: false }, {"),
+        "both option sources merge in official order (default, defineOptions, runtime), got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("name: 'FromScript'") && code.contains("inheritAttrs: false"),
+        "neither option source is dropped, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn companion_define_component_call_preserved() {
+    // HIGH: companion `export default defineComponent({ ... })` — official
+    // keeps the CALL RESULT as the merge target (does not unwrap the call).
+    let code = compile_sfc_script_code(
+        r#"<script>
+import { defineComponent } from 'vue'
+export default defineComponent({ name: 'Kept' })
+</script>
+
+<script setup>
+const msg = 'hi'
+</script>
+
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("const __default__ = defineComponent({"),
+        "the defineComponent(...) call must be preserved as __default__, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("/*@__PURE__*/Object.assign(__default__, {"),
+        "the call result is the Object.assign target, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("name: 'Kept'"),
+        "companion options preserved, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn ts_companion_default_spread_into_define_component() {
+    // TS + companion default: official spreads `...__default__` inside
+    // _defineComponent (the binding is still emitted).
+    let code = compile_sfc_script_code(
+        r#"<script lang="ts">
+export default { inheritAttrs: false }
+</script>
+
+<script setup lang="ts">
+const msg = 'hi'
+</script>
+
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("const __default__ = { inheritAttrs: false }"),
+        "TS companion default bound as __default__, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("/*@__PURE__*/_defineComponent({\n  ...__default__,"),
+        "TS spreads __default__ inside _defineComponent, got:\n{}",
+        code
+    );
+    assert_eq!(
+        code.matches("export default").count(),
+        1,
+        "exactly one default export, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn ts_companion_nonliteral_default_preserved() {
+    // BLOCKER for TS too: non-literal companion default must not be dropped.
+    let code = compile_sfc_script_code(
+        r#"<script lang="ts">
+const baseOptions = { inheritAttrs: false }
+export default baseOptions
+</script>
+
+<script setup lang="ts">
+const msg = 'hi'
+</script>
+
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("const __default__ = baseOptions"),
+        "TS non-literal companion default bound, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("...__default__"),
+        "TS spreads __default__ into the wrapper, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn ts_define_options_spread_shape() {
+    // TS + defineOptions only: official spreads `...<definedOptions>` inside
+    // _defineComponent (not inlined properties).
+    let code = compile_sfc_script_code(
+        r#"<script setup lang="ts">
+defineOptions({ inheritAttrs: false })
+const msg = 'hi'
+</script>
+
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("/*@__PURE__*/_defineComponent({\n  ...{ inheritAttrs: false },"),
+        "TS defineOptions emits the official spread shape, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn ts_companion_and_define_options_merge_both() {
+    // TS with BOTH: official emits both spreads in order.
+    let code = compile_sfc_script_code(
+        r#"<script lang="ts">
+export default { name: 'FromScript' }
+</script>
+
+<script setup lang="ts">
+defineOptions({ inheritAttrs: false })
+const msg = 'hi'
+</script>
+
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("...__default__,"),
+        "companion spread present, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("...{ inheritAttrs: false },"),
+        "defineOptions spread present, got:\n{}",
+        code
+    );
+    let default_pos = code.find("...__default__").unwrap();
+    let options_pos = code.find("...{ inheritAttrs: false }").unwrap();
+    assert!(
+        default_pos < options_pos,
+        "official order: __default__ spread before defineOptions spread, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn self_closing_setup_with_companion_default_merges_via_default_binding() {
+    // Edge case in the companion family: `<script setup />` + companion
+    // `export default <expr>` must not produce duplicate default exports —
+    // official rebinds to `const __default__` and merges via Object.assign.
+    let code = compile_sfc_script_code(
+        r#"<script>
+export default { inheritAttrs: false }
+</script>
+
+<script setup />
+
+<template><div>hi</div></template>"#,
+    );
+    assert!(
+        code.contains("const __default__ = { inheritAttrs: false }"),
+        "companion default must be bound as __default__, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("/*@__PURE__*/Object.assign(__default__, {"),
+        "__default__ must merge into the minimal component, got:\n{}",
+        code
+    );
+    assert_eq!(
+        code.matches("export default").count(),
+        1,
+        "exactly one default export, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn companion_default_merges_in_inline_template_mode() {
+    // The companion merge holds on the inline (production) topology too:
+    // `__default__` bound + Object.assign + render inlined into setup.
+    let result = compile_sfc_inline(
+        r#"<script>
+export default { inheritAttrs: false }
+</script>
+
+<script setup>
+const msg = 'hi'
+</script>
+
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let script = result.script.as_ref().expect("script block");
+    assert!(
+        script
+            .code
+            .contains("const __default__ = { inheritAttrs: false }"),
+        "companion default bound in inline mode, got:\n{}",
+        script.code
+    );
+    assert!(
+        script
+            .code
+            .contains("/*@__PURE__*/Object.assign(__default__, {"),
+        "Object.assign merge in inline mode, got:\n{}",
+        script.code
+    );
+    assert!(
+        script.code.contains("return (_ctx,_cache) => {"),
+        "render inlined into setup, got:\n{}",
+        script.code
+    );
+    assert_eq!(
+        script.code.matches("export default").count(),
+        1,
+        "exactly one default export, got:\n{}",
+        script.code
+    );
+}
+
+// =========================================================================
+// D1 — defineOptions() must not reference setup-local bindings
+// =========================================================================
+//
+// Official `@vue/compiler-sfc` (3.6.0-rc.1) emits a compile ERROR when a
+// `defineOptions()` argument references a locally declared (setup) variable,
+// because the argument is hoisted outside `setup()`:
+//   "`defineOptions()` in <script setup> cannot reference locally declared
+//    variables because it will be hoisted outside of the setup() function.
+//    If your component options require initialization in the module scope,
+//    use a separate normal <script> to export the options instead."
+// Literal-const bindings and imports stay valid.
+
+const D1_OFFICIAL_MESSAGE: &str = "in <script setup> cannot reference locally declared variables";
+
+#[test]
+fn define_options_setup_local_ref_is_compile_error() {
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst someRef = ref('x')\ndefineOptions({ name: someRef })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(D1_OFFICIAL_MESSAGE)),
+        "setup-local defineOptions reference must be a compile error (official), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_options_setup_local_call_result_is_compile_error() {
+    // Any non-literal setup binding is invalid (const opts = { ... }).
+    let result = compile_sfc(
+        "<script setup>\nconst opts = { name: 'x' }\ndefineOptions(opts)\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(D1_OFFICIAL_MESSAGE)),
+        "setup-local options object must be a compile error (official), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_options_literal_const_reference_stays_valid() {
+    // Official exempts literal-const bindings (they are hoistable constants).
+    let result = compile_sfc(
+        "<script setup>\nconst compName = 'MyComp'\ndefineOptions({ name: compName })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "literal-const reference must stay valid (official exemption), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_options_imported_reference_stays_valid() {
+    // Imports are module scope — `defineOptions(importedOpts)` is valid and
+    // becomes the Object.assign target (official).
+    let code = compile_sfc_script_code(
+        "<script setup>\nimport importedOpts from './opts'\ndefineOptions(importedOpts)\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        code.contains("/*@__PURE__*/Object.assign(importedOpts, {"),
+        "imported options must be the Object.assign target, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// D2 — template ref binding
+// =========================================================================
+//
+// Official inline (compileScript({ inlineTemplate: true })): a static
+// `ref="el"` whose name matches a setup-let/setup-ref/setup-maybe-ref binding
+// compiles to `{ ref_key: "el", ref: el }` — the setup binding receives the
+// element. A dynamic `:ref="elRef"` resolves in scope (`{ ref: elRef.value }`
+// inline / `{ ref: $setup.elRef }` non-inline) and is NEVER hoisted out of
+// setup. Non-inline static refs stay `{ ref: "el" }`.
+
+#[test]
+fn inline_static_ref_with_setup_binding_emits_ref_key_binding() {
+    let result = compile_sfc_inline(
+        "<script setup>\nimport { ref } from 'vue'\nconst el = ref(null)\n</script>\n<template><div ref=\"el\">x</div></template>",
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("ref_key: \"el\""),
+        "inline static ref to a setup binding must emit ref_key, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("ref: el"),
+        "inline static ref to a setup binding must reference the binding directly, got:\n{}",
+        code
+    );
+    // The ref pair must live INSIDE setup (the render closure), never hoisted
+    // to module scope (would be a ReferenceError).
+    let setup_pos = code.find("setup(__props").expect("setup present");
+    let ref_pos = code.find("ref_key: \"el\"").expect("ref_key present");
+    assert!(
+        ref_pos > setup_pos,
+        "ref_key/ref must be inside setup (the render closure), got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("const _hoisted_"),
+        "the ref props object must not be hoisted to module scope, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn inline_static_ref_without_binding_stays_hoisted_string() {
+    // No matching setup binding → official keeps `{ ref: "el" }` (hoisted string).
+    let result = compile_sfc_inline(
+        "<script setup>\nconst x = 1\n</script>\n<template><div ref=\"el\">x</div></template>",
+    );
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("{ ref: \"el\" }"),
+        "static ref without a setup binding stays a string, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn inline_dynamic_ref_with_setup_binding_not_hoisted() {
+    // Dynamic :ref resolves in setup scope (elRef.value), never hoisted
+    // (hoisting to module scope was a ReferenceError).
+    let result = compile_sfc_inline(
+        "<script setup>\nimport { ref } from 'vue'\nconst elRef = ref(null)\n</script>\n<template><div :ref=\"elRef\">x</div></template>",
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("{ ref: elRef.value }"),
+        "inline dynamic ref resolves in setup scope, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("const _hoisted_"),
+        "dynamic ref props object must not be hoisted to module scope, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn noninline_static_ref_with_setup_binding_stays_string() {
+    // Non-inline static ref matches official: `{ ref: "el" }` (string).
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst el = ref(null)\n</script>\n<template><div ref=\"el\">x</div></template>",
+    );
+    let tpl = &result.template.as_ref().expect("template block").code;
+    assert!(
+        tpl.contains("{ ref: \"el\" }"),
+        "non-inline static ref stays a string (official), got:\n{}",
+        tpl
+    );
+}
+
+#[test]
+fn noninline_dynamic_ref_with_setup_binding_not_hoisted() {
+    // Non-inline was ALSO broken: `{ ref: $setup.elRef }` hoisted to module
+    // scope ($setup is a render parameter — ReferenceError at module load).
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst elRef = ref(null)\n</script>\n<template><div :ref=\"elRef\">x</div></template>",
+    );
+    let tpl = &result.template.as_ref().expect("template block").code;
+    assert!(
+        tpl.contains("{ ref: $setup.elRef }"),
+        "non-inline dynamic ref resolves via $setup in the render fn, got:\n{}",
+        tpl
+    );
+    assert!(
+        !tpl.contains("const _hoisted_1 = { ref: $setup"),
+        "dynamic ref props object must not be hoisted to module scope, got:\n{}",
+        tpl
+    );
+}
+
+// =========================================================================
+// D4 — inline setup context: attrs/slots destructure
+// =========================================================================
+//
+// Official inline injects `attrs: $attrs` / `slots: $slots` into the setup
+// context destructure WHEN the template uses `$attrs`/`$slots` (on-use;
+// `buildDestructureElements` runs only for inlineTemplate). Template
+// references then resolve to the destructured binding (bare), not `_ctx.*`.
+
+#[test]
+fn inline_template_using_attrs_destructures_attrs() {
+    let result = compile_sfc_inline(
+        "<script setup>\nconst x = 1\n</script>\n<template><div v-bind=\"$attrs\">x</div></template>",
+    );
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("setup(__props, { attrs: $attrs })"),
+        "inline setup must destructure attrs on template use, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("$attrs") && !code.contains("_ctx.$attrs"),
+        "template $attrs references resolve to the destructured binding, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn inline_template_using_slots_destructures_slots() {
+    let result = compile_sfc_inline(
+        "<script setup>\nconst x = 1\n</script>\n<template><div :class=\"$slots.default ? 'y' : 'n'\">x</div></template>",
+    );
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("setup(__props, { slots: $slots })"),
+        "inline setup must destructure slots on template use, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("$slots.default") && !code.contains("_ctx.$slots.default"),
+        "template $slots references resolve to the destructured binding, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn inline_plain_template_no_attrs_slots_destructure() {
+    // On-use condition: no $attrs/$slots usage → no destructure (official).
+    let result = compile_sfc_inline(
+        "<script setup>\nconst x = 1\n</script>\n<template><div>{{ x }}</div></template>",
+    );
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("setup(__props)"),
+        "no attrs/slots destructure without template use, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("attrs: $attrs") && !code.contains("slots: $slots"),
+        "got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// D7 — result.inline reflects the runtime inline ACTUALLY happening
+// =========================================================================
+
+#[test]
+fn result_inline_false_for_ide_target() {
+    // IDE emits only TSX (no runtime inline body) — result.inline must not
+    // be set merely because the option is on.
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        inline: Some(true),
+        target: CompileTarget::IDE,
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    let result = compile(
+        "<script setup>\nconst msg = 'hi'\n</script>\n<template><div>{{ msg }}</div></template>",
+        &options,
+        &verter_opts,
+        &VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
+    assert!(result.tsx.is_some(), "IDE target emits TSX");
+    assert!(
+        !result.inline,
+        "result.inline must be false for the IDE target (no runtime inline)"
+    );
+}
+
+#[test]
+fn result_inline_true_when_runtime_inline_happens() {
+    let result = compile_sfc_inline(
+        "<script setup>\nconst msg = 'hi'\n</script>\n<template><div>{{ msg }}</div></template>",
+    );
+    assert!(
+        result.inline,
+        "result.inline true when the runtime inline happened"
+    );
+    assert!(result.template.is_none());
+}
+
+// =========================================================================
+// FIX1 — inline template refs: user (maybe-ref) imports bind ref_key/ref
+// =========================================================================
+//
+// Official binding metadata (compiler-sfc 3.6.0-rc.1):
+//   imported === "*" || (imported === "default" && source.endsWith(".vue"))
+//     || source === "vue"  →  "setup-const"   (string ref)
+//   everything else (named imports anywhere, default imports from
+//     non-vue non-.vue sources)              →  "setup-maybe-ref" (ref_key/ref)
+
+#[test]
+fn inline_static_ref_with_named_user_import_binds_ref_key() {
+    let result = compile_sfc_inline(
+        "<script setup>\nimport { elRef } from './refs'\n</script>\n<template><div ref=\"elRef\">x</div></template>",
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("ref_key: \"elRef\""),
+        "named user import used as a template ref must bind ref_key (official setup-maybe-ref), got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("ref: elRef"),
+        "must reference the import binding directly, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("const _hoisted_"),
+        "the ref pair must not be hoisted to module scope, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn inline_static_ref_with_default_user_import_binds_ref_key() {
+    // Default import from a non-.vue source → setup-maybe-ref (binds).
+    let result = compile_sfc_inline(
+        "<script setup>\nimport elRef from './refs'\n</script>\n<template><div ref=\"elRef\">x</div></template>",
+    );
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("ref_key: \"elRef\"") && code.contains("ref: elRef"),
+        "default user import from a non-.vue source must bind ref_key/ref (official), got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn inline_static_ref_with_vue_import_stays_string() {
+    // vue-source import → setup-const → string ref (official).
+    let result = compile_sfc_inline(
+        "<script setup>\nimport { ref } from 'vue'\nconst x = ref(1)\n</script>\n<template><div ref=\"ref\">x</div></template>",
+    );
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("{ ref: \"ref\" }") && !code.contains("ref_key"),
+        "vue-source import must stay a string ref, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn inline_static_ref_with_namespace_import_stays_string() {
+    // `import * as refs` → setup-const → string ref (official).
+    let result = compile_sfc_inline(
+        "<script setup>\nimport * as refs from './refs'\n</script>\n<template><div ref=\"refs\">x</div></template>",
+    );
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("{ ref: \"refs\" }") && !code.contains("ref_key"),
+        "namespace import must stay a string ref, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn inline_static_ref_with_dotvue_default_import_stays_string() {
+    // Default import from a .vue source → setup-const → string ref (official).
+    let result = compile_sfc_inline(
+        "<script setup>\nimport Comp from './Comp.vue'\n</script>\n<template><div ref=\"Comp\">x</div></template>",
+    );
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("{ ref: \"Comp\" }") && !code.contains("ref_key"),
+        "default .vue import must stay a string ref, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// FIX2 — all-literal enum is a literal-const (valid in defineOptions)
+// =========================================================================
+
+#[test]
+fn define_options_all_literal_enum_stays_valid() {
+    // Official isAllLiteral: every member has no initializer or a static
+    // (scalar-literal) initializer → literal-const → allowed.
+    let code = compile_sfc_script_code(
+        "<script setup lang=\"ts\">\nenum E { A, B }\ndefineOptions({ x: E.A })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        code.contains("E.A"),
+        "all-literal enum must stay valid (official literal-const), got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn define_options_non_literal_enum_member_is_compile_error() {
+    let result = compile_sfc(
+        "<script setup lang=\"ts\">\nfunction someFn(): number { return 1 }\nenum E { A = someFn() }\ndefineOptions({ x: E.A })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(D1_OFFICIAL_MESSAGE)),
+        "enum with a non-literal member must be rejected (official), got: {:?}",
+        result.errors
+    );
+}
+
+// =========================================================================
+// R5-FIX1 — `is_static_node` unwraps TS wrappers (official `unwrapTSNode`)
+// =========================================================================
+//
+// Official `isStaticNode` calls `unwrapTSNode(node)` FIRST, stripping
+// `as`/`satisfies`/`!`/type-assertion/instantiation wrappers before the
+// scalar-literal / static-composition match. So an all-literal enum whose
+// members carry those wrappers is still `literal-const` and stays valid in
+// `defineOptions`/`defineProps`/etc.
+
+#[test]
+fn r5_fix1_enum_ts_wrapped_literal_members_stay_valid() {
+    // `1 as const` / `2 satisfies number` unwrap to scalar literals → every
+    // member is static → the enum is all-literal (literal-const) → referencing
+    // it in defineOptions is valid (no scope-reference error).
+    let result = compile_sfc(
+        "<script setup lang=\"ts\">\nenum E { A = 1 as const, B = 2 satisfies number }\ndefineOptions({ x: E.A })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "TS-wrapped all-literal enum must stay valid (official unwrapTSNode), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn r5_fix1_enum_nonnull_and_assertion_wrapped_members_stay_valid() {
+    // Non-null `!` and angle-bracket type-assertion wrappers over scalar
+    // literals also unwrap to statics → all-literal enum stays valid.
+    let result = compile_sfc(
+        "<script setup lang=\"ts\">\nenum E { A = 1!, B = (2 as const) }\ndefineOptions({ y: E.B })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "non-null / parenthesized TS-wrapped enum members must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn r5_fix1_enum_non_static_ts_wrapped_member_still_rejected() {
+    // `foo() as const` unwraps to a CALL expression — NOT static — so the enum
+    // is setup-const and referencing it in defineOptions is rejected. This is
+    // the negative guard proving the unwrap does not over-accept.
+    let result = compile_sfc(
+        "<script setup lang=\"ts\">\nfunction foo(): number { return 1 }\nenum E { A = foo() as const }\ndefineOptions({ x: E.A })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(D1_OFFICIAL_MESSAGE)),
+        "non-static TS-wrapped enum member must keep the enum setup-const (rejected), got: {:?}",
+        result.errors
+    );
+}
+
+// =========================================================================
+// R5-FIX2 — `classify_const_init` static-node forms are `LiteralConst`
+// =========================================================================
+//
+// Official `walkDeclaration` marks a const `literal-const` when
+// `isStaticNode(unwrapTSNode(init))` — covering static unary/binary/logical
+// compositions, expression-free template literals, and TS-unwrapped scalars.
+// Object/array literals are NOT static (kept setup-const, `canNeverBeRef`).
+
+#[test]
+fn r5_fix2_static_compositions_are_literal_const() {
+    for init in [
+        "const K = 1 + 2",      // binary of literals
+        "const K = -1",         // unary of a literal
+        "const K = `x`",        // template literal, no expressions
+        "const K = !true",      // unary of a boolean literal
+        "const K = 5 as const", // TS-wrapped scalar
+        "const K = 1 + 2 * 3",  // nested static binary
+    ] {
+        let src = format!(
+            "<script setup lang=\"ts\">\n{init}\ndefineOptions({{ x: K }})\n</script>\n<template><div>x</div></template>"
+        );
+        let result = compile_sfc(&src);
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+            "static const `{init}` must be literal-const (valid in defineOptions), got: {:?}",
+            result.errors
+        );
+    }
+}
+
+#[test]
+fn r5_fix2_object_and_array_literals_stay_rejected() {
+    // Official isStaticNode is false for object/array expressions → setup-const
+    // → rejected in defineOptions. The unwrap/static widening must NOT leak here.
+    for init in ["const o = { a: 1 }", "const o = [1, 2]"] {
+        let src = format!(
+            "<script setup lang=\"ts\">\n{init}\ndefineOptions({{ x: o }})\n</script>\n<template><div>x</div></template>"
+        );
+        let result = compile_sfc(&src);
+        assert!(
+            result.errors.iter().any(|d| d.severity
+                == crate::compile::CompileDiagnosticSeverity::Error
+                && d.message.contains(D1_OFFICIAL_MESSAGE)),
+            "object/array const `{init}` must stay setup-const (rejected), got: {:?}",
+            result.errors
+        );
+    }
+}
+
+// =========================================================================
+// R5-FIX3 — scope-check detects setup-locals at any name length / nesting
+// =========================================================================
+//
+// Official `checkInvalidScopeReference` walks EVERY referenced identifier in
+// the macro runtime argument (nested object-property values, array elements,
+// any name length), excluding nested function-scope locals. The prior tests
+// used multi-char names; a 1-char nested default slipped the check because the
+// `Props` prop-key bindings carry FILE-relative spans that, sliced into the
+// content-relative name map, could overwrite a same-length setup binding.
+
+#[test]
+fn r5_fix3_one_char_setup_local_nested_default_is_error() {
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\ndefineProps({ x: { default: f } })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineProps()` in <script setup> cannot reference locally declared variables"
+            )),
+        "1-char setup-local nested default must be rejected (official), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn r5_fix3_one_char_setup_local_array_element_is_error() {
+    // 1-char setup-local as an array element inside defineEmits.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst e = ref('save')\ndefineEmits([e])\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineEmits()` in <script setup> cannot reference locally declared variables"
+            )),
+        "1-char setup-local array element must be rejected (official), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn r5_fix3_nested_validator_function_local_stays_valid() {
+    // A nested validator function param (`f`) shadowing the setup binding name
+    // is a function-scope local — official does NOT reject it. The reference
+    // `f > 0` resolves to the param, not the setup ref.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\ndefineProps({ x: { validator: (f) => f > 0 } })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "a nested validator function param shadowing a setup name must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn r5_fix3_setup_local_inside_nested_function_body_is_error() {
+    // A setup-local referenced INSIDE a nested function body but NOT shadowed
+    // (no param/local of that name) is still an invalid scope reference —
+    // official walkIdentifiers records it because it is not a function-scope local.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst g = ref(0)\ndefineProps({ x: { default: () => g.value } })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineProps()` in <script setup> cannot reference locally declared variables"
+            )),
+        "an un-shadowed setup-local used inside a nested function body must be rejected, got: {:?}",
+        result.errors
+    );
+}
+
+// =========================================================================
+// FIX3 — scope check for defineProps / defineEmits / defineModel
+// =========================================================================
+
+#[test]
+fn define_props_local_ref_default_is_compile_error() {
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst dft = ref('x')\ndefineProps({ x: { default: dft } })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineProps()` in <script setup> cannot reference locally declared variables"
+            )),
+        "defineProps default referencing a setup-local must be rejected (official), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_props_imported_default_stays_valid() {
+    let result = compile_sfc(
+        "<script setup>\nimport { dft } from './defs'\ndefineProps({ x: { default: dft } })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "imported default must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_emits_local_ref_is_compile_error() {
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst evt = ref('save')\ndefineEmits([evt])\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineEmits()` in <script setup> cannot reference locally declared variables"
+            )),
+        "defineEmits referencing a setup-local must be rejected (official), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_model_local_ref_default_is_compile_error() {
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst dft = ref('x')\nconst m = defineModel({ default: dft })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineModel()` in <script setup> cannot reference locally declared variables"
+            )),
+        "defineModel default referencing a setup-local must be rejected (official), got: {:?}",
+        result.errors
+    );
+}
+
+// =========================================================================
+// defineModel get/set transformers are NOT hoisted — setup-local refs valid
+// =========================================================================
+//
+// Official `processDefineModel` (3.6.0-rc.1) emits a defineModel options
+// object's `get`/`set` transformer functions back INTO setup() (they wrap the
+// model ref via `useModel`), so ONLY the non-get/set option properties are
+// hoisted and scope-checked (`runtimeOptionNodes`). A setup-local referenced
+// inside `get`/`set` is therefore VALID; a spread element or a computed key in
+// the options object defeats static analysis and the whole object is skipped.
+// (defineProps/defineEmits options ARE hoisted wholesale, so a setup-local
+// there stays correctly rejected — see the tests above.)
+
+#[test]
+fn define_model_get_set_arrow_setup_local_stays_valid() {
+    // The headline false-positive: get/set ARROW transformers referencing a
+    // setup-local ref. Official accepts (they are emitted into setup()).
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\nconst m = defineModel({ get: () => f.value, set: (v) => { f.value = v } })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "defineModel get/set arrow transformers referencing a setup-local must stay valid (official emits them into setup()), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_model_get_set_method_form_setup_local_stays_valid() {
+    // Method-shorthand form `get() { ... }` / `set(v) { ... }` — same key name,
+    // still skipped.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\nconst m = defineModel({ get() { return f.value }, set(v) { f.value = v } })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "defineModel get/set method-form transformers referencing a setup-local must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_model_get_set_string_key_setup_local_stays_valid() {
+    // String-literal keys `"get"` / `"set"` — official matches by key value.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\nconst m = defineModel({ \"get\": () => f.value, \"set\": (v) => { f.value = v } })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "defineModel string-key get/set transformers referencing a setup-local must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_model_options_spread_skips_scope_check() {
+    // A spread element defeats static analysis — official leaves
+    // `runtimeOptionNodes` empty and checks nothing (even a `get` referencing a
+    // setup-local; `...extra` is an import here, the only setup-local is `f`).
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nimport { extra } from './x'\nconst f = ref(0)\nconst m = defineModel({ ...extra, get: () => f.value })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "defineModel options with a spread element must skip the scope check (official), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_model_options_computed_key_skips_scope_check() {
+    // A computed key defeats static analysis — official skips the whole object.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst k = ref('get')\nconst f = ref(0)\nconst m = defineModel({ [k.value]: () => f.value })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "defineModel options with a computed key must skip the scope check (official), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_model_named_get_set_setup_local_stays_valid() {
+    // Named model: the options object is arg1; get/set are still skipped.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\nconst m = defineModel('count', { get: () => f.value, set: (v) => { f.value = v } })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "named defineModel get/set transformers referencing a setup-local must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_model_default_arrow_setup_local_still_errors() {
+    // `default` IS a hoisted runtime option — a setup-local reference (even
+    // behind an arrow) stays invalid. Guards against over-skipping.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\nconst m = defineModel({ default: () => f.value })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineModel()` in <script setup> cannot reference locally declared variables"
+            )),
+        "defineModel `default` arrow referencing a setup-local must STILL be rejected (hoisted), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_model_named_default_setup_local_still_errors() {
+    // Named model: `default` on arg1 is still a hoisted runtime option.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\nconst m = defineModel('count', { default: f })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineModel()` in <script setup> cannot reference locally declared variables"
+            )),
+        "named defineModel `default` referencing a setup-local must STILL be rejected, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_model_default_function_scope_local_stays_valid() {
+    // A function-scope local inside `default` is not a setup-local — valid,
+    // exactly as for defineProps.
+    let result = compile_sfc(
+        "<script setup>\nconst m = defineModel({ default: () => { const x = 1; return x } })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "defineModel `default` with only a function-scope local must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
+// =========================================================================
+// R7-1 — parenthesized NAMED defineModel options must still be scope-checked
+// =========================================================================
+//
+// OXC materialises `(expr)` as an explicit `ParenthesizedExpression` node,
+// whereas Babel (the official parser) folds parentheses into an
+// `extra.parenthesized` flag and exposes no wrapper node. For the NAMED form
+// `defineModel("name", ({ ... }))`, official reads `node.arguments[1]` and tests
+// `options.type === "ObjectExpression"` — which holds in Babel because there is
+// no wrapper node. We must peel the paren node (ONLY the paren node, NOT the TS
+// wrappers, matching official's un-`unwrapTSNode`'d `arguments[1]`) to reach the
+// same ObjectExpression; otherwise ALL scope checks are skipped and a hoisted
+// `default: <setup-local>` is wrongly accepted.
+
+#[test]
+fn define_model_named_paren_default_setup_local_still_errors() {
+    // The R7-1 defect: parenthesized named options — `default: f` (a setup-local)
+    // is a hoisted runtime option and must be rejected. Was ACCEPTED (the paren
+    // wrapper node was not recognised as an ObjectExpression, skipping the check).
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\nconst m = defineModel('count', ({ default: f }))\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineModel()` in <script setup> cannot reference locally declared variables"
+            )),
+        "parenthesized named defineModel `default` referencing a setup-local must be rejected, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_model_named_paren_get_skips_but_default_errors() {
+    // Mixed: a `get` transformer (setup-scoped, valid) alongside a hoisted
+    // `default: f` (invalid). Peeling the paren must restore the get/set split —
+    // `get` stays fine while `default: f` is still rejected.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\nconst m = defineModel('count', ({ get: () => f.value, default: f }))\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineModel()` in <script setup> cannot reference locally declared variables"
+            )),
+        "parenthesized named defineModel with a hoisted `default: f` must be rejected, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_model_named_paren_get_only_stays_valid() {
+    // A parenthesized named options object with ONLY a `get` transformer
+    // referencing a setup-local stays valid (get is emitted back into setup()).
+    // Guards against the paren-peel over-rejecting the setup-scoped transformer.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\nconst m = defineModel('count', ({ get: () => f.value }))\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "parenthesized named defineModel with only a `get` transformer must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn with_defaults_local_ref_default_is_compile_error() {
+    // Type-based defineProps + runtime defaults with a setup-local reference —
+    // official reports it under `defineProps()`.
+    let result = compile_sfc(
+        "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst dft = ref('x')\nwithDefaults(defineProps<{ x?: string }>(), { x: dft.value })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineProps()` in <script setup> cannot reference locally declared variables"
+            )),
+        "withDefaults defaults referencing a setup-local must be rejected (official), got: {:?}",
+        result.errors
+    );
+}
+
+// =========================================================================
+// defineProps reactive-destructure default scope-check
+// =========================================================================
+//
+// Official sets `ctx.propsDestructureDecl` (the node
+// `checkInvalidScopeReference(ctx.propsDestructureDecl, DEFINE_PROPS)` walks)
+// ONLY in `processDefineProps` when the call is a DIRECT `defineProps` (NOT
+// `withDefaults`, i.e. `isWithDefaults === false`) AND the declaration id is an
+// `ObjectPattern`. In that reactive-destructure form the default expressions are
+// hoisted with the props runtime decl (the `mergeDefaults` merge), so a default
+// referencing a setup-local breaks at runtime and is rejected under
+// `defineProps()`. The destructured binding NAMES are NOT registered as
+// setup-locals (official's `walkDeclaration` skips them), so only the default
+// `right` expressions can trigger the error — never the destructure targets /
+// aliases. Two forms are NOT props destructures and stay valid: under
+// `withDefaults(...)` reactive destructure is DISABLED (the declId is never
+// recorded, defaults are not hoisted), and a top-level ARRAY pattern is never a
+// props destructure. DIAGNOSTIC ONLY: the reactive-destructure
+// `_mergeDefaults`/`__props` runtime transform is a separate concern and is
+// intentionally NOT implemented here.
+
+#[test]
+fn define_props_destructure_default_setup_local_is_compile_error() {
+    // R7-2 defect: `const { x = dft }` where `dft` is a setup-local. The default
+    // is hoisted → official rejects; Verter accepted (never walked the pattern).
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst dft = ref('x')\nconst { x = dft } = defineProps({ x: Number })\n</script>\n<template><div>{{ x }}</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineProps()` in <script setup> cannot reference locally declared variables"
+            )),
+        "defineProps destructure default referencing a setup-local must be rejected (official), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_props_destructure_alias_default_setup_local_is_compile_error() {
+    // Aliased form `{ x: y = dft }` — the default `dft` is still hoisted; the
+    // alias local `y` is a binding target (never flagged), `dft` is the
+    // setup-local that must be rejected.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst dft = ref('x')\nconst { x: y = dft } = defineProps({ x: Number })\n</script>\n<template><div>{{ y }}</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineProps()` in <script setup> cannot reference locally declared variables"
+            )),
+        "aliased defineProps destructure default referencing a setup-local must be rejected, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn with_defaults_destructure_default_setup_local_stays_valid() {
+    // Under `withDefaults(...)` reactive props destructure is DISABLED
+    // (`processDefineProps(..., isWithDefaults=true)` never calls
+    // `processPropsDestructure`, so `propsDestructureDecl` is never set). The
+    // destructure then runs as a plain in-setup destructure and its defaults are
+    // NOT hoisted out of setup() — a setup-local default is therefore VALID
+    // (official emits only a warning, never the scope error). Only the direct
+    // `defineProps` reactive-destructure form hoists the defaults.
+    let result = compile_sfc(
+        "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst dft = ref('x')\nconst { x = dft } = withDefaults(defineProps<{ x?: string }>(), {})\n</script>\n<template><div>{{ x }}</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "withDefaults destructure default referencing a setup-local must stay valid (official disables reactive destructure under withDefaults; only warns), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_props_destructure_default_import_stays_valid() {
+    // An imported default is module-scope — valid (never hoisted out of reach).
+    let result = compile_sfc(
+        "<script setup>\nimport { someImport } from './defs'\nconst { x = someImport } = defineProps({ x: Number })\n</script>\n<template><div>{{ x }}</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "defineProps destructure default referencing an import must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_props_destructure_default_literal_stays_valid() {
+    // A literal default carries no free reference — valid.
+    let result = compile_sfc(
+        "<script setup>\nconst { x = 1 } = defineProps({ x: Number })\n</script>\n<template><div>{{ x }}</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "defineProps destructure literal default must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_props_destructure_default_function_scope_local_stays_valid() {
+    // A local declared INSIDE a default factory function body is function-scope,
+    // not a setup-local — valid, exactly as for the runtime-object default path.
+    let result = compile_sfc(
+        "<script setup>\nconst { x = () => { const a = 1; return a } } = defineProps({ x: Number })\n</script>\n<template><div>{{ x }}</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "defineProps destructure default factory with only a function-scope local must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn array_pattern_destructure_default_setup_local_stays_valid() {
+    // Only an ObjectPattern declId is a props destructure (official
+    // `processDefineProps` gates on `declId.type === "ObjectPattern"`). A
+    // top-level ARRAY pattern is never recorded as `propsDestructureDecl`, so its
+    // defaults are not hoisted and a setup-local default stays VALID.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst d = ref(0)\nconst [a = d] = defineProps({ x: Number })\n</script>\n<template><div>{{ a }}</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "a top-level array-pattern destructure of defineProps is not a props destructure — a setup-local default must stay valid (official), got: {:?}",
+        result.errors
+    );
+}
+
+// =========================================================================
+// Wrapped macro CALL SITES — peel Parenthesized + TS wrappers before detection
+// =========================================================================
+//
+// Official runs `unwrapTSNode(node.expression)` / `unwrapTSNode(decl.init)`
+// BEFORE `isCallOf(...)` dispatches to processDefineProps / processDefineEmits /
+// processDefineModel / processDefineOptions / withDefaults. Babel folds
+// parentheses into a flag (no wrapper node), so a merely-parenthesized macro
+// call still matches; OXC materializes an explicit `ParenthesizedExpression`, so
+// Verter peels parens plus the 5 TS wrapper nodes (`as` / satisfies / non-null /
+// type-assertion / instantiation) to reach the same CallExpression. Without the
+// peel the whole scope walk is skipped and a setup-local reference goes uncaught.
+
+#[test]
+fn paren_wrapped_define_props_call_setup_local_default_is_error() {
+    // `(defineProps({...}))` — a parenthesized bare macro call. Official detects
+    // it (Babel drops the paren); Verter must peel the OXC paren node.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\n;(defineProps({ x: { default: f } }))\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineProps()` in <script setup> cannot reference locally declared variables"
+            )),
+        "a parenthesized defineProps call must still be scope-checked (official peels wrappers), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn ts_as_wrapped_define_props_call_setup_local_default_is_error() {
+    // `(defineProps({...}) as any)` — a TS `as`-wrapped bare macro call. Official
+    // `unwrapTSNode` peels TSAsExpression before `isCallOf`.
+    let result = compile_sfc(
+        "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst f = ref(0)\n;(defineProps({ x: { default: f } }) as any)\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineProps()` in <script setup> cannot reference locally declared variables"
+            )),
+        "a TS-as-wrapped defineProps call must still be scope-checked (official unwrapTSNode), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn ts_wrapped_define_model_init_setup_local_default_is_error() {
+    // `const m = (defineModel({...}) as any)` — a TS/paren-wrapped macro in a
+    // variable init. Official peels `decl.init` via unwrapTSNode before isCallOf,
+    // so the get/set-aware defineModel scope check still applies to the hoisted
+    // `default` option.
+    let result = compile_sfc(
+        "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst f = ref(0)\nconst m = (defineModel({ default: f }) as any)\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineModel()` in <script setup> cannot reference locally declared variables"
+            )),
+        "a TS-wrapped defineModel init must still be scope-checked (official peels decl.init), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn paren_wrapped_define_props_call_imported_default_stays_valid() {
+    // Discrimination: the peel must not over-reject — a wrapped call whose default
+    // is an import (module scope) stays valid.
+    let result = compile_sfc(
+        "<script setup>\nimport { dft } from './defs'\n;(defineProps({ x: { default: dft } }))\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "a parenthesized defineProps call with an imported default must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
+// =========================================================================
+// FIX4 — inline setup destructure order: expose, emit, attrs, slots
+// =========================================================================
+
+#[test]
+fn inline_setup_destructure_official_order() {
+    // Official builds emit (__emit) BEFORE buildDestructureElements pushes
+    // attrs/slots — so emit precedes attrs/slots.
+    let result = compile_sfc_inline(
+        "<script setup>\nconst emit = defineEmits(['save'])\ndefineExpose({ x: 1 })\n</script>\n<template><div :data-a=\"$attrs\" :data-s=\"$slots.default\">x</div></template>",
+    );
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains(
+            "setup(__props, { expose: __expose, emit: __emit, attrs: $attrs, slots: $slots })"
+        ),
+        "official destructure order is expose, emit, attrs, slots, got:\n{}",
+        code
+    );
 }

@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/elements-text/dynamic-style.vue"
+  ],
+  "names": [],
+  "mappings": ";;;wBAQE,oBAA2D;IAArD,KAAK,2BAAI,YAAK,aAAa,UAAG;KAAW,QAAM",
+  "sourcesContent": [
+    "\n  <div :style=\"{ color, marginTop: top + 'px' }\">Styled</div>\n"
+  ]
+}

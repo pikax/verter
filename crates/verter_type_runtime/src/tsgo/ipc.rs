@@ -4,11 +4,10 @@
 //! the Language Server Protocol over stdin/stdout with JSON-RPC framing.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::UNIX_EPOCH;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
@@ -1365,15 +1364,19 @@ pub struct TsgoTypeProvider {
 
 impl Drop for TsgoTypeProvider {
     fn drop(&mut self) {
-        // Kill the TSGO child process to prevent orphans.
-        // start_kill() is non-blocking (sends TerminateProcess on Windows, SIGKILL on Unix).
-        // This is a belt-and-suspenders backup — kill_on_drop(true) on the Command
-        // already handles this, but an explicit Drop makes the intent clear.
+        // Kill the TSGO child process TREE to prevent orphans (a descendant
+        // holding the pipes dies too). This is a belt-and-suspenders backup —
+        // kill_on_drop(true) on the Command already handles the direct child,
+        // but an explicit Drop makes the tree kill intent clear. A child whose
+        // pid can no longer be read (already reaped) is left to kill_on_drop.
         if let Some(slot) = &mut self.child {
             let child = slot
                 .get_mut()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(child) = child {
+                if let Some(pid) = child.id() {
+                    verter_tsgo_api::process::TreeKill::arm(pid).kill_tree();
+                }
                 let _ = child.start_kill();
             }
         }
@@ -1393,19 +1396,24 @@ impl TsgoTypeProvider {
     ///
     /// When `crash_notify` is `Some`, the `Notify` is signaled when the read loop
     /// exits (EOF, I/O error), allowing the `ResilientTypeProvider` to detect the
-    /// crash and trigger a restart.
+    /// crash and trigger a restart. The child is spawned in its OWN process
+    /// group / job ([`verter_tsgo_api::process::configure_tree_spawn`]) so
+    /// teardown kills the whole tree, never just the direct child.
     pub async fn spawn_with_crash_signal(
         tsgo_bin: &str,
         root_uri: &str,
         crash_notify: Option<Arc<Notify>>,
     ) -> Result<Self, TypeProviderError> {
-        let mut child = tokio::process::Command::new(tsgo_bin)
+        let mut command = tokio::process::Command::new(tsgo_bin);
+        command
             .arg("--lsp")
             .arg("--stdio")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        verter_tsgo_api::process::configure_tree_spawn(&mut command);
+        let mut child = command
             .spawn()
             .map_err(|e| TypeProviderError::new(format!("failed to spawn tsgo: {e}")))?;
 
@@ -3160,6 +3168,7 @@ impl TypeProvider for TsgoTypeProvider {
             match tokio::time::timeout(std::time::Duration::from_secs(1), child.wait()).await {
                 Ok(Ok(_)) => Ok(()),
                 Ok(Err(error)) => {
+                    verter_tsgo_api::process::TreeKill::arm(child.id().unwrap_or(0)).kill_tree();
                     let _ = child.start_kill();
                     let _ =
                         tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await;
@@ -3168,6 +3177,7 @@ impl TypeProvider for TsgoTypeProvider {
                     )))
                 }
                 Err(_) => {
+                    verter_tsgo_api::process::TreeKill::arm(child.id().unwrap_or(0)).kill_tree();
                     let kill_error = child.start_kill().err();
                     match tokio::time::timeout(std::time::Duration::from_secs(2), child.wait())
                         .await
@@ -3806,463 +3816,6 @@ fn extract_markup_string(v: &serde_json::Value) -> Option<String> {
     v.as_str()
         .map(String::from)
         .or_else(|| v.get("value").and_then(|v2| v2.as_str()).map(String::from))
-}
-
-/// The explicit, highest-precedence tsgo-binary override env var.
-///
-/// Mirrors how `--tsdk` lets a user pin the tsserver SDK: when set and pointing
-/// at an existing file, this exact path wins over every discovered location. It
-/// is the escape hatch for a non-standard install (e.g. a hand-built tsgo) and
-/// keeps the canonical precedence honest (explicit override first).
-pub const TSGO_BINARY_ENV: &str = "VERTER_TSGO_BIN";
-
-/// Canonical tsgo discovery for production and tests.
-///
-/// Searches in strict precedence order so the same tsgo is found regardless of
-/// entry point (R-Shared-Optimized-Codebase: one shared discovery path, not a
-/// test-harness-only fork):
-///
-/// 1. **Explicit override** — the `VERTER_TSGO_BIN` env var, when it names an
-///    existing file (the analog of `--tsdk` for tsserver).
-/// 2. **Workspace `node_modules`** — the rc `@typescript/typescript-*` binary
-///    installed as a workspace dependency (flat-npm OR pnpm layout). This is the
-///    common real-project case (a project that pins `typescript@>=7` in
-///    `package.json`) that the npm/npx cache misses.
-/// 3. **npm/npx cache** — the rc native binary under the npm or npx cache.
-///
-/// `workspace_root` is the directory whose `node_modules` is searched in tier 2;
-/// pass `None` (or a root without a matching `node_modules`) to skip straight to
-/// the cache tier. Discovery is rc-only: there is no `tsgo`-on-`PATH` lookup and
-/// no `.bin/tsgo` shim probe (a global `tsgo` is the retired native-preview
-/// engine). Returns the existing [`TsgoBinaryLookupError`] (cache
-/// checked-locations) when no binary is found in any tier.
-pub fn find_tsgo_binary_canonical(
-    workspace_root: Option<&std::path::Path>,
-) -> Result<String, TsgoBinaryLookupError> {
-    // Tier 1: explicit override.
-    if let Some(path) = tsgo_binary_env_override() {
-        tracing::debug!("TSGO discovery: using {TSGO_BINARY_ENV} override at {path}");
-        return Ok(path);
-    }
-
-    // Tier 2: workspace node_modules (flat-npm + pnpm).
-    if let Some(root) = workspace_root {
-        let node_modules = root.join("node_modules");
-        if let Some(path) = find_tsgo_binary_under_node_modules(&node_modules) {
-            tracing::debug!("TSGO discovery: found in workspace node_modules at {path}");
-            return Ok(path);
-        }
-    }
-
-    // Tiers 3 + 4: PATH, then npm/npx cache.
-    find_tsgo_binary()
-}
-
-/// Read the [`TSGO_BINARY_ENV`] override, returning it only when it names an
-/// existing file. An unset or stale (non-existent) override is ignored so a
-/// leftover env var never wedges discovery.
-fn tsgo_binary_env_override() -> Option<String> {
-    let raw = std::env::var_os(TSGO_BINARY_ENV)?;
-    if raw.is_empty() {
-        return None;
-    }
-    let path = PathBuf::from(&raw);
-    path.is_file().then(|| path.to_string_lossy().to_string())
-}
-
-/// Find the rc tsgo engine binary from an explicit override or the npm/npx
-/// cache.
-///
-/// Checks (in order):
-/// 1. The [`TSGO_BINARY_ENV`] (`VERTER_TSGO_BIN`) override, when it names an
-///    existing file — the dev/baseline/oracle-gen callers' escape hatch when
-///    the engine lives outside the workspace `node_modules`.
-/// 2. The rc native binary from the npm/npx cache
-///    (`@typescript/typescript-{platform}/lib/tsc`).
-///
-/// This is the rc-only PATH/cache tier of [`find_tsgo_binary_canonical`]
-/// (tier 3); production should call the canonical entry point so the workspace
-/// `node_modules` tier is honored first. There is intentionally NO `tsgo`-on-`PATH`
-/// lookup and NO `.bin/tsgo` shim probe: a global `tsgo` is the retired
-/// native-preview engine, so resolving one would silently launch the legacy
-/// engine. Discovery fails closed instead.
-pub fn find_tsgo_binary() -> Result<String, TsgoBinaryLookupError> {
-    if let Some(path) = tsgo_binary_env_override() {
-        tracing::debug!("TSGO discovery: using {TSGO_BINARY_ENV} override at {path}");
-        return Ok(path);
-    }
-
-    let cache_roots = collect_npm_cache_roots(
-        npm_config_cache_from_env(),
-        npm_config_get_cache(),
-        default_npm_cache_root(),
-    );
-    tracing::debug!("TSGO discovery: cache roots = {:?}", cache_roots);
-
-    let result = find_tsgo_binary_in(&cache_roots);
-    match &result {
-        Ok(path) => tracing::debug!("TSGO discovery: selected binary at {path}"),
-        Err(err) => tracing::debug!("TSGO discovery failed: {err}"),
-    }
-    result
-}
-
-/// Resolve the tsgo native binary from a workspace `node_modules` directory.
-///
-/// `find_tsgo_binary` searches PATH + the npm/npx cache, which misses a tsgo
-/// installed as a workspace dependency (pnpm or flat npm layout). This locates
-/// the platform-specific rc `@typescript/typescript-{plat}-{arch}` binary
-/// directly under `<node_modules>`:
-///
-/// - flat npm: `<node_modules>/@typescript/typescript-{plat}/lib/tsc[.exe]`
-/// - pnpm:     `<node_modules>/.pnpm/@typescript+typescript-{plat}@*/node_modules/@typescript/typescript-{plat}/lib/tsc[.exe]`
-///
-/// Platform-aware (reuses [`tsgo_native_binary_rel_paths`]); returns `None` when
-/// no binary is present. Paths are built with `Path::join`, never string
-/// concatenation, so it is portable across macOS / Windows / Linux.
-pub fn find_tsgo_binary_under_node_modules(node_modules: &std::path::Path) -> Option<String> {
-    // Flat npm layout: <node_modules>/@typescript/typescript-*/lib/tsc[.exe].
-    // `flat_npm_tsgo_candidate_paths` produces the rc `tsc` candidates (the sole
-    // engine source); the first existing candidate wins.
-    for candidate in flat_npm_tsgo_candidate_paths(node_modules) {
-        if candidate.exists() {
-            return Some(candidate.to_string_lossy().to_string());
-        }
-    }
-
-    // pnpm layout: <node_modules>/.pnpm/<pkg>@<ver>/node_modules/@typescript/typescript-*/lib/tsc[.exe].
-    // The rc `typescript` package is the sole engine SOURCE; mtime ordering
-    // breaks ties between multiple installed rc store entries.
-    let pnpm_dir = node_modules.join(".pnpm");
-    if let Ok(entries) = std::fs::read_dir(&pnpm_dir) {
-        let store_dirs: Vec<PathBuf> = entries
-            .flatten()
-            .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
-            .map(|e| e.path())
-            .collect();
-
-        for source in TSGO_ENGINE_SOURCES {
-            let mut dirs: Vec<PathBuf> = store_dirs
-                .iter()
-                .filter(|p| {
-                    p.file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|n| n.starts_with(source.pnpm_store_prefix))
-                        .unwrap_or(false)
-                })
-                .cloned()
-                .collect();
-            // Prefer the most recently modified store entry (newest install) of
-            // THIS source.
-            dirs.sort_by_key(|b| std::cmp::Reverse(entry_modified(b)));
-            for dir in dirs {
-                for candidate in pnpm_store_tsgo_candidate_paths(&dir) {
-                    if candidate.exists() {
-                        return Some(candidate.to_string_lossy().to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
-/// Build the flat-npm tsgo candidate paths under a `node_modules` directory.
-///
-/// Pure path construction (no filesystem access) so the layout math is unit
-/// testable on every platform: `<node_modules>/@typescript/typescript-{plat}-{arch}/lib/tsc[.exe]`.
-/// Built with `Path::join` (never string concatenation) for portability.
-fn flat_npm_tsgo_candidate_paths(node_modules: &std::path::Path) -> Vec<PathBuf> {
-    tsgo_native_binary_rel_paths()
-        .into_iter()
-        .map(|rel| {
-            // `rel` is rooted at "node_modules/…"; strip that prefix to join
-            // under the given node_modules dir.
-            let rel_under_nm = rel
-                .strip_prefix("node_modules/")
-                .map(str::to_owned)
-                .unwrap_or(rel);
-            node_modules.join(rel_under_nm)
-        })
-        .collect()
-}
-
-/// Build the pnpm-store tsgo candidate paths under a single pnpm store entry
-/// (`<node_modules>/.pnpm/@typescript+typescript-{plat}@{ver}`).
-///
-/// Pure path construction (no filesystem access): the store entry nests a real
-/// `node_modules/@typescript/typescript-{plat}-{arch}/lib/tsc[.exe]`, so
-/// the relative paths join verbatim. Built with `Path::join` for portability.
-fn pnpm_store_tsgo_candidate_paths(store_entry: &std::path::Path) -> Vec<PathBuf> {
-    tsgo_native_binary_rel_paths()
-        .into_iter()
-        .map(|rel| store_entry.join(rel))
-        .collect()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TsgoBinaryLookupError {
-    checked_locations: Vec<String>,
-}
-
-impl TsgoBinaryLookupError {
-    fn new(checked_locations: Vec<String>) -> Self {
-        Self { checked_locations }
-    }
-}
-
-impl std::fmt::Display for TsgoBinaryLookupError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.checked_locations.is_empty() {
-            write!(f, "tsgo binary not found")
-        } else {
-            write!(
-                f,
-                "tsgo binary not found; checked {}",
-                self.checked_locations.join(", ")
-            )
-        }
-    }
-}
-
-impl std::error::Error for TsgoBinaryLookupError {}
-
-/// Resolve the rc tsgo engine binary from the npm/npx cache roots.
-///
-/// rc-only: scans each cache root's `_npx/*` entries (newest install first) for
-/// the rc `@typescript/typescript-{plat}/lib/tsc[.exe]` native binary. There is
-/// intentionally no `.bin/tsgo` shim probe — a `tsgo`-named shim is the retired
-/// native-preview engine. Returns the checked-locations error when no rc binary
-/// is present.
-fn find_tsgo_binary_in(cache_roots: &[PathBuf]) -> Result<String, TsgoBinaryLookupError> {
-    let mut checked_locations = Vec::new();
-    let mut npx_entries = Vec::new();
-
-    for cache_root in cache_roots {
-        push_checked_location(&mut checked_locations, cache_root.display().to_string());
-        let npx_dir = cache_root.join("_npx");
-        push_checked_location(&mut checked_locations, npx_dir.display().to_string());
-
-        let Ok(entries) = std::fs::read_dir(&npx_dir) else {
-            continue;
-        };
-
-        for entry in entries.flatten() {
-            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                npx_entries.push(entry.path());
-            }
-        }
-    }
-
-    npx_entries.sort_by_key(|b| std::cmp::Reverse(entry_modified(b)));
-
-    for entry in &npx_entries {
-        for rel_path in tsgo_native_binary_rel_paths() {
-            let candidate = entry.join(rel_path);
-            push_checked_location(&mut checked_locations, candidate.display().to_string());
-            if candidate.exists() {
-                return Ok(candidate.to_string_lossy().to_string());
-            }
-        }
-    }
-
-    Err(TsgoBinaryLookupError::new(checked_locations))
-}
-
-fn collect_npm_cache_roots(
-    env_cache: Option<PathBuf>,
-    npm_config_cache: Option<PathBuf>,
-    default_root: Option<PathBuf>,
-) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    push_cache_root(&mut roots, env_cache);
-    push_cache_root(&mut roots, npm_config_cache);
-    push_cache_root(&mut roots, default_root);
-    roots
-}
-
-fn npm_config_cache_from_env() -> Option<PathBuf> {
-    std::env::var_os("NPM_CONFIG_CACHE")
-        .or_else(|| std::env::var_os("npm_config_cache"))
-        .map(PathBuf::from)
-}
-
-fn npm_config_get_cache() -> Option<PathBuf> {
-    let npm_cmd = if cfg!(windows) { "npm.cmd" } else { "npm" };
-    let output = std::process::Command::new(npm_cmd)
-        .args(["config", "get", "cache"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    let cache = stdout.lines().next()?.trim();
-    if cache.is_empty() || matches!(cache, "undefined" | "null") {
-        None
-    } else {
-        Some(PathBuf::from(cache))
-    }
-}
-
-fn default_npm_cache_root() -> Option<PathBuf> {
-    // On Windows: %LOCALAPPDATA%/npm-cache
-    // On Unix: ~/.npm
-    if cfg!(windows) {
-        std::env::var("LOCALAPPDATA")
-            .ok()
-            .map(|d| PathBuf::from(d).join("npm-cache"))
-    } else {
-        dirs_or_home().map(|d| d.join(".npm"))
-    }
-}
-
-fn dirs_or_home() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(PathBuf::from)
-}
-
-/// The TS≥7 tsgo-engine binary source — the installed `typescript@>=7`
-/// package's native binary. Mirrors the gate's discovery
-/// (`tools/tsgo-api-gate/run-gate.mjs`): the published `typescript@7.x` (e.g.
-/// `7.0.2`) ships the typescript-go engine as `tsc` (renamed from `tsgo`) in
-/// `@typescript/typescript-{plat}-{arch}`. This is the SOLE engine source.
-const TSGO_ENGINE_SOURCES: &[TsgoEngineSource] = &[TsgoEngineSource {
-    scope_package_prefix: "@typescript/typescript-",
-    pnpm_store_prefix: "@typescript+typescript-",
-    binary_stem: "tsc",
-}];
-
-/// One TS≥7 tsgo-engine binary source (package family + binary name).
-#[derive(Clone, Copy)]
-struct TsgoEngineSource {
-    /// The scoped platform-package name prefix, e.g. `@typescript/typescript-`
-    /// (the `{plat}-{arch}` suffix is appended per target).
-    scope_package_prefix: &'static str,
-    /// The pnpm-store entry prefix, e.g. `@typescript+typescript-`.
-    pnpm_store_prefix: &'static str,
-    /// The binary file stem (no extension): `tsc` for the rc engine.
-    binary_stem: &'static str,
-}
-
-/// The `{plat}-{arch}` platform-package suffixes, current platform first so its
-/// binary is preferred within each source. Plain data — no filesystem.
-fn tsgo_platform_arch_suffixes() -> Vec<&'static str> {
-    let mut suffixes = Vec::new();
-
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    suffixes.push("win32-x64");
-    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-    suffixes.push("win32-arm64");
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    suffixes.push("linux-x64");
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    suffixes.push("linux-arm64");
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    suffixes.push("darwin-x64");
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    suffixes.push("darwin-arm64");
-
-    // Append the remaining platforms (cross-compilation / test stability); the
-    // current-platform suffix (if any) stays first via the dedup below.
-    for s in [
-        "win32-x64",
-        "win32-arm64",
-        "linux-x64",
-        "linux-arm64",
-        "darwin-x64",
-        "darwin-arm64",
-    ] {
-        if !suffixes.contains(&s) {
-            suffixes.push(s);
-        }
-    }
-
-    suffixes
-}
-
-/// The relative path under `<node_modules>` to a source's platform binary,
-/// e.g. `node_modules/@typescript/typescript-win32-x64/lib/tsc.exe`. The `.exe`
-/// suffix is added on Windows. Built as an owned `String` (each source/platform
-/// combination is distinct), portable across OSes.
-fn tsgo_source_rel_path(source: &TsgoEngineSource, plat_arch: &str) -> String {
-    let ext = if cfg!(windows) { ".exe" } else { "" };
-    format!(
-        "node_modules/{}{}/lib/{}{}",
-        source.scope_package_prefix, plat_arch, source.binary_stem, ext
-    )
-}
-
-/// The TS≥7 native-binary relative paths under `<node_modules>`: the rc
-/// `@typescript/typescript-*` `tsc` binary (the sole engine source), current
-/// platform first.
-fn tsgo_native_binary_rel_paths() -> Vec<String> {
-    let suffixes = tsgo_platform_arch_suffixes();
-    let mut rel_paths = Vec::new();
-    for source in TSGO_ENGINE_SOURCES {
-        for plat_arch in &suffixes {
-            let rel = tsgo_source_rel_path(source, plat_arch);
-            if !rel_paths.contains(&rel) {
-                rel_paths.push(rel);
-            }
-        }
-    }
-    rel_paths
-}
-
-fn entry_modified(path: &Path) -> std::time::SystemTime {
-    path.metadata()
-        .and_then(|meta| meta.modified())
-        .unwrap_or(UNIX_EPOCH)
-}
-
-fn push_checked_location(checked_locations: &mut Vec<String>, location: String) {
-    if !checked_locations
-        .iter()
-        .any(|existing| existing == &location)
-    {
-        checked_locations.push(location);
-    }
-}
-
-fn push_cache_root(roots: &mut Vec<PathBuf>, root: Option<PathBuf>) {
-    let Some(root) = root.map(normalize_npm_cache_root) else {
-        return;
-    };
-    if !roots
-        .iter()
-        .any(|existing| cache_root_key(existing) == cache_root_key(&root))
-    {
-        roots.push(root);
-    }
-}
-
-fn normalize_npm_cache_root(root: PathBuf) -> PathBuf {
-    if root.file_name().and_then(|name| name.to_str()) == Some("_npx") {
-        root.parent().map(PathBuf::from).unwrap_or(root)
-    } else {
-        root
-    }
-}
-
-fn cache_root_key(path: &Path) -> String {
-    // Windows `\` separators normalize to `/` so the same root reached via either
-    // separator dedups; backslash is a valid filename char on Unix, so that part
-    // stays Windows-only. Case folds on a case-insensitive filesystem (Windows /
-    // default macOS) through the single shared FS-identity policy so case-variant
-    // roots dedup, and is preserved on a case-sensitive one (Linux).
-    let value = path.to_string_lossy();
-    let separator_normalized = if cfg!(windows) {
-        value.replace('\\', "/")
-    } else {
-        value.into_owned()
-    };
-    if verter_span::path::fs_is_case_insensitive() {
-        separator_normalized.to_ascii_lowercase()
-    } else {
-        separator_normalized
-    }
 }
 
 /// Create a temporary project directory with tsconfig.json for testing.

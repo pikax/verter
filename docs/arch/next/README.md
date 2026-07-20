@@ -29,6 +29,10 @@ Supporting backlog docs in this directory:
   release-clean review (C3: deprecated `verter_workspace` graph re-exports).
 - **[`lsp-pending.md`](lsp-pending.md)** — the LSP-branch-owned items the release-clean full-green
   gate still awaits.
+- **[`vue-inline-template-runtime.md`](vue-inline-template-runtime.md)** — Verter's SFC→JS runtime
+  does not emit the official `inlineTemplate: true` production topology (setup-returned render
+  closure); behaviorally equivalent, production-parity + perf feature deferred from the Vue
+  conformance-goldens program.
 
 ## Provenance caveats (read before trusting a detail)
 

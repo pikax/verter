@@ -84,6 +84,11 @@ pub struct FfiCompileProfile {
     pub source_map: Option<bool>,
     /// Compilation target preset: "bundler" (default), "ide", or "analysis".
     pub target: Option<String>,
+    /// Inline the render function inside `setup()` (Vue production topology).
+    /// Absent resolves to `isProduction` (official default: inline in prod
+    /// builds). VDOM client only; Vapor inline and inline SSR fall back to
+    /// non-inline.
+    pub inline: Option<bool>,
     /// Experimental: strict slot children type checking.
     pub strict_slots: Option<bool>,
     /// Requested compile cache mode: "stateless", "content", or

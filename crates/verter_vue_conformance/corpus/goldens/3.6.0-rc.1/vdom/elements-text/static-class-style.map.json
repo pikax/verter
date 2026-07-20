@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/elements-text/static-class-style.vue"
+  ],
+  "names": [],
+  "mappings": ";;;EACO,KAAK,EAAC,eAAe;EAAC,KAAmC,EAAnC,kCAAmC;;;;wBAA9D,oBAEM,OAFN,UAEM;IADJ,oBAAgC,UAA1B,KAAK,EAAC,OAAO,IAAC,OAAK",
+  "sourcesContent": [
+    "\n  <div class=\"card elevated\" style=\"color: red; margin-top: 4px\">\n    <span class=\"label\">Label</span>\n  </div>\n"
+  ]
+}

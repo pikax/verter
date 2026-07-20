@@ -423,9 +423,11 @@ fn build_host_config() -> HostConfig {
 /// ([`run_declaration_stage`]) because tsgo `--api` exposes no emit surface.
 ///
 /// Returns [`Err`] when the in-memory `--api` typecheck stage cannot run (engine
-/// absent, or a connect/init/updateSnapshot/protocol/project-not-found failure) —
-/// the caller surfaces it as a non-zero process exit. This fail-closed contract
-/// is why a broken/missing engine can never masquerade as a clean typecheck.
+/// absent, or a connect/init/updateSnapshot/protocol/project-not-found failure),
+/// or when the declaration/emit stage fails (engine unresolvable, invocation
+/// failure, or an error exit with no parseable diagnostics) — the caller surfaces
+/// it as a non-zero process exit. This fail-closed contract is why a
+/// broken/missing engine can never masquerade as a clean typecheck or a clean emit.
 pub fn run(
     config: &TsConfig,
     tsconfig_path: &Path,
@@ -476,7 +478,8 @@ pub fn run(
     let mut public_api_failures = in_memory.failures;
 
     // ── Declaration/emit stage: temp-file `tsgo --project` (tsgo `--api` has no
-    //    emit surface). Only when `--declaration` is requested. ──
+    //    emit surface). Only when `--declaration` is requested. FAIL-CLOSED: an
+    //    engine that cannot run the emit is a hard error, never silent success. ──
     let emitted_files = if opts.declaration {
         let (decl_diagnostics, emitted, declaration_failures) =
             run_declaration_stage(&host, config, tsconfig_path, opts)?;
@@ -565,24 +568,51 @@ fn ambient_shim_carriers(base: &Path) -> Vec<(String, String)> {
     ]
 }
 
-/// Discover the gated tsgo `--api` engine (the rc `@typescript/typescript-*`
-/// native binary the wire gate pins). Mirrors the canonical discovery precedence
-/// the LSP/host uses: the explicit `VERTER_TSGO_BIN` override first, then the rc
-/// engine in the project's `node_modules` via the SHARED
-/// [`verter_tsgo_api::transport::spawn::discover_tsgo`]. The retired native-preview
-/// `tsgo` is intentionally NOT searched — it fails the wire gate, so resolving one
-/// would only fail-close after a spawn. (The npm/npx-cache rc tier of the canonical
-/// discovery lives in `verter_type_runtime`; verter-tsc cannot depend on it within
-/// this block's scope. TODO(follow-up): hoist that rc cache-search into
-/// `verter_tsgo_api` so every consumer — verter-tsc included — shares all tiers.)
-fn discover_api_engine(root: &Path) -> Option<PathBuf> {
-    if let Some(raw) = std::env::var_os("VERTER_TSGO_BIN") {
-        let path = PathBuf::from(raw);
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-    verter_tsgo_api::transport::spawn::discover_tsgo(root).ok()
+/// Resolve the gated tsgo engine for verter-tsc via the 4-tier toolchain
+/// resolver ([`verter_tsgo_api::toolchain::discovery`]): shared
+/// (`VERTER_TSGO_BIN`, then PATH) → project-local ancestor `node_modules` →
+/// temp update cache → bundled sidecar; the first WORKING candidate wins
+/// (bounded version probe + support policy + capability smoke per candidate).
+/// A resolution failure carries the actionable tier report.
+///
+/// This is the ONLY resolution path verter-tsc uses — BOTH the in-memory
+/// typecheck stage and the declaration/emit stage resolve through it (a
+/// `--version`-only selection can mask a working candidate behind a broken one
+/// and is banned). Sync wrapper: builds a private runtime; call the async
+/// [`verter_tsgo_api::toolchain::discovery::resolve`] from async contexts.
+fn resolve_tsgo_engine(
+    root: &Path,
+    requirement: verter_tsgo_api::toolchain::validation::Capability,
+) -> Result<PathBuf, verter_tsgo_api::toolchain::discovery::ResolveError> {
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+        requirement,
+        Some(root.to_path_buf()),
+    );
+    resolve_tsgo_engine_for(&request).map(|resolution| resolution.path)
+}
+
+/// The injectable seam of [`resolve_tsgo_engine`]: the full capability-validated
+/// resolution over an EXPLICIT request (tests drive it without touching the
+/// process environment).
+fn resolve_tsgo_engine_for(
+    request: &verter_tsgo_api::toolchain::discovery::ResolutionRequest,
+) -> Result<
+    verter_tsgo_api::toolchain::discovery::Resolution,
+    verter_tsgo_api::toolchain::discovery::ResolveError,
+> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(
+            |e| verter_tsgo_api::toolchain::discovery::ResolveError::NoUsableCandidate {
+                rejections: Vec::new(),
+                notes: vec![format!(
+                    "verter-tsc: failed to start the tsgo resolution runtime: {e}"
+                )],
+                requirement: request.requirement,
+            },
+        )?;
+    runtime.block_on(verter_tsgo_api::toolchain::discovery::resolve(request))
 }
 
 /// The in-memory tsgo `--api` typecheck stage: generate the validation carriers
@@ -596,19 +626,20 @@ fn run_inmemory_typecheck(
 ) -> Result<PublicApiBatch<Vec<Diagnostic>>, api_check::TypecheckError> {
     let root = strip_unc_prefix(&config.root_dir);
 
-    // Discover the GATED `--api` engine (the rc `@typescript/typescript-*` native
-    // binary the wire gate pins). No tsc fallback for the typecheck path by design —
-    // a missing or wire-diverged engine is a HARD failure (surfaced as a non-zero
-    // exit), NOT a silent empty diagnostic set that would masquerade as a clean run.
-    let engine = match discover_api_engine(&root) {
-        Some(p) => strip_unc_prefix(&p),
-        None => {
-            return Err(api_check::TypecheckError::new(
-                "verter-tsc: no gated tsgo `--api` engine found for in-memory typecheck. \
-                 Install the pinned engine (`typescript@7.0.2`) in the project's node_modules, \
-                 or point VERTER_TSGO_BIN at the `tsc` native binary. \
-                 (There is no tsc fallback for the typecheck path.)",
-            ));
+    // Resolve the GATED `--api` engine (a supported tsgo native binary —
+    // validated end-to-end by the resolver). No tsc fallback for the typecheck
+    // path by design — a missing or wire-diverged engine is a HARD failure
+    // (surfaced as a non-zero exit), NOT a silent empty diagnostic set that
+    // would masquerade as a clean run.
+    let engine = match resolve_tsgo_engine(
+        &root,
+        verter_tsgo_api::toolchain::validation::Capability::Api,
+    ) {
+        Ok(p) => strip_unc_prefix(&p),
+        Err(e) => {
+            return Err(api_check::TypecheckError::new(format!(
+                "verter-tsc: {e}. (There is no tsc fallback for the typecheck path.)"
+            )));
         }
     };
 
@@ -707,10 +738,18 @@ fn run_inmemory_typecheck(
 
 /// The temp-file `--declaration` emit stage (retained permanently — tsgo `--api`
 /// exposes no emit surface). Generates the minimal `.tsc.tsx` carriers + the
-/// vue-shims ambient on disk, runs `tsgo --project --declaration` (tsc fallback if
-/// tsgo is absent), remaps diagnostics, and post-processes `.tsc.tsx.d.ts` →
-/// `.vue.d.ts`. Returns declaration diagnostics, emitted `.d.ts` files, and
-/// per-source projection failures.
+/// vue-shims ambient on disk, runs `tsgo --project --declaration` (resolved
+/// through the SAME capability-validated first-working resolver as the
+/// typecheck stage — no `--version`-only selection), remaps diagnostics, and
+/// post-processes `.tsc.tsx.d.ts` → `.vue.d.ts`. Returns declaration
+/// diagnostics, emitted `.d.ts` files, and per-source projection failures.
+///
+/// FAIL-CLOSED: a resolution failure, a staging failure, an invocation failure
+/// (spawn/timeout), or an engine that exits in error producing NO parseable
+/// diagnostics is a hard [`api_check::TypecheckError`] (→ non-zero process
+/// exit) — never a silent `Ok` with zero declarations, which would masquerade
+/// as a clean emit. A non-zero engine exit WITH parseable diagnostics is an
+/// ordinary type-error run (the diagnostics surface; the process exits 1).
 fn run_declaration_stage(
     host: &VerterHost,
     config: &TsConfig,
@@ -719,15 +758,12 @@ fn run_declaration_stage(
 ) -> Result<(Vec<Diagnostic>, Vec<PathBuf>, Vec<PublicApiFailure>), api_check::TypecheckError> {
     // The temp dir MUST be inside the project root so tsc resolves node_modules
     // (e.g. `import("vue")`) from the generated `.tsc.tsx` files.
-    let temp_dir = match TempDir::new_in(&config.root_dir) {
-        Ok(d) => d,
-        Err(e) => {
-            return Err(api_check::TypecheckError::new(format!(
-                "verter-tsc: failed to create temp directory for declaration emit in {}: {e}",
-                config.root_dir.display()
-            )));
-        }
-    };
+    let temp_dir = TempDir::new_in(&config.root_dir).map_err(|e| {
+        api_check::TypecheckError::new(format!(
+            "verter-tsc: failed to create temp directory for declaration emit in {}: {e}",
+            config.root_dir.display()
+        ))
+    })?;
 
     // Minimal macro-only `.tsc.tsx` carriers (declaration codegen), on disk.
     let decl_dir = temp_dir.path().join("_tsc");
@@ -769,26 +805,29 @@ fn run_declaration_stage(
         tsc_tsx_paths.push(ts_path.clone());
     }
 
-    // Discover the checker for the temp-file path: tsgo, else tsc.
+    // Resolve the checker for the temp-file path through the SAME first-working,
+    // capability-VALIDATED resolver as the typecheck stage. `Capability::Lsp`
+    // is the closest validated surface to the CLI-compiler invocation: it
+    // proves the binary spawns and completes a real handshake, so a candidate
+    // that merely answers `--version` can no longer mask a working one. A
+    // resolution failure is a HARD failure (fail-closed).
     let root = strip_unc_prefix(&config.root_dir);
-    let checker_bin = if let Some(tsgo) = reporter::find_tsgo(&root) {
-        eprintln!(
-            "verter-tsc: declaration emit using tsgo at {}",
-            tsgo.display()
-        );
-        strip_unc_prefix(&tsgo)
-    } else if let Some(tsc) = reporter::find_tsc(&root) {
-        eprintln!("verter-tsc: declaration emit: tsgo not found, falling back to tsc");
-        strip_unc_prefix(&tsc)
-    } else {
-        eprintln!(
-            "verter-tsc: no type checker found for declaration emit. \
-             Install tsgo: npm install -D @typescript/native-preview\n\
-             Or install tsc: npm install -D typescript"
-        );
-        return Err(api_check::TypecheckError::new(
-            "verter-tsc: no type checker found for declaration emit; install tsgo or tsc",
-        ));
+    let checker_bin = match resolve_tsgo_engine(
+        &root,
+        verter_tsgo_api::toolchain::validation::Capability::Lsp,
+    ) {
+        Ok(path) => {
+            eprintln!(
+                "verter-tsc: declaration emit using tsgo at {}",
+                path.display()
+            );
+            strip_unc_prefix(&path)
+        }
+        Err(e) => {
+            return Err(api_check::TypecheckError::new(format!(
+                "verter-tsc: declaration emit cannot run: {e}"
+            )));
+        }
     };
 
     let decl_opts = EmitOptions {
@@ -796,32 +835,39 @@ fn run_declaration_stage(
         declaration: true,
         declaration_dir: opts.declaration_dir.clone(),
     };
-    let decl_tsconfig = match write_temp_tsconfig(
+    let decl_tsconfig = write_temp_tsconfig(
         temp_dir.path(),
         tsconfig_path,
         &tsc_tsx_paths,
         &decl_opts,
         &config.root_dir,
-    ) {
-        Ok(tc) => tc,
-        Err(e) => {
-            return Err(api_check::TypecheckError::new(format!(
-                "verter-tsc: failed to write declaration tsconfig: {e}"
-            )));
-        }
-    };
+    )
+    .map_err(|e| {
+        api_check::TypecheckError::new(format!(
+            "verter-tsc: failed to write declaration tsconfig: {e}"
+        ))
+    })?;
 
-    let invocation = match invoke_checker(&checker_bin, &decl_tsconfig, &decl_opts) {
-        Ok(inv) => inv,
-        Err(e) => {
-            return Err(api_check::TypecheckError::new(format!(
-                "verter-tsc: declaration stage failed: {e}"
-            )));
-        }
-    };
+    let invocation = invoke_checker(&checker_bin, &decl_tsconfig, &decl_opts).map_err(|e| {
+        api_check::TypecheckError::new(format!("verter-tsc: declaration stage failed: {e}"))
+    })?;
 
     let raw_diags = reporter::parse_tsc_output(&invocation.output);
     let diagnostics = remap_diagnostics(raw_diags, &tsx_to_vue);
+
+    if !invocation.success && diagnostics.is_empty() {
+        // FAIL-CLOSED: the engine exited in error and produced NO parseable
+        // diagnostics — it did not typecheck/emit anything. This is an engine
+        // failure, not a clean run: surface it (non-zero exit) rather than
+        // returning an empty diagnostic set + zero declarations (a broken
+        // engine masquerading as a successful emit).
+        return Err(api_check::TypecheckError::new(format!(
+            "verter-tsc: declaration stage failed: the engine at {} exited in error \
+             producing no diagnostics and no declarations — the declaration emit did \
+             not run (fail-closed: a failed emit is never a silent success)",
+            checker_bin.display()
+        )));
+    }
 
     if !invocation.success {
         eprintln!(
@@ -844,13 +890,42 @@ fn run_declaration_stage(
     Ok((diagnostics, emitted, declaration_batch.failures))
 }
 
+/// The bound on one declaration-stage engine invocation. On expiry the engine
+/// process TREE is killed (a descendant holding the pipes dies too), the child
+/// is reaped, and the pipe-reader threads are drained with a bound — the call
+/// never hangs and never leaves a live/zombie process behind.
+const DECLARATION_INVOKE_BOUND: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The bound on draining the engine's pipes after exit/kill. A descendant that
+/// keeps a pipe open past this point turns the read into an error (the child
+/// is already dead, so no output is legitimately in flight).
+const PIPE_DRAIN_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Invoke the type-checker binary and return its combined stdout+stderr output
 /// plus whether the subprocess exited successfully.
+///
+/// Bounded END-TO-END: the engine is spawned in its own process group / job
+/// ([`verter_tsgo_api::process`]); on the poll deadline, a `try_wait` error,
+/// or a pipe drain overrun, the WHOLE tree is killed and the child reaped, so
+/// no error path ever leaves a live or zombie process behind.
 fn invoke_checker(
     checker_bin: &Path,
     tsconfig_path: &Path,
     opts: &EmitOptions,
 ) -> Result<CheckerInvocation, String> {
+    invoke_checker_bounded(checker_bin, tsconfig_path, opts, DECLARATION_INVOKE_BOUND)
+}
+
+/// The bound-injectable core of [`invoke_checker`] (tests drive a wedged engine
+/// against a short bound).
+fn invoke_checker_bounded(
+    checker_bin: &Path,
+    tsconfig_path: &Path,
+    opts: &EmitOptions,
+    bound: std::time::Duration,
+) -> Result<CheckerInvocation, String> {
+    use verter_tsgo_api::process::{configure_tree_spawn_std, TreeKill};
+
     let mut cmd = if cfg!(target_os = "windows")
         && !reporter::is_native_binary(checker_bin)
         && checker_bin
@@ -878,58 +953,118 @@ fn invoke_checker(
     }
 
     // Spawn with piped I/O and drain stdout/stderr in background threads to
-    // avoid deadlock (child blocks on full pipe buffer if we don't read).
+    // avoid deadlock (child blocks on full pipe buffer if we don't read). The
+    // readers report over channels so the joins are BOUNDED (recv_timeout).
+    configure_tree_spawn_std(&mut cmd);
     let mut child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to run {}: {e}", checker_bin.display()))?;
+    let tree = TreeKill::arm(child.id());
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
 
-    let stdout_handle = std::thread::spawn(move || {
+    let (stdout_tx, stdout_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
         let mut buf = Vec::new();
         std::io::Read::read_to_end(&mut std::io::BufReader::new(stdout), &mut buf).ok();
-        buf
+        let _ = stdout_tx.send(buf);
     });
-    let stderr_handle = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         let mut buf = Vec::new();
         std::io::Read::read_to_end(&mut std::io::BufReader::new(stderr), &mut buf).ok();
-        buf
+        let _ = stderr_tx.send(buf);
     });
 
-    // Poll with timeout
-    let timeout = std::time::Duration::from_secs(300); // 5 minutes
+    /// Drain both reader channels, bounded; `true` when both reported.
+    fn drain_pipes(
+        stdout_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+        stderr_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    ) -> Option<(Vec<u8>, Vec<u8>)> {
+        let stdout = stdout_rx.recv_timeout(PIPE_DRAIN_BOUND).ok()?;
+        let stderr = stderr_rx.recv_timeout(PIPE_DRAIN_BOUND).ok()?;
+        Some((stdout, stderr))
+    }
+
+    /// Kill the tree, reap the child (bounded), drain the pipes (bounded) —
+    /// the shared teardown every failure path runs so none of them can leave
+    /// a live/zombie process or a hung join behind.
+    fn teardown(
+        tree: &TreeKill,
+        child: &mut std::process::Child,
+        stdout_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+        stderr_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
+        tree.kill_tree();
+        reap_std_child_bounded(child, PIPE_DRAIN_BOUND);
+        let _ = drain_pipes(stdout_rx, stderr_rx);
+    }
+
+    // Poll with the deadline.
     let start = std::time::Instant::now();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    // Wait for reader threads to finish after kill
-                    let _ = stdout_handle.join();
-                    let _ = stderr_handle.join();
+                if start.elapsed() > bound {
+                    teardown(&tree, &mut child, &stdout_rx, &stderr_rx);
                     return Err(format!(
-                        "type checker timed out after {}s",
-                        timeout.as_secs()
+                        "type checker timed out after {}s (the engine process tree was killed and reaped)",
+                        bound.as_secs()
                     ));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            Err(e) => return Err(format!("error waiting for type checker: {e}")),
+            Err(e) => {
+                teardown(&tree, &mut child, &stdout_rx, &stderr_rx);
+                return Err(format!(
+                    "error waiting for type checker: {e} (the engine process tree was killed and reaped)"
+                ));
+            }
         }
     };
 
-    let stdout_bytes = stdout_handle.join().unwrap_or_default();
-    let stderr_bytes = stderr_handle.join().unwrap_or_default();
+    let (stdout_bytes, stderr_bytes) = match drain_pipes(&stdout_rx, &stderr_rx) {
+        Some(parts) => parts,
+        None => {
+            // The child exited but a descendant kept a pipe open past the
+            // drain bound: kill the tree and fail closed (partial output is
+            // never a legitimate clean read).
+            teardown(&tree, &mut child, &stdout_rx, &stderr_rx);
+            return Err(
+                "the engine exited but a descendant kept its pipes open; the output could \
+                 not be drained (fail-closed: the engine process tree was killed)"
+                    .to_string(),
+            );
+        }
+    };
 
     Ok(CheckerInvocation {
         output: String::from_utf8_lossy(&stdout_bytes).into_owned()
             + &String::from_utf8_lossy(&stderr_bytes),
         success: status.success(),
     })
+}
+
+/// Reap a `std` child after a kill, bounded by polling: `true` when the child
+/// was reaped. (std has no timed `wait`; the poll loop is the bounded form.)
+fn reap_std_child_bounded(child: &mut std::process::Child, bound: std::time::Duration) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {
+                if start.elapsed() > bound {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(_) => return false,
+        }
+    }
 }
 
 /// Write a synthetic tsconfig.json in `temp_dir` that:
@@ -2147,6 +2282,71 @@ mod tests {
         host
     }
 
+    /// The minimal `--lsp` handshake arm (POSIX sh) spliced into every mock
+    /// checker script: the capability-validated resolver spawns each candidate
+    /// with `--lsp --stdio` and requires an `initialize` response whose
+    /// `serverInfo.version` agrees with the `--version` probe. The arm answers
+    /// every framed request carrying an `id` with that serverInfo, then serves
+    /// until EOF (the smoke kills the process after the handshake).
+    #[cfg(not(target_os = "windows"))]
+    const MOCK_LSP_HANDSHAKE_SH: &str = r#"
+for arg in "$@"; do
+  if [ "$arg" = "--lsp" ]; then
+    while IFS= read -r line; do
+      line=${line%$'\r'}
+      len=0
+      while [ -n "$line" ]; do
+        case "$line" in
+          [Cc]ontent-[Ll]ength:*) len=$(printf '%s' "${line#*:}" | tr -d ' ') ;;
+        esac
+        IFS= read -r line || exit 0
+        line=${line%$'\r'}
+      done
+      [ "$len" -gt 0 ] || continue
+      body=$(dd bs=1 count="$len" 2>/dev/null)
+      id=$(printf '%s' "$body" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)
+      [ -n "$id" ] || continue
+      resp="{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"capabilities\":{},\"serverInfo\":{\"name\":\"mock-tsc\",\"version\":\"7.0.2\"}}}"
+      printf 'Content-Length: %s\r\n\r\n%s' "${#resp}" "$resp"
+    done
+    exit 0
+  fi
+done
+"#;
+
+    /// The same handshake arm (PowerShell) for the Windows mock scripts.
+    #[cfg(target_os = "windows")]
+    const MOCK_LSP_HANDSHAKE_PS1: &str = r#"
+if ($Args -contains '--lsp') {
+    $reader = [System.Console]::In
+    $writer = [System.Console]::Out
+    while ($true) {
+        $len = 0
+        $line = $reader.ReadLine()
+        if ($null -eq $line) { exit 0 }
+        while ($line -ne '') {
+            if ($line -match 'Content-Length:\s*(\d+)') { $len = [int]$Matches[1] }
+            $line = $reader.ReadLine()
+            if ($null -eq $line) { exit 0 }
+        }
+        if ($len -le 0) { continue }
+        $buf = New-Object char[] $len
+        $off = 0
+        while ($off -lt $len) {
+            $n = $reader.Read($buf, $off, $len - $off)
+            if ($n -le 0) { exit 0 }
+            $off += $n
+        }
+        $body = -join $buf
+        if ($body -match '"id"\s*:\s*(\d+)') {
+            $resp = '{"jsonrpc":"2.0","id":' + $Matches[1] + ',"result":{"capabilities":{},"serverInfo":{"name":"mock-tsc","version":"7.0.2"}}}'
+            $writer.Write("Content-Length: " + $resp.Length + "`r`n`r`n" + $resp)
+            $writer.Flush()
+        }
+    }
+}
+"#;
+
     /// Discriminating gate for the `build_host_config()` seam: the production
     /// `verter-tsc` host MUST construct through the Batch typecheck preset
     /// (BUILD analysis scope + `Build` query profile + lazily-spawned
@@ -2210,12 +2410,15 @@ mod tests {
         assert_ne!(host.query_profile(), full.query_profile);
     }
 
-    /// Install a mock checker the DECLARATION stage discovers as `tsgo` (so
-    /// `find_tsgo` short-circuits to it before any real tsgo on PATH/npx). It is a
-    /// `--project`/`--declaration` subprocess mock only — it does NOT speak the
-    /// `--api` wire, so the in-memory typecheck stage's `TsgoClient::connect`
-    /// probe fails and that stage fail-closes to zero diagnostics, leaving the
-    /// declaration-stage diagnostics as the only ones these tests observe.
+    /// Install a mock checker the DECLARATION stage resolves through the
+    /// toolchain resolver's project-local `.bin` shim tier. Its `--version` +
+    /// `--lsp` handshake arms make it pass the capability smoke (version
+    /// `7.0.2`, matching `serverInfo`); its `--project`/`--declaration`
+    /// behavior is the fixture under test. It does NOT speak the `--api`
+    /// wire, so the in-memory typecheck stage cannot run against it — these
+    /// tests drive [`run_declaration_stage`] directly (see
+    /// [`run_declaration_only`]), leaving the declaration-stage diagnostics as
+    /// the only ones they observe.
     fn write_mock_tsc(project_root: &Path, mode: &str) {
         let bin_dir = project_root.join("node_modules").join(".bin");
         fs::create_dir_all(&bin_dir).unwrap();
@@ -2228,6 +2431,13 @@ mod tests {
                 &ps1,
                 r#"
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
+
+if ($Args -contains '--version') {
+    Write-Output 'Version 7.0.2'
+    exit 0
+}
+
+__MOCK_LSP_HANDSHAKE_PS1__
 
 $project = ''
 $declaration = $false
@@ -2270,7 +2480,8 @@ New-Item -ItemType Directory -Force -Path $declarationDir | Out-Null
 $emitted = Join-Path $declarationDir ($tscTsx.Name + '.d.ts')
 Set-Content -Path $emitted -Value 'export declare const ok: number;'
 exit 0
-"#,
+"#
+                .replace("__MOCK_LSP_HANDSHAKE_PS1__", MOCK_LSP_HANDSHAKE_PS1),
             )
             .unwrap();
             fs::write(
@@ -2289,6 +2500,15 @@ exit 0
 project=""
 declaration=0
 declaration_dir=""
+
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    echo "Version 7.0.2"
+    exit 0
+  fi
+done
+
+__MOCK_LSP_HANDSHAKE_SH__
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -2325,7 +2545,8 @@ fi
 
 mkdir -p "$declaration_dir"
 printf "export declare const ok: number;\n" > "$declaration_dir/$(basename "$tsc_tsx").d.ts"
-"#,
+"#
+                .replace("__MOCK_LSP_HANDSHAKE_SH__", MOCK_LSP_HANDSHAKE_SH),
             )
             .unwrap();
 
@@ -2351,6 +2572,13 @@ printf "export declare const ok: number;\n" > "$declaration_dir/$(basename "$tsc
                 &ps1,
                 r#"
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
+
+if ($Args -contains '--version') {
+    Write-Output 'Version 7.0.2'
+    exit 0
+}
+
+__MOCK_LSP_HANDSHAKE_PS1__
 
 $project = ''
 $declaration = $false
@@ -2410,6 +2638,15 @@ project=""
 declaration=0
 declaration_dir=""
 
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    echo "Version 7.0.2"
+    exit 0
+  fi
+done
+
+__MOCK_LSP_HANDSHAKE_SH__
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --project)
@@ -2444,7 +2681,8 @@ printf "export declare const ok: number;\n" > "$declaration_dir/$(basename "$tsc
 # Report an error from a different file
 printf "src/other.ts(5,10): error TS2304: Cannot find name 'SomeMissingType'.\n"
 exit 1
-"#,
+"#
+                .replace("__MOCK_LSP_HANDSHAKE_SH__", MOCK_LSP_HANDSHAKE_SH),
             )
             .unwrap();
 
@@ -2453,6 +2691,79 @@ exit 1
             perms.set_mode(0o755);
             fs::set_permissions(&script, perms).unwrap();
         }
+    }
+
+    // ── DISCRIMINATING (B3): a wedged declaration engine (hangs with a
+    //    grandchild holding the pipes) fails BOUNDED and leaves NO live
+    //    descendant — the invocation is bounded end-to-end with a process-tree
+    //    kill + reap, never a hung reader join or a leaked process. ────────────
+    #[cfg(unix)]
+    #[test]
+    fn invoke_checker_kills_a_wedged_engine_tree_within_the_bound() {
+        use verter_tsgo_api::process::process_alive;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let pid_file = temp.path().join("grandchild.pid");
+        let script_path = temp.path().join("wedged-engine");
+        // The engine: spawn a grandchild holding the pipes (records its pid),
+        // then hang forever. `try_wait` never reports; the readers never EOF.
+        let script = format!(
+            "#!/bin/sh\nsleep 600 &\necho $! > \"{}\"\nwait\n",
+            pid_file.display()
+        );
+        fs::write(&script_path, &script).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms).unwrap();
+        }
+
+        let opts = EmitOptions {
+            no_emit: false,
+            declaration: true,
+            declaration_dir: None,
+        };
+        let tsconfig = temp.path().join("tsconfig.json");
+        fs::write(&tsconfig, "{}").unwrap();
+
+        let start = std::time::Instant::now();
+        let result = invoke_checker_bounded(
+            &script_path,
+            &tsconfig,
+            &opts,
+            std::time::Duration::from_secs(1),
+        );
+        let err = match result {
+            Ok(_) => panic!("a wedged engine must fail the bounded invocation"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("timed out"),
+            "the bounded failure must name the timeout: {err}"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(15),
+            "the bound must actually fire (kill tree + reap + bounded drains): {:?}",
+            start.elapsed()
+        );
+
+        // The pipe-holding grandchild must not survive the tree kill.
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .expect("the grandchild registered its pid")
+            .trim()
+            .parse()
+            .expect("a pid");
+        for _ in 0..100 {
+            if !process_alive(pid) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(
+            !process_alive(pid),
+            "the pipe-holding grandchild (pid {pid}) must not survive the tree kill"
+        );
     }
 
     /// Drive ONLY the declaration/emit stage (the temp-file `tsgo --project`
@@ -2484,7 +2795,7 @@ exit 1
         }
         let (diagnostics, emitted, failures) =
             run_declaration_stage(&host, config, tsconfig_path, opts)
-                .expect("declaration infrastructure");
+                .expect("the declaration stage must run against the validating mock checker");
         assert!(
             failures.is_empty(),
             "fixture projection failures: {failures:?}"

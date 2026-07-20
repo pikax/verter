@@ -38,6 +38,10 @@ pub struct BindingResolver<'alloc> {
     /// These are treated as `Static` for reactivity purposes while keeping
     /// their `$props.`/`__props.` prefix for correct runtime access.
     const_props: Option<rustc_hash::FxHashSet<&'alloc str>>,
+    /// Named/default user imports official marks `setup-maybe-ref` — inline
+    /// template refs to these names bind `ref_key`/`ref: name`. Owned (tiny
+    /// set, cloned from the codegen options).
+    ref_bindable_imports: rustc_hash::FxHashSet<String>,
 }
 
 impl<'alloc> BindingResolver<'alloc> {
@@ -50,6 +54,7 @@ impl<'alloc> BindingResolver<'alloc> {
             is_ssr: false,
             is_tsx: false,
             const_props: None,
+            ref_bindable_imports: rustc_hash::FxHashSet::default(),
         }
     }
 
@@ -69,7 +74,20 @@ impl<'alloc> BindingResolver<'alloc> {
             is_ssr: false,
             is_tsx: false,
             const_props,
+            ref_bindable_imports: rustc_hash::FxHashSet::default(),
         }
+    }
+
+    /// Whether `name` is a user import official marks `setup-maybe-ref` —
+    /// an inline template `ref="name"` binds `ref_key`/`ref: name`.
+    #[inline]
+    pub fn is_ref_bindable_import(&self, name: &str) -> bool {
+        self.ref_bindable_imports.contains(name)
+    }
+
+    /// Install the ref-bindable import set (from script codegen).
+    pub fn set_ref_bindable_imports(&mut self, names: rustc_hash::FxHashSet<String>) {
+        self.ref_bindable_imports = names;
     }
 
     /// Set the vapor mode flag.
@@ -192,6 +210,13 @@ impl<'alloc> BindingResolver<'alloc> {
                 None if ident == "$event" => "",
                 None => "_ctx.",
             };
+        }
+        // Inline template mode: `$attrs`/`$slots` resolve to the setup-context
+        // destructure (official `buildDestructureElements` injects them into
+        // `setup(__props, { attrs: $attrs, slots: $slots })` on template use),
+        // so they are referenced BARE — never `_ctx.$attrs` / `_ctx.$slots`.
+        if self.is_inline && (ident == "$attrs" || ident == "$slots") {
+            return "";
         }
         match self.bindings.get(ident) {
             Some(bt) if bt.is_props() => {

@@ -583,6 +583,14 @@ pub struct PropsResult {
     /// `{ key: item.name }` evaluates `item` outside the v-for (reka-ui
     /// CheckboxGroup `item is not defined`).
     pub has_vnode_key: bool,
+    /// True when a `ref` needs dynamic handling: an inline static `ref="el"`
+    /// naming a setup binding (emits `ref_key` + `ref: el`) or a dynamic
+    /// `:ref="expr"` with a non-literal value. Like [`Self::has_vnode_key`],
+    /// the props object embeds a scope-bound reference and must not be
+    /// hoisted to module scope — hoisting `{ ref: $setup.elRef }` /
+    /// `{ ref: elRef.value }` evaluates it outside the render function /
+    /// `setup()` (a plain ReferenceError at module load).
+    pub has_dynamic_ref: bool,
     /// v-model on a native element (input/textarea/select) that needs
     /// `_withDirectives()` wrapping after the element VNode is created.
     pub native_vmodel: Option<NativeVModel>,
@@ -949,6 +957,11 @@ pub(crate) fn build_props_object_into(
     // hoisting so loop-scoped keys like `item.name` are not evaluated at
     // module scope.
     let mut has_vnode_key = false;
+    // True when a `ref` needs dynamic handling (inline static ref naming a
+    // setup binding, or a dynamic `:ref` with a non-literal value). Blocks
+    // props-object hoisting so the scope-bound reference is not evaluated at
+    // module scope (same failure class as `has_vnode_key`).
+    let mut has_dynamic_ref = false;
     let mut uses_normalize_class = false;
     let mut uses_normalize_style = false;
     let mut uses_with_modifiers = false;
@@ -1118,15 +1131,45 @@ pub(crate) fn build_props_object_into(
 
         // Emit ref prop first (cached in v_ref, not in props vec)
         if let Some(ref_prop) = &element.v_ref {
-            buf.push_str("ref: ");
             if let (Some(vs), Some(ve)) = (ref_prop.value_start, ref_prop.value_end) {
                 let ref_value = &source[vs as usize..ve as usize];
-                buf.push('"');
-                helpers::escape_js_string_into(buf, ref_value);
-                buf.push('"');
+                // Official inline (compileScript({ inlineTemplate: true })): a
+                // static `ref="el"` naming a setup-let/setup-ref/setup-maybe-ref
+                // binding compiles to `{ ref_key: "el", ref: el }` so the setup
+                // binding receives the element (the props object becomes dynamic
+                // and is never hoisted). Non-inline keeps the runtime string ref.
+                // Official also binds maybe-ref USER IMPORTS (named imports from
+                // any source + default imports from non-vue non-.vue sources);
+                // vue-source, default-.vue-source, and namespace imports stay
+                // string refs.
+                let inline_binding = resolver.is_inline() && {
+                    matches!(
+                        resolver.get(ref_value),
+                        Some(
+                            super::super::binding::BindingType::SetupLet
+                                | super::super::binding::BindingType::SetupRef
+                                | super::super::binding::BindingType::SetupMaybeRef
+                        )
+                    ) || (matches!(
+                        resolver.get(ref_value),
+                        Some(super::super::binding::BindingType::SetupImport)
+                    ) && resolver.is_ref_bindable_import(ref_value))
+                };
+                if inline_binding {
+                    buf.push_str("ref_key: \"");
+                    helpers::escape_js_string_into(buf, ref_value);
+                    buf.push_str("\", ref: ");
+                    buf.push_str(ref_value);
+                    has_dynamic_ref = true;
+                } else {
+                    buf.push_str("ref: ");
+                    buf.push('"');
+                    helpers::escape_js_string_into(buf, ref_value);
+                    buf.push('"');
+                }
             } else {
                 // ref without value (rare, but handle gracefully)
-                buf.push_str("\"\"");
+                buf.push_str("ref: \"\"");
             }
             first = false;
         }
@@ -1413,6 +1456,28 @@ pub(crate) fn build_props_object_into(
                                 )
                             {
                                 dynamic_props.push(key.to_string());
+                            }
+                        }
+                        // A dynamic `:ref` (non-literal value) embeds a
+                        // scope-bound reference in the props object — it must
+                        // not be hoisted to module scope (evaluated outside
+                        // the render fn / setup(): `$setup.elRef` / `elRef.value`
+                        // are not module-scope names). Pure literals
+                        // (`:ref="'el'"`) and const-prop values stay hoistable.
+                        if is_vnode_ref {
+                            let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
+                            let is_pure_literal = oxc_exp.is_some_and(|e| {
+                                e.dynamism == Dynamism::Static
+                                    && e.bindings
+                                        .as_ref()
+                                        .is_some_and(|b| b.non_ignored_binding_names().is_empty())
+                            });
+                            if !is_pure_literal
+                                && !resolver.all_bindings_const_props(
+                                    oxc_exp.and_then(|e| e.bindings.as_ref()),
+                                )
+                            {
+                                has_dynamic_ref = true;
                             }
                         }
                         if props::needs_quoted_key(&key) {
@@ -1931,6 +1996,7 @@ pub(crate) fn build_props_object_into(
         uses_guard_reactive_props,
         uses_to_handlers,
         has_vnode_key,
+        has_dynamic_ref,
         native_vmodel,
         directive_entries,
     }
@@ -2256,7 +2322,7 @@ pub fn process_element_leave<'alloc>(
     };
 
     // Props
-    let (dynamic_props, native_vmodel, directive_entries) = if has_props {
+    let (dynamic_props, has_dynamic_ref, native_vmodel, directive_entries) = if has_props {
         buf.push_str(", ");
         let props_start = buf.len();
         let props_result = build_props_object_into(
@@ -2279,6 +2345,7 @@ pub fn process_element_leave<'alloc>(
             && !element.tag_type.is_component()
             && props_result.dynamic_props.is_empty()
             && !props_result.has_vnode_key
+            && !props_result.has_dynamic_ref
             && !props_result.uses_merge
             && !props_result.uses_normalize_class
             && !props_result.uses_normalize_style
@@ -2332,6 +2399,7 @@ pub fn process_element_leave<'alloc>(
         }
         (
             props_result.dynamic_props,
+            props_result.has_dynamic_ref,
             props_result.native_vmodel,
             props_result.directive_entries,
         )
@@ -2341,13 +2409,13 @@ pub fn process_element_leave<'alloc>(
         buf.push_str(", { key: ");
         buf.push_str(&k.to_string());
         buf.push_str(" }");
-        (Vec::new(), None, Vec::new())
+        (Vec::new(), false, None, Vec::new())
     } else {
         if has_children || patch_flag != 0 {
             // Need null placeholder for props when there are children or patch flags
             buf.push_str(", null");
         }
-        (Vec::new(), None, Vec::new())
+        (Vec::new(), false, None, Vec::new())
     };
     // For components with dynamic bound props, add PATCH_PROPS so that
     // shouldUpdateComponent can check listed dynamic props.
@@ -2361,6 +2429,12 @@ pub fn process_element_leave<'alloc>(
         patch_flag &= !helpers::PATCH_PROPS;
     } else {
         patch_flag |= helpers::PATCH_PROPS;
+    }
+    // Official emits 512 /* NEED_PATCH */ for dynamic refs (an inline
+    // ref_key/ref binding or a dynamic `:ref`) so the patcher traverses and
+    // updates the ref binding.
+    if has_dynamic_ref {
+        patch_flag |= helpers::PATCH_NEED_PATCH;
     }
 
     // Children opening

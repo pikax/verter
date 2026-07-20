@@ -60,6 +60,13 @@ pub struct RequestOptions {
     /// handle future resolves to [`TsgoApiError::Cancelled`] and the response is
     /// discarded.
     pub cancel: Option<CancelToken>,
+    /// An optional hard deadline for the engine's response, measured from when
+    /// the actor starts serving the request. On expiry the request fails with
+    /// [`TsgoApiError::Timeout`] and the ENGINE IS TORN DOWN (the single-flight
+    /// wire cannot recover a wedged request; the transport is terminated with a
+    /// process-tree kill), so a hung engine can never block a caller forever.
+    /// `None` keeps the legacy unbounded wait (interactive lanes).
+    pub deadline: Option<std::time::Duration>,
 }
 
 /// A cheap, cloneable cancellation flag.
@@ -90,6 +97,7 @@ struct ActorRequest {
     method: String,
     payload: Vec<u8>,
     cancel: Option<CancelToken>,
+    deadline: Option<std::time::Duration>,
     reply: oneshot::Sender<TsgoApiResult<Vec<u8>>>,
 }
 
@@ -140,6 +148,7 @@ impl ClientHandle {
             method: method.to_string(),
             payload,
             cancel: opts.cancel.clone(),
+            deadline: opts.deadline,
             reply: reply_tx,
         };
 
@@ -225,6 +234,27 @@ where
     }
 }
 
+/// A serve-loop failure: the error to answer the caller with, and whether it
+/// is fatal to the actor (a fatal error ends the actor task; a non-fatal one —
+/// an engine error frame — lets it continue serving).
+struct ServeError {
+    error: TsgoApiError,
+    fatal: bool,
+}
+
+impl ServeError {
+    fn fatal(error: TsgoApiError) -> Self {
+        Self { error, fatal: true }
+    }
+
+    fn non_fatal(error: TsgoApiError) -> Self {
+        Self {
+            error,
+            fatal: false,
+        }
+    }
+}
+
 /// The single actor task.
 struct Actor<T: DuplexTransport> {
     transport: T,
@@ -289,33 +319,89 @@ impl<T: DuplexTransport> Actor<T> {
 
     /// Write one request and read frames until its matching response, servicing
     /// callbacks inline. All state is local — no lock crosses an await.
+    ///
+    /// When the request carries a `deadline`, the whole serve (write + frame
+    /// reads) runs under it: on expiry the transport is TERMINATED (a wedged
+    /// single-flight wire cannot be recovered), the caller is answered with
+    /// [`TsgoApiError::Timeout`], and the actor ends.
     async fn serve_one(&mut self, req: ActorRequest) -> TsgoApiResult<()> {
-        let frame = encode_frame(MessageType::Request, req.method.as_bytes(), &req.payload);
+        let ActorRequest {
+            method,
+            payload,
+            cancel,
+            deadline,
+            reply,
+        } = req;
+
+        let work = self.serve_frames(&method, &payload, cancel);
+        let outcome = match deadline {
+            Some(bound) => match tokio::time::timeout(bound, work).await {
+                Ok(outcome) => outcome,
+                Err(_) => {
+                    // The deadline fired: tear the engine down (process-tree
+                    // kill via the transport), answer bounded, end the actor.
+                    self.transport.terminate().await;
+                    let _ = reply.send(Err(TsgoApiError::Timeout(format!(
+                        "`{method}` exceeded its {} ms request deadline; the engine was terminated",
+                        bound.as_millis()
+                    ))));
+                    return Err(TsgoApiError::Timeout(format!(
+                        "`{method}` deadline fired; actor ending"
+                    )));
+                }
+            },
+            None => work.await,
+        };
+
+        match outcome {
+            Ok(Some(payload)) => {
+                let _ = reply.send(Ok(payload));
+                Ok(())
+            }
+            // The request resolved without a reply to send (cancelled mid-flight).
+            Ok(None) => Ok(()),
+            Err(ServeError { error, fatal }) => {
+                let _ = reply.send(Err(error));
+                if fatal {
+                    Err(TsgoApiError::Transport("actor ending".into()))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// The frame-level serve loop for one request: returns the response
+    /// payload, `Ok(None)` when the request resolved without a reply (cancelled
+    /// mid-flight), or a [`ServeError`] (fatal errors end the actor).
+    async fn serve_frames(
+        &mut self,
+        method: &str,
+        payload: &[u8],
+        cancel: Option<CancelToken>,
+    ) -> Result<Option<Vec<u8>>, ServeError> {
+        let frame = encode_frame(MessageType::Request, method.as_bytes(), payload);
         if let Err(e) = self.transport.send_frame(&frame).await {
-            let _ = req.reply.send(Err(e));
-            return Err(TsgoApiError::Transport("send failed".into()));
+            return Err(ServeError::fatal(e));
         }
 
         loop {
             let raw = match self.transport.recv_frame().await {
                 Ok(Some(bytes)) => bytes,
                 Ok(None) => {
-                    let _ = req.reply.send(Err(TsgoApiError::Transport(
+                    return Err(ServeError::fatal(TsgoApiError::Transport(
                         "engine closed the connection".into(),
                     )));
-                    return Err(TsgoApiError::Transport("eof".into()));
                 }
                 Err(e) => {
-                    let _ = req.reply.send(Err(e));
-                    return Err(TsgoApiError::Transport("recv failed".into()));
+                    return Err(ServeError::fatal(e));
                 }
             };
 
             let (decoded, _) = match decode_frame(&raw, 0) {
                 Ok(d) => d,
                 Err(e) => {
-                    let _ = req.reply.send(Err(e));
-                    return Err(TsgoApiError::Codec("frame decode".into()));
+                    return Err(ServeError::fatal(e));
                 }
             };
 
@@ -323,36 +409,25 @@ impl<T: DuplexTransport> Actor<T> {
                 MessageType::Response => {
                     // Name correlation: the response name must match the request
                     // method (syncChannel.js:208-214).
-                    if decoded.name != req.method.as_bytes() {
-                        let _ = req.reply.send(Err(TsgoApiError::Codec(format!(
-                            "response name mismatch: expected `{}`",
-                            req.method
+                    if decoded.name != method.as_bytes() {
+                        return Err(ServeError::fatal(TsgoApiError::Codec(format!(
+                            "response name mismatch: expected `{method}`"
                         ))));
-                        return Err(TsgoApiError::Codec("name mismatch".into()));
                     }
                     // If the request was cancelled mid-flight, discard the result
                     // (the handle future already resolved to Cancelled).
-                    let payload = decoded.payload.to_vec();
-                    if req
-                        .cancel
-                        .as_ref()
-                        .map(|t| t.is_cancelled())
-                        .unwrap_or(false)
-                    {
+                    if cancel.as_ref().map(|t| t.is_cancelled()).unwrap_or(false) {
                         // Drop the reply (cancelled); the response is consumed
                         // and the wire is clean for the next request.
-                        return Ok(());
+                        return Ok(None);
                     }
-                    let _ = req.reply.send(Ok(payload));
-                    return Ok(());
+                    return Ok(Some(decoded.payload.to_vec()));
                 }
                 MessageType::Error => {
                     let msg = String::from_utf8_lossy(decoded.payload).into_owned();
-                    let _ = req.reply.send(Err(TsgoApiError::Transport(format!(
-                        "engine error for `{}`: {msg}",
-                        req.method
+                    return Err(ServeError::non_fatal(TsgoApiError::Transport(format!(
+                        "engine error for `{method}`: {msg}"
                     ))));
-                    return Ok(());
                 }
                 MessageType::Call => {
                     // Service the host FS callback synchronously from the
@@ -360,16 +435,14 @@ impl<T: DuplexTransport> Actor<T> {
                     let name = String::from_utf8_lossy(decoded.name).into_owned();
                     let reply_frame = self.service_callback(&name, decoded.payload);
                     if let Err(e) = self.transport.send_frame(&reply_frame).await {
-                        let _ = req.reply.send(Err(e));
-                        return Err(TsgoApiError::Transport("callback send failed".into()));
+                        return Err(ServeError::fatal(e));
                     }
                     // Continue reading frames for the same request.
                 }
                 other => {
-                    let _ = req.reply.send(Err(TsgoApiError::Codec(format!(
+                    return Err(ServeError::fatal(TsgoApiError::Codec(format!(
                         "unexpected message type from engine: {other:?}"
                     ))));
-                    return Err(TsgoApiError::Codec("unexpected frame".into()));
                 }
             }
         }

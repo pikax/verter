@@ -3960,6 +3960,7 @@ dependencies = [
  "verter_scheduler",
  "verter_session",
  "verter_span",
+ "verter_tsgo_api",
  "verter_type_runtime",
  "verter_workspace",
 ]
@@ -4383,6 +4384,7 @@ dependencies = [
  "verter_macro_dto",
  "verter_session",
  "verter_span",
+ "verter_tsc",
  "verter_tsgo_api",
  "verter_workspace",
  "walkdir",
@@ -4400,6 +4402,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "verter_span",
+ "verter_tsgo_api",
  "windows-sys",
 ]
 
@@ -4442,6 +4445,23 @@ dependencies = [
  "verter_language",
  "verter_span",
  "verter_tsgo_api",
+]
+
+[[package]]
+name = "verter_vue_conformance"
+version = "0.0.1-beta.1"
+dependencies = [
+ "hex",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "oxc_semantic",
+ "oxc_span",
+ "serde",
+ "serde_json",
+ "sha2",
+ "verter_compiler",
+ "verter_session",
 ]
 
 [[package]]

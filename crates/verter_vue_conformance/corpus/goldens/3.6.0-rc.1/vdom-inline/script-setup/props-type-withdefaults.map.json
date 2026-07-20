@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/script-setup/props-type-withdefaults.vue"
+  ],
+  "names": [],
+  "mappings": ";;;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;;;;;;;AAE9C,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AAQd,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;wBAOX,oBAEM;IAFA,OAAK,8CAAE,IAAI,SAAS,KAAK,CAAC,IAAI;sBAC/B,YAAI,CAAC,IAAI,IAAG,IAAE,oBAAG,YAAI,IAAG,IAAE,oBAAG,YAAI,CAAC,MAAM",
+  "sourcesContent": [
+    "<script setup lang=\"ts\">\nimport type { Item } from \"../../support/types\"\n\nconst props = withDefaults(\n  defineProps<{\n    item: Item\n    size?: \"sm\" | \"lg\"\n    tags?: string[]\n  }>(),\n  { size: \"sm\", tags: () => [] },\n)\nconst emit = defineEmits<{\n  pick: [item: Item]\n  close: []\n}>()\n</script>\n\n<template>\n  <div @click=\"emit('pick', props.item)\">\n    {{ item.name }} ({{ size }}) {{ tags.length }}\n  </div>\n</template>\n"
+  ]
+}

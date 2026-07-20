@@ -1,0 +1,63 @@
+{
+  "schema": 2,
+  "caseId": "elements-text/static-class-style",
+  "backend": "vdom",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/elements-text/static-class-style.vue",
+    "sha256": "f6ac1360dcea4407df709122debbb8cd4c8e225e372fce719739413a15838783"
+  },
+  "options": {
+    "sha256": "ae326c3524c2a75cf9682ba8ee49f2d8cf124d2825dd5585ff92d5c0637383fb",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/elements-text/static-class-style.vue",
+      "id": "elements-text/static-class-style",
+      "pipeline": "compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": false,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vdom/elements-text/static-class-style.js",
+      "sha256": "cdf34d2f683093ea5a650fe11beb9b3bb22628b7af1dbb12b5c4696669c862bd",
+      "bytes": 515
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vdom/elements-text/static-class-style.map.json",
+      "sha256": "cbe81bff29a5065c603623fef2749585fe1de5a75cc34ad11177d67efffc8b56"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createElementBlock",
+      "alias": "_createElementBlock"
+    },
+    {
+      "imported": "createElementVNode",
+      "alias": "_createElementVNode"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    }
+  ]
+}

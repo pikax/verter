@@ -49,6 +49,8 @@
     "gen:oracle-snapshots": "cargo run -p verter_session --features oracle-gen --bin oracle_gen",
     "gen:typeinfo-manifest": "node scripts/gen-typeinfo-ignore-manifest.mjs",
     "gen:typeinfo-manifest:check": "node scripts/gen-typeinfo-ignore-manifest.mjs --check",
+    "gen:vue-goldens": "node packages/vue-conformance-oracle/gen-vue-goldens.mjs",
+    "gen:vue-goldens:check": "node packages/vue-conformance-oracle/gen-vue-goldens.mjs --check",
     "integration-test": "node scripts/integration-test/run.mjs",
     "integration-test:discover": "node scripts/integration-test/run.mjs --discover-local --discover-only",
     "integration-test:local": "node scripts/integration-test/run.mjs --discover-local --local-only",

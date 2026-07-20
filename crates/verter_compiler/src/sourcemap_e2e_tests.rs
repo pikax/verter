@@ -1699,3 +1699,91 @@ const dir = ref(Direction.Up)
         assert_hoisted_maps_to_source(&sm, &tsx.code, source, "const enum Direction {");
     }
 }
+
+// ── Inline-template source maps ────────────────────────────────────
+
+/// Inline topology: the render closure is spliced into `setup()` on the SAME
+/// CodeTransform (single-CT merge + `move_slice`), so template expressions
+/// keep their SFC source mappings. Assert an inlined template expression
+/// maps back to the TEMPLATE line (not the script line).
+#[test]
+fn inline_template_expression_maps_to_template_source() {
+    // Line map (0-based): 0 <script setup>, 1 import, 2 const msg, 3 </script>,
+    // 4 blank, 5 <template>, 6 <div :title="msg">{{ msg }}</div>, 7 </template>
+    let source = "<script setup>\nimport { ref } from 'vue'\nconst msg = ref('hello')\n</script>\n\n<template>\n  <div :title=\"msg\">{{ msg }}</div>\n</template>";
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        inline: Some(true),
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        source_map: true,
+        ..Default::default()
+    };
+    let result = compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
+    let script = result.script.as_ref().expect("script block");
+    assert!(
+        script.code.contains("return (_ctx,_cache) => {"),
+        "render must be inlined into setup:\n{}",
+        script.code
+    );
+    let sm = oxc_sourcemap::OwnedSourceMap::from_json_string(&script.source_map)
+        .expect("parse script sourcemap");
+    let lookup = build_lookup_table(&sm);
+
+    // The `msg` inside the inlined render's prop binding (`title: msg.value`)
+    // must map to the template line (6), not the script's `const msg` line (2).
+    let gen_offset = script
+        .code
+        .find("title: msg")
+        .expect("prop binding in output")
+        + "title: ".len();
+    let (gen_line, gen_col) = byte_offset_to_line_col(&script.code, gen_offset);
+    let token = sm
+        .lookup_token(&lookup, gen_line, gen_col)
+        .expect("sourcemap token for the inlined prop expression");
+    assert!(
+        token.get_source_id().is_some(),
+        "inlined prop expression must be mapped (not synthetic):\n{}",
+        script.code
+    );
+    assert_eq!(
+        token.get_src_line(),
+        6,
+        "inlined prop expression must map to the template line (6), got src line {} col {}\nGenerated:\n{}",
+        token.get_src_line(),
+        token.get_src_col(),
+        script.code
+    );
+
+    // Same for the interpolation `_toDisplayString( msg.value )`.
+    let gen_offset = script
+        .code
+        .find("_toDisplayString( msg")
+        .expect("interpolation in output")
+        + "_toDisplayString( ".len();
+    let (gen_line, gen_col) = byte_offset_to_line_col(&script.code, gen_offset);
+    let token = sm
+        .lookup_token(&lookup, gen_line, gen_col)
+        .expect("sourcemap token for the inlined interpolation");
+    assert!(
+        token.get_source_id().is_some(),
+        "inlined interpolation must be mapped (not synthetic):\n{}",
+        script.code
+    );
+    assert_eq!(
+        token.get_src_line(),
+        6,
+        "inlined interpolation must map to the template line (6), got src line {} col {}\nGenerated:\n{}",
+        token.get_src_line(),
+        token.get_src_col(),
+        script.code
+    );
+}

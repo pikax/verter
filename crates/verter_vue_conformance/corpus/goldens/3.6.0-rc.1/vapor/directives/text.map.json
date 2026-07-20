@@ -1,0 +1,13 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/directives/text.vue"
+  ],
+  "names": [
+    "plain"
+  ],
+  "mappings": ";;;;;;oDAOaA,UAAK",
+  "sourcesContent": [
+    "\n  <p v-text=\"plain\"></p>\n"
+  ]
+}

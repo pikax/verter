@@ -1,0 +1,87 @@
+{
+  "schema": 2,
+  "caseId": "components/child-comp",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/components/child-comp.vue",
+    "sha256": "ccec2f3e27465b962543d548e1cebee609ac84bae1ed48fc544c591b55211e05"
+  },
+  "options": {
+    "sha256": "6d95425be7fbeb22d6b236f642243f4a83b8bd0386c5ffb135663d0f1b28b625",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/components/child-comp.vue",
+      "id": "components/child-comp",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vapor/components/child-comp.js",
+      "sha256": "8a306143a79b8d4dffd24ef87c34a0fb76b39fa1204d84a56dbc81c933d12f29",
+      "bytes": 1392
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vapor/components/child-comp.map.json",
+      "sha256": "18252c7597c9e65c0a2c6b0a65807ea03cdd172dfabb589d2eea69fbe91da580"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "child",
+      "alias": "_child"
+    },
+    {
+      "imported": "createInvoker",
+      "alias": "_createInvoker"
+    },
+    {
+      "imported": "createSlot",
+      "alias": "_createSlot"
+    },
+    {
+      "imported": "delegateEvents",
+      "alias": "_delegateEvents"
+    },
+    {
+      "imported": "renderEffect",
+      "alias": "_renderEffect"
+    },
+    {
+      "imported": "setInsertionState",
+      "alias": "_setInsertionState"
+    },
+    {
+      "imported": "setText",
+      "alias": "_setText"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    }
+  ]
+}

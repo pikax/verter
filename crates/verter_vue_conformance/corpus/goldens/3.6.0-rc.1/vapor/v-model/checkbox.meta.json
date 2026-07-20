@@ -1,0 +1,67 @@
+{
+  "schema": 2,
+  "caseId": "v-model/checkbox",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/v-model/checkbox.vue",
+    "sha256": "ad46747040e20ac12cdbfc92e24adedb35165f60424bf83cebc11042e1747e6a"
+  },
+  "options": {
+    "sha256": "8b5cf79a53dcfe2d9d677b3017f934f86ecf1af3becb4be7ed99f2885e46d614",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/v-model/checkbox.vue",
+      "id": "v-model/checkbox",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vapor/v-model/checkbox.js",
+      "sha256": "116b8cc21c847f588e61f4c7225dfb6c7c294c3d9c78183b78e369e861e857a3",
+      "bytes": 734
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vapor/v-model/checkbox.map.json",
+      "sha256": "099dbe461004fc5f2a6b98ff51669614bc1c8e99e5a3c96327c8910d7703d515"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "applyCheckboxModel",
+      "alias": "_applyCheckboxModel"
+    },
+    {
+      "imported": "child",
+      "alias": "_child"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    }
+  ]
+}

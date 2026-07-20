@@ -1,0 +1,67 @@
+{
+  "schema": 2,
+  "caseId": "v-bind/dynamic-arg",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/v-bind/dynamic-arg.vue",
+    "sha256": "4c1c48b617e38a3aeb9e492604f25ebc84994cfd204fb58962e9da93b7edd842"
+  },
+  "options": {
+    "sha256": "24ba4395616d05aadfd4c0917d977d5eb79538179b55644c9b7254ac9396f285",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/v-bind/dynamic-arg.vue",
+      "id": "v-bind/dynamic-arg",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vapor/v-bind/dynamic-arg.js",
+      "sha256": "34d904eaf106affbffd5b7c310bd9843f6ae87c1b988f2fa2061724afa602ba0",
+      "bytes": 747
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vapor/v-bind/dynamic-arg.map.json",
+      "sha256": "7d4082dce78bd37afe5be1ffe4468965e9633236dfc04783bd4dea910ff34018"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "renderEffect",
+      "alias": "_renderEffect"
+    },
+    {
+      "imported": "setDynamicProps",
+      "alias": "_setDynamicProps"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    }
+  ]
+}

@@ -567,9 +567,14 @@ fn test_build_paths_config_payload_includes_paths_only() {
     );
 }
 
-fn tsgo_bin_or_skip() -> Option<String> {
-    match find_tsgo_binary() {
-        Ok(bin) => Some(bin),
+async fn tsgo_bin_or_skip() -> Option<String> {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+        verter_tsgo_api::toolchain::validation::Capability::Lsp,
+        Some(repo_root),
+    );
+    match verter_tsgo_api::toolchain::discovery::resolve(&request).await {
+        Ok(resolution) => Some(resolution.path.to_string_lossy().into_owned()),
         Err(err) => {
             if std::env::var("VERTER_REQUIRE_TSGO")
                 .map(|v| v == "1")
@@ -709,15 +714,15 @@ fn test_normalize_file_uri() {
 fn test_normalize_file_uri_cache_key_match() {
     // Simulate what open_file does: path_to_uri → normalize → cache key
     let path = "C:/Users/Someone/AppData/Local/Temp/verter_test/App.vue.tsx";
-    let our_key = normalize_file_uri(&TsgoTypeProvider::path_to_uri(path));
+    let _our_key = normalize_file_uri(&TsgoTypeProvider::path_to_uri(path));
 
     // Simulate what read_loop does with TSGO's publishDiagnostics URI
     let tsgo_raw = "file:///c%3A/users/someone/appdata/local/temp/verter_test/app.vue.tsx";
-    let tsgo_key = normalize_file_uri(tsgo_raw);
+    let _tsgo_key = normalize_file_uri(tsgo_raw);
 
     #[cfg(windows)]
     assert_eq!(
-        our_key, tsgo_key,
+        _our_key, _tsgo_key,
         "open_file cache key and read_loop cache key must match"
     );
 }
@@ -759,7 +764,7 @@ fn test_offset_to_position() {
 /// @ai-generated — TSGO process spawns and initializes successfully
 #[tokio::test]
 async fn test_tsgo_spawn_and_initialize() {
-    let Some(tsgo_bin) = tsgo_bin_or_skip() else {
+    let Some(tsgo_bin) = tsgo_bin_or_skip().await else {
         return;
     };
 
@@ -783,7 +788,7 @@ async fn test_tsgo_spawn_and_initialize() {
 /// @ai-generated — TSGO processes open_file and hover for a .ts file
 #[tokio::test]
 async fn test_tsgo_hover_on_ts_file() {
-    let Some(tsgo_bin) = tsgo_bin_or_skip() else {
+    let Some(tsgo_bin) = tsgo_bin_or_skip().await else {
         return;
     };
 
@@ -833,7 +838,7 @@ async fn test_tsgo_hover_on_ts_file() {
 /// the connection survives by waiting for tsgo to settle, then making a request.
 #[tokio::test]
 async fn test_tsgo_survives_workspace_configuration() {
-    let Some(tsgo_bin) = tsgo_bin_or_skip() else {
+    let Some(tsgo_bin) = tsgo_bin_or_skip().await else {
         return;
     };
 
@@ -2633,356 +2638,9 @@ async fn cached_content_resolves_equivalent_path_forms_after_load_file() {
     );
 }
 
-#[test]
-fn test_collect_npm_cache_roots_uses_env_then_npm_then_default() {
-    let roots = collect_npm_cache_roots(
-        Some(std::path::PathBuf::from("/env-cache")),
-        Some(std::path::PathBuf::from("/npm-cache")),
-        Some(std::path::PathBuf::from("/default-cache")),
-    );
-
-    assert_eq!(
-        roots,
-        vec![
-            std::path::PathBuf::from("/env-cache"),
-            std::path::PathBuf::from("/npm-cache"),
-            std::path::PathBuf::from("/default-cache")
-        ]
-    );
-}
-
-#[test]
-fn test_collect_npm_cache_roots_deduplicates_preserving_order() {
-    let roots = collect_npm_cache_roots(
-        Some(std::path::PathBuf::from("/shared-cache")),
-        Some(std::path::PathBuf::from("/shared-cache")),
-        Some(std::path::PathBuf::from("/default-cache")),
-    );
-
-    assert_eq!(
-        roots,
-        vec![
-            std::path::PathBuf::from("/shared-cache"),
-            std::path::PathBuf::from("/default-cache")
-        ]
-    );
-}
-
-#[test]
-fn test_find_tsgo_binary_in_resolves_rc_native_binary_not_legacy_shim() {
-    let cache_root = std::env::temp_dir().join(format!(
-        "verter_tsgo_lookup_native_preference_{}",
-        std::process::id()
-    ));
-    let native_rel = tsgo_native_binary_rel_paths()
-        .into_iter()
-        .next()
-        .expect("expected at least one rc native tsc path");
-    let native_path = cache_root.join("_npx/entry").join(native_rel);
-    // A legacy `.bin/tsgo` shim alongside it — must be ignored.
-    let shim_path = cache_root.join("_npx/entry/node_modules/.bin/tsgo");
-
-    let _ = std::fs::remove_dir_all(&cache_root);
-    std::fs::create_dir_all(native_path.parent().unwrap()).unwrap();
-    std::fs::create_dir_all(shim_path.parent().unwrap()).unwrap();
-    std::fs::write(&native_path, "native").unwrap();
-    std::fs::write(&shim_path, "shim").unwrap();
-
-    let result = find_tsgo_binary_in(std::slice::from_ref(&cache_root)).unwrap();
-
-    assert_eq!(std::path::PathBuf::from(result), native_path);
-
-    let _ = std::fs::remove_dir_all(cache_root);
-}
-
-#[test]
-fn test_find_tsgo_binary_in_reports_checked_roots_when_not_found() {
-    let cache_root =
-        std::env::temp_dir().join(format!("verter_tsgo_lookup_missing_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&cache_root);
-    std::fs::create_dir_all(cache_root.join("_npx/entry")).unwrap();
-
-    let err = find_tsgo_binary_in(std::slice::from_ref(&cache_root)).unwrap_err();
-    let display = err.to_string();
-
-    assert!(
-        display.contains(cache_root.to_string_lossy().as_ref()),
-        "error should mention cache root, got: {display}"
-    );
-    assert!(
-        display.contains("_npx"),
-        "error should mention the _npx search path, got: {display}"
-    );
-
-    let _ = std::fs::remove_dir_all(cache_root);
-}
-
 // ---------------------------------------------------------------------------
 // Workspace node_modules tsgo discovery + canonical precedence (FIX-1)
 // ---------------------------------------------------------------------------
-
-/// The flat-npm candidate paths are constructed under `<node_modules>` (NOT a
-/// nested `node_modules/node_modules`) and land on the current platform's rc
-/// `@typescript/typescript-{plat}-{arch}/lib/tsc[.exe]`. Pure path math —
-/// no filesystem, so it holds on every platform.
-#[test]
-fn flat_npm_tsgo_candidate_paths_are_rooted_directly_under_node_modules() {
-    let node_modules = std::path::Path::new("/proj/node_modules");
-    let candidates = flat_npm_tsgo_candidate_paths(node_modules);
-
-    assert!(
-        !candidates.is_empty(),
-        "expected at least the current-platform candidate"
-    );
-    // The current platform's binary is first; it must be joined directly under
-    // node_modules (the leading `node_modules/` of the rel path is stripped).
-    let first = &candidates[0];
-    assert!(
-        first.starts_with(node_modules),
-        "candidate must be under the node_modules dir, got: {}",
-        first.display()
-    );
-    assert!(
-        first.components().any(|c| c.as_os_str() == "@typescript"),
-        "candidate must descend into @typescript, got: {}",
-        first.display()
-    );
-    assert!(
-        first.ends_with("lib/tsc") || first.ends_with("lib/tsc.exe"),
-        "candidate must end at the rc lib/tsc[.exe] binary, got: {}",
-        first.display()
-    );
-    // No double node_modules in the leading segment.
-    let s = first.to_string_lossy().replace('\\', "/");
-    assert!(
-        !s.contains("node_modules/node_modules"),
-        "flat-npm candidate must not nest node_modules, got: {s}"
-    );
-}
-
-/// The pnpm-store candidate paths are constructed under a single store entry,
-/// nesting the real `node_modules/@typescript/typescript-*/lib/tsc[.exe]`.
-/// Pure path math — no filesystem.
-#[test]
-fn pnpm_store_tsgo_candidate_paths_nest_under_store_entry() {
-    let store_entry =
-        std::path::Path::new("/proj/node_modules/.pnpm/@typescript+typescript-x@7.0.1-rc");
-    let candidates = pnpm_store_tsgo_candidate_paths(store_entry);
-
-    assert!(!candidates.is_empty());
-    let first = &candidates[0];
-    assert!(
-        first.starts_with(store_entry),
-        "pnpm candidate must be under the store entry, got: {}",
-        first.display()
-    );
-    let s = first.to_string_lossy().replace('\\', "/");
-    assert!(
-        s.contains("/node_modules/@typescript/"),
-        "pnpm candidate must nest the real node_modules/@typescript path, got: {s}"
-    );
-    assert!(
-        first.ends_with("lib/tsc") || first.ends_with("lib/tsc.exe"),
-        "pnpm candidate must end at the rc lib/tsc[.exe] binary, got: {}",
-        first.display()
-    );
-}
-
-/// Materialize a flat-npm rc `tsc` binary under a fake workspace `node_modules`
-/// and prove `find_tsgo_binary_under_node_modules` discovers it (the production
-/// workspace-dependency case PATH + cache miss).
-#[test]
-fn find_tsgo_under_node_modules_discovers_flat_npm_layout() {
-    let root = std::env::temp_dir().join(format!(
-        "verter_tsgo_flat_npm_{}_{}",
-        std::process::id(),
-        line!()
-    ));
-    let node_modules = root.join("node_modules");
-    let _ = std::fs::remove_dir_all(&root);
-
-    // Use the current platform's rel path (first entry) so the test materializes
-    // the binary the running platform looks for (the rc `tsc`).
-    let rel = tsgo_native_binary_rel_paths().swap_remove(0);
-    let rel_under_nm = rel.strip_prefix("node_modules/").unwrap_or(&rel).to_owned();
-    let bin = node_modules.join(rel_under_nm);
-    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
-    std::fs::write(&bin, "tsc").unwrap();
-
-    let found = find_tsgo_binary_under_node_modules(&node_modules);
-    assert_eq!(
-        found.map(std::path::PathBuf::from),
-        Some(bin),
-        "flat-npm workspace rc tsc must be discovered under node_modules"
-    );
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-/// Materialize a pnpm-store rc `tsc` binary and prove `find_tsgo_binary_under_node_modules`
-/// discovers it via the `.pnpm` store walk.
-#[test]
-fn find_tsgo_under_node_modules_discovers_pnpm_layout() {
-    let root = std::env::temp_dir().join(format!(
-        "verter_tsgo_pnpm_{}_{}",
-        std::process::id(),
-        line!()
-    ));
-    let node_modules = root.join("node_modules");
-    let _ = std::fs::remove_dir_all(&root);
-
-    let store_entry = node_modules
-        .join(".pnpm")
-        .join("@typescript+typescript-test@7.0.1-rc");
-    // Materialize the rc `tsc` binary under the rc store dir.
-    let rel = pnpm_store_tsgo_candidate_paths(&store_entry)
-        .into_iter()
-        .find(|c| {
-            let s = c.to_string_lossy().replace('\\', "/");
-            s.contains("/@typescript/typescript-")
-                && (s.ends_with("/lib/tsc") || s.ends_with("/lib/tsc.exe"))
-        })
-        .expect("an rc tsc pnpm candidate must exist for this platform");
-    std::fs::create_dir_all(rel.parent().unwrap()).unwrap();
-    std::fs::write(&rel, "tsc").unwrap();
-
-    let found = find_tsgo_binary_under_node_modules(&node_modules);
-    assert_eq!(
-        found.map(std::path::PathBuf::from),
-        Some(rel),
-        "pnpm-store workspace rc tsc must be discovered under node_modules/.pnpm"
-    );
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-/// `find_tsgo_binary_canonical` searches the WORKSPACE node_modules (tier 2) —
-/// the production-path proof: a binary present only in `<root>/node_modules`
-/// (not on PATH, not in the npm cache, no env override) is found. This is the
-/// canonical wiring the LSP `try_spawn_tsgo` now uses; reverting production to
-/// the bare `find_tsgo_binary()` would make a real project's pinned tsgo
-/// undiscoverable. Serialized because it touches the override env var.
-#[test]
-fn canonical_discovery_searches_workspace_node_modules() {
-    let _guard = tsgo_env_test_lock().lock().unwrap();
-    // Ensure no override env leaks in from the ambient environment.
-    let prev = std::env::var_os(TSGO_BINARY_ENV);
-    std::env::remove_var(TSGO_BINARY_ENV);
-
-    let root = std::env::temp_dir().join(format!(
-        "verter_tsgo_canon_ws_{}_{}",
-        std::process::id(),
-        line!()
-    ));
-    let node_modules = root.join("node_modules");
-    let _ = std::fs::remove_dir_all(&root);
-    let rel = tsgo_native_binary_rel_paths().swap_remove(0);
-    let rel_under_nm = rel.strip_prefix("node_modules/").unwrap_or(&rel).to_owned();
-    let bin = node_modules.join(rel_under_nm);
-    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
-    std::fs::write(&bin, "tsc").unwrap();
-
-    let found = find_tsgo_binary_canonical(Some(&root));
-
-    if let Some(v) = prev {
-        std::env::set_var(TSGO_BINARY_ENV, v);
-    }
-    let _ = std::fs::remove_dir_all(&root);
-
-    assert_eq!(
-        found.ok().map(std::path::PathBuf::from),
-        Some(bin),
-        "canonical discovery must find the rc engine pinned in the workspace node_modules"
-    );
-}
-
-/// The explicit `VERTER_TSGO_BIN` override is the HIGHEST-precedence tier: when
-/// it names an existing file it wins even over a workspace-node_modules binary.
-/// Serialized because it mutates the override env var.
-#[test]
-fn canonical_discovery_prefers_explicit_env_override() {
-    let _guard = tsgo_env_test_lock().lock().unwrap();
-    let prev = std::env::var_os(TSGO_BINARY_ENV);
-
-    let root = std::env::temp_dir().join(format!(
-        "verter_tsgo_canon_override_{}_{}",
-        std::process::id(),
-        line!()
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-
-    // A workspace binary that would win at tier 2 …
-    let node_modules = root.join("node_modules");
-    let rel = tsgo_native_binary_rel_paths().swap_remove(0);
-    let rel_under_nm = rel.strip_prefix("node_modules/").unwrap_or(&rel).to_owned();
-    let ws_bin = node_modules.join(rel_under_nm);
-    std::fs::create_dir_all(ws_bin.parent().unwrap()).unwrap();
-    std::fs::write(&ws_bin, "ws-tsgo").unwrap();
-
-    // … but an explicit override pointing at a different existing file wins.
-    let override_bin = root.join("custom-tsgo");
-    std::fs::write(&override_bin, "override-tsgo").unwrap();
-    std::env::set_var(TSGO_BINARY_ENV, &override_bin);
-
-    let found = find_tsgo_binary_canonical(Some(&root));
-
-    match prev {
-        Some(v) => std::env::set_var(TSGO_BINARY_ENV, v),
-        None => std::env::remove_var(TSGO_BINARY_ENV),
-    }
-    let _ = std::fs::remove_dir_all(&root);
-
-    assert_eq!(
-        found.ok().map(std::path::PathBuf::from),
-        Some(override_bin),
-        "the explicit VERTER_TSGO_BIN override must win over the workspace binary"
-    );
-}
-
-/// A stale (non-existent) `VERTER_TSGO_BIN` override is IGNORED so a leftover
-/// env var never wedges discovery — it falls through to the next tier.
-#[test]
-fn canonical_discovery_ignores_nonexistent_env_override() {
-    let _guard = tsgo_env_test_lock().lock().unwrap();
-    let prev = std::env::var_os(TSGO_BINARY_ENV);
-
-    let root = std::env::temp_dir().join(format!(
-        "verter_tsgo_canon_stale_{}_{}",
-        std::process::id(),
-        line!()
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    let node_modules = root.join("node_modules");
-    let rel = tsgo_native_binary_rel_paths().swap_remove(0);
-    let rel_under_nm = rel.strip_prefix("node_modules/").unwrap_or(&rel).to_owned();
-    let ws_bin = node_modules.join(rel_under_nm);
-    std::fs::create_dir_all(ws_bin.parent().unwrap()).unwrap();
-    std::fs::write(&ws_bin, "ws-tsgo").unwrap();
-
-    // Point the override at a path that does not exist.
-    std::env::set_var(TSGO_BINARY_ENV, root.join("does-not-exist-tsgo"));
-
-    let found = find_tsgo_binary_canonical(Some(&root));
-
-    match prev {
-        Some(v) => std::env::set_var(TSGO_BINARY_ENV, v),
-        None => std::env::remove_var(TSGO_BINARY_ENV),
-    }
-    let _ = std::fs::remove_dir_all(&root);
-
-    assert_eq!(
-        found.ok().map(std::path::PathBuf::from),
-        Some(ws_bin),
-        "a stale override must be ignored and discovery must fall through to the workspace tier"
-    );
-}
-
-/// Process-global lock so the override-env-mutating canonical-discovery tests do
-/// not race each other within this test binary.
-fn tsgo_env_test_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
-}
 
 /// Verify that kill_on_drop prevents orphaned child processes.
 /// Spawns a long-lived child, drops it, then checks the process is dead.
@@ -3428,7 +3086,7 @@ async fn stale_completion_request_detected_by_generation_counter() {
 /// @ai-generated — E2E: real TSGO concurrent requests complete without deadlock.
 #[tokio::test]
 async fn e2e_concurrent_requests_complete_without_deadlock() {
-    let Some(tsgo_bin) = tsgo_bin_or_skip() else {
+    let Some(tsgo_bin) = tsgo_bin_or_skip().await else {
         return;
     };
 
@@ -3983,191 +3641,6 @@ async fn resolve_completion_returns_some_when_only_label_details_present() {
 }
 
 // ---------------------------------------------------------------------------
-// rc-only engine discovery: the installed `typescript@>=7` package's
-// `@typescript/typescript-{plat}-{arch}/lib/tsc[.exe]` binary is the SOLE engine.
-//
-// The published `typescript@7.x` (e.g. 7.0.1-rc) ships the typescript-go binary
-// as `tsc` (renamed from `tsgo`) in the `@typescript/typescript-*` optional
-// dependency. Discovery mirrors the gate's engine-selection rule and resolves
-// only this rc source — there is no native-preview fallback.
-// ---------------------------------------------------------------------------
-
-/// DISCRIMINATING: engine discovery is rc-ONLY — `TSGO_ENGINE_SOURCES` holds
-/// exactly the single rc `@typescript/typescript-*` `tsc` source, with NO
-/// native-preview `tsgo` source. Fails while a native-preview source is present.
-#[test]
-fn tsgo_engine_sources_is_rc_only_no_native_preview() {
-    assert_eq!(
-        TSGO_ENGINE_SOURCES.len(),
-        1,
-        "engine discovery is rc-only: exactly one source"
-    );
-    assert_eq!(
-        TSGO_ENGINE_SOURCES[0].binary_stem, "tsc",
-        "the sole source is the rc `typescript` package's `tsc` binary"
-    );
-    assert!(
-        !TSGO_ENGINE_SOURCES.iter().any(|s| s.binary_stem == "tsgo"
-            || s.scope_package_prefix.contains("native-preview")
-            || s.pnpm_store_prefix.contains("native-preview")),
-        "no native-preview `tsgo` source may remain"
-    );
-}
-
-/// The flat-npm candidate list is rc-ONLY: it contains the rc
-/// `@typescript/typescript-*` `tsc` binary and NO native-preview `tsgo`
-/// candidate. Pure path math — holds on every OS.
-#[test]
-fn flat_npm_candidate_paths_are_rc_only() {
-    let node_modules = std::path::Path::new("/proj/node_modules");
-    let candidates = flat_npm_tsgo_candidate_paths(node_modules);
-
-    let to_s = |p: &std::path::PathBuf| p.to_string_lossy().replace('\\', "/");
-
-    // An rc `@typescript/typescript-*/lib/tsc[.exe]` candidate must be present.
-    let has_rc = candidates.iter().any(|c| {
-        let s = to_s(c);
-        s.contains("/@typescript/typescript-")
-            && (s.ends_with("/lib/tsc") || s.ends_with("/lib/tsc.exe"))
-    });
-    assert!(
-        has_rc,
-        "expected an rc `@typescript/typescript-*/lib/tsc[.exe]` candidate, got: {:?}",
-        candidates.iter().map(to_s).collect::<Vec<_>>()
-    );
-
-    // NEGATIVE: no native-preview `tsgo` candidate may be produced.
-    let has_np = candidates.iter().any(|c| {
-        let s = to_s(c);
-        s.contains("/@typescript/native-preview-")
-            || s.ends_with("/lib/tsgo")
-            || s.ends_with("/lib/tsgo.exe")
-    });
-    assert!(
-        !has_np,
-        "rc-only discovery must NOT produce a native-preview `tsgo` candidate, got: {:?}",
-        candidates.iter().map(to_s).collect::<Vec<_>>()
-    );
-}
-
-/// When an rc `tsc` binary is materialized in the flat-npm layout,
-/// `find_tsgo_binary_under_node_modules` returns it.
-#[test]
-fn find_tsgo_under_node_modules_discovers_rc_tsc_flat_npm() {
-    let root = std::env::temp_dir().join(format!(
-        "verter_tsgo_rc_primary_flat_{}_{}",
-        std::process::id(),
-        line!()
-    ));
-    let node_modules = root.join("node_modules");
-    let _ = std::fs::remove_dir_all(&root);
-
-    let all = flat_npm_tsgo_candidate_paths(&node_modules);
-    let to_s = |p: &std::path::PathBuf| p.to_string_lossy().replace('\\', "/");
-    let rc = all
-        .iter()
-        .find(|c| {
-            let s = to_s(c);
-            s.contains("/@typescript/typescript-")
-                && (s.ends_with("/lib/tsc") || s.ends_with("/lib/tsc.exe"))
-        })
-        .cloned()
-        .expect("an rc tsc candidate must exist for this platform");
-
-    std::fs::create_dir_all(rc.parent().unwrap()).unwrap();
-    std::fs::write(&rc, "tsc").unwrap();
-
-    let found = find_tsgo_binary_under_node_modules(&node_modules).map(std::path::PathBuf::from);
-    assert_eq!(
-        found,
-        Some(rc),
-        "the rc `typescript-*` tsc binary must be discovered under node_modules"
-    );
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-/// The rc `tsc` binary in the pnpm store layout
-/// (`.pnpm/@typescript+typescript-{plat}@{ver}/node_modules/@typescript/typescript-{plat}/lib/tsc[.exe]`)
-/// is discovered by `find_tsgo_binary_under_node_modules`.
-#[test]
-fn find_tsgo_under_node_modules_discovers_rc_tsc_pnpm() {
-    let root = std::env::temp_dir().join(format!(
-        "verter_tsgo_rc_pnpm_{}_{}",
-        std::process::id(),
-        line!()
-    ));
-    let node_modules = root.join("node_modules");
-    let _ = std::fs::remove_dir_all(&root);
-
-    let store_entry = node_modules
-        .join(".pnpm")
-        .join("@typescript+typescript-test@7.0.1-rc");
-    let to_s = |p: &std::path::PathBuf| p.to_string_lossy().replace('\\', "/");
-    let rc_rel = pnpm_store_tsgo_candidate_paths(&store_entry)
-        .into_iter()
-        .find(|c| {
-            let s = to_s(c);
-            s.contains("/@typescript/typescript-")
-                && (s.ends_with("/lib/tsc") || s.ends_with("/lib/tsc.exe"))
-        })
-        .expect("an rc tsc pnpm candidate must exist for this platform");
-    std::fs::create_dir_all(rc_rel.parent().unwrap()).unwrap();
-    std::fs::write(&rc_rel, "tsc").unwrap();
-
-    let found = find_tsgo_binary_under_node_modules(&node_modules).map(std::path::PathBuf::from);
-    assert_eq!(
-        found,
-        Some(rc_rel),
-        "rc `typescript-*` tsc must be discovered under node_modules/.pnpm"
-    );
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-/// DISCRIMINATING (negative): with ONLY a native-preview `tsgo` binary present
-/// (no rc package), discovery finds NOTHING under node_modules — rc-only
-/// discovery ignores the native-preview channel entirely.
-#[test]
-fn find_tsgo_under_node_modules_ignores_native_preview_tsgo() {
-    let root = std::env::temp_dir().join(format!(
-        "verter_tsgo_np_ignored_{}_{}",
-        std::process::id(),
-        line!()
-    ));
-    let node_modules = root.join("node_modules");
-    let _ = std::fs::remove_dir_all(&root);
-
-    // Materialize a native-preview `tsgo` binary under the flat-npm + pnpm
-    // layouts for the current platform; rc-only discovery must NOT find it.
-    let ext = if cfg!(windows) { ".exe" } else { "" };
-    for plat in [
-        "win32-x64",
-        "win32-arm64",
-        "linux-x64",
-        "linux-arm64",
-        "darwin-x64",
-        "darwin-arm64",
-    ] {
-        let flat = node_modules
-            .join("@typescript")
-            .join(format!("native-preview-{plat}"))
-            .join("lib")
-            .join(format!("tsgo{ext}"));
-        std::fs::create_dir_all(flat.parent().unwrap()).unwrap();
-        std::fs::write(&flat, "tsgo").unwrap();
-    }
-
-    let found = find_tsgo_binary_under_node_modules(&node_modules);
-    assert_eq!(
-        found, None,
-        "a native-preview `tsgo` install must NOT be discovered (rc-only); got: {found:?}"
-    );
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-// ---------------------------------------------------------------------------
 // rc-only PATH/npx-cache discovery: the npx-cache tier resolves ONLY the rc
 // `@typescript/typescript-*` `tsc` native binary. The legacy native-preview
 // discovery routes — a `tsgo` binary on `PATH` and the `.bin/tsgo` npm shim —
@@ -4175,124 +3648,3 @@ fn find_tsgo_under_node_modules_ignores_native_preview_tsgo() {
 // either route would let production silently launch the legacy engine when the
 // workspace rc `tsc` is absent. Discovery fails closed instead.
 // ---------------------------------------------------------------------------
-
-/// DISCRIMINATING (negative): with ONLY a `.bin/tsgo` npm shim present in the
-/// npx cache (no rc `tsc` native binary), `find_tsgo_binary_in` fails closed —
-/// it never resolves the legacy `tsgo`-named shim. Fails while the `.bin/tsgo`
-/// shim tier is still wired.
-#[test]
-fn find_tsgo_binary_in_ignores_legacy_tsgo_shim() {
-    let cache_root = std::env::temp_dir().join(format!(
-        "verter_tsgo_legacy_shim_ignored_{}_{}",
-        std::process::id(),
-        line!()
-    ));
-    let _ = std::fs::remove_dir_all(&cache_root);
-    // A `.bin/tsgo` shim under the npx cache — the legacy native-preview route.
-    let shim = cache_root.join("_npx/entry/node_modules/.bin/tsgo");
-    std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
-    std::fs::write(&shim, "shim").unwrap();
-    // Also the Windows shim variants, to be exhaustive.
-    std::fs::write(
-        cache_root.join("_npx/entry/node_modules/.bin/tsgo.cmd"),
-        "shim",
-    )
-    .unwrap();
-    std::fs::write(
-        cache_root.join("_npx/entry/node_modules/.bin/tsgo.bat"),
-        "shim",
-    )
-    .unwrap();
-
-    let result = find_tsgo_binary_in(std::slice::from_ref(&cache_root));
-    assert!(
-        result.is_err(),
-        "a legacy `.bin/tsgo` shim must NOT be discovered (rc-only); got: {result:?}"
-    );
-
-    let _ = std::fs::remove_dir_all(cache_root);
-}
-
-/// The npx-cache tier still resolves the rc `@typescript/typescript-*` `tsc`
-/// native binary (the rc-faithful route the dev/oracle-gen callers rely on).
-#[test]
-fn find_tsgo_binary_in_discovers_rc_tsc_native_binary() {
-    let cache_root = std::env::temp_dir().join(format!(
-        "verter_tsgo_rc_native_npx_{}_{}",
-        std::process::id(),
-        line!()
-    ));
-    let native_rel = tsgo_native_binary_rel_paths()
-        .into_iter()
-        .next()
-        .expect("expected at least one rc native tsc path");
-    let native_path = cache_root.join("_npx/entry").join(native_rel);
-
-    let _ = std::fs::remove_dir_all(&cache_root);
-    std::fs::create_dir_all(native_path.parent().unwrap()).unwrap();
-    std::fs::write(&native_path, "tsc").unwrap();
-
-    let result = find_tsgo_binary_in(std::slice::from_ref(&cache_root)).unwrap();
-    assert_eq!(std::path::PathBuf::from(result), native_path);
-
-    let _ = std::fs::remove_dir_all(cache_root);
-}
-
-/// The explicit `VERTER_TSGO_BIN` override is honored by the bare
-/// `find_tsgo_binary()` entry too (the dev/baseline/oracle-gen callers' escape
-/// hatch now that the legacy `tsgo` PATH route is gone): an override naming an
-/// existing file wins, with no workspace/PATH/cache binary present. Serialized
-/// because it mutates the override env var.
-#[test]
-fn find_tsgo_binary_honors_explicit_env_override() {
-    let _guard = tsgo_env_test_lock().lock().unwrap();
-    let prev = std::env::var_os(TSGO_BINARY_ENV);
-
-    let dir = std::env::temp_dir().join(format!(
-        "verter_tsgo_bare_override_{}_{}",
-        std::process::id(),
-        line!()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let override_bin = dir.join("custom-rc-tsc");
-    std::fs::write(&override_bin, "override-tsc").unwrap();
-    std::env::set_var(TSGO_BINARY_ENV, &override_bin);
-
-    let found = find_tsgo_binary();
-
-    match prev {
-        Some(v) => std::env::set_var(TSGO_BINARY_ENV, v),
-        None => std::env::remove_var(TSGO_BINARY_ENV),
-    }
-    let _ = std::fs::remove_dir_all(&dir);
-
-    assert_eq!(
-        found.ok().map(std::path::PathBuf::from),
-        Some(override_bin),
-        "bare find_tsgo_binary must honor the VERTER_TSGO_BIN override"
-    );
-}
-
-#[test]
-fn cache_root_key_folds_case_per_fs_policy() {
-    // npm cache-root dedup folds case IFF the host filesystem is case-insensitive —
-    // the single shared `verter_span::path::fs_is_case_insensitive` policy. Pre-fix
-    // the fold was `cfg!(windows)`-only, so on case-insensitive macOS two case-variant
-    // roots keyed distinct and the same cache root was tracked twice. Routing through
-    // the shared policy dedups them there too; a case-sensitive FS (Linux) keeps them
-    // distinct. Platform-faithful + discriminating on macOS.
-    let upper = cache_root_key(std::path::Path::new("/Users/Dev/.npm"));
-    let lower = cache_root_key(std::path::Path::new("/Users/dev/.npm"));
-    if verter_span::path::fs_is_case_insensitive() {
-        assert_eq!(
-            upper, lower,
-            "case-variant npm cache roots dedup to one key on a case-insensitive filesystem"
-        );
-    } else {
-        assert_ne!(
-            upper, lower,
-            "case-variant npm cache roots stay distinct on a case-sensitive filesystem"
-        );
-    }
-}

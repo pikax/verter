@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-on/key-modifiers.vue"
+  ],
+  "names": [],
+  "mappings": ";;;wBAME,oBAAqD;IAA7C,OAAK,YAAQ,cAAO;IAAG,SAAO,YAAM,YAAK",
+  "sourcesContent": [
+    "\n  <input @keyup.enter=\"onEnter\" @keydown.esc=\"onEsc\" />\n"
+  ]
+}

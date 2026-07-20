@@ -24,6 +24,24 @@ use super::macros::{
 };
 use super::{ScriptCodeGenOptions, ScriptContext};
 
+/// Whether an import binding is ref-bindable as an inline template ref
+/// (`ref_key`/`ref: name`), matching official compiler-sfc binding metadata:
+/// named imports from ANY source and default imports from non-`vue`,
+/// non-component sources are `setup-maybe-ref` (ref-bindable); namespace
+/// imports, default imports from component (Vue-carrier) sources, and
+/// `vue`-source imports are `setup-const` (stay string refs). The
+/// component-source test routes through the language registry (the ONE
+/// carrier-extension authority — no hand-matched extension literals).
+pub(super) fn is_ref_bindable_import(source: &str, kind: Option<ImportSpecifierKind>) -> bool {
+    !(matches!(kind, Some(ImportSpecifierKind::Namespace))
+        || (matches!(kind, Some(ImportSpecifierKind::Default))
+            && verter_language::LanguageRegistry::global()
+                .classify_static(source)
+                .static_resolution()
+                .is_vue()))
+        && source != "vue"
+}
+
 /// Determine OXC SourceType from a script block's `lang` attribute.
 /// - `lang="tsx"` / `lang="jsx"` → TSX (JSX + TS superset)
 /// - `lang="ts"` or no lang → TypeScript (angle-bracket casts like `<string>0` are valid)
@@ -42,6 +60,34 @@ pub(super) fn source_type_from_lang(lang: Option<&ScriptLanguage>) -> SourceType
 
 // ======================== process_script_setup ========================
 
+/// How the runtime component object is wrapped, matching the official
+/// `@vue/compiler-sfc` non-inline gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ComponentWrap {
+    /// JS with no companion `export default` / `defineOptions`:
+    /// plain object literal (`const __sfc__ = { ... }`).
+    Plain,
+    /// TS (`lang="ts"`/`"tsx"`): `/*@__PURE__*/_defineComponent({ ... })`.
+    DefineComponent,
+    /// JS with companion `export default` / `defineOptions`:
+    /// `/*@__PURE__*/Object.assign({ ...options }, { ...runtime })`.
+    ObjectAssign,
+}
+
+/// Pick the runtime wrapper for a `<script setup>` component, matching the
+/// official `@vue/compiler-sfc` non-inline gate: `isTS` → `_defineComponent`;
+/// JS with a companion default export / `defineOptions` → `Object.assign`
+/// merge; otherwise a plain object literal (no `_defineComponent` import).
+pub(super) fn component_wrap(is_ts: bool, has_options: bool) -> ComponentWrap {
+    if is_ts {
+        ComponentWrap::DefineComponent
+    } else if has_options {
+        ComponentWrap::ObjectAssign
+    } else {
+        ComponentWrap::Plain
+    }
+}
+
 /// Process a `<script setup>` block (with optional companion `<script>`).
 ///
 /// Parses the script content with OXC, then:
@@ -57,10 +103,24 @@ pub fn process_script_setup<'alloc>(
     prepared: &PreparedScript<'alloc>,
     ctx: &mut ScriptContext<'alloc>,
     options: &ScriptCodeGenOptions<'_>,
+    is_ts: bool,
 ) {
     if setup.content.is_none() {
-        // Self-closing <script setup /> — emit empty component
-        emit_minimal_component(setup, ctx, options);
+        // Self-closing <script setup /> — emit empty component. The companion
+        // <script> still needs its codegen (its `export default <expr>` must
+        // be rebound to `__default__` and merged — never dropped, and never
+        // left as a duplicate default export).
+        let mut macro_state = MacroState::new();
+        if let Some(companion) = prepared.companion() {
+            process_companion_script(companion, &mut ctx.out, &mut macro_state);
+        }
+        emit_minimal_component(
+            setup,
+            ctx,
+            options,
+            is_ts,
+            macro_state.has_companion_default,
+        );
         return;
     }
 
@@ -85,11 +145,20 @@ pub fn process_script_setup<'alloc>(
     // names for template resolution. Its type inventory was already folded into
     // the setup parse, so only the import names flow back here.
     let companion_import_names = match prepared.companion() {
-        Some(companion) => {
-            process_companion_script(companion, ctx.source, &mut ctx.out, &mut macro_state)
-        }
+        Some(companion) => process_companion_script(companion, &mut ctx.out, &mut macro_state),
         None => Vec::new(),
     };
+
+    // Merge the companion's ref-bindable imports into the context set
+    // (companion imports are in scope at runtime — same official rule).
+    if !macro_state.ref_bindable_imports.is_empty() {
+        let names: Vec<&str> = macro_state
+            .ref_bindable_imports
+            .iter()
+            .map(|n| ctx.out.alloc_str(n))
+            .collect();
+        ctx.ref_bindable_imports.extend(names);
+    }
 
     let parse_result = prepared_setup.parse_result();
 
@@ -124,6 +193,18 @@ pub fn process_script_setup<'alloc>(
             ScriptItem::Import(imp) => {
                 let abs_start = content_start + imp.span.start;
                 let abs_end = content_start + imp.span.end;
+
+                // Record official `setup-maybe-ref` import bindings — inline
+                // template refs to these names bind `ref_key`/`ref: name`
+                // (named/default user imports except vue-source, default
+                // `.vue`-source, and namespace imports).
+                if !imp.is_type_only {
+                    for b in &imp.bindings {
+                        if !b.is_type_only && is_ref_bindable_import(imp.source, b.import_kind) {
+                            ctx.ref_bindable_imports.insert(ctx.out.alloc_str(b.name));
+                        }
+                    }
+                }
 
                 if !options.keep_ts_types && imp.is_type_only {
                     // Type-only import — strip entirely. process.rs is the SOLE
@@ -238,9 +319,12 @@ pub fn process_script_setup<'alloc>(
     // Imports in the companion <script> block are available to the template at runtime
     // because the component factory merges both script blocks. We mark them as SetupImport
     // (not SetupConst) so they're filtered by template_used_vars — only companion imports
-    // actually referenced in the template appear in __returned__. This matches Vue's
-    // official compiler behavior and prevents type-only imports (e.g., CurrencyCodes used
-    // only as `"EUR" as CurrencyCodes`) from leaking into __returned__ as runtime references.
+    // actually referenced in the template appear in __returned__. This is an intentional,
+    // TRACKED over-elision divergence: official 3.6.0-rc.1 INCLUDES unused setup imports in
+    // __returned__ (as `get x() { return x }` getters); Verter elides them (see
+    // `docs/arch/future/vue-vdom-parity-backlog.md` D6, post-merge). The filter still keeps
+    // type-only imports (e.g., CurrencyCodes used only as `"EUR" as CurrencyCodes`) out of
+    // __returned__ — official excludes those too.
     for name in &companion_import_names {
         // Skip if setup script already declares the same name (setup takes precedence)
         let alloc_name = ctx.out.alloc_str(name);
@@ -333,7 +417,27 @@ pub fn process_script_setup<'alloc>(
         ctx.imports.push("_withAsyncContext");
     }
 
-    // Build wrapper opening (includes __name, props, emits, options sections)
+    // Build wrapper opening (includes __name, props, emits, options sections).
+    // The wrapper shape follows the official non-inline gate: TS components
+    // keep `_defineComponent`; JS components are plain object literals unless
+    // a companion `export default` / `defineOptions` forces the
+    // `Object.assign` merge path.
+    let wrap = component_wrap(
+        is_ts,
+        macro_state.has_companion_default || macro_state.options_expr.is_some(),
+    );
+    // Official inline `buildDestructureElements`: inject `attrs: $attrs` /
+    // `slots: $slots` into the setup context destructure WHEN the template
+    // uses them (on-use), so inline template references resolve to the
+    // destructured bindings instead of `_ctx.*`.
+    let (uses_attrs, uses_slots) = if options.inline_template {
+        match options.template_used_vars.as_ref() {
+            Some(vars) => (vars.contains("$attrs"), vars.contains("$slots")),
+            None => (false, false),
+        }
+    } else {
+        (false, false)
+    };
     let wrapper_start = build_setup_wrapper_start(
         options.component_name,
         parse_result.is_async,
@@ -341,7 +445,11 @@ pub fn process_script_setup<'alloc>(
         macro_state.has_emit,
         macro_state.props_section.as_deref(),
         macro_state.emits_section.as_deref(),
-        macro_state.options_section.as_deref(),
+        macro_state.options_expr.as_deref(),
+        macro_state.has_companion_default,
+        uses_attrs,
+        uses_slots,
+        wrap,
     );
 
     // Overwrite open tag with wrapper
@@ -367,6 +475,7 @@ pub fn process_script_setup<'alloc>(
         },
         options.is_vapor,
         options.ssr,
+        wrap,
     );
 
     // Handle close tag
@@ -380,8 +489,11 @@ pub fn process_script_setup<'alloc>(
         }
     }
 
-    // Track _defineComponent import
-    ctx.imports.push("_defineComponent");
+    // Track the _defineComponent import only when the wrapper emits the call
+    // (TS components). Plain-object and Object.assign shapes need no helper.
+    if wrap == ComponentWrap::DefineComponent {
+        ctx.imports.push("_defineComponent");
+    }
 }
 
 // ======================== process_script_only ========================
@@ -465,15 +577,33 @@ fn emit_minimal_component(
     setup: &RootNodeScript,
     ctx: &mut ScriptContext<'_>,
     options: &ScriptCodeGenOptions<'_>,
+    is_ts: bool,
+    has_companion_default: bool,
 ) {
-    let mut s = String::with_capacity(128);
-    s.push_str("const __sfc__ = /*@__PURE__*/_defineComponent({\n");
+    let mut s = String::with_capacity(160);
+    // Official gate: TS keeps `_defineComponent` (spreading `__default__`);
+    // JS emits a plain object — or the `Object.assign(__default__, …)` merge
+    // when a companion default exists.
+    if is_ts {
+        s.push_str("const __sfc__ = /*@__PURE__*/_defineComponent({\n");
+        if has_companion_default {
+            s.push_str("  ...__default__,\n");
+        }
+    } else if has_companion_default {
+        s.push_str("const __sfc__ = /*@__PURE__*/Object.assign(__default__, {\n");
+    } else {
+        s.push_str("const __sfc__ = {\n");
+    }
     if !options.component_name.is_empty() {
         s.push_str("  __name: '");
         s.push_str(options.component_name);
         s.push_str("',\n");
     }
-    s.push_str("});\n");
+    if is_ts || has_companion_default {
+        s.push_str("});\n");
+    } else {
+        s.push_str("};\n");
+    }
     if options.is_vapor {
         s.push_str("__sfc__.__vapor = true;\n");
     }
@@ -492,18 +622,51 @@ fn emit_minimal_component(
         .unwrap_or(setup.tag_open.end);
     ctx.out.overwrite(setup.tag_open.start, end, &s);
 
-    ctx.imports.push("_defineComponent");
+    if is_ts {
+        ctx.imports.push("_defineComponent");
+    }
 }
 
 /// Build the opening part of the setup wrapper with sections.
 ///
+/// TS (`ComponentWrap::DefineComponent`) — official spreads the companion
+/// default (`...__default__`) and `defineOptions` (`...<expr>`) before the
+/// runtime options:
 /// ```js
 /// const __sfc__ = /*@__PURE__*/_defineComponent({
-///   inheritAttrs: false,           // from defineOptions
+///   ...__default__,                  // from companion <script> export default
+///   ...{ inheritAttrs: false },      // from defineOptions
 ///   __name: 'ComponentName',
-///   props: { title: String },      // from defineProps
-///   emits: ['click'],              // from defineEmits
+///   props: { title: String },        // from defineProps
+///   emits: ['click'],                // from defineEmits
 ///   setup(__props, { expose: __expose, emit: __emit }) {
+/// ```
+///
+/// JS without options (`ComponentWrap::Plain`) — official emits a plain
+/// object literal with no `_defineComponent` call or import:
+/// ```js
+/// const __sfc__ = {
+///   __name: 'ComponentName',
+///   setup(__props) {
+/// ```
+///
+/// JS with companion default / defineOptions (`ComponentWrap::ObjectAssign`)
+/// — official merges via `Object.assign` (official order: `__default__`,
+/// `<definedOptions>`, runtime object):
+/// ```js
+/// const __sfc__ = /*@__PURE__*/Object.assign(__default__, { inheritAttrs: false }, {
+///   __name: 'ComponentName',
+///   setup(__props) {
+/// ```
+///
+/// TS (`ComponentWrap::DefineComponent`) — official spreads both option
+/// sources inside `_defineComponent`:
+/// ```js
+/// const __sfc__ = /*@__PURE__*/_defineComponent({
+///   ...__default__,
+///   ...{ inheritAttrs: false },
+///   __name: 'ComponentName',
+///   setup(__props) {
 /// ```
 #[allow(clippy::too_many_arguments)]
 fn build_setup_wrapper_start(
@@ -513,16 +676,47 @@ fn build_setup_wrapper_start(
     has_emit: bool,
     props_section: Option<&str>,
     emits_section: Option<&str>,
-    options_section: Option<&str>,
+    options_expr: Option<&str>,
+    has_companion_default: bool,
+    uses_attrs: bool,
+    uses_slots: bool,
+    wrap: ComponentWrap,
 ) -> String {
     let mut s = String::with_capacity(256);
-    s.push_str("const __sfc__ = /*@__PURE__*/_defineComponent({\n");
-
-    // defineOptions content (before __name)
-    if let Some(opts) = options_section {
-        s.push_str("  ");
-        s.push_str(opts);
-        s.push_str(",\n");
+    match wrap {
+        ComponentWrap::DefineComponent => {
+            s.push_str("const __sfc__ = /*@__PURE__*/_defineComponent({\n");
+            // Official spreads the companion default and defineOptions, in
+            // order, before the runtime options.
+            if has_companion_default {
+                s.push_str("  ...__default__,\n");
+            }
+            if let Some(expr) = options_expr {
+                s.push_str("  ...");
+                s.push_str(expr);
+                s.push_str(",\n");
+            }
+        }
+        ComponentWrap::Plain => {
+            s.push_str("const __sfc__ = {\n");
+        }
+        ComponentWrap::ObjectAssign => {
+            // Official merge targets, in order: `__default__` (companion),
+            // the raw defineOptions expression, then the runtime object.
+            s.push_str("const __sfc__ = /*@__PURE__*/Object.assign(");
+            let mut first = true;
+            if has_companion_default {
+                s.push_str("__default__");
+                first = false;
+            }
+            if let Some(expr) = options_expr {
+                if !first {
+                    s.push_str(", ");
+                }
+                s.push_str(expr);
+            }
+            s.push_str(", {\n");
+        }
     }
 
     if !component_name.is_empty() {
@@ -552,8 +746,10 @@ fn build_setup_wrapper_start(
         s.push_str("  setup(__props");
     }
 
-    // Add destructured context if needed
-    if has_expose || has_emit {
+    // Add destructured context if needed. Official order: expose, emit
+    // (`emit: __emit` is pushed before buildDestructureElements), attrs,
+    // slots (attrs/slots only for inline template mode, on-use).
+    if has_expose || has_emit || uses_attrs || uses_slots {
         s.push_str(", { ");
         let mut first = true;
         if has_expose {
@@ -565,6 +761,20 @@ fn build_setup_wrapper_start(
                 s.push_str(", ");
             }
             s.push_str("emit: __emit");
+            first = false;
+        }
+        if uses_attrs {
+            if !first {
+                s.push_str(", ");
+            }
+            s.push_str("attrs: $attrs");
+            first = false;
+        }
+        if uses_slots {
+            if !first {
+                s.push_str(", ");
+            }
+            s.push_str("slots: $slots");
         }
         s.push_str(" }");
     }
@@ -577,7 +787,8 @@ fn build_setup_wrapper_start(
 ///
 /// ```js
 ///   return { msg, count }
-/// }});
+/// }});                    // _defineComponent / Object.assign shapes
+/// }};                     // plain-object shape
 /// __sfc__.__scopeId = "data-v-xxx";
 /// export default __sfc__;
 /// ```
@@ -586,6 +797,7 @@ fn build_setup_wrapper_end(
     scope_id: Option<&str>,
     is_vapor: bool,
     ssr: bool,
+    wrap: ComponentWrap,
 ) -> String {
     let mut s = String::with_capacity(128);
     if let Some(ret) = returned {
@@ -609,7 +821,10 @@ fn build_setup_wrapper_end(
             s.push_str(";\nObject.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });\nreturn __returned__;\n");
         }
     }
-    s.push_str("\n}});\n");
+    match wrap {
+        ComponentWrap::Plain => s.push_str("\n}};\n"),
+        ComponentWrap::DefineComponent | ComponentWrap::ObjectAssign => s.push_str("\n}});\n"),
+    }
     if is_vapor {
         s.push_str("__sfc__.__vapor = true;\n");
     }
@@ -627,7 +842,12 @@ fn build_setup_wrapper_end(
 /// Includes all setup-type bindings (not props, data, or options).
 /// `SetupImport` bindings are only included when their identifier appears in
 /// the `template_used_vars` set (AST-based, from expression bindings + component
-/// tag names). Returns a JS object literal like `{ msg, count }`.
+/// tag names) — an intentional, TRACKED over-elision divergence: official
+/// 3.6.0-rc.1 INCLUDES unused setup imports in `__returned__` (as
+/// `get x() { return x }` getters); Verter elides them (see
+/// `docs/arch/future/vue-vdom-parity-backlog.md` D6, post-merge). Type-only
+/// imports stay excluded (official excludes those too). Returns a JS object
+/// literal like `{ msg, count }`.
 fn build_returned_object(
     bindings: &FxHashMap<&str, BindingType>,
     template_used_vars: Option<&FxHashSet<String>>,

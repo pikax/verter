@@ -143,151 +143,6 @@ fn parse_tsc_line(line: &str) -> Option<TscDiagnostic> {
     })
 }
 
-/// Find the path to the `tsgo` binary.
-///
-/// Search order:
-/// 1. Native binary in `node_modules/@typescript/native-preview-<platform>/lib/tsgo[.exe]`
-///    (walking up parent dirs — skips Node.js shim overhead)
-/// 2. `node_modules/.bin/tsgo[.cmd]` (walking up parent dirs)
-/// 3. `tsgo` on PATH
-/// 4. npx cache (`%LOCALAPPDATA%/npm-cache/_npx/` or `~/.npm/_npx/`)
-pub fn find_tsgo(start_dir: &Path) -> Option<std::path::PathBuf> {
-    let native_pkg = native_tsgo_package_name();
-    let native_bin = native_tsgo_binary_name();
-
-    // Walk up from start_dir checking node_modules at each level.
-    let mut dir = start_dir.to_path_buf();
-    loop {
-        let nm = dir.join("node_modules");
-
-        // 1. Direct native binary (fastest — no Node.js shim).
-        if let Some(pkg) = &native_pkg {
-            let candidate = nm
-                .join("@typescript")
-                .join(pkg)
-                .join("lib")
-                .join(native_bin);
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-
-        // 2. npm shim in .bin/.
-        let bin_dir = nm.join(".bin");
-        if cfg!(target_os = "windows") {
-            let candidate_cmd = bin_dir.join("tsgo.cmd");
-            if candidate_cmd.exists() {
-                return Some(candidate_cmd);
-            }
-        }
-        let candidate = bin_dir.join("tsgo");
-        if candidate.exists() {
-            return Some(candidate);
-        }
-
-        match dir.parent() {
-            Some(p) => dir = p.to_path_buf(),
-            None => break,
-        }
-    }
-
-    // 3. PATH lookup.
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(p) = which_simple("tsgo.cmd").or_else(|| which_simple("tsgo.exe")) {
-            return Some(p);
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        if let Some(p) = which_simple("tsgo") {
-            return Some(p);
-        }
-    }
-
-    // 4. npx cache.
-    find_tsgo_in_npx_cache()
-}
-
-/// Search the npx cache for a tsgo binary.
-fn find_tsgo_in_npx_cache() -> Option<std::path::PathBuf> {
-    let cache_dir = npm_cache_npx_dir()?;
-    let entries = std::fs::read_dir(&cache_dir).ok()?;
-    let native_pkg = native_tsgo_package_name();
-    let native_bin = native_tsgo_binary_name();
-
-    for entry in entries.flatten() {
-        let base = entry.path().join("node_modules");
-
-        // Native binary in the cache.
-        if let Some(pkg) = &native_pkg {
-            let candidate = base
-                .join("@typescript")
-                .join(pkg)
-                .join("lib")
-                .join(native_bin);
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-
-        // Shim in the cache.
-        if cfg!(target_os = "windows") {
-            let shim = base.join(".bin").join("tsgo.cmd");
-            if shim.exists() {
-                return Some(shim);
-            }
-        }
-        let shim = base.join(".bin").join("tsgo");
-        if shim.exists() {
-            return Some(shim);
-        }
-    }
-
-    None
-}
-
-/// Get the npm cache `_npx` directory.
-fn npm_cache_npx_dir() -> Option<std::path::PathBuf> {
-    if cfg!(target_os = "windows") {
-        std::env::var("LOCALAPPDATA")
-            .ok()
-            .map(|d| std::path::PathBuf::from(d).join("npm-cache").join("_npx"))
-    } else {
-        std::env::var("HOME")
-            .ok()
-            .map(|d| std::path::PathBuf::from(d).join(".npm").join("_npx"))
-    }
-}
-
-/// Return the platform-specific native tsgo package name, e.g. `native-preview-win32-x64`.
-fn native_tsgo_package_name() -> Option<&'static str> {
-    if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
-        Some("native-preview-win32-x64")
-    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
-        Some("native-preview-win32-arm64")
-    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-        Some("native-preview-linux-x64")
-    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
-        Some("native-preview-linux-arm64")
-    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
-        Some("native-preview-darwin-x64")
-    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        Some("native-preview-darwin-arm64")
-    } else {
-        None
-    }
-}
-
-/// Return the platform-specific native binary name (`tsgo.exe` on Windows, `tsgo` elsewhere).
-fn native_tsgo_binary_name() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "tsgo.exe"
-    } else {
-        "tsgo"
-    }
-}
-
 /// Returns `true` if the binary at `path` is a native executable (not a `.cmd`/`.sh` shim).
 pub fn is_native_binary(path: &Path) -> bool {
     match path.extension().and_then(|e| e.to_str()) {
@@ -295,59 +150,11 @@ pub fn is_native_binary(path: &Path) -> bool {
         Some(ext) if ext.eq_ignore_ascii_case("sh") => false,
         Some(ext) if ext.eq_ignore_ascii_case("exe") => true,
         Some(_) => false,
-        // No extension: native on Unix, shim on Windows (node_modules/.bin/tsgo is a shell script).
-        // But the actual native binary `tsgo` (no ext) in the platform package IS native.
-        // Heuristic: if the path contains `@typescript/native-preview`, it's a native binary.
-        None => {
-            let path_str = path.to_string_lossy();
-            path_str.contains("native-preview-") || !cfg!(target_os = "windows")
-        }
+        // No extension: native on Unix (the platform package's `tsc`; a `.bin`
+        // shim there carries a shebang and spawns fine), not directly
+        // executable on Windows.
+        None => !cfg!(target_os = "windows"),
     }
-}
-
-/// Find the path to the `tsc` binary in node_modules or PATH.
-pub fn find_tsc(start_dir: &Path) -> Option<std::path::PathBuf> {
-    // Check node_modules/.bin/tsc relative to start_dir and its parents.
-    // On Windows, prefer .cmd (batch wrapper) over bare name (shell script).
-    let mut dir = start_dir.to_path_buf();
-    loop {
-        let bin_dir = dir.join("node_modules").join(".bin");
-        if cfg!(target_os = "windows") {
-            let candidate_cmd = bin_dir.join("tsc.cmd");
-            if candidate_cmd.exists() {
-                return Some(candidate_cmd);
-            }
-        }
-        let candidate = bin_dir.join("tsc");
-        if candidate.exists() {
-            return Some(candidate);
-        }
-        match dir.parent() {
-            Some(p) => dir = p.to_path_buf(),
-            None => break,
-        }
-    }
-    // Fall back to PATH.
-    #[cfg(target_os = "windows")]
-    {
-        which_simple("tsc.cmd").or_else(|| which_simple("tsc"))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        which_simple("tsc")
-    }
-}
-
-/// Look for a binary on PATH by iterating PATH entries.
-fn which_simple(name: &str) -> Option<std::path::PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(name);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -372,13 +179,19 @@ mod tests {
     }
 
     #[test]
-    fn is_native_binary_native_preview_no_ext() {
-        assert!(
-            is_native_binary(Path::new(
-                "/project/node_modules/@typescript/native-preview-linux-x64/lib/tsgo"
-            )),
-            "tsgo in native-preview package without ext should be native"
-        );
+    fn is_native_binary_platform_package_no_ext() {
+        let path = Path::new("/project/node_modules/@typescript/typescript-linux-x64/lib/tsc");
+        if cfg!(target_os = "windows") {
+            assert!(
+                !is_native_binary(path),
+                "an extensionless name is not directly executable on Windows"
+            );
+        } else {
+            assert!(
+                is_native_binary(path),
+                "the platform package's extensionless tsc is native on Unix"
+            );
+        }
     }
 
     #[test]
@@ -452,90 +265,6 @@ Found 1 error.
             "backslashes should be normalized"
         );
         assert_eq!(diags[0].file, "src/components/App.vue");
-    }
-
-    // ── find_tsgo tests ─────────────────────────────────────────────
-
-    #[test]
-    fn find_tsgo_discovers_node_modules_bin() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let bin_dir = temp.path().join("node_modules/.bin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-
-        if cfg!(target_os = "windows") {
-            let tsgo_cmd = bin_dir.join("tsgo.cmd");
-            std::fs::write(&tsgo_cmd, "@echo off").unwrap();
-            let result = find_tsgo(temp.path());
-            assert!(
-                result.is_some(),
-                "should find tsgo.cmd in node_modules/.bin"
-            );
-            assert!(
-                result.unwrap().to_string_lossy().contains("tsgo.cmd"),
-                "should return the .cmd path on Windows"
-            );
-        } else {
-            let tsgo = bin_dir.join("tsgo");
-            std::fs::write(&tsgo, "#!/bin/sh").unwrap();
-            let result = find_tsgo(temp.path());
-            assert!(result.is_some(), "should find tsgo in node_modules/.bin");
-        }
-    }
-
-    #[test]
-    fn find_tsgo_prefers_native_binary_over_shim() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let nm = temp.path().join("node_modules");
-
-        // Create both the shim and the native binary.
-        let bin_dir = nm.join(".bin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-
-        if let Some(pkg) = native_tsgo_package_name() {
-            let native_dir = nm.join("@typescript").join(pkg).join("lib");
-            std::fs::create_dir_all(&native_dir).unwrap();
-            let native_bin = native_dir.join(native_tsgo_binary_name());
-            std::fs::write(&native_bin, "native").unwrap();
-
-            if cfg!(target_os = "windows") {
-                std::fs::write(bin_dir.join("tsgo.cmd"), "@echo off").unwrap();
-            } else {
-                std::fs::write(bin_dir.join("tsgo"), "#!/bin/sh").unwrap();
-            }
-
-            let result = find_tsgo(temp.path());
-            assert!(result.is_some(), "should find tsgo");
-            let path = result.unwrap();
-            assert!(
-                path.to_string_lossy().contains("native-preview-"),
-                "should prefer native binary over shim: {}",
-                path.display()
-            );
-        }
-    }
-
-    #[test]
-    fn find_tsgo_does_not_panic_on_empty_dir() {
-        // Verify find_tsgo doesn't crash on a directory with no node_modules.
-        // We can't assert None because tsgo may be on PATH or in npx cache.
-        let temp = tempfile::TempDir::new().unwrap();
-        let _result = find_tsgo(temp.path()); // should not panic
-    }
-
-    // ── helper tests ────────────────────────────────────────────────
-
-    #[test]
-    fn native_tsgo_package_name_is_set() {
-        // On any common CI/dev platform, this should return Some.
-        let name = native_tsgo_package_name();
-        assert!(
-            name.is_some(),
-            "should have a known platform package name on this OS/arch"
-        );
-        assert!(
-            name.unwrap().starts_with("native-preview-"),
-            "package name should start with native-preview-"
-        );
     }
 
     #[test]

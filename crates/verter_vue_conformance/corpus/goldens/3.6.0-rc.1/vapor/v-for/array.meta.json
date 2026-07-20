@@ -1,0 +1,83 @@
+{
+  "schema": 2,
+  "caseId": "v-for/array",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/v-for/array.vue",
+    "sha256": "b33fe7618fa189ecf317c17a53d18cbca609dba31fe97362e45f9a166afa41ea"
+  },
+  "options": {
+    "sha256": "d827ad9e36e067b177c3881af50011f54233723a5bb0170244ca486c64ab8c37",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/v-for/array.vue",
+      "id": "v-for/array",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vapor/v-for/array.js",
+      "sha256": "9655bb8838164d9a527b7bcd86d501805cab766e8dfd314f4576a358689370dd",
+      "bytes": 1030
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vapor/v-for/array.map.json",
+      "sha256": "8d58a5e04528d1c752682f3e34a74d75028b772baab357500926043b4ab9cd99"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createFor",
+      "alias": "_createFor"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "renderEffect",
+      "alias": "_renderEffect"
+    },
+    {
+      "imported": "setInsertionState",
+      "alias": "_setInsertionState"
+    },
+    {
+      "imported": "setText",
+      "alias": "_setText"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    },
+    {
+      "imported": "txt",
+      "alias": "_txt"
+    }
+  ]
+}

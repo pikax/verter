@@ -1,0 +1,63 @@
+{
+  "schema": 2,
+  "caseId": "v-bind/static-dynamic",
+  "backend": "vdom",
+  "topology": "inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/v-bind/static-dynamic.vue",
+    "sha256": "f1f5e466f7a777fa082733b9ddbcfa1ce2437cd599ac582d0619ca30c26ea2f4"
+  },
+  "options": {
+    "sha256": "569bbff75f64355792d52827596c9f8837d1b9790c054bad5ba01889195e25c4",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/v-bind/static-dynamic.vue",
+      "id": "v-bind/static-dynamic",
+      "pipeline": "compileScript:inlineTemplate",
+      "topology": "inline",
+      "inlineTemplate": true,
+      "bindingMetadata": false,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vdom-inline/v-bind/static-dynamic.js",
+      "sha256": "0bec1c1838d7e452d8edb90e5d30fe3cc9a2c0bb45e68623ea672e759bf293af",
+      "bytes": 511
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vdom-inline/v-bind/static-dynamic.map.json",
+      "sha256": "15e87f160da612d8ef55e22fdb76b7e4c4217a6f8e69ae1c9847f44650be1bbf"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createElementBlock",
+      "alias": "_createElementBlock"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    }
+  ]
+}

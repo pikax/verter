@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-for/index-destructure.vue"
+  ],
+  "names": [],
+  "mappings": ";;;wBAUE,oBAIK;uBAHH,oBAEK,6BAF+B,YAAK,KAA3B,EAAE,EAAE,IAAI,IAAI,KAAK;4BAA/B,oBAEK,QAFuC,GAAG,EAAE,EAAE,qBAC9C,KAAK,IAAG,KAAG,oBAAG,IAAI",
+  "sourcesContent": [
+    "\n  <ul>\n    <li v-for=\"({ id, name }, index) in users\" :key=\"id\">\n      {{ index }} — {{ name }}\n    </li>\n  </ul>\n"
+  ]
+}

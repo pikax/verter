@@ -1,0 +1,13 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-on/method-ref.vue"
+  ],
+  "names": [
+    "onSubmit"
+  ],
+  "mappings": ";;;;;UAKS,QAAM,EAAEA,aAAQ",
+  "sourcesContent": [
+    "\n  <form @submit=\"onSubmit\">\n    <button>Send</button>\n  </form>\n"
+  ]
+}
