@@ -4311,8 +4311,8 @@ defineProps<Slots>()
         )
         .unwrap();
 
-    let meta = project
-        .host()
+    let host = project.host();
+    let meta = host
         .get_component_meta("/App.vue")
         .expect("should return component meta");
 
@@ -4322,6 +4322,25 @@ defineProps<Slots>()
         "re-exported imported typeof member paths should resolve through final component meta: {:?}",
         prop_names
     );
+
+    // Namespace aliases identify modules, while the qualified member
+    // identifies the exported declaration. Treating `ThemeNs` as an ordinary
+    // named import misses, and stopping at the barrel loses the terminal
+    // source/name. Pin both halves alongside the final-meta assertion.
+    let resolved = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+        host,
+        "/App.vue",
+        verter_type_expr::TopLevelOwnerId::instance(0),
+        None,
+        "ThemeNs.sharedTheme",
+    )
+    .expect("the exact-owner namespace member must resolve through the barrel");
+    assert_eq!(resolved.canonical_id.as_ref(), "/inner.ts");
+    assert_eq!(
+        resolved.owner,
+        verter_type_expr::TopLevelOwnerId::ordinary_file()
+    );
+    assert_eq!(resolved.symbol_name.as_ref(), "theme");
 }
 
 #[test]
@@ -6138,14 +6157,22 @@ defineProps<{ x: string }>()
 fn local_type_declaration_id_ignores_import_bindings_from_indexed_ready() {
     let project = make_project();
     project
-        .upsert_base("/src/types.ts", "export interface Props { msg: string }")
+        .upsert_base(
+            "/src/types.ts",
+            "export interface Props { msg: string }\nexport interface Shared { remote: string }",
+        )
         .unwrap();
     project
         .upsert_base(
             "/src/App.vue",
-            r#"<script setup lang="ts">
-import type { Props } from './types'
+            r#"<script lang="ts">
+type Shared = { local: string }
+type Duplicate = { module: string }
+</script>
+<script setup lang="ts">
+import type { Props, Shared } from './types'
 type Local = { count: number }
+type Duplicate = { setup: string }
 defineProps<Props>()
 </script>
 <template><div /></template>"#,
@@ -6164,6 +6191,16 @@ defineProps<Props>()
         host.local_type_declaration_id("/src/App.vue", "Local")
             .is_some(),
         "owner-local declarations should still resolve through the cached eval env",
+    );
+    assert!(
+        host.local_type_declaration_id("/src/App.vue", "Shared")
+            .is_some(),
+        "an import in the setup owner must not hide the same-named declaration in the module owner",
+    );
+    assert!(
+        host.local_type_declaration_id("/src/App.vue", "Duplicate")
+            .is_none(),
+        "owner-agnostic declaration-id lookup must fail closed when multiple lexical owners declare the same type name",
     );
 }
 
@@ -6320,7 +6357,7 @@ defineProps<TreeNode>()
 // Dispatch substitution spike (#1).
 //
 // A black-box dispatch test (it uses NO instrumentation hooks): it
-// validates that `dispatch.lower_type_expr_in_scope` + `ProjectPath`
+// validates that owner-exact dispatch lowering + `ProjectPath`
 // projection + `raise_node_to_type_expr` substitute the
 // script-setup-generic `T` when given the parent macro shell `Props<T>`
 // directly.
@@ -6339,7 +6376,7 @@ defineProps<TreeNode>()
 // the spike's non-discriminating `pre_lower_count > 0`.
 // ===========================================================================
 
-/// Spike #1: validates that `dispatch.lower_type_expr_in_scope` +
+/// Spike #1: validates that owner-exact dispatch lowering +
 /// `ProjectPath` projection + `raise_node_to_type_expr` correctly
 /// substitute the script-setup-generic `T` when given the parent
 /// macro shell `Props<T>` directly.
@@ -6401,7 +6438,12 @@ defineProps<Props<T>>()
         }]),
     };
     let lowered = dispatch
-        .lower_type_expr_in_scope_with_mode("/Generic.vue", &props_t, ProjectionMode::Expanded)
+        .lower_type_expr_in_owner_scope_with_mode(
+            "/Generic.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            &props_t,
+            ProjectionMode::Expanded,
+        )
         .expect("dispatch must lower the Props<T> shell rooted at /Generic.vue");
 
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
@@ -6655,7 +6697,12 @@ defineProps<{ type?: ButtonHTMLAttributes['type'] }>()
     };
 
     let lowered = dispatch
-        .lower_type_expr_in_scope_with_mode("/src/App.vue", &expr, ProjectionMode::Expanded)
+        .lower_type_expr_in_owner_scope_with_mode(
+            "/src/App.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            &expr,
+            ProjectionMode::Expanded,
+        )
         .expect("dispatch must lower IndexedAccess<ButtonHTMLAttributes, 'type'> at /src/App.vue");
 
     let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
@@ -7773,7 +7820,8 @@ defineProps<FixedProps | BubbleProps>()
 #[test]
 fn dispatch_aliased_conditional_emits_branch_merge() {
     use crate::meta_resolve::projectors::{
-        resolve_payload_surface_with_scope, PayloadSurfaceScope,
+        resolve_emit_payload_to_conditional_root, resolve_payload_surface_with_scope,
+        PayloadSurfaceScope,
     };
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{ProjectionMode, SemanticNodeData};
@@ -7809,7 +7857,12 @@ defineEmits<ConditionalEmits>()
         type_arguments: std::sync::Arc::from(Vec::<TypeExpr>::new().into_boxed_slice()),
     };
     let payload_node = dispatch
-        .lower_type_expr_in_scope_with_mode(scope, &conditional_ref, ProjectionMode::Navigate)
+        .lower_type_expr_in_owner_scope_with_mode(
+            scope,
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            &conditional_ref,
+            ProjectionMode::Navigate,
+        )
         .expect("ConditionalEmits must lower to a Navigate carrier node");
 
     // Pre-condition: the payload is a carrier (NOT a bare Conditional),
@@ -7823,6 +7876,15 @@ defineEmits<ConditionalEmits>()
          be a CARRIER (DeclRef/DeclPlaceholder), not a bare Conditional — that is \
          the shape the carrier walk must follow"
     );
+
+    let mut carrier_visited = rustc_hash::FxHashSet::default();
+    let conditional_root =
+        resolve_emit_payload_to_conditional_root(&dispatch, payload_node, 0, &mut carrier_visited)
+            .expect("the named emit alias carrier must reach its conditional root");
+    assert!(matches!(
+        crate::project_semantic_dispatch::node_data_for(host, conditional_root).as_deref(),
+        Some(SemanticNodeData::Conditional { .. })
+    ));
 
     let mut diag_sink = Vec::new();
     let surface = resolve_payload_surface_with_scope(
@@ -7875,7 +7937,8 @@ defineEmits<ConditionalEmits>()
 #[test]
 fn dispatch_long_alias_chain_to_conditional_emits_branch_merge() {
     use crate::meta_resolve::projectors::{
-        resolve_payload_surface_with_scope, PayloadSurfaceScope,
+        resolve_emit_payload_to_conditional_root, resolve_payload_surface_with_scope,
+        PayloadSurfaceScope,
     };
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{ProjectionMode, SemanticNodeData};
@@ -7921,7 +7984,12 @@ defineEmits<EmitChain0>()
         type_arguments: std::sync::Arc::from(Vec::<TypeExpr>::new().into_boxed_slice()),
     };
     let payload_node = dispatch
-        .lower_type_expr_in_scope_with_mode(scope, &chain_head_ref, ProjectionMode::Navigate)
+        .lower_type_expr_in_owner_scope_with_mode(
+            scope,
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            &chain_head_ref,
+            ProjectionMode::Navigate,
+        )
         .expect("EmitChain0 must lower to a Navigate carrier node");
 
     // Precondition: the chain head is a carrier (NOT a bare Conditional),
@@ -7935,6 +8003,15 @@ defineEmits<EmitChain0>()
         "fixture precondition: the Navigate-lowered chain head must be a \
          CARRIER (DeclRef/DeclPlaceholder), not a bare Conditional"
     );
+
+    let mut carrier_visited = rustc_hash::FxHashSet::default();
+    let conditional_root =
+        resolve_emit_payload_to_conditional_root(&dispatch, payload_node, 0, &mut carrier_visited)
+            .expect("the >8-hop named emit alias carrier must reach its conditional root");
+    assert!(matches!(
+        crate::project_semantic_dispatch::node_data_for(host, conditional_root).as_deref(),
+        Some(SemanticNodeData::Conditional { .. })
+    ));
 
     let mut diag_sink = Vec::new();
     let surface = resolve_payload_surface_with_scope(

@@ -248,26 +248,17 @@ fn c1_local_type_declaration_id_graph_native_matches_oracle_presence_and_is_boun
     );
 }
 
-/// C1 — the import guard is LOAD-BEARING and discriminating: a name that
-/// is BOTH an import target AND has a local type header must resolve to
-/// `None` (an imported name has no LOCAL declaration id), even though its
-/// local `type_header` is present. Removing the reader's
-/// `if state.import_target(name).is_some() { return None }` guard would
-/// make the reader fall through to the header-ordinal path and return
-/// `Some` — diverging from the oracle (which keeps its own import guard
-/// and returns `None`).
+/// C1 — a value import and a local type declaration coexist in distinct TS
+/// declaration spaces. The declaration-header inventory is the authority for
+/// C1, so the import must not erase the local type's declaration id.
 ///
-/// Discrimination proof (verified by break → red → revert): deleting the
-/// graph-native import guard makes `graph_native` return `Some` for
-/// `Shared` (its local `type_header` is present) while the oracle stays
-/// `None` → the `assert_eq!(oracle.is_some(), graph.is_some())` and the
-/// `graph.is_none()` assertion both go RED. The precondition assertions
-/// below pin that the collision is REAL (the name is both an import
-/// target and a local type header), so the test cannot silently degrade
-/// into a no-collision case where the guard is irrelevant.
+/// Discrimination proof (verified by break → red → revert): restoring the
+/// former file-wide import guard makes `Shared` return `None` despite its
+/// exact-owner type header. The preconditions pin that the collision is real,
+/// so the positive declaration-id assertions cannot pass vacuously.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn c1_import_guard_is_load_bearing_for_a_name_with_a_local_type_header_collision() {
+fn c1_local_type_header_wins_over_same_name_value_import_binding() {
     use crate::types::HostConfig;
     use crate::VerterHost;
 
@@ -278,7 +269,7 @@ fn c1_import_guard_is_load_bearing_for_a_name_with_a_local_type_header_collision
     // `Shared`. A value import and a local type live in different
     // declaration spaces, so the shallow index records BOTH an
     // `import_target("Shared")` and a local `type_header("Shared")` — the
-    // collision the import guard must win.
+    // collision whose type header must remain independently addressable.
     upsert_ts(
         &host,
         "/src/types.ts",
@@ -295,7 +286,7 @@ fn c1_import_guard_is_load_bearing_for_a_name_with_a_local_type_header_collision
         .expect("shallow state must exist");
     assert!(
         state.import_target("Shared").is_some(),
-        "precondition: `Shared` must be an import target (else the guard is not exercised)"
+        "precondition: `Shared` must be an import target (else coexistence is not exercised)"
     );
     assert!(
         state
@@ -303,22 +294,21 @@ fn c1_import_guard_is_load_bearing_for_a_name_with_a_local_type_header_collision
             .header_index()
             .type_header("Shared")
             .is_some(),
-        "precondition: `Shared` must ALSO have a local type header (else the guard is irrelevant — \
-         the header-ordinal path would already return None)"
+        "precondition: `Shared` must ALSO have a local type header (else the declaration-id result \
+         would already be None)"
     );
 
-    // The import guard wins: graph-native returns None, matching the
-    // oracle (which keeps its OWN import guard).
+    // Both consumers select the unique authored owner from the header
+    // inventory; the value import is irrelevant to the local TYPE id.
     let oracle = host.local_type_declaration_id("/src/types.ts", "Shared");
     let graph = host.local_type_declaration_id_graph_native("/src/types.ts", "Shared");
     assert!(
-        oracle.is_none(),
-        "oracle: an imported name has no LOCAL type declaration id even with a same-name local type"
+        oracle.is_some(),
+        "oracle: the same-name value import must not erase the local type declaration id"
     );
     assert!(
-        graph.is_none(),
-        "graph-native: the import guard must win over the local type header — removing it would \
-         return Some here and diverge from the oracle"
+        graph.is_some(),
+        "graph-native: the exact-owner local type header must remain addressable beside the value import"
     );
     assert_eq!(oracle.is_some(), graph.is_some());
 }

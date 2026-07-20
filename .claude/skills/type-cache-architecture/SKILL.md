@@ -1278,6 +1278,15 @@ The coordinated invalidation boundaries are:
   payloads without the persisted exact module-export inventory, export owners,
   and owner-qualified binding keys.
 
+Exact-owner shallow facts also govern qualified namespace roots. For
+`import * as Ns from './dep'`, the cached binding for `(owner, Ns)` is a MODULE
+handle (`is_namespace`), not a request to find an export literally named
+`Ns`. Resolution first proves that exact-owner namespace fact (ambiguous
+bindings fail closed), then sends only the qualified MEMBER through the shared
+type/value export resolver. Re-export aliases therefore publish the terminal
+declaration canonical/name rather than the namespace module or barrel
+identity; there is no prepared-declaration or file-wide name-rematch fallback.
+
 The other named versions are intentionally unchanged:
 
 - `RESOLVED_IMPORT_FACTS_RESOLVER_VERSION = 1`: this cache serializes

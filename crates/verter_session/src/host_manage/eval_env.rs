@@ -63,20 +63,23 @@ impl VerterHost {
         canonical_source: &str,
         resolved_name: &str,
     ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
-        if self
-            .routed_shallow_state(canonical_source)
-            .is_some_and(|state| state.import_target(resolved_name).is_some())
-        {
-            return None;
-        }
+        // Resolve the owner from the cached declaration-header inventory
+        // before consulting the whole env. A Vue canonical can contain both
+        // module and setup owners; the legacy ordinary-owner lookup lost a
+        // setup-local declaration, while the former file-wide import guard
+        // let an import in one owner hide a real declaration in another.
+        // Exactly one declaration owner is required — multi-owner same-name
+        // declarations are ambiguous at this owner-agnostic API and fail
+        // closed. An import-only name has no declaration header and therefore
+        // also returns `None` without a permissive name rematch.
+        let state = self.routed_shallow_state(canonical_source)?;
+        let owner = Self::unique_local_type_declaration_owner_in(&state, resolved_name)?;
 
-        // Read the id through the memo-owned whole-env `Arc` — a
-        // single map lookup; never a whole-env deep clone (this is the
-        // most-hit whole-env consumer, reached on every
-        // `get_component_meta` resolution).
+        // Read the id through the memo-owned whole-env `Arc` at the proven
+        // owner — a single map lookup; never a whole-env deep clone.
         let oracle = self
             .base_eval_env_arc(canonical_source)
-            .and_then(|env| env.type_declaration_id(resolved_name));
+            .and_then(|env| env.type_declaration_id_in(owner, resolved_name));
         // Non-breaking readiness cross-check (debug/test only): the
         // bounded graph-native reader must AGREE with the oracle on
         // PRESENCE (`Some`/`None`). The oracle stays authoritative for the
@@ -92,9 +95,35 @@ impl VerterHost {
         oracle
     }
 
+    /// Return the sole authored owner declaring `resolved_name` in the
+    /// canonical's cached header inventory. The owner-agnostic declaration-id
+    /// API cannot choose between two lexical owners, so ambiguity is `None`.
+    /// Import bindings never enter this inventory and cannot mask a local
+    /// declaration owned by another SFC region.
+    fn unique_local_type_declaration_owner_in(
+        state: &crate::resolver_core::shallow_file_state::ShallowFileState,
+        resolved_name: &str,
+    ) -> Option<verter_type_expr::TopLevelOwnerId> {
+        let mut owner = None;
+        for key in state
+            .decl_bodies()
+            .header_index()
+            .type_headers
+            .keys()
+            .filter(|key| key.name.as_ref() == resolved_name)
+        {
+            match owner {
+                None => owner = Some(key.owner),
+                Some(existing) if existing == key.owner => {}
+                Some(_) => return None,
+            }
+        }
+        owner
+    }
+
     /// Bounded, graph-native presence reader for the C1 consumer
-    /// (`local_type_declaration_id`). Routes the import guard + the
-    /// local-type PRESENCE check through `routed_shallow_state` and the
+    /// (`local_type_declaration_id`). Routes the unique declaration-owner +
+    /// local-type PRESENCE checks through `routed_shallow_state` and the
     /// per-symbol declaration-header index — it NEVER materialises
     /// `whole_env()` / `base_eval_env_arc`.
     ///
@@ -125,15 +154,11 @@ impl VerterHost {
         resolved_name: &str,
     ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
         let state = self.routed_shallow_state(canonical_source)?;
-        // Same import guard as the oracle: an imported name has no LOCAL
-        // type declaration id.
-        if state.import_target(resolved_name).is_some() {
-            return None;
-        }
+        let owner = Self::unique_local_type_declaration_owner_in(&state, resolved_name)?;
         // Presence WITHOUT body lowering — a header miss is `None`,
         // mirroring the oracle's `type_declaration_id` miss.
         let header_index = state.decl_bodies().header_index();
-        header_index.type_header(resolved_name)?;
+        header_index.type_header_in(owner, resolved_name)?;
         // Stable-unique per `(file, name)`: a deterministic ordinal over
         // the header index's sorted type-symbol names. This is NOT the
         // oracle's interleaved id (see the doc comment) but is stable
@@ -142,7 +167,7 @@ impl VerterHost {
         let mut type_names: Vec<&str> = header_index
             .type_headers
             .keys()
-            .filter(|key| key.owner == verter_type_expr::TopLevelOwnerId::ordinary_file())
+            .filter(|key| key.owner == owner)
             .map(|key| key.name.as_ref())
             .collect();
         type_names.sort_unstable();

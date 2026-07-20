@@ -358,40 +358,24 @@ fn resolve_namespace_member_from_facts(
     ctx: &dyn ResolverContext,
     canonical_id: &str,
     owner: verter_type_expr::TopLevelOwnerId,
-    scope_payload: Option<&DeclarationScopePayload>,
+    _scope_payload: Option<&DeclarationScopePayload>,
     symbol_name: &str,
 ) -> Option<ResolvedRootIdentity> {
     let dot_pos = symbol_name.find('.')?;
     let prefix = &symbol_name[..dot_pos];
     let member = &symbol_name[dot_pos + 1..];
-    let binding =
-        resolve_import_binding_from_facts(ctx, canonical_id, owner, scope_payload, prefix)?;
-    let interner = ctx.project_type_store().identity_interner();
-
-    // Structurally read-only (see the scope read above).
-    if let Some(target_entry) = ctx
-        .ensure_indexed_ready_serve(&binding.canonical_id)
-        .map(|serve| serve.indexed)
-    {
-        if let Some(crate::resolver_core::ExportTarget::Local { owner, symbol_name }) =
-            target_entry.shallow_state.export_target(member)
-        {
-            return Some(ResolvedRootIdentity::new_in_owner(
-                interner.intern(&binding.canonical_id),
-                *owner,
-                interner.intern(symbol_name),
-            ));
-        }
-    }
+    let target_canonical =
+        resolve_namespace_import_canonical_from_facts(ctx, canonical_id, owner, prefix)?;
 
     let (resolved, route_facts) =
-        ctx.resolve_imported_type_root_with_facts(&binding.canonical_id, member);
+        ctx.resolve_imported_type_root_with_facts(&target_canonical, member);
     ctx.observe_borrowed_signature(&route_facts);
     if let Some(resolved) = resolved {
         return Some(resolved);
     }
 
-    ctx.resolve_value_export_target(&binding.canonical_id, member)
+    let interner = ctx.project_type_store().identity_interner();
+    ctx.resolve_value_export_target(&target_canonical, member)
         .map(|target| {
             ResolvedRootIdentity::new_in_owner(
                 interner.intern(&target.canonical_id),
@@ -399,6 +383,38 @@ fn resolve_namespace_member_from_facts(
                 interner.intern(&target.name),
             )
         })
+}
+
+/// Resolve the dependency canonical owned by an exact namespace-import
+/// binding (`import * as Ns from './dep'`). A namespace alias is a module
+/// handle, not an exported declaration name: routing it through ordinary
+/// import resolution would incorrectly probe the dependency for an export
+/// literally named `Ns` before the qualified member is known.
+///
+/// The owner-qualified shallow import table is the sole authority. Its
+/// ambiguous-binding state is already fail-closed (`import_target_in` returns
+/// `None`), and `is_namespace` distinguishes a real module handle from a named
+/// or default import. The returned canonical remains the namespace MODULE;
+/// [`resolve_namespace_member_from_facts`] sends the member through the shared
+/// type/value export resolvers, which own final re-export identity.
+fn resolve_namespace_import_canonical_from_facts(
+    ctx: &dyn ResolverContext,
+    canonical_id: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
+    prefix: &str,
+) -> Option<String> {
+    let indexed = ctx
+        .ensure_indexed_ready_serve(canonical_id)
+        .map(|serve| serve.indexed)?;
+    let target = indexed
+        .shallow_state
+        .import_target_in(owner, prefix)
+        .filter(|target| target.is_namespace)?;
+    if target.canonical_id.is_empty() {
+        ctx.resolve_type_dependency_canonical(canonical_id, &target.source_specifier)
+    } else {
+        Some(target.canonical_id.clone())
+    }
 }
 
 fn resolve_imported_type_root_identity(
