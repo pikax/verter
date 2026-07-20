@@ -14971,7 +14971,9 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
         }
     };
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host = Arc::new(VerterHost::new_standalone(
+        real_provider_correctness_config(),
+    ));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
     // Construct the server under this test's per-session store-dir override so the
@@ -15119,7 +15121,9 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_immed
         }
     };
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host = Arc::new(VerterHost::new_standalone(
+        real_provider_correctness_config(),
+    ));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
     // Construct the server under this test's per-session store-dir override so the
@@ -15843,7 +15847,9 @@ async fn completion_with_real_tsserver_recovers_when_current_file_sync_was_misse
         }
     };
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host = Arc::new(VerterHost::new_standalone(
+        real_provider_correctness_config(),
+    ));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
     // Construct the server under this test's per-session store-dir override so the
@@ -15955,7 +15961,9 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
         }
     };
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host = Arc::new(VerterHost::new_standalone(
+        real_provider_correctness_config(),
+    ));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
     // Construct the server under this test's per-session store-dir override so the
