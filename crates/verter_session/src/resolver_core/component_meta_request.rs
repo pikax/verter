@@ -11,6 +11,16 @@ pub(crate) struct ComponentMetaComputeOutcome<R> {
     pub(crate) cache_refusal: Option<crate::resolver_core::fact_read_set::NonCacheablePropagation>,
 }
 
+pub(crate) struct ComponentMetaCacheLookup<R, P> {
+    pub(crate) value: R,
+    pub(crate) admission: Option<P>,
+}
+
+pub(crate) struct ComponentMetaRequestResult<R, P> {
+    pub(crate) request: RequestRunResult<Option<R>>,
+    pub(crate) admission: Option<P>,
+}
+
 #[cfg(test)]
 impl<R> ComponentMetaComputeOutcome<R> {
     fn from_owner_scope(value: Option<R>, non_cacheable: bool) -> Self {
@@ -28,6 +38,7 @@ pub(crate) trait ComponentMetaRequestHost {
     type Mode: Copy;
     type Resolution: Clone;
     type CapturedInputs;
+    type AdmissionProof;
 
     fn cache_key(&self, canonical: &str, mode: Self::Mode) -> ResolutionNodeKey;
     /// Snapshot a base store view together with the manager's currentness
@@ -64,7 +75,7 @@ pub(crate) trait ComponentMetaRequestHost {
         canonical: &str,
         mode: Self::Mode,
         store_view: &Self::View,
-    ) -> Option<Self::Resolution>;
+    ) -> Option<ComponentMetaCacheLookup<Self::Resolution, Self::AdmissionProof>>;
     /// Run the cold component-meta compute against `store_view`.
     ///
     /// `base_is_current` is the manager's currentness proof for the
@@ -91,7 +102,7 @@ pub(crate) trait ComponentMetaRequestHost {
         canonical: &str,
         mode: Self::Mode,
         result: &Self::Resolution,
-    );
+    ) -> Option<Self::AdmissionProof>;
     /// Typed structural completeness carried by `result`. Every scalar and
     /// fixed-view lane captures this immediately after compute; a partial is
     /// returned to its caller but can neither reach a publisher nor remain as
@@ -163,6 +174,7 @@ struct ComponentMetaRequestExecutor<'a, H: ComponentMetaRequestHost> {
     captured_inputs: Option<H::CapturedInputs>,
     last_completeness: crate::semantic_query::ResultCompleteness,
     last_cache_refusal: Option<crate::resolver_core::fact_read_set::NonCacheablePropagation>,
+    last_admission: Option<H::AdmissionProof>,
     max_attempts: usize,
 }
 
@@ -179,6 +191,7 @@ impl<'a, H: ComponentMetaRequestHost> ComponentMetaRequestExecutor<'a, H> {
             captured_inputs: None,
             last_completeness: crate::semantic_query::ResultCompleteness::Complete,
             last_cache_refusal: None,
+            last_admission: None,
             max_attempts,
         }
     }
@@ -304,9 +317,11 @@ where
     }
 
     fn try_get_cached(&mut self, view: &Self::View) -> Option<Option<H::Resolution>> {
-        self.host
-            .try_get_cached_component_meta(&self.canonical, self.mode, view)
-            .map(Some)
+        let lookup = self
+            .host
+            .try_get_cached_component_meta(&self.canonical, self.mode, view)?;
+        self.last_admission = lookup.admission;
+        Some(Some(lookup.value))
     }
 
     fn compute(&mut self, view: &Self::View) -> Result<Option<H::Resolution>, Self::Error> {
@@ -380,8 +395,9 @@ where
             // attempt current, structurally complete, and free of an
             // owner-scoped cache refusal. This publisher therefore has no
             // second, drift-prone boolean policy to re-derive.
-            self.host
-                .store_component_meta_result(&self.canonical, self.mode, result);
+            self.last_admission =
+                self.host
+                    .store_component_meta_result(&self.canonical, self.mode, result);
         }
     }
 
@@ -428,15 +444,19 @@ pub(crate) fn run_component_meta_request<H>(
     mode: H::Mode,
     fixed_store_view: Option<(&H::View, u64, bool)>,
     max_attempts: usize,
-) -> RequestRunResult<Option<H::Resolution>>
+) -> ComponentMetaRequestResult<H::Resolution, H::AdmissionProof>
 where
     H: ComponentMetaRequestHost,
 {
     let mut executor =
         ComponentMetaRequestExecutor::new(host, canonical.to_string(), mode, max_attempts)
             .with_fixed_view(fixed_store_view);
-    run_stable_request(singleflight, &mut executor)
-        .expect("component-meta request execution is infallible")
+    let request = run_stable_request(singleflight, &mut executor)
+        .expect("component-meta request execution is infallible");
+    ComponentMetaRequestResult {
+        request,
+        admission: executor.last_admission,
+    }
 }
 
 #[cfg(test)]
@@ -520,6 +540,7 @@ mod tests {
         type Mode = ();
         type Resolution = usize;
         type CapturedInputs = ();
+        type AdmissionProof = ();
 
         fn cache_key(&self, canonical: &str, _mode: Self::Mode) -> ResolutionNodeKey {
             ResolutionNodeKey {
@@ -569,7 +590,7 @@ mod tests {
             _canonical: &str,
             _mode: Self::Mode,
             _store_view: &Self::View,
-        ) -> Option<Self::Resolution> {
+        ) -> Option<ComponentMetaCacheLookup<Self::Resolution, Self::AdmissionProof>> {
             None
         }
 
@@ -602,8 +623,9 @@ mod tests {
             canonical: &str,
             _mode: Self::Mode,
             _result: &Self::Resolution,
-        ) {
+        ) -> Option<Self::AdmissionProof> {
             self.promotions.borrow_mut().push(canonical.to_string());
+            Some(())
         }
 
         // The sentinel fingerprint drives a stable-but-partial result for
@@ -656,6 +678,7 @@ mod tests {
         // would return true here and PROMOTE the stale result; the
         // fingerprint gate returns false and blocks it.
         let result = run_component_meta_request(&host, &singleflight, "/proj/App.vue", (), None, 1);
+        let result = result.request;
 
         // The result is still HANDED to the caller (return-only)…
         assert_eq!(
@@ -709,6 +732,7 @@ mod tests {
             Some((&StubView, captured_fp, true)),
             1,
         );
+        let result = result.request;
 
         assert_eq!(result.value, Some(42));
         assert_eq!(
@@ -758,6 +782,7 @@ mod tests {
             Some((&StubView, captured_fp, false)),
             1,
         );
+        let result = result.request;
 
         assert_eq!(
             result.value,
@@ -816,6 +841,7 @@ mod tests {
             Some((&StubView, captured_fp, true)),
             1,
         );
+        let result = result.request;
 
         // The computed value is still HANDED to the caller (return-only)…
         assert_eq!(
@@ -857,6 +883,7 @@ mod tests {
         >::default();
 
         let result = run_component_meta_request(&host, &singleflight, "/proj/App.vue", (), None, 3);
+        let result = result.request;
 
         assert_eq!(result.value, Some(42));
         assert_eq!(
@@ -888,6 +915,7 @@ mod tests {
         // fixed/batch lane consulted per-result completeness, so this stable
         // partial was mirrored into the shared cache and reported Complete.
         let result = run_component_meta_request(&host, &singleflight, "/proj/App.vue", (), None, 1);
+        let result = result.request;
 
         assert_eq!(result.value, Some(42), "the partial remains return-only");
         assert!(
@@ -918,6 +946,7 @@ mod tests {
         >::default();
 
         let result = run_component_meta_request(&host, &singleflight, "/proj/App.vue", (), None, 1);
+        let result = result.request;
 
         assert_eq!(
             result.value,
@@ -982,6 +1011,7 @@ mod tests {
         // `run_stable_request`'s outer loop also runs once, so the single
         // stability check observes the incoherent fallback attempt.
         let result = run_component_meta_request(&host, &singleflight, "/proj/App.vue", (), None, 1);
+        let result = result.request;
 
         // The computed value is still HANDED to the caller (return-only)…
         assert_eq!(
@@ -1042,6 +1072,7 @@ mod tests {
         >::default();
 
         let result = run_component_meta_request(&host, &singleflight, "/proj/App.vue", (), None, 2);
+        let result = result.request;
 
         assert_eq!(
             result.value,
@@ -1100,6 +1131,7 @@ mod tests {
             Some((&StubView, captured_fp, false)),
             3,
         );
+        let result = result.request;
 
         // The value is still HANDED to the caller (return-only)…
         assert_eq!(
@@ -1164,6 +1196,7 @@ mod tests {
             Some((&StubView, captured_fp, true)),
             3,
         );
+        let result = result.request;
 
         assert_eq!(
             result.value,
@@ -1214,6 +1247,7 @@ mod tests {
             Some((&StubView, captured_fp, true)),
             3,
         );
+        let result = result.request;
 
         assert_eq!(result.value, Some(42));
         assert_eq!(

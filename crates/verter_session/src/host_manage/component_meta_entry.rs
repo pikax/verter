@@ -671,28 +671,35 @@ impl VerterHost {
         run_cold_body_pre_resolve_hook();
         // Pin the request executor to the caller's fixed view (FENCED), so
         // the resolve shares the capture's snapshot rather than re-reading.
-        let executor_fixed = {
-            let (executor_view, executor_fp) = fixed.executor_fixed_view();
-            Some((executor_view, executor_fp, fixed.is_current()))
-        };
+        let (executor_view, executor_fp) = fixed.executor_fixed_view();
+        let executor_fixed = Some((executor_view, executor_fp, fixed.is_current()));
         let results = self.project_type_store.component_meta_results();
         let (resolved_opt, meta_opt) = results.compute_and_admit(
             self,
             canonical,
             "view-aware path",
             || {
-                let resolved = match self.resolve_component_meta_with_view_and_fixed(
-                    canonical,
-                    crate::types::ProjectionMode::Expanded,
-                    view,
-                    executor_fixed,
-                ) {
-                    Some(r) => r,
+                let (mut resolved, admission) = match self
+                    .resolve_component_meta_with_view_and_fixed_admission(
+                        canonical,
+                        crate::types::ProjectionMode::Expanded,
+                        view,
+                        executor_fixed,
+                    ) {
+                    Some(pair) => pair,
                     None => return (None, None),
                 };
                 let extract = extract_component_meta_from_resolved(
                     self, canonical, &resolved, true, // include_fallthrough
                     ctx,
+                );
+                self.merge_extraction_facts_into_admitted_resolved_meta(
+                    canonical,
+                    crate::types::ProjectionMode::Expanded,
+                    view.fingerprint(),
+                    &mut resolved,
+                    extract.fallthrough_fact_versions.as_deref(),
+                    admission.as_ref(),
                 );
                 (
                     Some(resolved),

@@ -53,8 +53,9 @@ pub fn materialize_imported_runtime_values_into_env<R: ImportedRuntimeValueResol
     required_binding_names: Option<&FxHashSet<String>>,
     env: &mut EvalEnv,
     resolver: &R,
-) {
+) -> std::collections::BTreeSet<ValueDeclIdentity> {
     let mut dep_env_cache: FxHashMap<String, Option<Arc<EvalEnv>>> = FxHashMap::default();
+    let mut materialized = std::collections::BTreeSet::new();
 
     for import in imports {
         if import.is_type_only {
@@ -101,6 +102,7 @@ pub fn materialize_imported_runtime_values_into_env<R: ImportedRuntimeValueResol
                 alias.owner = import.owner;
                 alias.name = binding.name.clone();
                 env.add_value(alias);
+                materialized.insert(target);
                 continue;
             }
             let source_env = match dep_env_cache
@@ -164,8 +166,11 @@ pub fn materialize_imported_runtime_values_into_env<R: ImportedRuntimeValueResol
             alias.owner = import.owner;
             alias.name = binding.name.clone();
             env.add_value(alias);
+            materialized.insert(target);
         }
     }
+
+    materialized
 }
 
 fn prepared_value_decl_to_value_decl_info(

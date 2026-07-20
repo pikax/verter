@@ -1379,7 +1379,7 @@ fn fallthrough_env_without_required_runtime_values_shares_the_memo_env_arc() {
         .base_eval_env_arc("/src/Solo.vue")
         .expect("memo whole-env resolves");
     assert!(
-        Arc::ptr_eq(&env, &memo_env),
+        Arc::ptr_eq(&env.env, &memo_env),
         "no required runtime values ⇒ the fallthrough env must BE the memo's \
          whole-env Arc (zero whole-env clones on this path)"
     );

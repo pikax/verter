@@ -13,7 +13,9 @@
 use crate::host_manage::{
     component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
 };
-use crate::resolver_core::{run_component_meta_request, RequestSource, SingleflightRole};
+use crate::resolver_core::{
+    run_component_meta_request, ComponentMetaRequestResult, RequestSource, SingleflightRole,
+};
 use crate::types::{FileAnalysisSnapshot, Hash16, ProjectionMode};
 use crate::VerterHost;
 use std::collections::{BTreeSet, VecDeque};
@@ -152,6 +154,29 @@ impl VerterHost {
         view: &dyn crate::session_view::SessionView,
         fixed_store_view: Option<(&crate::resolver_store::HostStoreView, u64, bool)>,
     ) -> Option<ResolvedComponentMetaState> {
+        self.resolve_component_meta_with_view_and_fixed_admission(
+            canonical_or_alias,
+            mode,
+            view,
+            fixed_store_view,
+        )
+        .map(|(resolved, _admission)| resolved)
+    }
+
+    /// Resolve component metadata and retain the exact stable-cache admission
+    /// that served or published the returned state. Extraction uses this
+    /// call-owned proof to enrich only that candidate after its additional
+    /// runtime dependencies have been materialized.
+    pub(crate) fn resolve_component_meta_with_view_and_fixed_admission(
+        &self,
+        canonical_or_alias: &str,
+        mode: ProjectionMode,
+        view: &dyn crate::session_view::SessionView,
+        fixed_store_view: Option<(&crate::resolver_store::HostStoreView, u64, bool)>,
+    ) -> Option<(
+        ResolvedComponentMetaState,
+        Option<crate::host_manage::component_meta_request_impl::ResolvedMetaAdmissionProof>,
+    )> {
         let started = component_meta_debug_enabled().then(Instant::now);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         let _ctx_guard = self.install_request_budget_context_if_none(
@@ -202,7 +227,10 @@ impl VerterHost {
             view,
             overlay: std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
         };
-        let result = run_component_meta_request(
+        let ComponentMetaRequestResult {
+            request: result,
+            admission,
+        } = run_component_meta_request(
             &request_host,
             self.resolver_runtime().component_meta.singleflight(),
             &canonical,
@@ -425,7 +453,7 @@ impl VerterHost {
             self.finalize_request_audit_record(record);
         }
 
-        result.value
+        result.value.map(|resolved| (resolved, admission))
     }
 
     /// Test-only bare-host cold-compute entry. Production callers must
@@ -2414,7 +2442,8 @@ impl VerterHost {
 
     /// Convenience wrapper that builds an owned `HostStoreView` once.
     /// Hot-path callers thread their view through
-    /// [`Self::try_get_cached_resolved_meta_with_store_view`] directly.
+    /// [`Self::try_get_cached_resolved_meta_with_store_view_and_admission`]
+    /// directly.
     #[allow(dead_code)]
     pub(crate) fn try_get_cached_resolved_meta(
         &self,
@@ -2424,20 +2453,20 @@ impl VerterHost {
         self.try_get_cached_resolved_meta_for_view_fingerprint(canonical, mode, 0)
     }
 
-    /// View-aware variant of [`Self::try_get_cached_resolved_meta`].
-    ///
-    /// The hot-path trait callers in `component_meta_request_impl.rs`
-    /// route here with the request-bound `&HostStoreView` they already
-    /// hold, avoiding the full-workspace snapshot rebuild on each first
-    /// warm read.
-    #[inline]
-    pub(crate) fn try_get_cached_resolved_meta_with_store_view(
+    /// View-aware warm lookup that also carries the exact admitted candidate
+    /// identity needed for a later extraction-signature refinement.
+    pub(crate) fn try_get_cached_resolved_meta_with_store_view_and_admission(
         &self,
         view: &crate::resolver_store::HostStoreView,
         canonical: &str,
         mode: ProjectionMode,
-    ) -> Option<ResolvedComponentMetaState> {
-        self.try_get_cached_resolved_meta_for_view_fingerprint_with_store_view(
+    ) -> Option<
+        crate::resolver_core::ComponentMetaCacheLookup<
+            ResolvedComponentMetaState,
+            crate::host_manage::component_meta_request_impl::ResolvedMetaAdmissionProof,
+        >,
+    > {
+        self.try_get_cached_resolved_meta_for_view_fingerprint_with_store_view_and_admission(
             view, canonical, mode, 0,
         )
     }
@@ -2496,21 +2525,53 @@ impl VerterHost {
         mode: ProjectionMode,
         view_fingerprint: u64,
     ) -> Option<ResolvedComponentMetaState> {
+        self.try_get_cached_resolved_meta_for_view_fingerprint_with_store_view_and_admission(
+            view,
+            canonical,
+            mode,
+            view_fingerprint,
+        )
+        .map(|lookup| lookup.value)
+    }
+
+    pub(crate) fn try_get_cached_resolved_meta_for_view_fingerprint_with_store_view_and_admission(
+        &self,
+        view: &crate::resolver_store::HostStoreView,
+        canonical: &str,
+        mode: ProjectionMode,
+        view_fingerprint: u64,
+    ) -> Option<
+        crate::resolver_core::ComponentMetaCacheLookup<
+            ResolvedComponentMetaState,
+            crate::host_manage::component_meta_request_impl::ResolvedMetaAdmissionProof,
+        >,
+    > {
         let cache_key = crate::host_manage::component_meta_request_impl::resolved_meta_cache_key_with_view_fingerprint(
             canonical,
             mode,
             view_fingerprint,
         );
-        if let Some(cached) = self
+        if let Some((cached, candidate)) = self
             .resolver_runtime()
             .component_meta
-            .get_if_valid(&cache_key, view)
+            .get_if_valid_with_admission(&cache_key, view)
         {
             if cached.completeness.is_partial() {
                 return None;
             }
             self.mirror_cached_resolved_meta_arc(canonical, mode, view_fingerprint, cached.clone());
-            return Some(cached.as_ref().clone());
+            return Some(crate::resolver_core::ComponentMetaCacheLookup {
+                value: cached.as_ref().clone(),
+                admission: Some(
+                    crate::host_manage::component_meta_request_impl::ResolvedMetaAdmissionProof {
+                        cache_key,
+                        candidate,
+                        project_generation: self.project_type_store.current_project_generation(),
+                        external_supersession_fingerprint: self
+                            .current_external_supersession_fingerprint(),
+                    },
+                ),
+            });
         }
 
         // View-aware legacy fallback: the slot is keyed by
@@ -2554,15 +2615,31 @@ impl VerterHost {
         // passes them through unchanged. Empty signatures skip
         // admission rather than caching a phantom-fact entry — the
         // cached state is still returned.
-        if !cached.fact_versions.is_empty() {
+        let admission = if !cached.fact_versions.is_empty() {
             self.resolver_runtime().component_meta.insert_arc_with_kind(
                 cache_key,
                 cached.state.clone(),
                 cached.fact_versions.to_vec(),
                 "component_meta.results",
-            );
-        }
-        Some(cached.state.as_ref().clone())
+            )
+        } else {
+            None
+        };
+        Some(crate::resolver_core::ComponentMetaCacheLookup {
+            value: cached.state.as_ref().clone(),
+            admission: admission.map(|candidate| {
+                crate::host_manage::component_meta_request_impl::ResolvedMetaAdmissionProof {
+                    cache_key: crate::host_manage::component_meta_request_impl::resolved_meta_cache_key_with_view_fingerprint(
+                        canonical,
+                        mode,
+                        view_fingerprint,
+                    ),
+                    candidate,
+                    project_generation: self.project_type_store.current_project_generation(),
+                    external_supersession_fingerprint: self.current_external_supersession_fingerprint(),
+                }
+            }),
+        })
     }
 
     pub(crate) fn store_cached_resolved_meta(
@@ -2571,14 +2648,14 @@ impl VerterHost {
         mode: ProjectionMode,
         state: &ResolvedComponentMetaState,
         fact_versions: &[crate::resolver_core::FactVersionRef],
-    ) {
+    ) -> Option<crate::host_manage::component_meta_request_impl::ResolvedMetaAdmissionProof> {
         self.store_cached_resolved_meta_for_view_fingerprint(
             canonical,
             mode,
             state,
             fact_versions,
             0,
-        );
+        )
     }
 
     /// View-fingerprint-aware variant of [`Self::store_cached_resolved_meta`].
@@ -2589,9 +2666,9 @@ impl VerterHost {
         state: &ResolvedComponentMetaState,
         fact_versions: &[crate::resolver_core::FactVersionRef],
         view_fingerprint: u64,
-    ) {
+    ) -> Option<crate::host_manage::component_meta_request_impl::ResolvedMetaAdmissionProof> {
         if state.completeness.is_partial() {
-            return;
+            return None;
         }
         component_meta_trace_custom!(
             "store_cached_component_meta_result",
@@ -2624,18 +2701,21 @@ impl VerterHost {
         // admission would refuse and emit
         // `FactSignatureAdmissionRefused`, which would inflate the
         // refused counter on the steady-state baseline).
-        if !admitted.is_empty() {
+        let cache_key = crate::host_manage::component_meta_request_impl::resolved_meta_cache_key_with_view_fingerprint(
+            canonical,
+            mode,
+            view_fingerprint,
+        );
+        let admission = if !admitted.is_empty() {
             self.resolver_runtime().component_meta.insert_arc_with_kind(
-                crate::host_manage::component_meta_request_impl::resolved_meta_cache_key_with_view_fingerprint(
-                    canonical,
-                    mode,
-                    view_fingerprint,
-                ),
+                cache_key.clone(),
                 state.clone(),
                 admitted.to_vec(),
                 "component_meta.results",
-            );
-        }
+            )
+        } else {
+            None
+        };
         // View-aware mirror: the legacy `cached_resolved_meta` slot is
         // keyed by `(ProjectionMode, view_fingerprint)` so overlay-
         // bearing publishers (`view_fingerprint != 0`) cannot
@@ -2643,6 +2723,89 @@ impl VerterHost {
         // (view_fingerprint == 0) does NOT fall through to an overlay-
         // derived entry.
         self.mirror_cached_resolved_meta_arc(canonical, mode, view_fingerprint, state);
+        admission.map(|candidate| {
+            crate::host_manage::component_meta_request_impl::ResolvedMetaAdmissionProof {
+                cache_key,
+                candidate,
+                project_generation: self.project_type_store.current_project_generation(),
+                external_supersession_fingerprint: self.current_external_supersession_fingerprint(),
+            }
+        })
+    }
+
+    /// Merge extraction/fallthrough facts into the call-owned resolved state
+    /// and refresh the resolved-meta cache only when that exact slot was
+    /// already admitted and still validates under the request's captured
+    /// store view. This can narrow an admitted signature; it never turns a
+    /// return-only or partial computation into a cache entry.
+    pub(crate) fn merge_extraction_facts_into_admitted_resolved_meta(
+        &self,
+        canonical: &str,
+        mode: ProjectionMode,
+        view_fingerprint: u64,
+        resolved: &mut ResolvedComponentMetaState,
+        extraction_facts: Option<&[crate::resolver_core::FactVersionRef]>,
+        admission: Option<
+            &crate::host_manage::component_meta_request_impl::ResolvedMetaAdmissionProof,
+        >,
+    ) {
+        if !resolved.merge_extraction_fact_versions(extraction_facts) {
+            return;
+        }
+        let cross_file_facts = extraction_facts
+            .unwrap_or_default()
+            .iter()
+            .filter(|fact| fact.canonical_id() != Some(canonical))
+            .cloned()
+            .collect::<Vec<_>>();
+        crate::fact_signature_helpers::observe_fact_signature(&cross_file_facts);
+
+        let Some(admission) = admission else {
+            return;
+        };
+        if resolved.completeness.is_partial()
+            || admission.cache_key
+                != crate::host_manage::component_meta_request_impl::resolved_meta_cache_key_with_view_fingerprint(
+                    canonical,
+                    mode,
+                    view_fingerprint,
+                )
+            || admission.project_generation
+                != self.project_type_store.current_project_generation()
+            || admission.external_supersession_fingerprint
+                != self.current_external_supersession_fingerprint()
+        {
+            return;
+        }
+
+        let fact_versions = crate::host_manage::component_meta_entry::strip_owner_route_fact(
+            canonical,
+            &resolved.fact_versions,
+        );
+        let replacement = Arc::new(resolved.clone());
+        if !self.resolver_runtime().component_meta.resign_arc_with_kind(
+            &admission.cache_key,
+            &admission.candidate,
+            replacement.clone(),
+            fact_versions.to_vec(),
+            "component_meta.results",
+        ) {
+            return;
+        }
+
+        if let Some(mut derived) = self.derived_raw_cache().get_mut(canonical) {
+            if let Some(cached) = derived
+                .cached_resolved_meta
+                .get_mut(&(mode, view_fingerprint))
+            {
+                if Arc::ptr_eq(&cached.state, admission.candidate.value()) {
+                    *cached = crate::types::ResolvedComponentMetaCacheEntry {
+                        fact_versions,
+                        state: replacement,
+                    };
+                }
+            }
+        }
     }
 
     pub(crate) fn mirror_cached_resolved_meta_arc(

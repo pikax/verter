@@ -212,9 +212,9 @@ impl MetaSession {
         );
 
         // (2) Cold resolve pinned to the fixed view (FENCED promotion).
-        let Some(resolved) = ({
+        let Some((mut resolved, admission)) = ({
             let (executor_view, captured_fp) = fixed.executor_fixed_view();
-            host.resolve_component_meta_with_view_and_fixed(
+            host.resolve_component_meta_with_view_and_fixed_admission(
                 canonical.as_str(),
                 crate::types::ProjectionMode::Expanded,
                 view,
@@ -244,6 +244,14 @@ impl MetaSession {
             canonical.as_str(),
             &resolved,
             host_ctx_ref,
+        );
+        host.merge_extraction_facts_into_admitted_resolved_meta(
+            canonical.as_str(),
+            crate::types::ProjectionMode::Expanded,
+            view.fingerprint(),
+            &mut resolved,
+            fallthrough_fact_versions.as_deref(),
+            admission.as_ref(),
         );
         // ONE merged admission signal: the resolve-phase completeness merged
         // with the whole-extract scope (macro-DTO read + fallthrough compute).

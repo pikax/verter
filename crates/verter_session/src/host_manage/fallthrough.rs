@@ -53,6 +53,24 @@ pub(crate) struct FallthroughComputeOutcome {
     pub(crate) completeness: crate::semantic_query::ResultCompleteness,
 }
 
+/// Call-owned inputs for one fallthrough evaluation. The dependency lane is
+/// populated by the same runtime-value materializer that built `env`, so it
+/// names only values that were successfully hydrated. `BTreeSet` preserves
+/// exact canonical/lexical-owner/name identity with deterministic dedup.
+pub(super) struct FallthroughEvalInputs {
+    pub(super) env: std::sync::Arc<verter_semantic::analysis::type_eval::EvalEnv>,
+    pub(super) materialized_runtime_values:
+        std::collections::BTreeSet<crate::resolver_core::ValueDeclIdentity>,
+}
+
+impl std::ops::Deref for FallthroughEvalInputs {
+    type Target = verter_semantic::analysis::type_eval::EvalEnv;
+
+    fn deref(&self) -> &Self::Target {
+        self.env.as_ref()
+    }
+}
+
 impl VerterHost {
     pub fn resolve_fallthrough_surface(
         &self,
@@ -330,7 +348,7 @@ impl VerterHost {
             canonical_id,
             false,
         );
-        let fallthrough_fact_versions = resolved.fact_versions.clone();
+        let mut fallthrough_fact_versions = resolved.fact_versions.clone();
 
         // Macro-DTO surface read runs under the request-bound `ctx` (not
         // `self`, the bare host) — `vue_macro_dtos_with_ctx` ->
@@ -382,11 +400,24 @@ impl VerterHost {
         };
         // Build a lightweight fallthrough eval env: base owner env + runtime
         // values + prop overrides.
-        let eval_env = self.build_fallthrough_eval_env_lightweight(
+        let eval_inputs = self.build_fallthrough_eval_env_lightweight(
             canonical_id,
             &resolved.snapshot,
             Some(&base_meta.root_reachability),
         );
+        if let Some(inputs) = eval_inputs.as_ref() {
+            let no_transitive_dependencies = std::collections::BTreeSet::new();
+            for dependency in &inputs.materialized_runtime_values {
+                crate::resolver_core::extend_unique_fact_versions(
+                    &mut fallthrough_fact_versions,
+                    ctx.current_dependency_fact_versions(
+                        dependency.canonical_id.as_str(),
+                        &no_transitive_dependencies,
+                    ),
+                );
+            }
+        }
+        let eval_env = eval_inputs.map(|inputs| inputs.env);
 
         let resolved_surface = resolver_resolve_fallthrough_surface(
             &fallthrough_resolver,
@@ -458,7 +489,7 @@ impl VerterHost {
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         root_reachability: Option<&verter_semantic::analysis::component_meta::RootReachability>,
-    ) -> Option<std::sync::Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
+    ) -> Option<FallthroughEvalInputs> {
         component_meta_trace_custom!(
             "build_fallthrough_eval_env_lightweight",
             format!(
@@ -481,40 +512,43 @@ impl VerterHost {
             // Nothing to hydrate: the memo-owned whole-env Arc IS the
             // fallthrough env — zero whole-env clones on this path
             // (every downstream consumer reads it immutably).
-            return Some(base_env);
+            return Some(FallthroughEvalInputs {
+                env: base_env,
+                materialized_runtime_values: std::collections::BTreeSet::new(),
+            });
         }
         let local_value_names: rustc_hash::FxHashSet<verter_type_expr::DeclKey> =
             base_env.value_symbols.keys().cloned().collect();
         // Hydration mutates: clone the base env once, hydrate, and
         // hand out a fresh Arc.
         let mut env = (*base_env).clone();
-        {
-            // The graph-native dep extractor
-            // (`fallthrough_runtime_value_deps_graph_native`) enumerates the
-            // cross-file runtime-value sources the materializer hydrates,
-            // WITHOUT a whole-env clone of any dependency, so a future
-            // whole-env-free builder can drive hydration off the per-name
-            // value readers. Its equivalence with the materializer is proved
-            // OFFLINE on full `(source_canonical, source_name)` pairs by
-            // `c3_fallthrough_runtime_value_deps_graph_native_equals_\
-            // materializer_touched_full_pairs`. No in-production cross-check
-            // runs here: the only faithful in-production touched-pair recompute
-            // would route through the legacy `resolve_value_export_target`
-            // whole-env peel (materialising every dependency's whole env) —
-            // the exact cost the readiness work removes — and a name-count
-            // proxy is unsound (legal double-alias-onto-one-source hydrates two
-            // bindings from one dep pair). The offline pair-equality test is
-            // the authoritative equivalence rail.
+        // The graph-native dep extractor
+        // (`fallthrough_runtime_value_deps_graph_native`) enumerates the
+        // cross-file runtime-value sources the materializer hydrates,
+        // WITHOUT a whole-env clone of any dependency, so a future
+        // whole-env-free builder can drive hydration off the per-name
+        // value readers. Its equivalence with the materializer is proved
+        // OFFLINE on full `(source_canonical, source_name)` pairs by
+        // `c3_fallthrough_runtime_value_deps_graph_native_equals_\
+        // materializer_touched_full_pairs`. No in-production cross-check
+        // runs here: the only faithful in-production touched-pair recompute
+        // would route through the legacy `resolve_value_export_target`
+        // whole-env peel (materialising every dependency's whole env) —
+        // the exact cost the readiness work removes — and a name-count
+        // proxy is unsound (legal double-alias-onto-one-source hydrates two
+        // bindings from one dep pair). The offline pair-equality test is
+        // the authoritative equivalence rail.
 
-            self.materialize_imported_runtime_values_into_env(
-                snapshot,
-                &local_value_names,
-                Some(&required_runtime_value_names),
-                &mut env,
-            );
-        }
-
-        Some(std::sync::Arc::new(env))
+        let materialized_runtime_values = self.materialize_imported_runtime_values_into_env(
+            snapshot,
+            &local_value_names,
+            Some(&required_runtime_value_names),
+            &mut env,
+        );
+        Some(FallthroughEvalInputs {
+            env: std::sync::Arc::new(env),
+            materialized_runtime_values,
+        })
     }
 
     /// Graph-native dep-extraction reader for the lightweight fallthrough
@@ -626,7 +660,7 @@ impl VerterHost {
         owner_local_value_names: &rustc_hash::FxHashSet<verter_type_expr::DeclKey>,
         required_runtime_value_names: Option<&rustc_hash::FxHashSet<String>>,
         env: &mut verter_semantic::analysis::type_eval::EvalEnv,
-    ) {
+    ) -> std::collections::BTreeSet<crate::resolver_core::ValueDeclIdentity> {
         component_meta_trace_custom!(
             "materialize_runtime_values",
             format!(
@@ -639,7 +673,7 @@ impl VerterHost {
         );
         let started = component_meta_debug_enabled().then(Instant::now);
         let resolver = HostRuntimeValueResolver { host: self };
-        materialize_imported_runtime_values_into_env(
+        let materialized = materialize_imported_runtime_values_into_env(
             snapshot.imports.as_slice(),
             owner_local_value_names,
             required_runtime_value_names,
@@ -663,6 +697,7 @@ impl VerterHost {
                 env.value_symbols.len(),
             ),
         );
+        materialized
     }
 
     pub(super) fn build_generic_child_prop_overrides(

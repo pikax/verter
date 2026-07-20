@@ -306,9 +306,9 @@ pub(crate) fn populate_public_instance_sidecar(
 pub(crate) struct ComponentMetaExtractOutcome {
     /// The projected component-meta analysis.
     pub(crate) analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-    /// The fallthrough resolution's fact versions when the caller threads them
-    /// (the payload surface stores Full payloads under this fact set); `None`
-    /// for the analysis-surface entry that does not request facts.
+    /// The fallthrough resolution's fact versions. Both the analysis and
+    /// payload extraction entries publish this call-owned dependency lane so
+    /// their caller can merge it into the resolved-state signature.
     pub(crate) fallthrough_fact_versions: Option<Vec<crate::resolver_core::FactVersionRef>>,
     /// The COMPUTE completeness observed across the WHOLE extract body — the
     /// macro-DTO read, projection, policy, and the folded fallthrough compute.
@@ -360,6 +360,7 @@ pub(crate) fn extract_component_meta_from_resolved(
         &resolved_type_registry,
         resolved.evaluated_types.as_ref(),
     );
+    let mut fallthrough_facts = None;
     if include_fallthrough {
         let mut visiting = rustc_hash::FxHashSet::default();
         // The completeness travels WITH the resolution via the outcome carrier
@@ -375,6 +376,7 @@ pub(crate) fn extract_component_meta_from_resolved(
             ctx,
         );
         if let Some(resolution) = outcome.resolution {
+            fallthrough_facts = Some(resolution.fact_versions.clone());
             meta.accepted_props = resolution.accepted_props;
             meta.accepted_events = resolution.accepted_events;
             meta.accepted_surface_completeness = resolution.accepted_surface_completeness;
@@ -405,7 +407,7 @@ pub(crate) fn extract_component_meta_from_resolved(
     extract_scope.discard();
     ComponentMetaExtractOutcome {
         analysis: meta,
-        fallthrough_fact_versions: None,
+        fallthrough_fact_versions: fallthrough_facts,
         completeness,
     }
 }

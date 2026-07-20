@@ -37,8 +37,9 @@ use std::time::Instant;
 use crate::host_manage::component_meta_request_impl::ViewBoundRequestHost;
 use crate::meta::MetaProject;
 use crate::resolver_core::{
-    run_component_meta_request, CanonicalCompletionOverlay, ComponentMetaRequestHost,
-    RequestRunResult, RequestSource, ResolutionNodeKey, SingleflightRole, StoreView,
+    run_component_meta_request, CanonicalCompletionOverlay, ComponentMetaCacheLookup,
+    ComponentMetaRequestHost, RequestRunResult, RequestSource, ResolutionNodeKey, SingleflightRole,
+    StoreView,
 };
 use crate::session_view::HostViewRef;
 use crate::types::HostConfig;
@@ -177,6 +178,7 @@ fn component_meta_owner_scope_refuses_only_the_final_publication_then_heals() {
         None,
         crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS,
     );
+    let first = first.request;
 
     assert!(
         first.value.is_some(),
@@ -214,6 +216,7 @@ fn component_meta_owner_scope_refuses_only_the_final_publication_then_heals() {
         None,
         crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS,
     );
+    let second = second.request;
     assert_eq!(
         second.source,
         RequestSource::Flight {
@@ -247,6 +250,7 @@ fn component_meta_owner_scope_refuses_only_the_final_publication_then_heals() {
         None,
         crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS,
     );
+    let third = third.request;
     assert_eq!(third.source, RequestSource::Cache);
     assert_eq!(
         host.provenance()
@@ -411,6 +415,7 @@ impl<'a> ComponentMetaRequestHost for GatingRequestHost<'a> {
     type Mode = <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::Mode;
     type Resolution = <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::Resolution;
     type CapturedInputs = <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::CapturedInputs;
+    type AdmissionProof = <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::AdmissionProof;
 
     fn cache_key(&self, canonical: &str, mode: Self::Mode) -> ResolutionNodeKey {
         self.inner.cache_key(canonical, mode)
@@ -445,7 +450,7 @@ impl<'a> ComponentMetaRequestHost for GatingRequestHost<'a> {
         canonical: &str,
         mode: Self::Mode,
         store_view: &Self::View,
-    ) -> Option<Self::Resolution> {
+    ) -> Option<ComponentMetaCacheLookup<Self::Resolution, Self::AdmissionProof>> {
         self.inner
             .try_get_cached_component_meta(canonical, mode, store_view)
     }
@@ -472,7 +477,7 @@ impl<'a> ComponentMetaRequestHost for GatingRequestHost<'a> {
         canonical: &str,
         mode: Self::Mode,
         result: &Self::Resolution,
-    ) {
+    ) -> Option<Self::AdmissionProof> {
         self.inner
             .store_component_meta_result(canonical, mode, result)
     }
@@ -599,6 +604,7 @@ fn concurrent_demand_for_same_meta_key_collapses_to_one_compute() {
             None,
             crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS,
         )
+        .request
     };
 
     let (leader_result, follower_results) = std::thread::scope(|scope| {
@@ -1408,6 +1414,8 @@ fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
         type Resolution = <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::Resolution;
         type CapturedInputs =
             <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::CapturedInputs;
+        type AdmissionProof =
+            <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::AdmissionProof;
 
         fn cache_key(&self, canonical: &str, mode: Self::Mode) -> ResolutionNodeKey {
             self.inner.cache_key(canonical, mode)
@@ -1437,7 +1445,7 @@ fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
             _canonical: &str,
             _mode: Self::Mode,
             _store_view: &Self::View,
-        ) -> Option<Self::Resolution> {
+        ) -> Option<ComponentMetaCacheLookup<Self::Resolution, Self::AdmissionProof>> {
             // Force a result-cache MISS so the request always runs `compute`,
             // even though the prior `get_component_meta` warmed the result
             // cache. The internal resolver caches (prepared declarations,
@@ -1472,7 +1480,7 @@ fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
             canonical: &str,
             mode: Self::Mode,
             result: &Self::Resolution,
-        ) {
+        ) -> Option<Self::AdmissionProof> {
             self.inner
                 .store_component_meta_result(canonical, mode, result)
         }
@@ -1509,6 +1517,7 @@ fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
         None,
         crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS,
     );
+    let result = result.request;
     let observed = delta.load(std::sync::atomic::Ordering::Relaxed);
 
     // The compute must have run (cold Leader / Fallback), so the delta was

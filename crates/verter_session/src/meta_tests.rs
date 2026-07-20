@@ -21942,6 +21942,26 @@ defineProps<WidgetProps>()
             )
         })
     };
+    let extraction = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        crate::host_manage::extract_component_meta_from_resolved(
+            host,
+            "/src/Widget.vue",
+            cached.state.as_ref(),
+            true,
+            ctx,
+        )
+    });
+    assert!(
+        extraction
+            .fallthrough_fact_versions
+            .as_deref()
+            .is_some_and(|facts| facts.iter().any(|fact| matches!(
+                fact,
+                FactVersionRef::FileWholeHash { canonical_id, .. }
+                    if canonical_id == "/src/utils.ts"
+            ))),
+        "fallthrough extraction MUST publish the exact runtime root-spread dependency facts"
+    );
     assert!(
         roots_file("/src/types.ts"),
         "cached fact signature MUST root the macro type dependency \
